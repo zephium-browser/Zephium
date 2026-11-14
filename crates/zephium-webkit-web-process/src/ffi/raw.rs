@@ -20,6 +20,20 @@ unsafe extern "C" {
         world: *mut Object,
     ) -> *mut Object;
     pub fn webkit_web_page_get_id(page: *mut Object) -> u64;
+    pub fn webkit_web_page_get_uri(page: *mut Object) -> *const c_char;
+    pub fn webkit_web_page_get_dom_document(page: *mut Object) -> *mut Object;
+    pub fn webkit_dom_document_query_selector_all(
+        document: *mut Object,
+        selectors: *const c_char,
+        error: *mut *mut Object,
+    ) -> *mut Object;
+    pub fn webkit_dom_node_list_get_length(list: *mut Object) -> std::ffi::c_ulong;
+    pub fn webkit_dom_node_list_item(list: *mut Object, index: std::ffi::c_ulong) -> *mut Object;
+    pub fn webkit_dom_html_object_element_get_type() -> usize;
+    pub fn webkit_dom_html_object_element_get_data(element: *mut Object) -> *mut c_char;
+    pub fn webkit_dom_html_embed_element_get_src(element: *mut Object) -> *mut c_char;
+    pub fn g_type_check_instance_is_a(instance: *mut Object, ty: usize) -> c_int;
+    pub fn webkit_uri_response_get_uri(response: *mut Object) -> *const c_char;
     pub fn webkit_web_page_get_form_manager(page: *mut Object, world: *mut Object) -> *mut Object;
     pub fn webkit_web_page_send_message_to_view(
         page: *mut Object,
@@ -140,6 +154,12 @@ unsafe extern "C" {
     pub fn jsc_weak_value_get_value(value: *mut Object) -> *mut Object;
     pub fn soup_message_headers_get_one(headers: *mut Object, name: *const c_char)
         -> *const c_char;
+    pub fn soup_message_headers_remove(headers: *mut Object, name: *const c_char);
+    pub fn soup_message_headers_append(
+        headers: *mut Object,
+        name: *const c_char,
+        value: *const c_char,
+    );
     pub fn soup_message_headers_replace(
         headers: *mut Object,
         name: *const c_char,

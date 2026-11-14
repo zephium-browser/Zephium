@@ -5,6 +5,7 @@ use crate::dispatch::{ApiTable, RegistrationError};
 pub mod action;
 pub mod bookmarks;
 pub mod commands;
+pub mod declarative_net_request;
 pub mod dom;
 pub mod extension;
 pub mod font_settings;
@@ -33,6 +34,7 @@ where
         + crate::i18n::I18nHost
         + crate::scripting_registry::ScriptingHost
         + crate::browser::BrowserPort
+        + declarative_net_request::DnrHost
         + 'static,
 {
     crate::storage::register(table)?;
@@ -46,6 +48,7 @@ where
     runtime::register(table)?;
     action::register(table)?;
     commands::register(table)?;
+    declarative_net_request::register(table)?;
     permissions::register(table)?;
     extension::register(table)?;
     management::register(table)?;

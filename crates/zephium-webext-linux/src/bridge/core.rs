@@ -122,6 +122,8 @@ pub(crate) enum Effect {
         view: u64,
         owner: ViewRef,
         observations: Vec<zephium_webkit_web_process_protocol::protocol::RequestEvent>,
+        dropped_observations: u64,
+        dropped_matches: u64,
     },
     Form {
         view: u64,
@@ -179,6 +181,7 @@ pub(crate) enum Phase {
 
 struct View {
     role: Role,
+    tab_id: i32,
     plan: ResolvedPlan,
     attached: Option<(u64, ResolvedPlan)>,
     phase: Phase,
@@ -242,6 +245,7 @@ pub(crate) struct Core {
     next_document: u64,
     policy: Option<(u64, Rc<SealedPolicy>)>,
     next_policy: u64,
+    policy_publications: BTreeMap<u64, (usize, bool)>,
     scripts: BTreeMap<u64, Rc<SealedScripts>>,
     current_scripts: u64,
     next_request: u64,
@@ -288,6 +292,7 @@ impl Core {
             next_document: 0,
             policy: None,
             next_policy: 0,
+            policy_publications: BTreeMap::new(),
             scripts: BTreeMap::new(),
             current_scripts: 0,
             next_request: 0,
@@ -374,6 +379,15 @@ impl Core {
     // ---- views ----
 
     pub fn register_tab(&mut self, tab: ItemId, plan: &AttachPlan) -> Result<u64, RegisterError> {
+        self.register_tab_with_id(tab, -1, plan)
+    }
+
+    pub fn register_tab_with_id(
+        &mut self,
+        tab: ItemId,
+        tab_id: i32,
+        plan: &AttachPlan,
+    ) -> Result<u64, RegisterError> {
         if self
             .views
             .values()
@@ -383,7 +397,7 @@ impl Core {
         }
         let resolved = ResolvedPlan::resolve(plan, self.authority_scheme(), None)
             .map_err(RegisterError::Plan)?;
-        self.register(Role::Tab(tab), resolved)
+        self.register(Role::Tab(tab), resolved, tab_id)
     }
 
     pub fn register_owned(
@@ -407,7 +421,7 @@ impl Core {
             .authority
             .open_view(install, kind)
             .map_err(RegisterError::Bind)?;
-        self.register(Role::Owned(view), resolved)
+        self.register(Role::Owned(view), resolved, -1)
     }
 
     fn installed_extension(&self, install: ExtensionInstallId) -> Option<ExtensionId> {
@@ -418,7 +432,12 @@ impl Core {
         self.scheme
     }
 
-    fn register(&mut self, role: Role, plan: ResolvedPlan) -> Result<u64, RegisterError> {
+    fn register(
+        &mut self,
+        role: Role,
+        plan: ResolvedPlan,
+        tab_id: i32,
+    ) -> Result<u64, RegisterError> {
         if self.closed {
             if let Role::Owned(view) = role {
                 self.authority.close_view(view);
@@ -437,6 +456,7 @@ impl Core {
             id,
             View {
                 role,
+                tab_id,
                 plan,
                 attached: None,
                 phase: Phase::Pending,
@@ -538,9 +558,10 @@ impl Core {
             self.attach_now(id);
             return;
         };
-        let attach = view
+        let mut attach = view
             .plan
             .attach(&self.token, generation, view.role.page_role());
+        attach.tab_id = view.tab_id;
         let Ok(bytes) = encode_ui(&UiMessage::Attach(attach)) else {
             return;
         };
@@ -615,9 +636,10 @@ impl Core {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        let attach = view
+        let mut attach = view
             .plan
             .attach(&self.token, generation, view.role.page_role());
+        attach.tab_id = view.tab_id;
         let Ok(bytes) = encode_ui(&UiMessage::Attach(attach)) else {
             view.phase = Phase::Refused(generation);
             self.stats.attach_refused += 1;
@@ -816,6 +838,8 @@ impl Core {
             Event::Requests {
                 generation,
                 observations,
+                dropped_observations,
+                dropped_matches,
             } if Some(generation) == current => {
                 if view
                     .attached_plan()
@@ -825,6 +849,8 @@ impl Core {
                         view: id,
                         owner: view.role.owner(),
                         observations,
+                        dropped_observations,
+                        dropped_matches,
                     });
                 }
             }
@@ -1528,6 +1554,10 @@ impl Core {
     pub fn publish_policy(&mut self, policy: Rc<SealedPolicy>) -> u64 {
         self.next_policy += 1;
         let generation = self.next_policy;
+        self.policy_publications.insert(generation, (0, false));
+        while self.policy_publications.len() > 64 {
+            self.policy_publications.pop_first();
+        }
         self.policy = Some((generation, policy.clone()));
         let targets: Vec<u64> = self
             .views
@@ -1553,6 +1583,9 @@ impl Core {
             length: policy.len(),
         });
         if let Ok(bytes) = encode_ui(&message) {
+            if let Some((pending, _)) = self.policy_publications.get_mut(&policy_generation) {
+                *pending += 1;
+            }
             self.effects.push(Effect::Send {
                 view: id,
                 name: POLICY_MESSAGE,
@@ -1564,10 +1597,28 @@ impl Core {
         }
     }
 
-    pub fn policy_settled(&mut self, accepted: bool) {
+    pub fn policy_settled(&mut self, generation: u64, accepted: bool) {
+        if let Some((pending, failed)) = self.policy_publications.get_mut(&generation) {
+            *pending = pending.saturating_sub(1);
+            *failed |= !accepted;
+        }
         if !accepted {
             self.stats.policy_refused += 1;
         }
+    }
+
+    pub fn policy_status(&self, generation: u64) -> Option<Result<(), bool>> {
+        self.policy_publications
+            .get(&generation)
+            .map(|(pending, failed)| {
+                if *pending > 0 {
+                    Err(false)
+                } else if *failed {
+                    Err(true)
+                } else {
+                    Ok(())
+                }
+            })
     }
 }
 

@@ -231,5 +231,14 @@
     "functions": [
       "getAll"
     ]
+  },
+  "declarativeNetRequest": {
+    "functions": [
+      "updateDynamicRules",
+      "testMatchOutcome"
+    ],
+    "events": [
+      "onRuleMatchedDebug"
+    ]
   }
 }

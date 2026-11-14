@@ -27,6 +27,7 @@ thiserror.workspace = true
 url.workspace = true
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 zephium-webkit-web-process-protocol = { path = "../zephium-webkit-web-process-protocol", version = "=0.1.0" }
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0" }
 
 [dev-dependencies]
 proptest.workspace = true

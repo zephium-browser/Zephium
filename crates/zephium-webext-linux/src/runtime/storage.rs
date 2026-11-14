@@ -63,6 +63,10 @@ pub(crate) enum Job {
 
 #[derive(Debug)]
 pub(crate) enum Done {
+    Destroyed {
+        install: ExtensionInstallId,
+        failed: bool,
+    },
     Scripts {
         ticket: u64,
         result: Result<(), ApiError>,
@@ -189,12 +193,13 @@ fn run(inbox: &mpsc::Receiver<Job>, outbox: &mpsc::Sender<Done>, mut signal: &Un
                 let failed = stores
                     .remove(&install)
                     .is_some_and(|store| store.destroy().is_err());
-                if let Some(directory) = directory {
-                    let _ = std::fs::remove_dir_all(directory);
-                }
-                failed.then_some(Done::Failed {
-                    install: Some(install),
-                    message: "Extension storage could not be removed.",
+                let directory_failed = directory.is_some_and(|directory| {
+                    std::fs::remove_dir_all(directory)
+                        .is_err_and(|error| error.kind() != ErrorKind::NotFound)
+                });
+                Some(Done::Destroyed {
+                    install,
+                    failed: failed || directory_failed,
                 })
             }
             Job::CommitScripts {

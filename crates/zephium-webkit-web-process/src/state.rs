@@ -623,6 +623,7 @@ pub fn attachment_widens(old: &Attach, new: &Attach) -> bool {
     old.token == new.token
         && old.protocol_version == new.protocol_version
         && old.role == new.role
+        && old.tab_id == new.tab_id
         && old.limits == new.limits
         && new.generation >= old.generation
         && old.extension_bootstrap == new.extension_bootstrap

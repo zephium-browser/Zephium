@@ -1077,3 +1077,41 @@ fn extensions_see_their_manifest_strings_localized() {
     assert_eq!(manifest["commands"]["run"]["description"], "Titled");
     assert_eq!(manifest["content_scripts"][0]["js"][0], "__MSG_name__.js");
 }
+
+#[test]
+fn removal_waits_for_network_io_and_storage_erasure_before_reactivation() {
+    let directory = tempfile::tempdir().unwrap();
+    let state_path = directory.path().join("install");
+    std::fs::create_dir(&state_path).unwrap();
+    std::fs::write(
+        state_path.join("dnr.json"),
+        b"retained until network retirement",
+    )
+    .unwrap();
+    let mut harness = Harness::new();
+    let mut admission = admitted(harness.install);
+    admission.state_directory = Some(state_path.clone());
+    harness
+        .host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    harness
+        .host
+        .forget(harness.install, true, &mut Outbox::default());
+    assert!(harness.host.has_pending_script_writes(harness.install));
+    assert!(state_path.join("dnr.json").exists());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.host.has_pending_script_writes(harness.install) {
+        assert!(std::time::Instant::now() < deadline);
+        for done in harness.host.network_take() {
+            if done.prepared {
+                assert!(harness.host.network_finish(done.revision, true));
+            } else {
+                harness.host.network_done(done, &mut Outbox::default());
+            }
+        }
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut Outbox::default());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!state_path.exists());
+}

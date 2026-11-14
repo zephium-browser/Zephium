@@ -108,6 +108,19 @@ impl ScriptingHost for Host {
     }
 }
 
+impl super::declarative_net_request::DnrHost for Host {
+    fn dnr_state(&self, _: &Sender) -> Result<&super::declarative_net_request::DnrState, ApiError> {
+        Err(self.reached())
+    }
+    fn dnr_request(
+        &mut self,
+        _: super::declarative_net_request::Request,
+        invocation: Invocation<'_>,
+    ) -> Handled {
+        invocation.reply(Err(self.reached()))
+    }
+}
+
 fn permissions(names: &[&str]) -> InstallPermissions {
     let (declaration, _) =
         PermissionDeclaration::from_manifest(&Manifest::from_value(json!({"permissions": names})));
@@ -244,6 +257,11 @@ fn methods() -> Vec<String> {
             .map(|name| (*name).to_owned()),
     );
     methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(
+        super::declarative_net_request::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
     methods
 }
 

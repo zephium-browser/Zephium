@@ -222,6 +222,14 @@ impl RuntimeEngine for EngineSide {
     fn notice(&self, notice: &Notice) {
         let profile = self.profile;
         match notice {
+            Notice::NetworkStatus { install, status } => {
+                if let Some(error) = &status.error {
+                    eprintln!(
+                        "extension {install} network rules kept their previous policy: {} characters",
+                        error.chars().count()
+                    );
+                }
+            }
             Notice::Error(error) => {
                 if cfg!(debug_assertions) {
                     eprintln!("extension {} error: {}", error.install, error.message);

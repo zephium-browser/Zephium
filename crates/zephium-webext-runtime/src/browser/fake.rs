@@ -1278,6 +1278,15 @@ impl FakeBrowser {
 }
 
 impl BrowserPort for FakeBrowser {
+    fn set_dnr_badge(
+        &mut self,
+        _: zephium_core::ids::ExtensionInstallId,
+        tab_id: i32,
+        text: Option<&str>,
+    ) -> Result<(), ApiError> {
+        self.snapshot.tab(tab_id)?;
+        self.action.set_dnr_badge(tab_id, text)
+    }
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
         if sender.profile() != self.snapshot.profile {
             return Err(ApiError::cannot_access_page());

@@ -20,6 +20,7 @@ struct Access {
     contexts: BTreeSet<String>,
     permission: Option<String>,
     manifest: Option<String>,
+    dnr: Option<(bool, bool)>,
 }
 
 fn contexts(value: &Value) -> Option<BTreeSet<String>> {
@@ -53,6 +54,12 @@ fn contexts(value: &Value) -> Option<BTreeSet<String>> {
 fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -> Option<Access> {
     if depth >= 16 || rules.is_empty() {
         return None;
+    }
+    if rules
+        .iter()
+        .any(|rule| rule["name"].as_str() == Some("declarativeNetRequest"))
+    {
+        return dnr_access(rules);
     }
     let mut ordered: Vec<_> = rules.iter().collect();
     ordered.sort_by_key(|rule| rule["name"].as_str().map(str::len));
@@ -92,6 +99,7 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
             contexts: contexts(rule.get("contexts")?)?,
             permission: None,
             manifest: None,
+            dnr: None,
         };
         if current.contexts.is_empty() {
             continue;
@@ -141,6 +149,79 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
     result
 }
 
+fn dnr_access(rules: &[Value]) -> Option<Access> {
+    let mut ordered: Vec<_> = rules.iter().collect();
+    ordered.sort_by_key(|rule| rule["name"].as_str().map(str::len));
+    let mut parent = Map::new();
+    let mut alternatives = Vec::new();
+    for entry in ordered {
+        let choices = entry["rules"].as_array()?;
+        alternatives.clear();
+        for choice in choices {
+            let mut inherited = parent.clone();
+            inherited.extend(choice.as_object()?.clone());
+            alternatives.push(inherited);
+        }
+        if let Some(index) = choices
+            .iter()
+            .position(|choice| choice["default_parent"] == true)
+        {
+            parent = alternatives[index].clone();
+        }
+    }
+    if alternatives.len() != 2 {
+        return None;
+    }
+    let mut feedback = None;
+    let mut unpacked = None;
+    let mut permissions = Vec::new();
+    for rule in alternatives {
+        if rule.get("contexts")? != &json!(["privileged_extension"]) {
+            return None;
+        }
+        let dependencies = rule.get("dependencies")?.as_array()?;
+        let has_feedback = dependencies
+            .iter()
+            .any(|value| value == "permission:declarativeNetRequestFeedback");
+        let names: Vec<_> = dependencies
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "permission:declarativeNetRequestFeedback")
+            .collect();
+        if names.len() != 1 || dependencies.len() != 1 + usize::from(has_feedback) {
+            return None;
+        }
+        permissions.push(names[0].to_owned());
+        let development = match rule.get("location").and_then(Value::as_str) {
+            None => false,
+            Some("unpacked") => true,
+            _ => return None,
+        };
+        if feedback.is_some_and(|old| old != has_feedback)
+            || unpacked.is_some_and(|old| old != development)
+        {
+            return None;
+        }
+        feedback = Some(has_feedback);
+        unpacked = Some(development);
+    }
+    permissions.sort_unstable();
+    if permissions
+        != [
+            "permission:declarativeNetRequest",
+            "permission:declarativeNetRequestWithHostAccess",
+        ]
+    {
+        return None;
+    }
+    Some(Access {
+        contexts: contexts(&json!(["privileged_extension"]))?,
+        permission: None,
+        manifest: None,
+        dnr: Some((feedback?, unpacked?)),
+    })
+}
+
 fn apply_policy(name: &str, access: &mut Access) {
     if !matches!(name, "runtime.sendMessage" | "runtime.connect") {
         access.contexts.remove("externalPage");
@@ -178,6 +259,18 @@ fn add_access(target: &mut Value, access: &Access) {
     }
     if let Some(feature) = &access.manifest {
         target["manifest"] = json!([feature]);
+    }
+    if let Some((feedback, unpacked)) = access.dnr {
+        target["permissions"] = json!([
+            "declarativeNetRequest",
+            "declarativeNetRequestWithHostAccess"
+        ]);
+        if feedback {
+            target["requiredPermissions"] = json!(["declarativeNetRequestFeedback"]);
+        }
+        if unpacked {
+            target["unpackedOnly"] = json!(true);
+        }
     }
 }
 
@@ -567,6 +660,7 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
                     contexts: BTreeSet::new(),
                     permission: None,
                     manifest: None,
+                    dnr: None,
                 });
                 apply_policy(&full, &mut access);
                 add_access(&mut spec, &access);

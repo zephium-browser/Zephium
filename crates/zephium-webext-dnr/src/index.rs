@@ -2142,22 +2142,42 @@ pub struct Extension<'a> {
 }
 
 pub fn evaluate<'a>(request: &Request<'_>, extensions: &'a [Extension<'a>]) -> Decision<'a> {
-    let matching: Vec<_> = extensions
-        .iter()
-        .flat_map(|ext| {
-            ext.rulesets.iter().flat_map(move |set| {
-                set.candidates(request)
-                    .filter(|r| r.matches(request))
-                    .map(move |r| {
-                        let rule = r.decision_rule();
-                        let regex = rule
-                            .condition
-                            .regex_filter
-                            .as_ref()
-                            .and_then(|_| r.capture_regex());
-                        (ext.id, ext.install_order, set.ruleset_id(), rule, regex)
-                    })
-            })
+    evaluate_filtered(
+        request,
+        extensions.iter().flat_map(|extension| {
+            extension
+                .rulesets
+                .iter()
+                .map(move |set| (extension.id, extension.install_order, *set))
+        }),
+        |_, _| true,
+    )
+}
+
+/// Evaluate mapped indexes after the native host's permission admission. The
+/// iterator avoids building a second extension/ruleset graph per request.
+pub fn evaluate_filtered<'a>(
+    request: &Request<'_>,
+    rulesets: impl Iterator<Item = (&'a str, u64, &'a CompiledRuleset<'a>)>,
+    admitted: impl Fn(&str, &Rule) -> bool,
+) -> Decision<'a> {
+    let admitted = &admitted;
+    let matching: Vec<_> = rulesets
+        .flat_map(|(id, order, set)| {
+            set.candidates(request)
+                .filter(|rule| rule.matches(request))
+                .filter_map(move |reference| {
+                    let rule = reference.decision_rule();
+                    if !admitted(id, &rule) {
+                        return None;
+                    }
+                    let regex = rule
+                        .condition
+                        .regex_filter
+                        .as_ref()
+                        .and_then(|_| reference.capture_regex());
+                    Some((id, order, set.ruleset_id(), rule, regex))
+                })
         })
         .collect();
     evaluate_matching_candidates(

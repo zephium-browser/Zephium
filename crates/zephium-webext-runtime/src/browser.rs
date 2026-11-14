@@ -8,7 +8,7 @@
 use serde_json::Value;
 use url::Url;
 use zephium_core::extensions::{ExtensionBrowserSurface, ExtensionBrowserTab};
-use zephium_core::ids::{ItemId, ProfileId};
+use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 
 use crate::context::{DocumentGeneration, FrameId, Sender};
 use crate::dispatch::{Handled, Invocation};
@@ -411,6 +411,16 @@ pub trait BrowserPort {
     /// Validates an extension-relative packaged resource without exposing file paths.
     fn validate_resource(&self, _sender: &Sender, _path: &str) -> Result<(), ApiError> {
         Err(ApiError::other("Could not load file."))
+    }
+    /// Commits DNR-owned badge text through the native action model. None clears the
+    /// DNR overlay and restores extension action text; it does not clear that text.
+    fn set_dnr_badge(
+        &mut self,
+        _install: ExtensionInstallId,
+        _tab_id: i32,
+        _text: Option<&str>,
+    ) -> Result<(), ApiError> {
+        Err(unsupported())
     }
     /// Unix time for history defaults and event timestamps.
     fn now_ms(&self) -> u64 {

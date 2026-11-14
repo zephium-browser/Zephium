@@ -384,6 +384,16 @@ impl InstallPermissions {
         })
     }
 
+    /// Whether an explicit activeTab invocation still covers this exact document.
+    pub fn has_active_tab_grant(
+        &self,
+        tab: ItemId,
+        main_document: DocumentGeneration,
+        url: &Url,
+    ) -> bool {
+        self.has_api(ACTIVE_TAB) && self.active_tab_covers(tab, main_document, url)
+    }
+
     /// The person invoked the extension on `tab`, whose main frame shows
     /// `url`. Grants `activeTab` when declared, or one-tab access to a
     /// requested host that site access withholds. Returns whether a grant
@@ -732,6 +742,13 @@ pub enum Gate {
     RequiresManifest(&'static str),
     /// Requires any one of these.
     RequiresAny(&'static [&'static str]),
+    /// The generated DNR alternatives, optionally requiring feedback and an unpacked install.
+    DeclarativeNetRequest {
+        /// Debug feedback requires its explicit API permission.
+        feedback: bool,
+        /// Debug and test APIs are limited to development installs.
+        unpacked: bool,
+    },
 }
 
 impl Gate {
@@ -750,6 +767,12 @@ impl Gate {
                 permissions.declaration.manifest_features.contains(*name)
             }
             Self::RequiresAny(names) => names.iter().any(|name| permissions.has_api(name)),
+            Self::DeclarativeNetRequest { feedback, unpacked } => {
+                (permissions.has_api("declarativeNetRequest")
+                    || permissions.has_api("declarativeNetRequestWithHostAccess"))
+                    && (!feedback || permissions.has_api("declarativeNetRequestFeedback"))
+                    && (!unpacked || sender.unpacked())
+            }
         };
         if !granted {
             return Err(ApiError::missing_permission());

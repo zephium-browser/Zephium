@@ -393,3 +393,57 @@ fn regex_quota_includes_rules_accelerated_by_domain() {
         .expect_err("aggregate regex limit includes domain-indexed rules");
     assert!(error.to_string().contains("regex"));
 }
+
+#[test]
+fn permission_filtered_indexes_match_independent_candidate_admission() {
+    for seed in 1..=12 {
+        let source = serde_json::to_vec(&generated_rules(seed, RulesetKind::Session)).unwrap();
+        let parsed = parse_rules_json(&source, RulesetKind::Session).unwrap();
+        let originals: Vec<_> = parsed
+            .rules
+            .iter()
+            .cloned()
+            .map(|rule| PreparedRule::new(rule).unwrap())
+            .collect();
+        let compiled =
+            CompiledRuleset::compile("_session", RulesetKind::Session, parsed.rules).unwrap();
+        let bytes = compiled.to_bytes();
+        let mapped = CompiledRuleset::load(&bytes).unwrap();
+        for suffix in 0..16 {
+            let url = format!(
+                "https://d{}.example.test/path{}?needle{}",
+                suffix % 8,
+                suffix,
+                suffix % 8
+            );
+            let host = format!("d{}.example.test", suffix % 8);
+            let mut request = Request::new(&url, &host, ResourceType::Script);
+            request.initiator_host = Some("source.test");
+            request.top_host = Some("top.test");
+            request.tab_id = 7;
+            for admitted_parity in 0..=1 {
+                let actual = zephium_webext_dnr::evaluate_filtered(
+                    &request,
+                    std::iter::once(("extension", 1, &mapped)),
+                    |_, rule| rule.id % 2 == admitted_parity,
+                );
+                let expected = evaluate_candidates(
+                    &request,
+                    originals
+                        .iter()
+                        .filter(|rule| rule.rule().id % 2 == admitted_parity)
+                        .map(|rule| Candidate {
+                            extension_id: "extension",
+                            install_order: 1,
+                            ruleset_id: "_session",
+                            rule,
+                        }),
+                );
+                assert_eq!(
+                    actual, expected,
+                    "seed={seed} request={suffix} parity={admitted_parity}"
+                );
+            }
+        }
+    }
+}

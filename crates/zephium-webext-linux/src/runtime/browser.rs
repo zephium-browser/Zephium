@@ -491,6 +491,11 @@ impl Shared {
         }))
     }
 
+    /// The Chrome tab id of a shell tab, given now if it has none yet.
+    pub(crate) fn assign_tab_id(&self, tab: ItemId) -> i32 {
+        self.state.borrow_mut().tabs.assign(tab)
+    }
+
     /// The Chrome tab id of a shell tab, when it was published.
     pub(crate) fn tab_id(&self, tab: ItemId) -> Option<i32> {
         self.state.borrow().tabs.get(tab)
@@ -1584,6 +1589,29 @@ impl Browser {
 }
 
 impl BrowserPort for Browser {
+    fn set_dnr_badge(
+        &mut self,
+        install: ExtensionInstallId,
+        tab_id: i32,
+        text: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let mut state = self.shared.state.borrow_mut();
+        let store = state
+            .actions
+            .get_mut(&install)
+            .ok_or_else(ApiError::context_invalidated)?;
+        let before = store.get(Some(tab_id), action::Property::BadgeText);
+        store.set_dnr_badge(tab_id, text)?;
+        if before != store.get(Some(tab_id), action::Property::BadgeText) {
+            state
+                .outgoing
+                .push_back(Outgoing::Engine(BrowserCall::ActionsChanged));
+        }
+        drop(state);
+        self.shared.kick_if_queued();
+        Ok(())
+    }
+
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
         let state = self.shared.state.borrow();
         if state.profile != Some(sender.profile()) {

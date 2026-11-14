@@ -126,6 +126,7 @@ pub(crate) struct Bootstrap<'a> {
     pub messages: &'a Value,
     pub ui_language: &'a str,
     pub incognito: bool,
+    pub unpacked: bool,
     pub permissions: &'a [String],
 }
 
@@ -139,6 +140,7 @@ impl Bootstrap<'_> {
             "messages": self.messages,
             "uiLanguage": self.ui_language,
             "incognito": self.incognito,
+            "unpacked": self.unpacked,
             "permissions": self.permissions,
         });
         if let (Some(worker), Some(object)) = (worker, value.as_object_mut()) {
@@ -311,6 +313,7 @@ mod tests {
             messages: &messages,
             ui_language: "en-US",
             incognito: false,
+            unpacked: false,
             permissions: &[],
         };
         for module in [false, true] {

@@ -15,6 +15,34 @@ use crate::model::{
 };
 use crate::parse::compile_regex;
 
+/// Chrome compares the initiator's registrable domain, ignoring URL scheme.
+pub fn domain_type(host: &str, initiator_host: Option<&str>) -> DomainType {
+    let Some(initiator) = initiator_host else {
+        return DomainType::ThirdParty;
+    };
+    let host = host.trim_end_matches('.');
+    let initiator = initiator.trim_end_matches('.');
+    let request_ip = host.trim_matches(['[', ']']).parse::<std::net::IpAddr>();
+    let initiator_ip = initiator
+        .trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>();
+    if request_ip.is_ok() || initiator_ip.is_ok() {
+        return if request_ip.is_ok() && request_ip == initiator_ip {
+            DomainType::FirstParty
+        } else {
+            DomainType::ThirdParty
+        };
+    }
+    if psl::domain_str(host)
+        .unwrap_or(host)
+        .eq_ignore_ascii_case(psl::domain_str(initiator).unwrap_or(initiator))
+    {
+        DomainType::FirstParty
+    } else {
+        DomainType::ThirdParty
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     BeforeRequest,
@@ -1907,5 +1935,36 @@ mod tests {
             .action,
             DecisionAction::Allow
         );
+    }
+}
+
+#[cfg(test)]
+mod party_tests {
+    use super::*;
+
+    #[test]
+    fn party_uses_public_suffix_boundaries_and_treats_opaque_as_third_party() {
+        for (request, initiator) in [
+            ("ads.example.co.uk", "www.example.co.uk"),
+            ("example.com.", "EXAMPLE.COM"),
+            ("localhost", "localhost"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("[::1]", "[::1]"),
+        ] {
+            assert_eq!(
+                domain_type(request, Some(initiator)),
+                DomainType::FirstParty
+            );
+        }
+        for (request, initiator) in [
+            ("ads.example.co.uk", Some("different.co.uk")),
+            ("one.github.io", Some("two.github.io")),
+            ("127.0.0.1", Some("127.0.0.2")),
+            ("127.0.0.1", Some("10.0.0.1")),
+            ("127.0.0.1", Some("subdomain.0.1")),
+            ("example.test", None),
+        ] {
+            assert_eq!(domain_type(request, initiator), DomainType::ThirdParty);
+        }
     }
 }

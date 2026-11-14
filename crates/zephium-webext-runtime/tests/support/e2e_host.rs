@@ -3,6 +3,7 @@ use std::io::{BufRead, Write};
 
 use crate::FakeBrowser;
 use runtime::alarms::{AlarmEnvironment, AlarmHost, Alarms};
+use runtime::api::declarative_net_request::{DnrHost, DnrState, Request as DnrRequest};
 use runtime::api::{action, scripting, tabs, web_navigation};
 use runtime::browser::{BrowserPort, BrowserRequest, BrowserSnapshot, ExtensionInfo};
 use runtime::context::{ClaimedWorld, CommittedDocument, InjectedWorld, TabDocument, ViewKind};
@@ -48,6 +49,7 @@ struct Host {
     browser: FakeBrowser,
     catalog: Messages,
     scripts: ScriptRegistry,
+    dnr: DnrState,
     storage: Storage,
     alarms: Alarms,
     clock: ManualClock,
@@ -70,6 +72,14 @@ impl Host {
 }
 
 impl BrowserPort for Host {
+    fn set_dnr_badge(
+        &mut self,
+        install: ExtensionInstallId,
+        tab_id: i32,
+        text: Option<&str>,
+    ) -> Result<(), ApiError> {
+        self.browser.set_dnr_badge(install, tab_id, text)
+    }
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
         self.browser.snapshot(sender)
     }
@@ -248,6 +258,19 @@ impl BrowserPort for Host {
 impl I18nHost for Host {
     fn messages(&self, _: &Sender) -> Result<&Messages, ApiError> {
         Ok(&self.catalog)
+    }
+}
+
+impl DnrHost for Host {
+    fn dnr_state(&self, _: &Sender) -> Result<&DnrState, ApiError> {
+        Ok(&self.dnr)
+    }
+    fn dnr_request(&mut self, request: DnrRequest, call: Invocation<'_>) -> Handled {
+        let result = self.dnr.execute(&request).map(|(state, reply)| {
+            self.dnr = state;
+            reply
+        });
+        call.reply(result)
     }
 }
 
@@ -496,6 +519,7 @@ impl Peer {
                 )
                 .expect("messages"),
                 scripts: ScriptRegistry::default(),
+                dnr: DnrState::default(),
                 storage: Storage::memory(profile(), install(), false),
                 alarms: Alarms::new(),
                 clock: ManualClock::default(),
@@ -1125,6 +1149,7 @@ impl Peer {
         self.host.browser.info.manifest = localized.clone();
         self.host.browser.info.commands = manifest["commands"].as_object().map(|commands| commands.iter().map(|(name, command)| json!({"name": name, "description": command["description"].as_str().unwrap_or(""), "shortcut": command["suggested_key"][std::env::consts::OS].as_str().or_else(|| command["suggested_key"]["default"].as_str()).unwrap_or("")})).collect()).unwrap_or_default();
         self.host.conformance = true;
+        self.host.dnr = DnrState::default();
         json!({"manifest": localized, "messages": self.host.catalog.catalog(), "uiLanguage": self.host.catalog.ui_language()})
     }
 

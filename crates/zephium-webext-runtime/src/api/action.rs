@@ -142,6 +142,7 @@ struct Overrides {
 pub struct ActionStore {
     defaults: Overrides,
     tabs: BTreeMap<i32, Overrides>,
+    dnr_badges: BTreeMap<i32, String>,
     revision: ExtensionActionRevision,
     /// Native toolbar pin preference; adapters update it from browser settings.
     pub is_on_toolbar: bool,
@@ -160,6 +161,7 @@ impl Default for ActionStore {
                 ..Overrides::default()
             },
             tabs: BTreeMap::new(),
+            dnr_badges: BTreeMap::new(),
             revision: ExtensionActionRevision::INITIAL,
             is_on_toolbar: false,
         }
@@ -220,7 +222,9 @@ impl ActionStore {
         Overrides {
             title: field(|s| s.title.clone()),
             popup: field(|s| s.popup.clone()),
-            badge: field(|s| s.badge.clone()),
+            badge: tab
+                .and_then(|tab| self.dnr_badges.get(&tab).cloned())
+                .or_else(|| field(|s| s.badge.clone())),
             background: Some(background),
             foreground: Some(foreground),
             enabled: local.and_then(|s| s.enabled).or(self.defaults.enabled),
@@ -293,14 +297,36 @@ impl ActionStore {
         }
     }
 
+    /// Sets the DNR count overlay without replacing extension-authored badge text.
+    pub fn set_dnr_badge(&mut self, tab: i32, text: Option<&str>) -> Result<(), ApiError> {
+        if text.is_some_and(|text| text.len() > MAX_BADGE_BYTES) {
+            return Err(ApiError::message_too_large());
+        }
+        if self.dnr_badges.get(&tab).map(String::as_str) == text {
+            return Ok(());
+        }
+        let revision = self
+            .revision
+            .next()
+            .ok_or_else(ApiError::context_invalidated)?;
+        if let Some(text) = text {
+            self.dnr_badges.insert(tab, text.to_owned());
+        } else {
+            self.dnr_badges.remove(&tab);
+        }
+        self.revision = revision;
+        Ok(())
+    }
+
     /// Navigation and tab close clear the complete override, including badge/icon/enabled.
     pub fn reset_tab(&mut self, tab: i32) -> Result<(), ApiError> {
-        if self.tabs.contains_key(&tab) {
+        if self.tabs.contains_key(&tab) || self.dnr_badges.contains_key(&tab) {
             let revision = self
                 .revision
                 .next()
                 .ok_or_else(ApiError::context_invalidated)?;
             self.tabs.remove(&tab);
+            self.dnr_badges.remove(&tab);
             self.revision = revision;
         }
         Ok(())

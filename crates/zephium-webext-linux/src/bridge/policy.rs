@@ -5,6 +5,7 @@ use std::io::Write;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::fs::{fcntl_add_seals, fcntl_get_seals, memfd_create, MemfdFlags, SealFlags};
+use zephium_webkit_web_process_protocol::dnr::{DnrPolicySnapshot, MAX_DNR_SNAPSHOT_BYTES};
 use zephium_webkit_web_process_protocol::policy::MAX_SNAPSHOT_BYTES;
 
 const REQUIRED_SEALS: SealFlags = SealFlags::SEAL
@@ -38,7 +39,12 @@ pub struct SealedPolicy {
 impl SealedPolicy {
     /// Seals `bytes`. Their format is the caller's; the module validates it.
     pub fn new(bytes: &[u8]) -> Result<Self, PolicyError> {
-        if bytes.is_empty() || bytes.len() > MAX_SNAPSHOT_BYTES {
+        let limit = if DnrPolicySnapshot::is_dnr(bytes) {
+            MAX_DNR_SNAPSHOT_BYTES
+        } else {
+            MAX_SNAPSHOT_BYTES
+        };
+        if bytes.is_empty() || bytes.len() > limit {
             return Err(PolicyError::InvalidSize);
         }
         let length = u32::try_from(bytes.len()).map_err(|_| PolicyError::InvalidSize)?;

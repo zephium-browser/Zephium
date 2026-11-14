@@ -99,6 +99,7 @@ export class RustPeer {
       binding.generatedSurface,
       binding.bootstrap({
         contextKind: kind === "extension" ? "options" : kind,
+        unpacked: true,
         manifest,
         permissions: manifest.permissions || [],
         messages: {},

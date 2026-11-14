@@ -2,8 +2,8 @@
 //! shared runtime's authority, dispatcher and services, and the views the
 //! runtime owns, driven from the GTK main loop.
 //!
-//! Everything runs on the GTK thread. The only other thread is the storage
-//! executor (see `runtime/storage.rs`). Timers are one glib timeout at the
+//! Native composition runs on the GTK thread; FIFO storage and network workers
+//! own blocking persistence and rule compilation. Timers are one glib timeout at the
 //! earliest deadline any service has; native callbacks are queued and
 //! handled from an idle source, never re-entrantly.
 
@@ -40,10 +40,12 @@ pub use self::errors::{
 pub use self::host::{Activation, BackgroundStatus, Notice, RuntimeHost};
 use self::host::{Admitted, HostConfig, NativeOp};
 use crate::background::{check_background, page_script, InstallRefusal};
+use crate::bridge::SealedPolicy;
 use crate::bridge::{
     AttachPlan, BridgeConfig, BridgeError, BridgeViewId, ExtensionPages, ProfileBridge,
     RegisterError, ShutdownDrain,
 };
+use crate::network::{self, NetworkStatus};
 use crate::scheme::{RequestHost, Requester, Scheme, SchemeError};
 use crate::views::{
     create_view, ExtensionPage, Owned, PageEntry, PageKind, PageScript, ViewError, ViewKindKey,
@@ -206,6 +208,18 @@ struct Record {
     manifest: Manifest,
 }
 
+struct NetworkPublication {
+    prepared: network::Done,
+    revision: u64,
+    generation: u64,
+    candidate: Rc<SealedPolicy>,
+    previous: Rc<SealedPolicy>,
+    deadline: Instant,
+    decision_sent: bool,
+    rollback: bool,
+    completion: Option<network::Done>,
+}
+
 struct Inner {
     context: webkit2gtk::WebContext,
     scheme: Rc<Scheme>,
@@ -217,6 +231,11 @@ struct Inner {
     scale: u64,
     timer: RefCell<Option<glib::SourceId>>,
     storage_source: RefCell<Option<glib::SourceId>>,
+    network_source: RefCell<Option<glib::SourceId>>,
+    network_poll: RefCell<Option<glib::SourceId>>,
+    network_policy: RefCell<Rc<SealedPolicy>>,
+    network_publication: RefCell<Option<NetworkPublication>>,
+    network_tabs: RefCell<HashMap<BridgeViewId, ItemId>>,
     idle: Cell<bool>,
     running: Cell<bool>,
     retired: Cell<bool>,
@@ -248,6 +267,25 @@ struct TabEntry {
 #[derive(Clone)]
 pub struct ProfileRuntime {
     inner: Rc<Inner>,
+}
+
+type PermissionResult = Result<(), String>;
+
+/// An update settles after every attached page accepted the new network grants.
+#[derive(Clone)]
+pub struct PermissionUpdate {
+    completion: Rc<RefCell<Option<PermissionResult>>>,
+}
+
+impl PermissionUpdate {
+    /// `None` while the update is pending; failures preserve the previous grants.
+    pub fn poll(&self) -> Option<PermissionResult> {
+        self.completion.borrow().clone()
+    }
+
+    pub(crate) fn settle(&self, result: PermissionResult) {
+        *self.completion.borrow_mut() = Some(result);
+    }
 }
 
 fn hex(install: ExtensionInstallId) -> String {
@@ -343,6 +381,13 @@ impl ProfileRuntime {
             host,
         )
         .map_err(RuntimeError::Bridge)?;
+        let empty = zephium_webkit_web_process_protocol::dnr::DnrPolicySnapshot::encode(&[])
+            .map_err(|_| RuntimeError::Setup("empty network policy".into()))?;
+        let network_policy = Rc::new(
+            SealedPolicy::new(&empty)
+                .map_err(|_| RuntimeError::Setup("network policy could not be sealed".into()))?,
+        );
+        bridge.publish_prepared_policy(network_policy.clone());
         let inner = Rc::new(Inner {
             context: context.clone(),
             scheme,
@@ -354,6 +399,11 @@ impl ProfileRuntime {
             scale,
             timer: RefCell::new(None),
             storage_source: RefCell::new(None),
+            network_source: RefCell::new(None),
+            network_poll: RefCell::new(None),
+            network_policy: RefCell::new(network_policy),
+            network_publication: RefCell::new(None),
+            network_tabs: RefCell::new(HashMap::new()),
             idle: Cell::new(false),
             running: Cell::new(false),
             retired: Cell::new(false),
@@ -401,6 +451,26 @@ impl ProfileRuntime {
             glib::ControlFlow::Continue
         });
         *inner.storage_source.borrow_mut() = Some(source);
+        let fd = inner
+            .bridge
+            .with_runtime(|host, _| host.network_fd())
+            .map_err(|_| RuntimeError::Setup("runtime busy".into()))?;
+        let weak = Rc::downgrade(&inner);
+        let source = glib::source::unix_fd_add_local(fd, glib::IOCondition::IN, move |_, _| {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let done = inner
+                .bridge
+                .with_runtime(|host, _| host.network_take())
+                .unwrap_or_default();
+            for done in done {
+                inner.network_event(done);
+            }
+            inner.run();
+            glib::ControlFlow::Continue
+        });
+        *inner.network_source.borrow_mut() = Some(source);
         Ok(Self { inner })
     }
 
@@ -419,6 +489,34 @@ impl ProfileRuntime {
     /// background starts on its first event.
     pub fn install_enabled(&self, spec: InstallSpec) -> Result<(), InstallError> {
         self.inner.activate(spec, &Activation::Enabled)
+    }
+
+    /// Supplies the stable installation ordinal from the browser's durable records.
+    /// Call before install/enable, including on profile restoration.
+    pub fn set_install_order(&self, install: ExtensionInstallId, order: u64) -> Result<(), String> {
+        self.inner
+            .bridge
+            .with_runtime(|host, _| host.set_install_order(install, order))
+            .map_err(|_| "Runtime is busy.".to_owned())?
+    }
+
+    /// Replaces API/network grants after consent or revocation. Poll the returned
+    /// update before reporting success; the host also rebuilds content-script plans.
+    pub fn permissions_changed(
+        &self,
+        install: ExtensionInstallId,
+        permissions: InstallPermissions,
+    ) -> Result<PermissionUpdate, String> {
+        let update = PermissionUpdate {
+            completion: Rc::new(RefCell::new(None)),
+        };
+        self.inner
+            .bridge
+            .with_runtime(|host, _| {
+                host.update_network_permissions(install, permissions, update.clone())
+            })
+            .map_err(|_| "Runtime is busy.".to_owned())??;
+        Ok(update)
     }
 
     /// A new version replaced a running one: the old background stops, its
@@ -519,7 +617,18 @@ impl ProfileRuntime {
         tab: ItemId,
         view: &webkit2gtk::WebView,
     ) -> Result<BridgeViewId, RegisterError> {
-        self.inner.attach_ordinary_tab(tab, view)
+        let tab_id = self.inner.browser.assign_tab_id(tab);
+        self.attach_tab_with_id(tab, tab_id, view)
+    }
+
+    /// Attaches a tab with its stable Chrome id for per-tab DNR and feedback.
+    pub fn attach_tab_with_id(
+        &self,
+        tab: ItemId,
+        tab_id: i32,
+        view: &webkit2gtk::WebView,
+    ) -> Result<BridgeViewId, RegisterError> {
+        self.inner.attach_ordinary_tab(tab, tab_id, view)
     }
 
     /// Detaches a tab; its contexts end.
@@ -575,6 +684,15 @@ impl ProfileRuntime {
     /// The Chrome tab id the runtime gave a shell tab.
     pub fn tab_id(&self, tab: ItemId) -> Option<i32> {
         self.inner.browser.tab_id(tab)
+    }
+
+    /// Rule loading, errors and unsupported rules for install review/details.
+    pub fn network_status(&self, install: ExtensionInstallId) -> Option<NetworkStatus> {
+        self.inner
+            .bridge
+            .with_runtime(|host, _| host.network_status(install))
+            .ok()
+            .flatten()
     }
 
     /// Whether navigating `requester` to `uri` may promote it to that
@@ -665,6 +783,7 @@ impl ProfileRuntime {
 
 /// Teardown of one extension: its views are gone once this settles.
 pub struct ExtensionStop {
+    runtime: Weak<Inner>,
     views: Rc<Views>,
     install: ExtensionInstallId,
     quiet_since: Option<Instant>,
@@ -678,7 +797,13 @@ impl ExtensionStop {
 
     /// Whether everything is gone and the loop was quiet for a moment.
     pub fn poll(&mut self) -> bool {
-        if self.remaining_views() > 0 || gtk::events_pending() {
+        let retiring = self.runtime.upgrade().is_some_and(|inner| {
+            inner
+                .bridge
+                .with_runtime(|host, _| host.network_retiring(self.install))
+                .unwrap_or(true)
+        });
+        if retiring || self.remaining_views() > 0 || gtk::events_pending() {
             self.quiet_since = None;
             return false;
         }
@@ -730,6 +855,124 @@ fn pump(timeout: Duration, mut settled: impl FnMut() -> bool) -> bool {
 }
 
 impl Inner {
+    fn network_event(self: &Rc<Self>, mut done: network::Done) {
+        if done.prepared {
+            let accepts = self
+                .bridge
+                .with_runtime(|host, _| host.network_accepts(&done))
+                .unwrap_or(false);
+            if !accepts {
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, _| host.network_finish(done.revision, false));
+                return;
+            }
+            let Some(policy) = done
+                .result
+                .as_mut()
+                .ok()
+                .and_then(|update| update.policy.take())
+            else {
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, _| host.network_finish(done.revision, false));
+                return;
+            };
+            let candidate = Rc::new(policy);
+            let generation = self.bridge.publish_prepared_policy(candidate.clone());
+            *self.network_publication.borrow_mut() = Some(NetworkPublication {
+                revision: done.revision,
+                generation,
+                candidate,
+                previous: self.network_policy.borrow().clone(),
+                deadline: Instant::now() + Duration::from_secs(10),
+                decision_sent: false,
+                rollback: false,
+                completion: None,
+                prepared: done,
+            });
+            self.poll_network();
+            return;
+        }
+        let pending = self.network_publication.borrow_mut().take();
+        if let Some(mut publication) = pending {
+            if publication.revision == done.revision {
+                if done.result.is_ok() {
+                    *self.network_policy.borrow_mut() = publication.candidate;
+                    let _ = self
+                        .bridge
+                        .with_runtime(|host, out| host.network_done(done, out));
+                } else {
+                    if !publication.rollback {
+                        publication.generation = self
+                            .bridge
+                            .publish_prepared_policy(publication.previous.clone());
+                        publication.rollback = true;
+                        publication.deadline = Instant::now() + Duration::from_secs(10);
+                    }
+                    publication.completion = Some(done);
+                    *self.network_publication.borrow_mut() = Some(publication);
+                    self.poll_network();
+                }
+                return;
+            }
+            *self.network_publication.borrow_mut() = Some(publication);
+        }
+        let _ = self
+            .bridge
+            .with_runtime(|host, out| host.network_done(done, out));
+    }
+
+    fn poll_network(self: &Rc<Self>) {
+        if self.retired.get() {
+            return;
+        }
+        let Some(mut publication) = self.network_publication.borrow_mut().take() else {
+            return;
+        };
+        let status = self.bridge.policy_status(publication.generation);
+        let expired = Instant::now() >= publication.deadline;
+        if publication.rollback {
+            if publication.completion.is_some() && (status != Some(Err(false)) || expired) {
+                if let Some(done) = publication.completion.take() {
+                    let _ = self
+                        .bridge
+                        .with_runtime(|host, out| host.network_done(done, out));
+                }
+                self.run();
+                return;
+            }
+        } else if !publication.decision_sent && (status != Some(Err(false)) || expired) {
+            let current = self
+                .bridge
+                .with_runtime(|host, _| host.network_accepts(&publication.prepared))
+                .unwrap_or(false);
+            let commit = current && !expired && status == Some(Ok(()));
+            if !commit {
+                publication.generation = self
+                    .bridge
+                    .publish_prepared_policy(publication.previous.clone());
+                publication.rollback = true;
+                publication.deadline = Instant::now() + Duration::from_secs(10);
+            }
+            let _ = self
+                .bridge
+                .with_runtime(|host, _| host.network_finish(publication.revision, commit));
+            publication.decision_sent = true;
+        }
+        *self.network_publication.borrow_mut() = Some(publication);
+        if self.network_poll.borrow().is_none() {
+            let weak = Rc::downgrade(self);
+            let source = glib::timeout_add_local_once(Duration::from_millis(5), move || {
+                if let Some(inner) = weak.upgrade() {
+                    inner.network_poll.borrow_mut().take();
+                    inner.poll_network();
+                }
+            });
+            *self.network_poll.borrow_mut() = Some(source);
+        }
+    }
+
     fn schedule(self: &Rc<Self>) {
         if self.idle.replace(true) {
             return;
@@ -1120,7 +1363,7 @@ impl Inner {
             .map_err(|_| InstallError::Admission("runtime busy".into()))?;
         if pending {
             return Err(InstallError::Admission(
-                "script registration is still being saved; retry after it settles".into(),
+                "extension state is still being saved or removed; retry after it settles".into(),
             ));
         }
         Ok(())
@@ -1246,6 +1489,7 @@ impl Inner {
         self.records.borrow_mut().remove(&install);
         self.run();
         ExtensionStop {
+            runtime: Rc::downgrade(self),
             views: self.views.clone(),
             install,
             quiet_since: None,
@@ -1341,6 +1585,13 @@ impl Inner {
         if let Some(source) = self.storage_source.borrow_mut().take() {
             source.remove();
         }
+        if let Some(source) = self.network_source.borrow_mut().take() {
+            source.remove();
+        }
+        if let Some(source) = self.network_poll.borrow_mut().take() {
+            source.remove();
+        }
+        let _ = self.bridge.with_runtime(|host, _| host.stop_network());
         let owned: Vec<(ExtensionInstallId, ViewKindKey)> =
             self.views.owned.borrow().keys().copied().collect();
         for (install, key) in owned {
@@ -1538,10 +1789,17 @@ impl Inner {
     fn attach_ordinary_tab(
         self: &Rc<Self>,
         tab: ItemId,
+        tab_id: i32,
         view: &webkit2gtk::WebView,
     ) -> Result<BridgeViewId, RegisterError> {
-        let plan = self.content.borrow().plan.clone();
-        let id = self.bridge.attach_tab(tab, view, &plan)?;
+        let mut plan = self.content.borrow().plan.clone();
+        plan.apply_policy = true;
+        plan.observe_requests = true;
+        let id = self.bridge.attach_tab_with_id(tab, tab_id, view, &plan)?;
+        self.network_tabs.borrow_mut().insert(id, tab);
+        let _ = self
+            .bridge
+            .with_runtime(|host, _| host.network_tab(tab, tab_id));
         // An extension document in a tab gets its install's cross-origin
         // access once it commits; anything else loses it before it starts.
         let weak = Rc::downgrade(self);
@@ -1594,6 +1852,11 @@ impl Inner {
     }
 
     fn detach_ordinary_tab(&self, view: BridgeViewId) {
+        if let Some(tab) = self.network_tabs.borrow_mut().remove(&view) {
+            let _ = self
+                .bridge
+                .with_runtime(|host, _| host.network_tab_closed(tab));
+        }
         use webkit2gtk::{UserContentManagerExt, WebViewExt};
         if let Some(mut entry) = self.tabs.borrow_mut().remove(&view) {
             if let (Some(webview), Some(loads)) = (entry.view.upgrade(), entry.loads.take()) {
@@ -1627,6 +1890,12 @@ impl Drop for Inner {
             timer.remove();
         }
         if let Some(source) = self.storage_source.get_mut().take() {
+            source.remove();
+        }
+        if let Some(source) = self.network_source.get_mut().take() {
+            source.remove();
+        }
+        if let Some(source) = self.network_poll.get_mut().take() {
             source.remove();
         }
     }
