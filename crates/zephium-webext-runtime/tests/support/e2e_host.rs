@@ -1,13 +1,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
+use crate::FakeBrowser;
 use runtime::alarms::{AlarmEnvironment, AlarmHost, Alarms};
+use runtime::api::{action, scripting, tabs, web_navigation};
+use runtime::browser::{BrowserPort, BrowserRequest, BrowserSnapshot, ExtensionInfo};
 use runtime::context::{ClaimedWorld, CommittedDocument, InjectedWorld, TabDocument, ViewKind};
 use runtime::dispatch::{encode_for, Responder};
 use runtime::envelope::{ApiName, Envelope, EventSeq};
 use runtime::events::{
     EventFacts, EventImportance, EventQueue, EventRegistry, EventsHost, ListenerRequest,
 };
+use runtime::i18n::{I18nHost, LocaleEnvironment, Messages};
 use runtime::lifecycle::{Command, Lifecycle, Observation, StartReason};
 use runtime::limits::{Clock, ManualClock};
 use runtime::pattern::DocumentOrigin;
@@ -17,6 +21,7 @@ use runtime::ports::{
     MessageTarget, MessagingHost, PortAction, PortService,
 };
 use runtime::protocol::{ProtocolHost, ProtocolRequest, WorkerSession};
+use runtime::scripting_registry::{ResourceKind, ScriptRegistry, ScriptingHost};
 use runtime::storage::{Storage, StorageChangeEvent, StorageHost};
 use runtime::{
     ApiError, ApiTable, Authority, ContextKey, Dispatcher, DocumentGeneration, ExtensionId,
@@ -40,6 +45,9 @@ enum Work {
 }
 
 struct Host {
+    browser: FakeBrowser,
+    catalog: Messages,
+    scripts: ScriptRegistry,
     storage: Storage,
     alarms: Alarms,
     clock: ManualClock,
@@ -56,6 +64,128 @@ impl Host {
             1_000_000 + self.clock.now_nanos() / 1_000_000,
             false,
         )
+    }
+}
+
+impl BrowserPort for Host {
+    fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
+        self.browser.snapshot(sender)
+    }
+    fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError> {
+        self.browser.extension_info(sender)
+    }
+    fn request(&mut self, request: BrowserRequest, call: Invocation<'_>) -> Handled {
+        if let BrowserRequest::Scripting(request) = &request {
+            if let scripting::Request::Execute {
+                source: scripting::ScriptSource::Function { source, args },
+                ..
+            } = request
+            {
+                assert_eq!(source, "(value) => value");
+                assert_eq!(args, &[Value::Null]);
+            }
+            let results = request
+                .target()
+                .frames
+                .iter()
+                .rev()
+                .map(|frame| scripting::FrameResult {
+                    frame: frame.clone(),
+                    result: Ok(json!({"frame": frame.frame.get(), "value": null})),
+                })
+                .collect();
+            let result = scripting::reply(request, results);
+            self.browser
+                .requests
+                .push(BrowserRequest::Scripting(request.clone()));
+            return call.reply(result);
+        }
+        use runtime::browser::ServiceRequest;
+        use zephium_core::extension_data::{ExtensionDataCall, ExtensionDataReply};
+        let result = match &request {
+            BrowserRequest::Data(ExtensionDataCall::Bookmarks(_)) => {
+                runtime::api::bookmarks::reply(
+                    call.name(),
+                    call.args(),
+                    &ExtensionDataReply::Bookmarks(
+                        zephium_core::bookmarks::BookmarkReply::Entries(vec![]),
+                    ),
+                )
+            }
+            BrowserRequest::Data(ExtensionDataCall::RecentlyClosed { .. }) => {
+                runtime::api::sessions::reply(
+                    call.name(),
+                    &ExtensionDataReply::Closed(vec![]),
+                    None,
+                )
+            }
+            BrowserRequest::Notifications(runtime::api::notifications::Request::GetAll) => {
+                Ok(json!({}))
+            }
+            BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => Ok(json!("active")),
+            BrowserRequest::Service(ServiceRequest::FontList) => {
+                Ok(json!([{"fontId":"Fixture Mono","displayName":"Fixture Mono"}]))
+            }
+            BrowserRequest::Service(ServiceRequest::Search(search)) => {
+                let tab = self
+                    .browser
+                    .snapshot
+                    .tabs
+                    .iter()
+                    .find(|tab| Some(tab.tab.id()) == search.tab)
+                    .expect("search tab")
+                    .id;
+                let mut url = Url::parse("https://example.com/search").expect("search URL");
+                url.query_pairs_mut().append_pair("q", &search.text);
+                self.browser
+                    .navigate(tab, url.as_str(), call.permissions())
+                    .map(|()| Value::Null)
+            }
+            _ => return self.browser.request(request, call),
+        };
+        self.browser.requests.push(request);
+        call.reply(result)
+    }
+    fn frames(
+        &self,
+        sender: &Sender,
+        tab: ItemId,
+    ) -> Result<Vec<web_navigation::BrowserFrame>, ApiError> {
+        self.browser.frames(sender, tab)
+    }
+    fn validate_resource(&self, sender: &Sender, path: &str) -> Result<(), ApiError> {
+        self.browser.validate_resource(sender, path)
+    }
+    fn now_ms(&self) -> u64 {
+        self.browser.now_ms()
+    }
+}
+
+impl I18nHost for Host {
+    fn messages(&self, _: &Sender) -> Result<&Messages, ApiError> {
+        Ok(&self.catalog)
+    }
+}
+
+impl ScriptingHost for Host {
+    fn script_registry(&self, _: &Sender) -> Result<&ScriptRegistry, ApiError> {
+        Ok(&self.scripts)
+    }
+    fn validate_script_resource(
+        &self,
+        sender: &Sender,
+        path: &str,
+        _: ResourceKind,
+    ) -> Result<(), ApiError> {
+        self.browser.validate_resource(sender, path)
+    }
+    fn commit_script_registry(
+        &mut self,
+        _: &Sender,
+        registry: ScriptRegistry,
+    ) -> Result<(), ApiError> {
+        self.scripts = registry;
+        Ok(())
     }
 }
 
@@ -187,9 +317,25 @@ impl Peer {
                 externally_connectable: None,
             })
             .expect("admit");
-        let permissions = ["storage", "alarms", "nativeMessaging"];
+        let permissions = [
+            "storage",
+            "alarms",
+            "nativeMessaging",
+            "tabs",
+            "activeTab",
+            "scripting",
+            "webNavigation",
+            "history",
+            "bookmarks",
+            "sessions",
+            "topSites",
+            "search",
+            "notifications",
+            "idle",
+            "fontSettings",
+        ];
         let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(
-            json!({"permissions": permissions}),
+            json!({"permissions": permissions, "host_permissions": ["https://example.com/*"], "optional_permissions": ["downloads"], "action": {}, "commands": {}}),
         ));
         let permissions = InstallPermissions::new(
             declaration,
@@ -198,16 +344,56 @@ impl Peer {
             false,
         );
         let mut table = ApiTable::new();
-        runtime::storage::register(&mut table).expect("storage methods");
-        runtime::alarms::register(&mut table).expect("alarm methods");
-        runtime::events::register(&mut table).expect("events");
-        runtime::ports::register(&mut table).expect("messages");
+        runtime::api::register(&mut table).expect("all namespaces");
         runtime::protocol::register(&mut table).expect("binding protocol");
         let mut lifecycle = Lifecycle::new(profile());
         assert!(lifecycle.register(install()));
+        let mut browser = FakeBrowser::new(profile());
+        let window = browser.add_window(false);
+        browser.add_tab(window, "https://example.com/", true);
+        browser.add_tab(window, "https://other.test/", false);
+        for tab in &browser.snapshot.tabs {
+            browser.frames.push(web_navigation::BrowserFrame {
+                tab: tab.tab.id(),
+                frame: FrameId::MAIN,
+                document: tab.document,
+                document_id: tab.document_id.clone(),
+                url: tab.url().expect("URL"),
+                origin: DocumentOrigin::of_url(&tab.url().expect("URL")),
+                parent_frame_id: None,
+                parent_document_id: None,
+                document_lifecycle: "active".into(),
+                frame_type: "outermost_frame".into(),
+                error_occurred: false,
+            });
+        }
+        let mut child = browser.frames[0].clone();
+        child.frame = FrameId::new(3);
+        child.document = DocumentGeneration::new(3).expect("child generation");
+        child.document_id = "child-document".into();
+        child.parent_frame_id = Some(FrameId::MAIN);
+        child.parent_document_id = Some(browser.frames[0].document_id.clone());
+        child.frame_type = "sub_frame".into();
+        browser.frames.push(child);
+        browser.info.manifest =
+            json!({"manifest_version":3,"action":{},"name":"Fixture","version":"1"});
+        browser.resources.insert("script.js".into());
         Self {
             authority,
             host: Host {
+                browser,
+                catalog: Messages::new(
+                    ExtensionId::parse(EXTENSION).expect("extension"),
+                    LocaleEnvironment {
+                        ui_language: "en".into(),
+                        accept_languages: vec!["en".into()],
+                        right_to_left: false,
+                    },
+                    None,
+                    &Default::default(),
+                )
+                .expect("messages"),
+                scripts: ScriptRegistry::default(),
                 storage: Storage::memory(profile(), install(), false),
                 alarms: Alarms::new(),
                 clock: ManualClock::default(),
@@ -230,7 +416,7 @@ impl Peer {
         }
     }
 
-    fn add_context(&mut self, label: &str, kind: &str) {
+    fn add_context(&mut self, label: &str, kind: &str, frame_id: u64) {
         let sender = if kind == "background" {
             let commands = self
                 .host
@@ -277,16 +463,27 @@ impl Peer {
             );
             sender
         } else {
-            let tab = ItemId::from(5);
+            let frame = self
+                .host
+                .browser
+                .frames
+                .iter()
+                .find(|frame| frame.tab == ItemId::from(1) && frame.frame.get() == frame_id)
+                .expect("content frame");
+            let tab = frame.tab;
             let document = TabDocument {
                 tab,
-                frame: FrameId::MAIN,
-                committed: document("https://example.com/", 3),
+                frame: frame.frame,
+                committed: CommittedDocument {
+                    generation: frame.document,
+                    origin: frame.origin.clone(),
+                    url: frame.url.clone(),
+                },
             };
             self.authority
                 .record_injection(
                     tab,
-                    FrameId::MAIN,
+                    document.frame,
                     document.committed.generation,
                     install(),
                     InjectedWorld::Isolated,
@@ -499,6 +696,15 @@ impl Peer {
     }
 
     fn drain(&mut self) {
+        for (name, args) in std::mem::take(&mut self.host.browser.events) {
+            for target in self
+                .host
+                .events
+                .targets(install(), &name, &EventFacts::default())
+            {
+                self.event(&target, &name, args.clone());
+            }
+        }
         while let Some(work) = self.host.work.pop_front() {
             match work {
                 Work::Changed(change) => {
@@ -524,6 +730,7 @@ impl Peer {
                 }
                 Work::Message(source, request, responder) => match request {
                     MessageRequest::Send { payload, target } => {
+                        let mut documents = None;
                         let route = match target {
                             MessageTarget::Runtime { extension_id }
                                 if extension_id
@@ -532,15 +739,18 @@ impl Peer {
                             {
                                 MessageRoute::Runtime
                             }
-                            MessageTarget::Tab {
-                                tab_id: 5,
-                                frame_id,
-                                document_id: None,
-                            } => MessageRoute::Tab {
-                                tab: ItemId::from(5),
-                                frame: frame_id.map(FrameId::new),
-                                document: None,
-                            },
+                            MessageTarget::ResolvedTab { routes } => {
+                                let Some(MessageRoute::Tab { tab, .. }) = routes.first() else {
+                                    panic!("resolved tab routes")
+                                };
+                                let route = MessageRoute::Tab {
+                                    tab: *tab,
+                                    frame: None,
+                                    document: None,
+                                };
+                                documents = Some(routes);
+                                route
+                            }
                             _ => {
                                 self.settle(responder, Err(runtime::ports::no_receiver()));
                                 continue;
@@ -549,6 +759,9 @@ impl Peer {
                         let listeners = self
                             .senders
                             .values()
+                            .filter(|sender| documents.as_ref().is_none_or(|routes| routes.iter().any(|route| {
+                                matches!(route, MessageRoute::Tab { tab, frame, document } if sender.tab() == Some(*tab) && sender.frame() == *frame && Some(sender.document()) == *document)
+                            })))
                             .flat_map(|sender| {
                                 self.host
                                     .events
@@ -689,7 +902,11 @@ impl Peer {
     fn command(&mut self, command: &Value) -> Value {
         let label = command["context"].as_str().unwrap_or("background");
         match command["op"].as_str().expect("operation") {
-            "context" => self.add_context(label, command["kind"].as_str().expect("kind")),
+            "context" => self.add_context(
+                label,
+                command["kind"].as_str().expect("kind"),
+                command["frameId"].as_u64().unwrap_or(0),
+            ),
             "frame" => {
                 let bytes = command["frame"]
                     .as_array()
@@ -769,6 +986,98 @@ impl Peer {
                         &event.name,
                         &event.arguments,
                     );
+                }
+            }
+            "restrictPermissions" => {
+                let manifest = Manifest::from_value(
+                    json!({"permissions": ["storage", "alarms", "activeTab", "scripting", "webNavigation"], "optional_permissions": ["downloads"], "action": {}}),
+                );
+                let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+                self.permissions = InstallPermissions::new(
+                    declaration,
+                    &PermissionRequest::default(),
+                    SiteAccess::OnAllSites,
+                    false,
+                );
+            }
+            "click" => {
+                let tab = self
+                    .host
+                    .browser
+                    .snapshot
+                    .tab(command["tabId"].as_i64().expect("tab") as i32)
+                    .expect("tab");
+                assert_eq!(
+                    self.host
+                        .browser
+                        .action
+                        .trusted_invoke(tab, &mut self.permissions)
+                        .expect("action click"),
+                    action::Activation::Click
+                );
+                let args = json!([tabs::project_for(
+                    tab,
+                    &self.senders[label],
+                    &self.permissions
+                )]);
+                for target in
+                    self.host
+                        .events
+                        .targets(install(), "action.onClicked", &EventFacts::default())
+                {
+                    self.event(&target, "action.onClicked", args.clone());
+                }
+            }
+            "navigation" => {
+                let frame = self
+                    .host
+                    .browser
+                    .frames
+                    .iter()
+                    .find(|frame| {
+                        frame.tab == ItemId::from(command["tabId"].as_u64().expect("tab") as u128)
+                            && frame.frame == FrameId::MAIN
+                    })
+                    .expect("frame")
+                    .clone();
+                let observation = web_navigation::NavigationObservation {
+                    tab_id: command["tabId"].as_i64().expect("tab") as i32,
+                    frame,
+                    event: web_navigation::NavigationEvent::Committed,
+                    time_stamp: 123.5,
+                    transition_type: Some("link".into()),
+                    transition_qualifiers: vec![],
+                    error: None,
+                };
+                let facts = web_navigation::event_facts(&observation.frame, observation.tab_id);
+                for target in self
+                    .host
+                    .events
+                    .targets(install(), observation.event.name(), &facts)
+                {
+                    let sender = self
+                        .senders
+                        .values()
+                        .find(|sender| sender.context_key() == target)
+                        .expect("sender");
+                    if let Ok(mut args) = web_navigation::observation(
+                        &self.host,
+                        sender,
+                        &self.permissions,
+                        &observation,
+                    ) {
+                        let listeners =
+                            self.host
+                                .events
+                                .listeners(sender, observation.event.name(), &facts);
+                        args.as_array_mut()
+                            .expect("event args")
+                            .push(json!(listeners
+                                .iter()
+                                .map(|id| id.get())
+                                .collect::<Vec<_>>()));
+                        self.event(&target, observation.event.name(), args);
+                    }
                 }
             }
             "stats" => {}

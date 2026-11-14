@@ -5,7 +5,7 @@
 //
 // Surface (`surface.generated.js`, one JSON value):
 //   { version: 1, namespaces: { "<dotted name>": Namespace } }
-//   Namespace { contexts?: Kind[], permissions?: string[] (any one suffices),
+//   Namespace { contexts?: Kind[], permissions?: string[] (any one suffices), manifest?: string[],
 //               functions?: { name: Function }, events?: { name: Event },
 //               properties?: { name: JSON constant or enum } }
 //   Function  { parameters?: Param[] (no callback), returns?: "async" | "sync",
@@ -258,6 +258,7 @@
     const extensionId = I.String(own(bootstrap, 'extensionId'));
     const scheme = typeof own(bootstrap, 'scheme') === 'string' ? bootstrap.scheme : 'chrome-extension';
     const manifestText = I.JSONStringify(own(bootstrap, 'manifest') || {});
+    const manifest = I.JSONParse(manifestText);
     const messages = own(bootstrap, 'messages') || {};
     const uiLanguage = typeof own(bootstrap, 'uiLanguage') === 'string' ? bootstrap.uiLanguage : 'en-US';
     const incognito = own(bootstrap, 'incognito') === true;
@@ -311,6 +312,10 @@
     };
     const available = (node) => {
       const contexts = own(node, 'contexts');
+      const features = own(node, 'manifest');
+      if (I.isArray(features)) {
+        for (let i = 0; i < features.length; i++) if (!I.hasOwn(manifest, features[i]) || manifest[features[i]] === null) return false;
+      }
       return (contexts === undefined || contains(contexts, kind)) && permitted(own(node, 'permissions'));
     };
 

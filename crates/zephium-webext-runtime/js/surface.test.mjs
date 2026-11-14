@@ -32,9 +32,9 @@ test('generated surface has the binding format and excludes host-only metadata',
   assert.equal(namespaces.zephium, undefined);
   assert.equal(namespaces.runtime.functions.markListenerRegistrationComplete, undefined);
   for (const namespace of Object.values(namespaces)) {
-    for (const key of Object.keys(namespace)) assert.ok(['contexts', 'permissions', 'functions', 'events', 'properties'].includes(key), key);
+    for (const key of Object.keys(namespace)) assert.ok(['contexts', 'permissions', 'manifest', 'functions', 'events', 'properties'].includes(key), key);
     for (const fn of Object.values(namespace.functions || {})) {
-      for (const key of Object.keys(fn)) assert.ok(['contexts', 'permissions', 'parameters', 'returns', 'callback', 'callbackRequired', 'promise', 'result', 'optionalResult', 'signature', 'setting'].includes(key), key);
+      for (const key of Object.keys(fn)) assert.ok(['contexts', 'permissions', 'manifest', 'parameters', 'returns', 'callback', 'callbackRequired', 'promise', 'result', 'optionalResult', 'signature', 'setting'].includes(key), key);
       assert.equal(Boolean(fn.parameters?.some((parameter) => parameter.name === 'callback')), false);
     }
   }
@@ -105,4 +105,18 @@ test('mixed synchronous return and callback methods retain their modes and requi
   const { chrome } = extensionContext('background', { permissions: ['contextMenus'] });
   assert.equal(typeof chrome.contextMenus.onClicked.addListener, 'function');
   assert.equal(chrome.contextMenus.create, undefined);
+});
+
+
+test('manifest-gated APIs require admitted features independently of API permissions', () => {
+  for (const feature of ['action', 'commands']) {
+    const absent = extensionContext('background', { permissions: [feature] });
+    assert.equal(absent.chrome[feature], undefined);
+    const empty = extensionContext('background', { manifest: { manifest_version: 3, [feature]: null } });
+    assert.equal(empty.chrome[feature], undefined);
+    const admitted = extensionContext('background', { permissions: [], manifest: { manifest_version: 3, [feature]: {} } });
+    assert.equal(typeof admitted.chrome[feature], 'object');
+    const content = extensionContext('contentScript', { manifest: { manifest_version: 3, [feature]: {} } });
+    assert.equal(content.chrome[feature], undefined);
+  }
 });

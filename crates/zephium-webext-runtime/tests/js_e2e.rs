@@ -3,6 +3,11 @@
 #[path = "support/e2e_host.rs"]
 mod host;
 
+#[path = "../src/browser/fake.rs"]
+mod fake;
+pub use fake::FakeBrowser;
+pub use zephium_webext_runtime::*;
+
 use std::process::Command;
 
 #[test]

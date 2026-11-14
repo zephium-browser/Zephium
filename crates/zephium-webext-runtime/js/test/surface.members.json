@@ -226,5 +226,10 @@
     "events": [
       "onCreated"
     ]
+  },
+  "commands": {
+    "functions": [
+      "getAll"
+    ]
   }
 }

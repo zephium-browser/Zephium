@@ -10,13 +10,14 @@ use zephium_core::extensions::{
 };
 use zephium_core::ids::{ItemId, ProfileId};
 
-use super::*;
 use crate::api::{tabs, windows};
+use crate::browser::*;
 use crate::dispatch::{ApiTable, Dispatcher, Inbound};
 use crate::envelope::{ApiName, CallId, Direction, Envelope};
 use crate::permissions::InstallPermissions;
+use crate::{ApiError, DocumentGeneration, Handled, Invocation, Sender};
 
-pub(crate) struct FakeBrowser {
+pub struct FakeBrowser {
     pub snapshot: BrowserSnapshot,
     pub info: ExtensionInfo,
     pub requests: Vec<BrowserRequest>,

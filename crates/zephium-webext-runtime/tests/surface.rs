@@ -35,6 +35,32 @@ fn kinds() -> [(ContextKind, &'static str); 9] {
 fn projected_members_match_host_access_and_invocation_signatures() {
     let surface = surface();
     let namespaces = surface["namespaces"].as_object().expect("namespaces");
+    for namespace in [
+        "runtime",
+        "tabs",
+        "windows",
+        "action",
+        "commands",
+        "permissions",
+        "scripting",
+        "webNavigation",
+        "history",
+        "bookmarks",
+        "sessions",
+        "topSites",
+        "search",
+        "notifications",
+        "extension",
+        "management",
+        "idle",
+        "dom",
+        "fontSettings",
+    ] {
+        assert!(
+            namespaces.contains_key(namespace),
+            "missing batch-one namespace: {namespace}"
+        );
+    }
     let mut checked = 0;
     for (namespace, node) in namespaces {
         for field in ["functions", "events"] {
@@ -82,15 +108,31 @@ fn projected_members_match_host_access_and_invocation_signatures() {
                     .flatten()
                     .filter_map(Value::as_str)
                     .collect();
+                let features: Vec<_> = ancestors
+                    .iter()
+                    .filter_map(|node| node["manifest"].as_array())
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect();
                 if let Some(host) = host {
                     match host.gate {
                         Gate::Open => {
-                            assert!(permissions.is_empty(), "{public_name}: {permissions:?}")
+                            assert!(
+                                permissions.is_empty() && features.is_empty(),
+                                "{public_name}: {permissions:?}, {features:?}"
+                            )
                         }
                         Gate::Requires(required) => assert!(
                             !permissions.is_empty()
+                                && features.is_empty()
                                 && permissions.iter().all(|permission| *permission == required),
                             "{public_name}: {permissions:?}, expected {required}"
+                        ),
+                        Gate::RequiresManifest(required) => assert!(
+                            permissions.is_empty()
+                                && !features.is_empty()
+                                && features.iter().all(|feature| *feature == required),
+                            "{public_name}: {features:?}, expected {required}"
                         ),
                         other => panic!("unprojectable gate for {public_name}: {other:?}"),
                     }
@@ -144,7 +186,7 @@ fn projected_members_match_host_access_and_invocation_signatures() {
             }
         }
     }
-    assert_eq!(checked, 419, "301 public callables and 118 events");
+    assert_eq!(checked, 420, "302 public callables and 118 events");
     assert!(surface["namespaces"]["runtime"]["functions"]
         .get("markListenerRegistrationComplete")
         .is_none());

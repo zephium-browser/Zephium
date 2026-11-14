@@ -13,6 +13,7 @@ use zephium_webext::manifest::Manifest;
 
 #[derive(Default)]
 struct Host {
+    browser: Option<crate::browser::fake::FakeBrowser>,
     events: EventRegistry,
     messages: MessageService,
     limiter: Limiter,
@@ -20,6 +21,31 @@ struct Host {
     settlements: Vec<MessageSettlement>,
     reports: usize,
     message_request: Option<crate::ports::MessageRequest>,
+}
+
+impl crate::browser::BrowserPort for Host {
+    fn snapshot(&self, sender: &Sender) -> Result<crate::browser::BrowserSnapshot, ApiError> {
+        self.browser
+            .as_ref()
+            .ok_or_else(crate::browser::unsupported)?
+            .snapshot(sender)
+    }
+    fn frames(
+        &self,
+        sender: &Sender,
+        tab: zephium_core::ids::ItemId,
+    ) -> Result<Vec<crate::api::web_navigation::BrowserFrame>, ApiError> {
+        self.browser
+            .as_ref()
+            .ok_or_else(crate::browser::unsupported)?
+            .frames(sender, tab)
+    }
+    fn extension_info(&self, _: &Sender) -> Result<crate::browser::ExtensionInfo, ApiError> {
+        Ok(crate::browser::ExtensionInfo::default())
+    }
+    fn request(&mut self, _: crate::browser::BrowserRequest, call: Invocation<'_>) -> Handled {
+        call.reply(Err(crate::browser::unsupported()))
+    }
 }
 
 impl EventsHost for Host {
@@ -566,14 +592,16 @@ fn dispatcher_preserves_opaque_message_text_and_rejects_object_wire_payloads() {
     let mut table = table();
     crate::ports::register(&mut table).unwrap();
     let mut dispatcher = Dispatcher::new(table);
-    let granted = permissions(&["nativeMessaging"]);
+    let granted =
+        crate::api::scripting::tests::permissions(&["nativeMessaging"], &["https://example.com/*"]);
+    host.browser = Some(crate::api::scripting::tests::fixture());
     for (method, args, text) in [
         (
             "runtime.sendMessage",
             json!([null, "  {\"key\":true}  ", null]),
             "  {\"key\":true}  ",
         ),
-        ("tabs.sendMessage", json!([3, "{invalid", null]), "{invalid"),
+        ("tabs.sendMessage", json!([1, "{invalid", null]), "{invalid"),
         (
             "runtime.sendNativeMessage",
             json!(["org.example.host", "not JSON"]),

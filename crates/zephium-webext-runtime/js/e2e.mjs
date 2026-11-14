@@ -82,8 +82,8 @@ class RustPeer {
     }
   }
 
-  async context(label, kind = 'background') {
-    await this.command('context', { context: label, kind });
+  async context(label, kind = 'background', frameId = 0) {
+    await this.command('context', { context: label, kind, frameId });
     const realm = createRealm();
     const context = { ...realm, label, dropAcks: false, frames: [], rawReplies: new Map(), rawId: 0x70000000 };
     context.realmBytes = realm.run('Uint8Array');
@@ -113,7 +113,7 @@ class RustPeer {
     context.chrome = realm.run(bundle)(
       'page',
       global.__zephiumWebExtensionSurface,
-      bootstrap({ contextKind: kind, permissions: ['storage', 'alarms', 'nativeMessaging'] }),
+      bootstrap({ contextKind: kind, manifest: { manifest_version: 3, name: 'Fixture', version: '1', action: {}, commands: {} }, permissions: ['storage', 'alarms', 'nativeMessaging', 'tabs', 'activeTab', 'scripting', 'webNavigation', 'history', 'bookmarks', 'sessions', 'topSites', 'search', 'notifications', 'idle', 'fontSettings'] }),
     );
     context.rawCall = (name, args) => {
       const id = ++context.rawId;
@@ -193,7 +193,7 @@ test('real messaging service handles sync, callback, promise and refusal respons
   assert.deepEqual(plain(await content.chrome.runtime.sendMessage({ mode: 'sync', value: 7 })), { style: 'sync', value: 7 });
   assert.deepEqual(plain(await content.chrome.runtime.sendMessage({ mode: 'callback' })), { style: 'callback' });
   assert.deepEqual(plain(await content.chrome.runtime.sendMessage({ mode: 'promise' })), { style: 'promise' });
-  assert.deepEqual(plain(await background.chrome.tabs.sendMessage(5, 'reverse')), { content: 'reverse' });
+  assert.deepEqual(plain(await background.chrome.tabs.sendMessage(1, 'reverse')), { content: 'reverse' });
   await assert.rejects(background.chrome.runtime.sendMessage('content is not a runtime target'), {
     message: 'Could not establish connection. Receiving end does not exist.',
   });
@@ -287,5 +287,175 @@ test('generated argument errors and Rust context policy both refuse invalid call
   await assert.rejects(content.rawCall('runtime.connectNative', ['fixture.host']), /not available in this context/);
   await assert.rejects(content.rawCall('zephium.workerLifecycle', ['activated', null]), /not available in this context/);
   assert.deepEqual(plain(await background.chrome.storage.local.get(null)), {});
+  assert.equal((await peer.command('stats')).bytes, 0);
+});
+
+
+function callback(chrome, invoke) {
+  return new Promise((resolve, reject) => invoke((value) => {
+    const error = chrome.runtime.lastError;
+    if (error) reject(new Error(error.message));
+    else resolve(value);
+  }));
+}
+
+for (const metadata of [true, false]) test(`browser tab mutations preserve event order with metadata=${metadata}`, { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  const tabs = plain(await chrome.tabs.query({}));
+  assert.deepEqual(tabs.map((tab) => tab.url), ['https://example.com/', 'https://other.test/']);
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.tabs.query({}, done))), tabs);
+  if (!metadata) {
+    await peer.command('restrictPermissions');
+    for (const tab of await chrome.tabs.query({})) {
+      for (const field of ['url', 'pendingUrl', 'title', 'favIconUrl']) assert.equal(field in tab, false);
+    }
+    for (const window of await chrome.windows.getAll({ populate: true })) {
+      for (const tab of window.tabs) assert.equal('url' in tab, false);
+    }
+  }
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.tabs.query({}, done))), plain(await chrome.tabs.query({})));
+  const events = [];
+  for (const name of ['onCreated', 'onActivated', 'onUpdated', 'onRemoved']) {
+    chrome.tabs[name].addListener((...args) => events.push([name, plain(args)]));
+  }
+  await peer.idle();
+  const created = await chrome.tabs.create({ url: 'https://example.com/new', active: true });
+  await chrome.tabs.update(created.id, { url: 'https://example.com/next' });
+  await callback(chrome, (done) => chrome.tabs.remove(created.id, done));
+  await peer.idle();
+  assert.deepEqual(events.map(([name]) => name), ['onCreated', 'onActivated', 'onUpdated', ...(metadata ? ['onUpdated'] : []), 'onUpdated', 'onRemoved', 'onActivated']);
+  assert.equal(events[0][1][0].id, created.id);
+  assert.deepEqual(events.filter(([name]) => name === 'onUpdated').map(([, args]) => args[1].status), metadata ? ['loading', undefined, 'complete'] : ['loading', 'complete']);
+  const removed = events.find(([name]) => name === 'onRemoved')[1];
+  assert.equal(removed[0], created.id);
+  assert.equal(removed[1].isWindowClosing, false);
+  if (!metadata) {
+    assert.equal('url' in events[0][1][0], false);
+    for (const [, args] of events.filter(([name]) => name === 'onUpdated')) {
+      assert.equal('url' in args[1], false);
+      assert.equal('url' in args[2], false);
+    }
+  }
+  assert.deepEqual(plain(await chrome.tabs.query({})).map((tab) => tab.id), [1, 2]);
+  await assert.rejects(chrome.tabs.get(created.id), /No tab with id/);
+});
+
+test('tabs messages honor frame and document selectors through the browser port', { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  const main = await peer.context('main', 'contentScript');
+  const child = await peer.context('child', 'contentScript', 3);
+  const received = [];
+  for (const [context, frame] of [[main, 0], [child, 3]]) {
+    context.chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+      received.push(frame);
+      respond({ frame, message });
+    });
+  }
+  await peer.idle();
+  assert.deepEqual(plain(await chrome.tabs.sendMessage(1, 'child', { frameId: 3 })), { frame: 3, message: 'child' });
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.tabs.sendMessage(1, 'main', { frameId: 0 }, done))), { frame: 0, message: 'main' });
+  assert.deepEqual(received, [3, 0]);
+  await assert.rejects(chrome.tabs.sendMessage(1, 'mismatch', { frameId: 0, documentId: 'child-document' }), /Receiving end does not exist/);
+  await assert.rejects(chrome.tabs.sendMessage(1, 'missing', { frameId: 99 }), /Receiving end does not exist/);
+  assert.deepEqual(received, [3, 0]);
+});
+
+test('windows populate tabs and action state grants only the invoked activeTab', { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  const windows = plain(await chrome.windows.getAll({ populate: true }));
+  assert.deepEqual(windows[0].tabs.map((tab) => tab.id), [1, 2]);
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.windows.getAll({ populate: true }, done))), windows);
+  await chrome.action.setBadgeText({ text: 'global' });
+  await callback(chrome, (done) => chrome.action.setBadgeText({ tabId: 1, text: 'one' }, done));
+  assert.equal(await chrome.action.getBadgeText({ tabId: 1 }), 'one');
+  assert.equal(await callback(chrome, (done) => chrome.action.getBadgeText({ tabId: 2 }, done)), 'global');
+  await peer.command('restrictPermissions');
+  assert.equal((await chrome.tabs.get(1)).url, undefined);
+  await assert.rejects(chrome.scripting.executeScript({ target: { tabId: 1 }, files: ['script.js'] }), /Cannot access/);
+  const clicks = [];
+  chrome.action.onClicked.addListener((tab) => clicks.push(plain(tab)));
+  await peer.idle();
+  await peer.command('click', { tabId: 1 });
+  assert.equal(clicks[0].url, 'https://example.com/');
+  assert.equal((await chrome.tabs.get(1)).url, 'https://example.com/');
+  assert.equal((await chrome.tabs.get(2)).url, undefined);
+  assert.equal((await chrome.scripting.executeScript({ target: { tabId: 1 }, files: ['script.js'] }))[0].frameId, 0);
+  await chrome.tabs.update(1, { url: 'https://other.test/next' });
+  assert.equal(await chrome.action.getBadgeText({ tabId: 1 }), 'global');
+  assert.equal((await chrome.tabs.get(1)).url, undefined);
+});
+
+test('permissions contains works in both modes and request requires a native gesture', { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  assert.equal(await chrome.permissions.contains({ permissions: ['tabs'] }), true);
+  assert.equal(await callback(chrome, (done) => chrome.permissions.contains({ permissions: ['downloads'] }, done)), false);
+  const error = { message: 'This function must be called during a user gesture' };
+  await assert.rejects(chrome.permissions.request({ permissions: ['downloads'] }), error);
+  await assert.rejects(callback(chrome, (done) => chrome.permissions.request({ permissions: ['downloads'] }, done)), error);
+  assert.equal(chrome.runtime.lastError, undefined);
+  assert.equal(await chrome.permissions.contains({ permissions: ['downloads'] }), false);
+});
+
+test('scripting returns native frame result shapes and navigation applies URL filters', { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  const injection = { target: { tabId: 1, allFrames: true }, func: (value) => value, args: [null] };
+  const expected = [{ frameId: 0, documentId: 'document-1', result: { frame: 0, value: null } }, { frameId: 3, documentId: 'child-document', result: { frame: 3, value: null } }];
+  assert.deepEqual(plain(await chrome.scripting.executeScript(injection)), expected);
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.scripting.executeScript(injection, done))), expected);
+  await assert.rejects(chrome.scripting.executeScript({ target: { tabId: 2 }, files: ['script.js'] }), /Cannot access/);
+  const frames = plain(await chrome.webNavigation.getAllFrames({ tabId: 1 }));
+  assert.deepEqual(frames.map((frame) => frame.frameId), [0, 3]);
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.webNavigation.getAllFrames({ tabId: 1 }, done))), frames);
+  const matching = [], excluded = [];
+  chrome.webNavigation.onCommitted.addListener((event) => matching.push(plain(event)), { url: [{ hostEquals: 'example.com' }] });
+  chrome.webNavigation.onCommitted.addListener((event) => excluded.push(plain(event)), { url: [{ hostEquals: 'other.test' }] });
+  await peer.idle();
+  await peer.command('navigation', { tabId: 1 });
+  await peer.command('navigation', { tabId: 2 });
+  await peer.idle();
+  assert.equal(matching.length, 1);
+  assert.equal(matching[0].url, 'https://example.com/');
+  assert.equal(matching[0].documentId, 'document-1');
+  assert.equal(matching[0].transitionType, 'link');
+  assert.deepEqual(excluded, []);
+});
+
+
+test('remaining batch-one namespaces reach Rust in callback and promise modes', { timeout: 15_000 }, async (t) => {
+  const peer = new RustPeer(t);
+  const { chrome } = await peer.context('background');
+  for (const [namespace, method, args, expected] of [
+    ['commands', 'getAll', [], []],
+    ['history', 'search', [{ text: '' }], []],
+    ['bookmarks', 'getChildren', ['0'], []],
+    ['sessions', 'getRecentlyClosed', [], []],
+    ['topSites', 'get', [], []],
+    ['notifications', 'getAll', [], {}],
+    ['extension', 'isAllowedIncognitoAccess', [], false],
+    ['idle', 'queryState', [15], 'active'],
+    ['fontSettings', 'getFontList', [], [{ fontId: 'Fixture Mono', displayName: 'Fixture Mono' }]],
+  ]) {
+    assert.deepEqual(plain(await chrome[namespace][method](...args)), expected, `${namespace} promise`);
+    assert.deepEqual(plain(await callback(chrome, (done) => chrome[namespace][method](...args, done))), expected, `${namespace} callback`);
+  }
+  const info = plain(await chrome.runtime.getPlatformInfo());
+  assert.equal(typeof info.os, 'string');
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.runtime.getPlatformInfo(done))), info);
+  const self = plain(await chrome.management.getSelf());
+  assert.equal(self.id, bootstrap().extensionId);
+  assert.equal(self.name, 'Fixture');
+  assert.deepEqual(plain(await callback(chrome, (done) => chrome.management.getSelf(done))), self);
+  assert.equal(await chrome.search.query({ text: 'promise', tabId: 1 }), undefined);
+  assert.equal(await callback(chrome, (done) => chrome.search.query({ text: 'callback', tabId: 1 }, done)), undefined);
+  assert.equal((await chrome.tabs.get(1)).url, 'https://example.com/search?q=callback');
+  assert.equal((await chrome.history.search({ text: 'example.com' })).length, 2);
+  // DOM identity stays in the realm: this namespace has only a synchronous helper.
+  assert.equal(typeof chrome.dom.openOrClosedShadowRoot, 'function');
+  assert.throws(() => chrome.dom.openOrClosedShadowRoot({}), /HTMLElement/);
   assert.equal((await peer.command('stats')).bytes, 0);
 });

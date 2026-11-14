@@ -19,6 +19,7 @@ const KINDS: [&str; 9] = [
 struct Access {
     contexts: BTreeSet<String>,
     permission: Option<String>,
+    manifest: Option<String>,
 }
 
 fn contexts(value: &Value) -> Option<BTreeSet<String>> {
@@ -90,6 +91,7 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
         let mut current = Access {
             contexts: contexts(rule.get("contexts")?)?,
             permission: None,
+            manifest: None,
         };
         if current.contexts.is_empty() {
             continue;
@@ -97,26 +99,30 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
         if let Some(dependencies) = rule.get("dependencies") {
             for dependency in dependencies.as_array()? {
                 let dependency = dependency.as_str()?;
-                let permission = if let Some(permission) = dependency.strip_prefix("permission:") {
-                    Some(permission.to_owned())
-                } else if let Some(api) = dependency.strip_prefix("api:") {
-                    let inherited =
-                        access(namespaces.get(api)?.as_array()?, namespaces, depth + 1)?;
-                    current
-                        .contexts
-                        .retain(|kind| inherited.contexts.contains(kind));
-                    inherited.permission
-                } else {
-                    return None;
-                };
-                if current.permission.is_some()
-                    && permission.is_some()
-                    && current.permission != permission
+                let (permission, manifest) =
+                    if let Some(permission) = dependency.strip_prefix("permission:") {
+                        (Some(permission.to_owned()), None)
+                    } else if let Some(feature) = dependency.strip_prefix("manifest:") {
+                        (None, Some(feature.to_owned()))
+                    } else if let Some(api) = dependency.strip_prefix("api:") {
+                        let inherited =
+                            access(namespaces.get(api)?.as_array()?, namespaces, depth + 1)?;
+                        current
+                            .contexts
+                            .retain(|kind| inherited.contexts.contains(kind));
+                        (inherited.permission, inherited.manifest)
+                    } else {
+                        return None;
+                    };
+                if (current.permission.is_some() || current.manifest.is_some())
+                    && (permission.is_some() || manifest.is_some())
+                    && (current.permission != permission || current.manifest != manifest)
                 {
                     return None;
                 }
-                if permission.is_some() {
+                if permission.is_some() || manifest.is_some() {
                     current.permission = permission;
+                    current.manifest = manifest;
                 }
             }
         }
@@ -124,7 +130,7 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
             continue;
         }
         if let Some(result) = &mut result {
-            if result.permission != current.permission {
+            if result.permission != current.permission || result.manifest != current.manifest {
                 return None;
             }
             result.contexts.extend(current.contexts);
@@ -169,6 +175,9 @@ fn add_access(target: &mut Value, access: &Access) {
     target["contexts"] = context_value(&access.contexts);
     if let Some(permission) = &access.permission {
         target["permissions"] = json!([permission]);
+    }
+    if let Some(feature) = &access.manifest {
+        target["manifest"] = json!([feature]);
     }
 }
 
@@ -557,6 +566,7 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
                 .unwrap_or(Access {
                     contexts: BTreeSet::new(),
                     permission: None,
+                    manifest: None,
                 });
                 apply_policy(&full, &mut access);
                 add_access(&mut spec, &access);
@@ -623,15 +633,20 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
             .map(|(_, node)| node)
             .collect();
         let access_nodes: Vec<_> = members.iter().copied().chain(children).collect();
-        let common_permission = access_nodes
-            .first()
-            .and_then(|member| member.get("permissions"))
-            .filter(|permission| {
+        let common_access: Vec<_> = ["permissions", "manifest"]
+            .into_iter()
+            .filter_map(|field| {
                 access_nodes
-                    .iter()
-                    .all(|member| member.get("permissions") == Some(*permission))
+                    .first()
+                    .and_then(|member| member.get(field))
+                    .filter(|value| {
+                        access_nodes
+                            .iter()
+                            .all(|member| member.get(field) == Some(*value))
+                    })
+                    .map(|value| (field, value.clone()))
             })
-            .cloned();
+            .collect();
         if allowed.is_empty() && members.is_empty() {
             allowed = access(
                 rules
@@ -648,8 +663,8 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
         let all_contexts = context_value(&allowed);
         let node = namespaces.get_mut(name).ok_or("missing namespace")?;
         node["contexts"] = all_contexts.clone();
-        if let Some(permission) = &common_permission {
-            node["permissions"] = permission.clone();
+        for (field, value) in &common_access {
+            node[*field] = value.clone();
         }
         for field in ["functions", "events"] {
             if let Some(members) = node.get_mut(field).and_then(Value::as_object_mut) {
@@ -658,8 +673,8 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
                     if member.get("contexts") == Some(&all_contexts) {
                         member.remove("contexts");
                     }
-                    if common_permission.is_some() {
-                        member.remove("permissions");
+                    for (field, _) in &common_access {
+                        member.remove(*field);
                     }
                 }
             }
@@ -805,9 +820,46 @@ mod tests {
     }
 
     #[test]
+    fn manifest_dependencies_survive_inheritance_and_namespace_lifting() {
+        let rule = json!([{"name":"sample","rules":{"contexts":["privileged_extension"],"dependencies":["manifest:action"]}}]);
+        let namespaces = BTreeMap::from([("sample".into(), rule.clone())]);
+        let inherited = json!([{"name":"child","rules":{"contexts":["privileged_extension"],"dependencies":["api:sample"]}}]);
+        assert_eq!(
+            access(inherited.as_array().unwrap(), &namespaces, 0)
+                .unwrap()
+                .manifest
+                .as_deref(),
+            Some("action")
+        );
+        let catalog = Catalog {
+            features: BTreeMap::new(),
+            schemas: vec![json!({
+                "namespace":"sample", "feature_rules":rule,
+                "functions":[{"name":"call","feature_rules":rule}],
+                "events":[{"name":"onEvent","feature_rules":rule}]
+            })],
+        };
+        let surface = surface(&catalog).unwrap();
+        assert_eq!(
+            surface["namespaces"]["sample"]["manifest"],
+            json!(["action"])
+        );
+        assert!(surface["namespaces"]["sample"]["functions"]["call"]
+            .get("manifest")
+            .is_none());
+        for dependencies in [
+            json!(["permission:action", "manifest:action"]),
+            json!(["manifest:action", "manifest:commands"]),
+        ] {
+            let rules = json!([{"name":"sample","rules":{"contexts":["privileged_extension"],"dependencies":dependencies}}]);
+            assert!(access(rules.as_array().unwrap(), &namespaces, 0).is_none());
+        }
+    }
+
+    #[test]
     fn unsupported_authority_expressions_fail_closed() {
         let namespaces = BTreeMap::new();
-        assert!(access(json!([{"name":"sample","rules":{"contexts":["privileged_extension"],"dependencies":["manifest:action"]}}]).as_array().unwrap(), &namespaces, 0).is_none());
+        assert!(access(json!([{"name":"sample","rules":{"contexts":["privileged_extension"],"dependencies":["unsupported:action"]}}]).as_array().unwrap(), &namespaces, 0).is_none());
         let alternatives = json!([{"name":"sample","rules":[{"contexts":["privileged_extension"],"dependencies":["permission:one"]},{"contexts":["content_script"],"dependencies":["permission:two"]}]}]);
         assert!(access(alternatives.as_array().unwrap(), &namespaces, 0).is_none());
     }
