@@ -2,7 +2,7 @@
   import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import type { Snippet } from "svelte";
-  import { IS_WINDOWS } from "$shared/platform";
+  import { IS_MAC, IS_WINDOWS } from "$shared/platform";
   import * as motion from "$session/motion.svelte";
   import { surface as browserPage } from "$domain/surface";
   import { tabs } from "$domain/tabs";
@@ -254,11 +254,11 @@
   /** Native follows the pointer over the card too, which the card's own
    *  events miss while another app has the keyboard. */
   let overCard = false;
-  /** Windows cannot blend the chrome over a page, so it cuts the chrome to
-   *  the card, and the cut follows the card as it slides: a little behind it
+  /** Windows and Linux use a native cut around the card, which follows its
+   *  slide: a little behind it
    *  on the way in and a little ahead on the way out, so nothing past the
    *  card is ever uncovered. */
-  const CUT_TO_CARD = IS_WINDOWS;
+  const CUT_TO_CARD = !IS_MAC;
   /** About two display frames: how far the cut keeps behind or ahead. */
   const CUT_LEAD_MS = 34;
   const slides = () => !reducedMotion();

@@ -31,12 +31,15 @@
   }
 
   function restorePointerState(): void {
-    if (captureTarget && activePointer != null && captureTarget.hasPointerCapture(activePointer)) {
-      captureTarget.releasePointerCapture(activePointer);
-    }
-    document.body.style.cursor = previousCursor;
+    const target = captureTarget;
+    const pointer = activePointer;
     activePointer = null;
     captureTarget = null;
+    // Releasing capture can deliver lostpointercapture synchronously.
+    if (target && pointer != null && target.hasPointerCapture(pointer)) {
+      target.releasePointerCapture(pointer);
+    }
+    document.body.style.cursor = previousCursor;
   }
 
   function handleMove(event: PointerEvent): void {
@@ -49,23 +52,30 @@
     });
   }
 
-  function handleUp(event: PointerEvent): void {
-    if (event.pointerId !== activePointer) return;
-
+  function finishPointer(x: number | null, y: number | null): void {
+    if (activePointer == null) return;
     if (animationFrame !== 0) {
       cancelAnimationFrame(animationFrame);
       animationFrame = 0;
     }
 
+    layout.release(x, y);
+    restorePointerState();
+  }
+
+  function handleUp(event: PointerEvent): void {
+    if (event.pointerId !== activePointer) return;
+
     // The final coordinate and release remain one ordered native command.
     // Separate fire-and-forget drag/release calls could persist the previous
     // animation frame's ratio.
-    layout.release(
+    finishPointer(
       event.type === "pointerup" ? event.clientX : null,
       event.type === "pointerup" ? event.clientY : null,
     );
-    restorePointerState();
   }
+
+  const handleBlur = () => finishPointer(null, null);
 
   function handleDown(event: PointerEvent, vertical: boolean): void {
     if (activePointer != null || event.button !== 0) return;
@@ -113,15 +123,17 @@
     window.addEventListener("pointermove", handleMove);
     window.addEventListener("pointerup", handleUp);
     window.addEventListener("pointercancel", handleUp);
+    window.addEventListener("lostpointercapture", handleUp);
+    window.addEventListener("blur", handleBlur);
 
     return () => {
       window.removeEventListener("pointermove", handleMove);
       window.removeEventListener("pointerup", handleUp);
       window.removeEventListener("pointercancel", handleUp);
+      window.removeEventListener("lostpointercapture", handleUp);
+      window.removeEventListener("blur", handleBlur);
 
-      if (animationFrame !== 0) cancelAnimationFrame(animationFrame);
-      if (activePointer != null) layout.release(null, null);
-      restorePointerState();
+      finishPointer(null, null);
     };
   });
 </script>

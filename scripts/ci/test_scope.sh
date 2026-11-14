@@ -27,7 +27,7 @@ expect true true false frame/src/shared/ipc/bindings.ts
 expect true false false docs/frontend.md crates/zephium-core/src/lib.rs
 expect true false false Cargo.lock desktop/src/lib.rs
 expect true true true .github/workflows/ci.yml
-expect true true true scripts/ci/scope.sh
+expect true true true scripts/ci/scope.sh scripts/ci/linux-test.sh
 expect true true false desktop/tauri.conf.json
 
 # Release policy and its regressions must reach the workflows job.

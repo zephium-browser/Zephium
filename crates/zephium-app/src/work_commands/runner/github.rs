@@ -1,16 +1,21 @@
 //! The child can request one opaque local-socket route; only the captured broker
 //! closure can decide the remote resource. No provider credential enters gh.
 use super::{Failure, Output};
+use std::future::Future;
+#[cfg(any(target_os = "macos", windows, test))]
 use std::{
-    future::Future,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
+#[cfg(any(target_os = "macos", windows, test))]
 pub(super) mod socket;
 #[cfg(windows)]
 use super::windows_github::Runtime;
+#[cfg(any(target_os = "macos", windows, test))]
 use socket::Listener;
+#[cfg(any(target_os = "macos", windows, test))]
 const BODY_LIMIT: usize = 60 * 1024;
+#[cfg(any(target_os = "macos", windows, test))]
 const HEADER_LIMIT: usize = 8192;
 
 pub(crate) fn available() -> bool {
@@ -141,6 +146,7 @@ where
     Ok(output)
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
 pub(super) async fn serve<F, FF>(
     listener: Listener,
     port: u16,
@@ -205,6 +211,7 @@ where
         }
     }
 }
+#[cfg(any(target_os = "macos", windows, test))]
 fn exact_request(bytes: &[u8], port: u16, nonce: &str) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -249,12 +256,12 @@ fn exact_request(bytes: &[u8], port: u16, nonce: &str) -> bool {
 mod tests {
     use super::*;
     fn fixture_listener() -> (tempfile::TempDir, Listener, std::path::PathBuf) {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         let directory = tempfile::Builder::new()
             .prefix("zgh-")
             .tempdir_in("/private/tmp")
             .unwrap();
-        #[cfg(not(unix))]
+        #[cfg(not(target_os = "macos"))]
         let directory = tempfile::Builder::new().prefix("zgh-").tempdir().unwrap();
         let path = directory.path().canonicalize().unwrap().join("broker.sock");
         let listener = Listener::bind(&path).unwrap();
@@ -393,6 +400,7 @@ mod tests {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 pub(super) fn environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     // Markers satisfy gh's CLI/auth preflight; neither is a provider credential.
     let result: Vec<_> = [
@@ -418,6 +426,7 @@ pub(super) fn environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     };
     result
 }
+#[cfg(any(target_os = "macos", windows, test))]
 pub(super) fn write_config(
     home: &std::path::Path,
     endpoint: &std::path::Path,

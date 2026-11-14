@@ -32,7 +32,12 @@ impl WorkerError for Failure {
         *self == Self::Stopped
     }
     fn unsettled(&self) -> bool {
-        matches!(self, Self::CleanupPending | Self::StopUnconfirmed)
+        match self {
+            Self::CleanupPending => true,
+            #[cfg(any(target_os = "macos", windows))]
+            Self::StopUnconfirmed => true,
+            _ => false,
+        }
     }
 }
 pub(super) struct Control {

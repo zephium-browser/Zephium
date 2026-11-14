@@ -119,6 +119,7 @@ impl WorkActivity {
             observers.entry(observer.attempt()).or_insert(observer);
         }
     }
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     fn persist_evicted(
         &self,
         profile: ProfileId,

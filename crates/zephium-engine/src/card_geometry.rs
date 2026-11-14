@@ -1,5 +1,5 @@
 //! Where a hidden sidebar's card stands in physical pixels, and where its
-//! shadow lies in a page's own window. Pure, so the Windows stage and the
+//! shadow lies in a page's own window. Pure, so the native stages and the
 //! tests share one answer.
 
 use zephium_core::geometry::Rect;
@@ -26,6 +26,7 @@ pub(crate) fn card_pixels(card: Rect, client: (i32, i32), scale: f64) -> Option<
 
 /// The card's rectangle in the coordinates of a page window placed at
 /// `container` in the same space, as `(offset, size)`.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn in_container(card: PixelRect, container: PixelRect) -> ((i32, i32), (i32, i32)) {
     (
         (card.0 - container.0, card.1 - container.1),

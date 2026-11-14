@@ -164,6 +164,13 @@ impl Keymap {
             .is_none_or(|index| !self.off[index].load(Ordering::Acquire))
     }
 
+    #[cfg(any(
+        test,
+        all(
+            feature = "work-product",
+            any(target_os = "macos", target_os = "windows")
+        )
+    ))]
     pub(crate) fn ai_enabled(&self) -> bool {
         self.feature_on("ai")
     }

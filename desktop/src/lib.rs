@@ -77,7 +77,7 @@ mod data_export;
 mod default_browser;
 mod diagnostic_report;
 mod diagnostics;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod edge_reach;
 mod external_links;
 #[cfg(feature = "work-product")]
@@ -89,6 +89,8 @@ mod history_menu;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
+#[cfg(target_os = "linux")]
+mod linux_display;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
 #[cfg(any(target_os = "linux", test))]
@@ -5787,7 +5789,7 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
@@ -5801,7 +5803,7 @@ fn sidebar_set_hidden(caller: WebviewWindow, shell: State<'_, Handle>, hidden: b
     if !authorize(&caller, CallerPolicy::Main, "sidebar_set_hidden") {
         return;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     platform::imp::sidebar_hidden(&caller, hidden);
     shell.dispatch(Command::SetSidebarHidden(hidden));
 }
@@ -5868,11 +5870,11 @@ fn sidebar_resize_guide(
     {
         return false;
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         shell.dispatch(Command::SidebarResizeGuide(width))
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, width);
         false
@@ -6782,9 +6784,13 @@ fn install_async_runtime() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if cfg!(all(unix, not(target_os = "macos"))) {
+    if !cfg!(any(
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux"
+    )) {
         diagnostic!(
-            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
+            "Zephium does not support this platform. Use macOS, Windows, or Linux (experimental)."
         );
         std::process::exit(1);
     }
@@ -7095,6 +7101,10 @@ pub fn run() {
                 .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
             #[cfg(feature = "work-development-traces")]
             let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
+            #[cfg(target_os = "linux")]
+            let main_builder = main_builder
+                .transparent(false)
+                .background_color(tauri::utils::config::Color(26, 26, 29, 255));
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
                 .decorations(false)
@@ -7150,8 +7160,7 @@ pub fn run() {
                     }
                 })
                 .on_page_load(move |window, payload| {
-                    // The native window is transparent and its privileged
-                    // WebView is deliberately constructed at about:blank so
+                    // The privileged WebView is constructed at about:blank so
                     // deny handlers can be installed before app code runs.
                     // Never expose that engine-default backing surface. A
                     // native Finished event proves only document loading; the
@@ -7182,6 +7191,7 @@ pub fn run() {
             // Onboarding composes for one size; the browser takes the window
             // back resizable once it has replaced onboarding.
             if onboarding {
+                #[cfg(not(target_os = "linux"))]
                 window.set_resizable(false)?;
                 window.set_maximizable(false)?;
             }
@@ -8025,6 +8035,7 @@ pub fn run() {
 
             #[cfg(target_os = "linux")]
             {
+                overlay::linux::install(&panel_window).map_err(std::io::Error::other)?;
                 // When portal/direct-X11 registration is unavailable the
                 // focused fallback must also close a launcher whose panel,
                 // rather than the main window, owns keyboard focus.
