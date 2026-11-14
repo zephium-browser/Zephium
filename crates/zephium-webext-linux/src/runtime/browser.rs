@@ -1533,8 +1533,28 @@ impl BrowserPort for Browser {
         state.snapshot()
     }
 
-    fn extension_info(&self, _sender: &Sender) -> Result<ExtensionInfo, ApiError> {
-        Ok(ExtensionInfo::default())
+    fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError> {
+        let state = self.shared.state.borrow();
+        let commands = state
+            .installs
+            .get(&sender.install())
+            .and_then(|facts| facts.manifest.get("commands")?.as_object().cloned())
+            .unwrap_or_default()
+            .into_iter()
+            .take(100)
+            .map(|(name, command)| {
+                let description = command
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                // Shortcuts are not bound on Linux yet, so none is reported.
+                json!({"name": name, "description": description, "shortcut": ""})
+            })
+            .collect();
+        Ok(ExtensionInfo {
+            commands,
+            ..ExtensionInfo::default()
+        })
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {

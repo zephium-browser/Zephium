@@ -105,7 +105,7 @@ fn conformance_host() {
             state_directory: Some(state.path().to_owned()),
             locale: LocaleEnvironment {
                 ui_language: "en-US".into(),
-                accept_languages: vec!["en-US".into()],
+                accept_languages: vec!["en-US".into(), "en".into()],
                 right_to_left: false,
             },
             time_scale: 1,

@@ -122,6 +122,15 @@ impl Host {
         };
         let attached = self.runtime.attach_tab(id, &view).expect("attach tab");
         let (shell, dirty) = (Rc::downgrade(&self.shell), self.dirty.clone());
+        let (titles, retitled) = (Rc::downgrade(&self.shell), self.dirty.clone());
+        view.connect_title_notify(move |view| {
+            if let Some(shell) = titles.upgrade() {
+                if let Some(tab) = shell.borrow_mut().tabs.get_mut(&id) {
+                    tab.title = view.title().map(|t| t.to_string()).unwrap_or_default();
+                }
+                retitled.set(true);
+            }
+        });
         view.connect_load_changed(move |view, event| {
             let Some(shell) = shell.upgrade() else {
                 return;
