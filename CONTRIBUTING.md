@@ -210,6 +210,30 @@ sandbox/process tests require an admitted WebKitGTK runtime and a separate
 isolated native run. A foundation job passing on older distro libraries does
 not establish those runtime guarantees or Linux release support.
 
+#### Linux graphics startup
+
+Linux Graphics settings save a renderer preference for the next process. Explicit
+renderer environment overrides take priority; Automatic also observes startup
+recovery. The policy lives in `crates/zephium-core/src/linux_graphics.rs` and is
+applied by `desktop/src/linux_graphics.rs` before any WebKit process starts.
+
+On virtio/virgl with a known WebKitGTK version of 2.53.2 or newer, policy keeps
+the default DMA-BUF renderer and independently sets `WEBKIT_DISABLE_DMABUF_ATLAS=1`
+to prevent missing small images. This atlas workaround also applies when GPU mode
+is selected explicitly. Other GPUs and older or unknown WebKitGTK versions get
+no automatic atlas switch. Any existing atlas environment value is preserved;
+only exactly `1` disables DMA-BUF atlas textures. WebKit reads this switch once
+per process, so changes require a restart. Zephium removes only its own graphics
+environment additions when restarting, allowing policy to be evaluated again.
+
+The Graphics page's review/copy report describes the active atlas workaround and
+user overrides separately from the renderer path. `--gpu-report` describes what
+policy would apply without starting WebKit or recording a launch. For manual
+comparisons, use a disposable profile and explicitly set the atlas variable to
+`0` (default atlas) or `1` (workaround); merely unsetting it allows policy to apply.
+An existing recovery hold still requires the Graphics page's faster-mode retry
+before Automatic can return to the default renderer.
+
 ### Local aggregate and specialized gates
 
 `cargo xtask ci` is a larger local aggregate implemented in

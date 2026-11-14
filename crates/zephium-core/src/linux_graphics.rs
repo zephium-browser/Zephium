@@ -245,6 +245,7 @@ fn bounded_lowercase(value: &str) -> String {
 pub enum VersionPredicate {
     Any,
     Exact(GraphicsVersion),
+    AtLeast(GraphicsVersion),
     Range {
         minimum: GraphicsVersion,
         maximum_exclusive: GraphicsVersion,
@@ -256,10 +257,24 @@ impl VersionPredicate {
         match self {
             Self::Any => true,
             Self::Exact(required) => version == Some(required),
+            Self::AtLeast(minimum) => version.is_some_and(|version| version >= minimum),
             Self::Range {
                 minimum,
                 maximum_exclusive,
             } => version.is_some_and(|version| version >= minimum && version < maximum_exclusive),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AtlasWorkaroundReason {
+    VirtioMissingImages,
+}
+
+impl AtlasWorkaroundReason {
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::VirtioMissingImages => "prevent missing small images on virtio/virgl",
         }
     }
 }
@@ -273,28 +288,19 @@ pub struct RendererPolicyRule {
     pub nvidia_version: VersionPredicate,
     pub path: RendererPath,
     pub reason: &'static str,
+    pub disable_dmabuf_atlas: Option<AtlasWorkaroundReason>,
 }
-
-const VIRTIO_REASON: &str = "virtio/virgl: DMA-BUF icon flicker observed with WebKitGTK 2.54.2; shared-memory acceptance pending";
 
 pub const RENDERER_POLICY: &[RendererPolicyRule] = &[
     RendererPolicyRule {
         driver_class: DriverClass::VirtioVirgl,
-        session: Some(SessionType::Wayland),
-        webkit_version: VersionPredicate::Exact(GraphicsVersion::new(2, 54, 2)),
+        session: None,
+        webkit_version: VersionPredicate::AtLeast(GraphicsVersion::new(2, 53, 2)),
         mesa_version: VersionPredicate::Any,
         nvidia_version: VersionPredicate::Any,
-        path: RendererPath::DisableDmabuf,
-        reason: VIRTIO_REASON,
-    },
-    RendererPolicyRule {
-        driver_class: DriverClass::VirtioVirgl,
-        session: Some(SessionType::X11),
-        webkit_version: VersionPredicate::Exact(GraphicsVersion::new(2, 54, 2)),
-        mesa_version: VersionPredicate::Any,
-        nvidia_version: VersionPredicate::Any,
-        path: RendererPath::DisableDmabuf,
-        reason: VIRTIO_REASON,
+        path: RendererPath::Default,
+        reason: "virtio/virgl: retain the default DMA-BUF renderer",
+        disable_dmabuf_atlas: Some(AtlasWorkaroundReason::VirtioMissingImages),
     },
     RendererPolicyRule {
         driver_class: DriverClass::Software,
@@ -304,6 +310,7 @@ pub const RENDERER_POLICY: &[RendererPolicyRule] = &[
         nvidia_version: VersionPredicate::Any,
         path: RendererPath::Default,
         reason: "software rasterizer: retain WebKit's GL/device capability checks",
+        disable_dmabuf_atlas: None,
     },
 ];
 
@@ -316,23 +323,31 @@ pub struct PolicyContext {
     pub nvidia_version: Option<GraphicsVersion>,
 }
 
-pub fn renderer_policy(context: PolicyContext) -> (RendererPath, &'static str) {
-    for rule in RENDERER_POLICY {
-        if rule.driver_class == context.driver_class
+fn policy_rule(context: PolicyContext) -> Option<&'static RendererPolicyRule> {
+    RENDERER_POLICY.iter().find(|rule| {
+        rule.driver_class == context.driver_class
             && rule
                 .session
                 .is_none_or(|session| session == context.session)
             && rule.webkit_version.matches(context.webkit_version)
             && rule.mesa_version.matches(context.mesa_version)
             && rule.nvidia_version.matches(context.nvidia_version)
-        {
-            return (rule.path, rule.reason);
-        }
-    }
-    (
-        RendererPath::Default,
-        "no evidenced renderer exception; retain WebKit defaults",
+    })
+}
+
+pub fn renderer_policy(context: PolicyContext) -> (RendererPath, &'static str) {
+    policy_rule(context).map_or(
+        (
+            RendererPath::Default,
+            "no evidenced renderer exception; retain WebKit defaults",
+        ),
+        |rule| (rule.path, rule.reason),
     )
+}
+
+/// Independent of renderer preferences, overrides and startup recovery.
+pub fn atlas_workaround_policy(context: PolicyContext) -> Option<AtlasWorkaroundReason> {
+    policy_rule(context).and_then(|rule| rule.disable_dmabuf_atlas)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -785,24 +800,27 @@ mod tests {
     }
 
     #[test]
-    fn policy_exceptions_apply_only_to_evidenced_versions_and_sessions() {
-        for session in [SessionType::Wayland, SessionType::X11] {
+    fn atlas_workaround_requires_virtio_and_a_known_affected_webkit() {
+        for session in [SessionType::Wayland, SessionType::X11, SessionType::Unknown] {
             let mut target = context(DriverClass::VirtioVirgl);
             target.session = session;
-            assert_eq!(renderer_policy(target).0, RendererPath::DisableDmabuf);
-            for version in [
-                None,
-                Some(GraphicsVersion::new(2, 52, 6)),
-                Some(GraphicsVersion::new(2, 54, 3)),
-                Some(GraphicsVersion::new(2, 56, 0)),
+            for (version, affected) in [
+                (None, false),
+                (Some(GraphicsVersion::new(2, 52, 6)), false),
+                (Some(GraphicsVersion::new(2, 53, 1)), false),
+                (Some(GraphicsVersion::new(2, 53, 2)), true),
+                (Some(GraphicsVersion::new(2, 54, 2)), true),
+                (Some(GraphicsVersion::new(2, 56, 0)), true),
+                (Some(GraphicsVersion::new(3, 0, 0)), true),
             ] {
                 target.webkit_version = version;
                 assert_eq!(renderer_policy(target).0, RendererPath::Default);
+                assert_eq!(
+                    atlas_workaround_policy(target),
+                    affected.then_some(AtlasWorkaroundReason::VirtioMissingImages)
+                );
             }
         }
-        let mut target = context(DriverClass::VirtioVirgl);
-        target.session = SessionType::Unknown;
-        assert_eq!(renderer_policy(target).0, RendererPath::Default);
         for driver in [
             DriverClass::MesaRadeonsi,
             DriverClass::MesaIris,
@@ -816,6 +834,7 @@ mod tests {
             DriverClass::OtherMesa,
             DriverClass::Unknown,
         ] {
+            assert_eq!(atlas_workaround_policy(context(driver)), None);
             assert_eq!(
                 renderer_policy(context(driver)).0,
                 RendererPath::Default,
@@ -905,7 +924,7 @@ mod tests {
             RendererOverrides::default(),
             CrashRecovery::default(),
         );
-        assert_eq!(selected.path, RendererPath::DisableDmabuf);
+        assert_eq!(selected.path, RendererPath::Default);
         assert_eq!(selected.source, SelectionSource::Policy);
     }
 
@@ -969,15 +988,15 @@ mod tests {
         let selected = select(deeper);
         assert_eq!(selected.path, RendererPath::DisableDmabuf);
         assert_eq!(selected.source, SelectionSource::CrashRecovery);
-        // A hold no stricter than policy is not reported as one.
+        // Virtio now retains the default renderer, so its slower hold still applies.
         let virgl = select_renderer(
             context(DriverClass::VirtioVirgl),
             RendererPreference::Automatic,
             RendererOverrides::default(),
             held,
         );
-        assert_eq!(virgl.path, RendererPath::DisableDmabuf);
-        assert_eq!(virgl.source, SelectionSource::Policy);
+        assert_eq!(virgl.path, RendererPath::ForceShm);
+        assert_eq!(virgl.source, SelectionSource::RepeatedFailure);
         // Explicit choices and environment overrides still win.
         let chosen = select_renderer(
             target,

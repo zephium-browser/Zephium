@@ -10,8 +10,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use zephium_core::linux_graphics::{
-    select_renderer, CrashRecovery, GraphicsVersion, PolicyContext, RendererOverrides,
-    RendererPath, RendererPreference, SelectionSource,
+    atlas_workaround_policy, select_renderer, CrashRecovery, GraphicsVersion, PolicyContext,
+    RendererOverrides, RendererPreference, SelectionSource,
 };
 use zephium_ipc::linux_graphics::{GpuReport, ProbeData, ProbeOutcome};
 
@@ -21,12 +21,13 @@ const PROBE_INCONCLUSIVE: u8 = 21;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PROBE_BYTES: u64 = 64 * 1024;
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
-static APPLIED: OnceLock<&'static str> = OnceLock::new();
+static APPLIED: OnceLock<Vec<&'static str>> = OnceLock::new();
 
 struct Runtime {
     report: GpuReport,
     store: Option<state::StateStore>,
     initial_preference: RendererPreference,
+    atlas: environment::AtlasStatus,
 }
 
 /// Called by main before GTK, WebKit or the async runtime creates threads.
@@ -109,18 +110,19 @@ pub fn prepare() -> Option<ExitCode> {
     let disable = disable.as_ref().map(|value| value.to_string_lossy());
     let force_shm = force_shm.as_ref().map(|value| value.to_string_lossy());
     let gl = detection.gl.as_ref();
+    let policy_context = PolicyContext {
+        driver_class: detection.driver_class,
+        session: detection.session,
+        webkit_version: version(&detection.webkit_version),
+        mesa_version: gl
+            .and_then(|gl| gl.mesa_version.as_deref())
+            .and_then(version),
+        nvidia_version: gl
+            .and_then(|gl| gl.nvidia_version.as_deref())
+            .and_then(version),
+    };
     let selection = select_renderer(
-        PolicyContext {
-            driver_class: detection.driver_class,
-            session: detection.session,
-            webkit_version: version(&detection.webkit_version),
-            mesa_version: gl
-                .and_then(|gl| gl.mesa_version.as_deref())
-                .and_then(version),
-            nvidia_version: gl
-                .and_then(|gl| gl.nvidia_version.as_deref())
-                .and_then(version),
-        },
+        policy_context,
         preference,
         RendererOverrides {
             disable_dmabuf: disable.as_deref(),
@@ -128,10 +130,15 @@ pub fn prepare() -> Option<ExitCode> {
         },
         recovery,
     );
+    let startup_environment = environment::StartupEnvironment::plan(
+        &selection,
+        atlas_workaround_policy(policy_context),
+        |name| std::env::var_os(name),
+    );
     if !report_only {
-        if !matches!(selection.source, SelectionSource::Environment) {
-            apply_path(selection.path);
-        }
+        // WebKit caches the atlas switch in each process: set it before any WebView exists.
+        let _ =
+            APPLIED.set(startup_environment.apply(|name, value| std::env::set_var(name, value)));
         if preference == RendererPreference::Automatic
             && !matches!(selection.source, SelectionSource::Environment)
         {
@@ -162,13 +169,17 @@ pub fn prepare() -> Option<ExitCode> {
         text: String::new(),
     };
     if report_only {
-        print!("{}", report::render(&report));
+        print!(
+            "{}",
+            report::render(&report, startup_environment.atlas, true)
+        );
         return Some(ExitCode::SUCCESS);
     }
     let _ = RUNTIME.set(Mutex::new(Runtime {
         report,
         store,
         initial_preference: preference,
+        atlas: startup_environment.atlas,
     }));
     None
 }
@@ -198,25 +209,16 @@ fn version(value: &str) -> Option<GraphicsVersion> {
     GraphicsVersion::parse(value)
 }
 
-fn apply_path(path: RendererPath) {
-    // Only called in the single-threaded entry point, and only without user overrides.
-    let name = match path {
-        RendererPath::Default => return,
-        RendererPath::ForceShm => "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
-        RendererPath::DisableDmabuf => "WEBKIT_DISABLE_DMABUF_RENDERER",
-    };
-    std::env::set_var(name, "1");
-    let _ = APPLIED.set(name);
-}
-
-/// Starts the next process without the renderer variable this one set for
-/// itself, so it selects again instead of reading it as the person's override.
+/// Starts the next process without the graphics variables this one set for
+/// itself, so it selects again instead of reading them as the person's overrides.
 pub(crate) fn restart(env: &tauri::Env) -> ! {
     if let Ok(path) = tauri::process::current_binary(env) {
         let mut command = Command::new(path);
         command.args(env.args_os.iter().skip(1));
-        if let Some(name) = APPLIED.get() {
-            command.env_remove(name);
+        if let Some(names) = APPLIED.get() {
+            for name in names {
+                command.env_remove(name);
+            }
         }
         if let Err(error) = command.spawn() {
             eprintln!("graphics: could not restart Zephium: {error}");
@@ -260,7 +262,7 @@ pub(crate) fn report() -> Result<GpuReport, String> {
         .lock()
         .map_err(|_| "Graphics startup state is unavailable")?;
     let mut report = runtime.report.clone();
-    report.text = report::render(&report);
+    report.text = report::render(&report, runtime.atlas, false);
     Ok(report)
 }
 

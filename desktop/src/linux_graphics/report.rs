@@ -1,7 +1,8 @@
+use super::environment::AtlasStatus;
 use std::fmt::Write;
 use zephium_ipc::linux_graphics::{GpuReport, PluginPresence};
 
-pub(super) fn render(report: &GpuReport) -> String {
+pub(super) fn render(report: &GpuReport, atlas: AtlasStatus, report_only: bool) -> String {
     let detection = &report.detection;
     let mut text = String::from("Zephium Linux GPU report\n");
     let _ = writeln!(
@@ -66,6 +67,7 @@ pub(super) fn render(report: &GpuReport) -> String {
         "Selected: {:?} ({:?}); {}",
         report.selection.path, report.selection.source, report.selection.reason
     );
+    let _ = writeln!(text, "{}", atlas.description(report_only));
     let recovery = &report.selection.crash_recovery;
     let _ = writeln!(
         text,
