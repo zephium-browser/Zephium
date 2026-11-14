@@ -152,6 +152,8 @@ fn conformance_host() {
         pump_for(Duration::from_millis(10));
         host.work();
     }
+    // Like the reference browser profile: its start page, then the runner.
+    host.open("about:blank", true);
     host.open(&format!("chrome-extension://{extension}/runner.html"), true);
     let (lines, input) = mpsc::channel::<String>();
     std::thread::spawn(move || {
