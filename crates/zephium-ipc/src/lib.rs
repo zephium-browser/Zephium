@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+pub mod linux_graphics;
 pub mod page_assist;
 mod time;
 pub mod work;

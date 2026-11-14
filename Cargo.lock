@@ -7659,6 +7659,7 @@ dependencies = [
  "zephium-import",
  "zephium-ipc",
  "zephium-notes",
+ "zephium-private-fs",
  "zephium-store",
  "zephium-voice",
  "zephium-webext",

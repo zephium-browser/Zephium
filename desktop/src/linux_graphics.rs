@@ -1,76 +1,270 @@
-use std::io;
+mod detection;
+mod environment;
+mod report;
+mod state;
+
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use zephium_core::linux_graphics::{
+    select_renderer, CrashRecovery, GraphicsVersion, PolicyContext, RendererOverrides,
+    RendererPath, RendererPreference, SelectionSource,
+};
+use zephium_ipc::linux_graphics::{GpuReport, ProbeData, ProbeOutcome};
 
 const PROBE_ARGUMENT: &str = "--zephium-internal-gtk-gl-probe";
 const GL_UNAVAILABLE: u8 = 20;
 const PROBE_INCONCLUSIVE: u8 = 21;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_PROBE_BYTES: u64 = 64 * 1024;
+static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
 
-#[derive(Debug, PartialEq, Eq)]
-enum ProbeOutcome {
-    Supported,
-    Unavailable,
-    Inconclusive,
+struct Runtime {
+    report: GpuReport,
+    store: Option<state::StateStore>,
+    initial_preference: RendererPreference,
 }
 
+/// Called by main before GTK, WebKit or the async runtime creates threads.
 pub fn prepare() -> Option<ExitCode> {
     if std::env::args_os().skip(1).eq([PROBE_ARGUMENT]) {
-        return Some(probe());
+        let data = detection::probe();
+        let status = match data.outcome {
+            ProbeOutcome::Supported => ExitCode::SUCCESS,
+            ProbeOutcome::Unavailable => ExitCode::from(GL_UNAVAILABLE),
+            ProbeOutcome::Inconclusive => ExitCode::from(PROBE_INCONCLUSIVE),
+        };
+        match serde_json::to_string(&data) {
+            Ok(json) => println!("{json}"),
+            Err(_) => return Some(ExitCode::from(PROBE_INCONCLUSIVE)),
+        }
+        return Some(status);
     }
-    // GDK reads this once during initialization. Honor explicit user choices.
-    if std::env::var_os("GDK_GL").is_some() {
-        return None;
+    let report_only = std::env::args_os().skip(1).any(|arg| arg == "--gpu-report");
+    let executable = std::env::current_exe().ok();
+    let mut probe = executable
+        .as_deref()
+        .and_then(|path| run_probe(path, false));
+    if std::env::var_os("GDK_GL").is_none()
+        && probe
+            .as_ref()
+            .is_some_and(|data| data.outcome == ProbeOutcome::Unavailable)
+    {
+        if let Some(path) = executable.as_deref() {
+            let fallback = run_probe(path, true);
+            if fallback
+                .as_ref()
+                .is_some_and(|data| data.outcome == ProbeOutcome::Supported)
+            {
+                eprintln!("graphics: using verified GLES context after default GTK GL initialization failed");
+                let error = Command::new(path)
+                    .args(std::env::args_os().skip(1))
+                    .env("GDK_GL", "gles")
+                    .exec();
+                eprintln!("graphics: could not restart with the verified GLES context: {error}");
+                return Some(ExitCode::FAILURE);
+            }
+            // Retain the actual default backend and monitor facts even without GL.
+            if probe.is_none() {
+                probe = fallback;
+            }
+        }
     }
-    let executable = match std::env::current_exe() {
-        Ok(executable) => executable,
+    let detection = detection::collect(probe);
+    let environment = environment::capture();
+    let mut warnings = Vec::new();
+    let mut store = None;
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let snapshot = match state::resolve_config_directory(&context.config().identifier) {
+        Ok(config) => {
+            if report_only {
+                state::StateStore::read_existing(&config)
+            } else {
+                match state::StateStore::open_or_create(&config) {
+                    Ok(opened) => {
+                        let snapshot = opened.snapshot();
+                        store = Some(opened);
+                        Ok(snapshot)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+        Err(error) => Err(error),
+    };
+    let (preference, recovery) = match snapshot {
+        Ok(snapshot) => (snapshot.preference, snapshot.recovery),
         Err(error) => {
-            eprintln!("graphics: could not locate GTK context probe executable: {error}");
-            return None;
+            warnings.push(error.to_string());
+            (RendererPreference::Automatic, CrashRecovery::default())
         }
     };
-    let default = run_probe(&executable, false);
-    if default != ProbeOutcome::Unavailable {
-        if default == ProbeOutcome::Inconclusive {
-            eprintln!("graphics: GTK context probe did not complete; retaining system defaults");
+    let disable = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER");
+    let force_shm = std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM");
+    let disable = disable.as_ref().map(|value| value.to_string_lossy());
+    let force_shm = force_shm.as_ref().map(|value| value.to_string_lossy());
+    let gl = detection.gl.as_ref();
+    let selection = select_renderer(
+        PolicyContext {
+            driver_class: detection.driver_class,
+            session: detection.session,
+            webkit_version: version(&detection.webkit_version),
+            mesa_version: gl
+                .and_then(|gl| gl.mesa_version.as_deref())
+                .and_then(version),
+            nvidia_version: gl
+                .and_then(|gl| gl.nvidia_version.as_deref())
+                .and_then(version),
+        },
+        preference,
+        RendererOverrides {
+            disable_dmabuf: disable.as_deref(),
+            force_shm: force_shm.as_deref(),
+        },
+        recovery,
+    );
+    if !report_only {
+        if !matches!(selection.source, SelectionSource::Environment) {
+            apply_path(selection.path);
         }
-        return None;
+        if preference == RendererPreference::Automatic
+            && !matches!(selection.source, SelectionSource::Environment)
+        {
+            if let Some(store) = store.as_mut() {
+                if let Err(error) =
+                    store.record_automatic_attempt(selection.path, selection.crash_recovery)
+                {
+                    warnings.push(error.to_string());
+                }
+            }
+        }
     }
-    if run_probe(&executable, true) != ProbeOutcome::Supported {
-        eprintln!(
-            "graphics: GTK could not create a default GL context or verify a GLES fallback; \
-             rendering may be incomplete. Check the system graphics driver and GTK installation"
-        );
-        return None;
+    let report = GpuReport {
+        detection,
+        preference,
+        running_preference: preference,
+        selection,
+        environment,
+        restart_required: false,
+        startup_status: if report_only {
+            "report only; no launch recorded"
+        } else {
+            "awaiting window shown"
+        }
+        .into(),
+        state_warnings: warnings,
+        text: String::new(),
+    };
+    if report_only {
+        print!("{}", report::render(&report));
+        return Some(ExitCode::SUCCESS);
     }
-    eprintln!("graphics: using verified GLES context after default GTK GL initialization failed");
-    // Re-exec sets the process-local choice before GTK or runtime threads start.
-    let error = Command::new(executable)
-        .args(std::env::args_os().skip(1))
-        .env("GDK_GL", "gles")
-        .exec();
-    eprintln!("graphics: could not restart with the verified GLES context: {error}");
-    Some(ExitCode::FAILURE)
+    let _ = RUNTIME.set(Mutex::new(Runtime {
+        report,
+        store,
+        initial_preference: preference,
+    }));
+    None
 }
 
-fn run_probe(executable: &std::path::Path, gles: bool) -> ProbeOutcome {
+fn version(value: &str) -> Option<GraphicsVersion> {
+    GraphicsVersion::parse(value)
+}
+
+fn apply_path(path: RendererPath) {
+    // Only called in the single-threaded entry point, and only without user overrides.
+    match path {
+        RendererPath::Default => {}
+        RendererPath::ForceShm => std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1"),
+        RendererPath::DisableDmabuf => std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+    }
+}
+
+pub(crate) fn window_shown() {
+    drop(tauri::async_runtime::spawn_blocking(settle_window_shown));
+}
+
+fn settle_window_shown() {
+    let Some(runtime) = RUNTIME.get() else {
+        return;
+    };
+    let Ok(mut runtime) = runtime.lock() else {
+        return;
+    };
+    if runtime.report.startup_status == "window shown; recovery reset" {
+        return;
+    }
+    if let Some(store) = runtime.store.as_mut() {
+        if let Err(error) = store.window_shown() {
+            runtime.report.state_warnings.push(error.to_string());
+            runtime.report.startup_status =
+                "window shown; recovery reset could not be saved".into();
+            return;
+        }
+    } else {
+        runtime.report.startup_status = "window shown; recovery storage unavailable".into();
+        return;
+    }
+    runtime.report.startup_status = "window shown; recovery reset".into();
+}
+
+pub(crate) fn report() -> Result<GpuReport, String> {
+    let runtime = RUNTIME
+        .get()
+        .ok_or("Graphics startup report is unavailable")?
+        .lock()
+        .map_err(|_| "Graphics startup state is unavailable")?;
+    let mut report = runtime.report.clone();
+    report.text = report::render(&report);
+    Ok(report)
+}
+
+pub(crate) fn set_preference(preference: RendererPreference) -> Result<GpuReport, String> {
+    {
+        let mut runtime = RUNTIME
+            .get()
+            .ok_or("Graphics startup report is unavailable")?
+            .lock()
+            .map_err(|_| "Graphics startup state is unavailable")?;
+        let store = runtime
+            .store
+            .as_mut()
+            .ok_or("Renderer preferences are unavailable for this launch")?;
+        store
+            .set_preference(preference)
+            .map_err(|error| error.to_string())?;
+        runtime.report.preference = preference;
+        runtime.report.restart_required = preference != runtime.initial_preference;
+    }
+    report()
+}
+
+fn run_probe(executable: &std::path::Path, gles: bool) -> Option<ProbeData> {
+    let mut output = tempfile::tempfile().ok()?;
     let mut command = Command::new(executable);
     command
         .arg(PROBE_ARGUMENT)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(output.try_clone().ok()?)
         .stderr(Stdio::null());
     if gles {
         command.env("GDK_GL", "gles");
     }
-    match command
+    let status = command
         .spawn()
         .and_then(|mut child| wait_bounded(&mut child, PROBE_TIMEOUT))
-    {
-        Ok(status) => outcome(status),
-        Err(_) => ProbeOutcome::Inconclusive,
+        .ok()?;
+    if output.metadata().ok()?.len() > MAX_PROBE_BYTES {
+        return None;
     }
+    output.seek(SeekFrom::Start(0)).ok()?;
+    let mut bytes = Vec::new();
+    output.take(MAX_PROBE_BYTES).read_to_end(&mut bytes).ok()?;
+    let data: ProbeData = serde_json::from_slice(&bytes).ok()?;
+    (data.outcome == outcome(status)).then_some(data)
 }
 
 fn outcome(status: ExitStatus) -> ProbeOutcome {
@@ -106,36 +300,6 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> 
     }
 }
 
-fn probe() -> ExitCode {
-    use gtk::prelude::*;
-
-    if gtk::init().is_err() {
-        return ExitCode::from(PROBE_INCONCLUSIVE);
-    }
-    // Realize without mapping: no visible window, focus transfer, or WebKit.
-    let window = gtk::Window::new(gtk::WindowType::Toplevel);
-    window.set_accept_focus(false);
-    window.set_focus_on_map(false);
-    window.set_default_size(1, 1);
-    window.realize();
-    if window.is_visible() || window.is_mapped() {
-        return ExitCode::from(PROBE_INCONCLUSIVE);
-    }
-    let Some(native) = window.window() else {
-        return ExitCode::from(PROBE_INCONCLUSIVE);
-    };
-    let Ok(context) = native.create_gl_context() else {
-        return ExitCode::from(GL_UNAVAILABLE);
-    };
-    if context.realize().is_err() {
-        return ExitCode::from(GL_UNAVAILABLE);
-    }
-    if std::env::var_os("GDK_GL").is_some_and(|value| value == "gles") && !context.uses_es() {
-        return ExitCode::from(GL_UNAVAILABLE);
-    }
-    ExitCode::SUCCESS
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,13 +326,16 @@ mod tests {
             .arg("30")
             .spawn()
             .expect("sleep child");
-        let error = wait_bounded(&mut child, Duration::from_millis(25))
-            .expect_err("sleep exceeds the probe deadline");
+        let error =
+            wait_bounded(&mut child, Duration::from_millis(25)).expect_err("probe deadline");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
-        let status = child
-            .try_wait()
-            .expect("reaped child")
-            .expect("exit status");
-        assert_eq!(status.signal(), Some(9));
+        assert_eq!(
+            child
+                .try_wait()
+                .expect("reaped child")
+                .expect("exit status")
+                .signal(),
+            Some(9)
+        );
     }
 }

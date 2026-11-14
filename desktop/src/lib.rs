@@ -93,6 +93,8 @@ mod launcher_trigger;
 mod linux_display;
 #[cfg(target_os = "linux")]
 mod linux_global_shortcuts;
+#[cfg(target_os = "linux")]
+pub mod linux_graphics;
 #[cfg(any(target_os = "linux", test))]
 mod linux_shortcut;
 #[cfg(any(target_os = "linux", test))]
@@ -122,6 +124,7 @@ mod recently_closed;
 mod relaunch;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod renderer_recovery;
+mod renderer_settings;
 mod resource_close;
 mod search_providers;
 mod spaces;
@@ -537,6 +540,8 @@ impl UiStartupGate {
             }
             #[cfg(feature = "adblock-qa")]
             blocker_bench::window_shown();
+            #[cfg(target_os = "linux")]
+            linux_graphics::window_shown();
             on_main_window_mapped(window);
             #[cfg(feature = "work-development-traces")]
             startup_styles::after_show(window, &self.expected());
@@ -1984,6 +1989,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             download_call,
             download_open_access_settings,
             about::about_info,
+            renderer_settings::gpu_report,
+            renderer_settings::renderer_preference_set,
             system_time::system_clock_24h,
             updates::update_status,
             updates::update_check,

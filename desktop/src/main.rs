@@ -4,12 +4,9 @@
     windows_subsystem = "windows"
 )]
 
-#[cfg(target_os = "linux")]
-mod linux_graphics;
-
 fn main() -> std::process::ExitCode {
     #[cfg(target_os = "linux")]
-    if let Some(status) = linux_graphics::prepare() {
+    if let Some(status) = zephium_desktop_lib::linux_graphics::prepare() {
         return status;
     }
     #[cfg(all(target_os = "macos", feature = "work-product"))]
