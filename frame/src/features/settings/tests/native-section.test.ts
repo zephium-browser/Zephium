@@ -22,12 +22,13 @@ test("every settings page a menu or command names is the one that opens", () => 
     "features",
     "search",
     "privacy",
+    "graphics",
   ]) {
     handleNativeSection(`settings.section.${id}`);
     expect(section()).toBe(id);
   }
   handleNativeSection("settings.section.unknown");
-  expect(section()).toBe("privacy");
+  expect(section()).toBe("graphics");
 });
 
 test("Search opens at Search whichever page Settings was last left on", () => {

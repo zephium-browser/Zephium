@@ -32,6 +32,7 @@
     sites: () => import("./sections/SitesPage.svelte"),
     mcp: () => import("./sections/ConnectionsPage.svelte"),
     performance: () => import("./sections/PerformancePage.svelte"),
+    graphics: () => import("./sections/GraphicsPage.svelte"),
     account: () => import("./sections/AccountPage.svelte"),
     about: () => import("./sections/AboutPage.svelte"),
   };

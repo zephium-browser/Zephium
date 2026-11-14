@@ -6,7 +6,7 @@ import { tabs } from "$domain/tabs";
 import * as tools from "$session/tools.svelte";
 import Shell from "../Shell.svelte";
 
-vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
+vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true, IS_LINUX: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({

@@ -555,6 +555,18 @@ export const fields = {
     description: m.pref_performance_exceptions_help,
     initial: "",
   },
+  "graphics.mode": {
+    section: "graphics",
+    label: m.graphics_mode,
+    description: m.graphics_mode_help,
+    initial: "automatic",
+  },
+  "graphics.report": {
+    section: "graphics",
+    label: m.graphics_report,
+    description: m.graphics_report_help,
+    initial: "",
+  },
   "voice.engine": {
     section: "ai",
     label: m.voice_engine_title,
