@@ -67,6 +67,8 @@ struct NativePage {
 
 struct NativeFrame {
     pointer: *mut Object,
+    /// Serialized document origin, computed once per document for initiators.
+    origin: Option<String>,
     weak_data: *mut (u64, u64),
     installed: BTreeSet<String>,
     receivers: BTreeMap<String, *mut Object>,
@@ -1055,6 +1057,7 @@ unsafe extern "C" fn window_cleared(
                 frame_id,
                 NativeFrame {
                     pointer: frame,
+                    origin: protocol::document_origin(&uri),
                     weak_data: watcher,
                     installed: BTreeSet::new(),
                     receivers: BTreeMap::new(),
@@ -1622,8 +1625,6 @@ unsafe extern "C" fn send_request(
             }
         };
         let destination = header(c"Sec-Fetch-Dest", 64);
-        let fetch_mode = header(c"Sec-Fetch-Mode", 64);
-        let content_type = header(c"Content-Type", 128);
         let mut resource_type = match destination.as_deref() {
             Some(destination) => ResourceType::infer(Some(destination)),
             None => {
@@ -1646,13 +1647,14 @@ unsafe extern "C" fn send_request(
         // These headers are supplied by WebKit's loader; URL suffixes never
         // establish a resource type, and Accept is consulted only without them.
         if destination.as_deref() == Some("empty") {
-            resource_type = if content_type.as_deref().is_some_and(|value| {
+            resource_type = if header(c"Content-Type", 128).is_some_and(|value| {
                 value.starts_with("application/csp-report")
                     || value.starts_with("application/reports+json")
             }) {
                 ResourceType::CspReport
             } else if header(c"Ping-To", protocol::MAX_URI_BYTES).is_some()
-                || (fetch_mode.as_deref() == Some("no-cors") && method.as_deref() == Some("POST"))
+                || (method.as_deref() == Some("POST")
+                    && header(c"Sec-Fetch-Mode", 64).as_deref() == Some("no-cors"))
             {
                 ResourceType::Ping
             } else {
@@ -1669,15 +1671,13 @@ unsafe extern "C" fn send_request(
             .filter(|origin| {
                 with_runtime(|runtime| {
                     runtime.pages.get(&page_id).is_some_and(|native| {
-                        native
-                            .frames
-                            .keys()
-                            .filter_map(|id| runtime.state.frame(page_id, *id))
-                            .any(|frame| {
-                                !frame.opaque
-                                    && protocol::document_origin(&frame.uri).as_ref()
-                                        == Some(origin)
-                            })
+                        native.frames.iter().any(|(id, frame)| {
+                            frame.origin.as_ref() == Some(origin)
+                                && runtime
+                                    .state
+                                    .frame(page_id, *id)
+                                    .is_some_and(|frame| !frame.opaque)
+                        })
                     })
                 })
                 .unwrap_or(false)
