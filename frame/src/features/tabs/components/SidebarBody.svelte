@@ -12,6 +12,7 @@
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
+  import { openOnEmptyMiddleClick } from "../lib/middle-click";
   import { untrack, type Snippet } from "svelte";
 
   let {
@@ -112,6 +113,7 @@
       use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
       class="tab-scroller scroll-edges"
       data-glide-scroller
+      {...openOnEmptyMiddleClick(tabs.open)}
     >
       <TabList
         {selection}
