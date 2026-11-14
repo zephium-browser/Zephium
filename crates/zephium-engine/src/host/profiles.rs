@@ -1025,6 +1025,8 @@ impl EngineHost {
                 && !self.unverifiable_browser_processes.contains(&profile)
                 && !self.windows_cleanup_invariant_failed;
         }
+        #[cfg(target_os = "linux")]
+        self.webext_linux.retire_profile(profile);
         #[cfg(not(target_os = "macos"))]
         self.web_contexts.remove(&profile);
         #[cfg(target_os = "windows")]

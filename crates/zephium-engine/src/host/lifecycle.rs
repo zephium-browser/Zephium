@@ -264,6 +264,9 @@ impl EngineHost {
         ))]
         crate::platform::imp::page_glow::forget(id);
         let removed = self.views.remove(&id);
+        #[cfg(target_os = "linux")]
+        self.webext_linux
+            .detach_tab(id, removed.as_ref().map(|observed| &observed.view));
         self.navigation_snapshots.remove(&id);
         self.partitions.remove(&id);
         #[cfg(target_os = "windows")]
@@ -330,6 +333,9 @@ impl EngineHost {
             done(false);
             return;
         }
+        // Tab views go in shutdown_common; extension views drain on the loop.
+        #[cfg(target_os = "linux")]
+        let done = self.webext_linux.shutdown(done);
         #[cfg(target_os = "macos")]
         let done = if let Some(downloads) = &self.downloads {
             let (native_done, download_done) = join_download_shutdown(done);

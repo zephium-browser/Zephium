@@ -166,6 +166,13 @@ windows-numerics = "0.2"
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+javascriptcore-rs = "=1.1.2"
+tempfile.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
+zephium-webext-linux = { path = "../zephium-webext-linux", version = "=0.1.0" }
+zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "objc2", "std"] }
