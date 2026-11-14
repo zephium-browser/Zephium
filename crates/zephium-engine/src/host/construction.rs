@@ -150,7 +150,15 @@ impl EngineHost {
         );
         // Restored and explicitly opened tabs need the same live profile grant
         // as native child adoption, before either fresh or spare construction.
-        if !event_permit.allows_navigation(url) {
+        // The tab's own extension gate exists only once it is built; the
+        // browser opening an installed extension's page is admitted here.
+        #[cfg(target_os = "linux")]
+        let admitted = event_permit.allows_navigation(url)
+            || (event_permit.allows_navigation("about:blank")
+                && self.webext_linux.admits_initial(partition, url));
+        #[cfg(not(target_os = "linux"))]
+        let admitted = event_permit.allows_navigation(url);
+        if !admitted {
             eprintln!("security: rejected invalid native view target");
             self.sink
                 .emit_for(event_token, EngineEvent::ViewCreationFailed { id });

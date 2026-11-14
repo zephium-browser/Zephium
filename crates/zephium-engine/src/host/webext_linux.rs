@@ -730,6 +730,19 @@ impl LinuxExtensions {
 
     /// The browser itself navigates `tab` to `url` (address field, an
     /// extension's `tabs.create`/`update`, the options page).
+    /// Whether the browser may open a new tab of `partition` directly at
+    /// `url`: a page of an install this profile's runtime is running.
+    pub(super) fn admits_initial(&self, partition: Partition, url: &str) -> bool {
+        !matches!(partition, Partition::Ephemeral(_))
+            && Url::parse(url).is_ok_and(|url| {
+                zephium_core::navigation::extension_document_id(&url).is_some()
+                    && self
+                        .profiles
+                        .get(&partition.profile())
+                        .is_some_and(|entry| entry.side.install_of(&url).is_some())
+            })
+    }
+
     pub(super) fn authorize_navigation(&self, profile: ProfileId, tab: ItemId, url: &str) {
         let Some(entry) = self.profiles.get(&profile) else {
             return;
