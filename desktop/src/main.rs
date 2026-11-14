@@ -7,7 +7,42 @@
 #[cfg(target_os = "linux")]
 mod linux_graphics;
 
+/// Runs before any thread or helper process exists, so every WebKit process
+/// inherits the policy.
+#[cfg(target_os = "linux")]
+fn prepare_process_memory() {
+    // Some glibc builds (Fedora's `glibc.malloc.hugetlb=1`) madvise every
+    // heap for transparent huge pages; sparsely used 2 MiB pages then stay
+    // fully resident. The flag is inherited across fork and exec.
+    // SAFETY: sets a process attribute; no memory is shared or borrowed.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    }
+    // One glibc arena per thread up to 8 per core keeps freed memory
+    // scattered and resident; two arenas cover a GUI process's contention.
+    #[cfg(target_env = "gnu")]
+    {
+        const ARENAS: &str = "glibc.malloc.arena_max=2";
+        // SAFETY: called before any thread can allocate.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 2);
+        }
+        // Helper processes read their own tunables when they start.
+        let tunables = std::env::var("GLIBC_TUNABLES").unwrap_or_default();
+        if !tunables.contains("glibc.malloc.arena_max") {
+            let value = if tunables.is_empty() {
+                ARENAS.to_owned()
+            } else {
+                format!("{tunables}:{ARENAS}")
+            };
+            std::env::set_var("GLIBC_TUNABLES", value);
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    prepare_process_memory();
     #[cfg(target_os = "linux")]
     if let Some(status) = linux_graphics::prepare() {
         return status;

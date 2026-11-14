@@ -182,6 +182,7 @@ zephium-webext-linux = { path = "../crates/zephium-webext-linux", version = "=0.
 zephium-webext-runtime = { path = "../crates/zephium-webext-runtime", version = "=0.1.0" }
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
+libc = "0.2"
 x11rb = { version = "=0.13.2", features = ["xkb"] }
 xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
