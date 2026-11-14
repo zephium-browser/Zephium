@@ -429,6 +429,12 @@ impl<S> Dispatcher<S> {
         &self.limiter
     }
 
+    /// Shared accounting for service deliveries. Return every reservation through
+    /// this ledger; API calls and port traffic share the same install budget.
+    pub fn limiter_mut(&mut self) -> &mut Limiter {
+        &mut self.limiter
+    }
+
     /// Calls awaiting settlement.
     pub fn pending_calls(&self) -> usize {
         self.pending.len()

@@ -164,6 +164,11 @@ pub struct Reservation {
 }
 
 impl Reservation {
+    /// Authenticated context charged by this reservation.
+    pub fn context(&self) -> &ContextKey {
+        &self.context
+    }
+
     /// The bytes held.
     pub fn bytes(&self) -> u64 {
         self.bytes
