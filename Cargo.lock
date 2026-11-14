@@ -7877,6 +7877,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-linux"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "gtk",
+ "webkit2gtk",
+ "zephium-core",
+ "zephium-webext",
+ "zephium-webext-runtime",
+]
+
+[[package]]
 name = "zephium-webext-macos"
 version = "0.1.0"
 dependencies = [

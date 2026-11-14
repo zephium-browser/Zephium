@@ -1,0 +1,17 @@
+[package]
+name = "zephium-webext-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zephium-core.workspace = true
+zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
+zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gio = "0.18"
+glib = "0.18"
+gtk = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
