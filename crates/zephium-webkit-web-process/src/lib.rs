@@ -6,6 +6,6 @@
 
 #[cfg(target_os = "linux")]
 mod ffi;
-pub mod policy;
-pub mod protocol;
 pub mod state;
+
+pub use zephium_webkit_web_process_protocol::{policy, protocol};

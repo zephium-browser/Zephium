@@ -6,6 +6,7 @@
 //! content-script injection and the bridge to the web-process module.
 #![cfg(target_os = "linux")]
 
+pub mod bridge;
 pub mod csp;
 pub mod package;
 pub mod scheme;
