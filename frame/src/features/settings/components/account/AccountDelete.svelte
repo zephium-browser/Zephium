@@ -8,9 +8,12 @@
   import { codeDigits, explainAccountFault } from "../../lib/account";
 
   let open = $state(false);
-  let sent = $state(false);
+  const sent = $derived(session.awaitingDeletionCode());
   let code = $state("");
   let opener: HTMLElement | null = null;
+  $effect(() => {
+    if (!sent) code = "";
+  });
   const busy = $derived(session.pending());
   const fault = $derived(session.fault());
   const faultText = $derived(
@@ -21,7 +24,7 @@
 
   async function submit() {
     if (!sent) {
-      sent = await session.sendDeletionCode();
+      await session.sendDeletionCode();
       return;
     }
     const digits = codeDigits(code);
@@ -39,7 +42,6 @@
     onclick={() => {
       opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       session.clearFault();
-      sent = false;
       code = "";
       open = true;
     }}>{m.account_delete_open()}</Button
@@ -81,6 +83,12 @@
         </div>
         <footer>
           <Button onclick={() => (open = false)}>{m.action_cancel()}</Button>
+          {#if sent}<Button
+              disabled={!!busy}
+              onclick={async () => {
+                if (await session.sendDeletionCode()) code = "";
+              }}>{m.account_code_resend()}</Button
+            >{/if}
           {#if !sent}<Button type="submit" pending={busy === "deletion_code"}
               >{m.account_delete_send()}</Button
             >{:else}<Button

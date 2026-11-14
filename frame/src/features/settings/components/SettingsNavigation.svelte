@@ -8,6 +8,8 @@
   import { Cancel01Icon, Search01Icon } from "@hugeicons/core-free-icons";
   import { untrack } from "svelte";
   import { captureFrom, playTo, type Origin } from "$shared/lib/plate-glide";
+  import { IS_MAC } from "$shared/platform";
+  import { fullscreen } from "$shared/lib/fullscreen.svelte";
 
   // The account mirror stays out of the browser's startup graph.
   const identity = import("./SettingsIdentity.svelte");
@@ -40,9 +42,9 @@
   data-glide-host
   aria-label={m.settings_title()}
 >
-  <!-- A panel beside the rail, headed like every tool's: closing it returns
-       to the page the rail still shows. -->
-  <header class="settings-panel-header">
+  <!-- Its name and the way out share the window's own row, beside the lights
+       where the system draws them. -->
+  <header class="settings-panel-header" data-lights={(IS_MAC && !fullscreen()) || undefined}>
     <h2>{m.settings_title()}</h2>
     <IconButton
       icon={Cancel01Icon}

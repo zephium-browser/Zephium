@@ -19,6 +19,9 @@
   import { RowDrag } from "$session/row-drag.svelte";
   import { favicons } from "$domain/favicons";
   import DragMark from "$shared/ui/DragMark";
+  import { IS_MAC } from "$shared/platform";
+  import type { TabSelection } from "../lib/tab-selection.svelte";
+  import { isSelectionModifier } from "../lib/tab-selection";
 
   let {
     entries,
@@ -30,9 +33,17 @@
     cascadeFrom = 0,
     columns,
     onSelect,
+    selection,
+    rangeOrder,
+    onVisibleOrder,
+    selectionEscapeBlocked = false,
   }: {
     /** Lay the tiles out in rows of this many even columns, filling upwards. */
     columns?: number;
+    selection?: TabSelection;
+    rangeOrder?: readonly string[];
+    onVisibleOrder?: (order: string[]) => void;
+    selectionEscapeBlocked?: boolean;
     /** Where this list's first row falls in the launch cascade. */
     cascadeFrom?: number;
     entries: SidebarEntry[];
@@ -48,13 +59,57 @@
   const folded = new SvelteSet<string>();
   let hiddenUnits = $derived(collapsedSidebarUnits(displayUnits, folded, tabs.activeId()));
 
+  const selectable = $derived(selection !== undefined && variant === "list" && !splitting);
+  const selectedIds = $derived(selectable ? (selection?.value.ids ?? []) : []);
+  const visibleOrder = $derived(
+    displayUnits.flatMap((unit) => {
+      if (hiddenUnits.has(unit.key) || unit.kind === "folder") return [];
+      return unit.kind === "split" ? unit.tabs.map((entry) => entry.tab.id) : [unit.tab.id];
+    }),
+  );
+  $effect(() => {
+    onVisibleOrder?.(visibleOrder);
+  });
+  $effect(() => {
+    const current = selection;
+    if (!current) return;
+    const scope = JSON.stringify([tabs.profile()?.id, tabs.activeSpaceId()]);
+    const order = rangeOrder ?? visibleOrder;
+    const ids = tabs.tabs().flatMap((tab) => (order.includes(tab.id) ? [tab.id] : []));
+    const split = splitting;
+    untrack(() => {
+      current.reconcile(scope, ids);
+      if (split) current.clear();
+    });
+  });
+
+  function escape(event: KeyboardEvent) {
+    if (
+      !selection ||
+      selectionEscapeBlocked ||
+      event.defaultPrevented ||
+      event.key !== "Escape" ||
+      event.isComposing
+    )
+      return;
+    const selected = selection.value.ids.length > 0;
+    if (!selected && !list?.contains(document.activeElement)) return;
+    selection.clear();
+    if (selected) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
+  const modified = (event: MouseEvent) => selectable && isSelectionModifier(event, IS_MAC);
+
   const drag = new RowDrag({
     list: () => list,
     region: () => list?.closest<HTMLElement>("[data-tabs-drop]") ?? undefined,
     // Only open tabs reorder in place; native places anything dropped in
     // this list among them.
     reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
-    drop: ({ id, x, y, over, before }) => {
+    drop: ({ id, x, y, over, before, page }) => {
       // A split's tabs share one row, so they never reorder in place; let go
       // anywhere in the sidebar and the tab leaves its split for there.
       // A tab that cannot be kept goes back where it was.
@@ -75,10 +130,17 @@
         void tabDrag.move(id, false, before);
         return;
       }
-      tabs.dropTab(id, x, y);
+      if (page) tabs.dropTab(id, x, y);
     },
   });
-  const handlePointerDown = (event: PointerEvent, tab: TabView) => drag.down(event, tab.id);
+  const handlePointerDown = (event: PointerEvent, tab: TabView) => {
+    if (event.button === 0 && modified(event)) {
+      drag.abandon();
+      drag.swallowClick();
+      return;
+    }
+    drag.down(event, tab.id);
+  };
   const handlePointerMove = (event: PointerEvent) => drag.move(event);
   const handlePointerUp = (event: PointerEvent) => drag.up(event);
   const handlePointerCancel = (event: PointerEvent) => drag.cancel(event);
@@ -119,8 +181,17 @@
     tabs.openTabMenu(tab.id, event.clientX, event.clientY);
   }
 
-  function select(id: string) {
+  function select(id: string, event?: MouseEvent) {
+    if (selection && event && modified(event)) {
+      drag.swallowClick();
+      const order = rangeOrder ?? visibleOrder;
+      const active = tabs.activeId();
+      if (event.shiftKey) selection.range(id, active, order);
+      else selection.toggle(id, active !== null && order.includes(active) ? active : null);
+      return;
+    }
     if (drag.swallowClick()) return;
+    selection?.plain(id);
     onSelect(id);
   }
 
@@ -140,6 +211,8 @@
   Mounted even when empty, and hidden instead: the first site kept, or the
   first tab opened, is an arrival the list has to be present to see.
 -->
+<svelte:window onkeydown={escape} />
+
 <nav
   class={["tab-list", variant === "essentials" && "tab-list-flush"]}
   aria-label={label}
@@ -174,6 +247,7 @@
           motionKey={unit.key}
           tabs={unit.tabs.map((entry) => entry.tab)}
           activeId={tabs.activeId()}
+          {selectedIds}
           {splitting}
           closable={section === "today"}
           class={[
@@ -205,6 +279,8 @@
           cascade={cascadeFrom + index}
           tab={unit.tab}
           active={unit.tab.id === tabs.activeId()}
+          selected={selectedIds.includes(unit.tab.id)}
+          multiSelecting={selectedIds.length >= 2}
           depth={unit.depth}
           closable={section === "today" && !tabs.loneNewTab(unit.tab.id)}
           class={[

@@ -454,13 +454,14 @@ impl super::EngineHost {
         }
         let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
             .map_err(|e| e.to_string())?;
-        self.ensure_windows_profile_environment_at_path(
-            profile,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-            path.clone(),
-            true,
-        )
-        .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
+        let environment_bootstrap = self
+            .ensure_windows_profile_environment_at_path(
+                profile,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                path.clone(),
+                true,
+            )
+            .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
         zephium_webext::ExtensionId::parse(&load.extension_id)
             .ok_or("Invalid extension identity.")?;
         let manifest =
@@ -500,6 +501,8 @@ impl super::EngineHost {
                 return Err(error);
             }
         };
+        // A new browser keeps its bootstrap until this management controller exists.
+        drop(environment_bootstrap);
         let mut rollback_failed = false;
         let result = (|| {
             let native_profile = native::profile(&bridge.view.webview())
@@ -629,13 +632,14 @@ impl super::EngineHost {
             // controller to remove their native record without enabling them.
             let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
                 .map_err(|error| error.to_string())?;
-            self.ensure_windows_profile_environment_at_path(
-                profile,
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-                path,
-                true,
-            )
-            .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
+            let environment_bootstrap = self
+                .ensure_windows_profile_environment_at_path(
+                    profile,
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    path,
+                    true,
+                )
+                .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
             let runtime = ExtensionRuntimeInstance::new(
                 profile,
                 load.install,
@@ -647,6 +651,7 @@ impl super::EngineHost {
                 Rc::new(RefCell::new(Action::default())),
                 runtime,
             )?;
+            drop(environment_bootstrap);
             let result = (|| {
                 let native_profile =
                     native::profile(&bridge.view.webview()).map_err(|error| error.to_string())?;

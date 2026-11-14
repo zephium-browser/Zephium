@@ -10,7 +10,7 @@
   // never a startup request.
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
-  import type { TabView } from "$shared/ipc/bindings";
+  import { commands, type TabView } from "$shared/ipc/bindings";
   import { newTabImage } from "$session/newtab-background.svelte";
   import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
@@ -34,13 +34,14 @@
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
-  import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
+  import { expanded as sidebarWidth, expandBriefly } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack, type Component, type Snippet } from "svelte";
   import { clearRequest } from "$domain/site-data";
   import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
+  import Button from "$shared/ui/Button";
   import { events } from "$shared/ipc/native-events";
   import { askSettings, handleNativeSection } from "$features/settings";
   import * as m from "$shared/i18n/messages";
@@ -71,6 +72,8 @@
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
+  /** The new tab field's menu, kept out of the graph the launcher shares. */
+  const loadMenu = () => import("$shared/ui/Menu");
   /** New Note, from the menu or its shortcut: a note starts where notes are open. */
   async function newNote() {
     const profile = tabs.profile()?.id;
@@ -82,12 +85,16 @@
   }
   // Settings opened from a page lands on the section that page asked for.
   function openSettings() {
-    handleNativeSection("settings.section.newtab");
+    handleNativeSection("settings.section.general");
     void browserPage.open("settings");
   }
   function openAccount(intent: "account" | "credits") {
     askSettings(intent === "credits" ? "credits" : null);
     handleNativeSection("settings.section.account");
+    void browserPage.open("settings");
+  }
+  function openSearchSettings() {
+    handleNativeSection("settings.section.search");
     void browserPage.open("settings");
   }
   function openAbout() {
@@ -136,11 +143,105 @@
     };
   });
   let splitting = $state(false);
+  let splitCancel = $state<HTMLButtonElement>();
+  let releaseSplit: (() => void) | null = null;
+  let splitOrigin: HTMLElement | null = null;
+  let splitScope = "";
+  let splitGeneration = 0;
+  let pendingSplit = $state<{ scope: string; page: string } | null>(null);
+  const splitTarget = () =>
+    JSON.stringify([tabs.profile()?.id, tabs.activeSpaceId(), tabs.activeId()]);
+  const splitContext = () =>
+    JSON.stringify([splitTarget(), browserPage.currentPage(), toolHost.activeTool()]);
+
+  function chooseSplit() {
+    if (splitting || !tabs.activeId()) return;
+    const page = browserPage.currentPage();
+    if (page !== null) {
+      if (!pendingSplit) {
+        pendingSplit = { scope: splitTarget(), page };
+        void browserPage.open(null);
+      }
+      return;
+    }
+    pendingSplit = null;
+    const active = document.activeElement;
+    splitOrigin =
+      active instanceof HTMLElement && active.matches("button, input, textarea, select, a[href]")
+        ? active
+        : null;
+    splitScope = splitContext();
+    releaseSplit = expandBriefly({ fullColumn: true });
+    splitting = true;
+    const generation = ++splitGeneration;
+    void tick().then(() => {
+      if (splitting && generation === splitGeneration && document.hasFocus())
+        splitCancel?.focus({ preventScroll: true });
+    });
+  }
+
+  function finishSplit(restoreFocus = true) {
+    splitting = false;
+    releaseSplit?.();
+    releaseSplit = null;
+    const origin = splitOrigin;
+    splitOrigin = null;
+    const generation = ++splitGeneration;
+    if (restoreFocus)
+      void tick().then(() => {
+        if (
+          generation === splitGeneration &&
+          document.hasFocus() &&
+          origin?.isConnected &&
+          !origin.closest("[hidden], [inert]") &&
+          !origin.matches(":disabled") &&
+          origin.getClientRects().length > 0
+        )
+          origin.focus({ preventScroll: true });
+      });
+  }
+
+  function escapeSplit(event: KeyboardEvent) {
+    if (
+      (!splitting && pendingSplit === null) ||
+      event.key !== "Escape" ||
+      event.defaultPrevented ||
+      event.isComposing
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    pendingSplit = null;
+    if (splitting) finishSplit();
+  }
+
+  $effect(() => {
+    const scope = splitContext();
+    if (splitting && scope !== splitScope) untrack(() => finishSplit(false));
+  });
+  $effect(() => {
+    const pending = pendingSplit;
+    const page = browserPage.currentPage();
+    const target = splitTarget();
+    const failed = browserPage.navigationFailed();
+    if (!pending) return;
+    if (pending.scope !== target || failed || (page !== null && page !== pending.page))
+      pendingSplit = null;
+    else if (page === null) untrack(chooseSplit);
+  });
+  onDestroy(() => {
+    splitGeneration++;
+    releaseSplit?.();
+  });
   let inWork = $derived(browserPage.currentPage() === "work");
   // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
     toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
   );
+  // A tool in full keeps the same rail beside its page, under the window's
+  // own head, as Work does.
+  let toolPage = $derived(browserPage.toolPage());
+  let besideRail = $derived(paneled || toolPage);
   let incognito = $derived(tabs.profile()?.kind === "incognito");
   // The column's body settles in only when the environment changes, never on launch.
   let modeSwitched = $state(false);
@@ -210,6 +311,9 @@
   let railEssentials = $derived(
     tree.favorites.flatMap((entry) => (entry.kind === "tab" ? [entry.tab] : [])),
   );
+  // Beside a tool the rail keeps only the current tab; the switcher holds the rest.
+  let railCurrent = $derived(railTabs.filter((tab) => tab.id === tabs.activeId()));
+  const openSwitcher = () => void commands.tabSwitcherOpen().catch(() => false);
   let railClosable = $derived(
     new Set(tree.today.flatMap((entry) => (entry.kind === "tab" ? [entry.tab.id] : []))),
   );
@@ -232,7 +336,7 @@
     if (command.seq === 0 || command.seq === handledCommand) return;
     handledCommand = command.seq;
     untrack(() => {
-      if (command.id === "split.choose") splitting = true;
+      if (command.id === "split.choose") chooseSplit();
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
       if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
       if (command.id === "tab.clearSiteData") clearRequest.ask(tabs.takeMenuTargetUrl());
@@ -315,10 +419,16 @@
       if (findInPage.isOpen() && findInPage.searching() !== active) findInPage.hide();
     });
   });
+  let sidebarBody = $state<ReturnType<typeof SidebarBody>>();
+  function selectEssential(id: string) {
+    sidebarBody?.clearSelection();
+    selectTab(id);
+  }
   function selectTab(id: string) {
     if (splitting) {
+      if (id === tabs.activeId()) return;
       tabs.split(id);
-      splitting = false;
+      finishSplit();
       return;
     }
     // In Work a tab opens over the canvas; the work stays where it is.
@@ -326,6 +436,8 @@
     else tabs.activate(id);
   }
 </script>
+
+<svelte:window onkeydowncapture={escapeSplit} />
 
 <!-- The player of a tab playing behind the page in front; its code loads the
      first time there is one. -->
@@ -349,8 +461,8 @@
   {#if !newTabImage()}<SkyLight shown={skyShown} />{/if}
   <Sidebar
     >{#snippet browserBody(compact)}
-      {#if compact && (inWork || paneled)}
-        {#if !inWork}<AddressField {compact} /><StoreInstallRail />{/if}
+      {#if compact && (inWork || besideRail)}
+        {#if !inWork && !(toolPage && !paneled)}<AddressField {compact} /><StoreInstallRail />{/if}
         {#if paneled && IS_WINDOWS}
           {#if browserPage.currentPage() === "settings"}<ModeTabs compact standalone />{/if}
           <div class="rail-search"><SidebarSearch /></div>
@@ -363,7 +475,14 @@
            new list settles in where the old one was. -->
       {#key inWork}<div class="sidebar-mode-body" data-arriving={modeSwitched}>
           {#if compact}
-            <TabRail entries={railTabs} closable={railClosable} onSelect={selectTab} />
+            <TabRail
+              entries={besideRail && !inWork ? railCurrent : railTabs}
+              closable={railClosable}
+              onSelect={selectTab}
+              switcher={besideRail && !inWork ? openSwitcher : undefined}
+              spaces={!inWork}
+              roomy={besideRail || inWork}
+            />
           {:else}
             <!--
             The switch sits above the address field because it governs the
@@ -395,10 +514,19 @@
             {#if !inWork}<SidebarPagePermission />{/if}
 
             <HidingBar />
-            {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
-                {m.choose_split()}
-              </p>{/if}
-            <SidebarBody pinned={tree.pinned} today={tree.today} {splitting} onSelect={selectTab}>
+            {#if splitting}<div class="flex shrink-0 items-center gap-1 px-3 pb-1">
+                <p class="flex-1 text-[12px] text-accent" aria-live="polite">{m.choose_split()}</p>
+                <Button variant="ghost" bind:ref={splitCancel} onclick={() => finishSplit()}
+                  >{m.action_cancel()}</Button
+                >
+              </div>{/if}
+            <SidebarBody
+              bind:this={sidebarBody}
+              pinned={tree.pinned}
+              today={tree.today}
+              {splitting}
+              onSelect={selectTab}
+            >
               {#snippet extras()}<PinnedExtensions />{/snippet}
             </SidebarBody>
             <!-- Brief notices and downloads sit at the foot of the column, by the dock. -->
@@ -422,6 +550,7 @@
             profile={tabs.profile()?.id ?? ""}
           />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
+          roomy={besideRail}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
         >
@@ -447,7 +576,7 @@
                 columns={dockColumns}
                 label={m.essentials()}
                 {splitting}
-                onSelect={selectTab}
+                onSelect={selectEssential}
                 >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
               >
             </div>
@@ -469,7 +598,7 @@
                 variant="essentials"
                 label={m.essentials()}
                 {splitting}
-                onSelect={selectTab}
+                onSelect={selectEssential}
                 >{#snippet essentialTile(props)}<EssentialTile {...props} />{/snippet}</TabList
               >
             </div>
@@ -562,6 +691,8 @@
                       retryLabel={m.surface_retry()}
                       >{#snippet children(Search)}<Search
                           tabId={tabs.activeId()}
+                          {loadMenu}
+                          onsettings={openSearchSettings}
                         />{/snippet}</LazyView
                     >{/key}{/snippet}</NewTab
               >{/snippet}</LazyView

@@ -170,6 +170,7 @@ pub(super) struct SuspendAttempt {
     deadline: std::time::Instant,
     started: std::sync::atomic::AtomicBool,
     expired: std::sync::atomic::AtomicBool,
+    cycle: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -881,6 +882,10 @@ impl EngineHost {
     /// Closes the warm spare view, if one is waiting; the next completed load
     /// may build another.
     pub(crate) fn release_spare(&mut self) {
+        #[cfg(target_os = "windows")]
+        if self.spare_serves_a_call() {
+            return;
+        }
         if let Some(spare) = self.spare.take() {
             #[cfg(target_os = "windows")]
             {
@@ -1286,9 +1291,10 @@ impl EngineHost {
     /// Suspends hidden views: WebView2 `TrySuspend` on Windows, WebKit's
     /// suspend scheduling policy on macOS. Neither is reported as proof that
     /// a renderer stopped; macOS still runs audible or capturing pages.
-    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>) {
+    pub(crate) fn set_dormant(&mut self, ids: Vec<ItemId>, request: u64) {
         #[cfg(target_os = "windows")]
         {
+            self.dormant_request = request;
             let next: std::collections::HashSet<ItemId> = ids
                 .into_iter()
                 .filter(|id| self.hidden.contains(id))
@@ -1303,6 +1309,10 @@ impl EngineHost {
             }
             self.suspend_failed.retain(|id| next.contains(id));
             self.suspend_retries.retain(|id, _| next.contains(id));
+            self.dormant_cycles.retain(|id, _| next.contains(id));
+            for id in &next {
+                self.dormant_cycles.entry(*id).or_insert(request);
+            }
             let cancelled: Vec<_> = self
                 .views
                 .iter()
@@ -1327,6 +1337,8 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
             }
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = request;
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _ = ids;
     }
@@ -1376,7 +1388,9 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
-        self.suspend_refused(id);
+        if self.attempt_is_current(id, &attempt) {
+            self.suspend_refused(id);
+        }
         let timer = self
             .views
             .get_mut(&id)
@@ -1490,12 +1504,19 @@ impl EngineHost {
                     crate::platform::imp::resume(view);
                 }
             }
-            if self.desired_dormant.contains(&id) {
+            if self.desired_dormant.contains(&id) && self.attempt_is_current(id, &attempt) {
                 self.suspend_refused(id);
             }
         }
         self.refresh_missed_styles(id);
         self.pump_suspends();
+    }
+
+    /// Whether `attempt` was started in the page's current dormancy cycle: a
+    /// late answer from an earlier one settles without being counted.
+    #[cfg(target_os = "windows")]
+    fn attempt_is_current(&self, id: ItemId, attempt: &SuspendAttempt) -> bool {
+        self.dormant_cycles.get(&id) == Some(&attempt.cycle)
     }
 
     /// A refused suspension is asked once more after a pause; refused again,
@@ -1519,7 +1540,23 @@ impl EngineHost {
                     .insert(id, SuspendRetry { generation, timer });
             }
             Some(true) => {}
-            Some(false) => eprintln!("suspend: refused after its retry; the page stays awake"),
+            Some(false) => {
+                eprintln!("suspend: refused after its retry; the page stays awake");
+                // The shell then stops asking, so its desired set says what
+                // is really suspended.
+                if let (Some(view), Some(partition)) =
+                    (self.views.get(&id), self.partitions.get(&id))
+                {
+                    view.event_permit.emit(
+                        &self.sink,
+                        EngineEvent::DormancyRefused {
+                            id,
+                            profile: partition.profile(),
+                            request: self.dormant_request,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -1578,6 +1615,7 @@ impl EngineHost {
                 started: std::sync::atomic::AtomicBool::new(false),
                 expired: std::sync::atomic::AtomicBool::new(false),
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(2),
+                cycle: self.dormant_cycles.get(&id).copied().unwrap_or_default(),
             });
             let Some(view) = self.views.get_mut(&id) else {
                 continue;

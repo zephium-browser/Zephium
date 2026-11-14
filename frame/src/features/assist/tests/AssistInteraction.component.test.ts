@@ -130,6 +130,20 @@ test("Enter sends with the page in front; Shift+Enter only adds a line; × leave
   expect(native.ask).toHaveBeenLastCalledWith(expect.objectContaining({ attachments: [] }));
 });
 
+test("words typed while a question is on its way stay in the field", async () => {
+  let accept!: (value: { reply: number; fault: null }) => void;
+  native.ask.mockReturnValueOnce(new Promise((resolve) => (accept = resolve)));
+  const { field } = await open(status());
+  await field.fill("First question");
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => native.ask.mock.calls.length).toBe(1);
+  await field.fill("A follow-up");
+  accept({ reply: 2, fault: null });
+  await expect.poll(() => native.ask.mock.results[0]?.type).toBe("return");
+  await new Promise(requestAnimationFrame);
+  await expect.element(field).toHaveValue("A follow-up");
+});
+
 test("a suggestion sends itself with the page", async () => {
   const { screen } = await open(status());
   await screen.getByRole("button", { name: "Worth opening" }).click();
@@ -158,13 +172,12 @@ test("Escape closes the panel when chrome focus is outside its content", async (
   expect(onclose).toHaveBeenCalledOnce();
 });
 
-test("the header offers a visible close button even while a reply is working", async () => {
+test("the header's More menu closes the panel even while a reply is working", async () => {
   const onclose = vi.fn();
   native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
   const screen = await render(PanelStage, { profile: PROFILE, onclose });
-  const close = screen.getByRole("button", { name: "Close tool", exact: true });
-  await expect.element(close).toBeVisible();
-  await close.click();
+  await screen.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Close tool" }).click();
   expect(onclose).toHaveBeenCalledOnce();
 });
 
@@ -289,6 +302,35 @@ test("a confirm is answered on its own block, with the exact control", async () 
   await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 1, "approve"]);
 });
 
+test("a typing confirm shows the full value and sites read before approval", async () => {
+  const value = `private  "quoted" <script>text</script> ${"x".repeat(180)} tail`;
+  const label = `${JSON.stringify(value)} → Type into "Message"\nexample.com → ycombinator.com`;
+  const { screen } = await open(
+    status([
+      person(1, "Summarize the page"),
+      reply(
+        2,
+        [
+          {
+            kind: "steps",
+            steps: [{ index: 0, label, category: "type", state: "confirm", reason: null }],
+          },
+        ],
+        { state: "waiting", cost: null },
+      ),
+    ]),
+  );
+  const details = screen.getByText(label, { exact: true });
+  await expect.element(details).toBeVisible();
+  expect(details.element().textContent).toBe(label);
+  expect(getComputedStyle(details.element()).whiteSpace).toBe("pre-wrap");
+  expect(getComputedStyle(details.element()).overflowWrap).toBe("anywhere");
+  expect(details.element().querySelector("script")).toBeNull();
+  expect(native.decide).not.toHaveBeenCalled();
+  await screen.getByRole("button", { name: "Message", exact: true }).click();
+  await expect.poll(() => native.decide.mock.calls.at(-1)).toEqual([CONVERSATION, 2, 0, "approve"]);
+});
+
 test("Continue in Work starts it; once started, Open in Work goes to Work", async () => {
   const { screen } = await open(
     status([person(1, "Set up the status page"), reply(2, [text("Work fits."), HANDOFF()])]),
@@ -362,6 +404,9 @@ test("history lists past conversations, opens one and deletes one", async () => 
   await page.getByRole("menuitem", { name: "History" }).click();
   const row = screen.getByRole("button", { name: /^Pricing on the Pro plan/u });
   await expect.element(row).toBeVisible();
+  await expect
+    .element(screen.getByText("Zephium keeps your 200 most recent conversations."))
+    .toBeVisible();
   await screen.getByRole("button", { name: "Delete “Pricing on the Pro plan”" }).click();
   await expect.poll(() => native.remove.mock.calls.at(-1)).toEqual([SPACE, "c0"]);
   await expect.element(row).not.toBeInTheDocument();

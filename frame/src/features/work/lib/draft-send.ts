@@ -4,14 +4,22 @@ import { isLive } from "./agent-steps";
 import type { DraftView } from "./board/types";
 
 /**
- * Where a draft's Send stands, read from the run it started: sending while the
+ * Where a draft's Send stands, read from its durable grant or a known run: sending while the
  * run works or waits on Confirm, sent only when the page showed the send
  * happened, otherwise back to Send with what the run said.
  */
 export function draftSend(
   projection: WorkRuntimeProjection,
-  execution: WorkExecutionFact | undefined,
+  execution: WorkExecutionFact | string | undefined,
 ): Pick<DraftView, "send" | "note"> {
+  if (typeof execution === "string") {
+    const artifact = execution;
+    execution = projection.executions.findLast((entry) =>
+      entry.spec.nodes.some(
+        (node) => node.capability.kind === "agent" && node.capability.grant.draft === artifact,
+      ),
+    );
+  }
   if (!execution) return { send: "draft" };
   if (isLive(projection, execution)) return { send: "sending" };
   const steps = execution.steps ?? [];

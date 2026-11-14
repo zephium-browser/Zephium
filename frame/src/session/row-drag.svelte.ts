@@ -12,6 +12,9 @@ type Drop = {
   over: Element | null;
   /** The tab under the pointer, which a placement goes before. */
   before: string | null;
+  /** Whether native may read the point as the page: never over a sidebar
+   *  that floats above it. */
+  page: boolean;
 };
 
 type Options = {
@@ -70,6 +73,8 @@ export class RowDrag {
   #landing: Reorder | null = null;
   #essential = false;
   #bounds: DOMRect | null = null;
+  #floating = false;
+  #native = false;
   #slot = -1;
   #page = false;
 
@@ -96,10 +101,10 @@ export class RowDrag {
       this.#dragging = true;
       tabDrag.begin(this.#id);
       document.body.style.cursor = "grabbing";
-      this.#bounds =
-        target instanceof Element
-          ? (target.closest(".browser-sidebar")?.getBoundingClientRect() ?? null)
-          : null;
+      const sidebar = target instanceof Element ? target.closest(".browser-sidebar") : null;
+      this.#bounds = sidebar?.getBoundingClientRect() ?? null;
+      this.#floating = sidebar?.hasAttribute("data-hidden") ?? false;
+      this.#native = false;
       this.#slot = -1;
       this.#page = false;
       const reorder = this.#options.reorder();
@@ -124,7 +129,13 @@ export class RowDrag {
       this.#feel(inPlace, x);
       this.ghost = { id: this.#id, x, y };
       tabDrag.hover(x, y);
-      tabs.dragOver(x, y);
+      if (this.#onPage(x, y)) {
+        this.#native = true;
+        tabs.dragOver(x, y);
+      } else if (this.#native) {
+        this.#native = false;
+        tabs.dragOver(null, null);
+      }
     });
   }
 
@@ -166,7 +177,14 @@ export class RowDrag {
       y: event.clientY,
       over,
       before,
+      page: this.#onPage(event.clientX, event.clientY),
     });
+  }
+
+  #onPage(x: number, y: number) {
+    const bounds = this.#bounds;
+    if (!this.#floating || bounds === null) return true;
+    return x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom;
   }
 
   cancel(event: PointerEvent) {

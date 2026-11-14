@@ -385,7 +385,7 @@ fn drain_stderr(mut pipe: File, queue: std::sync::mpsc::SyncSender<Vec<u8>>) {
     }
 }
 
-fn write_stderr(queue: std::sync::mpsc::Receiver<Vec<u8>>, mut sink: RotatingLog) {
+fn write_stderr(queue: std::sync::mpsc::Receiver<Vec<u8>>, mut sink: RotatingLog) -> bool {
     let mut logging_available = true;
     while let Ok(bytes) = queue.recv() {
         if logging_available && sink.write_all_bounded(&bytes).is_err() {
@@ -395,6 +395,32 @@ fn write_stderr(queue: std::sync::mpsc::Receiver<Vec<u8>>, mut sink: RotatingLog
             logging_available = false;
         }
     }
+    logging_available
+        && sink
+            .current
+            .as_ref()
+            .is_some_and(|file| file.sync_all().is_ok())
+}
+
+type LogDrain = (File, std::sync::mpsc::Receiver<bool>);
+static LOG_DRAIN: std::sync::Mutex<Option<LogDrain>> = std::sync::Mutex::new(None);
+
+/// Close the broker input, then wait for queued bytes and the file sync within
+/// the caller's bound. A stuck disk must not prevent final process termination.
+pub fn flush_stderr_until(deadline: std::time::Instant) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE};
+    let drain = LOG_DRAIN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    let Some((pipe, done)) = drain else {
+        return true;
+    };
+    // Detach before closing our owned handle so later diagnostics fail harmlessly.
+    let _ = unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE::default()) };
+    drop(pipe);
+    done.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) == Ok(true)
 }
 
 // GUI-subsystem builds have no stderr. Route it through a bounded broker so
@@ -402,7 +428,7 @@ fn write_stderr(queue: std::sync::mpsc::Receiver<Vec<u8>>, mut sink: RotatingLog
 // privacy-sensitive append-only file. Filesystem anomalies disable file
 // logging; they never make the browser follow an attacker-controlled path.
 pub fn redirect_stderr(dir: &Path) {
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows::Win32::Foundation::{GetHandleInformation, HANDLE};
     use windows::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
     use windows::Win32::System::Pipes::CreatePipe;
@@ -430,9 +456,12 @@ pub fn redirect_stderr(dir: &Path) {
     let read_pipe = unsafe { File::from_raw_handle(read_handle.0) };
     let write_pipe = unsafe { File::from_raw_handle(write_handle.0) };
     let (queue, receiver) = std::sync::mpsc::sync_channel(STDERR_BUFFER_CHUNKS);
+    let (flushed, done) = std::sync::mpsc::sync_channel(1);
     let Ok(_writer) = std::thread::Builder::new()
         .name("zephium-stderr-writer".to_owned())
-        .spawn(move || write_stderr(receiver, sink))
+        .spawn(move || {
+            let _ = flushed.send(write_stderr(receiver, sink));
+        })
     else {
         return;
     };
@@ -444,9 +473,7 @@ pub fn redirect_stderr(dir: &Path) {
     };
 
     if unsafe { SetStdHandle(STD_ERROR_HANDLE, HANDLE(write_pipe.as_raw_handle())) }.is_ok() {
-        // SetStdHandle borrows the handle. The process standard-handle table
-        // owns no Rust value, so intentionally keep it alive until exit.
-        let _ = write_pipe.into_raw_handle();
+        *LOG_DRAIN.lock().unwrap_or_else(|error| error.into_inner()) = Some((write_pipe, done));
     }
 }
 
@@ -488,6 +515,20 @@ mod log_tests {
             segment_age: Duration::from_secs(60 * 60),
             retention: Duration::from_secs(24 * 60 * 60),
         }
+    }
+
+    #[test]
+    fn shutdown_drains_queued_log_bytes_before_acknowledging() {
+        let directory = TestDirectory::new();
+        let sink = RotatingLog::open(&directory.0, policy()).unwrap();
+        let (send, receive) = std::sync::mpsc::sync_channel(2);
+        send.send(b"final shutdown record\n".to_vec()).unwrap();
+        drop(send);
+        assert!(write_stderr(receive, sink));
+        assert_eq!(
+            std::fs::read(directory.0.join(ACTIVE_LOG_NAME)).unwrap(),
+            b"final shutdown record\n"
+        );
     }
 
     #[test]

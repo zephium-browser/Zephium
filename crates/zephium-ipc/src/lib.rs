@@ -743,7 +743,51 @@ impl PanelLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TabSwitcherAction {
+    Step {
+        reverse: bool,
+    },
+    Select {
+        index: u32,
+    },
+    Commit,
+    Cancel,
+    Close,
+    /// Leaves the switcher for a new tab in its window.
+    NewTab,
+    /// Leaves the switcher for this tab, whatever is selected by then.
+    Activate {
+        tab_id: String,
+    },
+    /// Closes this tab, whatever is selected by then, and stays open.
+    CloseTab {
+        tab_id: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherEntry {
+    pub tab_id: String,
+    pub title: String,
+    pub url_host: String,
+    pub favicon: Option<IconRef>,
+    pub preview_url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSwitcherState {
+    pub session_id: String,
+    pub window_id: String,
+    pub entries: Vec<TabSwitcherEntry>,
+    pub selected: u32,
+    pub keyboard: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct PanelState {
+    pub switcher: Option<TabSwitcherState>,
     pub window_id: Option<String>,
     pub revision: String,
     pub session_id: String,
@@ -770,6 +814,9 @@ pub struct SearchResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct SearchResults {
+    #[serde(default)]
+    #[specta(optional)]
+    pub shortcut: Option<String>,
     pub pending: bool,
     pub context: Option<SearchContext>,
     pub query: String,
@@ -996,6 +1043,9 @@ pub struct SiteDataView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrowsingDataResponse {
     Cleared,
+    /// Removed, but some of the site's data may remain: the engine would not
+    /// delete everything, or could not reach every place it is kept.
+    PartlyCleared,
     Sites {
         sites: Vec<SiteDataView>,
         /// The engine can only name sites by some of what it holds: sites
@@ -1722,6 +1772,10 @@ pub enum Projection {
     WorkEnvironmentChanged(work::WorkEnvironmentChangedV1),
     WorkChanged(work::WorkChangedV1),
     PanelOwner(PanelOwner),
+    TabSwitcher {
+        session: u64,
+        state: Option<TabSwitcherState>,
+    },
     Items(ItemsState),
     Tab(TabView),
     Favicons(FaviconsView),
@@ -1744,6 +1798,9 @@ pub enum Projection {
     /// should itself be fullscreen until this turns false. Only engines that
     /// present fullscreen inside the browser window send it.
     HostFullscreen(bool),
+    /// The browser window should come to the front, as the person asked for
+    /// one of its pages from outside it.
+    RaiseWindow,
     RuntimeStatus(RuntimeStatus),
     BlockerStatus(BlockerStatusView),
     Focus(FocusStatus),

@@ -430,7 +430,7 @@ fn focused_content_policy_query_has_no_profile_selector_and_fails_with_revision_
 }
 
 #[test]
-fn failed_shutdown_replays_only_late_critical_callbacks() {
+fn terminal_shutdown_discards_late_critical_callbacks() {
     let id = ItemId::from(7);
     let queue = CommandQueue::new();
     let handle = Handle::new(queue.clone());
@@ -449,22 +449,9 @@ fn failed_shutdown_replays_only_late_critical_callbacks() {
     assert!(matches!(queue.try_recv(), Some(Command::Shutdown { .. })));
     assert!(queue.try_recv().is_none());
 
-    let recovered = queue.reopen_after_failed_shutdown();
-    assert_eq!(recovered.len(), 2);
-    assert!(matches!(
-        &recovered[0],
-        Command::Engine(EngineEvent::Crashed { id: recovered }) if *recovered == id
-    ));
-    assert!(matches!(
-        &recovered[1],
-        Command::Engine(EngineEvent::UrlChanged { id: recovered, url })
-            if *recovered == id && url == "https://latest.example/"
-    ));
-    assert!(
-        queue.try_recv().is_none(),
-        "ordinary late work stays rejected"
-    );
-    assert!(handle.dispatch(Command::Open));
+    queue.close_and_drain();
+    assert!(queue.try_recv().is_none());
+    assert!(!handle.dispatch(Command::Open));
 }
 
 #[test]
@@ -712,4 +699,19 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
             session_id: context.session_id
         }
     ));
+}
+
+#[test]
+fn visit_title_wakes_do_not_get_postponed_by_later_titles() {
+    let queue = CommandQueue::new();
+    let now = std::time::Instant::now();
+    queue.schedule_visit_titles(now);
+    queue.schedule_visit_titles(now + std::time::Duration::from_secs(1));
+    assert!(matches!(
+        queue.wait_for_timer(now + std::time::Duration::from_secs(60)),
+        TimerWake::VisitTitles
+    ));
+    queue.stop_ticker();
+    queue.schedule_visit_titles(now);
+    assert!(matches!(queue.wait_for_timer(now), TimerWake::Stopped));
 }

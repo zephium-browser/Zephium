@@ -19,6 +19,7 @@ const {
   COMPACT_WIDTH,
   MAX_EXPANDED_WIDTH,
   MIN_EXPANDED_WIDTH,
+  PANEL_GAP,
   SNAP_THRESHOLD,
   applyDragWidth,
   adoptResizeWidth,
@@ -26,13 +27,60 @@ const {
   finishSidebarResize,
   cancelSidebarResize,
   expanded,
+  effectiveWidth,
+  expandBriefly,
+  fullColumnShown,
+  isHidden,
   resolveDragWidth,
   adoptMode,
   holdShown,
   setPanelExtent,
+  setMode,
   sidebarMode,
   toggleMode,
 } = await import("../sidebar-mode.svelte");
+
+describe("temporary full browser column", () => {
+  it("holds hidden and tool layouts until every owner releases, without changing the chosen mode", () => {
+    setMode("hidden");
+    setPanelExtent(336);
+    const first = expandBriefly({ fullColumn: true });
+    const second = expandBriefly({ fullColumn: true });
+    try {
+      expect(fullColumnShown()).toBe(true);
+      expect(sidebarMode()).toBe("hidden");
+      expect(isHidden()).toBe(false);
+      expect(effectiveWidth()).toBe(expanded());
+      first();
+      first();
+      expect(fullColumnShown()).toBe(true);
+      expect(effectiveWidth()).toBe(expanded());
+      second();
+      expect(fullColumnShown()).toBe(false);
+      expect(isHidden()).toBe(true);
+      expect(effectiveWidth()).toBe(COMPACT_WIDTH + PANEL_GAP + 336);
+    } finally {
+      first();
+      second();
+      setPanelExtent(0);
+      setMode("default");
+    }
+  });
+
+  it("keeps a mode deliberately chosen while the column was held", () => {
+    setMode("hidden");
+    const release = expandBriefly({ fullColumn: true });
+    try {
+      setMode("default");
+      release();
+      expect(sidebarMode()).toBe("default");
+      expect(isHidden()).toBe(false);
+    } finally {
+      release();
+      setMode("default");
+    }
+  });
+});
 
 describe("resolveDragWidth", () => {
   it("puts the column away below the threshold", () => {
@@ -90,7 +138,9 @@ describe("which width changes the page travels with", () => {
     expect(last()).toEqual([310, true]);
     expect(hidden()).toBe(true);
     applyDragWidth(SNAP_THRESHOLD + 40);
-    expect(last()[1]).toBe(true);
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+    expect(hidden()).toBe(true);
+    toggleMode();
     expect(hidden()).toBe(false);
   });
 

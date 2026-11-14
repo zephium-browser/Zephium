@@ -257,6 +257,10 @@ enum HostTaskKey {
     // of ordinary work cannot drop it and leave a hidden page awake.
     #[cfg(target_os = "windows")]
     SuspendRetry(ItemId),
+    // Closing a page opened only to reach a profile, once its call answered:
+    // a full queue of ordinary work must not leave it running.
+    #[cfg(any(test, target_os = "windows"))]
+    TemporarySpare(ProfileId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
     #[cfg(target_os = "macos")]
@@ -528,6 +532,12 @@ pub(crate) fn install(
             dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            dormant_request: 0,
+            #[cfg(target_os = "windows")]
+            dormant_cycles: std::collections::HashMap::new(),
+            #[cfg(target_os = "windows")]
+            temporary_page: None,
             #[cfg(target_os = "windows")]
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
@@ -1247,6 +1257,35 @@ where
     )
 }
 
+#[cfg(any(test, target_os = "windows"))]
+pub(super) fn with_temporary_spare_release<F>(
+    profile: ProfileId,
+    f: F,
+    defer: impl FnOnce(Box<dyn FnOnce()>) -> bool,
+) where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    if HOST_SEALED.with(Cell::get) {
+        return;
+    }
+    // Even a free host may be inside WebView2's completion Invoke. The
+    // ordinary pending queue drains at the end of host callbacks, which is
+    // also too early; enter it only from the later native loop turn.
+    if !defer(Box::new(move || {
+        if !with_priority(
+            HostTaskPriority::Lifecycle,
+            Some(HostTaskKey::TemporarySpare(profile)),
+            f,
+        ) && !HOST_SEALED.with(Cell::get)
+        {
+            eprintln!("engine: temporary page release could not reach the engine host");
+        }
+    })) {
+        // Never close inline. Leave the spare for a later release, reuse, or shutdown.
+        eprintln!("engine: temporary page release could not be deferred");
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
 where
@@ -1672,10 +1711,9 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                             "windows-work-shutdown: stage=process_wait_start obligations={} provenance_valid={process_provenance_valid}; content=redacted",
                             browser_processes.len());
                     }
-                    let process_exit_proven = process_provenance_valid
-                        && crate::platform::imp::wait_for_browser_process_shutdown(
+                    let (process_exit_proven, process_exit_clean) = crate::platform::imp::wait_for_browser_process_shutdown(
                             browser_processes,
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(20),
                         );
                     #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
                     {
@@ -1683,7 +1721,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=process_wait_complete proven={process_exit_proven}; content=redacted");
                     }
-                    if !process_exit_proven {
+                    if !process_provenance_valid || !process_exit_proven {
                         eprintln!(
                             "privacy: WebView2 full process-group shutdown could not be proven"
                         );
@@ -1707,7 +1745,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=private_cleanup_complete clean={cleaned}; content=redacted");
                     }
-                    finish(cleaned);
+                    finish(cleaned && process_exit_clean);
                 });
             if let Err(error) = spawned {
                 eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
@@ -1767,6 +1805,42 @@ mod tests {
             key: Some(key),
             task: Box::new(|_: &mut EngineHost| {}),
         }
+    }
+
+    #[test]
+    fn failed_windows_browser_exit_cleans_up_without_authorizing_clean_shutdown() {
+        let native = include_str!("../platform/windows/mod.rs");
+        let record = native
+            .split("fn record(&self, event: BrowserProcessExitEvent)")
+            .nth(1)
+            .unwrap()
+            .split("fn wait_until")
+            .next()
+            .unwrap();
+        assert!(record.contains(
+            "data.failed = matches!(event, BrowserProcessExitEvent::Exited { failed: true, .. })"
+        ));
+        let clean = native
+            .split("fn exited_cleanly(&self)")
+            .nth(1)
+            .unwrap()
+            .split("fn run_after_exit")
+            .next()
+            .unwrap();
+        assert!(clean.contains("!data.failed"));
+        let shutdown = include_str!("dispatch.rs")
+            .split("let (process_exit_proven, process_exit_clean)")
+            .nth(1)
+            .unwrap()
+            .split("if let Err(error) = spawned")
+            .next()
+            .unwrap();
+        assert!(
+            shutdown.find("cleanup_after_proven_exit()").unwrap()
+                < shutdown
+                    .find("finish(cleaned && process_exit_clean)")
+                    .unwrap()
+        );
     }
 
     #[test]
@@ -1839,6 +1913,149 @@ mod tests {
             .expect("install clears pending work after claiming");
         assert!(claim < seal_reset);
         assert!(claim < pending_reset);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn install_empty_host_for_release_test() -> tempfile::TempDir {
+        make_unavailable_for_test();
+        let root = tempfile::tempdir().unwrap();
+        // No native views are constructed: the unused parent is just a token.
+        #[cfg(target_os = "macos")]
+        let parent = RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(
+            std::ptr::NonNull::<u8>::dangling().cast(),
+        ));
+        #[cfg(target_os = "windows")]
+        let parent = RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(
+            std::num::NonZeroIsize::new(1).unwrap(),
+        ));
+        let dispatch: crate::MainThreadDispatch = Arc::new(|_| panic!("no native dispatch"));
+        let failure: Arc<dyn Fn(&'static str) + Send + Sync> =
+            Arc::new(|reason| panic!("unexpected terminal failure: {reason}"));
+        install(
+            parent,
+            root.path().to_owned(),
+            dispatch.clone(),
+            UserContentGeneration::new(1).unwrap(),
+            UserContent::default(),
+            Arc::new(crate::NativeOpenAuthority {
+                retirement: Arc::default(),
+                dispatch,
+                fatal: failure.clone(),
+            }),
+            Arc::new(|_| {}),
+            failure,
+        )
+        .unwrap();
+        root
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_waits_for_loop_turn_with_a_free_host() {
+        let _root = install_empty_host_for_release_test();
+        let turns = RefCell::new(VecDeque::new());
+        let releases = std::rc::Rc::new(Cell::new(0));
+        let released = releases.clone();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            move |_| released.set(released.get() + 1),
+            |task| {
+                turns.borrow_mut().push_back(task);
+                true
+            },
+        );
+        assert_eq!(releases.get(), 0, "Close must not run inside completion");
+        assert_eq!(turns.borrow().len(), 1);
+        // Another native callback must not drain the release prematurely.
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 0);
+
+        turns.borrow_mut().pop_front().unwrap()();
+        assert_eq!(
+            releases.get(),
+            1,
+            "the next turn releases without more host work"
+        );
+        let released = releases.clone();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            move |_| released.set(released.get() + 1),
+            |task| {
+                turns.borrow_mut().push_back(task);
+                true
+            },
+        );
+        let turn = turns.borrow_mut().pop_front().unwrap();
+        HOST.with(|host| {
+            // A nested native pump may deliver the wake while the host is
+            // borrowed. It must retain the existing lifecycle queue behavior.
+            let _borrow = host.borrow_mut();
+            turn();
+            assert_eq!(releases.get(), 1);
+        });
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 2);
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 2, "each release must run exactly once");
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        assert!(turns.borrow().is_empty());
+        make_unavailable_for_test();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_is_owned_by_shutdown_if_it_wins_the_loop_turn() {
+        let _root = install_empty_host_for_release_test();
+        let turn = Cell::new(None);
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("shutdown already owns the spare"),
+            |task| {
+                turn.set(Some(task));
+                true
+            },
+        );
+        assert!(with_priority(HostTaskPriority::Shutdown, None, |_| {}));
+        HOST.with(|host| *host.borrow_mut() = None);
+        turn.take().unwrap()();
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("a sealed host must not release again"),
+            |_| panic!("a sealed host needs no release wake"),
+        );
+        make_unavailable_for_test();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_leaves_page_when_deferral_is_refused() {
+        let _root = install_empty_host_for_release_test();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("failed deferral must never fall back to inline Close"),
+            |_| false,
+        );
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        make_unavailable_for_test();
+    }
+
+    #[test]
+    fn temporary_spare_release_leaves_page_when_host_is_unavailable() {
+        make_unavailable_for_test();
+        let turn = Cell::new(None);
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("failed host admission must never release the page"),
+            |task| {
+                turn.set(Some(task));
+                true
+            },
+        );
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        turn.take().unwrap()();
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        make_unavailable_for_test();
     }
 
     #[test]

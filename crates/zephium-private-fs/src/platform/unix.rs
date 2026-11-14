@@ -580,6 +580,19 @@ pub(crate) fn lock_exclusive(file: &File) -> Result<(), PrivateFsError> {
     Err(PrivateFsError::Io)
 }
 
+pub(crate) fn unlock_exclusive(file: &File) {
+    // Drop cannot report an error, and this crate has no logger. Interruption
+    // handling stays bounded. If unlock fails, closing the descriptor releases
+    // the lock only once no inherited duplicate remains open; until then,
+    // admission reports `LockUnavailable` rather than sharing the namespace.
+    for _ in 0..4 {
+        match rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock) {
+            Err(rustix::io::Errno::INTR) => continue,
+            _ => break,
+        }
+    }
+}
+
 pub(crate) fn atomic_replace(
     directory: &File,
     _directory_path: &Path,

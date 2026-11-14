@@ -1,3 +1,4 @@
+import { preferences } from "$domain/preferences";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -24,12 +25,26 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+    settingGet: async () => null,
     launcherSearch: native.search,
     launcherRun: native.run,
     panelLayout: native.layout,
   });
 });
 afterEach(() => {
+  preferences.dispose();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
   delete document.documentElement.dataset.material;
@@ -56,6 +71,7 @@ function glass(layout: PanelLayout) {
 }
 
 const context: PanelState = {
+  switcher: null,
   ...native.context,
   revision: "0000000000000001",
   visible: true,
@@ -115,6 +131,27 @@ test("Enter before any answer arrives runs once, against that exact request", as
     results: [search("rust"), search("rust book")],
   });
   expect(native.run).toHaveBeenCalledTimes(1);
+});
+
+test("ArrowUp from the typed action selects and runs the last suggestion", async () => {
+  const bookmark: SearchResult = {
+    kind: "bookmark",
+    title: "Gmail",
+    detail: "mail.google.com",
+    icon: null,
+    action: { type: "OpenUrl", url: "https://mail.google.com/" },
+  };
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await screen.getByRole("combobox").fill("gma");
+  const owner = await reply("gma", [search("gma"), bookmark]);
+  await userEvent.keyboard("{ArrowUp}");
+  await expect
+    .element(screen.getByRole("option", { name: /Gmail/u }))
+    .toHaveAttribute("aria-selected", "true");
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(bookmark.action, owner, false),
+  );
 });
 
 test("an obsolete answer cannot put its rows back on screen", async () => {
@@ -447,6 +484,11 @@ test("editing an address asks for that address and never for an empty field firs
   await new Promise((done) => setTimeout(done, 100));
   expect(native.search.mock.calls.map(([query]) => query)).toEqual(["https://example.com/"]);
   await expect.element(screen.getByRole("combobox")).toHaveValue("https://example.com/");
+  const input = screen.getByRole("combobox").element() as HTMLInputElement;
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, input.value.length]);
+  await userEvent.keyboard("https://github.com/");
+  await expect.element(screen.getByRole("combobox")).toHaveValue("https://github.com/");
 });
 
 test("sleeping past the resume deadline clears a query even when its timer never fired", async () => {
@@ -662,4 +704,16 @@ test("the sheet stops where a short display lets the window stop", async () => {
   } finally {
     available.mockRestore();
   }
+});
+
+test("launcher exposes the prefix shortcut and clears it with empty Backspace", async () => {
+  await preferences.init();
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "yt ");
+  await expect.element(screen.getByRole("combobox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.element(field).toHaveValue("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
 });

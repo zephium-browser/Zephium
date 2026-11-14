@@ -26,6 +26,8 @@ use zephium_core::session::{
 };
 use zephium_core::zoom::SavedLevel;
 
+type HeldTabPreview = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
+
 type HeldErasure = (ProfileId, Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>);
 type HeldBlockerUpdate = (
     ProfileId,
@@ -294,13 +296,29 @@ pub(super) fn agent_lifecycle_with_clean(
 
 type FirstUrlAfterReply = Option<(Arc<str>, NavigationRequestId)>;
 
+thread_local! {
+    static SUSPENDS_HIDDEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `test` with engines that suspend hidden views as WebView2 does, so a
+/// shared shell test pins the Windows path as well as the macOS one.
+pub(super) fn suspending(test: fn()) {
+    SUSPENDS_HIDDEN.set(true);
+    test();
+}
+
 #[derive(Default)]
 pub(crate) struct FakeEngine {
+    /// Hidden views are really suspended: the desired set is kept, and a
+    /// suspended page cannot answer a discard probe.
+    suspends_hidden: std::sync::atomic::AtomicBool,
+    suspended: Mutex<std::collections::HashSet<ItemId>>,
     automatic_pip: Mutex<Vec<(Option<ItemId>, bool)>>,
     picker_result: Mutex<Option<zephium_core::blocker::ElementPickerResult>>,
     hold_picker: std::sync::atomic::AtomicBool,
     held_picker: Mutex<Option<zephium_core::blocker::ElementPickerCompletion>>,
     calls: Mutex<Vec<String>>,
+    chrome_raises: Mutex<Vec<ChromeRaise>>,
     proxies: Mutex<Vec<Option<String>>>,
     previews: Mutex<Vec<Option<zephium_core::ports::engine::DropPreview>>>,
     extension_browser_surfaces: Mutex<Vec<ExtensionBrowserSurface>>,
@@ -338,6 +356,7 @@ pub(crate) struct FakeEngine {
     reject_navigation_dispatch: std::sync::atomic::AtomicBool,
     reject_discard_dispatch: std::sync::atomic::AtomicBool,
     reject_native_dispatch: std::sync::atomic::AtomicBool,
+    unsupported_chrome_raise: std::sync::atomic::AtomicBool,
     native_favicons: std::sync::atomic::AtomicBool,
     cannot_mute: std::sync::atomic::AtomicBool,
     unsupported_presentation: std::sync::atomic::AtomicBool,
@@ -350,6 +369,7 @@ pub(crate) struct FakeEngine {
     fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
     fullscreen_exits: Mutex<Vec<ItemId>>,
     layout_regions: Mutex<Vec<Option<Rect>>>,
+    tab_preview_completions: Mutex<Vec<HeldTabPreview>>,
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
     data_reply: Mutex<Option<zephium_core::browsing_data::EngineDataReply>>,
     download_calls: Mutex<Vec<(Partition, zephium_core::downloads::DownloadCall)>>,
@@ -362,6 +382,15 @@ pub(crate) struct FakeEngine {
     >,
     pub(crate) extension_data_changes:
         Mutex<Vec<(ProfileId, zephium_core::extension_data::ExtensionDataChange)>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChromeRaise {
+    window: WindowId,
+    raised: bool,
+    card: Rect,
+    slide: bool,
+    dispatch: NativeDispatch,
 }
 
 impl FakeEngine {
@@ -488,6 +517,11 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
+    fn capture_tab_preview(&self, id: ItemId, _url: String, done: HeldTabPreview) {
+        self.log(format!("capture-preview {id}"));
+        self.tab_preview_completions.lock().unwrap().push(done);
+    }
+
     fn browsing_data_call(
         &self,
         partition: Partition,
@@ -842,11 +876,26 @@ impl Engine for FakeEngine {
         &self,
         window: WindowId,
         raised: bool,
-        _card: Rect,
-        _slide: bool,
+        card: Rect,
+        slide: bool,
     ) -> NativeDispatch {
         self.log(format!("raise@{window} {raised}"));
-        self.native_admission()
+        let dispatch = if self
+            .unsupported_chrome_raise
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NativeDispatch::Unsupported
+        } else {
+            self.native_admission()
+        };
+        self.chrome_raises.lock().unwrap().push(ChromeRaise {
+            window,
+            raised,
+            card,
+            slide,
+            dispatch,
+        });
+        dispatch
     }
     fn hint_stage_motion(
         &self,
@@ -942,6 +991,11 @@ impl Engine for FakeEngine {
             .load(std::sync::atomic::Ordering::Acquire)
     }
     fn probe_discard_safety(&self, id: ItemId, probe: DiscardProbeId) -> bool {
+        // A suspended WebView2 does not run the probe's script.
+        assert!(
+            !self.suspended.lock().unwrap().contains(&id),
+            "{id} was probed while still suspended"
+        );
         self.log(format!("probe-discard {id} {}", probe.0));
         true
     }
@@ -960,7 +1014,13 @@ impl Engine for FakeEngine {
             item.map_or_else(|| "all".into(), |id| id.to_string())
         ));
     }
-    fn set_dormant(&self, ids: Vec<ItemId>) {
+    fn set_dormant(&self, ids: Vec<ItemId>, _request: u64) {
+        if self
+            .suspends_hidden
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            *self.suspended.lock().unwrap() = ids.iter().copied().collect();
+        }
         let mut ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         ids.sort();
         self.log(format!("dormant {}", ids.join(",")));
@@ -1097,6 +1157,11 @@ type SiteUpdateCallback =
 
 #[derive(Default)]
 pub(crate) struct FakeStore {
+    /// What a site's history names; none refuses the scan.
+    /// The origin scan's answer and whether it finished; none answers an
+    /// empty, finished scan. `site_origins_refused` refuses the scan.
+    pub(crate) site_origins: Mutex<Option<(Vec<String>, bool)>>,
+    pub(crate) site_origins_refused: std::sync::atomic::AtomicBool,
     backup_clears: Mutex<Vec<ProfileId>>,
     backup_clear_result: Mutex<Option<bool>>,
     held_backup_clears: Mutex<Option<Vec<BackupClearCallback>>>,
@@ -1149,6 +1214,8 @@ pub(crate) struct FakeStore {
     history_started: std::sync::atomic::AtomicBool,
     visits: Mutex<Vec<String>>,
     recorded_visits: Mutex<Vec<zephium_core::ports::store::HistoryVisit>>,
+    amended_titles: Mutex<Vec<(String, String)>>,
+    amend_title_fails: std::sync::atomic::AtomicBool,
     pub(super) recorded_time: Mutex<Vec<(ProfileId, Vec<zephium_core::time::HourTally>)>>,
     icon_ages: Mutex<std::collections::HashMap<String, i64>>,
     icons: Mutex<Vec<(String, Vec<u8>)>>,
@@ -1189,6 +1256,8 @@ pub(crate) struct FakeStore {
     /// Saved page zoom per profile, and how many times each profile was loaded.
     pub(crate) zoom_saved: Mutex<std::collections::HashMap<ProfileId, Vec<SavedLevel>>>,
     pub(crate) zoom_loads: std::sync::atomic::AtomicUsize,
+    zoom_save_fails: std::sync::atomic::AtomicBool,
+    zoom_save_fail_site: Mutex<Option<String>>,
     /// Tasks `resource_call` lists, and the searches it was asked for.
     pub(super) task_rows: Mutex<
         Vec<(
@@ -1875,6 +1944,27 @@ impl Store for FakeStore {
         u32::try_from(before - visits.len()).unwrap_or(u32::MAX)
     }
 
+    fn site_origins(
+        &self,
+        _profile: ProfileId,
+        _site: String,
+        done: Box<dyn FnOnce(Vec<String>, bool) + Send>,
+    ) -> bool {
+        if self
+            .site_origins_refused
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return false;
+        }
+        let (origins, complete) = self
+            .site_origins
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or((Vec::new(), true));
+        done(origins, complete);
+        true
+    }
     fn discard_session_backup(
         &self,
         profile: ProfileId,
@@ -1918,6 +2008,13 @@ impl Store for FakeStore {
         percent: Option<u16>,
         set_at: i64,
     ) -> bool {
+        if self
+            .zoom_save_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+            || self.zoom_save_fail_site.lock().unwrap().as_ref() == Some(&site)
+        {
+            return false;
+        }
         let mut saved = self.zoom_saved.lock().unwrap();
         let levels = saved.entry(profile).or_default();
         levels.retain(|level| level.site != site);
@@ -1932,6 +2029,16 @@ impl Store for FakeStore {
     }
 
     fn amend_visit_title(&self, _profile: ProfileId, url: String, title: String) -> bool {
+        if self
+            .amend_title_fails
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.amended_titles
+            .lock()
+            .unwrap()
+            .push((url.clone(), title.clone()));
         let mut visits = self.recorded_visits.lock().unwrap();
         if let Some(visit) = visits.iter_mut().rev().find(|visit| visit.url == url) {
             visit.title = title;
@@ -2197,12 +2304,13 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::WebExtensionAccessRemoved(_) => {}
         Projection::WebExtensionStoreClick(_) => {}
         Projection::Favicons(_) => {}
-        Projection::PanelOwner(_) => {}
+        Projection::PanelOwner(_) | Projection::TabSwitcher { .. } => {}
         Projection::UiCommand(_) => {}
         Projection::FindResult(_) => {}
         Projection::Search(_) => {}
         Projection::Layout(_) => {}
         Projection::HostFullscreen(_) => {}
+        Projection::RaiseWindow => {}
         Projection::RuntimeStatus(_) => {}
         Projection::BlockerStatus(_) => {}
         Projection::Focus(_) => {}
@@ -2216,6 +2324,9 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
 
 pub(super) fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
     let engine = Arc::new(FakeEngine::default());
+    engine
+        .suspends_hidden
+        .store(SUSPENDS_HIDDEN.get(), std::sync::atomic::Ordering::Release);
     let screen: Screen = Arc::new(Mutex::new(ItemsState {
         projection_revision: String::new(),
         profile: None,
@@ -2537,6 +2648,7 @@ mod profiles;
 mod projections;
 mod search;
 mod shutdown;
+mod sidebar_card;
 mod site_permissions;
 mod spaces;
 mod tabs;
@@ -2550,5 +2662,6 @@ mod blocker_sites;
 
 mod webext;
 
+mod recent_tabs;
 #[cfg(target_os = "windows")]
 mod webext_windows;

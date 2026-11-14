@@ -1,4 +1,6 @@
 import { commands } from "$shared/ipc/bindings";
+import { settle } from "$domain/operations";
+import { observe } from "$shared/lib/observe";
 
 /** Compact is the rail that Work, Tasks and tools put the column into; the
  *  shape a person picks is expanded or hidden. */
@@ -20,12 +22,12 @@ export const MAX_EXPANDED_WIDTH = 460;
 export const SNAP_THRESHOLD = 140;
 
 const MODE_SETTING = "sidebar.mode";
+const WIDTH_SETTING = "sidebar.width";
 
 let mode = $state.raw<SidebarMode>("default");
 let desiredMode: SidebarMode = "default";
 let expandedWidth = $state.raw(240);
-let drag: { mode: SidebarMode; desired: SidebarMode; expanded: number; pending: number } | null =
-  null;
+let drag = $state.raw<{ mode: SidebarMode; expanded: number } | null>(null);
 let resizeSettlement = $state(0);
 // One ordering counter, seeded above every earlier owner: an earlier
 // document, and an earlier copy of this module in the same document, which a
@@ -40,7 +42,10 @@ export const sidebarResizeSettlement = () => resizeSettlement;
 
 export const sidebarMode = () => mode;
 export const isCompact = () => mode === "compact";
-export const isHidden = () => mode === "hidden" && !held;
+export const isHidden = () => mode === "hidden" && !held && !fullColumnShown();
+
+let fullColumnHolds = $state(0);
+export const fullColumnShown = () => fullColumnHolds > 0;
 
 /** A destination that wants the column in view, the rail of Work or a tool,
  *  holds a hidden sidebar out for as long as it is shown. */
@@ -51,21 +56,24 @@ export function holdShown(value: boolean) {
   if (mode === "hidden") publish(true);
 }
 export const expanded = () => expandedWidth;
-/** The chrome gap between the rail and an open utility panel. */
+/** The gap between the rail and a tool's panel beside it. */
 export const PANEL_GAP = 8;
 let panelExtent = $state.raw(0);
 
 export const effectiveWidth = () =>
-  panelExtent > 0
-    ? COMPACT_WIDTH + PANEL_GAP + panelExtent
-    : mode === "compact"
-      ? COMPACT_WIDTH
-      : // Hidden keeps its width: it comes back over the page at that width.
-        expandedWidth;
+  fullColumnShown()
+    ? expandedWidth
+    : panelExtent > 0
+      ? COMPACT_WIDTH + PANEL_GAP + panelExtent
+      : mode === "compact"
+        ? COMPACT_WIDTH
+        : // Hidden keeps its width: it comes back over the page at that width.
+          expandedWidth;
 
 export const hasPanel = () => panelExtent > 0;
 
-/** A utility panel borrows width beside the rail without changing the persisted mode. */
+/** A tool's panel stands beside the rail, without changing the persisted width
+ *  or mode. */
 export function setPanelExtent(extent: number) {
   const next = Math.max(0, Math.min(MAX_EXPANDED_WIDTH - COMPACT_WIDTH - PANEL_GAP, extent));
   if (next === panelExtent) return;
@@ -75,6 +83,35 @@ export function setPanelExtent(extent: number) {
 
 function clampExpanded(value: number) {
   return Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, Math.round(value)));
+}
+
+let persistedWidth: number | null = null;
+let widthSaveRevision = 0;
+
+function rememberWidth(value: number) {
+  expandedWidth = value;
+  if (value === persistedWidth) return;
+  const revision = ++widthSaveRevision;
+  // An in-flight write may replace the last confirmed width, even if it fails
+  // to report back. Keep the displayed width retryable until storage confirms it.
+  persistedWidth = null;
+  void persistWidth(value, revision);
+}
+
+async function persistWidth(value: number, revision: number) {
+  try {
+    const result = await settle(commands.settingSet(WIDTH_SETTING, String(value)));
+    if (result.outcome === "failed" || result.outcome === "rejected") return;
+    const stored = await observe(commands.settingGet(WIDTH_SETTING), 1500);
+    if (
+      revision === widthSaveRevision &&
+      stored.state === "received" &&
+      stored.value === String(value)
+    )
+      persistedWidth = value;
+  } catch {
+    // A transport or readback failure leaves this width eligible for retry.
+  }
 }
 
 /** Resolves a raw drag width to whichever designed shape it lands in. */
@@ -99,42 +136,60 @@ function publish(travel = false) {
 }
 
 export function applyDragWidth(value: number) {
-  if (drag) {
-    drag.pending = value;
+  if (!Number.isFinite(value)) return;
+  if (isHidden()) {
+    const width = clampExpanded(value);
+    if (drag && width === expandedWidth) return;
+    if (drag) expandedWidth = width;
+    else rememberWidth(width);
+    void commands.sidebarSetWidth(width, false, resizeRevision);
     return;
   }
+  if (drag) return;
   const next = resolveDragWidth(value);
-  if (next.mode === mode && next.expanded === expandedWidth) return;
+  if (next.mode === mode && next.expanded === expandedWidth) {
+    if (next.mode === "default") rememberWidth(next.expanded);
+    return;
+  }
   const modeChanged = next.mode !== mode;
   mode = next.mode;
-  expandedWidth = next.expanded;
+  if (next.mode === "default") rememberWidth(next.expanded);
   desiredMode = mode;
   publish(modeChanged);
   if (modeChanged) save(mode);
 }
 
-/** The non-native capture fallback also keeps the rendered layout unchanged. */
 export function beginSidebarResize() {
   if (drag) return;
-  drag = { mode, desired: desiredMode, expanded: expandedWidth, pending: effectiveWidth() };
+  drag = { mode, expanded: expandedWidth };
 }
 
 export function finishSidebarResize(value: number) {
   if (!drag) return;
   drag = null;
   adoptResizeWidth(value);
-  // The page travels to the new edge, as it does from the native guide.
-  void commands.sidebarSetWidth(effectiveWidth(), true, resizeRevision);
+  void commands.sidebarSetWidth(effectiveWidth(), !isHidden(), resizeRevision);
 }
 
 export function cancelSidebarResize() {
+  const original = drag;
   drag = null;
+  if (original?.mode === "hidden" && expandedWidth !== original.expanded) {
+    expandedWidth = original.expanded;
+    void commands.sidebarSetWidth(expandedWidth, false, resizeRevision);
+  }
 }
 
 /** Native has admitted one final width; adopt its display shape without another layout command. */
 export function adoptResizeWidth(value: number, revision = resizeRevision) {
   if (revision !== resizeRevision) return;
   if (!Number.isFinite(value)) return;
+  if (isHidden()) {
+    drag = null;
+    rememberWidth(clampExpanded(value));
+    resizeSettlement++;
+    return;
+  }
   // A fast drag overshoots the bounds; it lands on the nearest one.
   const next = resolveDragWidth(Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value)));
   if (next.mode === "hidden") {
@@ -146,7 +201,7 @@ export function adoptResizeWidth(value: number, revision = resizeRevision) {
   const changed = next.mode !== mode;
   mode = next.mode;
   desiredMode = mode;
-  expandedWidth = next.expanded;
+  rememberWidth(next.expanded);
   resizeSettlement++;
   if (changed) save(mode);
 }
@@ -155,6 +210,16 @@ let resizeListenerInstalled = false;
 function installResizeListener() {
   if (resizeListenerInstalled) return;
   resizeListenerInstalled = true;
+  window.addEventListener("zephium:sidebar-resize-progress", (event) => {
+    if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
+      return;
+    const { width, revision, active } = event.detail;
+    if (revision !== resizeRevision || !isHidden() || !Number.isFinite(width)) return;
+    if (active === true) {
+      beginSidebarResize();
+      expandedWidth = clampExpanded(width);
+    } else if (active === false) cancelSidebarResize();
+  });
   window.addEventListener("zephium:sidebar-width-selected", (event) => {
     if (!(event instanceof CustomEvent) || !event.detail || typeof event.detail !== "object")
       return;
@@ -209,8 +274,18 @@ export function setMode(next: SidebarMode) {
  * Shows the full column for a moment without touching the preference. The
  * returned function puts the rail back, unless a shape was chosen meanwhile.
  */
-export function expandBriefly(): () => void {
+export function expandBriefly({ fullColumn = false }: { fullColumn?: boolean } = {}): () => void {
   cancelSidebarResize();
+  // A chooser needs the browser list even beside a mounted tool panel.
+  if (fullColumn) {
+    if (++fullColumnHolds === 1) publish(true);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (--fullColumnHolds === 0) publish(true);
+    };
+  }
   const away = mode;
   if (away === "default") return () => {};
   mode = "default";
@@ -230,14 +305,27 @@ export function toggleMode() {
 }
 
 /**
- * Adopts the persisted mode. The width is published afterwards so native
+ * Adopts the persisted mode and expanded width. The width is published afterwards so native
  * layout matches the restored shape on the first paint rather than after the
  * first interaction.
  */
 export async function init(): Promise<void> {
   installResizeListener();
   try {
-    const stored = await commands.settingGet(MODE_SETTING);
+    const [stored, width] = await Promise.all([
+      commands.settingGet(MODE_SETTING).catch(() => null),
+      commands.settingGet(WIDTH_SETTING).catch(() => null),
+    ]);
+    const restored = Number(width);
+    if (
+      Number.isInteger(restored) &&
+      restored >= MIN_EXPANDED_WIDTH &&
+      restored <= MAX_EXPANDED_WIDTH &&
+      String(restored) === width
+    ) {
+      expandedWidth = restored;
+      persistedWidth = restored;
+    }
     if (stored === "compact" || stored === "hidden") {
       mode = chosen(stored);
       desiredMode = mode;

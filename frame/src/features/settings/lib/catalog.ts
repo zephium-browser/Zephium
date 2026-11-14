@@ -618,7 +618,8 @@ export const fields = {
   "updates.auto-check": {
     section: "about",
     label: m.pref_updates_auto,
-    description: m.pref_updates_auto_help,
+    description: (os?: string) =>
+      os?.startsWith("macOS") ? m.pref_updates_auto_help_mac() : m.pref_updates_auto_help(),
     initial: true,
   },
   "about.diagnostics": {

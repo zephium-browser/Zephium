@@ -14,6 +14,23 @@ fn settled_zoom_scale(previous: f64, requested: f64, succeeded: bool) -> f64 {
     }
 }
 
+fn report_find_refusal(
+    accepted: bool,
+    request: Option<FindRequest>,
+    report: impl FnOnce(String, u32, Option<u32>),
+) {
+    if !accepted {
+        if let Some(request) = request {
+            report(request.query, 0, None);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
+    read.and_then(|(html, truncated)| (!truncated).then_some(html))
+}
+
 impl EngineHost {
     pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
         let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
@@ -159,7 +176,7 @@ impl EngineHost {
             let slot = source.clone();
             self.read_html(id, move |read| {
                 if let Ok(mut slot) = slot.lock() {
-                    *slot = read.map(|(html, _)| html);
+                    *slot = saveable_source(read);
                 }
             });
             let page = crate::platform::imp::native_webview(view);
@@ -263,9 +280,12 @@ impl EngineHost {
             use wry::WebViewExtUnix;
             view.view.webview()
         };
-        if !crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report) {
+        let accepted =
+            crate::platform::imp::find(&native, &mut view.find, request.as_ref(), report.clone());
+        if !accepted {
             eprintln!("engine: find is unavailable in this web engine");
         }
+        report_find_refusal(accepted, request, report());
     }
 
     pub(crate) fn print(&self, id: ItemId) {
@@ -283,6 +303,40 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn refused_find_reports_no_results_but_accepted_find_waits_for_native() {
+        for accepted in [false, true] {
+            let mut results = Vec::new();
+            super::report_find_refusal(
+                accepted,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward: true,
+                }),
+                |query, matches, active| results.push((query, matches, active)),
+            );
+            assert_eq!(
+                results,
+                if accepted {
+                    vec![]
+                } else {
+                    vec![("needle".into(), 0, None)]
+                }
+            );
+            super::report_find_refusal(false, None, |_, _, _| panic!("closing find has no result"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn truncated_html_is_not_offered_for_saving() {
+        assert_eq!(super::saveable_source(Some(("prefix".into(), true))), None);
+        assert_eq!(super::saveable_source(None), None);
+        assert_eq!(
+            super::saveable_source(Some(("complete".into(), false))),
+            Some("complete".into())
+        );
+    }
+
     use super::*;
 
     #[test]

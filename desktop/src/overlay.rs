@@ -1,7 +1,7 @@
 //! A native launcher created on first use and put to sleep while hidden. It hosts search only:
 //! destinations are handed to the browser, which already has their views
 //! loaded, so nothing heavy is ever instantiated a second time here.
-mod geometry;
+pub(crate) mod geometry;
 mod idle;
 mod model;
 #[cfg(target_os = "windows")]
@@ -59,8 +59,13 @@ struct State {
     content_height: f64,
     layout_revision: u64,
     placement: Option<geometry::Placement>,
+    /// What the window was last placed for: the launcher, or the switcher
+    /// with this many cards across.
+    placed_for: Option<Option<(usize, usize, bool)>>,
+    /// How many cards stand across on the work area the window was last
+    /// placed on.
+    switcher_columns: usize,
     pending_document: Option<tauri::Url>,
-    focus_revision: u64,
     focus_timer: bool,
     closed: bool,
     suspending: bool,
@@ -75,7 +80,26 @@ impl State {
     /// drops as a duplicate, would otherwise refuse every later action.
     fn begin(&mut self) {
         self.pending = None;
+        if self.model.switcher.is_some() {
+            self.content_height = geometry::INITIAL_HEIGHT;
+        }
         self.model.search();
+    }
+    /// Holds the launcher for one action until it settles, so a second one
+    /// cannot hide the outcome of the first.
+    fn arm(&mut self, id: &str, context: &SearchContext, background: bool) -> bool {
+        if !self.model.admits(context) || self.pending.is_some() {
+            return false;
+        }
+        self.model.clear_error();
+        self.pending = Some(Pending {
+            id: id.into(),
+            background,
+        });
+        true
+    }
+    fn settle(&mut self, id: &str) -> Option<Pending> {
+        self.pending.take_if(|pending| pending.id == id)
     }
 }
 #[derive(Clone)]
@@ -114,8 +138,9 @@ impl Overlay {
                 content_height: geometry::INITIAL_HEIGHT,
                 layout_revision: 0,
                 placement: None,
+                placed_for: None,
+                switcher_columns: geometry::SWITCHER_COLUMNS,
                 pending_document,
-                focus_revision: 0,
                 focus_timer: false,
                 closed: false,
                 suspending: false,
@@ -213,6 +238,7 @@ impl Overlay {
             return;
         }
         self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
@@ -243,6 +269,7 @@ impl Overlay {
     /// Opens on the current page's address, the way an address bar would.
     pub fn edit(&self, tab: String, url: String) {
         self.on_main(move |this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
@@ -250,10 +277,54 @@ impl Overlay {
             {
                 let mut state = this.state();
                 state.pending = None;
+                if state.model.switcher.is_some() {
+                    state.content_height = geometry::INITIAL_HEIGHT;
+                }
                 state.model.edit(tab, url);
             }
             this.cancel_search(old);
             this.present();
+        });
+    }
+    pub fn switcher(&self, snapshot: zephium_ipc::TabSwitcherState) {
+        self.on_main(move |this| {
+            if !crate::tab_switcher::may_present(this.window_app(), &snapshot) {
+                return;
+            }
+            let old = this.state().model.session();
+            let opening = this.state().model.switcher.as_ref().map(|s| &s.session_id)
+                != Some(&snapshot.session_id);
+            {
+                let mut state = this.state();
+                state.pending = None;
+                state.model.show_switcher(snapshot);
+                state.content_height = f64::INFINITY;
+            }
+            if opening {
+                this.cancel_search(old);
+            }
+            this.present();
+        });
+    }
+    pub fn finish_switcher(&self, session: u64, commit: bool) {
+        self.on_main(move |this| {
+            if this
+                .state()
+                .model
+                .switcher
+                .as_ref()
+                .is_some_and(|s| s.session_id == session.to_string())
+            {
+                this.state().model.hide();
+                this.present();
+                if commit {
+                    this.raise_browser();
+                }
+                #[cfg(target_os = "macos")]
+                if !commit {
+                    crate::panel::return_to_previous();
+                }
+            }
         });
     }
     pub fn editing_tab(&self) -> Option<String> {
@@ -261,11 +332,15 @@ impl Overlay {
     }
     pub fn toggle(&self) {
         self.on_main(|this| {
+            crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
                 return;
             }
             let old = this.state().model.session();
-            let dismissing = this.state().model.presented;
+            let dismissing = {
+                let state = this.state();
+                state.model.presented && state.model.switcher.is_none()
+            };
             if dismissing {
                 this.state().model.hide();
             } else {
@@ -313,10 +388,13 @@ impl Overlay {
     /// where native draws the shapes, they move first and a smaller window
     /// follows once they have settled, so nothing is cut off mid-motion.
     pub fn layout(&self, layout: PanelLayout) {
-        if !layout.bounded() {
+        if self.state().model.switcher.is_some() || !layout.bounded() {
             return;
         }
         self.on_main(move |this| {
+            if this.state().model.switcher.is_some() {
+                return;
+            }
             let height = layout
                 .height
                 .clamp(geometry::RESTING_HEIGHT, geometry::MAX_HEIGHT);
@@ -402,6 +480,11 @@ impl Overlay {
     }
     fn present(&self) {
         let snapshot = self.snapshot();
+        if let Some(switcher) = &snapshot.switcher {
+            if !crate::tab_switcher::may_present(self.window_app(), switcher) {
+                return;
+            }
+        }
         let (ready, document) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let document = if snapshot.visible && !state.model.ready {
@@ -440,9 +523,33 @@ impl Overlay {
         // On macOS the window stays up through its fade-out, so a launcher
         // called back inside it arrives without ever having been ordered out.
         let arriving = !shown(&self.window);
-        if !visible(&self.window) {
+        let columns = self.state().switcher_columns;
+        let placing = snapshot
+            .switcher
+            .as_ref()
+            .map(|s| geometry::switcher_grid(s.entries.len(), columns));
+        if !visible(&self.window) || self.state().placed_for != Some(placing) {
             self.place();
+            self.state().placed_for = Some(placing);
         }
+        // The switcher stands on one plate of its own; the launcher's shapes
+        // come back when it lays itself out again.
+        #[cfg(target_os = "macos")]
+        crate::panel::hold(snapshot.switcher.as_ref().map(|s| {
+            let (width, height) =
+                geometry::switcher_size(s.entries.len(), self.state().switcher_columns);
+            let inset = if animated_shapes() {
+                geometry::SHAPE_INSET
+            } else {
+                0.0
+            };
+            zephium_ipc::PanelRect {
+                x: inset,
+                y: inset,
+                width,
+                height,
+            }
+        }));
         if arriving {
             self.tell_browser("launcher.presented");
         }
@@ -469,38 +576,20 @@ impl Overlay {
         self.state().model.context(request_id)
     }
     pub fn arm_action(&self, id: &str, context: &SearchContext, background: bool) -> bool {
-        {
-            let mut state = self.state();
-            if !state.model.admits(context) || state.pending.is_some() {
-                return false;
-            }
-            state.model.clear_error();
-            state.pending = Some(Pending {
-                id: id.into(),
-                background,
-            });
+        if !self.state().arm(id, context, background) {
+            return false;
         }
         self.on_main(|this| this.publish());
         true
     }
     pub fn action_rejected(&self, id: &str) {
-        let mut state = self.state();
-        if state
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.id == id)
-        {
-            state.pending = None;
-        }
+        let _ = self.state().settle(id);
     }
     pub fn operation(&self, result: OperationDisposition) {
         self.on_main(move |this| {
             let old_session = this.state().model.session();
             let mut state = this.state();
-            let Some(pending) = state
-                .pending
-                .take_if(|pending| pending.id == result.operation_id)
-            else {
+            let Some(pending) = state.settle(&result.operation_id) else {
                 return;
             };
             let accepted = matches!(
@@ -526,17 +615,17 @@ impl Overlay {
         });
     }
     pub fn focus_changed(&self) {
-        {
+        let mut observed = {
             let mut state = self.state();
-            state.focus_revision = state.focus_revision.saturating_add(1);
+            let observed = state.model.record_focus_change();
             if state.focus_timer {
                 return;
             }
             state.focus_timer = true;
-        }
+            observed
+        };
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let mut observed = this.state().focus_revision;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(35)).await;
                 let settled = {
@@ -544,11 +633,11 @@ impl Overlay {
                     if state.closed {
                         return;
                     }
-                    if state.focus_revision == observed {
+                    if state.model.latest_focus_change() == observed {
                         state.focus_timer = false;
                         true
                     } else {
-                        observed = state.focus_revision;
+                        observed = state.model.latest_focus_change();
                         false
                     }
                 };
@@ -556,7 +645,7 @@ impl Overlay {
                     break;
                 }
             }
-            this.on_main(|this| {
+            this.on_main(move |this| {
                 if !this.state().model.ready {
                     return;
                 }
@@ -571,8 +660,9 @@ impl Overlay {
                 let old_session = this.state().model.session();
                 this.state()
                     .model
-                    .focus(panel_focused, main_focused, app_active);
+                    .focus(observed, panel_focused, main_focused, app_active);
                 if this.snapshot() != old {
+                    crate::tab_switcher::cancel(this.window_app());
                     #[cfg(target_os = "macos")]
                     crate::panel::forget_previous();
                     this.cancel_search(old_session);
@@ -592,6 +682,26 @@ impl Overlay {
         self.state().closed = true;
         idle::destroyed();
     }
+    /// The window's place on a work area: the launcher's, or the switcher's
+    /// sized to the cards it shows.
+    fn placement(&self, work_width: f64, work_height: f64) -> geometry::Placement {
+        let inset = if animated_shapes() {
+            geometry::SHAPE_INSET
+        } else {
+            0.0
+        };
+        let cards = self
+            .state()
+            .model
+            .switcher
+            .as_ref()
+            .map(|s| s.entries.len());
+        self.state().switcher_columns = geometry::switcher_columns(work_width, inset);
+        match cards {
+            Some(cards) => geometry::Placement::switcher(work_width, work_height, inset, cards),
+            None => geometry::Placement::new(work_width, work_height, inset),
+        }
+    }
     /// Places the launcher on the display under the pointer, where the user is
     /// looking, at the same height every time. Everything is in points: the
     /// pointer, the displays and the frame are AppKit's own, so displays of
@@ -601,15 +711,7 @@ impl Overlay {
         let Some(work) = crate::panel::work_area(&self.window) else {
             return;
         };
-        let placement = geometry::Placement::new(
-            work.width,
-            work.height,
-            if animated_shapes() {
-                geometry::SHAPE_INSET
-            } else {
-                0.0
-            },
-        );
+        let placement = self.placement(work.width, work.height);
         let height = placement.height(self.state().content_height);
         crate::panel::place(
             &self.window,
@@ -652,14 +754,9 @@ impl Overlay {
             return;
         }
         let work = monitor.work_area();
-        let placement = geometry::Placement::new(
+        let placement = self.placement(
             f64::from(work.size.width) / scale,
             f64::from(work.size.height) / scale,
-            if animated_shapes() {
-                geometry::SHAPE_INSET
-            } else {
-                0.0
-            },
         );
         let height = placement.height(self.state().content_height);
         // Windows rescales a window that lands on a display of another scale,
@@ -676,7 +773,7 @@ impl Overlay {
                 position: PhysicalPosition::new(0.0, 0.0).into(),
                 size: PhysicalSize::new(
                     placement.width * scale,
-                    placement.height(geometry::MAX_HEIGHT) * scale,
+                    placement.height(f64::INFINITY) * scale,
                 )
                 .into(),
             });
@@ -1042,5 +1139,70 @@ mod context_cache_tests {
         assert_eq!(cache.search_private(&stale), None);
         cache.0.lock().unwrap().as_mut().unwrap().space = "next".into();
         assert_eq!(cache.newtab_context("tab", 8).unwrap().space_id, "next");
+    }
+}
+
+#[cfg(test)]
+mod action_barrier_tests {
+    use super::*;
+    fn presented() -> State {
+        let mut model = Model::default();
+        model.set_owner(Some(Owner {
+            private: false,
+            window: "window".into(),
+            profile: "profile".into(),
+            name: "Personal".into(),
+            space: "space".into(),
+        }));
+        model.search();
+        State {
+            model,
+            pending: None,
+            content_height: geometry::INITIAL_HEIGHT,
+            layout_revision: 0,
+            placement: None,
+            placed_for: None,
+            switcher_columns: geometry::SWITCHER_COLUMNS,
+            pending_document: None,
+            focus_timer: false,
+            closed: false,
+            suspending: false,
+            #[cfg(target_os = "windows")]
+            material_restored: false,
+        }
+    }
+
+    #[test]
+    fn one_action_holds_the_launcher_until_it_settles() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("app", &context, false));
+        // A shell action sent while an app command is in flight would hide
+        // whichever outcome lands second.
+        assert!(!state.arm("shell", &context, false));
+        assert!(state.settle("shell").is_none());
+        assert!(state.settle("app").is_some());
+        assert!(state.arm("shell", &context, false));
+    }
+
+    #[test]
+    fn a_refused_command_releases_the_launcher() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.arm("disabled", &context, false));
+        // What `action_rejected` does when routing refuses the command.
+        let _ = state.settle("disabled");
+        assert!(state.pending.is_none());
+        assert!(state.arm("next", &context, false));
+    }
+
+    #[test]
+    fn a_stale_presentation_arms_nothing() {
+        let mut state = presented();
+        let stale = state.model.context("1").unwrap();
+        state.model.hide();
+        state.begin();
+        assert!(!state.arm("late", &stale, false));
+        assert!(state.pending.is_none());
     }
 }

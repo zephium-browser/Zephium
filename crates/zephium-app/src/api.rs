@@ -9,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId, SpaceId};
+use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
@@ -119,8 +119,8 @@ pub trait PresentationChrome: GeometryChrome {
 
 /// Terminal result of the ordered application shutdown protocol.
 ///
-/// A retryable failure happens before the native engine is torn down and
-/// leaves the actor live. `Unclean` is terminal: either the actor exited
+/// A retryable failure means shutdown admission was refused; an already
+/// admitted barrier may still be running. `Unclean` is terminal: either the actor exited
 /// without completing the barrier or one of agent lifecycle, Store, blocker,
 /// or native cleanup was not proven, so the process must exit unsuccessfully.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,6 +264,29 @@ pub enum PageRequestDecision {
 
 #[derive(Clone, Debug)]
 pub enum Command {
+    BeginTabSwitcher {
+        session: u64,
+        reverse: bool,
+        keyboard: bool,
+    },
+    TabSwitcher {
+        session: u64,
+        action: zephium_ipc::TabSwitcherAction,
+    },
+    RevealTabSwitcher {
+        session: u64,
+    },
+    CaptureTabPreview,
+    TabPreviewReady {
+        request: u64,
+        bytes: Option<Vec<u8>>,
+    },
+    ReadTabPreview {
+        window: WindowId,
+        tab: ItemId,
+        revision: u64,
+        done: std::sync::mpsc::SyncSender<Option<Vec<u8>>>,
+    },
     WorkDocument(crate::WorkDocumentSubmission),
     WorkChanged(zephium_ipc::work::WorkChangedV1),
     WorkEnvironmentChanged(zephium_ipc::work::WorkEnvironmentChangedV1),
@@ -348,6 +371,8 @@ pub enum Command {
     FocusWake,
     /// A quiet tab's speaker is due to go.
     AudioWake,
+    /// Pending visit titles reached the end of their coalescing window.
+    VisitTitlesWake,
     /// Captures one persistent destination before any source reads begin,
     /// restoring the session first for onboarding.
     ImportDestination {
@@ -1221,12 +1246,12 @@ impl fmt::Debug for ImportDestinationCompletion {
     }
 }
 #[derive(Clone)]
-pub struct ImportCompletion(Completion<Option<u32>>);
+pub struct ImportCompletion(Completion<Option<(u32, bool)>>);
 impl ImportCompletion {
-    pub fn new(done: impl FnOnce(Option<u32>) + Send + 'static) -> Self {
+    pub fn new(done: impl FnOnce(Option<(u32, bool)>) + Send + 'static) -> Self {
         Self(Arc::new(Mutex::new(Some(Box::new(done)))))
     }
-    pub fn finish(self, added: Option<u32>) {
+    pub fn finish(self, added: Option<(u32, bool)>) {
         let done = self
             .0
             .lock()

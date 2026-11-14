@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     applyDragWidth,
+    isHidden,
     claimSidebarResizeOwner,
     sidebarResizeRevision,
     beginSidebarResize,
@@ -13,6 +14,7 @@
     MIN_EXPANDED_WIDTH,
   } from "$session/sidebar-mode.svelte";
   import { commands } from "$shared/ipc/bindings";
+  import { IS_MAC } from "$shared/platform";
   import { onDestroy } from "svelte";
 
   let { width, disabled = false }: { width: number; disabled?: boolean } = $props();
@@ -64,6 +66,7 @@
     const value = width;
     const enabled = !disabled;
     configuredRevision = sidebarResizeRevision();
+    if (sidebarResizeActive()) return;
     queueConfiguration({
       width: value,
       enabled,
@@ -82,7 +85,7 @@
     document.body.style.cursor = previousCursor;
   }
   function handlePointerDown(event: PointerEvent) {
-    if (disabled || nativeCapture || event.button !== 0) return;
+    if (disabled || (nativeCapture && !isHidden()) || event.button !== 0) return;
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) return;
     event.preventDefault();
@@ -99,10 +102,20 @@
     updateGuide(width);
   }
   function updateGuide(value: number) {
-    pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
-    // Preview where release lands, including the snap to the rail.
-    const landing = resolveDragWidth(pending);
-    pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
+    if (isHidden()) {
+      pending = Math.max(MIN_EXPANDED_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      if (IS_MAC) {
+        applyDragWidth(pending);
+        return;
+      }
+      // On Windows the card keeps its width while the guide moves; release
+      // resizes it once, as the column does, and never snaps it to the rail.
+    } else {
+      pending = Math.max(COMPACT_WIDTH, Math.min(MAX_EXPANDED_WIDTH, value));
+      // Preview where release lands, including the snap to the rail.
+      const landing = resolveDragWidth(pending);
+      pending = landing.mode === "compact" ? COMPACT_WIDTH : landing.expanded;
+    }
     guide = pending;
     if (frame !== 0) return;
     frame = requestAnimationFrame(() => {
@@ -179,7 +192,8 @@
   role="separator"
   aria-label="Resize sidebar"
   aria-orientation="vertical"
-  aria-valuemin={COMPACT_WIDTH}
+  data-tauri-drag-region="false"
+  aria-valuemin={isHidden() ? MIN_EXPANDED_WIDTH : COMPACT_WIDTH}
   aria-valuemax={MAX_EXPANDED_WIDTH}
   aria-valuenow={width}
   aria-disabled={disabled}
@@ -187,9 +201,14 @@
   class={[
     // Mostly in the gap beside the column, as the native target on macOS,
     // so the tab list's edge and scrollbar stay usable.
-    "group absolute inset-y-0 -right-1.5 z-20 w-2 cursor-col-resize touch-none outline-none",
-    // The native control owns the pointer; the tab list's edge stays usable.
-    nativeCapture && "pointer-events-none",
+    "group absolute inset-y-0 z-20 w-2 cursor-col-resize touch-none outline-none",
+    // On the hidden card it stays over the card's own padding, which is all
+    // the card there is to hold: past its edge is the page.
+    isHidden() ? "right-0" : "-right-1.5",
+    // The native control owns the pointer beside the column, so the tab
+    // list's edge stays usable. The card's padding stays held here as well:
+    // a press that native missed must never fall through to dragging the window.
+    nativeCapture && !isHidden() && "pointer-events-none",
   ]}
   onpointerdown={handlePointerDown}
   onpointermove={handlePointerMove}
@@ -202,7 +221,7 @@
       aria-hidden="true"
       class={[
         "absolute top-1/2 right-1.5 h-7 w-0.5 -translate-y-1/2 rounded-full bg-transparent group-focus-visible:bg-accent",
-        !nativeCapture && "group-hover:bg-text-muted",
+        (!nativeCapture || isHidden()) && "group-hover:bg-text-muted",
       ]}
     ></span>{/if}
 </div>

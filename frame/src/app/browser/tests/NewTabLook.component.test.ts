@@ -1,16 +1,43 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { resourceTestServer } from "$shared/testing/resources/server";
-import type { SearchResult } from "$shared/ipc/bindings";
+import type { SearchResult, SearchShortcut } from "$shared/ipc/bindings";
 import { preferences } from "$domain/preferences";
 import { taskSession } from "$domain/resources";
 import { loadNewTab } from "$features/newtab";
 import { loadNewTabSearch } from "$features/search";
 import NewTabLook from "./NewTabLook.svelte";
 import { themed } from "./look-bench";
+
+/** A slice of the default shortcuts: the engines and a few sites. */
+const SHORTCUTS: SearchShortcut[] = (
+  [
+    ["google", "Google", ["g", "google"], "https://www.google.com/"],
+    ["duckduckgo", "DuckDuckGo", ["d", "ddg", "duckduckgo"], "https://duckduckgo.com/"],
+    ["bing", "Bing", ["b", "bing"], "https://www.bing.com/"],
+    ["brave", "Brave", ["br", "brave"], "https://search.brave.com/"],
+    ["perplexity", "Perplexity", ["pplx", "perplexity"], "https://www.perplexity.ai/"],
+    ["chatgpt", "ChatGPT", ["gpt", "chatgpt"], "https://chatgpt.com/"],
+    ["claude", "Claude", ["cl", "claude"], "https://claude.ai/"],
+    ["wikipedia", "Wikipedia", ["w", "wiki", "wikipedia"], "https://en.wikipedia.org/"],
+    ["youtube", "YouTube", ["yt", "youtube"], "https://www.youtube.com/"],
+    ["google-maps", "Google Maps", ["gm", "maps"], "https://maps.google.com/"],
+    ["github", "GitHub", ["gh", "github"], "https://github.com/"],
+    ["reddit", "Reddit", ["r", "reddit"], "https://www.reddit.com/"],
+  ] as const
+).map(([id, name, keywords, home]) => ({
+  id,
+  name,
+  keywords: [...keywords],
+  search_url: `${home}?q={searchTerms}`,
+  home_url: home,
+  domain: new URL(home).hostname,
+  suggestions: null,
+  enabled: true,
+}));
 
 const native = vi.hoisted(() => ({
   call: vi.fn(),
@@ -22,6 +49,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     resourceCall: native.call,
+    searchShortcutDefaults: async () => SHORTCUTS,
+    faviconProbe: async () => true,
     settingGet: async (key: string) => native.settings[key] ?? null,
     newtabSearchContext: async () => ({
       window_id: "window",
@@ -65,6 +94,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
 });
 afterEach(() => {
+  themed("zephium");
   vi.useRealTimers();
   preferences.dispose();
   delete document.documentElement.dataset.theme;
@@ -140,8 +170,9 @@ test("the field hangs from the top, and the name and the day stand in the sky", 
   // The page is the sky less the notch the field hangs in.
   const ground = screen.container.querySelector<HTMLElement>(".page")!;
   expect(ground.style.clipPath).toMatch(/A ?18 18 0 0 0/u);
-  const sky = screen.container.querySelector<HTMLElement>(".sky")!;
-  expect(sky.style.backgroundImage).toMatch(/sky-day|sky-night/u);
+  const print = screen.container.querySelector<HTMLCanvasElement>(".sky canvas")!;
+  expect(print.width).toBeGreaterThan(0);
+  expect(getComputedStyle(print).imageRendering).toBe("pixelated");
 
   // The figures: what the blocker stopped today, focus time against the
   // day's goal, and what is due, read from Tasks with the overdue one.
@@ -187,6 +218,21 @@ test("typing turns the page over to results dropping from the field", async () =
   await capture(screen, "search");
 });
 
+test("the field's mark opens the engines and shortcuts", async () => {
+  const screen = await setup();
+  await screen.getByRole("combobox").fill("cats");
+  for (const theme of ["dark", "light"]) {
+    document.documentElement.dataset.theme = theme;
+    screen.container.style.background = "var(--color-canvas)";
+    await skied(screen);
+    await screen.getByRole("button", { name: "Search engine and shortcuts" }).click();
+    await expect.element(page.getByRole("menu")).toBeVisible();
+    await settled();
+    await page.screenshot({ path: `../../../../../target/newtab/engines-${theme}.png` });
+    await userEvent.keyboard("{Escape}");
+  }
+});
+
 test("a narrow pane keeps the field inside the page", async () => {
   const screen = await setup({}, 0);
   screen.container.style.inlineSize = "660px";
@@ -202,10 +248,11 @@ test("a narrow pane keeps the field inside the page", async () => {
   await capture(screen, "narrow");
 });
 
-test("the new tab in each theme, both modes", async () => {
-  const screen = await setup({ "ui.newtab-clock-format": "12h" });
-  await skied(screen);
-  for (const id of ["zephium", "paper", "nord", "dracula", "catppuccin"]) {
+test.each(["zephium", "paper", "nord", "dracula", "catppuccin"])(
+  "the new tab in both modes with %s",
+  async (id) => {
+    const screen = await setup({ "ui.newtab-clock-format": "12h" });
+    await skied(screen);
     themed(id);
     for (const theme of ["dark", "light"]) {
       document.documentElement.dataset.theme = theme;
@@ -215,6 +262,5 @@ test("the new tab in each theme, both modes", async () => {
         .elementLocator(screen.container)
         .screenshot({ path: `../../../../../target/look/themes/${id}-${theme}-newtab-page.png` });
     }
-  }
-  themed("zephium");
-});
+  },
+);

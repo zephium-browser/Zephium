@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import type { HTMLInputAttributes } from "svelte/elements";
   import { Search01Icon } from "@hugeicons/core-free-icons";
   import Icon from "../Icon/Icon.svelte";
@@ -11,7 +12,10 @@
     onsubmit,
     oninput,
     inputProps = {},
+    lead,
   }: {
+    /** Stands where the magnifier does, for a field that says more there. */
+    lead?: Snippet;
     inputProps?: Omit<HTMLInputAttributes, "value" | "oninput">;
     oninput?: (value: string) => void;
     label: string;
@@ -33,10 +37,10 @@
     onsubmit?.(value.trim());
   }}
 >
-  <label class="sr-only" for={uid}>{label}</label><Icon
-    icon={Search01Icon}
-    size={size === "page" ? 16 : 14}
-  /><input
+  <label class="sr-only" for={uid}>{label}</label>{#if lead}{@render lead()}{:else}<Icon
+      icon={Search01Icon}
+      size={size === "page" ? 16 : 14}
+    />{/if}<input
     id={uid}
     bind:this={ref}
     type="search"
