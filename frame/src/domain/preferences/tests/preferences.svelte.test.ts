@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const native = vi.hoisted(() => ({
   get: vi.fn(),
+  shortcuts: vi.fn(),
   set: vi.fn(),
   settle: vi.fn(),
   stop: vi.fn(),
@@ -9,13 +10,17 @@ const native = vi.hoisted(() => ({
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ settingGet: native.get, settingSet: native.set });
+  return mockBindings({
+    settingGet: native.get,
+    settingSet: native.set,
+    searchShortcutDefaults: native.shortcuts,
+  });
 });
 vi.mock("$domain/operations", () => ({ settle: native.settle }));
 vi.mock("$shared/ipc/native-events", () => ({ events: { uiCommand: { listen: native.listen } } }));
 beforeEach(() => {
   vi.resetModules();
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
   vi.resetAllMocks();
   native.listener = null;
   native.listen.mockImplementation((listener: typeof native.listener) => {
@@ -23,6 +28,7 @@ beforeEach(() => {
     return Promise.resolve(native.stop);
   });
   native.get.mockResolvedValue(null);
+  native.shortcuts.mockResolvedValue([]);
   native.set.mockResolvedValue({ accepted: true, operation_id: "0000000000000001" });
   native.settle.mockResolvedValue({ outcome: "deferred", disposition: null });
 });
@@ -53,14 +59,101 @@ describe("preference observation lifecycle", () => {
     );
     const first = preferences.init();
     expect(preferences.init()).toBe(first);
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     native.listener?.({ payload: "preference.ui.accent=sage" });
+    native.listener?.({ payload: "preference.privacy.smartscreen=false" });
     finish("sky");
     await first;
     expect(native.listen).toHaveBeenCalledOnce();
     expect(preferences.value("ui.accent")).toBe("sage");
+    expect(preferences.value("privacy.smartscreen")).toBe("false");
     preferences.dispose();
     expect(native.stop).toHaveBeenCalledOnce();
+  });
+  it("limits native startup reads and reuses a free slot while another read is held", async () => {
+    const preferences = await import("../preferences.svelte");
+    const releases: (() => void)[] = [];
+    let outstanding = 0;
+    let peak = 0;
+    function hold<T>(value: T) {
+      outstanding++;
+      peak = Math.max(peak, outstanding);
+      return new Promise<T>((resolve) => {
+        releases.push(() => {
+          outstanding--;
+          resolve(value);
+        });
+      });
+    }
+    native.shortcuts.mockImplementation(() => hold([]));
+    native.get.mockImplementation(() => hold(null));
+    const startup = preferences.init();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outstanding).toBe(8);
+    expect(native.get).toHaveBeenCalledTimes(7);
+    releases.splice(1, 1)[0]!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(native.get).toHaveBeenCalledTimes(8);
+    expect(outstanding).toBe(8);
+    expect(peak).toBe(8);
+
+    native.get.mockImplementation(async (key: string) =>
+      key === "privacy.smartscreen" ? "false" : null,
+    );
+    for (const release of releases) release();
+    await startup;
+    expect(preferences.value("privacy.smartscreen")).toBe("false");
+    preferences.dispose();
+  });
+  it("shares a deadline across reads started at different times", async () => {
+    const preferences = await import("../preferences.svelte");
+    const pending = new Map<string, (value: string) => void>();
+    native.get.mockImplementation(
+      (key: string) => new Promise<string>((resolve) => pending.set(key, resolve)),
+    );
+    const startup = preferences.init();
+    const finished = vi.fn();
+    void startup.then(finished);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(native.get).toHaveBeenCalledTimes(8);
+    pending.get("appearance")!("dark");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(native.get).toHaveBeenCalledTimes(9);
+    expect(finished).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(finished).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(preferences.value("appearance")).toBe("dark");
+    pending.get("ui.accent")!("sky");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(native.get).toHaveBeenCalledTimes(9);
+    expect(preferences.value("ui.accent")).toBe("graphite");
+    preferences.dispose();
+  });
+  it("stops startup reads on disposal and ignores replies from that generation", async () => {
+    const preferences = await import("../preferences.svelte");
+    const pending = new Map<string, (value: string) => void>();
+    native.get.mockImplementation(
+      (key: string) => new Promise<string>((resolve) => pending.set(key, resolve)),
+    );
+    const first = preferences.init();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(native.get).toHaveBeenCalledTimes(8);
+    preferences.dispose();
+    await first;
+    expect(native.stop).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(native.get).toHaveBeenCalledTimes(8);
+
+    native.get.mockImplementation(async (key: string) => (key === "ui.accent" ? "sage" : null));
+    await preferences.init();
+    const calls = native.get.mock.calls.length;
+    for (const reply of pending.values()) reply("sky");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(native.get).toHaveBeenCalledTimes(calls);
+    expect(preferences.value("ui.accent")).toBe("sage");
+    preferences.dispose();
   });
   it("cannot leave a hung readback pending forever", async () => {
     const preferences = await import("../preferences.svelte");
