@@ -905,6 +905,54 @@ thread_local! {
     static TEST_GRANT_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(all(test, windows))]
+fn has_test_grant_home() -> bool {
+    TEST_GRANT_HOME.with(|slot| slot.borrow().is_some())
+}
+
+#[cfg(test)]
+fn test_tempdir_fallback_root() -> std::io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("PUBLIC")
+            .map(PathBuf::from)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "PUBLIC is unset"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(std::env::temp_dir())
+    }
+}
+
+#[cfg(test)]
+fn test_tempdir_with_fallback(
+    current_dir: &Path,
+    fallback_root: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> std::io::Result<tempfile::TempDir> {
+    if !protected_path(current_dir) {
+        if let Ok(directory) = tempfile::tempdir_in(current_dir) {
+            return Ok(directory);
+        }
+    }
+
+    let fallback = fallback_root()?.canonicalize()?;
+    if protected_path(&fallback) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test fixture fallback directory is protected",
+        ));
+    }
+    tempfile::tempdir_in(fallback)
+}
+
+#[cfg(test)]
+pub(crate) fn test_tempdir() -> tempfile::TempDir {
+    let current_dir = std::env::current_dir().expect("test working directory");
+    test_tempdir_with_fallback(&current_dir, test_tempdir_fallback_root)
+        .unwrap_or_else(|error| panic!("create test directory: {error}"))
+}
+
 /// Current-thread fixture home; never mutates HOME or changes production policy.
 #[cfg(test)]
 pub(crate) struct TestGrantHome {
@@ -960,7 +1008,7 @@ fn permitted_folders(home: Option<&Path>) -> Vec<PathBuf> {
     {
         use windows::Win32::UI::Shell::{FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads};
         #[cfg(test)]
-        if std::env::var_os("HOME").is_some() {
+        if has_test_grant_home() {
             return folders;
         }
         for id in [FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads] {
@@ -992,7 +1040,10 @@ fn protected_folders(home: Option<&Path>) -> Vec<PathBuf> {
             folders.push(home.join("AppData"));
             folders.push(home.join(".zephium-native-v1"));
         }
-        let native = !cfg!(test) || std::env::var_os("HOME").is_none();
+        #[cfg(test)]
+        let native = !has_test_grant_home();
+        #[cfg(not(test))]
+        let native = true;
         if native {
             for id in [
                 FOLDERID_LocalAppData,
@@ -1677,11 +1728,11 @@ fn clip(text: String) -> (String, bool) {
 mod tests {
     use super::*;
 
-    fn home_grant() -> (tempfile::TempDir, WorkFileGrant, PathBuf) {
-        // The grant policy resolves against $HOME; tests point it at a
-        // temporary home so nothing real is touched.
-        let home = tempfile::tempdir().unwrap();
-        std::env::set_var("HOME", home.path());
+    fn home_grant() -> (tempfile::TempDir, TestGrantHome, WorkFileGrant, PathBuf) {
+        // Keep the test home thread-local so parallel tests never observe a
+        // temporary HOME value or inherit one after this fixture is dropped.
+        let home = test_tempdir();
+        let home_scope = TestGrantHome::new(home.path().to_path_buf());
         let project = home.path().join("Documents").join("project");
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::create_dir_all(home.path().join(".ssh")).unwrap();
@@ -1700,7 +1751,45 @@ mod tests {
             "relative/path".into(),
         ]);
         assert_eq!(refused.len(), 4);
-        (home, grant, project)
+        (home, home_scope, grant, project)
+    }
+
+    #[test]
+    fn test_tempdir_avoids_protected_working_directory_components() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fallback = test_tempdir_fallback_root()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let scratch = tempfile::tempdir_in(&fallback).unwrap();
+        for component in [".config", "AppData"] {
+            let protected = scratch
+                .path()
+                .join("workspace")
+                .join(component)
+                .join("project");
+            std::fs::create_dir_all(&protected).unwrap();
+            let directory = test_tempdir_with_fallback(&protected, || Ok(fallback.clone()))
+                .expect("safe temporary fallback should be available");
+            assert!(directory.path().starts_with(&fallback));
+            assert!(directory.path().parent().unwrap().starts_with(&fallback));
+        }
+    }
+
+    #[test]
+    fn test_tempdir_falls_back_when_working_directory_cannot_host_fixtures() {
+        let _serial = crate::WORK_RUNTIME_TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fallback = test_tempdir_fallback_root()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let file = tempfile::NamedTempFile::new_in(&fallback).unwrap();
+        let directory = test_tempdir_with_fallback(file.path(), || Ok(fallback.clone())).unwrap();
+        assert!(directory.path().starts_with(fallback));
     }
 
     #[test]
@@ -1708,7 +1797,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("ordinary.txt");
         for secret in [
             "-----BEGIN OPENSSH PRIVATE KEY-----",
@@ -1750,7 +1839,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let large = project.join("large.txt");
         std::fs::File::create(&large)
             .unwrap()
@@ -1777,7 +1866,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let marker = "fixture-secret-never-return";
         for name in [
             ".env",
@@ -1923,7 +2012,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (home, grant, project) = home_grant();
+        let (home, _home_scope, grant, project) = home_grant();
         let listing = grant.list(&project.to_string_lossy()).unwrap();
         assert_eq!(listing.kind, WorkFileKindV1::Directory);
         assert!(listing.text.contains("src/\n"));
@@ -2008,7 +2097,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (home, _grant, project) = home_grant();
+        let (home, _home_scope, _grant, project) = home_grant();
         for protected in ["Library/Keychains", ".config/gcloud", "Library/Cookies"] {
             std::fs::create_dir_all(home.path().join(protected)).unwrap();
         }
@@ -2029,7 +2118,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let (home, grant, project) = home_grant();
+        let (home, _home_scope, grant, project) = home_grant();
         for protected in [
             ".ssh/keys",
             ".config/gcloud/accounts",
@@ -2070,8 +2159,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn redirected_known_folders_are_explicit_policy_roots() {
-        let home = tempfile::tempdir().unwrap();
-        let redirected = tempfile::tempdir().unwrap();
+        let home = test_tempdir();
+        let redirected = test_tempdir();
         let home = home.path().canonicalize().unwrap();
         let redirected = redirected.path().canonicalize().unwrap();
         let path = redirected.to_string_lossy();
@@ -2200,7 +2289,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let readme = project.join("README.md").to_string_lossy().into_owned();
         let proposal = grant
             .propose_edit(&readme, "hello world", "hello, world")
@@ -2240,7 +2329,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("many.txt");
         std::fs::write(
             &path,
@@ -2297,7 +2386,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let path = project.join("README.md").to_string_lossy().into_owned();
         let before = grant.read(&path).unwrap();
         let mut kind = WorkStepKindV1::EditFile {
@@ -2347,7 +2436,7 @@ mod tests {
         let _serial = crate::WORK_RUNTIME_TEST_SERIAL
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let (_home, grant, project) = home_grant();
+        let (_home, _home_scope, grant, project) = home_grant();
         let from = project.join("README.md").to_string_lossy().into_owned();
         let to = project.join("moved.md").to_string_lossy().into_owned();
         let kind = WorkStepKindV1::MoveFile {

@@ -453,7 +453,7 @@ mod tests {
     use super::*;
 
     fn tree() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::work_files::test_tempdir();
         let root = dir.path();
         std::fs::create_dir_all(root.join("src/deep")).unwrap();
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
@@ -483,7 +483,7 @@ mod tests {
 
     #[test]
     fn search_withholds_recognized_secret_body_and_filename() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::work_files::test_tempdir();
         let root = directory.path().canonicalize().unwrap();
         std::fs::write(root.join("plain.txt"), "needle ordinary").unwrap();
         std::fs::write(root.join("body.txt"), "needle\nghp_inertFixtureToken").unwrap();
@@ -515,7 +515,7 @@ mod tests {
 
     #[test]
     fn child_whitelist_overrides_parent_ignore_rule() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::work_files::test_tempdir();
         let root = directory.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("child")).unwrap();
         std::fs::write(root.join(".gitignore"), "*.txt\n").unwrap();
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn protected_files_and_external_ignore_rules_never_enter_results() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::work_files::test_tempdir();
         let parent = parent.path().canonicalize().unwrap();
         let root = parent.join("project");
         std::fs::create_dir(&root).unwrap();
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn grep_caps_lines_and_clips_long_ones() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::work_files::test_tempdir();
         let body: String = (0..500).map(|n| format!("needle {n}\n")).collect();
         std::fs::write(dir.path().join("many.txt"), body).unwrap();
         std::fs::write(

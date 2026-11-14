@@ -26,27 +26,20 @@ const QUIT_COMMAND: &str = "printf started; sleep 30; touch replayed";
 
 struct Home {
     dir: tempfile::TempDir,
-    previous: Option<std::ffi::OsString>,
+    _grant_home: crate::work_files::TestGrantHome,
 }
 impl Home {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("HOME");
-        std::env::set_var("HOME", dir.path());
+        let dir = crate::work_files::test_tempdir();
+        let grant_home = crate::work_files::TestGrantHome::new(dir.path().to_path_buf());
         std::fs::create_dir(dir.path().join("project")).unwrap();
-        Self { dir, previous }
+        Self {
+            dir,
+            _grant_home: grant_home,
+        }
     }
     fn project(&self) -> PathBuf {
         self.dir.path().join("project").canonicalize().unwrap()
-    }
-}
-impl Drop for Home {
-    fn drop(&mut self) {
-        if let Some(previous) = &self.previous {
-            std::env::set_var("HOME", previous);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 }
 fn local_begin(work: WorkId, expected: WorkRevision, root: &Path) -> WorkCommandV1 {

@@ -97,9 +97,14 @@ impl ComputerHost for Recorder {
     }
 }
 
-fn project() -> (tempfile::TempDir, ComputerTools, PathBuf) {
-    let home = tempfile::tempdir().unwrap();
-    std::env::set_var("HOME", home.path());
+fn project() -> (
+    tempfile::TempDir,
+    crate::work_files::TestGrantHome,
+    ComputerTools,
+    PathBuf,
+) {
+    let home = crate::work_files::test_tempdir();
+    let home_scope = crate::work_files::TestGrantHome::new(home.path().to_path_buf());
     let root = home.path().join("code/app");
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
@@ -113,10 +118,10 @@ fn project() -> (tempfile::TempDir, ComputerTools, PathBuf) {
     let (grant, refused) = WorkFileGrant::admit(&[root.to_string_lossy().into_owned()]);
     assert!(refused.is_empty());
     let tools = ComputerTools::new(grant, &root.to_string_lossy()).unwrap();
-    (home, tools, root)
+    (home, home_scope, tools, root)
 }
 
-/// Runs a test body while it owns $HOME, which the grant policy reads.
+/// Runs a test body while its thread-local home fixture is active.
 fn serially(body: impl std::future::Future<Output = ()>) {
     let _serial = crate::WORK_RUNTIME_TEST_SERIAL
         .lock()
@@ -132,7 +137,7 @@ fn serially(body: impl std::future::Future<Output = ()>) {
 #[test]
 fn edits_need_a_read_a_unique_match_and_an_approval() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host =
             Recorder::deciding(&[Decision::Declined, Decision::Approved, Decision::Approved]);
         let edit = |old: &str, new: &str| json!({"path": "src/lib.rs", "old": old, "new": new});
@@ -203,7 +208,7 @@ fn edits_need_a_read_a_unique_match_and_an_approval() {
 #[test]
 fn a_file_changed_since_it_was_read_is_read_again() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host = Recorder::deciding(&[Decision::Approved]);
         tools
             .call(&host, "read", &json!({"path": "src/lib.rs"}))
@@ -232,7 +237,7 @@ fn a_file_changed_since_it_was_read_is_read_again() {
 #[test]
 fn writes_create_freely_but_replace_only_what_was_read() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host = Recorder::deciding(&[Decision::Approved, Decision::Approved]);
         let created = tools
             .call(
@@ -276,7 +281,7 @@ fn writes_create_freely_but_replace_only_what_was_read() {
 #[test]
 fn finding_files_respects_gitignore() {
     serially(async {
-        let (_home, tools, _root) = project();
+        let (_home, _home_scope, tools, _root) = project();
         let host = Recorder::default();
         let found = tools.call(&host, "glob", &json!({"pattern": "*.rs"})).await;
         assert_eq!(found.content, "src/lib.rs");
@@ -308,7 +313,7 @@ fn finding_files_respects_gitignore() {
 #[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn commands_keep_their_approval_classes() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host = Recorder::deciding(&[Decision::Declined]);
         let listed = tools
             .call(&host, "bash", &json!({"command": "ls src"}))
@@ -351,7 +356,7 @@ fn commands_keep_their_approval_classes() {
 #[ignore = "Requires the currently unavailable confined Computer writer or runner; retained for qualification"]
 fn test_output_is_summarised() {
     serially(async {
-        let (_home, tools, _root) = project();
+        let (_home, _home_scope, tools, _root) = project();
         let host = Recorder::deciding(&[Decision::Approved]);
         #[cfg(windows)]
         let command = "Write-Output 'running 2 tests'; Write-Output 'test a ... ok'; Write-Output 'test b ... FAILED'; Write-Output 'test result: FAILED. 1 passed; 1 failed; 0 ignored'";
@@ -376,7 +381,7 @@ fn test_output_is_summarised() {
 #[test]
 fn unavailable_capabilities_refuse_before_approval_and_keep_reads_useful() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host = Recorder::deciding(&[Decision::Approved]);
         for (name, args) in [
             ("bash", json!({"command": "touch escaped"})),
@@ -419,7 +424,7 @@ fn unavailable_capabilities_refuse_before_approval_and_keep_reads_useful() {
 fn reviews_only_actual_approved_before_after_edits() {
     serially(async {
         crate::work_commands::runner::ensure_available().unwrap();
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host =
             Recorder::deciding(&[Decision::Approved, Decision::Approved, Decision::Approved]);
         let empty = tools
@@ -520,7 +525,7 @@ fn reviews_only_actual_approved_before_after_edits() {
 #[test]
 fn recovery_tools_require_approval_and_restore_without_overwrite() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let storage = tempfile::Builder::new()
             .prefix("work-recovery-app-")
             .tempdir_in("/private/tmp")
@@ -685,7 +690,7 @@ fn recovery_tools_require_approval_and_restore_without_overwrite() {
 #[test]
 fn recognizable_secret_arguments_are_rejected_before_recording() {
     serially(async {
-        let (_home, tools, _) = project();
+        let (_home, _home_scope, tools, _) = project();
         let host = Recorder::default();
         for (name, args) in [
             (
@@ -713,7 +718,7 @@ fn current_index_tool_records_scoped_diff_and_honest_failures() {
     serially(async {
         use sha1::{Digest, Sha1};
         use std::io::Write;
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let path = root.join("src/lib.rs");
         let before = std::fs::read(&path).unwrap();
         let mut object = format!("blob {}\0", before.len()).into_bytes();
@@ -777,7 +782,7 @@ fn current_index_tool_records_scoped_diff_and_honest_failures() {
 #[ignore = "Native qualified Python tool receipts and held-output privacy; inert sources only"]
 fn selected_python_tests_record_truthful_outcomes_without_live_output() {
     serially(async {
-        let (_home, tools, root) = project();
+        let (_home, _home_scope, tools, root) = project();
         let host = Recorder::default();
         let path = root.join("test_inert.py");
         let args = json!({"tests":["test_inert.py"]});
