@@ -2,22 +2,45 @@ use gtk::prelude::*;
 
 use crate::linux_display::{display_backend, DisplayBackend};
 
+#[path = "linux_surface.rs"]
+mod surface;
+pub(crate) use surface::{install, set_switcher};
+
 /// Issue geometry on GTK's thread before presentation can map the window.
 pub(super) fn place(
     window: &gtk::ApplicationWindow,
     size: tauri::LogicalSize<f64>,
     position: Option<tauri::PhysicalPosition<f64>>,
+    shadow_room: f64,
 ) {
     // Tao queues these setters on another GLib source. Calling them through
     // Tauri and then presenting GTK directly can map the previous grid size.
     let size = size.cast::<i32>();
-    window.resize(size.width.max(1), size.height.max(1));
+    let Some((width, height, padding)) =
+        surface::place(window, size.width.max(1), size.height.max(1), shadow_room)
+    else {
+        return;
+    };
+    window.resize(width, height);
     if let (DisplayBackend::X11, Some(position)) = (display_backend(window), position) {
         // Match Tao's physical-to-GTK conversion using this window's
         // current scale, rather than the destination monitor's scale.
         let position = position.to_logical::<i32>(f64::from(window.scale_factor()));
-        window.move_(position.x, position.y);
+        window.move_(
+            position.x.saturating_sub(padding),
+            position.y.saturating_sub(padding),
+        );
     }
+}
+
+/// Follow content height without choosing a different monitor or origin.
+pub(super) fn resize(window: &gtk::ApplicationWindow, size: tauri::LogicalSize<f64>) {
+    let size = size.cast::<i32>();
+    let Some((width, height, _)) = surface::resize(window, size.width.max(1), size.height.max(1))
+    else {
+        return;
+    };
+    window.resize(width, height);
 }
 
 /// Refresh the owner before mapping, returning whether global coordinates exist.
@@ -172,6 +195,7 @@ mod tests {
                     &panel,
                     size,
                     Some(tauri::PhysicalPosition::new(x * scale, y * scale)),
+                    20.0,
                 );
                 let requested = size.cast::<i32>();
                 // Observe GTK's pending size while still hidden, without
