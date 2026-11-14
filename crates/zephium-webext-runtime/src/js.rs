@@ -65,3 +65,24 @@ pub const MATCHER: &str = concat!(
     include_str!("../js/content.js"),
     ")(Z);return Z.content.matches(data);})"
 );
+
+const SURFACE_SCRIPT: &str = include_str!("../js/surface.generated.js");
+
+/// The generated API surface as one JSON value, the `surface` argument of
+/// [`BUNDLE`] entries.
+pub fn surface() -> &'static str {
+    SURFACE_SCRIPT
+        .split_once("Object.freeze(")
+        .and_then(|(_, rest)| rest.trim_end().strip_suffix(");"))
+        .unwrap_or("{\"version\":1,\"namespaces\":{}}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn surface_is_the_generated_json_value() {
+        let value: serde_json::Value = serde_json::from_str(super::surface()).unwrap();
+        assert_eq!(value["version"], 1);
+        assert!(value["namespaces"]["runtime"].is_object());
+    }
+}
