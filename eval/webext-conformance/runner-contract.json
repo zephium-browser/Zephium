@@ -47,18 +47,39 @@
     "invoke-action": "Activate case tabId and invoke its real extension action. Chromium uses browser CDP Extensions.triggerAction with actual tab target obtained by Target.getTargets filter; no synthetic onClicked event or grant injection. Return {supported:true,method}; case requires action event, grant and revocation."
   },
   "nodeRunner": {
-    "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/home/crynta/Dev/zephium-linux/audit/target node eval/webext-conformance/run-node.mjs --runtime-root PATH [--check] [--case ID] [--output DIR]",
-    "dependency": "feat/webext-js-integration 18c14044a or descendant containing tests/js_e2e.rs. No cross-worktree mutation; builds locked test host from selected checkout, records its git revision. Without harness exits 2.",
+    "command": "CARGO_BUILD_JOBS=4 CARGO_TARGET_DIR=/home/crynta/Dev/zephium-linux/audit/target node eval/webext-conformance/run-node.mjs --check [--case ID] [--output DIR] [--host EXECUTABLE]",
+    "dependency": "This checkout by default; optional --runtime-root PATH selects another checkout explicitly. Builds its locked tests/js_e2e.rs host and records that checkout revision; --host must be a matching already-built host.",
     "supportedCases": [
+      "action-tab-state",
+      "alarms-clamp",
       "alarms-create-forms",
+      "alarms-order",
+      "commands-inventory",
+      "i18n-fallback",
+      "i18n-placeholders",
+      "i18n-predefined",
+      "navigation-document",
+      "permissions-inventory",
+      "permissions-request-gesture",
+      "ports-disconnect",
+      "runtime-callback-promise",
       "runtime-last-error-unchecked",
+      "runtime-response-styles",
       "storage-bytes",
       "storage-get-forms",
       "storage-on-changed",
-      "storage-quota"
+      "storage-quota",
+      "storage-session-access",
+      "tabs-lifecycle",
+      "tabs-query-permission",
+      "tabs-query-redaction",
+      "windows-lifecycle"
     ],
-    "execution": "Same case.js and shared harness run in fresh Node vm realm with actual binding modules and generated schema. Bytes travel to Rust stdio_host through its real dispatcher; no FakeHost handlers. Existing dispatcher host models a background principal with storage/alarms permissions. Manual host epoch and realm Date.now both 1000000; no browser or native acceptance claimed. Host harness lacks arbitrary manifest/context/browser adapters; remaining cases are unsupported.",
-    "limitations": "Rust services use in-memory test persistence and fixed permissions. Adapter must be extended with install/manifest/locale/context controls before other cases can run. --host may select an already-built matching test executable."
+    "execution": "Same case.js and shared harness in fresh Node vm realms using actual generated bindings and byte envelopes through Rust stdio_host. The fake browser models tab/window/action state and deterministic single-document loading, not native page execution or network. Manifest permissions, resource inventory and locale catalogs are passed into the runtime before contexts bind. Runtime-message and port cases load the original background.js in a distinct authenticated realm. Manual host epoch and realm Date.now both 1000000. Session storage access loads the original API-only content.js in an independently authenticated fake content principal after fake tab creation. This qualifies principal enforcement, not native content injection.",
+    "limitations": "node-plan.mjs classifies all 57 cases, with explicit reasons for unavailable cases; output/coverage/inventory.json preserves that inventory. Real page/network/worker/world injection is not simulated, native event acceptance is untested, and DNR metadata cases remain unavailable-runtime because no DNR backend is installed. --host matching is the caller responsibility.",
+    "partialCases": {
+      "scripting-register-lifecycle": "Registration metadata and refusals only. Five native injection calls (ten observations) are omitted explicitly; result is always labelled partial. Oracle observations are projected by validated labels without modifying reference files."
+    }
   },
   "ci": "check.sh is the bounded CI entry point. Automatic hosted job deferred: checked reference includes Linux ARM64 getPlatformInfo and allocator-sensitive session bytes; current hosted Ubuntu job is x86_64. Do not silently normalize genuine platform facts. Run on the matching host or qualify a separate reference before wiring CI.",
   "normalization": "Identity placeholders retain equality relationships. Tab/window IDs in exact known error templates are replaced without changing punctuation or other words; UUID document IDs and fixture HTTP/HTTPS origins are mapped. Rule IDs, alarm periods, byte counts, platform facts, and observation order remain evidence. Concurrent cross-frame event collection is projected into ordered per-frame sequences explicitly in case code."

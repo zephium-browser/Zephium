@@ -5,6 +5,7 @@ export class RustPeer {
     this.next = 0;
     this.pending = new Map();
     this.contexts = new Map();
+    this.console = [];
     this.child = spawn(
       executable,
       ["--ignored", "--exact", "stdio_host", "--nocapture"],
@@ -15,6 +16,7 @@ export class RustPeer {
       this.stderr = (this.stderr + chunk).slice(-16384);
     });
     this.child.on("error", (error) => this.fail(error));
+    this.child.stdin.on("error", (error) => this.fail(error));
     this.child.on("exit", (code) => {
       if (!this.closing)
         this.fail(new Error(`Rust dispatcher exited ${code}: ${this.stderr}`));
@@ -25,7 +27,9 @@ export class RustPeer {
       if (start < 0) return;
       try {
         const record = JSON.parse(line.slice(start + "ZEPHIUM_E2E:".length));
-        if (record.frame) {
+        if (record.console) {
+          this.console.push(record.console);
+        } else if (record.frame) {
           const realm = this.contexts.get(record.context);
           if (!realm?.receiver)
             throw new Error(`Unregistered context ${record.context}`);
@@ -34,6 +38,7 @@ export class RustPeer {
           const request = this.pending.get(record.id);
           if (!request) throw new Error(`Unknown reply ${record.id}`);
           this.pending.delete(record.id);
+          clearTimeout(request.timer);
           request.resolve(record.result);
         }
       } catch (error) {
@@ -43,27 +48,46 @@ export class RustPeer {
   }
   fail(error) {
     this.error = error;
-    for (const request of this.pending.values()) request.reject(error);
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
     this.pending.clear();
   }
   command(op, data = {}) {
     if (this.error) return Promise.reject(this.error);
     const id = ++this.next;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.fail(new Error(`Rust dispatcher ${op} timeout (10000ms)`));
+      }, 10000);
+      this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(JSON.stringify({ id, op, ...data }) + "\n");
     });
   }
-  async context(binding, manifest) {
-    const label = "background";
-    await this.command("context", { context: label, kind: "background" });
+  async context(
+    binding,
+    manifest,
+    {
+      label = "background",
+      kind = "background",
+      bootstrap = {},
+      tabId = 1,
+      frameId = 0,
+    } = {},
+  ) {
+    await this.command("context", { context: label, kind, tabId, frameId });
     const realm = binding.createRealm();
     realm.Bytes = realm.run("Uint8Array");
     const global = realm.run("globalThis");
     global.__zephiumPost = (bytes) => {
-      this.command("frame", { context: label, frame: Array.from(bytes) }).catch(
-        (error) => this.fail(error),
-      );
+      this.command("frame", { context: label, frame: Array.from(bytes) })
+        .then(() =>
+          this.closing
+            ? undefined
+            : this.command("advance", { millis: 0, requestedDue: true }),
+        )
+        .catch((error) => this.fail(error));
       return true;
     };
     global.__zephiumRegisterReceiver = (receiver) => {
@@ -74,10 +98,11 @@ export class RustPeer {
     realm.Z.api.page(
       binding.generatedSurface,
       binding.bootstrap({
-        contextKind: "background",
+        contextKind: kind === "extension" ? "options" : kind,
         manifest,
         permissions: manifest.permissions || [],
         messages: {},
+        ...bootstrap,
       }),
     );
     return realm;
