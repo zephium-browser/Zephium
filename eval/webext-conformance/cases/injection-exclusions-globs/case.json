@@ -1,0 +1,6 @@
+{
+  "id": "injection-exclusions-globs",
+  "title": "Match exclusions and include/exclude globs restrict script injection",
+  "apis": ["manifest.content_scripts", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

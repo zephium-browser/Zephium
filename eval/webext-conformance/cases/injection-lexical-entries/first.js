@@ -1,0 +1,1 @@
+const sharedLexicalEntries = { values: ["start"] };

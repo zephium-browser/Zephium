@@ -1,0 +1,103 @@
+{
+  "caseId": "tabs-active-tab",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "execute before action:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "execute before action:error",
+      "value": {
+        "lastError": null,
+        "message": "Cannot access contents of the page. Extension manifest must request permission to access the respective host."
+      }
+    },
+    {
+      "label": "invoke real action:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invoke real action:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "method": "CDP Extensions.triggerAction",
+          "supported": true
+        }
+      }
+    },
+    {
+      "label": "action click observed",
+      "value": true
+    },
+    {
+      "label": "action click tab:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "action click tab:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "actionClick": {
+            "tabId": "<tab:1>",
+            "title": "Fixture",
+            "url": "<origin:b>/page.html?active-tab-before"
+          }
+        }
+      }
+    },
+    {
+      "label": "execute after action:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "execute after action:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "title": "Fixture",
+              "url": "<origin:b>/page.html?active-tab-before"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "execute after cross-origin navigation:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "execute after cross-origin navigation:error",
+      "value": {
+        "lastError": null,
+        "message": "Cannot access contents of the page. Extension manifest must request permission to access the respective host."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

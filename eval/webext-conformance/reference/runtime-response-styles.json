@@ -1,0 +1,193 @@
+{
+  "caseId": "runtime-response-styles",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "synchronous.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "synchronous.callback:callback",
+      "value": {
+        "args": [
+          {
+            "echo": {
+              "nested": [
+                1,
+                "two",
+                null
+              ]
+            },
+            "style": "synchronous"
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "synchronous.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "synchronous.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "synchronous.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "synchronous.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "echo": {
+            "nested": [
+              1,
+              "two",
+              null
+            ]
+          },
+          "style": "synchronous"
+        }
+      }
+    },
+    {
+      "label": "deferred.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "deferred.callback:callback",
+      "value": {
+        "args": [
+          {
+            "echo": {
+              "nested": [
+                1,
+                "two",
+                null
+              ]
+            },
+            "style": "deferred"
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "deferred.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "deferred.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "deferred.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "deferred.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "echo": {
+            "nested": [
+              1,
+              "two",
+              null
+            ]
+          },
+          "style": "deferred"
+        }
+      }
+    },
+    {
+      "label": "promise.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "promise.callback:callback",
+      "value": {
+        "args": [
+          {
+            "echo": {
+              "nested": [
+                1,
+                "two",
+                null
+              ]
+            },
+            "style": "promise"
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "promise.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "promise.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "promise.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "promise.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "echo": {
+            "nested": [
+              1,
+              "two",
+              null
+            ]
+          },
+          "style": "promise"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

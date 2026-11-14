@@ -1,0 +1,48 @@
+{
+  "caseId": "ports-navigation",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "port.ready",
+      "value": {
+        "name": "navigation-lifetime",
+        "ready": true
+      }
+    },
+    {
+      "label": "port.echo",
+      "value": {
+        "echo": {
+          "sequence": 1
+        }
+      }
+    },
+    {
+      "label": "port.navigationDisconnect",
+      "value": {
+        "lastError": null,
+        "samePort": true
+      }
+    },
+    {
+      "label": "port.postAfterNavigation:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "port.postAfterNavigation:error",
+      "value": {
+        "lastError": null,
+        "message": "Attempting to use a disconnected port object"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

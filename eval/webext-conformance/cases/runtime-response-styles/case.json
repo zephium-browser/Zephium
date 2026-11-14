@@ -1,0 +1,6 @@
+{
+  "id": "runtime-response-styles",
+  "title": "sendMessage synchronous, deferred, and promise responses",
+  "apis": ["runtime.sendMessage", "runtime.onMessage"],
+  "permissions": []
+}

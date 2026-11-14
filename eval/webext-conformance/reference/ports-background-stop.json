@@ -1,0 +1,46 @@
+{
+  "caseId": "ports-background-stop",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "port.ready",
+      "value": {
+        "name": "background-lifetime",
+        "ready": true
+      }
+    },
+    {
+      "label": "background.stop",
+      "value": {
+        "stopped": true
+      }
+    },
+    {
+      "label": "port.backgroundDisconnect",
+      "value": {
+        "lastError": null,
+        "samePort": true
+      }
+    },
+    {
+      "label": "port.postAfterBackgroundStop:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "port.postAfterBackgroundStop:error",
+      "value": {
+        "lastError": null,
+        "message": "Attempting to use a disconnected port object"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

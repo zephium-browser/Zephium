@@ -1,0 +1,235 @@
+{
+  "caseId": "storage-on-changed",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "local.insert.call",
+      "value": {}
+    },
+    {
+      "label": "local.insert.onChanged",
+      "value": {
+        "areaName": "local",
+        "changes": {
+          "alpha": {
+            "newValue": 1
+          },
+          "nested": {
+            "newValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "local.replace.call",
+      "value": {}
+    },
+    {
+      "label": "local.replace.onChanged",
+      "value": {
+        "areaName": "local",
+        "changes": {
+          "alpha": {
+            "newValue": 2,
+            "oldValue": 1
+          }
+        }
+      }
+    },
+    {
+      "label": "local.remove.call",
+      "value": {}
+    },
+    {
+      "label": "local.remove.onChanged",
+      "value": {
+        "areaName": "local",
+        "changes": {
+          "alpha": {
+            "oldValue": 2
+          }
+        }
+      }
+    },
+    {
+      "label": "local.clear.call",
+      "value": {}
+    },
+    {
+      "label": "local.clear.onChanged",
+      "value": {
+        "areaName": "local",
+        "changes": {
+          "nested": {
+            "oldValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.insert.call",
+      "value": {}
+    },
+    {
+      "label": "sync.insert.onChanged",
+      "value": {
+        "areaName": "sync",
+        "changes": {
+          "alpha": {
+            "newValue": 1
+          },
+          "nested": {
+            "newValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.replace.call",
+      "value": {}
+    },
+    {
+      "label": "sync.replace.onChanged",
+      "value": {
+        "areaName": "sync",
+        "changes": {
+          "alpha": {
+            "newValue": 2,
+            "oldValue": 1
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.remove.call",
+      "value": {}
+    },
+    {
+      "label": "sync.remove.onChanged",
+      "value": {
+        "areaName": "sync",
+        "changes": {
+          "alpha": {
+            "oldValue": 2
+          }
+        }
+      }
+    },
+    {
+      "label": "sync.clear.call",
+      "value": {}
+    },
+    {
+      "label": "sync.clear.onChanged",
+      "value": {
+        "areaName": "sync",
+        "changes": {
+          "nested": {
+            "oldValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "session.insert.call",
+      "value": {}
+    },
+    {
+      "label": "session.insert.onChanged",
+      "value": {
+        "areaName": "session",
+        "changes": {
+          "alpha": {
+            "newValue": 1
+          },
+          "nested": {
+            "newValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "label": "session.replace.call",
+      "value": {}
+    },
+    {
+      "label": "session.replace.onChanged",
+      "value": {
+        "areaName": "session",
+        "changes": {
+          "alpha": {
+            "newValue": 2,
+            "oldValue": 1
+          }
+        }
+      }
+    },
+    {
+      "label": "session.remove.call",
+      "value": {}
+    },
+    {
+      "label": "session.remove.onChanged",
+      "value": {
+        "areaName": "session",
+        "changes": {
+          "alpha": {
+            "oldValue": 2
+          }
+        }
+      }
+    },
+    {
+      "label": "session.clear.call",
+      "value": {}
+    },
+    {
+      "label": "session.clear.onChanged",
+      "value": {
+        "areaName": "session",
+        "changes": {
+          "nested": {
+            "oldValue": {
+              "items": [
+                true,
+                null
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

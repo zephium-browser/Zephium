@@ -1,0 +1,6 @@
+{
+  "id": "alarms-order",
+  "title": "Past-due alarm delivery and replacement before firing",
+  "apis": ["alarms.create", "alarms.onAlarm", "alarms.get", "alarms.clear"],
+  "permissions": ["alarms"]
+}

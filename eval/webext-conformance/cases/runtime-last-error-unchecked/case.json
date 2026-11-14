@@ -1,0 +1,6 @@
+{
+  "id": "runtime-last-error-unchecked",
+  "title": "Unchecked callback lastError emits a console diagnostic",
+  "apis": ["runtime.sendMessage", "runtime.lastError"],
+  "permissions": []
+}

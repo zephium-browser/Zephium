@@ -1,0 +1,114 @@
+{
+  "caseId": "runtime-callback-promise",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "platform.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "platform.callback:callback",
+      "value": {
+        "args": [
+          {
+            "arch": "arm64",
+            "nacl_arch": "arm",
+            "os": "linux"
+          }
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "platform.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "platform.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "platform.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "platform.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "arch": "arm64",
+          "nacl_arch": "arm",
+          "os": "linux"
+        }
+      }
+    },
+    {
+      "label": "noReceiver.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "noReceiver.callback:callback",
+      "value": {
+        "args": [],
+        "lastError": "Could not establish connection. Receiving end does not exist.",
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "noReceiver.callback:after",
+      "value": {
+        "lastError": "Could not establish connection. Receiving end does not exist."
+      }
+    },
+    {
+      "label": "noReceiver.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "lastError.afterCallback",
+      "value": {
+        "present": false
+      }
+    },
+    {
+      "label": "noReceiver.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "noReceiver.promise:error",
+      "value": {
+        "lastError": null,
+        "message": "Could not establish connection. Receiving end does not exist."
+      }
+    },
+    {
+      "label": "lastError.afterPromise",
+      "value": {
+        "present": false
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -1,0 +1,65 @@
+[
+  {
+    "caseId": "storage-bytes",
+    "engine": "node-rust",
+    "path": "/observations/35/value/value",
+    "expected": 64,
+    "actual": 47,
+    "reason": "Known runtime conformance gap: session getBytesInUse sums UTF-8 keys plus serialized JSON, while this Chromium reference reports estimated in-memory allocation. Preserve exact per-selector observations until session accounting matches.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:get_bytes_in_use at 18c14044a; reference/storage-bytes.json session.* observations"
+  },
+  {
+    "caseId": "storage-bytes",
+    "engine": "node-rust",
+    "path": "/observations/37/value/value",
+    "expected": 0,
+    "actual": 15,
+    "reason": "Known runtime conformance gap: session getBytesInUse sums UTF-8 keys plus serialized JSON, while this Chromium reference reports estimated in-memory allocation. Preserve exact per-selector observations until session accounting matches.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:get_bytes_in_use at 18c14044a; reference/storage-bytes.json session.* observations"
+  },
+  {
+    "caseId": "storage-bytes",
+    "engine": "node-rust",
+    "path": "/observations/39/value/value",
+    "expected": 64,
+    "actual": 25,
+    "reason": "Known runtime conformance gap: session getBytesInUse sums UTF-8 keys plus serialized JSON, while this Chromium reference reports estimated in-memory allocation. Preserve exact per-selector observations until session accounting matches.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:get_bytes_in_use at 18c14044a; reference/storage-bytes.json session.* observations"
+  },
+  {
+    "caseId": "storage-bytes",
+    "engine": "node-rust",
+    "path": "/observations/41/value/args/0",
+    "expected": 64,
+    "actual": 47,
+    "reason": "Known runtime conformance gap: session getBytesInUse sums UTF-8 keys plus serialized JSON, while this Chromium reference reports estimated in-memory allocation. Preserve exact per-selector observations until session accounting matches.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:get_bytes_in_use at 18c14044a; reference/storage-bytes.json session.* observations"
+  },
+  {
+    "caseId": "storage-bytes",
+    "engine": "node-rust",
+    "path": "/observations/47/value/value",
+    "expected": 64,
+    "actual": 32,
+    "reason": "Known runtime conformance gap: session getBytesInUse sums UTF-8 keys plus serialized JSON, while this Chromium reference reports estimated in-memory allocation. Preserve exact per-selector observations until session accounting matches.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:get_bytes_in_use at 18c14044a; reference/storage-bytes.json session.* observations"
+  },
+  {
+    "caseId": "storage-quota",
+    "engine": "node-rust",
+    "path": "/observations/10/value/message",
+    "expected": "Session storage quota bytes exceeded. Values were not stored.",
+    "actual": "Resource::kQuotaBytes quota exceeded",
+    "reason": "Known runtime conformance gap: session quota rejection uses the generic Resource::kQuotaBytes message rather than Chromium’s session-specific error. This entry documents the mismatch; it does not approve changing quota policy.",
+    "source": "crates/zephium-webext-runtime/src/storage/mod.rs:StorageError::QuotaExceeded and storage/quota.rs at 18c14044a; reference/storage-quota.json"
+  },
+  {
+    "caseId": "storage-quota",
+    "engine": "node-rust",
+    "path": "/observations/5/value/lastError",
+    "expected": "Resource::kQuotaBytesPerItem quota exceeded",
+    "actual": null,
+    "reason": "Known binding conformance gap: the lastError slot is restored when the callback returns, before its microtask runs. Chromium 153 retains it through the microtask and clears it by the following task.",
+    "source": "crates/zephium-webext-runtime/js/errors.js:lastError.run finally at 18c14044a; reference/storage-quota.json sync.callback.quota:after"
+  }
+]
