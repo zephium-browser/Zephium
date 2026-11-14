@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, Write};
 
 use crate::FakeBrowser;
@@ -55,6 +55,8 @@ struct Host {
     lifecycle: Lifecycle,
     sessions: HashMap<ContextKey, WorkerSession>,
     work: VecDeque<Work>,
+    conformance: bool,
+    navigation: VecDeque<web_navigation::NavigationObservation>,
 }
 
 impl Host {
@@ -91,7 +93,9 @@ impl BrowserPort for Host {
                 .rev()
                 .map(|frame| scripting::FrameResult {
                     frame: frame.clone(),
-                    result: Ok(json!({"frame": frame.frame.get(), "value": null})),
+                    result: Ok(scripting::ExecutionResult::Value(
+                        json!({"frame": frame.frame.get(), "value": null}),
+                    )),
                 })
                 .collect();
             let result = scripting::reply(request, results);
@@ -99,6 +103,86 @@ impl BrowserPort for Host {
                 .requests
                 .push(BrowserRequest::Scripting(request.clone()));
             return call.reply(result);
+        }
+        if self.conformance && matches!(request, BrowserRequest::Tabs(_)) {
+            let previous = self.browser.snapshot.clone();
+            let permissions = call.permissions().clone();
+            let handled = self.browser.request(request, call);
+            let created = self
+                .browser
+                .snapshot
+                .tabs
+                .iter()
+                .filter(|tab| !previous.tabs.iter().any(|old| old.id == tab.id))
+                .map(|tab| (tab.id, tab.url().expect("tab URL").to_string()))
+                .collect::<Vec<_>>();
+            for (id, url) in created {
+                self.browser
+                    .navigate(id, &url, &permissions)
+                    .expect("fake load");
+            }
+            for tab in &mut self.browser.snapshot.tabs {
+                if previous
+                    .tabs
+                    .iter()
+                    .find(|old| old.id == tab.id)
+                    .is_none_or(|old| old.document != tab.document)
+                {
+                    let url = tab.url().expect("tab URL");
+                    let title = if url.path() == "/page.html" {
+                        "Fixture"
+                    } else {
+                        tab.tab.title()
+                    };
+                    tab.tab = zephium_core::extensions::ExtensionBrowserTab::from_snapshot(
+                        Some(&tab.tab),
+                        tab.tab.id(),
+                        tab.tab.resident(),
+                        title,
+                        tab.tab.url().and_then(|url| Url::parse(url).ok()).as_ref(),
+                        tab.tab.loading(),
+                        tab.tab.pinned(),
+                    )
+                    .expect("fixture title");
+                    self.browser
+                        .frames
+                        .retain(|frame| frame.tab != tab.tab.id());
+                    let frame = web_navigation::BrowserFrame {
+                        tab: tab.tab.id(),
+                        frame: FrameId::MAIN,
+                        document: tab.document,
+                        document_id: tab.document_id.clone(),
+                        origin: DocumentOrigin::of_url(&url),
+                        url,
+                        parent_frame_id: None,
+                        parent_document_id: None,
+                        document_lifecycle: "active".into(),
+                        frame_type: "outermost_frame".into(),
+                        error_occurred: false,
+                    };
+                    self.browser.frames.push(frame.clone());
+                    for event in [
+                        web_navigation::NavigationEvent::BeforeNavigate,
+                        web_navigation::NavigationEvent::Committed,
+                        web_navigation::NavigationEvent::DomContentLoaded,
+                        web_navigation::NavigationEvent::Completed,
+                    ] {
+                        self.navigation
+                            .push_back(web_navigation::NavigationObservation {
+                                tab_id: tab.id,
+                                frame: frame.clone(),
+                                event,
+                                time_stamp: 1_000_000.0,
+                                transition_type: (event
+                                    == web_navigation::NavigationEvent::Committed)
+                                    .then(|| "link".into()),
+                                transition_qualifiers: vec![],
+                                error: None,
+                            });
+                    }
+                }
+            }
+            return handled;
         }
         use runtime::browser::ServiceRequest;
         use zephium_core::extension_data::{ExtensionDataCall, ExtensionDataReply};
@@ -202,9 +286,26 @@ impl StorageHost for Host {
 }
 
 impl AlarmHost for Host {
-    fn alarm_call(&mut self, _: &Sender, method: &str, args: &[Value]) -> Result<Value, ApiError> {
-        let environment = self.environment();
-        self.alarms.handle(method, args, environment)
+    fn alarm_call(
+        &mut self,
+        sender: &Sender,
+        method: &str,
+        args: &[Value],
+    ) -> Result<Value, ApiError> {
+        let environment = AlarmEnvironment::now(
+            &self.clock,
+            1_000_000 + self.clock.now_nanos() / 1_000_000,
+            sender.unpacked(),
+        );
+        let (value, warnings) = self
+            .alarms
+            .handle_with_warnings(method, args, environment)?;
+        if self.conformance {
+            for warning in warnings {
+                output(json!({"console": {"type": "warning", "text": warning}}));
+            }
+        }
+        Ok(value)
     }
 }
 
@@ -314,6 +415,7 @@ impl Peer {
                 extension_id: ExtensionId::parse(EXTENSION).expect("extension"),
                 generation: ExtensionRuntimeGeneration::new(1).expect("generation"),
                 allowed_in_incognito: false,
+                unpacked: false,
                 externally_connectable: None,
             })
             .expect("admit");
@@ -401,6 +503,8 @@ impl Peer {
                 lifecycle,
                 sessions: HashMap::new(),
                 work: VecDeque::new(),
+                conformance: false,
+                navigation: VecDeque::new(),
             },
             dispatcher: Dispatcher::new(table),
             permissions,
@@ -416,7 +520,7 @@ impl Peer {
         }
     }
 
-    fn add_context(&mut self, label: &str, kind: &str, frame_id: u64) {
+    fn add_context(&mut self, label: &str, kind: &str, frame_id: u64, tab_id: u64) {
         let sender = if kind == "background" {
             let commands = self
                 .host
@@ -462,13 +566,26 @@ impl Peer {
                     .expect("worker session"),
             );
             sender
+        } else if kind == "extension" {
+            let view = self
+                .authority
+                .open_view(install(), ViewKind::Options)
+                .expect("extension view");
+            self.authority
+                .bind_view(
+                    &view,
+                    &document(&format!("chrome-extension://{EXTENSION}/runner.html"), 100),
+                )
+                .expect("extension sender")
         } else {
             let frame = self
                 .host
                 .browser
                 .frames
                 .iter()
-                .find(|frame| frame.tab == ItemId::from(1) && frame.frame.get() == frame_id)
+                .find(|frame| {
+                    frame.tab == ItemId::from(tab_id as u128) && frame.frame.get() == frame_id
+                })
                 .expect("content frame");
             let tab = frame.tab;
             let document = TabDocument {
@@ -696,13 +813,63 @@ impl Peer {
     }
 
     fn drain(&mut self) {
+        while let Some(observation) = self.host.navigation.pop_front() {
+            let facts = web_navigation::event_facts(&observation.frame, observation.tab_id);
+            for target in self
+                .host
+                .events
+                .targets(install(), observation.event.name(), &facts)
+            {
+                let sender = self
+                    .senders
+                    .values()
+                    .find(|sender| sender.context_key() == target)
+                    .expect("navigation sender");
+                if let Ok(mut args) =
+                    web_navigation::observation(&self.host, sender, &self.permissions, &observation)
+                {
+                    let listeners =
+                        self.host
+                            .events
+                            .listeners(sender, observation.event.name(), &facts);
+                    args.as_array_mut()
+                        .expect("event args")
+                        .push(json!(listeners
+                            .iter()
+                            .map(|id| id.get())
+                            .collect::<Vec<_>>()));
+                    self.event(&target, observation.event.name(), args);
+                }
+            }
+        }
         for (name, args) in std::mem::take(&mut self.host.browser.events) {
             for target in self
                 .host
                 .events
                 .targets(install(), &name, &EventFacts::default())
             {
-                self.event(&target, &name, args.clone());
+                let mut args = args.clone();
+                if matches!(
+                    name.as_str(),
+                    "windows.onCreated" | "windows.onRemoved" | "windows.onFocusChanged"
+                ) {
+                    let sender = self
+                        .senders
+                        .values()
+                        .find(|sender| sender.context_key() == target)
+                        .expect("window event sender");
+                    let listeners =
+                        self.host
+                            .events
+                            .listeners(sender, &name, &EventFacts::default());
+                    args.as_array_mut()
+                        .expect("window arguments")
+                        .push(json!(listeners
+                            .iter()
+                            .map(|id| id.get())
+                            .collect::<Vec<_>>()));
+                }
+                self.event(&target, &name, args);
             }
         }
         while let Some(work) = self.host.work.pop_front() {
@@ -899,13 +1066,77 @@ impl Peer {
         self.senders.remove(label);
     }
 
+    fn configure(&mut self, command: &Value) -> Value {
+        assert!(self.senders.is_empty(), "configure before contexts");
+        let manifest = command["manifest"].clone();
+        self.authority = Authority::new(profile(), false, ExtensionScheme::CHROME_EXTENSION);
+        self.authority
+            .admit(InstallAdmission {
+                install: install(),
+                extension_id: ExtensionId::parse(EXTENSION).expect("extension"),
+                generation: ExtensionRuntimeGeneration::new(1).expect("generation"),
+                allowed_in_incognito: false,
+                unpacked: true,
+                externally_connectable: None,
+            })
+            .expect("conformance installation");
+        let (declaration, _) =
+            PermissionDeclaration::from_manifest(&Manifest::from_value(manifest.clone()));
+        self.permissions = InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::OnAllSites,
+            false,
+        );
+        let catalogs: BTreeMap<String, Value> =
+            serde_json::from_value(command["catalogs"].clone()).expect("catalogs");
+        self.host.catalog = Messages::new(
+            ExtensionId::parse(EXTENSION).expect("extension"),
+            LocaleEnvironment {
+                ui_language: "en-US".into(),
+                accept_languages: vec!["en-US".into(), "en".into()],
+                right_to_left: false,
+            },
+            manifest["default_locale"].as_str(),
+            &catalogs,
+        )
+        .expect("catalog");
+        let mut localized = manifest.clone();
+        for key in ["name", "description"] {
+            if let Some(text) = manifest[key].as_str() {
+                localized[key] = self
+                    .host
+                    .catalog
+                    .localize(text, true)
+                    .expect("localized manifest")
+                    .into();
+            }
+        }
+        self.host.browser = FakeBrowser::new(profile());
+        let window = self.host.browser.add_window(false);
+        self.host.browser.add_tab(window, "about:blank", false);
+        self.host.browser.add_tab(
+            window,
+            &format!("chrome-extension://{EXTENSION}/runner.html"),
+            true,
+        );
+        self.host.browser.resources =
+            serde_json::from_value(command["resources"].clone()).expect("resources");
+        self.host.browser.info.manifest = localized.clone();
+        self.host.browser.info.commands = manifest["commands"].as_object().map(|commands| commands.iter().map(|(name, command)| json!({"name": name, "description": command["description"].as_str().unwrap_or(""), "shortcut": command["suggested_key"][std::env::consts::OS].as_str().or_else(|| command["suggested_key"]["default"].as_str()).unwrap_or("")})).collect()).unwrap_or_default();
+        self.host.conformance = true;
+        json!({"manifest": localized, "messages": self.host.catalog.catalog(), "uiLanguage": self.host.catalog.ui_language()})
+    }
+
     fn command(&mut self, command: &Value) -> Value {
         let label = command["context"].as_str().unwrap_or("background");
         match command["op"].as_str().expect("operation") {
+            "configure" => return self.configure(command),
             "context" => self.add_context(
                 label,
                 command["kind"].as_str().expect("kind"),
                 command["frameId"].as_u64().unwrap_or(0),
+                command["tabId"].as_u64().unwrap_or(1),
             ),
             "frame" => {
                 let bytes = command["frame"]
@@ -917,6 +1148,22 @@ impl Peer {
                 self.receive(label, &bytes);
             }
             "advance" => {
+                if command["requestedDue"] == true {
+                    let now = self.host.environment();
+                    if self
+                        .host
+                        .alarms
+                        .get_all()
+                        .iter()
+                        .any(|alarm| alarm.scheduled_time <= now.unix_millis as f64)
+                    {
+                        if let Some(deadline) = self.host.alarms.next_wake() {
+                            self.host
+                                .clock
+                                .advance_nanos(deadline.saturating_sub(now.monotonic_nanos));
+                        }
+                    }
+                }
                 self.host
                     .clock
                     .advance_nanos(command["millis"].as_u64().expect("millis") * 1_000_000);

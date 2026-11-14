@@ -862,6 +862,9 @@ fn query(
         {
             continue;
         }
+        if !readable_for(tab, sender, permissions) && (title.is_some() || patterns.is_some()) {
+            continue;
+        }
         if readable_for(tab, sender, permissions) {
             if title
                 .as_ref()
@@ -973,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn query_supports_every_generated_filter_and_ignores_unreadable_sensitive_filters() {
+    fn query_supports_every_generated_filter_and_excludes_unreadable_sensitive_matches() {
         let (mut browser, mut dispatcher, sender) = browser();
         browser.snapshot.tabs[0].fav_icon_url = Some("https://example.com/icon.png".into());
         let granted = permissions(&["tabs"], &[]);
@@ -1015,7 +1018,34 @@ mod tests {
                 json!([{"url":"https://no-match.test/*","title":"no-match"}]),
             )
             .unwrap();
-        assert_eq!(unreadable.as_array().unwrap().len(), 2);
+        assert_eq!(unreadable, json!([]));
+        let host_access = permissions(&[], &["https://example.com/*"]);
+        let readable = browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &host_access,
+                "tabs.query",
+                json!([{"url":"https://example.com/*"}]),
+            )
+            .unwrap();
+        assert_eq!(readable.as_array().unwrap().len(), 1);
+        assert_eq!(readable[0]["id"], 1);
+        let ordinary = browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(&[], &[]),
+                "tabs.query",
+                json!([{"pinned":false}]),
+            )
+            .unwrap();
+        assert_eq!(ordinary.as_array().unwrap().len(), 2);
+        assert!(ordinary
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tab| tab.get("url").is_none()));
         assert!(browser
             .call(
                 &mut dispatcher,
@@ -1063,6 +1093,47 @@ mod tests {
         assert!(browser
             .call(&mut dispatcher, &sender, &none, "tabs.get", json!([id]))
             .is_err());
+    }
+
+    #[test]
+    fn pinning_an_existing_tab_moves_it_before_unpinned_tabs() {
+        let (mut browser, mut dispatcher, sender) = browser();
+        let granted = permissions(&["tabs"], &[]);
+        let pinned = browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &granted,
+                "tabs.update",
+                json!([2, {"pinned":true}]),
+            )
+            .unwrap();
+        assert_eq!(pinned["index"], 0);
+        assert_eq!(pinned["pinned"], true);
+        let other = browser
+            .call(&mut dispatcher, &sender, &granted, "tabs.get", json!([1]))
+            .unwrap();
+        assert_eq!(other["index"], 1);
+        let unpinned = browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &granted,
+                "tabs.update",
+                json!([2, {"pinned":false}]),
+            )
+            .unwrap();
+        assert_eq!(unpinned["pinned"], false);
+        assert_eq!(
+            browser
+                .snapshot
+                .tabs
+                .iter()
+                .map(|tab| tab.index)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2
+        );
     }
 
     #[test]

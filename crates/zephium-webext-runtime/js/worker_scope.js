@@ -211,13 +211,55 @@
     I.defineProperty(navigator, 'storage', { value: I.create(proto), enumerable: true, configurable: true });
   }
 
+  function workerImports(global, config) {
+    const nativeImport = global.importScripts;
+    const module = own(config, 'type') === 'module';
+    let installing = own(config, 'install') === true;
+    const loaded = new I.Set();
+    const resolve = (value) => {
+      const url = I.URLHref(new I.URL(I.String(value), own(config, 'scriptURL')));
+      const hash = I.StringIndexOf(url, '#');
+      return hash === -1 ? url : I.StringSlice(url, 0, hash);
+    };
+    if (typeof own(config, 'scriptURL') === 'string') I.SetAdd(loaded, resolve(config.scriptURL));
+    const installed = own(config, 'installedScripts');
+    if (I.isArray(installed)) {
+      for (let i = 0; i < installed.length; i++) {
+        if (typeof installed[i] === 'string') I.SetAdd(loaded, resolve(installed[i]));
+      }
+    }
+    const importScripts = function importScripts(...urls) {
+      if (module) {
+        throw new I.TypeError(
+          "Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts().",
+        );
+      }
+      const resolved = [];
+      for (let i = 0; i < urls.length; i++) I.ArrayPush(resolved, resolve(urls[i]));
+      for (let i = 0; i < resolved.length; i++) {
+        const url = resolved[i];
+        if (!installing && !I.SetHas(loaded, url)) {
+          const message = `Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at '${url}' failed to load.`;
+          throw I.DOMException ? new I.DOMException(message, 'NetworkError') : new I.Error(message);
+        }
+        I.apply(nativeImport, global, [url]);
+        I.SetAdd(loaded, url);
+      }
+    };
+    hidden(global, 'importScripts', importScripts);
+    const scope = global.WorkerGlobalScope;
+    if (scope && scope.prototype) hidden(scope.prototype, 'importScripts', importScripts);
+    return () => {
+      installing = false;
+    };
+  }
+
   // Runs in the worker before the extension's script. `options.global` and
   // `options.link` are for tests.
   function worker(surface, bootstrap, options) {
     options = options || {};
     const global = options.global || I.global;
     const config = own(bootstrap, 'worker') || {};
-    const module = own(config, 'type') === 'module';
     const link = options.link || T.portLink(T.messageLimit('background'));
     let attached = false;
     const onInit = (event) => {
@@ -308,13 +350,7 @@
     hidden(members, 'skipWaiting', function skipWaiting() {
       return I.PromiseResolve(undefined);
     });
-    if (module) {
-      hidden(global, 'importScripts', function importScripts() {
-        throw new I.TypeError(
-          "Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts().",
-        );
-      });
-    }
+    const finishImports = workerImports(global, config);
     if (typeof own(config, 'scriptURL') === 'string') workerLocation(global, config.scriptURL);
     storageManager(global, own(config, 'storage'));
 
@@ -332,6 +368,7 @@
     const finish = (state, detail) => {
       if (finished) return;
       finished = true;
+      finishImports();
       I.PromiseThen(report(state, detail), () => {
         if (state === 'activated') context.hub.release();
       }, () => {});
@@ -342,6 +379,7 @@
       if (own(config, 'install') !== true) return finish('activated', null);
       const timer = I.setTimeout(() => finish('timedOut', null), LIFECYCLE_TIMEOUT_MS);
       I.PromiseThen(classes.run(global, new classes.InstallEvent('install')), (installed) => {
+        finishImports();
         if (!installed) {
           I.clearTimeout(timer);
           return finish('failed', 'install');

@@ -1,6 +1,6 @@
 // Builds `chrome` (and `browser`, the same object) for one extension context
 // from the surface data and the context's bootstrap blob. Every async method
-// takes a trailing callback (with `runtime.lastError` set during it) or
+// takes a trailing callback (`runtime.lastError` survives its microtasks) or
 // returns a promise; synchronous members are served from the bootstrap.
 //
 // Surface (`surface.generated.js`, one JSON value):
@@ -23,7 +23,7 @@
 // mixed mode and requires a custom implementation; it is currently omitted.
 //
 // Bootstrap: { extensionId, scheme, contextKind, manifest (as getManifest
-// returns it), messages ({ lowercase name: text, placeholders applied }),
+// returns it), messages (resolved Chrome message catalog, or flattened strings),
 // uiLanguage, incognito, permissions (granted API permissions), worker? }.
 //
 // Host protocol beyond plain `namespace.method` calls (arguments are the
@@ -225,12 +225,12 @@
 
   // Chrome's base::ReplaceStringPlaceholders: `$1`-`$9` substitute, `$$`
   // runs keep all but one `$`, any other `$x` is dropped.
-  function substitute(message, substitutions) {
+  function substitute(message, substitutions, placeholders, escapeLt) {
     let out = '';
     for (let i = 0; i < message.length; i++) {
       const c = message[i];
       if (c !== '$') {
-        out += c;
+        out += c === '<' && escapeLt ? '&lt;' : c;
         continue;
       }
       if (i + 1 >= message.length) break;
@@ -244,6 +244,18 @@
         continue;
       }
       const code = I.StringCharCodeAt(message, i);
+      if (placeholders !== undefined && (code < 0x31 || code > 0x39)) {
+        const end = I.StringIndexOf(message, '$', i);
+        if (end !== -1) {
+          const name = I.StringToLowerCase(I.StringSlice(message, i, end));
+          const content = own(own(placeholders, name), 'content');
+          if (typeof content === 'string') {
+            out += substitute(content, substitutions, undefined, escapeLt);
+            i = end;
+            continue;
+          }
+        }
+      }
       if (code < 0x31 || code > 0x39) continue;
       const index = code - 0x31;
       if (index < substitutions.length) out += substitutions[index];
@@ -348,7 +360,9 @@
 
     function getMessage(values) {
       const name = I.StringToLowerCase(I.String(values[0]));
-      let message = own(messages, name);
+      const entry = own(messages, name);
+      let message = typeof entry === 'string' ? entry : own(entry, 'message');
+      const placeholders = own(entry, 'placeholders');
       if (typeof message !== 'string') message = predefined()[name];
       if (typeof message !== 'string') return '';
       const raw = values[1];
@@ -359,12 +373,7 @@
       } else if (raw !== null && raw !== undefined) {
         substitutions = [I.String(raw)];
       }
-      if (own(values[2], 'escapeLt') === true) {
-        let escaped = '';
-        for (let i = 0; i < message.length; i++) escaped += message[i] === '<' ? '&lt;' : message[i];
-        message = escaped;
-      }
-      return substitute(message, substitutions);
+      return substitute(message, substitutions, placeholders, own(values[2], 'escapeLt') === true);
     }
 
     const checkConnectInfo = (name, signature, info) => {

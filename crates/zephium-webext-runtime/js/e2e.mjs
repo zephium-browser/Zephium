@@ -148,6 +148,8 @@ test('real storage callbacks, promises, changes and lastError scope', { timeout:
     resolve();
   }));
   assert.equal(error, 'This is a read-only store.');
+  assert.equal(background.chrome.runtime.lastError.message, error);
+  await flush();
   assert.equal(background.chrome.runtime.lastError, undefined);
   await assert.rejects(background.chrome.storage.managed.set({ refused: true }), { message: error });
   assert.deepEqual(plain(await background.chrome.storage.managed.get(null)), {});
@@ -206,6 +208,8 @@ test('real messaging service handles sync, callback, promise and refusal respons
     resolve();
   }));
   assert.equal(callbackError, 'The message port closed before a response was received.');
+  assert.equal(content.chrome.runtime.lastError.message, callbackError);
+  await flush();
   assert.equal(content.chrome.runtime.lastError, undefined);
   const pending = content.chrome.runtime.sendMessage({ mode: 'pending' });
   const rejected = assert.rejects(pending, /A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received/);

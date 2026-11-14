@@ -605,6 +605,12 @@ impl FakeBrowser {
                     properties.pinned,
                     properties.muted,
                 )?;
+                if properties
+                    .pinned
+                    .is_some_and(|pinned| pinned != old.tab.pinned())
+                {
+                    self.position_tab(tab_id, 0)?;
+                }
                 let index = self.tab_index(tab_id)?;
                 if let Some(value) = properties.auto_discardable {
                     self.snapshot.tabs[index].auto_discardable = value;

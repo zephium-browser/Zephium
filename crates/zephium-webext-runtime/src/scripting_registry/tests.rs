@@ -235,6 +235,126 @@ fn failed_native_commit_and_failed_resource_validation_preserve_registry() {
 }
 
 #[test]
+fn registered_projection_omits_empty_lists_without_changing_durable_snapshots() {
+    let mut dispatcher = dispatcher();
+    let mut host = Host::default();
+    let sender = background_sender();
+    call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        true,
+        "scripting.registerContentScripts",
+        json!([[registration("probe")]]),
+    )
+    .unwrap();
+    let registered = call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        true,
+        "scripting.getRegisteredContentScripts",
+        json!([]),
+    )
+    .unwrap();
+    assert_eq!(
+        registered,
+        json!([{
+            "id": "probe", "matches": ["https://example.com/*"], "js": ["content.js"],
+            "allFrames": false, "matchOriginAsFallback": false, "persistAcrossSessions": true,
+            "runAt": "document_idle", "world": "ISOLATED"
+        }])
+    );
+    let snapshot = serde_json::to_value(host.registry.snapshot()).unwrap();
+    assert_eq!(snapshot[0]["css"], json!([]));
+    assert_eq!(snapshot[0]["excludeMatches"], json!([]));
+
+    call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        true,
+        "scripting.updateContentScripts",
+        json!([[{"id": "probe", "js": [], "css": ["content.css"], "excludeMatches": ["https://example.com/private/*"]}]]),
+    )
+    .unwrap();
+    let registered = call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        true,
+        "scripting.getRegisteredContentScripts",
+        json!([]),
+    )
+    .unwrap();
+    assert!(registered[0].get("js").is_none());
+    assert_eq!(registered[0]["css"], json!(["content.css"]));
+    assert_eq!(
+        registered[0]["excludeMatches"],
+        json!(["https://example.com/private/*"])
+    );
+}
+
+#[test]
+fn duplicate_and_missing_registration_errors_name_the_id_and_preserve_atomicity() {
+    let mut dispatcher = dispatcher();
+    let mut host = Host::default();
+    let sender = background_sender();
+    call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        true,
+        "scripting.registerContentScripts",
+        json!([[registration("probe")]]),
+    )
+    .unwrap();
+    let before = host.registry.snapshot();
+    for (method, args, message) in [
+        (
+            "scripting.registerContentScripts",
+            json!([[registration("other"), registration("probe")]]),
+            "Duplicate script ID 'probe'",
+        ),
+        (
+            "scripting.updateContentScripts",
+            json!([[{"id": "probe", "world": "MAIN"}, {"id": "probe", "world": "ISOLATED"}]]),
+            "Duplicate script ID 'probe'",
+        ),
+        (
+            "scripting.updateContentScripts",
+            json!([[{"id": "probe", "world": "MAIN"}, {"id": "missing", "js": ["content.js"]}]]),
+            "Script with ID 'missing' does not exist or is not fully registered",
+        ),
+        (
+            "scripting.unregisterContentScripts",
+            json!([{"ids": ["probe", "missing"]}]),
+            "Script with ID 'missing' does not exist or is not fully registered",
+        ),
+    ] {
+        assert_eq!(
+            call(&mut dispatcher, &mut host, &sender, true, method, args),
+            Err(message.into())
+        );
+        assert_eq!(host.registry.snapshot(), before);
+        assert_eq!(host.commits, 1);
+    }
+    assert_eq!(
+        call(
+            &mut dispatcher,
+            &mut host,
+            &sender,
+            true,
+            "scripting.updateContentScripts",
+            json!([[{"id": "x".repeat(257)}]]),
+        ),
+        Err(ApiError::malformed_arguments().message().into())
+    );
+    assert_eq!(host.registry.snapshot(), before);
+    assert_eq!(host.commits, 1);
+}
+
+#[test]
 fn static_glob_metadata_consumes_the_shared_registry_budget() {
     let glob = "?".repeat(crate::pattern::MAX_GLOB_BYTES);
     let globs = vec![glob; crate::pattern::MAX_GLOBS_PER_SCRIPT];
