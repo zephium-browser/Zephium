@@ -13,7 +13,7 @@ fn tab(id: u128, url: &str, loading: bool) -> ExtensionBrowserTab {
         loading,
         false,
     )
-        .expect("tab")
+    .expect("tab")
 }
 
 fn surface(
