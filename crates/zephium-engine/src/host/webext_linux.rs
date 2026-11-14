@@ -346,6 +346,7 @@ struct Install {
 
 struct ProfileEntry {
     runtime: ProfileRuntime,
+    context: webkit2gtk::WebContext,
     side: Rc<EngineSide>,
     installs: HashMap<ExtensionInstallId, Install>,
     tabs: HashMap<ItemId, BridgeViewId>,
@@ -533,22 +534,27 @@ impl LinuxExtensions {
 
     /// Sets up the profile's runtime on its new context, before any view of
     /// it loads. Private profiles get none.
+    /// Starts the profile's runtime on a context that has no WebView yet:
+    /// WebKit refuses sandbox paths once the context has a Web process. A
+    /// runtime left on a context whose construction failed moves to this one.
     pub(super) fn prepare_context(
         &mut self,
         partition: Partition,
-        view: &wry::WebView,
+        context: &webkit2gtk::WebContext,
         profile_directory: Option<&Path>,
         sink: &Sink,
     ) {
-        use wry::WebViewExtUnix;
         let profile = partition.profile();
-        if self.profiles.contains_key(&profile) || self.failed.contains_key(&profile) {
+        if let Some(entry) = self.profiles.get(&profile) {
+            if entry.context == *context {
+                return;
+            }
+            self.retire_profile(profile);
+        }
+        if self.failed.contains_key(&profile) {
             return;
         }
-        let Some(context) = view.webview().context() else {
-            return;
-        };
-        self.create_runtime(partition, &context, profile_directory, sink);
+        self.create_runtime(partition, context, profile_directory, sink);
         for work in self.queued.remove(&profile).unwrap_or_default() {
             match work {
                 Queued::Load(load) => self.load(profile, load, sink),
@@ -637,6 +643,7 @@ impl LinuxExtensions {
                     profile,
                     ProfileEntry {
                         runtime,
+                        context: context.clone(),
                         side,
                         installs: HashMap::new(),
                         tabs: HashMap::new(),

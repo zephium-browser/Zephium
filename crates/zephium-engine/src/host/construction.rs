@@ -979,6 +979,17 @@ impl EngineHost {
                     self.linux_unverifiable_data_managers.insert(profile);
                     return None;
                 };
+                // Extensions configure the context before its first WebView.
+                #[cfg(target_os = "linux")]
+                {
+                    let sink = self.sink.clone();
+                    self.webext_linux.prepare_context(
+                        partition,
+                        context.webkit_context(),
+                        expected_directory.as_deref(),
+                        &sink,
+                    );
+                }
                 WebViewBuilder::new_with_web_context(context)
             } else {
                 let Some(context) = self.web_contexts.get_mut(&profile) else {
@@ -2480,13 +2491,6 @@ impl EngineHost {
         // before the first load, which the browser itself asked for.
         #[cfg(target_os = "linux")]
         {
-            let sink = self.sink.clone();
-            self.webext_linux.prepare_context(
-                partition,
-                &view,
-                expected_website_data_directory.as_deref(),
-                &sink,
-            );
             self.webext_linux.attach_tab(partition, id.get(), &view);
             self.webext_linux
                 .authorize_navigation(partition.profile(), id.get(), url);
