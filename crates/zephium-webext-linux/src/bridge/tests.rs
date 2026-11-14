@@ -50,6 +50,7 @@ fn admission(install: ExtensionInstallId, id: &str) -> InstallAdmission {
         generation: ExtensionRuntimeGeneration::INITIAL,
         allowed_in_incognito: false,
         externally_connectable: None,
+        unpacked: false,
     }
 }
 
