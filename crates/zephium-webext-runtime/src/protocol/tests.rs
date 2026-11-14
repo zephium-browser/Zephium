@@ -388,6 +388,10 @@ fn malformed_internal_reports_never_reach_the_host() {
         ("zephium.workerLifecycle", json!(["running", null])),
         (
             "zephium.workerLifecycle",
+            json!(["installed", "unexpected"]),
+        ),
+        (
+            "zephium.workerLifecycle",
             json!(["activated", "unexpected"]),
         ),
         (
@@ -442,6 +446,17 @@ fn lifecycle_success_commits_registrations_and_stale_worker_cannot_revive_itself
             None,
         )
         .unwrap();
+    assert!(session
+        .observe(
+            &background,
+            WorkerLifecycle::Installed,
+            &mut lifecycle,
+            &mut events,
+            &clock,
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(lifecycle.state(install()), Some(BackgroundState::Starting));
     session
         .observe(
             &background,

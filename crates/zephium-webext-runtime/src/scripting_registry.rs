@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zephium_webext::manifest::{normalize_resource, ContentScript, Manifest, RunAt, World};
 
-use crate::dispatch::{ApiTable, RegistrationError};
+use crate::dispatch::{ApiTable, Handled, Invocation, RegistrationError};
 use crate::pattern::{ContentScriptMatcher, FrameDocument, MatchOptions};
 use crate::{ApiError, Sender};
 
@@ -429,6 +429,22 @@ fn prepare(
 
 /// Adapter access to the authenticated install's registry and package.
 pub trait ScriptingHost {
+    /// Handles a registration call; adapters may defer durable commits.
+    fn scripting_request(&mut self, invocation: Invocation<'_>) -> Handled {
+        let result = prepare_registration(
+            self,
+            invocation.sender(),
+            invocation.name(),
+            invocation.args(),
+        )
+        .and_then(|(value, candidate)| {
+            if let Some(candidate) = candidate {
+                self.commit_script_registry(invocation.sender(), candidate)?;
+            }
+            Ok(value)
+        });
+        invocation.reply(result)
+    }
     /// Returns the registry belonging to this sender's profile and install.
     fn script_registry(&self, sender: &Sender) -> Result<&ScriptRegistry, ApiError>;
     /// Validates a package file, including JavaScript syntax, before registration.
@@ -464,6 +480,57 @@ fn filter(args: &[Value]) -> Result<Option<Vec<String>>, ApiError> {
         .transpose()
 }
 
+/// Validates a call against the current registry without adopting its mutation.
+/// A deferred adapter must serialize calls until each durable commit settles.
+pub fn prepare_registration<S: ScriptingHost + ?Sized>(
+    host: &S,
+    sender: &Sender,
+    name: &str,
+    args: &[Value],
+) -> Result<(Value, Option<ScriptRegistry>), ApiError> {
+    let mut candidate = host.script_registry(sender)?.clone();
+    match name {
+        "scripting.registerContentScripts" => candidate.register(
+            serde_json::from_value(
+                args.first()
+                    .cloned()
+                    .ok_or_else(ApiError::malformed_arguments)?,
+            )
+            .map_err(|_| ApiError::malformed_arguments())?,
+            |path, kind| host.validate_script_resource(sender, path, kind),
+        )?,
+        "scripting.updateContentScripts" => candidate.update(
+            args.first()
+                .and_then(Value::as_array)
+                .ok_or_else(ApiError::malformed_arguments)?,
+            |path, kind| host.validate_script_resource(sender, path, kind),
+        )?,
+        "scripting.unregisterContentScripts" => candidate.unregister(filter(args)?.as_deref())?,
+        "scripting.getRegisteredContentScripts" => {
+            let mut scripts =
+                serde_json::to_value(candidate.get_registered(filter(args)?.as_deref()))
+                    .map_err(|_| ApiError::malformed_arguments())?;
+            for script in scripts.as_array_mut().into_iter().flatten() {
+                let object = script
+                    .as_object_mut()
+                    .ok_or_else(ApiError::malformed_arguments)?;
+                for name in ["css", "excludeMatches", "js"] {
+                    if object
+                        .get(name)
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    {
+                        object.remove(name);
+                    }
+                }
+            }
+            return Ok((scripts, None));
+        }
+        _ => return Err(ApiError::unknown_method()),
+    }
+    Ok((Value::Null, Some(candidate)))
+}
+
 /// Registers the four dynamic content-script methods.
 pub fn register<S: ScriptingHost + 'static>(
     table: &mut ApiTable<S>,
@@ -475,51 +542,7 @@ pub fn register<S: ScriptingHost + 'static>(
         "scripting.getRegisteredContentScripts",
     ] {
         table.register_generated(name, |host: &mut S, invocation| {
-            let result = (|| {
-                let sender = invocation.sender();
-                let mut candidate = host.script_registry(sender)?.clone();
-                let args = invocation.args();
-                match invocation.name() {
-                    "scripting.registerContentScripts" => candidate.register(
-                        serde_json::from_value(args[0].clone())
-                            .map_err(|_| ApiError::malformed_arguments())?,
-                        |path, kind| host.validate_script_resource(sender, path, kind),
-                    )?,
-                    "scripting.updateContentScripts" => candidate.update(
-                        args[0]
-                            .as_array()
-                            .ok_or_else(ApiError::malformed_arguments)?,
-                        |path, kind| host.validate_script_resource(sender, path, kind),
-                    )?,
-                    "scripting.unregisterContentScripts" => {
-                        candidate.unregister(filter(args)?.as_deref())?
-                    }
-                    _ => {
-                        let mut scripts = serde_json::to_value(
-                            candidate.get_registered(filter(args)?.as_deref()),
-                        )
-                        .map_err(|_| ApiError::malformed_arguments())?;
-                        for script in scripts.as_array_mut().into_iter().flatten() {
-                            let object = script
-                                .as_object_mut()
-                                .ok_or_else(ApiError::malformed_arguments)?;
-                            for name in ["css", "excludeMatches", "js"] {
-                                if object
-                                    .get(name)
-                                    .and_then(Value::as_array)
-                                    .is_some_and(Vec::is_empty)
-                                {
-                                    object.remove(name);
-                                }
-                            }
-                        }
-                        return Ok(scripts);
-                    }
-                }
-                host.commit_script_registry(sender, candidate)?;
-                Ok(Value::Null)
-            })();
-            invocation.reply(result)
+            host.scripting_request(invocation)
         })?;
     }
     Ok(())

@@ -7881,7 +7881,6 @@ dependencies = [
 name = "zephium-webext-linux"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "gio",
  "glib",
  "gtk",

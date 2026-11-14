@@ -134,6 +134,7 @@ pub(crate) struct Admitted {
     pub listeners: Option<Vec<u8>>,
     pub alarms: Option<Vec<u8>>,
     pub imports: Option<Vec<u8>>,
+    pub scripts: std::io::Result<Option<Vec<u8>>>,
 }
 
 struct Live {
@@ -141,6 +142,8 @@ struct Live {
     sender: Option<Sender>,
     booted: bool,
     activated: bool,
+    installed: bool,
+    installing: Option<Responder>,
     delivering: Option<EventSeq>,
     direct: HashSet<u64>,
     started_at: u64,
@@ -164,11 +167,25 @@ enum Offscreen {
     Open,
 }
 
+struct ScriptCall {
+    responder: Responder,
+    sender: Box<Sender>,
+    name: &'static str,
+    args: Vec<Value>,
+}
+
+struct PendingScripts {
+    ticket: u64,
+    responder: Responder,
+    candidate: ScriptRegistry,
+}
+
 pub(crate) struct InstallState {
     extension_id: ExtensionId,
     manifest: Value,
     root: PathBuf,
     background: Option<BackgroundScript>,
+    worker_surface: String,
     messages: Messages,
     catalog: Value,
     granted: Vec<String>,
@@ -178,6 +195,8 @@ pub(crate) struct InstallState {
     queue: EventQueue,
     alarms: Alarms,
     scripts: ScriptRegistry,
+    script_calls: VecDeque<ScriptCall>,
+    script_pending: Option<PendingScripts>,
     fresh: bool,
     live: Option<Live>,
     parked: Vec<Parked>,
@@ -217,6 +236,7 @@ impl InstallState {
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    Scripts(ScriptCall),
     Storage {
         responder: Responder,
         sender: Box<Sender>,
@@ -244,6 +264,10 @@ enum Work {
     Lifecycle {
         sender: Box<Sender>,
         report: WorkerLifecycle,
+    },
+    Installed {
+        sender: Box<Sender>,
+        responder: Responder,
     },
     WorkerError {
         sender: Box<Sender>,
@@ -427,6 +451,20 @@ impl I18nHost for State {
 }
 
 impl ScriptingHost for State {
+    fn scripting_request(&mut self, mut invocation: Invocation<'_>) -> Handled {
+        let sender = Box::new(invocation.sender().clone());
+        let name = invocation.name();
+        let args = invocation.take_args();
+        self.defer(invocation, |responder| {
+            Work::Scripts(ScriptCall {
+                responder,
+                sender,
+                name,
+                args,
+            })
+        })
+    }
+
     fn script_registry(&self, sender: &Sender) -> Result<&ScriptRegistry, ApiError> {
         self.installs
             .get(&sender.install())
@@ -496,6 +534,11 @@ impl ProtocolHost for State {
                     "colno": error.column,
                 }),
             }),
+            ProtocolRequest::WorkerLifecycle(WorkerLifecycle::Installed) => {
+                let (deferred, responder) = invocation.defer();
+                self.work.push(Work::Installed { sender, responder });
+                return deferred;
+            }
             ProtocolRequest::WorkerLifecycle(report) => {
                 self.work.push(Work::Lifecycle { sender, report });
             }
@@ -810,6 +853,7 @@ pub struct RuntimeHost {
     storage: StorageExecutor,
     tickets: HashMap<u64, (Responder, Box<Sender>)>,
     next_ticket: u64,
+    retired_script_writes: HashMap<ExtensionInstallId, u64>,
     sends: HashMap<u64, (MessageId, Responder)>,
     awaiting: HashMap<u64, ContextKey>,
     ops: VecDeque<NativeOp>,
@@ -1135,6 +1179,7 @@ impl RuntimeHost {
             storage,
             tickets: HashMap::new(),
             next_ticket: 0,
+            retired_script_writes: HashMap::new(),
             sends: HashMap::new(),
             awaiting: HashMap::new(),
             ops: VecDeque::new(),
@@ -1242,6 +1287,15 @@ impl RuntimeHost {
 
     // ---- installs -------------------------------------------------------
 
+    pub(crate) fn has_pending_script_writes(&self, install: ExtensionInstallId) -> bool {
+        self.retired_script_writes.contains_key(&install)
+            || self
+                .state
+                .installs
+                .get(&install)
+                .is_some_and(|state| state.script_pending.is_some())
+    }
+
     pub(crate) fn admit(&mut self, admitted: Admitted, activation: &Activation, out: &mut Outbox) {
         let now = self.tick_clock();
         let install = admitted.install;
@@ -1249,6 +1303,11 @@ impl RuntimeHost {
         let unlimited = admitted.permissions.has_api("unlimitedStorage");
         let clipboard = admitted.permissions.has_api("clipboardRead")
             || admitted.permissions.has_api("clipboardWrite");
+        let worker_surface = admitted
+            .background
+            .as_ref()
+            .map(|_| zephium_webext_runtime::js::background_surface(&admitted.manifest))
+            .unwrap_or_default();
         let scripts = ScriptRegistry::from_manifest(&admitted.manifest, |path, _| {
             zephium_webext::manifest::normalize_resource(path)
                 .filter(|path| admitted.root.join(path).is_file())
@@ -1262,6 +1321,7 @@ impl RuntimeHost {
             manifest: admitted.manifest.raw().clone(),
             root: admitted.root,
             background: admitted.background,
+            worker_surface,
             messages: admitted.messages,
             granted,
             unlimited,
@@ -1270,6 +1330,8 @@ impl RuntimeHost {
             queue: EventQueue::new(install),
             alarms: Alarms::new(),
             scripts,
+            script_calls: VecDeque::new(),
+            script_pending: None,
             fresh: matches!(
                 activation,
                 Activation::Installed | Activation::Updated { .. }
@@ -1287,7 +1349,30 @@ impl RuntimeHost {
             importing: Vec::new(),
         };
         let fresh_install = matches!(activation, Activation::Installed);
+        let mut script_restore_failed = false;
         if !fresh_install {
+            script_restore_failed = admitted.scripts.is_err();
+            if let Ok(Some(bytes)) = admitted.scripts.as_ref() {
+                let restored = serde_json::from_slice(bytes)
+                    .map_err(|_| ApiError::malformed_arguments())
+                    .and_then(|scripts| {
+                        state.scripts.restore(scripts, |path, _| {
+                            zephium_webext::manifest::normalize_resource(path)
+                                .filter(|path| !path.starts_with('_'))
+                                .filter(|path| {
+                                    std::fs::symlink_metadata(state.root.join(path))
+                                        .is_ok_and(|meta| meta.is_file())
+                                })
+                                .map(|_| ())
+                                .ok_or_else(|| {
+                                    ApiError::other("Registered script resource is unavailable.")
+                                })
+                        })
+                    });
+                if restored.is_err() {
+                    script_restore_failed = true;
+                }
+            }
             if let Some(bytes) = admitted.listeners.as_deref() {
                 if let Ok(snapshot) = ListenerSnapshot::decode(bytes) {
                     let _ = self.state.registry.restore(install, snapshot);
@@ -1336,6 +1421,15 @@ impl RuntimeHost {
         };
         let has_background = state.background.is_some();
         self.state.installs.insert(install, state);
+        if script_restore_failed {
+            self.record_error(
+                install,
+                ExtensionErrorKind::Startup,
+                ContextKind::Background,
+                "Persisted script registrations could not be restored.".into(),
+                Value::Null,
+            );
+        }
         if let (Some((installed, start)), true) = (reason, has_background) {
             self.enqueue(
                 install,
@@ -1391,6 +1485,9 @@ impl RuntimeHost {
         let Some(state) = self.state.installs.remove(&install) else {
             return;
         };
+        if let Some(pending) = &state.script_pending {
+            self.retired_script_writes.insert(install, pending.ticket);
+        }
         let contexts: Vec<ContextKey> = self
             .router
             .contexts
@@ -1648,6 +1745,28 @@ impl RuntimeHost {
         self.tick_clock();
         for done in done {
             match done {
+                Done::Scripts { ticket, result } => {
+                    self.retired_script_writes
+                        .retain(|_, pending| *pending != ticket);
+                    let install = self.state.installs.iter().find_map(|(id, state)| {
+                        state
+                            .script_pending
+                            .as_ref()
+                            .filter(|pending| pending.ticket == ticket)
+                            .map(|_| *id)
+                    });
+                    if let Some(install) = install {
+                        if let Some(state) = self.state.installs.get_mut(&install) {
+                            if let Some(pending) = state.script_pending.take() {
+                                if result.is_ok() {
+                                    state.scripts = pending.candidate;
+                                }
+                                self.settle(pending.responder, result.map(|()| Value::Null), out);
+                            }
+                        }
+                        self.process_script_calls(install, out);
+                    }
+                }
                 Done::Call {
                     ticket,
                     result,
@@ -1675,6 +1794,77 @@ impl RuntimeHost {
             }
         }
         self.settle_blockers(out);
+    }
+
+    fn process_script_calls(&mut self, install: ExtensionInstallId, out: &mut Outbox) {
+        loop {
+            let Some(state) = self.state.installs.get_mut(&install) else {
+                return;
+            };
+            if state.script_pending.is_some() {
+                return;
+            }
+            let Some(call) = state.script_calls.pop_front() else {
+                return;
+            };
+            let prepared = zephium_webext_runtime::scripting_registry::prepare_registration(
+                &self.state,
+                &call.sender,
+                call.name,
+                &call.args,
+            );
+            let (value, candidate) = match prepared {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    self.settle(call.responder, Err(error), out);
+                    continue;
+                }
+            };
+            let Some(candidate) = candidate else {
+                self.settle(call.responder, Ok(value), out);
+                continue;
+            };
+            let state = self
+                .state
+                .installs
+                .get_mut(&install)
+                .expect("admitted install");
+            if let Some(directory) = &state.state_directory {
+                let bytes = match serde_json::to_vec(&candidate.snapshot()) {
+                    Ok(bytes) if bytes.len() as u64 <= super::storage::MAX_STATE_FILE_BYTES => {
+                        bytes
+                    }
+                    _ => {
+                        self.settle(call.responder, Err(ApiError::too_many_pending()), out);
+                        continue;
+                    }
+                };
+                self.next_ticket += 1;
+                let ticket = self.next_ticket;
+                if self.storage.submit(Job::CommitScripts {
+                    ticket,
+                    path: directory.join("scripts.json"),
+                    bytes,
+                }) {
+                    state.script_pending = Some(PendingScripts {
+                        ticket,
+                        responder: call.responder,
+                        candidate,
+                    });
+                    return;
+                }
+                self.settle(
+                    call.responder,
+                    Err(ApiError::other(
+                        "Extension script registrations could not be saved.",
+                    )),
+                    out,
+                );
+            } else {
+                state.scripts = candidate;
+                self.settle(call.responder, Ok(value), out);
+            }
+        }
     }
 
     // ---- queries ---------------------------------------------------------
@@ -1815,12 +2005,15 @@ impl RuntimeHost {
             state.fresh,
             &state.installed_scripts,
             state.unlimited,
+            &state.worker_surface,
         );
         state.live = Some(Live {
             generation,
             sender: None,
             booted: false,
             activated: false,
+            installed: false,
+            installing: None,
             delivering: None,
             direct: HashSet::new(),
             started_at: now_real,
@@ -1859,6 +2052,7 @@ impl RuntimeHost {
         {
             live.sender = None;
             live.activated = false;
+            live.installing = None;
             live.delivering = None;
             live.direct.clear();
         }
@@ -2404,6 +2598,15 @@ impl RuntimeHost {
 
     fn work(&mut self, work: Work, out: &mut Outbox) {
         match work {
+            Work::Scripts(call) => {
+                let install = call.sender.install();
+                if let Some(state) = self.state.installs.get_mut(&install) {
+                    state.script_calls.push_back(call);
+                    self.process_script_calls(install, out);
+                } else {
+                    self.settle(call.responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
             Work::Storage {
                 responder,
                 sender,
@@ -2463,6 +2666,7 @@ impl RuntimeHost {
                 }
             }
             Work::Lifecycle { sender, report } => self.worker_lifecycle(&sender, report, out),
+            Work::Installed { sender, responder } => self.worker_installed(&sender, responder, out),
             Work::Booted { sender } => {
                 if let Some(live) = self.live_for(&sender) {
                     live.booted = true;
@@ -2629,6 +2833,51 @@ impl RuntimeHost {
             })
     }
 
+    fn worker_installed(&mut self, sender: &Sender, responder: Responder, out: &mut Outbox) {
+        let install = sender.install();
+        if self.live_for(sender).is_none()
+            || self.lifecycle.state(install) != Some(BackgroundState::Starting)
+        {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        let Some(state) = self.state.installs.get_mut(&install) else {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        };
+        let Some(live) = state.live.as_mut() else {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        };
+        if !state.fresh || live.installed {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        live.installed = true;
+        if state.queue.next_name() != Some("runtime.onInstalled") {
+            self.settle(responder, Ok(Value::Null), out);
+            return;
+        }
+        let event = state.queue.deliver(sender).ok().flatten();
+        let delivery = event.as_ref().and_then(|event| {
+            frame(
+                ContextKind::Background,
+                &Envelope::Event {
+                    seq: event.sequence,
+                    name: ApiName::parse(&event.name)?,
+                    args: &event.arguments,
+                },
+            )
+        });
+        let (Some(event), Some(delivery)) = (event, delivery) else {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        };
+        live.delivering = Some(event.sequence);
+        live.installing = Some(responder);
+        out.deliver(sender.context_key(), delivery);
+    }
+
     fn worker_lifecycle(&mut self, sender: &Sender, report: WorkerLifecycle, out: &mut Outbox) {
         let install = sender.install();
         if self.live_for(sender).is_none() {
@@ -2638,6 +2887,7 @@ impl RuntimeHost {
             return;
         };
         match report {
+            WorkerLifecycle::Installed => {}
             WorkerLifecycle::Activated => {
                 let _ = self.state.registry.finish_registration(sender);
                 self.state.work.push(Work::PersistListeners(install));
@@ -2699,13 +2949,18 @@ impl RuntimeHost {
             return;
         };
         let generation = live.generation;
+        let mut installing = None;
         let finished = if live.delivering == Some(seq) && state.queue.acknowledge(sender, seq) {
             live.delivering = None;
+            installing = live.installing.take();
             true
         } else {
             live.direct.remove(&seq.get())
         };
         if finished {
+            if let Some(responder) = installing {
+                self.settle(responder, Ok(Value::Null), out);
+            }
             self.observe(
                 Observation::EventFinished {
                     install,
@@ -2733,6 +2988,9 @@ impl RuntimeHost {
         self.awaiting.retain(|_, waiting| waiting != context);
         self.state.registry.cancel_context(context);
         if let Some(state) = self.state.installs.get_mut(&context.install()) {
+            state
+                .script_calls
+                .retain(|call| call.responder.context() != context);
             state.queue.cancel_context(context);
             if let Some(live) = state.live.as_mut() {
                 if live
@@ -2742,6 +3000,7 @@ impl RuntimeHost {
                 {
                     live.sender = None;
                     live.delivering = None;
+                    live.installing = None;
                     live.direct.clear();
                 }
             }
@@ -2807,6 +3066,38 @@ impl RuntimeHost {
 }
 
 impl Runtime for RuntimeHost {
+    fn transport_unavailable(
+        &mut self,
+        _view: crate::bridge::BridgeViewId,
+        owner: ViewRef,
+        reason: crate::bridge::UnavailableReason,
+    ) {
+        let (installs, context) = match owner {
+            ViewRef::Extension { install, kind } => (
+                vec![install],
+                match kind {
+                    ViewKind::Background => ContextKind::Background,
+                    ViewKind::Popup => ContextKind::Popup,
+                    ViewKind::Options => ContextKind::Options,
+                    ViewKind::Offscreen => ContextKind::Offscreen,
+                },
+            ),
+            ViewRef::Tab(_) => (
+                self.state.installs.keys().copied().collect(),
+                ContextKind::ContentScript,
+            ),
+        };
+        for install in installs {
+            self.record_error(
+                install,
+                ExtensionErrorKind::Startup,
+                context,
+                reason.to_string(),
+                Value::Null,
+            );
+        }
+    }
+
     fn receive(&mut self, sender: &Sender, envelope: &[u8], out: &mut Outbox) {
         let now = self.tick_clock();
         let _ = now;

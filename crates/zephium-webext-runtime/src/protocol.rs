@@ -36,6 +36,8 @@ pub struct WorkerError {
 /// Background first-task evaluation outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerLifecycle {
+    /// Install promises completed; accept only after delivering `onInstalled`.
+    Installed,
     /// Evaluation and install/activate promises completed successfully.
     Activated,
     /// Evaluation or a lifecycle promise failed.
@@ -232,6 +234,7 @@ fn parse_request(name: &str, args: &[Value]) -> Result<ProtocolRequest, ApiError
                 Some(bounded_text(detail, 1024)?.to_owned())
             };
             Ok(ProtocolRequest::WorkerLifecycle(match state.as_str() {
+                Some("installed") if detail.is_none() => WorkerLifecycle::Installed,
                 Some("activated") if detail.is_none() => WorkerLifecycle::Activated,
                 Some("failed") => WorkerLifecycle::Failed(detail),
                 Some("timedOut") if detail.is_none() => WorkerLifecycle::TimedOut,
@@ -389,6 +392,7 @@ impl WorkerSession {
     ) -> Result<Vec<Command>, ApiError> {
         self.check(sender, lifecycle)?;
         let observation = match report {
+            WorkerLifecycle::Installed => return Ok(Vec::new()),
             WorkerLifecycle::Activated => {
                 if lifecycle.state(sender.install()) == Some(BackgroundState::Running) {
                     return Ok(Vec::new());

@@ -151,7 +151,7 @@ pub enum RuntimeError {
 impl std::fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Bridge(error) => write!(formatter, "bridge: {error:?}"),
+            Self::Bridge(error) => write!(formatter, "bridge: {error}"),
             Self::Scheme(error) => write!(formatter, "scheme: {error}"),
             Self::Setup(reason) => write!(formatter, "runtime setup: {reason}"),
             Self::PrivateState => formatter.write_str("private profiles keep no extension state"),
@@ -187,9 +187,6 @@ enum NativeEvent {
         install: ExtensionInstallId,
     },
 }
-
-/// A crashed view awaiting its blank process, and its load handler.
-type DeadView = (webkit2gtk::WebView, Option<glib::SignalHandlerId>);
 
 struct Record {
     extension_id: ExtensionId,
@@ -383,6 +380,7 @@ impl ProfileRuntime {
         spec: InstallSpec,
         previous_version: &str,
     ) -> Result<(), InstallError> {
+        self.inner.check_script_writes(spec.install)?;
         let _ = self.inner.deactivate(spec.install, false);
         self.inner.activate(
             spec,
@@ -838,7 +836,7 @@ impl Inner {
         );
         let attached =
             self.bridge
-                .attach_extension_view(install, ViewKind::Background, &view, &plan, false);
+                .attach_extension_view(install, ViewKind::Background, &view, &plan);
         let id = match attached {
             Ok(id) => id,
             Err(error) => {
@@ -904,9 +902,9 @@ impl Inner {
                 handlers: Vec::new(),
             },
         );
-        let Ok(id) =
-            self.bridge
-                .attach_extension_view(install, ViewKind::Offscreen, &view, &plan, false)
+        let Ok(id) = self
+            .bridge
+            .attach_extension_view(install, ViewKind::Offscreen, &view, &plan)
         else {
             self.drop_owned(install, ViewKindKey::Offscreen, None);
             return Err(());
@@ -952,49 +950,16 @@ impl Inner {
         }
     }
 
-    /// Drops a view whose process crashed. WebKit keeps the replies to
-    /// messages sent to it after the crash (the bridge's re-attachment and
-    /// detachment) pending, each holding the view, until the page has a
-    /// process again; so it gets a blank one first and is dropped once
-    /// that commits, or after a bound.
+    /// Drops a crashed view without starting another renderer.
     fn drop_dead(
         self: &Rc<Self>,
         install: ExtensionInstallId,
         key: ViewKindKey,
         generation: Option<u64>,
     ) {
-        let Some(owned) = self.take_owned(install, key, generation) else {
-            return;
-        };
-        let view = owned.view;
-        self.views.ended(install, &view);
-        let slot: Rc<RefCell<Option<DeadView>>> = Rc::new(RefCell::new(None));
-        let release = {
-            let slot = slot.clone();
-            move || {
-                if let Some((view, handler)) = slot.borrow_mut().take() {
-                    if let Some(handler) = handler {
-                        view.disconnect(handler);
-                    }
-                    view.terminate_web_process();
-                }
-            }
-        };
-        let committed = Rc::new(release);
-        let on_load = committed.clone();
-        let handler = view.connect_load_changed(move |_, event| {
-            if matches!(
-                event,
-                webkit2gtk::LoadEvent::Committed | webkit2gtk::LoadEvent::Finished
-            ) {
-                let release = on_load.clone();
-                glib::idle_add_local_once(move || release());
-            }
-        });
-        *slot.borrow_mut() = Some((view.clone(), Some(handler)));
-        let bound = committed.clone();
-        glib::timeout_add_local_once(Duration::from_secs(5), move || bound());
-        view.load_uri("about:blank");
+        if let Some(owned) = self.take_owned(install, key, generation) {
+            self.views.ended(install, &owned.view);
+        }
     }
 
     fn take_owned(
@@ -1040,6 +1005,19 @@ impl Inner {
         })
     }
 
+    fn check_script_writes(&self, install: ExtensionInstallId) -> Result<(), InstallError> {
+        let pending = self
+            .bridge
+            .with_runtime(|host, _| host.has_pending_script_writes(install))
+            .map_err(|_| InstallError::Admission("runtime busy".into()))?;
+        if pending {
+            return Err(InstallError::Admission(
+                "script registration is still being saved; retry after it settles".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn activate(
         self: &Rc<Self>,
         spec: InstallSpec,
@@ -1048,6 +1026,7 @@ impl Inner {
         if self.retired.get() {
             return Err(InstallError::Retired);
         }
+        self.check_script_writes(spec.install)?;
         let background =
             check_background(&spec.manifest, &spec.directory).map_err(InstallError::Refused)?;
         if self.records.borrow().contains_key(&spec.install) {
@@ -1112,6 +1091,9 @@ impl Inner {
             listeners: snapshot("listeners.json"),
             alarms: snapshot("alarms.json"),
             imports: snapshot("imports.json"),
+            scripts: state_directory.as_ref().map_or(Ok(None), |directory| {
+                storage::read_scripts(&directory.join("scripts.json"))
+            }),
             manifest: spec.manifest,
             root: spec.directory,
             background,
@@ -1202,7 +1184,7 @@ impl Inner {
         self.next_page.set(serial + 1);
         let id = self
             .bridge
-            .attach_extension_view(install, kind.view_kind(), &view, &plan, false)
+            .attach_extension_view(install, kind.view_kind(), &view, &plan)
             .map_err(|error| ViewError::Attach(format!("{error:?}")))?;
         self.views.pages.borrow_mut().push(PageEntry {
             install,

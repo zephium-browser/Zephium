@@ -47,6 +47,11 @@ pub(crate) enum Job {
         install: ExtensionInstallId,
         directory: Option<PathBuf>,
     },
+    CommitScripts {
+        ticket: u64,
+        path: PathBuf,
+        bytes: Vec<u8>,
+    },
     Write {
         path: PathBuf,
         bytes: Vec<u8>,
@@ -58,6 +63,10 @@ pub(crate) enum Job {
 
 #[derive(Debug)]
 pub(crate) enum Done {
+    Scripts {
+        ticket: u64,
+        result: Result<(), ApiError>,
+    },
     Call {
         ticket: u64,
         result: Result<Value, ApiError>,
@@ -188,6 +197,16 @@ fn run(inbox: &mpsc::Receiver<Job>, outbox: &mpsc::Sender<Done>, mut signal: &Un
                     message: "Extension storage could not be removed.",
                 })
             }
+            Job::CommitScripts {
+                ticket,
+                path,
+                bytes,
+            } => Some(Done::Scripts {
+                ticket,
+                result: write_atomic(&path, &bytes).map_err(|_| {
+                    ApiError::other("Extension script registrations could not be saved.")
+                }),
+            }),
             Job::Write { path, bytes } => write_atomic(&path, &bytes).err().map(|_| Done::Failed {
                 install: None,
                 message: "Extension state could not be saved.",
@@ -246,6 +265,7 @@ pub(crate) fn private_directory(path: &Path) -> std::io::Result<()> {
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or(ErrorKind::InvalidInput)?;
     private_directory(parent)?;
+    let directory = std::fs::File::open(parent)?;
     let temporary = path.with_extension("tmp");
     {
         let mut file = std::fs::OpenOptions::new()
@@ -258,7 +278,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.sync_all()?;
     }
     std::fs::rename(&temporary, path)?;
-    std::fs::File::open(parent)?.sync_all()
+    directory.sync_all()
 }
 
 /// Reads a small state file the runtime wrote earlier.
@@ -272,4 +292,68 @@ pub(crate) fn read_state(path: &Path) -> Option<Vec<u8>> {
         .read_to_end(&mut bytes)
         .ok()?;
     Some(bytes)
+}
+
+/// A missing registration snapshot is valid; unreadable or oversized state is not.
+pub(crate) fn read_scripts(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_STATE_FILE_BYTES {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_STATE_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_snapshot_read_distinguishes_missing_and_unreadable_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        assert!(read_scripts(&directory.path().join("missing.json"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            read_scripts(directory.path()).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"[]").unwrap();
+        assert!(read_scripts(&file.join("scripts.json")).is_err());
+        assert_eq!(read_scripts(&file).unwrap(), Some(b"[]".to_vec()));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = read_scripts(&file);
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(unreadable.unwrap_err().kind(), ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn script_snapshot_read_accepts_the_limit_and_refuses_oversized_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scripts.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_STATE_FILE_BYTES).unwrap();
+        assert_eq!(
+            read_scripts(&path).unwrap().unwrap().len() as u64,
+            MAX_STATE_FILE_BYTES
+        );
+        file.set_len(MAX_STATE_FILE_BYTES + 1).unwrap();
+        assert_eq!(
+            read_scripts(&path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
 }
