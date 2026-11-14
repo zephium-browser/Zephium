@@ -145,7 +145,23 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
             Permission("declarativeNetRequest"),
             Permission("declarativeNetRequestWithHostAccess"),
         ],
-        "Can't block, redirect or change requests with rules",
+        "Can't change response headers with rules",
+        LIN,
+    ),
+    (
+        &[
+            Permission("declarativeNetRequest"),
+            Permission("declarativeNetRequestWithHostAccess"),
+        ],
+        "Rules don't apply to WebSockets or service-worker requests",
+        LIN,
+    ),
+    (
+        &[
+            Permission("declarativeNetRequest"),
+            Permission("declarativeNetRequestWithHostAccess"),
+        ],
+        "Rules tell some request types apart less precisely on non-HTTPS sites",
         LIN,
     ),
     (
@@ -364,7 +380,9 @@ mod tests {
             assess(raw.clone(), Platform::Linux),
             [
                 "Can't change privacy settings",
-                "Can't block, redirect or change requests with rules",
+                "Can't change response headers with rules",
+                "Rules don't apply to WebSockets or service-worker requests",
+                "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Can't show notifications",
             ]
         );
