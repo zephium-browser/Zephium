@@ -27,6 +27,9 @@ const MAX_MEMORY_BYTES: usize = 1024 * 1024;
 const MAX_RUNTIME_BYTES: usize = 8 * MAX_MEMORY_BYTES;
 const MAX_RUNTIME_RESOURCES: usize = 128;
 const MAX_ACTIVE_STREAMS: usize = 128;
+const MAX_WORKER_WRAPPERS: usize = 4;
+/// The query of a background worker's start URL (`<script>?zephium-worker`).
+pub const WORKER_QUERY: &str = "zephium-worker";
 
 /// Facts from the engine's live view registry, never request headers or JS claims.
 #[derive(Clone, Debug)]
@@ -109,6 +112,7 @@ struct Install {
     war: Vec<WarEntry>,
     active: Arc<AtomicBool>,
     runtime: BTreeMap<String, MemoryResource>,
+    workers: BTreeMap<String, MemoryResource>,
 }
 
 thread_local! {
@@ -222,6 +226,7 @@ impl Scheme {
                 war,
                 active: Arc::new(AtomicBool::new(true)),
                 runtime: BTreeMap::new(),
+                workers: BTreeMap::new(),
             },
         );
         Ok(alias)
@@ -269,6 +274,31 @@ impl Scheme {
             return Err(SchemeError::InvalidResource);
         }
         entry.runtime.insert(path.as_str().to_owned(), resource);
+        Ok(())
+    }
+
+    /// Serves `resource` as `<path>?zephium-worker` to the install's own
+    /// views only: the start script of a background worker, kept in the
+    /// script's directory so relative URLs inside it resolve as in Chrome.
+    pub fn set_worker_wrapper(
+        &self,
+        install: ExtensionInstallId,
+        path: &str,
+        resource: MemoryResource,
+    ) -> Result<(), SchemeError> {
+        let path = ResourcePath::parse(path)?;
+        if path.is_reserved() || path.is_favicon() || path.as_str().is_empty() {
+            return Err(SchemeError::InvalidResource);
+        }
+        let mut installs = self.installs.borrow_mut();
+        let entry = installs
+            .get_mut(&install)
+            .ok_or(SchemeError::InvalidInstall)?;
+        if entry.workers.len() >= MAX_WORKER_WRAPPERS && !entry.workers.contains_key(path.as_str())
+        {
+            return Err(SchemeError::InvalidResource);
+        }
+        entry.workers.insert(path.as_str().to_owned(), resource);
         Ok(())
     }
 
@@ -345,7 +375,16 @@ impl Scheme {
             refuse(request, 503);
             return;
         }
-        let memory = if uri.resource().is_reserved() {
+        let query = raw_uri
+            .split_once('?')
+            .map(|(_, rest)| rest.split_once('#').map_or(rest, |(query, _)| query));
+        let wrapper = (query == Some(WORKER_QUERY)
+            && matches!(requester, Requester::ExtensionOwned { install: owner } if owner == install))
+        .then(|| entry.workers.get(uri.resource().as_str()).cloned())
+        .flatten();
+        let memory = if wrapper.is_some() {
+            wrapper
+        } else if uri.resource().is_reserved() {
             entry.runtime.get(uri.resource().as_str()).cloned()
         } else if uri.resource().is_favicon() {
             self.favicon
@@ -355,7 +394,7 @@ impl Scheme {
             None
         };
         let body: Result<(Box<dyn Read + Send>, u64, String), PackageError> =
-            if uri.resource().is_reserved() || uri.resource().is_favicon() {
+            if memory.is_some() || uri.resource().is_reserved() || uri.resource().is_favicon() {
                 memory
                     .map(|resource| {
                         let length = resource.bytes.len() as u64;
