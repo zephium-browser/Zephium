@@ -1991,6 +1991,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             about::about_info,
             renderer_settings::gpu_report,
             renderer_settings::renderer_preference_set,
+            renderer_settings::renderer_retry_faster,
             system_time::system_clock_24h,
             updates::update_status,
             updates::update_check,

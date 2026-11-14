@@ -129,6 +129,8 @@ pub struct GpuReport {
     pub selection: zephium_core::linux_graphics::RendererSelection,
     pub environment: Vec<GraphicsEnvironmentOverride>,
     pub restart_required: bool,
+    /// The person asked the next automatic start to try a held-back faster path again.
+    pub retry_requested: bool,
     pub startup_status: String,
     pub state_warnings: Vec<String>,
     pub text: String,

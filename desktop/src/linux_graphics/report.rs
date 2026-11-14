@@ -72,6 +72,11 @@ pub(super) fn render(report: &GpuReport) -> String {
         "Startup: {}; recovery used for this launch: {}; previous incomplete: {:?}",
         report.startup_status, recovery.fallback_steps, recovery.previous_incomplete_path
     );
+    let _ = writeln!(
+        text,
+        "Held after repeated failures: {:?}; retry requested: {}",
+        recovery.held_path, report.retry_requested
+    );
     if report.environment.is_empty() {
         text.push_str("Environment overrides: none\n");
     }

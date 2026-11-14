@@ -39,3 +39,17 @@ pub(crate) async fn renderer_preference_set(
         Err("GPU renderer selection is available on Linux only".into())
     }
 }
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn renderer_retry_faster(caller: WebviewWindow) -> Result<GpuReport, String> {
+    if !authorize(&caller, CallerPolicy::Main, "renderer_retry_faster") {
+        return Err("Renderer preferences are restricted to the main interface".into());
+    }
+    #[cfg(target_os = "linux")]
+    return tauri::async_runtime::spawn_blocking(crate::linux_graphics::retry_faster)
+        .await
+        .map_err(|_| "Renderer retry task failed".to_owned())?;
+    #[cfg(not(target_os = "linux"))]
+    Err("GPU renderer selection is available on Linux only".into())
+}

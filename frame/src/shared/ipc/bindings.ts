@@ -593,6 +593,7 @@ export const commands = {
 } | null>("about_info"),
 	gpuReport: () => typedError<GpuReport, string>(__TAURI_INVOKE("gpu_report")),
 	rendererPreferenceSet: (preference: RendererPreference) => typedError<GpuReport, string>(__TAURI_INVOKE("renderer_preference_set", { preference })),
+	rendererRetryFaster: () => typedError<GpuReport, string>(__TAURI_INVOKE("renderer_retry_faster")),
 	/**
 	 *  `None` where the system has no such setting to read: the page then keeps
 	 *  its language's own hour cycle.
@@ -1305,6 +1306,11 @@ export type ClosedTabView = {
 export type CrashRecovery = {
 	fallback_steps: number,
 	previous_incomplete_path: RendererPath | null,
+	/**
+	 *  The path Automatic keeps because a faster one failed to start twice with this
+	 *  graphics fingerprint, until the fingerprint changes or the person retries.
+	 */
+	held_path: RendererPath | null,
 };
 
 export type DefaultBrowserStatus = {
@@ -1654,6 +1660,8 @@ export type GpuReport = {
 	selection: RendererSelection,
 	environment: GraphicsEnvironmentOverride[],
 	restart_required: boolean,
+	/**  The person asked the next automatic start to try a held-back faster path again. */
+	retry_requested: boolean,
 	startup_status: string,
 	state_warnings: string[],
 	text: string,
@@ -3165,7 +3173,7 @@ export type SearchShortcut_Serialize = {
 	enabled: boolean,
 };
 
-export type SelectionSource = "environment" | "preference" | "policy" | "crash_recovery";
+export type SelectionSource = "environment" | "preference" | "policy" | "crash_recovery" | "repeated_failure";
 
 export type SessionType = "wayland" | "x11" | "unknown";
 

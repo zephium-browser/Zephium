@@ -365,6 +365,9 @@ pub const MAX_CRASH_FALLBACK_STEPS: u8 = 2;
 pub struct CrashRecovery {
     pub fallback_steps: u8,
     pub previous_incomplete_path: Option<RendererPath>,
+    /// The path Automatic keeps because a faster one failed to start twice with this
+    /// graphics fingerprint, until the fingerprint changes or the person retries.
+    pub held_path: Option<RendererPath>,
 }
 
 impl CrashRecovery {
@@ -375,6 +378,7 @@ impl CrashRecovery {
                 .saturating_add(1)
                 .min(MAX_CRASH_FALLBACK_STEPS),
             previous_incomplete_path: Some(path),
+            held_path: self.held_path,
         }
     }
 
@@ -398,6 +402,7 @@ pub enum SelectionSource {
     Preference,
     Policy,
     CrashRecovery,
+    RepeatedFailure,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -440,6 +445,17 @@ pub fn select_renderer(
     }
     if let Some(previous) = recovery.previous_incomplete_path {
         path = path.max(previous.step_down());
+    }
+    if let Some(held) = recovery
+        .held_path
+        .filter(|held| *held >= path && *held > policy_path)
+    {
+        return RendererSelection {
+            path: held,
+            source: SelectionSource::RepeatedFailure,
+            reason: format!("automatic startup failed twice with this graphics fingerprint; staying on {held:?} until the driver, WebKitGTK, session or GPU changes, or a retry is requested; policy: {policy_reason}"),
+            crash_recovery: recovery,
+        };
     }
     if recovery.fallback_steps > 0 || recovery.previous_incomplete_path.is_some() {
         RendererSelection {
@@ -921,11 +937,55 @@ mod tests {
         let malformed = CrashRecovery {
             fallback_steps: 255,
             previous_incomplete_path: None,
+            held_path: None,
         };
         assert_eq!(
             select(malformed).crash_recovery.fallback_steps,
             MAX_CRASH_FALLBACK_STEPS
         );
+    }
+
+    #[test]
+    fn a_held_path_outranks_policy_and_a_single_step_down() {
+        let target = context(DriverClass::Unknown);
+        let select = |recovery| {
+            select_renderer(
+                target,
+                RendererPreference::Automatic,
+                RendererOverrides::default(),
+                recovery,
+            )
+        };
+        let held = CrashRecovery {
+            held_path: Some(RendererPath::ForceShm),
+            ..CrashRecovery::default()
+        };
+        let selected = select(held);
+        assert_eq!(selected.path, RendererPath::ForceShm);
+        assert_eq!(selected.source, SelectionSource::RepeatedFailure);
+        // A further failure this launch steps below the held path as before.
+        let deeper = held.record_incomplete(RendererPath::ForceShm);
+        assert_eq!(deeper.held_path, Some(RendererPath::ForceShm));
+        let selected = select(deeper);
+        assert_eq!(selected.path, RendererPath::DisableDmabuf);
+        assert_eq!(selected.source, SelectionSource::CrashRecovery);
+        // A hold no stricter than policy is not reported as one.
+        let virgl = select_renderer(
+            context(DriverClass::VirtioVirgl),
+            RendererPreference::Automatic,
+            RendererOverrides::default(),
+            held,
+        );
+        assert_eq!(virgl.path, RendererPath::DisableDmabuf);
+        assert_eq!(virgl.source, SelectionSource::Policy);
+        // Explicit choices and environment overrides still win.
+        let chosen = select_renderer(
+            target,
+            RendererPreference::Gpu,
+            RendererOverrides::default(),
+            held,
+        );
+        assert_eq!(chosen.path, RendererPath::Default);
     }
 
     #[test]

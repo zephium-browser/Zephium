@@ -79,12 +79,13 @@ pub fn prepare() -> Option<ExitCode> {
     let mut warnings = Vec::new();
     let mut store = None;
     let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    let fingerprint = fingerprint(&detection);
     let snapshot = match state::resolve_config_directory(&context.config().identifier) {
         Ok(config) => {
             if report_only {
-                state::StateStore::read_existing(&config)
+                state::StateStore::read_existing(&config, &fingerprint)
             } else {
-                match state::StateStore::open_or_create(&config) {
+                match state::StateStore::open_or_create(&config, fingerprint) {
                     Ok(opened) => {
                         let snapshot = opened.snapshot();
                         store = Some(opened);
@@ -150,6 +151,7 @@ pub fn prepare() -> Option<ExitCode> {
         selection,
         environment,
         restart_required: false,
+        retry_requested: false,
         startup_status: if report_only {
             "report only; no launch recorded"
         } else {
@@ -169,6 +171,27 @@ pub fn prepare() -> Option<ExitCode> {
         initial_preference: preference,
     }));
     None
+}
+
+fn fingerprint(detection: &zephium_ipc::linux_graphics::Detection) -> state::Fingerprint {
+    let gl = detection.gl.as_ref();
+    let driver_version = gl
+        .and_then(|gl| gl.nvidia_version.as_deref().or(gl.mesa_version.as_deref()))
+        .or_else(|| {
+            detection
+                .kernel
+                .devices
+                .first()
+                .and_then(|device| device.driver_version.as_deref())
+        })
+        .unwrap_or("");
+    state::Fingerprint::of(&[
+        &format!("{:?}", detection.driver_class),
+        gl.and_then(|gl| gl.renderer.as_deref()).unwrap_or(""),
+        driver_version,
+        &detection.webkit_version,
+        &format!("{:?}", detection.session),
+    ])
 }
 
 fn version(value: &str) -> Option<GraphicsVersion> {
@@ -256,7 +279,29 @@ pub(crate) fn set_preference(preference: RendererPreference) -> Result<GpuReport
             .set_preference(preference)
             .map_err(|error| error.to_string())?;
         runtime.report.preference = preference;
+        // A chosen mode replaces any retry, which only Automatic can carry out.
+        runtime.report.retry_requested = false;
         runtime.report.restart_required = preference != runtime.initial_preference;
+    }
+    report()
+}
+
+/// "Try the faster mode again": the next automatic start ignores this
+/// fingerprint's repeated failures. Nothing changes until that start.
+pub(crate) fn retry_faster() -> Result<GpuReport, String> {
+    {
+        let mut runtime = RUNTIME
+            .get()
+            .ok_or("Graphics startup report is unavailable")?
+            .lock()
+            .map_err(|_| "Graphics startup state is unavailable")?;
+        let store = runtime
+            .store
+            .as_mut()
+            .ok_or("Renderer preferences are unavailable for this launch")?;
+        store.retry_faster().map_err(|error| error.to_string())?;
+        runtime.report.retry_requested = true;
+        runtime.report.restart_required = true;
     }
     report()
 }
