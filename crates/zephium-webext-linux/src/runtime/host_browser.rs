@@ -8,7 +8,7 @@ use zephium_core::extensions::ExtensionBrowserSurface;
 use zephium_core::ids::{ExtensionInstallId, ItemId};
 use zephium_webext_runtime::api::action::Activation as ActionActivation;
 use zephium_webext_runtime::api::{permissions as permissions_api, tabs};
-use zephium_webext_runtime::context::{ContextKind, FrameId, Sender};
+use zephium_webext_runtime::context::{ContextKind, DocumentGeneration, FrameId, Sender};
 use zephium_webext_runtime::dispatch::Responder;
 use zephium_webext_runtime::errors::ApiError;
 use zephium_webext_runtime::events::EventFacts;
@@ -37,6 +37,32 @@ pub(crate) struct ContentInstall {
 impl RuntimeHost {
     pub(crate) fn browser(&self) -> std::rc::Rc<Shared> {
         self.browser.clone()
+    }
+
+    /// WebKit CORS-allowlist patterns for the install's granted hosts.
+    pub(crate) fn cors_patterns(&self, install: ExtensionInstallId) -> Vec<String> {
+        let Some(permissions) = self.permissions.get(&install) else {
+            return Vec::new();
+        };
+        let mut patterns: Vec<String> = permissions
+            .snapshot()
+            .origins
+            .into_iter()
+            .flat_map(|origin| {
+                if origin == "<all_urls>" {
+                    vec!["http://*/*".to_owned(), "https://*/*".to_owned()]
+                } else if let Some(rest) = origin.strip_prefix("*://") {
+                    vec![format!("http://{rest}"), format!("https://{rest}")]
+                } else if origin.starts_with("http://") || origin.starts_with("https://") {
+                    vec![origin]
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        patterns.sort();
+        patterns.dedup();
+        patterns
     }
 
     pub(crate) fn take_pending_out(&mut self, out: &mut Outbox) {
@@ -193,15 +219,36 @@ impl RuntimeHost {
         sender: &Sender,
         route: &TabRoute,
     ) -> Result<(MessageRoute, Vec<Sender>), ApiError> {
-        let tab = self
-            .browser
-            .tab_item(route.tab_id)
-            .ok_or_else(no_receiver)?;
-        let document = match &route.document_id {
-            Some(id) => Some(self.browser.document_of(tab, id).ok_or_else(no_receiver)?),
-            None => None,
+        let targets: Vec<(ItemId, Option<FrameId>, Option<DocumentGeneration>)> = match route {
+            TabRoute::Named {
+                tab_id,
+                frame_id,
+                document_id,
+            } => {
+                let tab = self.browser.tab_item(*tab_id).ok_or_else(no_receiver)?;
+                let document = match document_id {
+                    Some(id) => Some(self.browser.document_of(tab, id).ok_or_else(no_receiver)?),
+                    None => None,
+                };
+                vec![(tab, frame_id.map(FrameId::new), document)]
+            }
+            TabRoute::Resolved(routes) => routes
+                .iter()
+                .filter_map(|route| match route {
+                    MessageRoute::Tab {
+                        tab,
+                        frame,
+                        document,
+                    } => Some((*tab, *frame, *document)),
+                    _ => None,
+                })
+                .collect(),
         };
-        let frame = route.frame_id.map(FrameId::new);
+        let (tab, frame, document) = match targets.as_slice() {
+            [] => return Err(no_receiver()),
+            [single] => *single,
+            [first, ..] => (first.0, None, None),
+        };
         let receivers = self
             .router
             .contexts
@@ -209,9 +256,11 @@ impl RuntimeHost {
             .filter(|context| {
                 context.install() == sender.install()
                     && matches!(context.kind(), ContextKind::ContentScript)
-                    && context.tab() == Some(tab)
-                    && frame.is_none_or(|frame| context.frame() == Some(frame))
-                    && document.is_none_or(|document| context.document() == document)
+                    && targets.iter().any(|(tab, frame, document)| {
+                        context.tab() == Some(*tab)
+                            && frame.is_none_or(|frame| context.frame() == Some(frame))
+                            && document.is_none_or(|document| context.document() == document)
+                    })
             })
             .cloned()
             .collect();

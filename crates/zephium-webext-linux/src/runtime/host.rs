@@ -292,11 +292,16 @@ enum Work {
     ScriptsChanged,
 }
 
-/// A `tabs.sendMessage`/`tabs.connect` destination as the caller named it.
-struct TabRoute {
-    tab_id: i64,
-    frame_id: Option<u64>,
-    document_id: Option<String>,
+/// A `tabs.sendMessage`/`tabs.connect` destination.
+enum TabRoute {
+    /// As the caller named it.
+    Named {
+        tab_id: i64,
+        frame_id: Option<u64>,
+        document_id: Option<String>,
+    },
+    /// Exact documents the messaging service resolved and authorized.
+    Resolved(Vec<MessageRoute>),
 }
 
 /// The services handlers run against.
@@ -433,7 +438,7 @@ impl MessagingHost for State {
                 responder,
                 sender,
                 payload,
-                route: TabRoute {
+                route: TabRoute::Named {
                     tab_id,
                     frame_id,
                     document_id,
@@ -451,11 +456,29 @@ impl MessagingHost for State {
                 responder,
                 sender,
                 name,
-                route: TabRoute {
+                route: TabRoute::Named {
                     tab_id,
                     frame_id,
                     document_id,
                 },
+            }),
+            MessageRequest::Send {
+                target: MessageTarget::ResolvedTab { routes },
+                payload,
+            } => self.defer(invocation, |responder| Work::SendTab {
+                responder,
+                sender,
+                payload,
+                route: TabRoute::Resolved(routes),
+            }),
+            MessageRequest::Connect {
+                target: MessageTarget::ResolvedTab { routes },
+                name,
+            } => self.defer(invocation, |responder| Work::ConnectTab {
+                responder,
+                sender,
+                name,
+                route: TabRoute::Resolved(routes),
             }),
             MessageRequest::Send { .. } | MessageRequest::Connect { .. } => {
                 if let Ok(install) = self.install(&sender) {
@@ -677,7 +700,25 @@ impl BrowserPort for State {
     }
 
     fn validate_resource(&self, sender: &Sender, path: &str) -> Result<(), ApiError> {
-        self.validate_script_resource(sender, path, ResourceKind::JavaScript)
+        let direct = self.validate_script_resource(sender, path, ResourceKind::JavaScript);
+        if direct.is_ok() {
+            return direct;
+        }
+        // Icon paths resolve against the calling page, as in Chrome.
+        let resolved = sender.url().join(path).ok().filter(|url| {
+            url.scheme() == "chrome-extension"
+                && url.host_str() == Some(sender.extension_id().as_str())
+        });
+        match resolved {
+            Some(url) => self
+                .validate_script_resource(
+                    sender,
+                    url.path().trim_start_matches('/'),
+                    ResourceKind::JavaScript,
+                )
+                .map_err(|_| direct.unwrap_err()),
+            None => direct,
+        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -1244,6 +1285,7 @@ impl RuntimeHost {
     }
 
     pub(crate) fn set_kick(&mut self, kick: Rc<dyn Fn()>) {
+        self.browser.set_kick(kick.clone());
         self.kick = Some(kick);
     }
 

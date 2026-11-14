@@ -535,8 +535,8 @@ fn worker_reports_after_boot_are_recorded_bounded_and_rate_limited() {
 fn unimplemented_methods_and_events_are_counted() {
     let mut harness = Harness::new();
     let (background, ..) = harness.running(&[]);
-    harness.call(&background, "tabs.query", json!([{}]));
-    harness.call(&background, "tabs.query", json!([{}]));
+    harness.call(&background, "windows.create", json!([{}]));
+    harness.call(&background, "windows.create", json!([{}]));
     let out = harness.call(
         &background,
         "zephium.addListener",
@@ -544,7 +544,7 @@ fn unimplemented_methods_and_events_are_counted() {
     );
     assert!(replies(&out)[0].is_err());
     let unhandled = harness.host.unhandled(harness.install);
-    assert_eq!(unhandled.get("tabs.query"), Some(&2));
+    assert_eq!(unhandled.get("windows.create"), Some(&2));
     assert_eq!(unhandled.get("contextMenus.onClicked"), Some(&1));
 }
 

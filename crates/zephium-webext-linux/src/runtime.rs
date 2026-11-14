@@ -243,6 +243,7 @@ struct TabEntry {
     view: glib::WeakRef<webkit2gtk::WebView>,
     scripts: Vec<webkit2gtk::UserScript>,
     styles: Vec<webkit2gtk::UserStyleSheet>,
+    loads: Option<glib::SignalHandlerId>,
 }
 
 /// One profile's extension runtime. GTK thread only; clones share it.
@@ -918,6 +919,7 @@ impl Inner {
             .own_plan(install)
             .ok_or_else(|| "The extension is not running.".to_owned())?;
         let view = create_view(&self.context, false, None);
+        self.allow_cors(install, &view);
         self.views.owned.borrow_mut().insert(
             (install, ViewKindKey::Background),
             Owned {
@@ -986,6 +988,7 @@ impl Inner {
             .ok_or(())?;
         let plan = self.own_plan(install).ok_or(())?;
         let view = create_view(&self.context, clipboard, Some(&script));
+        self.allow_cors(install, &view);
         self.views.owned.borrow_mut().insert(
             (install, ViewKindKey::Offscreen),
             Owned {
@@ -1290,6 +1293,7 @@ impl Inner {
             .ok_or(ViewError::UnknownInstall)?;
         let plan = self.own_plan(install).ok_or(ViewError::UnknownInstall)?;
         let view = create_view(&self.context, false, Some(&script));
+        self.allow_cors(install, &view);
         let serial = self.next_page.get();
         self.next_page.set(serial + 1);
         let id = self
@@ -1514,6 +1518,28 @@ impl Inner {
         }
     }
 
+    fn allow_cors(&self, install: ExtensionInstallId, view: &webkit2gtk::WebView) {
+        let patterns = self
+            .bridge
+            .with_runtime(|host, _| host.cors_patterns(install))
+            .unwrap_or_default();
+        let patterns: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        view.set_cors_allowlist(&patterns);
+    }
+
+    fn install_of_uri(&self, uri: &str) -> Option<ExtensionInstallId> {
+        let url = url::Url::parse(uri).ok()?;
+        if url.scheme() != "chrome-extension" {
+            return None;
+        }
+        let host = url.host_str()?;
+        self.records
+            .borrow()
+            .iter()
+            .find(|(_, record)| record.extension_id.as_str() == host)
+            .map(|(install, _)| *install)
+    }
+
     fn attach_ordinary_tab(
         self: &Rc<Self>,
         tab: ItemId,
@@ -1521,12 +1547,32 @@ impl Inner {
     ) -> Result<BridgeViewId, RegisterError> {
         let plan = self.content.borrow().plan.clone();
         let id = self.bridge.attach_tab(tab, view, &plan)?;
+        // An extension document in a tab gets its install's cross-origin
+        // access once it commits; anything else loses it before it starts.
+        let weak = Rc::downgrade(self);
+        let loads = view.connect_load_changed(move |view, event| {
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            match event {
+                webkit2gtk::LoadEvent::Started => view.set_cors_allowlist(&[]),
+                webkit2gtk::LoadEvent::Committed => {
+                    let install = view.uri().and_then(|uri| inner.install_of_uri(&uri));
+                    match install {
+                        Some(install) => inner.allow_cors(install, view),
+                        None => view.set_cors_allowlist(&[]),
+                    }
+                }
+                _ => {}
+            }
+        });
         self.tabs.borrow_mut().insert(
             id,
             TabEntry {
                 view: view.downgrade(),
                 scripts: Vec::new(),
                 styles: Vec::new(),
+                loads: Some(loads),
             },
         );
         self.browser.tab_view(id, Some(tab));
@@ -1537,6 +1583,10 @@ impl Inner {
     fn detach_ordinary_tab(&self, view: BridgeViewId) {
         use webkit2gtk::{UserContentManagerExt, WebViewExt};
         if let Some(mut entry) = self.tabs.borrow_mut().remove(&view) {
+            if let (Some(webview), Some(loads)) = (entry.view.upgrade(), entry.loads.take()) {
+                webview.disconnect(loads);
+                webview.set_cors_allowlist(&[]);
+            }
             if let Some(manager) = entry
                 .view
                 .upgrade()

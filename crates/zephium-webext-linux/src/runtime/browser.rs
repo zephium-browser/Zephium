@@ -306,6 +306,7 @@ pub(crate) struct BrowserState {
 #[derive(Default)]
 pub(crate) struct Shared {
     state: RefCell<BrowserState>,
+    kick: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 /// The [`BrowserPort`] the runtime host dispatches to.
@@ -331,6 +332,21 @@ fn extension_url(extension: &str, path: &str) -> Option<String> {
 impl Shared {
     pub(crate) fn set_profile(&self, profile: ProfileId) {
         self.state.borrow_mut().profile = Some(profile);
+    }
+
+    /// Wakes the GTK side when work is queued from inside a dispatch.
+    pub(crate) fn set_kick(&self, kick: Rc<dyn Fn()>) {
+        *self.kick.borrow_mut() = Some(kick);
+    }
+
+    fn kick_if_queued(&self) {
+        if self.state.borrow().outgoing.is_empty() {
+            return;
+        }
+        let kick = self.kick.borrow().clone();
+        if let Some(kick) = kick {
+            kick();
+        }
     }
 
     pub(crate) fn take_outgoing(&self) -> Vec<Outgoing> {
@@ -453,7 +469,8 @@ impl Shared {
             } => {
                 let frames = state.frames.entry(*tab).or_default();
                 if frame.is_main() {
-                    frames.clear();
+                    // A new main document ends the subframes that came before it.
+                    frames.retain(|_, existing| existing.document > *document);
                 }
                 if frames.len() < MAX_FRAMES_PER_TAB || frames.contains_key(frame) {
                     frames.insert(
@@ -510,7 +527,12 @@ impl Shared {
 
     /// Replaces the surface and returns the tab events it implies.
     pub(crate) fn publish_surface(&self, surface: ExtensionBrowserSurface) -> Vec<TabEvent> {
-        let previous = self.snapshot_any();
+        // Tabs that exist when the browser first publishes were not created.
+        let previous = if self.state.borrow().surface.is_some() {
+            self.snapshot_any()
+        } else {
+            None
+        };
         {
             let mut state = self.state.borrow_mut();
             if state
@@ -872,7 +894,18 @@ fn diff(previous: &BrowserSnapshot, current: &BrowserSnapshot) -> Vec<TabEvent> 
 
 impl BrowserState {
     fn snapshot(&self) -> Result<BrowserSnapshot, ApiError> {
-        let surface = self.surface.as_ref().ok_or_else(unsupported)?;
+        let Some(surface) = self.surface.as_ref() else {
+            // Before the shell publishes its first surface there are no tabs.
+            return Ok(BrowserSnapshot {
+                profile: self.profile.ok_or_else(ApiError::context_invalidated)?,
+                generation: zephium_core::extensions::ExtensionBrowserSurfaceGeneration::new(1)
+                    .ok_or_else(ApiError::context_invalidated)?,
+                tabs: Vec::new(),
+                windows: Vec::new(),
+                current_window: None,
+                last_focused_window: None,
+            });
+        };
         let mut snapshot = BrowserSnapshot::from_surface(
             surface,
             |item| self.tabs.get(item),
@@ -995,6 +1028,11 @@ impl BrowserState {
                 }
             })
             .collect()
+    }
+
+    /// Chrome's unsupported-function error; the host counts these.
+    fn refuse(&mut self, invocation: Invocation<'_>) -> Handled {
+        invocation.reply(Err(unsupported()))
     }
 
     fn pend(
@@ -1159,7 +1197,7 @@ impl BrowserState {
                     VecDeque::from([action]),
                     Reply::Tabs(tab_ids, single),
                 ),
-                None => invocation.reply(Err(unsupported())),
+                None => self.refuse(invocation),
             },
             Request::Capture {
                 tab_id,
@@ -1183,7 +1221,7 @@ impl BrowserState {
                 )
             }
             Request::DetectLanguage { .. } => invocation.reply(Ok(json!("und"))),
-            Request::Discard { .. } => invocation.reply(Err(unsupported())),
+            Request::Discard { .. } => self.refuse(invocation),
         }
     }
 
@@ -1213,7 +1251,7 @@ impl BrowserState {
                 }
             }
             windows::Request::Create { .. } | windows::Request::Remove { .. } => {
-                invocation.reply(Err(unsupported()))
+                self.refuse(invocation)
             }
         }
     }
@@ -1234,12 +1272,20 @@ impl BrowserState {
             update: action::Update::Icon(action::Icon::Paths(paths)),
         } = &request
         {
+            // Chrome resolves icon paths against the calling page's URL.
+            let base = invocation.sender().url().clone();
             let raster = self.installs.get(&install).and_then(|facts| {
                 let path = paths
                     .iter()
                     .min_by_key(|(size, _)| i32::from(**size).abs_diff(32))
                     .map(|(_, path)| path.clone())?;
-                super::icons::package_icon(&facts.root, &path)
+                let resolved = base.join(&path).ok()?;
+                if resolved.scheme() != "chrome-extension"
+                    || resolved.host_str() != Some(facts.extension_id.as_str())
+                {
+                    return None;
+                }
+                super::icons::package_icon(&facts.root, resolved.path().trim_start_matches('/'))
             });
             let Some(raster) = raster else {
                 return invocation.reply(Err(ApiError::other("Failed to set icon.")));
@@ -1343,6 +1389,27 @@ impl BrowserState {
     }
 }
 
+/// `fontSettings.getFontList`: the families the system font map offers.
+fn font_list() -> Vec<Value> {
+    use gtk::pango::prelude::FontFamilyExt;
+    use gtk::prelude::WidgetExt;
+    const MAX_FONTS: usize = 4096;
+    let context = gtk::Label::new(None).pango_context();
+    let mut names: Vec<String> = context
+        .list_families()
+        .iter()
+        .map(|family| family.name().to_string())
+        .filter(|name| !name.is_empty() && name.len() <= 256)
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    names.dedup();
+    names
+        .into_iter()
+        .take(MAX_FONTS)
+        .map(|name| json!({"fontId": name, "displayName": name}))
+        .collect()
+}
+
 fn read_package_file(facts: &InstallFacts, file: &str) -> Result<(String, String), ApiError> {
     let missing = || ApiError::other(format!("Could not load file: '{file}'."));
     let path = zephium_webext::manifest::normalize_resource(file)
@@ -1393,20 +1460,8 @@ fn with_request(call: BrowserCall, id: u64) -> BrowserCall {
     }
 }
 
-impl BrowserPort for Browser {
-    fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
-        let state = self.shared.state.borrow();
-        if state.profile != Some(sender.profile()) {
-            return Err(ApiError::cannot_access_page());
-        }
-        state.snapshot()
-    }
-
-    fn extension_info(&self, _sender: &Sender) -> Result<ExtensionInfo, ApiError> {
-        Ok(ExtensionInfo::default())
-    }
-
-    fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+impl Browser {
+    fn dispatch(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
         let mut state = self.shared.state.borrow_mut();
         match request {
             BrowserRequest::Core(action) => {
@@ -1452,17 +1507,40 @@ impl BrowserPort for Browser {
                     })),
                 )
             }
-            BrowserRequest::Permissions(_) => invocation.reply(Err(unsupported())),
+            BrowserRequest::Permissions(_) => state.refuse(invocation),
             BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => {
                 invocation.reply(Ok(json!("active")))
             }
             BrowserRequest::Service(ServiceRequest::SetIdleInterval(_)) => {
                 invocation.reply(Ok(Value::Null))
             }
+            BrowserRequest::Service(ServiceRequest::FontList) => {
+                invocation.reply(Ok(Value::Array(font_list())))
+            }
             BrowserRequest::Notifications(_)
             | BrowserRequest::Service(_)
-            | BrowserRequest::Runtime(_) => invocation.reply(Err(unsupported())),
+            | BrowserRequest::Runtime(_) => state.refuse(invocation),
         }
+    }
+}
+
+impl BrowserPort for Browser {
+    fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError> {
+        let state = self.shared.state.borrow();
+        if state.profile != Some(sender.profile()) {
+            return Err(ApiError::cannot_access_page());
+        }
+        state.snapshot()
+    }
+
+    fn extension_info(&self, _sender: &Sender) -> Result<ExtensionInfo, ApiError> {
+        Ok(ExtensionInfo::default())
+    }
+
+    fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        let handled = self.dispatch(request, invocation);
+        self.shared.kick_if_queued();
+        handled
     }
 
     fn frames(&self, sender: &Sender, tab: ItemId) -> Result<Vec<BrowserFrame>, ApiError> {
