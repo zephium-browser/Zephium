@@ -1936,6 +1936,7 @@ impl RuntimeHost {
                             if let Some(pending) = state.script_pending.take() {
                                 if result.is_ok() {
                                     state.scripts = pending.candidate;
+                                    self.op(NativeOp::ScriptsChanged);
                                 }
                                 self.settle(pending.responder, result.map(|()| Value::Null), out);
                             }
@@ -2038,6 +2039,7 @@ impl RuntimeHost {
                 );
             } else {
                 state.scripts = candidate;
+                self.op(NativeOp::ScriptsChanged);
                 self.settle(call.responder, Ok(value), out);
             }
         }

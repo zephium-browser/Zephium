@@ -735,6 +735,7 @@ fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
         json!([[request("second", true)]]),
     );
     assert!(replies(&second).is_empty());
+    let _ = harness.host.take_ops();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut out = Outbox::default();
     while replies(&out).len() < 2 {
@@ -744,6 +745,14 @@ fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(replies(&out), vec![Ok(Value::Null), Ok(Value::Null)]);
+    assert!(
+        harness
+            .host
+            .take_ops()
+            .iter()
+            .any(|op| matches!(op, NativeOp::ScriptsChanged)),
+        "committed registrations reach future documents"
+    );
     let bytes = std::fs::read(durable.path().join("scripts.json")).unwrap();
     let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(snapshot.as_array().unwrap().len(), 2);
