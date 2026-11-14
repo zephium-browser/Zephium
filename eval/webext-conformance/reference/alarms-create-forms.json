@@ -1,0 +1,266 @@
+{
+  "caseId": "alarms-create-forms",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "create.named.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create.named.callback:callback",
+      "value": {
+        "args": [],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "create.named.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "create.named.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "create.unnamed.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create.unnamed.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "get.named:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get.named:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "named",
+          "periodInMinutes": 3,
+          "persistAcrossSessions": true,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "get.unnamed:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get.unnamed:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "",
+          "periodInMinutes": null,
+          "persistAcrossSessions": true,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "get.missing:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get.missing:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": null
+      }
+    },
+    {
+      "label": "getAll:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getAll:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "name": "",
+            "periodInMinutes": null,
+            "persistAcrossSessions": true,
+            "scheduled": "future"
+          },
+          {
+            "name": "named",
+            "periodInMinutes": 3,
+            "persistAcrossSessions": true,
+            "scheduled": "future"
+          }
+        ]
+      }
+    },
+    {
+      "label": "replace.named:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "replace.named:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "get.replaced:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get.replaced:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "named",
+          "periodInMinutes": null,
+          "persistAcrossSessions": true,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "create.conflictingSchedule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create.conflictingSchedule:error",
+      "value": {
+        "lastError": null,
+        "message": "Cannot set both when and delayInMinutes."
+      }
+    },
+    {
+      "label": "clear.named.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clear.named.callback:callback",
+      "value": {
+        "args": [
+          true
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "clear.named.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "clear.named.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "clear.missing.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clear.missing.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    },
+    {
+      "label": "clear.unnamed.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clear.unnamed.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "clearAll.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clearAll.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "getAll.afterClear:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getAll.afterClear:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

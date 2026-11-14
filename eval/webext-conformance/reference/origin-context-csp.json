@@ -1,0 +1,95 @@
+{
+  "caseId": "origin-context-csp",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "extension origin",
+      "value": {
+        "isSecureContext": true,
+        "navigatorStorage": "object",
+        "origin": "chrome-extension://<extension>",
+        "protocol": "chrome-extension:",
+        "runtimeOrigin": "chrome-extension://<extension>",
+        "windowType": "object"
+      }
+    },
+    {
+      "label": "inline executed",
+      "value": false
+    },
+    {
+      "label": "eval under extension CSP:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "eval under extension CSP:error",
+      "value": {
+        "lastError": null,
+        "message": "Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self'\".\n"
+      }
+    },
+    {
+      "label": "Function under extension CSP:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "Function under extension CSP:error",
+      "value": {
+        "lastError": null,
+        "message": "Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self'\".\n"
+      }
+    },
+    {
+      "label": "CSP violations",
+      "value": [
+        {
+          "blockedURI": "inline",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src-elem",
+          "violatedDirective": "script-src-elem"
+        },
+        {
+          "blockedURI": "inline",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src-elem",
+          "violatedDirective": "script-src-elem"
+        },
+        {
+          "blockedURI": "eval",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src",
+          "violatedDirective": "script-src"
+        },
+        {
+          "blockedURI": "eval",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src",
+          "violatedDirective": "script-src"
+        },
+        {
+          "blockedURI": "eval",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src",
+          "violatedDirective": "script-src"
+        },
+        {
+          "blockedURI": "eval",
+          "disposition": "enforce",
+          "effectiveDirective": "script-src",
+          "violatedDirective": "script-src"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

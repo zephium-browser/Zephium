@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "permissions": ["scripting"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["isolated-start.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["isolated-end.js"],
+      "run_at": "document_end",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["isolated-idle.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["main-start.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["main-end.js"],
+      "run_at": "document_end",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["main-idle.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ]
+}

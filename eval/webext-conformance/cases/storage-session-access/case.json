@@ -1,0 +1,10 @@
+{
+  "id": "storage-session-access",
+  "title": "Session storage access before and after changing trusted context policy",
+  "apis": [
+    "storage.session.setAccessLevel",
+    "storage.session.get",
+    "tabs.sendMessage"
+  ],
+  "permissions": ["storage", "tabs"]
+}

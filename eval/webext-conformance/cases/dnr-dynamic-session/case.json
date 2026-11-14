@@ -1,0 +1,11 @@
+{
+  "id": "dnr-dynamic-session",
+  "title": "Dynamic and session rules round trip with atomic invalid updates",
+  "apis": [
+    "declarativeNetRequest.updateDynamicRules",
+    "declarativeNetRequest.getDynamicRules",
+    "declarativeNetRequest.updateSessionRules",
+    "declarativeNetRequest.getSessionRules"
+  ],
+  "permissions": ["declarativeNetRequest"]
+}

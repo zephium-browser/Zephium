@@ -1,0 +1,6 @@
+{
+  "id": "resources-origin-access",
+  "title": "Web accessible resources accept declared origins and reject others",
+  "apis": ["runtime.getURL", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

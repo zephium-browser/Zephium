@@ -1,0 +1,12 @@
+{
+  "id": "navigation-frames",
+  "title": "Frame navigation lifecycle sequences and getAllFrames parent relationships",
+  "apis": [
+    "webNavigation.onBeforeNavigate",
+    "webNavigation.onCommitted",
+    "webNavigation.onDOMContentLoaded",
+    "webNavigation.onCompleted",
+    "webNavigation.getAllFrames"
+  ],
+  "permissions": ["webNavigation"]
+}

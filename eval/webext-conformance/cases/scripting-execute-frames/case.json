@@ -1,0 +1,6 @@
+{
+  "id": "scripting-execute-frames",
+  "title": "All-frame execution results and explicit frame targeting",
+  "apis": ["scripting.executeScript"],
+  "permissions": ["scripting"]
+}

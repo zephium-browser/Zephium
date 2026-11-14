@@ -1,0 +1,48 @@
+{
+  "caseId": "dnr-extension-redirect",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "install redirect:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "install redirect:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "redirect fetch:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "redirect fetch:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "redirected": true,
+          "status": 200,
+          "text": "redirected extension resource\n",
+          "url": "chrome-extension://<extension>/redirected.txt"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

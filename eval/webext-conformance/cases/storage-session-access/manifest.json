@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Session storage access",
+  "version": "1.0",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
