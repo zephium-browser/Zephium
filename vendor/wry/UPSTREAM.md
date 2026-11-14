@@ -30,7 +30,9 @@ Its security-relevant deltas currently enforce these invariants:
   contexts require an explicit profile data directory. Incognito views reject
   a supplied persistent context rather than reclassifying it after potential
   filesystem access. Incognito related views must use the exact supplied
-  ephemeral context.
+  ephemeral context. `WebContext::webkit_context` exposes the native context
+  so the embedder can add sandbox paths and Web-process extension setup before
+  the first WebView, when WebKit has not yet launched a Web process.
 - WebView2 construction exposes a pre-controller hardening hook and tracks
   partially constructed controller ownership so failures remain cleanable.
   `native_cleanup.rs` models the ordered, retryable ownership debt. The Windows
