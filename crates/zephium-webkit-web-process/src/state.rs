@@ -4,12 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use url::Url;
-
 use crate::protocol::{
-    Attach, Deliver, Detach, FrameEvent, FrameInfo, PageRole, MAX_ATTACH_BYTES, MAX_BATCH_EVENTS,
-    MAX_BOOTSTRAP_BYTES, MAX_ORIGINS, MAX_TOKEN_BYTES, MAX_URI_BYTES, MAX_WORLDS, MAX_WORLD_BYTES,
-    PROTOCOL_VERSION,
+    document_origin, Attach, Deliver, Detach, FrameEvent, FrameInfo, PageRole, MAX_ATTACH_BYTES,
+    MAX_BATCH_EVENTS, MAX_BOOTSTRAP_BYTES, MAX_ORIGINS, MAX_TOKEN_BYTES, MAX_URI_BYTES, MAX_WORLDS,
+    MAX_WORLD_BYTES, PROTOCOL_VERSION,
 };
 
 pub const MAX_PAGES: usize = 32;
@@ -478,29 +476,6 @@ fn valid_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-pub fn document_origin(uri: &str) -> Option<String> {
-    if uri.len() > MAX_URI_BYTES || uri.chars().any(|ch| ch.is_control()) {
-        return None;
-    }
-    let url = Url::parse(uri).ok()?;
-    match url.scheme() {
-        "http" | "https" => Some(url.origin().ascii_serialization()),
-        "chrome-extension" => {
-            let host = url.host_str()?;
-            if url.port().is_some()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || host.len() != 32
-                || !host.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
-            {
-                return None;
-            }
-            Some(format!("chrome-extension://{host}"))
-        }
-        _ => None,
-    }
 }
 
 fn valid_origin(origin: &str) -> bool {

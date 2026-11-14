@@ -7946,7 +7946,6 @@ dependencies = [
  "rustix",
  "serde_json",
  "tempfile",
- "url",
  "webkit2gtk",
  "zephium-webkit-web-process-protocol",
 ]

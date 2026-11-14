@@ -731,6 +731,32 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
     Ok(event)
 }
 
+/// The exact origin string attachment grants are matched against: the
+/// ASCII serialization for HTTP(S), `chrome-extension://<id>` for a
+/// canonical 32-letter extension id, and nothing for other documents.
+pub fn document_origin(uri: &str) -> Option<String> {
+    if uri.len() > MAX_URI_BYTES || uri.chars().any(|ch| ch.is_control()) {
+        return None;
+    }
+    let url = url::Url::parse(uri).ok()?;
+    match url.scheme() {
+        "http" | "https" => Some(url.origin().ascii_serialization()),
+        "chrome-extension" => {
+            let host = url.host_str()?;
+            if url.port().is_some()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || host.len() != 32
+                || !host.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+            {
+                return None;
+            }
+            Some(format!("chrome-extension://{host}"))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
