@@ -7101,6 +7101,10 @@ pub fn run() {
                 .initialization_script_for_all_frames(zephium_engine::PAGE_PRINT_DENY_SCRIPT);
             #[cfg(feature = "work-development-traces")]
             let main_builder = main_builder.initialization_script(startup_styles::SCRIPT);
+            #[cfg(target_os = "linux")]
+            let main_builder = main_builder
+                .transparent(false)
+                .background_color(tauri::utils::config::Color(26, 26, 29, 255));
             #[cfg(target_os = "windows")]
             let main_builder = main_builder
                 .decorations(false)
@@ -7156,8 +7160,7 @@ pub fn run() {
                     }
                 })
                 .on_page_load(move |window, payload| {
-                    // The native window is transparent and its privileged
-                    // WebView is deliberately constructed at about:blank so
+                    // The privileged WebView is constructed at about:blank so
                     // deny handlers can be installed before app code runs.
                     // Never expose that engine-default backing surface. A
                     // native Finished event proves only document loading; the
