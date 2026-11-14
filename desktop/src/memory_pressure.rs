@@ -192,6 +192,7 @@ mod native {
                                 trim_heap();
                             }
                             tier = next;
+                            eprintln!("memory: pressure {tier:?}");
                             let _ = shell.dispatch(Command::SetMemoryPressure(tier));
                         }
                     }
