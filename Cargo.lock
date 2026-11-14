@@ -7877,6 +7877,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-dnr"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "zephium-webext-macos"
 version = "0.1.0"
 dependencies = [
