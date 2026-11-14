@@ -10,6 +10,8 @@
 //!   `__zephiumRegisterReceiver`, before any page script;
 //! - `"content"`: once per document in the install's isolated world, before
 //!   any content script; script bundles then call the guard it publishes;
+//! - `"native-content"`: eagerly creates the content API after the native
+//!   adapter has matched the document; each file then runs at top level;
 //! - `"worker"`: first thing in the background worker, before the
 //!   extension's service-worker script;
 //! - `"owner"`: in the hidden owner page, with the worker start data as
@@ -49,6 +51,7 @@ pub const BUNDLE: &str = concat!(
     "switch(entry){",
     "case'page':return Z.api.page(surface,bootstrap);",
     "case'content':return Z.content.boot(surface,bootstrap);",
+    "case'native-content':if(!bootstrap||!['contentScript','userScript'].includes(bootstrap.contextKind))throw new TypeError('Invalid native content context');return Z.api.page(surface,bootstrap);",
     "case'worker':return Z.workerScope.worker(surface,bootstrap);",
     "case'owner':return Z.workerScope.owner(bootstrap);",
     "default:throw new TypeError('Unknown binding entry');}})"

@@ -13,8 +13,8 @@ use zephium_webext_runtime::limits::{
     RATE_MESSAGES_PER_SECOND,
 };
 use zephium_webkit_web_process_protocol::protocol::{
-    document_origin, encode_ui, Attach, Limits, PageRole, UiMessage, WorldRule, MAX_ATTACH_BYTES,
-    MAX_BOOTSTRAP_BYTES, MAX_ORIGINS, MAX_WORLDS, PROTOCOL_VERSION,
+    encode_ui, Attach, ExternalRule, Limits, MatchRule, PageRole, UiMessage, WorldRule,
+    MAX_ATTACH_BYTES, MAX_BOOTSTRAP_BYTES, MAX_ORIGINS, MAX_WORLDS, PROTOCOL_VERSION,
 };
 
 const ISOLATED_WORLD_PREFIX: &str = "zephium-principal-extension-";
@@ -61,16 +61,15 @@ fn hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// One install's world in a tab, and the exact origins whose documents get
-/// the bridge in it.
+/// One install's world and the compiled declarations admitting its documents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldGrant {
     /// The install whose scripts run in the world.
     pub install: ExtensionInstallId,
     /// Which of its worlds.
     pub world: InjectedWorld,
-    /// Serialized origins (`https://example.com`), compared exactly.
-    pub origins: Vec<String>,
+    /// Chrome match declarations compiled by the shared runtime matcher.
+    pub matches: Vec<MatchRule>,
     /// Glue run in the world at document creation, before page script.
     pub bootstrap: Arc<str>,
 }
@@ -91,6 +90,8 @@ pub struct ExtensionPages {
 pub struct AttachPlan {
     /// Isolated and `userScripts` worlds.
     pub worlds: Vec<WorldGrant>,
+    /// Restricted page-world external messaging declarations.
+    pub external: Vec<ExternalRule>,
     /// Extension origins whose documents get the bridge in the page world.
     pub extension_pages: Vec<ExtensionPages>,
     /// Glue run in the page world of those documents.
@@ -112,7 +113,7 @@ pub enum PlanError {
     InvalidOrigin(String),
     /// Two grants for the same world.
     DuplicateWorld,
-    /// A world with no origins.
+    /// A world with no match declarations.
     EmptyWorld,
     /// A bootstrap over the module's limit or containing NUL.
     InvalidBootstrap,
@@ -130,7 +131,7 @@ pub enum PlanError {
 pub(crate) struct ResolvedWorld {
     pub install: ExtensionInstallId,
     pub world: InjectedWorld,
-    pub origins: BTreeSet<String>,
+    pub matches: Vec<MatchRule>,
     pub bootstrap: Arc<str>,
 }
 
@@ -143,6 +144,7 @@ pub(crate) struct ResolvedPages {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedPlan {
     pub worlds: BTreeMap<String, ResolvedWorld>,
+    pub external: Vec<ExternalRule>,
     pub pages: BTreeMap<String, ResolvedPages>,
     pub extension_bootstrap: Arc<str>,
     pub observe_requests: bool,
@@ -164,6 +166,7 @@ impl ResolvedPlan {
         }
         if let Some(owner) = owner {
             let own = plan.worlds.is_empty()
+                && plan.external.is_empty()
                 && plan.extension_pages.len() == 1
                 && &plan.extension_pages[0].extension == owner;
             if !own {
@@ -174,23 +177,16 @@ impl ResolvedPlan {
         let mut worlds = BTreeMap::new();
         for grant in &plan.worlds {
             bootstrap(&grant.bootstrap)?;
-            if grant.origins.is_empty() {
+            if grant.matches.is_empty() {
                 return Err(PlanError::EmptyWorld);
             }
-            if grant.origins.len() > MAX_ORIGINS {
+            if grant.matches.len() > MAX_ORIGINS {
                 return Err(PlanError::TooMany);
-            }
-            let mut origins = BTreeSet::new();
-            for origin in &grant.origins {
-                if document_origin(origin).as_deref() != Some(origin.as_str()) {
-                    return Err(PlanError::InvalidOrigin(origin.clone()));
-                }
-                origins.insert(origin.clone());
             }
             let resolved = ResolvedWorld {
                 install: grant.install,
                 world: grant.world.clone(),
-                origins,
+                matches: grant.matches.clone(),
                 bootstrap: grant.bootstrap.clone(),
             };
             if worlds
@@ -217,6 +213,7 @@ impl ResolvedPlan {
         }
         let resolved = Self {
             worlds,
+            external: plan.external.clone(),
             pages,
             extension_bootstrap: plan.extension_bootstrap.clone(),
             observe_requests: plan.observe_requests,
@@ -230,11 +227,46 @@ impl ResolvedPlan {
         }
     }
 
-    /// Whether the world `name` may run in a document of `origin`.
-    pub fn admits_world(&self, name: &str, origin: &str) -> Option<&ResolvedWorld> {
+    /// Uses the same compiled match declarations as the module.
+    pub fn admits_world(
+        &self,
+        name: &str,
+        facts: &zephium_webkit_web_process_protocol::protocol::FrameInfo,
+    ) -> Option<&ResolvedWorld> {
         self.worlds
             .get(name)
-            .filter(|world| world.origins.contains(origin))
+            .filter(|world| world.matches.iter().any(|rule| rule.matches(facts)))
+    }
+
+    pub fn admits_external(
+        &self,
+        install: &str,
+        facts: &zephium_webkit_web_process_protocol::protocol::FrameInfo,
+    ) -> bool {
+        self.external
+            .iter()
+            .any(|rule| rule.install_id == install && rule.admits(facts))
+    }
+
+    /// A conservative structural widening keeps existing native contexts alive.
+    pub fn widens(&self, old: &Self) -> bool {
+        self.extension_bootstrap == old.extension_bootstrap
+            && self.observe_requests == old.observe_requests
+            && self.observe_forms == old.observe_forms
+            && self.apply_policy == old.apply_policy
+            && old.worlds.iter().all(|(name, prior)| {
+                self.worlds.get(name).is_some_and(|next| {
+                    next.install == prior.install
+                        && next.world == prior.world
+                        && next.bootstrap == prior.bootstrap
+                        && prior.matches.iter().all(|rule| next.matches.contains(rule))
+                })
+            })
+            && old
+                .pages
+                .iter()
+                .all(|(origin, pages)| self.pages.get(origin) == Some(pages))
+            && old.external.iter().all(|rule| self.external.contains(rule))
     }
 
     /// Whether the page world of a document of `origin` gets the bridge.
@@ -254,10 +286,12 @@ impl ResolvedPlan {
                 .iter()
                 .map(|(name, world)| WorldRule {
                     name: name.clone(),
-                    origins: world.origins.iter().cloned().collect(),
+                    install_id: hex(&world.install.bytes()),
+                    matches: world.matches.clone(),
                     bootstrap: world.bootstrap.to_string(),
                 })
                 .collect(),
+            external: self.external.clone(),
             extension_origins: self.pages.keys().cloned().collect(),
             extension_bootstrap: self.extension_bootstrap.to_string(),
             observe_requests: self.observe_requests,
@@ -307,7 +341,21 @@ mod tests {
         WorldGrant {
             install: install(10),
             world: InjectedWorld::Isolated,
-            origins: origins.iter().map(|origin| (*origin).to_owned()).collect(),
+            matches: origins
+                .iter()
+                .map(|origin| MatchRule {
+                    matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
+                        &[format!("{origin}/*")],
+                        &[],
+                        &[],
+                        &[],
+                        Default::default(),
+                    )
+                    .expect("matcher"),
+                    all_frames: true,
+                    file_access: false,
+                })
+                .collect(),
             bootstrap: "void 0".into(),
         }
     }
@@ -337,38 +385,44 @@ mod tests {
     }
 
     #[test]
-    fn origins_must_be_exact_serialized_origins() {
-        let scheme = ExtensionScheme::CHROME_EXTENSION;
-        for bad in [
-            "https://example.com/",
-            "HTTPS://example.com",
-            "https://example.com:443",
-            "file:///etc",
-            "about:blank",
-            "*://example.com",
-        ] {
-            let plan = AttachPlan {
-                worlds: vec![grant(&[bad])],
-                ..AttachPlan::default()
-            };
-            assert_eq!(
-                ResolvedPlan::resolve(&plan, scheme, None),
-                Err(PlanError::InvalidOrigin(bad.into())),
-                "{bad}"
-            );
-        }
-        let plan = AttachPlan {
-            worlds: vec![grant(&["https://example.com", "http://127.0.0.1:8080"])],
-            ..AttachPlan::default()
+    fn compiled_patterns_match_unlisted_origins_and_exclusions() {
+        let rule = MatchRule {
+            matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
+                &["<all_urls>"],
+                &["https://excluded.test/*"],
+                &[],
+                &[],
+                Default::default(),
+            )
+            .expect("matcher"),
+            all_frames: true,
+            file_access: false,
         };
-        let resolved = ResolvedPlan::resolve(&plan, scheme, None).expect("valid");
+        let plan = AttachPlan {
+            worlds: vec![WorldGrant {
+                matches: vec![rule],
+                ..grant(&["https://example.com"])
+            }],
+            ..Default::default()
+        };
+        let resolved =
+            ResolvedPlan::resolve(&plan, ExtensionScheme::CHROME_EXTENSION, None).expect("valid");
         let name = world_name(install(10), &InjectedWorld::Isolated);
+        let facts = |uri: &str| zephium_webkit_web_process_protocol::protocol::FrameInfo {
+            frame_id: 1,
+            document_seq: 1,
+            uri: uri.into(),
+            is_main: true,
+            table_generation: 0,
+            parent_frame_id: None,
+            creator_uri: None,
+            opaque: false,
+        };
         assert!(resolved
-            .admits_world(&name, "https://example.com")
+            .admits_world(&name, &facts("https://unlisted.test/page"))
             .is_some());
-        assert!(resolved.admits_world(&name, "https://other.com").is_none());
         assert!(resolved
-            .admits_world("zephium-webext-forged", "https://example.com")
+            .admits_world(&name, &facts("https://excluded.test/page"))
             .is_none());
     }
 

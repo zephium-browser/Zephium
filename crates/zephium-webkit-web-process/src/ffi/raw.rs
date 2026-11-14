@@ -15,7 +15,6 @@ unsafe extern "C" {
     pub fn webkit_frame_get_id(frame: *mut Object) -> u64;
     pub fn webkit_frame_is_main_frame(frame: *mut Object) -> c_int;
     pub fn webkit_frame_get_uri(frame: *mut Object) -> *const c_char;
-    pub fn webkit_frame_get_javascript_global_context(frame: *mut Object) -> *mut Object;
     pub fn webkit_frame_get_js_context_for_script_world(
         frame: *mut Object,
         world: *mut Object,
@@ -81,6 +80,7 @@ unsafe extern "C" {
     pub fn g_error_free(error: *mut Object);
     pub fn g_free(pointer: *mut c_void);
     pub fn g_get_monotonic_time() -> i64;
+    pub fn g_source_remove(source: c_uint) -> c_int;
     pub fn g_timeout_add_full(
         priority: c_int,
         interval: c_uint,
@@ -109,6 +109,9 @@ unsafe extern "C" {
     pub fn jsc_value_object_get_property_at_index(value: *mut Object, index: c_uint)
         -> *mut Object;
     pub fn jsc_value_to_int32(value: *mut Object) -> i32;
+    pub fn jsc_value_to_boolean(value: *mut Object) -> c_int;
+    pub fn jsc_value_new_from_json(context: *mut Object, json: *const c_char) -> *mut Object;
+    pub fn jsc_value_is_array(value: *mut Object) -> c_int;
     pub fn jsc_value_to_string(value: *mut Object) -> *mut c_char;
     pub fn jsc_value_is_string(value: *mut Object) -> c_int;
     pub fn jsc_value_object_get_property(value: *mut Object, name: *const c_char) -> *mut Object;
@@ -123,6 +126,13 @@ unsafe extern "C" {
         context: *mut Object,
         source: *const c_char,
         length: isize,
+    ) -> *mut Object;
+    pub fn jsc_context_evaluate_with_source_uri(
+        context: *mut Object,
+        source: *const c_char,
+        length: isize,
+        uri: *const c_char,
+        line: c_uint,
     ) -> *mut Object;
     pub fn jsc_context_get_exception(context: *mut Object) -> *mut Object;
     pub fn jsc_context_clear_exception(context: *mut Object);

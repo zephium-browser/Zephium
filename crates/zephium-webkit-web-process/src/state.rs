@@ -17,6 +17,7 @@ pub const MAX_PROCESS_FRAMES: usize = 1024;
 pub const MAX_PENDING_FRAME_EVENTS: usize = 512;
 pub const MAX_INFLIGHT_POSTS: usize = 4096;
 pub const MAX_PROCESS_INFLIGHT_BYTES: usize = 128 * 1024 * 1024;
+pub const MAX_FRAME_EVALUATIONS: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateError {
@@ -75,6 +76,9 @@ struct Frame {
     bucket: Bucket,
     inflight_bytes: usize,
     outstanding: usize,
+    injected_bytes: usize,
+    evaluations: usize,
+    script_budget_exhausted: bool,
 }
 
 struct Page {
@@ -143,10 +147,21 @@ impl State {
 
     pub fn attach(&mut self, page_id: u64, attach: Attach) -> Result<(), StateError> {
         let previous = self.page_generations.get(&page_id).copied();
+        let widened = self.pages.get(&page_id).is_some_and(|page| {
+            attach.generation == page.attach.generation
+                && attachment_widens(&page.attach, &attach)
+                && attach != page.attach
+        });
         let valid = self.token.as_deref() == Some(attach.token.as_str())
             && self.token.is_some()
             && validate_attach(&attach)
-            && previous.is_none_or(|generation| attach.generation > generation);
+            && (widened || previous.is_none_or(|generation| attach.generation > generation));
+        if valid && widened {
+            self.page_generations.insert(page_id, attach.generation);
+            let page = self.pages.get_mut(&page_id).ok_or(StateError::Inert)?;
+            page.attach = attach;
+            return Ok(());
+        }
         self.remove_page(page_id);
         if !valid {
             return Err(StateError::InvalidAttach);
@@ -260,6 +275,10 @@ impl State {
             document_seq: sequence,
             uri: uri.to_owned(),
             is_main,
+            parent_frame_id: None,
+            creator_uri: None,
+            opaque: uri.starts_with("data:") || uri.starts_with("blob:"),
+            table_generation: 0,
         };
         page.frames.insert(
             frame_id,
@@ -268,6 +287,9 @@ impl State {
                 bucket: Bucket::new(page.attach.limits.frame_burst),
                 inflight_bytes: 0,
                 outstanding: 0,
+                injected_bytes: 0,
+                evaluations: 0,
+                script_budget_exhausted: false,
             },
         );
         page.queue(FrameEvent::Created(info));
@@ -284,6 +306,96 @@ impl State {
         let info = frame.info.clone();
         page.queue(FrameEvent::Committed(info));
         true
+    }
+
+    pub fn set_frame_facts(
+        &mut self,
+        page_id: u64,
+        frame_id: u64,
+        parent_frame_id: Option<u64>,
+        creator_uri: Option<String>,
+        opaque: bool,
+    ) -> bool {
+        let Some(page) = self.pages.get_mut(&page_id) else {
+            return false;
+        };
+        let Some(frame) = page.frames.get_mut(&frame_id) else {
+            return false;
+        };
+        frame.info.parent_frame_id = parent_frame_id;
+        frame.info.creator_uri = creator_uri;
+        frame.info.opaque = opaque;
+        let info = frame.info.clone();
+        // Facts are filled before the newly created document is exposed.
+        for event in page.events.iter_mut().rev() {
+            if let FrameEvent::Created(created) = event {
+                if created.frame_id == frame_id && created.document_seq == info.document_seq {
+                    *created = info;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn set_frame_script_table(&mut self, page_id: u64, frame_id: u64, generation: u64) {
+        if let Some(page) = self.pages.get_mut(&page_id) {
+            if let Some(frame) = page.frames.get_mut(&frame_id) {
+                frame.info.table_generation = generation;
+                for event in page.events.iter_mut().rev() {
+                    if let FrameEvent::Created(info) = event {
+                        if info.frame_id == frame_id && info.document_seq == frame.info.document_seq
+                        {
+                            info.table_generation = generation;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn charge_script_bytes(
+        &mut self,
+        page_id: u64,
+        frame_id: u64,
+        document_seq: u64,
+        bytes: usize,
+    ) -> Result<(), StateError> {
+        let page = self.pages.get_mut(&page_id).ok_or(StateError::Inert)?;
+        let frame = page
+            .frames
+            .get_mut(&frame_id)
+            .ok_or(StateError::UnknownFrame)?;
+        if frame.info.document_seq != document_seq {
+            return Err(StateError::Stale);
+        }
+        let total = frame.injected_bytes.checked_add(bytes);
+        if frame.script_budget_exhausted
+            || frame.evaluations >= MAX_FRAME_EVALUATIONS
+            || total.is_none_or(|total| total > crate::protocol::MAX_FRAME_SCRIPT_BYTES)
+        {
+            frame.script_budget_exhausted = true;
+            return Err(StateError::Oversized);
+        }
+        frame.injected_bytes = total.ok_or(StateError::Oversized)?;
+        frame.evaluations += 1;
+        Ok(())
+    }
+
+    pub fn script_budget_exhausted(&self, page_id: u64, frame_id: u64, sequence: u64) -> bool {
+        self.pages
+            .get(&page_id)
+            .and_then(|page| page.frames.get(&frame_id))
+            .is_none_or(|frame| {
+                frame.info.document_seq != sequence || frame.script_budget_exhausted
+            })
+    }
+
+    pub fn queue_frame_event(&mut self, page_id: u64, event: FrameEvent) {
+        if let Some(page) = self.pages.get_mut(&page_id) {
+            page.queue(event);
+        }
     }
 
     pub fn remove_frame(&mut self, page_id: u64, frame_id: u64) -> bool {
@@ -307,17 +419,23 @@ impl State {
         let Some(frame) = page.frames.get(&frame_id) else {
             return Vec::new();
         };
-        let Some(origin) = document_origin(&frame.info.uri) else {
-            return Vec::new();
-        };
         let mut worlds: Vec<String> = page
             .attach
             .worlds
             .iter()
-            .filter(|world| world.origins.contains(&origin))
+            .filter(|world| world.matches.iter().any(|rule| rule.matches(&frame.info)))
             .map(|world| world.name.clone())
             .collect();
-        if page.attach.extension_origins.contains(&origin) {
+        if !frame.info.opaque
+            && document_origin(&frame.info.uri)
+                .is_some_and(|origin| page.attach.extension_origins.contains(&origin))
+        {
+            worlds.push(String::new());
+        }
+        if !frame.info.opaque
+            && crate::protocol::external_matches(&page.attach.external, &frame.info)
+            && !worlds.iter().any(String::is_empty)
+        {
             worlds.push(String::new());
         }
         worlds
@@ -325,6 +443,18 @@ impl State {
 
     pub fn valid_target(&self, page_id: u64, deliver: &Deliver) -> bool {
         self.validate_message(page_id, &deliver.token, deliver.generation)
+            && deliver.external_install.as_ref().is_none_or(|install| {
+                self.pages.get(&page_id).is_some_and(|page| {
+                    page.frames.get(&deliver.frame_id).is_some_and(|frame| {
+                        deliver.world.is_empty()
+                            && page
+                                .attach
+                                .external
+                                .iter()
+                                .any(|rule| rule.install_id == *install && rule.admits(&frame.info))
+                    })
+                })
+            })
             && self
                 .frame(page_id, deliver.frame_id)
                 .is_some_and(|frame| frame.document_seq == deliver.document_seq)
@@ -360,8 +490,15 @@ impl State {
         deliver: &Deliver,
         now_ms: u64,
     ) -> Result<u64, StateError> {
-        if !self.valid_target(page_id, deliver) {
+        if !self.validate_message(page_id, &deliver.token, deliver.generation)
+            || self
+                .frame(page_id, deliver.frame_id)
+                .is_none_or(|frame| frame.document_seq != deliver.document_seq)
+        {
             return Err(StateError::Stale);
+        }
+        if !self.valid_target(page_id, deliver) {
+            return Err(StateError::WrongWorld);
         }
         self.reserve_post(
             page_id,
@@ -482,6 +619,30 @@ fn valid_origin(origin: &str) -> bool {
     document_origin(origin).is_some_and(|canonical| canonical == origin)
 }
 
+pub fn attachment_widens(old: &Attach, new: &Attach) -> bool {
+    old.token == new.token
+        && old.protocol_version == new.protocol_version
+        && old.role == new.role
+        && old.limits == new.limits
+        && new.generation >= old.generation
+        && old.extension_bootstrap == new.extension_bootstrap
+        && (!old.observe_forms || new.observe_forms)
+        && (!old.observe_requests || new.observe_requests)
+        && old
+            .extension_origins
+            .iter()
+            .all(|origin| new.extension_origins.contains(origin))
+        && old.external.iter().all(|rule| new.external.contains(rule))
+        && old.worlds.iter().all(|world| {
+            new.worlds.iter().any(|next| {
+                world.name == next.name
+                    && world.install_id == next.install_id
+                    && world.bootstrap == next.bootstrap
+                    && world.matches.iter().all(|rule| next.matches.contains(rule))
+            })
+        })
+}
+
 fn validate_attach(attach: &Attach) -> bool {
     if attach.protocol_version != PROTOCOL_VERSION
         || attach.generation == 0
@@ -494,10 +655,10 @@ fn validate_attach(attach: &Attach) -> bool {
     {
         return false;
     }
-    let mut wire_bytes = 64 + attach.token.len() + attach.extension_bootstrap.len();
     let mut names = BTreeSet::new();
     for world in &attach.worlds {
-        if world.name.is_empty()
+        if !crate::protocol::valid_install_id(&world.install_id)
+            || world.name.is_empty()
             || world.name.len() > MAX_WORLD_BYTES
             || !(world.name.starts_with("zephium-principal-extension-")
                 || world.name.starts_with("zephium-webext-"))
@@ -506,27 +667,29 @@ fn validate_attach(attach: &Attach) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
             || !names.insert(world.name.as_str())
-            || world.origins.is_empty()
-            || world.origins.len() > MAX_ORIGINS
+            || world.matches.is_empty()
             || world.bootstrap.len() > MAX_BOOTSTRAP_BYTES
             || world.bootstrap.contains('\0')
-            || world.origins.iter().any(|origin| !valid_origin(origin))
         {
             return false;
         }
-        wire_bytes = wire_bytes.saturating_add(12 + world.name.len() + world.bootstrap.len());
-        for origin in &world.origins {
-            wire_bytes = wire_bytes.saturating_add(4 + origin.len());
-        }
     }
-    for origin in &attach.extension_origins {
-        wire_bytes = wire_bytes.saturating_add(4 + origin.len());
+    let mut external = BTreeSet::new();
+    if attach.external.iter().any(|rule| {
+        !crate::protocol::valid_install_id(&rule.install_id)
+            || !external.insert(&rule.install_id)
+            || rule.matches.is_empty()
+            || rule.bootstrap.is_empty()
+            || rule.bootstrap.contains('\0')
+    }) {
+        return false;
     }
-    wire_bytes <= MAX_ATTACH_BYTES
-        && attach
-            .extension_origins
-            .iter()
-            .all(|origin| origin.starts_with("chrome-extension://") && valid_origin(origin))
+    attach
+        .extension_origins
+        .iter()
+        .all(|origin| origin.starts_with("chrome-extension://") && valid_origin(origin))
+        && crate::protocol::encode_ui(&crate::protocol::UiMessage::Attach(attach.clone()))
+            .is_ok_and(|bytes| bytes.len() <= MAX_ATTACH_BYTES)
 }
 
 #[cfg(test)]
@@ -540,7 +703,19 @@ mod tests {
             generation: 1,
             worlds: vec![WorldRule {
                 name: "zephium-webext-isolated".into(),
-                origins: vec!["https://example.com".into()],
+                install_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                matches: vec![crate::protocol::MatchRule {
+                    matcher: crate::protocol::ContentScriptMatcher::new(
+                        &["https://example.com:443/*"],
+                        &[],
+                        &[],
+                        &[],
+                        crate::protocol::MatchOptions::default(),
+                    )
+                    .expect("matcher"),
+                    all_frames: true,
+                    file_access: false,
+                }],
                 bootstrap: String::new(),
             }],
             ..Attach::default()
@@ -554,6 +729,117 @@ mod tests {
             .clear_document(7, 42, "https://example.com/path", true)
             .expect("document");
         (state, seq)
+    }
+
+    #[test]
+    fn script_byte_budget_is_per_document_and_rejects_stale_targets() {
+        let (mut state, sequence) = attached();
+        assert_eq!(
+            state.charge_script_bytes(7, 42, sequence + 1, 1),
+            Err(StateError::Stale)
+        );
+        assert!(state
+            .charge_script_bytes(7, 42, sequence, crate::protocol::MAX_FRAME_SCRIPT_BYTES)
+            .is_ok());
+        assert_eq!(
+            state.charge_script_bytes(7, 42, sequence, 1),
+            Err(StateError::Oversized)
+        );
+        assert_eq!(
+            state.charge_script_bytes(7, 42, sequence, usize::MAX),
+            Err(StateError::Oversized)
+        );
+        let child = state
+            .clear_document(7, 43, "https://example.com", false)
+            .expect("child");
+        assert!(state.charge_script_bytes(7, 43, child, 1).is_ok());
+        let replacement = state
+            .clear_document(7, 42, "https://example.com/new", true)
+            .expect("replacement");
+        assert!(state.charge_script_bytes(7, 42, replacement, 1).is_ok());
+    }
+
+    #[test]
+    fn empty_scripts_cannot_bypass_the_evaluation_budget() {
+        let (mut state, sequence) = attached();
+        for _ in 0..MAX_FRAME_EVALUATIONS {
+            assert!(state.charge_script_bytes(7, 42, sequence, 0).is_ok());
+        }
+        assert_eq!(
+            state.charge_script_bytes(7, 42, sequence, 0),
+            Err(StateError::Oversized)
+        );
+        assert!(state.script_budget_exhausted(7, 42, sequence));
+    }
+
+    #[test]
+    fn widening_preserves_documents_reservations_and_does_not_publish_duplicate_facts() {
+        let (mut state, sequence) = attached();
+        state.drain_frame_events(7);
+        let pending = state
+            .reserve_post(7, 42, sequence, "zephium-webext-isolated", 1, 0)
+            .expect("pending");
+        let mut wider = attachment();
+        wider.worlds[0]
+            .matches
+            .push(crate::protocol::MatchRule::for_origin("https://another.test").expect("matcher"));
+        state.attach(7, wider.clone()).expect("widen");
+        assert_eq!(
+            state.frame(7, 42).expect("preserved").document_seq,
+            sequence
+        );
+        assert!(state.drain_frame_events(7).is_empty());
+        assert_eq!(state.pages.get(&7).expect("page").outstanding, 1);
+        state.settle_post(pending);
+        assert_eq!(state.pages.get(&7).expect("page").outstanding, 0);
+        let mut narrower = attachment();
+        narrower.generation = 2;
+        state.attach(7, narrower).expect("narrowed generation");
+        assert!(state.frame(7, 42).is_none());
+        assert_eq!(state.attach(7, wider), Err(StateError::InvalidAttach));
+        assert!(state.attachment(7).is_none());
+    }
+
+    #[test]
+    fn frame_facts_refuse_sandboxed_worlds_and_admit_only_explicit_blank_inheritance() {
+        let mut attach = attachment();
+        attach.worlds[0].matches[0].matcher = crate::protocol::ContentScriptMatcher::new(
+            &["https://example.com:443/*"],
+            &[],
+            &[],
+            &[],
+            crate::protocol::MatchOptions {
+                match_about_blank: true,
+                match_origin_as_fallback: false,
+            },
+        )
+        .expect("matcher");
+        let mut state = State::new(PROTOCOL_VERSION, "process-token".into());
+        state.attach(7, attach).expect("attach");
+        state
+            .clear_document(7, 1, "https://example.com", true)
+            .expect("top");
+        state.set_frame_facts(7, 1, None, None, true);
+        assert!(state.worlds_for_frame(7, 1).is_empty());
+        state
+            .clear_document(7, 2, "about:blank", false)
+            .expect("blank");
+        assert!(state.worlds_for_frame(7, 2).is_empty());
+        state.set_frame_facts(
+            7,
+            2,
+            Some(1),
+            Some("https://example.com/path".into()),
+            false,
+        );
+        assert_eq!(
+            state.worlds_for_frame(7, 2),
+            vec!["zephium-webext-isolated"]
+        );
+        state.set_frame_facts(7, 2, Some(1), Some("https://example.com/path".into()), true);
+        assert!(state.worlds_for_frame(7, 2).is_empty());
+        let created = state.drain_frame_events(7);
+        assert!(created.iter().any(|event| matches!(event, FrameEvent::Created(info) if info.frame_id == 2 && info.parent_frame_id == Some(1) && info.opaque)));
     }
 
     #[test]
@@ -945,7 +1231,7 @@ mod tests {
             let mut attach = attachment();
             match change {
                 0 => attach.worlds.push(attach.worlds[0].clone()),
-                1 => attach.worlds[0].origins = vec!["https://example.com/path".into()],
+                1 => attach.worlds[0].matches.clear(),
                 2 => attach.extension_origins.push("https://example.com".into()),
                 _ => attach.limits.max_message_bytes = 32 * 1024 * 1024,
             }

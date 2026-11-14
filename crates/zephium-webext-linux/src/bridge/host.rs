@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -20,14 +21,18 @@ use zephium_webext_runtime::context::{
     Authority, BindError, ContextKey, ExtensionScheme, InstallAdmission, ViewKind,
 };
 use zephium_webkit_web_process_protocol::protocol::{
-    decode_event, EVENT_MESSAGE, MAX_UI_BYTES, PROTOCOL_VERSION,
+    decode_delivery_result, decode_event, DeliveryStatus, ScriptTable, EVENT_MESSAGE, MAX_UI_BYTES,
+    PROTOCOL_VERSION,
 };
 
-use super::core::{AttachOutcome, BridgeStats, Core, Effect, Outgoing, Phase, RegisterError};
+use super::core::{
+    AttachOutcome, BridgeStats, Core, Effect, InjectionError, Outgoing, Phase, RegisterError,
+};
 use super::plan::AttachPlan;
 use super::policy::{PolicyError, SealedPolicy};
 use super::pull::{self, PULL_MIN_INTERVAL};
 use super::runtime::{BridgeViewId, DeliverError, Outbox, Runtime};
+use super::scripts::{ScriptTableError, SealedScripts};
 use super::ReplyToken;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -64,8 +69,8 @@ pub struct Busy;
 /// When an updated plan reaches the module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reattach {
-    /// Now. Every extension context in the view ends until its documents
-    /// are recreated.
+    /// Now. A structural widening preserves live contexts; other changes
+    /// end contexts until the documents are recreated.
     Now,
     /// When the main frame next navigates. The host applies the new plan
     /// to claims at once, so narrowing takes effect immediately.
@@ -329,12 +334,50 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         result
     }
 
+    /// Resolves a Chrome frame and host document to an exact native target.
+    pub fn frame_target(
+        &self,
+        view: BridgeViewId,
+        frame: zephium_webext_runtime::context::FrameId,
+        document: zephium_webext_runtime::context::DocumentGeneration,
+    ) -> Option<zephium_webkit_web_process_protocol::protocol::InjectionTarget> {
+        self.shared
+            .core
+            .borrow()
+            .frame_target(view.0, frame, document)
+    }
+
+    /// Sends a host-authorized execution; results arrive through `Runtime`.
+    /// Transport identity fields in `request` are replaced by host facts.
+    pub fn inject(
+        &self,
+        view: BridgeViewId,
+        install: ExtensionInstallId,
+        request: zephium_webkit_web_process_protocol::protocol::InjectRequest,
+    ) -> Result<u64, InjectionError> {
+        let result =
+            self.shared
+                .core
+                .borrow_mut()
+                .inject(view.0, install, request, self.shared.now_ms());
+        self.shared.collect();
+        result
+    }
+
     /// Publishes a request-policy snapshot to every attached view whose
     /// plan applies it, now and on every later attachment. Returns its
     /// policy generation.
     pub fn publish_policy(&self, bytes: &[u8]) -> Result<u64, PolicyError> {
         let policy = Rc::new(SealedPolicy::new(bytes)?);
         let generation = self.shared.core.borrow_mut().publish_policy(policy);
+        self.shared.collect();
+        Ok(generation)
+    }
+
+    /// Publishes this profile's immutable script snapshot to future documents.
+    pub fn publish_scripts(&self, table: ScriptTable) -> Result<u64, ScriptTableError> {
+        let table = Rc::new(SealedScripts::new(table)?);
+        let generation = self.shared.core.borrow_mut().publish_scripts(table)?;
         self.shared.collect();
         Ok(generation)
     }
@@ -702,7 +745,17 @@ impl<R: Runtime + 'static> Shared<R> {
                 bytes,
                 outgoing,
                 policy,
-            } => self.send(view, name, bytes, outgoing, policy.as_deref()),
+                scripts,
+            } => self.send(
+                view,
+                name,
+                bytes,
+                outgoing,
+                policy
+                    .as_ref()
+                    .map(|policy| policy.fd())
+                    .or_else(|| scripts.as_ref().map(|scripts| scripts.fd())),
+            ),
             Effect::Reply(token) => {
                 if let Some(message) = self.replies.borrow_mut().remove(&token.0) {
                     message.send_reply(&UserMessage::new(EVENT_MESSAGE, None));
@@ -734,6 +787,9 @@ impl<R: Runtime + 'static> Shared<R> {
                         runtime.context_closed(&context, reason, &mut outbox)
                     }
                     Effect::Lifecycle(event) => runtime.frame_lifecycle(&event, &mut outbox),
+                    Effect::Injection { view, result } => {
+                        runtime.injection_result(BridgeViewId(view), &result)
+                    }
                     Effect::Undeliverable { context, error } => {
                         runtime.undeliverable(&context, error)
                     }
@@ -767,7 +823,7 @@ impl<R: Runtime + 'static> Shared<R> {
         name: &'static str,
         bytes: Vec<u8>,
         outgoing: Outgoing,
-        policy: Option<&SealedPolicy>,
+        descriptor: Option<BorrowedFd<'_>>,
     ) {
         let view = self
             .hosts
@@ -779,10 +835,10 @@ impl<R: Runtime + 'static> Shared<R> {
             return;
         };
         let parameters = glib::Variant::from_data::<Vec<u8>, _>(bytes);
-        let message = match policy {
-            Some(policy) => {
+        let message = match descriptor {
+            Some(descriptor) => {
                 let descriptors = gio::UnixFDList::new();
-                if descriptors.append(policy.fd()).ok() != Some(0) {
+                if descriptors.append(descriptor).ok() != Some(0) {
                     self.settle(id, outgoing, Err(None));
                     return;
                 }
@@ -793,6 +849,7 @@ impl<R: Runtime + 'static> Shared<R> {
         self.pending.set(self.pending.get() + 1);
         let weak = Rc::downgrade(self);
         let pending = self.pending.clone();
+        let delivery = matches!(outgoing, Outgoing::Deliver { .. });
         view.send_message_to_page(&message, None::<&gio::Cancellable>, move |reply| {
             pending.set(pending.get().saturating_sub(1));
             let Some(shared) = weak.upgrade() else {
@@ -800,10 +857,23 @@ impl<R: Runtime + 'static> Shared<R> {
             };
             let reply = reply
                 .map(|reply| {
-                    reply
-                        .parameters()
-                        .and_then(|parameters| parameters.get::<bool>())
-                        .unwrap_or(false)
+                    let parameters = reply.parameters();
+                    if delivery {
+                        parameters
+                            .and_then(|parameters| {
+                                parameters
+                                    .fixed_array::<u8>()
+                                    .ok()
+                                    .and_then(|bytes| decode_delivery_result(bytes).ok())
+                            })
+                            .unwrap_or(DeliveryStatus::Denied)
+                    } else if parameters.and_then(|parameters| parameters.get::<bool>())
+                        == Some(true)
+                    {
+                        DeliveryStatus::Delivered
+                    } else {
+                        DeliveryStatus::Denied
+                    }
                 })
                 .map_err(|error| Some(error.matches(UserMessageError::Message)));
             shared.settle(id, outgoing, reply);
@@ -812,22 +882,28 @@ impl<R: Runtime + 'static> Shared<R> {
     }
 
     /// `Err(Some(true))`: no module handled it; `Err(_)`: never answered.
-    fn settle(&self, id: u64, outgoing: Outgoing, reply: Result<bool, Option<bool>>) {
+    fn settle(&self, id: u64, outgoing: Outgoing, reply: Result<DeliveryStatus, Option<bool>>) {
         let mut core = self.core.borrow_mut();
         match outgoing {
             Outgoing::Attach { generation } => {
                 let outcome = match reply {
-                    Ok(true) => AttachOutcome::Accepted,
-                    Ok(false) => AttachOutcome::Refused,
+                    Ok(DeliveryStatus::Delivered) => AttachOutcome::Accepted,
+                    Ok(_) => AttachOutcome::Refused,
                     Err(Some(true)) => AttachOutcome::Unhandled,
                     Err(_) => AttachOutcome::Failed,
                 };
                 core.attach_settled(id, generation, outcome);
             }
             Outgoing::Deliver { context } => {
-                core.delivery_settled(id, &context, reply == Ok(true));
+                core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied));
             }
-            Outgoing::Policy { .. } => core.policy_settled(reply == Ok(true)),
+            Outgoing::Policy { .. } => core.policy_settled(reply == Ok(DeliveryStatus::Delivered)),
+            Outgoing::Scripts { table_generation } => {
+                core.scripts_settled(id, table_generation, reply == Ok(DeliveryStatus::Delivered))
+            }
+            Outgoing::Inject { request_id } => {
+                core.injection_transport_settled(request_id, reply == Ok(DeliveryStatus::Delivered))
+            }
             Outgoing::Detach => {}
         }
     }
@@ -839,7 +915,9 @@ impl<R: Runtime + 'static> Shared<R> {
             .get(&id)
             .and_then(|host| Some((host.view.upgrade()?, host.pull.clone()?)));
         let Some((view, pull)) = host else {
-            self.core.borrow_mut().delivery_settled(id, &context, false);
+            self.core
+                .borrow_mut()
+                .delivery_settled(id, &context, DeliveryStatus::Denied);
             return;
         };
         let arguments = glib::VariantDict::new(None);
@@ -860,10 +938,15 @@ impl<R: Runtime + 'static> Shared<R> {
                     return;
                 };
                 let accepted = result.is_ok_and(|value| value.is_boolean() && value.to_boolean());
-                shared
-                    .core
-                    .borrow_mut()
-                    .delivery_settled(id, &context, accepted);
+                shared.core.borrow_mut().delivery_settled(
+                    id,
+                    &context,
+                    if accepted {
+                        DeliveryStatus::Delivered
+                    } else {
+                        DeliveryStatus::NoReceiver
+                    },
+                );
                 shared.collect();
             },
         );
