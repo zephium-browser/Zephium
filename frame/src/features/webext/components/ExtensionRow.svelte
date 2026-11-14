@@ -1,7 +1,7 @@
 <script lang="ts">
   import { MoreHorizontalIcon, PuzzleIcon } from "@hugeicons/core-free-icons";
   import type { WebExtensionView } from "$shared/ipc/bindings";
-  import { IS_WINDOWS } from "$shared/platform";
+  import { IS_LINUX, IS_WINDOWS } from "$shared/platform";
   import { webext } from "$domain/webext";
   import Button from "$shared/ui/Button";
   import Icon from "$shared/ui/Icon";
@@ -37,7 +37,7 @@
             label: m.webext_access_all(),
             checked: extension.access === "all",
           },
-          ...(!IS_WINDOWS
+          ...(!IS_WINDOWS && !IS_LINUX
             ? [
                 {
                   kind: "item" as const,
