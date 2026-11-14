@@ -800,7 +800,7 @@ fn is_storage_event(event: &str) -> bool {
 
 macro_rules! event_catalog {
     ($( $name:literal ),* $(,)?) => {
-        const EVENT_APIS: &[&str] = &[$($name),*];
+        pub(crate) const EVENT_APIS: &[&str] = &[$($name),*];
         fn listener_method(event: &str, operation: &str) -> Option<&'static str> {
             match (event, operation) {
                 $(( $name, "addListener") => Some(concat!($name, ".addListener")),
@@ -850,6 +850,40 @@ event_catalog!(
     "webRequest.onCompleted",
     "webRequest.onErrorOccurred",
     "webRequest.onAuthRequired",
+    "action.onClicked",
+    "action.onUserSettingsChanged",
+    "bookmarks.onChanged",
+    "bookmarks.onChildrenReordered",
+    "bookmarks.onCreated",
+    "bookmarks.onImportBegan",
+    "bookmarks.onImportEnded",
+    "bookmarks.onMoved",
+    "bookmarks.onRemoved",
+    "commands.onCommand",
+    "history.onVisitRemoved",
+    "history.onVisited",
+    "idle.onStateChanged",
+    "notifications.onButtonClicked",
+    "notifications.onClicked",
+    "notifications.onClosed",
+    "notifications.onPermissionLevelChanged",
+    "notifications.onShowSettings",
+    "permissions.onAdded",
+    "permissions.onRemoved",
+    "sessions.onChanged",
+    "tabs.onActiveChanged",
+    "tabs.onAttached",
+    "tabs.onDetached",
+    "tabs.onHighlightChanged",
+    "tabs.onHighlighted",
+    "tabs.onMoved",
+    "tabs.onReplaced",
+    "tabs.onSelectionChanged",
+    "tabs.onZoomChange",
+    "webNavigation.onCreatedNavigationTarget",
+    "webNavigation.onTabReplaced",
+    "windows.onBoundsChanged",
+    "runtime.onUpdateAvailable",
 );
 
 #[cfg(test)]
