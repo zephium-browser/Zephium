@@ -38,10 +38,36 @@ fn handle<S: StorageHost>(
     let now = host.storage_now_nanos();
     let sender = invocation.sender();
     let unlimited = invocation.permissions().has_api("unlimitedStorage");
-    let storage = host.storage(sender)?;
-    storage.check_access(sender, area)?;
-    let args = invocation.args();
     let member = invocation.name().rsplit('.').next().unwrap_or("");
+    let storage = host.storage(sender)?;
+    let (value, change) = execute(
+        storage,
+        sender,
+        area,
+        member,
+        invocation.args(),
+        unlimited,
+        now,
+    )?;
+    if let Some(change) = change {
+        host.storage_changed(sender, change);
+    }
+    Ok(value)
+}
+
+/// Runs one schema-validated `storage.<area>.<member>` call against the
+/// sender's store, for adapters that run storage on their own executor.
+/// Returns the result and the committed change to fan out, if any.
+pub fn execute(
+    storage: &mut Storage,
+    sender: &Sender,
+    area: Area,
+    member: &str,
+    args: &[Value],
+    unlimited: bool,
+    now: u64,
+) -> Result<(Value, Option<StorageChangeEvent>), ApiError> {
+    storage.check_access(sender, area)?;
     let mutation = match member {
         "get" => {
             let selector = match args.first() {
@@ -49,23 +75,21 @@ fn handle<S: StorageHost>(
                 Some(Value::Object(defaults)) => GetKeys::Defaults(defaults.clone()),
                 Some(value) => GetKeys::Keys(keys(value)),
             };
-            return storage
-                .get(area, &selector)
-                .map(Value::Object)
-                .map_err(Into::into);
+            return Ok((Value::Object(storage.get(area, &selector)?), None));
         }
         "getBytesInUse" => {
             let selector = args.first().filter(|value| !value.is_null()).map(keys);
-            return storage
-                .get_bytes_in_use(area, selector.as_deref())
-                .map(Value::from)
-                .map_err(Into::into);
+            return Ok((
+                Value::from(storage.get_bytes_in_use(area, selector.as_deref())?),
+                None,
+            ));
         }
         "getKeys" => {
-            return storage
-                .get_keys(area)
-                .map(|keys| Value::Array(keys.into_iter().map(Value::String).collect()))
-                .map_err(Into::into)
+            let keys = storage.get_keys(area)?;
+            return Ok((
+                Value::Array(keys.into_iter().map(Value::String).collect()),
+                None,
+            ));
         }
         "setAccessLevel" => {
             let access = if args
@@ -79,7 +103,7 @@ fn handle<S: StorageHost>(
                 AccessLevel::TrustedAndUntrustedContexts
             };
             storage.set_access_level(sender, area, access)?;
-            return Ok(Value::Null);
+            return Ok((Value::Null, None));
         }
         "set" => Mutation::Set(
             args.first()
@@ -96,10 +120,7 @@ fn handle<S: StorageHost>(
         _ => return Err(ApiError::unknown_method()),
     };
     let change = storage.mutate(area, &mutation, unlimited, now)?;
-    if let Some(change) = change {
-        host.storage_changed(sender, change);
-    }
-    Ok(Value::Null)
+    Ok((Value::Null, change))
 }
 
 /// Registers all four areas with storage permission gates. Access policies
