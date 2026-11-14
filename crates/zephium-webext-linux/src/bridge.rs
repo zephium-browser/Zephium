@@ -25,6 +25,7 @@ mod plan;
 mod policy;
 mod pull;
 mod runtime;
+mod scripts;
 
 pub use self::buffer::{
     BUFFER_TIMEOUT_MS, MAX_BUFFERED_BYTES_PER_PROFILE, MAX_BUFFERED_BYTES_PER_VIEW,
@@ -32,9 +33,9 @@ pub use self::buffer::{
 };
 pub use self::claims::Refusal;
 pub use self::core::{
-    BridgeStats, RegisterError, MAX_CONTEXTS, MAX_INFLIGHT_PER_CONTEXT, MAX_INFLIGHT_PER_VIEW,
-    MAX_QUEUED_BYTES_PER_CONTEXT, MAX_QUEUED_BYTES_PER_PROFILE, MAX_QUEUED_FRAMES_PER_CONTEXT,
-    MAX_VIEWS,
+    BridgeStats, InjectionError, RegisterError, MAX_CONTEXTS, MAX_INFLIGHT_PER_CONTEXT,
+    MAX_INFLIGHT_PER_VIEW, MAX_QUEUED_BYTES_PER_CONTEXT, MAX_QUEUED_BYTES_PER_PROFILE,
+    MAX_QUEUED_FRAMES_PER_CONTEXT, MAX_VIEWS,
 };
 pub use self::frames::MAX_FRAMES_PER_VIEW;
 pub use self::host::{
@@ -47,6 +48,7 @@ pub use self::runtime::{
     BridgeViewId, CloseReason, DeliverError, DispatchRuntime, FrameLifecycle, Outbox, PortTraffic,
     Ports, Runtime, ViewRef,
 };
+pub use self::scripts::{ScriptTableError, SealedScripts};
 
 /// Identifies a module event awaiting its reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -54,3 +56,6 @@ pub(crate) struct ReplyToken(pub u64);
 
 #[cfg(test)]
 mod tests;
+
+/// Shared native injection and matcher contracts.
+pub use zephium_webkit_web_process_protocol::protocol::{ExternalRule, MatchRule, ScriptTable};

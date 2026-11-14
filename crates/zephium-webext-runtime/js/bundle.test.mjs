@@ -13,6 +13,7 @@ const assembled = {
     'switch(entry){' +
     "case'page':return Z.api.page(surface,bootstrap);" +
     "case'content':return Z.content.boot(surface,bootstrap);" +
+    "case'native-content':if(!bootstrap||!['contentScript','userScript'].includes(bootstrap.contextKind))throw new TypeError('Invalid native content context');return Z.api.page(surface,bootstrap);" +
     "case'worker':return Z.workerScope.worker(surface,bootstrap);" +
     "case'owner':return Z.workerScope.owner(bootstrap);" +
     "default:throw new TypeError('Unknown binding entry');}})",
@@ -78,4 +79,17 @@ test('the content entry boots a guard and the matcher entry decides alone', () =
   const matcher = run(bundles.matcher);
   assert.equal(matcher({ matches: ['https://example.com/*'] }), true);
   assert.equal(matcher({ matches: ['https://example.org/*'] }), false);
+});
+
+test('native content creates the API before separately evaluated strict files', () => {
+  const { entry, run } = nativeRealm();
+  entry('native-content', surface, bootstrap({ contextKind: 'contentScript' }));
+  assert.equal(run('typeof chrome.runtime.sendMessage'), 'function');
+  assert.equal(run('typeof __zephiumPost'), 'undefined');
+  run('"use strict"; let sharedNativeLexical = 41;');
+  assert.equal(run('"use strict"; sharedNativeLexical + 1'), 42);
+  assert.throws(() => run('"use strict"; undeclaredNativeValue = 1'), /not defined/);
+  for (const contextKind of ['popup', 'background', 'externalPage']) {
+    assert.throws(() => nativeRealm().entry('native-content', surface, bootstrap({ contextKind })), /Invalid native content context/);
+  }
 });

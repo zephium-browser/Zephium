@@ -2,11 +2,18 @@
 
 #![forbid(unsafe_code)]
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub use crate::matching::*;
+pub use crate::scripts::*;
+use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
+use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
+
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";
 pub const DETACH_MESSAGE: &str = "zephium-webext-detach";
+pub const SCRIPTS_MESSAGE: &str = "zephium-webext-scripts";
+pub const INJECT_MESSAGE: &str = "zephium-webext-inject";
 pub const EVENT_MESSAGE: &str = "zephium-webext-event";
 pub const POST_FUNCTION: &str = "__zephiumPost";
 pub const REGISTER_FUNCTION: &str = "__zephiumRegisterReceiver";
@@ -81,8 +88,9 @@ impl Limits {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorldRule {
+    pub install_id: String,
     pub name: String,
-    pub origins: Vec<String>,
+    pub matches: Vec<MatchRule>,
     pub bootstrap: String,
 }
 
@@ -94,6 +102,7 @@ pub struct Attach {
     pub role: PageRole,
     pub limits: Limits,
     pub worlds: Vec<WorldRule>,
+    pub external: Vec<ExternalRule>,
     pub extension_origins: Vec<String>,
     pub extension_bootstrap: String,
     pub observe_requests: bool,
@@ -109,6 +118,7 @@ impl Default for Attach {
             role: PageRole::default(),
             limits: Limits::default(),
             worlds: Vec::new(),
+            external: Vec::new(),
             extension_origins: Vec::new(),
             extension_bootstrap: String::new(),
             observe_requests: false,
@@ -119,6 +129,7 @@ impl Default for Attach {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Deliver {
+    pub external_install: Option<String>,
     pub token: String,
     pub generation: u64,
     pub frame_id: u64,
@@ -148,6 +159,8 @@ pub enum UiMessage {
     Deliver(Deliver),
     Detach(Detach),
     Policy(PolicyUpdate),
+    Scripts(ScriptUpdate),
+    Inject(InjectRequest),
 }
 
 impl UiMessage {
@@ -157,28 +170,44 @@ impl UiMessage {
             Self::Deliver(_) => DELIVER_MESSAGE,
             Self::Detach(_) => DETACH_MESSAGE,
             Self::Policy(_) => POLICY_MESSAGE,
+            Self::Scripts(_) => SCRIPTS_MESSAGE,
+            Self::Inject(_) => INJECT_MESSAGE,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FrameInfo {
     pub frame_id: u64,
     pub document_seq: u64,
     pub uri: String,
     pub is_main: bool,
+    pub parent_frame_id: Option<u64>,
+    pub creator_uri: Option<String>,
+    pub opaque: bool,
+    pub table_generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrameEvent {
     Created(FrameInfo),
     Committed(FrameInfo),
-    Destroyed { frame_id: u64, document_seq: u64 },
+    Destroyed {
+        frame_id: u64,
+        document_seq: u64,
+    },
     Reset,
+    Evaluated(Evaluation),
+    ExternalPage {
+        install_id: String,
+        frame_id: u64,
+        document_seq: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Post {
+    pub external_install: Option<String>,
     pub generation: u64,
     pub post_id: u64,
     pub frame_id: u64,
@@ -225,6 +254,7 @@ pub enum Event {
         observations: Vec<RequestEvent>,
     },
     Form(FormEvent),
+    Injection(InjectionResult),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,52 +274,52 @@ impl std::fmt::Display for WireError {
 
 impl std::error::Error for WireError {}
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8], max: usize) -> Result<Self, WireError> {
+    pub(crate) fn new(bytes: &'a [u8], max: usize) -> Result<Self, WireError> {
         if bytes.len() > max {
             return Err(WireError::Oversized);
         }
         Ok(Self { bytes, at: 0 })
     }
 
-    fn take(&mut self, len: usize) -> Result<&'a [u8], WireError> {
+    pub(crate) fn take(&mut self, len: usize) -> Result<&'a [u8], WireError> {
         let end = self.at.checked_add(len).ok_or(WireError::Oversized)?;
         let result = self.bytes.get(self.at..end).ok_or(WireError::Truncated)?;
         self.at = end;
         Ok(result)
     }
 
-    fn u8(&mut self) -> Result<u8, WireError> {
+    pub(crate) fn u8(&mut self) -> Result<u8, WireError> {
         Ok(self.take(1)?[0])
     }
-    fn u16(&mut self) -> Result<u16, WireError> {
+    pub(crate) fn u16(&mut self) -> Result<u16, WireError> {
         Ok(u16::from_le_bytes(
             self.take(2)?.try_into().map_err(|_| WireError::Truncated)?,
         ))
     }
-    fn u32(&mut self) -> Result<u32, WireError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, WireError> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().map_err(|_| WireError::Truncated)?,
         ))
     }
-    fn u64(&mut self) -> Result<u64, WireError> {
+    pub(crate) fn u64(&mut self) -> Result<u64, WireError> {
         Ok(u64::from_le_bytes(
             self.take(8)?.try_into().map_err(|_| WireError::Truncated)?,
         ))
     }
-    fn boolean(&mut self) -> Result<bool, WireError> {
+    pub(crate) fn boolean(&mut self) -> Result<bool, WireError> {
         match self.u8()? {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(WireError::Invalid),
         }
     }
-    fn count(&mut self, max: usize) -> Result<usize, WireError> {
+    pub(crate) fn count(&mut self, max: usize) -> Result<usize, WireError> {
         let n = self.u32()? as usize;
         if n > max {
             Err(WireError::Oversized)
@@ -297,26 +327,26 @@ impl<'a> Reader<'a> {
             Ok(n)
         }
     }
-    fn blob(&mut self, max: usize) -> Result<&'a [u8], WireError> {
+    pub(crate) fn blob(&mut self, max: usize) -> Result<&'a [u8], WireError> {
         let n = self.count(max)?;
         self.take(n)
     }
-    fn string(&mut self, max: usize) -> Result<String, WireError> {
+    pub(crate) fn string(&mut self, max: usize) -> Result<String, WireError> {
         let value = std::str::from_utf8(self.blob(max)?).map_err(|_| WireError::Invalid)?;
         if value.contains('\0') {
             return Err(WireError::Invalid);
         }
         Ok(value.to_owned())
     }
-    fn end(self) -> Result<(), WireError> {
+    pub(crate) fn end(self) -> Result<(), WireError> {
         if self.at == self.bytes.len() {
             Ok(())
         } else {
             Err(WireError::Trailing)
         }
     }
-    fn header(&mut self, kind: u8) -> Result<(), WireError> {
-        if self.take(4)? != b"ZWP1" {
+    pub(crate) fn header(&mut self, kind: u8) -> Result<(), WireError> {
+        if self.take(4)? != b"ZWP2" {
             return Err(WireError::Version);
         }
         if self.u8()? != kind {
@@ -324,7 +354,7 @@ impl<'a> Reader<'a> {
         }
         Ok(())
     }
-    fn limits(&mut self) -> Result<Limits, WireError> {
+    pub(crate) fn limits(&mut self) -> Result<Limits, WireError> {
         Ok(Limits {
             max_message_bytes: self.u32()?,
             frame_inflight_bytes: self.u32()?,
@@ -337,7 +367,7 @@ impl<'a> Reader<'a> {
             page_burst: self.u16()?,
         })
     }
-    fn strings(&mut self, max: usize, length: usize) -> Result<Vec<String>, WireError> {
+    pub(crate) fn strings(&mut self, max: usize, length: usize) -> Result<Vec<String>, WireError> {
         let count = self.count(max)?;
         let mut items = Vec::new();
         for _ in 0..count {
@@ -345,47 +375,59 @@ impl<'a> Reader<'a> {
         }
         Ok(items)
     }
-    fn frame(&mut self) -> Result<FrameInfo, WireError> {
+    pub(crate) fn frame(&mut self) -> Result<FrameInfo, WireError> {
         Ok(FrameInfo {
             frame_id: self.u64()?,
             document_seq: self.u64()?,
             uri: self.string(MAX_URI_BYTES)?,
             is_main: self.boolean()?,
+            parent_frame_id: if self.boolean()? {
+                Some(self.u64()?)
+            } else {
+                None
+            },
+            creator_uri: if self.boolean()? {
+                Some(self.string(MAX_URI_BYTES)?)
+            } else {
+                None
+            },
+            opaque: self.boolean()?,
+            table_generation: self.u64()?,
         })
     }
 }
 
-struct Writer(Vec<u8>);
+pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
-    fn new(kind: u8) -> Self {
-        let mut bytes = b"ZWP1".to_vec();
+    pub(crate) fn new(kind: u8) -> Self {
+        let mut bytes = b"ZWP2".to_vec();
         bytes.push(kind);
         Self(bytes)
     }
-    fn u8(&mut self, v: u8) {
+    pub(crate) fn u8(&mut self, v: u8) {
         self.0.push(v);
     }
-    fn u16(&mut self, v: u16) {
+    pub(crate) fn u16(&mut self, v: u16) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn boolean(&mut self, v: bool) {
+    pub(crate) fn boolean(&mut self, v: bool) {
         self.u8(u8::from(v));
     }
-    fn count(&mut self, n: usize, max: usize) -> Result<(), WireError> {
+    pub(crate) fn count(&mut self, n: usize, max: usize) -> Result<(), WireError> {
         if n > max {
             return Err(WireError::Oversized);
         }
         self.u32(u32::try_from(n).map_err(|_| WireError::Oversized)?);
         Ok(())
     }
-    fn blob(&mut self, v: &[u8], max: usize) -> Result<(), WireError> {
+    pub(crate) fn blob(&mut self, v: &[u8], max: usize) -> Result<(), WireError> {
         self.count(v.len(), max)?;
         if self.0.len().saturating_add(v.len()) > MAX_UI_BYTES {
             return Err(WireError::Oversized);
@@ -393,20 +435,25 @@ impl Writer {
         self.0.extend_from_slice(v);
         Ok(())
     }
-    fn string(&mut self, v: &str, max: usize) -> Result<(), WireError> {
+    pub(crate) fn string(&mut self, v: &str, max: usize) -> Result<(), WireError> {
         if v.contains('\0') {
             return Err(WireError::Invalid);
         }
         self.blob(v.as_bytes(), max)
     }
-    fn strings(&mut self, v: &[String], max: usize, length: usize) -> Result<(), WireError> {
+    pub(crate) fn strings(
+        &mut self,
+        v: &[String],
+        max: usize,
+        length: usize,
+    ) -> Result<(), WireError> {
         self.count(v.len(), max)?;
         for item in v {
             self.string(item, length)?;
         }
         Ok(())
     }
-    fn limits(&mut self, v: &Limits) {
+    pub(crate) fn limits(&mut self, v: &Limits) {
         self.u32(v.max_message_bytes);
         self.u32(v.frame_inflight_bytes);
         self.u32(v.page_inflight_bytes);
@@ -417,11 +464,92 @@ impl Writer {
         self.u16(v.frame_burst);
         self.u16(v.page_burst);
     }
-    fn frame(&mut self, v: &FrameInfo) -> Result<(), WireError> {
+    pub(crate) fn frame(&mut self, v: &FrameInfo) -> Result<(), WireError> {
         self.u64(v.frame_id);
         self.u64(v.document_seq);
         self.string(&v.uri, MAX_URI_BYTES)?;
         self.boolean(v.is_main);
+        self.boolean(v.parent_frame_id.is_some());
+        if let Some(parent) = v.parent_frame_id {
+            self.u64(parent);
+        }
+        self.boolean(v.creator_uri.is_some());
+        if let Some(creator) = &v.creator_uri {
+            self.string(creator, MAX_URI_BYTES)?;
+        }
+        self.boolean(v.opaque);
+        self.u64(v.table_generation);
+        Ok(())
+    }
+}
+
+impl Reader<'_> {
+    pub(crate) fn rule(&mut self) -> Result<MatchRule, WireError> {
+        let matches = self.strings(MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES)?;
+        let excluded = self.strings(MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES)?;
+        if matches.len().saturating_add(excluded.len()) > MAX_MATCH_PATTERNS_PER_SET {
+            return Err(WireError::Oversized);
+        }
+        let included_globs = self.strings(MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES)?;
+        let excluded_globs = self.strings(MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES)?;
+        if included_globs.len().saturating_add(excluded_globs.len()) > MAX_GLOBS_PER_SCRIPT {
+            return Err(WireError::Oversized);
+        }
+        let options = MatchOptions {
+            match_about_blank: self.boolean()?,
+            match_origin_as_fallback: self.boolean()?,
+        };
+        let all_frames = self.boolean()?;
+        let file_access = self.boolean()?;
+        let matcher = ContentScriptMatcher::new(
+            &matches,
+            &excluded,
+            &included_globs,
+            &excluded_globs,
+            options,
+        )
+        .map_err(|_| WireError::Invalid)?;
+        Ok(MatchRule {
+            matcher,
+            all_frames,
+            file_access,
+        })
+    }
+}
+
+impl Writer {
+    pub(crate) fn rule(&mut self, rule: &MatchRule) -> Result<(), WireError> {
+        let set = rule.matcher.match_set();
+        if set.includes().len().saturating_add(set.excludes().len()) > MAX_MATCH_PATTERNS_PER_SET
+            || rule
+                .matcher
+                .include_globs()
+                .len()
+                .saturating_add(rule.matcher.exclude_globs().len())
+                > MAX_GLOBS_PER_SCRIPT
+        {
+            return Err(WireError::Oversized);
+        }
+        self.count(set.includes().len(), MAX_MATCH_PATTERNS_PER_SET)?;
+        for item in set.includes() {
+            self.string(item.as_str(), MAX_MATCH_PATTERN_BYTES)?;
+        }
+        self.count(set.excludes().len(), MAX_MATCH_PATTERNS_PER_SET)?;
+        for item in set.excludes() {
+            self.string(item.as_str(), MAX_MATCH_PATTERN_BYTES)?;
+        }
+        self.count(rule.matcher.include_globs().len(), MAX_GLOBS_PER_SCRIPT)?;
+        for item in rule.matcher.include_globs() {
+            self.string(item.as_str(), MAX_GLOB_BYTES)?;
+        }
+        self.count(rule.matcher.exclude_globs().len(), MAX_GLOBS_PER_SCRIPT)?;
+        for item in rule.matcher.exclude_globs() {
+            self.string(item.as_str(), MAX_GLOB_BYTES)?;
+        }
+        self.boolean(set.options().match_about_blank);
+        self.boolean(set.options().match_origin_as_fallback);
+        self.boolean(rule.all_frames);
+        self.boolean(rule.file_access);
         Ok(())
     }
 }
@@ -432,9 +560,14 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
         UiMessage::Deliver(_) => 2,
         UiMessage::Policy(_) => 3,
         UiMessage::Detach(_) => 4,
+        UiMessage::Scripts(_) => 5,
+        UiMessage::Inject(_) => 6,
     });
     match message {
         UiMessage::Attach(v) => {
+            if v.protocol_version != PROTOCOL_VERSION {
+                return Err(WireError::Version);
+            }
             w.u32(v.protocol_version);
             w.string(&v.token, MAX_TOKEN_BYTES)?;
             w.u64(v.generation);
@@ -445,9 +578,22 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
             w.limits(&v.limits);
             w.count(v.worlds.len(), MAX_WORLDS)?;
             for world in &v.worlds {
+                w.string(&world.install_id, MAX_INSTALL_ID_BYTES)?;
                 w.string(&world.name, MAX_WORLD_BYTES)?;
-                w.strings(&world.origins, MAX_ORIGINS, MAX_URI_BYTES)?;
+                w.count(world.matches.len(), MAX_ORIGINS)?;
+                for rule in &world.matches {
+                    w.rule(rule)?;
+                }
                 w.string(&world.bootstrap, MAX_BOOTSTRAP_BYTES)?;
+            }
+            w.count(v.external.len(), MAX_ORIGINS)?;
+            for rule in &v.external {
+                w.string(&rule.install_id, MAX_INSTALL_ID_BYTES)?;
+                w.count(rule.matches.len(), MAX_ORIGINS)?;
+                for pattern in &rule.matches {
+                    w.rule(pattern)?;
+                }
+                w.string(&rule.bootstrap, MAX_BOOTSTRAP_BYTES)?;
             }
             w.strings(&v.extension_origins, MAX_ORIGINS, MAX_URI_BYTES)?;
             w.string(&v.extension_bootstrap, MAX_BOOTSTRAP_BYTES)?;
@@ -463,6 +609,10 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
             w.u64(v.frame_id);
             w.u64(v.document_seq);
             w.string(&v.world, MAX_WORLD_BYTES)?;
+            w.boolean(v.external_install.is_some());
+            if let Some(install) = &v.external_install {
+                w.string(install, MAX_INSTALL_ID_BYTES)?;
+            }
             w.blob(&v.bytes, MAX_MESSAGE_BYTES)?;
         }
         UiMessage::Policy(v) => {
@@ -476,6 +626,17 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
             w.string(&v.token, MAX_TOKEN_BYTES)?;
             w.u64(v.generation);
         }
+        UiMessage::Scripts(v) => {
+            w.string(&v.token, MAX_TOKEN_BYTES)?;
+            w.u64(v.generation);
+            w.u64(v.table_generation);
+            w.u32(v.fd_index);
+            if v.length as usize > MAX_SCRIPT_TABLE_BYTES {
+                return Err(WireError::Oversized);
+            }
+            w.u32(v.length);
+        }
+        UiMessage::Inject(v) => w.inject(v)?,
     }
     Ok(w.0)
 }
@@ -486,6 +647,8 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
         DELIVER_MESSAGE => (2, MAX_UI_BYTES),
         POLICY_MESSAGE => (3, 1024),
         DETACH_MESSAGE => (4, 1024),
+        SCRIPTS_MESSAGE => (5, 1024),
+        INJECT_MESSAGE => (6, MAX_INJECT_REQUEST_BYTES),
         _ => return Err(WireError::Invalid),
     };
     let mut r = Reader::new(bytes, max)?;
@@ -493,6 +656,9 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
     let message = match tag {
         1 => {
             let protocol_version = r.u32()?;
+            if protocol_version != PROTOCOL_VERSION {
+                return Err(WireError::Version);
+            }
             let token = r.string(MAX_TOKEN_BYTES)?;
             let generation = r.u64()?;
             let role = match r.u8()? {
@@ -504,9 +670,32 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
             let count = r.count(MAX_WORLDS)?;
             let mut worlds = Vec::new();
             for _ in 0..count {
+                let install_id = r.string(MAX_INSTALL_ID_BYTES)?;
+                let name = r.string(MAX_WORLD_BYTES)?;
+                let n = r.count(MAX_ORIGINS)?;
+                let mut matches = Vec::new();
+                for _ in 0..n {
+                    matches.push(r.rule()?);
+                }
                 worlds.push(WorldRule {
-                    name: r.string(MAX_WORLD_BYTES)?,
-                    origins: r.strings(MAX_ORIGINS, MAX_URI_BYTES)?,
+                    install_id,
+                    name,
+                    matches,
+                    bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
+                });
+            }
+            let n = r.count(MAX_ORIGINS)?;
+            let mut external = Vec::new();
+            for _ in 0..n {
+                let install_id = r.string(MAX_INSTALL_ID_BYTES)?;
+                let n = r.count(MAX_ORIGINS)?;
+                let mut matches = Vec::new();
+                for _ in 0..n {
+                    matches.push(r.rule()?);
+                }
+                external.push(ExternalRule {
+                    install_id,
+                    matches,
                     bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
                 });
             }
@@ -517,6 +706,7 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
                 role,
                 limits,
                 worlds,
+                external,
                 extension_origins: r.strings(MAX_ORIGINS, MAX_URI_BYTES)?,
                 extension_bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
                 observe_requests: r.boolean()?,
@@ -529,6 +719,11 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
             frame_id: r.u64()?,
             document_seq: r.u64()?,
             world: r.string(MAX_WORLD_BYTES)?,
+            external_install: if r.boolean()? {
+                Some(r.string(MAX_INSTALL_ID_BYTES)?)
+            } else {
+                None
+            },
             bytes: r.blob(MAX_MESSAGE_BYTES)?.to_vec(),
         }),
         3 => UiMessage::Policy(PolicyUpdate {
@@ -542,6 +737,20 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
             token: r.string(MAX_TOKEN_BYTES)?,
             generation: r.u64()?,
         }),
+        5 => {
+            let v = ScriptUpdate {
+                token: r.string(MAX_TOKEN_BYTES)?,
+                generation: r.u64()?,
+                table_generation: r.u64()?,
+                fd_index: r.u32()?,
+                length: r.u32()?,
+            };
+            if v.length as usize > MAX_SCRIPT_TABLE_BYTES {
+                return Err(WireError::Oversized);
+            }
+            UiMessage::Scripts(v)
+        }
+        6 => UiMessage::Inject(r.inject()?),
         _ => return Err(WireError::Invalid),
     };
     r.end()?;
@@ -555,6 +764,7 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
         Event::Post(_) => 18,
         Event::Requests { .. } => 19,
         Event::Form(_) => 20,
+        Event::Injection(_) => 21,
     });
     match event {
         Event::Attached { generation } => w.u64(*generation),
@@ -580,6 +790,20 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
                         w.u64(*document_seq);
                     }
                     FrameEvent::Reset => w.u8(4),
+                    FrameEvent::Evaluated(v) => {
+                        w.u8(5);
+                        w.evaluation(v)?;
+                    }
+                    FrameEvent::ExternalPage {
+                        install_id,
+                        frame_id,
+                        document_seq,
+                    } => {
+                        w.u8(6);
+                        w.string(install_id, MAX_INSTALL_ID_BYTES)?;
+                        w.u64(*frame_id);
+                        w.u64(*document_seq);
+                    }
                 }
             }
         }
@@ -589,6 +813,10 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
             w.u64(v.frame_id);
             w.u64(v.document_seq);
             w.string(&v.world, MAX_WORLD_BYTES)?;
+            w.boolean(v.external_install.is_some());
+            if let Some(install) = &v.external_install {
+                w.string(install, MAX_INSTALL_ID_BYTES)?;
+            }
             w.string(&v.uri, MAX_URI_BYTES)?;
             w.blob(&v.bytes, MAX_MESSAGE_BYTES)?;
         }
@@ -627,6 +855,7 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
                 w.string(value, 8192)?;
             }
         }
+        Event::Injection(v) => w.injection_result(v)?,
     }
     Ok(w.0)
 }
@@ -638,12 +867,27 @@ pub fn encode_post_bytes(
     world: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, WireError> {
+    encode_post_bytes_for_install(generation, post_id, frame, world, payload, None)
+}
+
+pub fn encode_post_bytes_for_install(
+    generation: u64,
+    post_id: u64,
+    frame: &FrameInfo,
+    world: &str,
+    payload: &[u8],
+    external_install: Option<&str>,
+) -> Result<Vec<u8>, WireError> {
     let mut w = Writer::new(18);
     w.u64(generation);
     w.u64(post_id);
     w.u64(frame.frame_id);
     w.u64(frame.document_seq);
     w.string(world, MAX_WORLD_BYTES)?;
+    w.boolean(external_install.is_some());
+    if let Some(install) = external_install {
+        w.string(install, MAX_INSTALL_ID_BYTES)?;
+    }
     w.string(&frame.uri, MAX_URI_BYTES)?;
     w.blob(payload, MAX_MESSAGE_BYTES)?;
     Ok(w.0)
@@ -651,7 +895,7 @@ pub fn encode_post_bytes(
 
 pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
     let mut r = Reader::new(bytes, MAX_UI_BYTES)?;
-    if r.take(4)? != b"ZWP1" {
+    if r.take(4)? != b"ZWP2" {
         return Err(WireError::Version);
     }
     let tag = r.u8()?;
@@ -670,6 +914,12 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
                         document_seq: r.u64()?,
                     },
                     4 => FrameEvent::Reset,
+                    5 => FrameEvent::Evaluated(r.evaluation()?),
+                    6 => FrameEvent::ExternalPage {
+                        install_id: r.string(MAX_INSTALL_ID_BYTES)?,
+                        frame_id: r.u64()?,
+                        document_seq: r.u64()?,
+                    },
                     _ => return Err(WireError::Invalid),
                 });
             }
@@ -681,6 +931,11 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
             frame_id: r.u64()?,
             document_seq: r.u64()?,
             world: r.string(MAX_WORLD_BYTES)?,
+            external_install: if r.boolean()? {
+                Some(r.string(MAX_INSTALL_ID_BYTES)?)
+            } else {
+                None
+            },
             uri: r.string(MAX_URI_BYTES)?,
             bytes: r.blob(MAX_MESSAGE_BYTES)?.to_vec(),
         }),
@@ -725,6 +980,7 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
                 fields,
             })
         }
+        21 => Event::Injection(r.injection_result(generation)?),
         _ => return Err(WireError::Invalid),
     };
     r.end()?;
@@ -768,13 +1024,15 @@ mod tests {
                 token: "process-token".into(),
                 generation: 1,
                 worlds: vec![WorldRule {
+                    install_id: "a".repeat(32),
                     name: "isolated".into(),
-                    origins: vec!["https://example.com".into()],
+                    matches: vec![MatchRule::for_origin("https://example.com").expect("rule")],
                     bootstrap: "void 0".into(),
                 }],
                 ..Attach::default()
             }),
             UiMessage::Deliver(Deliver {
+                external_install: None,
                 token: "process-token".into(),
                 generation: 1,
                 frame_id: 42,
@@ -817,10 +1075,10 @@ mod tests {
 
     #[test]
     fn hostile_lengths_types_and_utf8_are_refused() {
-        let mut bytes = b"ZWP1\x04".to_vec();
+        let mut bytes = b"ZWP2\x04".to_vec();
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Oversized));
-        let mut bytes = b"ZWP1\x04".to_vec();
+        let mut bytes = b"ZWP2\x04".to_vec();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(255);
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Invalid));
@@ -843,6 +1101,7 @@ mod tests {
                     document_seq: 2,
                     uri: "https://example.com".into(),
                     is_main: true,
+                    ..FrameInfo::default()
                 }),
                 FrameEvent::Destroyed {
                     frame_id: 9,
@@ -885,8 +1144,10 @@ mod tests {
             document_seq: 2,
             uri: "https://example.com".into(),
             is_main: true,
+            ..FrameInfo::default()
         };
         let post = Post {
+            external_install: None,
             generation: 1,
             post_id: 3,
             frame_id: frame.frame_id,
@@ -941,5 +1202,89 @@ mod tests {
         assert!(limits.validate(PageRole::ExtensionOwned));
         limits.frame_burst = 0;
         assert!(!limits.validate(PageRole::ExtensionOwned));
+    }
+    #[test]
+    fn version_one_headers_and_embedded_versions_are_refused() {
+        let message = UiMessage::Attach(Attach {
+            token: "token".into(),
+            generation: 1,
+            ..Attach::default()
+        });
+        let bytes = encode_ui(&message).expect("message");
+        let mut old_header = bytes.clone();
+        old_header[3] = b'1';
+        assert_eq!(
+            decode_ui(ATTACH_MESSAGE, &old_header),
+            Err(WireError::Version)
+        );
+        let mut old_field = bytes;
+        old_field[5..9].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(
+            decode_ui(ATTACH_MESSAGE, &old_field),
+            Err(WireError::Version)
+        );
+        let old = Attach {
+            protocol_version: 1,
+            ..Attach::default()
+        };
+        assert_eq!(encode_ui(&UiMessage::Attach(old)), Err(WireError::Version));
+    }
+    #[test]
+    fn complete_frame_facts_and_external_install_routing_round_trip() {
+        let frame = FrameInfo {
+            frame_id: 42,
+            document_seq: 7,
+            uri: "about:srcdoc".into(),
+            is_main: false,
+            parent_frame_id: Some(9),
+            creator_uri: Some("https://a.test/path".into()),
+            opaque: true,
+            table_generation: 12,
+        };
+        let facts = Event::Frames {
+            generation: 3,
+            events: vec![
+                FrameEvent::Created(frame.clone()),
+                FrameEvent::Committed(frame.clone()),
+            ],
+        };
+        assert_eq!(
+            decode_event(&encode_event(&facts).expect("facts")),
+            Ok(facts)
+        );
+        let post = Post {
+            external_install: Some("a".repeat(32)),
+            generation: 3,
+            post_id: 4,
+            frame_id: frame.frame_id,
+            document_seq: frame.document_seq,
+            world: String::new(),
+            uri: frame.uri.clone(),
+            bytes: vec![0, 1, 2],
+        };
+        let bytes = encode_post_bytes_for_install(
+            3,
+            4,
+            &frame,
+            "",
+            &post.bytes,
+            post.external_install.as_deref(),
+        )
+        .expect("post");
+        assert_eq!(decode_event(&bytes), Ok(Event::Post(post.clone())));
+        assert_eq!(encode_event(&Event::Post(post)), Ok(bytes));
+        let deliver = UiMessage::Deliver(Deliver {
+            external_install: Some("a".repeat(32)),
+            token: "token".into(),
+            generation: 3,
+            frame_id: 42,
+            document_seq: 7,
+            world: String::new(),
+            bytes: vec![0, 1, 2],
+        });
+        assert_eq!(
+            decode_ui(DELIVER_MESSAGE, &encode_ui(&deliver).expect("delivery")),
+            Ok(deliver)
+        );
     }
 }

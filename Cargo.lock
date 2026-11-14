@@ -7972,6 +7972,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "webkit2gtk",
+ "zephium-webext-runtime",
  "zephium-webkit-web-process-protocol",
 ]
 
@@ -7979,7 +7980,9 @@ dependencies = [
 name = "zephium-webkit-web-process-protocol"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "url",
+ "zephium-webext-matcher",
 ]
 
 [[package]]
