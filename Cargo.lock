@@ -7948,6 +7948,14 @@ dependencies = [
  "tempfile",
  "url",
  "webkit2gtk",
+ "zephium-webkit-web-process-protocol",
+]
+
+[[package]]
+name = "zephium-webkit-web-process-protocol"
+version = "0.1.0"
+dependencies = [
+ "url",
 ]
 
 [[package]]
