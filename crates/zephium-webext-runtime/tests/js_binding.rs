@@ -9,7 +9,9 @@ use serde_json::Value;
 use zephium_webext_runtime::envelope::{
     ApiName, CallId, DecodeError, Direction, Envelope, EventSeq, PortId,
 };
-use zephium_webext_runtime::js::{BUNDLE, MATCHER};
+use zephium_webext_runtime::js::{
+    background_surface, BUNDLE, MATCHER, OWNER_BUNDLE, WORKER_BUNDLE,
+};
 
 fn js_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("js")
@@ -135,6 +137,27 @@ fn binding_tests_pass_in_node() {
     std::fs::create_dir_all(&bundles).expect("bundle directory");
     std::fs::write(bundles.join("bundle.js"), BUNDLE).expect("write bundle");
     std::fs::write(bundles.join("matcher.js"), MATCHER).expect("write matcher");
+    std::fs::write(bundles.join("owner.js"), OWNER_BUNDLE).expect("write owner relay");
+    std::fs::write(bundles.join("worker.js"), WORKER_BUNDLE).expect("write worker binding");
+    let projected: Vec<_> = [
+        serde_json::json!({"manifest_version":3}),
+        serde_json::json!({
+            "manifest_version":3,"permissions":["storage"],
+            "optional_permissions":["alarms","webNavigation","nativeMessaging"],"action":{}
+        }),
+    ]
+    .into_iter()
+    .map(|raw| {
+        let manifest = zephium_webext::manifest::Manifest::from_value(raw.clone());
+        let surface: Value = serde_json::from_str(&background_surface(&manifest)).unwrap();
+        serde_json::json!({"manifest":raw,"surface":surface})
+    })
+    .collect();
+    std::fs::write(
+        bundles.join("projected-surfaces.json"),
+        serde_json::to_vec(&projected).unwrap(),
+    )
+    .expect("write manifest projections");
     let mut tests: Vec<PathBuf> = std::fs::read_dir(js_dir())
         .expect("js directory")
         .map(|entry| entry.expect("entry").path())

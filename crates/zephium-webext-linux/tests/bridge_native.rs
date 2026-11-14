@@ -14,9 +14,9 @@ use webkit2gtk::{
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext_linux::bridge::{
-    world_name, AttachPlan, BridgeConfig, BridgeViewId, CloseReason, ExtensionPages,
-    FrameLifecycle, Outbox, ProfileBridge, Refusal, Runtime, Transport, WorldGrant,
-    BUFFER_TIMEOUT_MS,
+    world_name, AttachPlan, BridgeConfig, BridgeError, BridgeViewId, CloseReason, ExtensionPages,
+    FrameLifecycle, Outbox, ProfileBridge, Refusal, Runtime, Transport, UnavailableReason, ViewRef,
+    WorldGrant, BUFFER_TIMEOUT_MS,
 };
 use zephium_webext_runtime::context::{
     ContextKey, ContextKind, ExtensionId, ExtensionScheme, FrameId, InjectedWorld,
@@ -49,18 +49,13 @@ const GLUE: &str = r#"(() => {
     else hello();
 })()"#;
 
-const FALLBACK_PAGE: &str = r#"<!doctype html><script>
-    const queue = [btoa(JSON.stringify({phase:'hello', href:location.href}))];
-    globalThis.__zephiumPullOutbox = () => queue.shift() || '';
-    globalThis.__zephiumPullInbox = text => queue.push(btoa(JSON.stringify({phase:'ack', value:atob(text), href:location.href})));
-</script><p>fallback background</p>"#;
-
 #[derive(Default)]
 struct Record {
     received: Vec<(Sender, Value)>,
     closed: Vec<(ContextKey, CloseReason)>,
     lifecycle: Vec<FrameLifecycle>,
     injections: Vec<(BridgeViewId, InjectionResult)>,
+    unavailable: Vec<(BridgeViewId, ViewRef, UnavailableReason)>,
 }
 
 #[derive(Clone, Default)]
@@ -82,6 +77,15 @@ impl Runtime for TestRuntime {
         let mut record = self.0.borrow_mut();
         assert!(record.injections.len() < 64, "bounded execution capture");
         record.injections.push((view, result.clone()));
+    }
+
+    fn transport_unavailable(
+        &mut self,
+        view: BridgeViewId,
+        owner: ViewRef,
+        reason: UnavailableReason,
+    ) {
+        self.0.borrow_mut().unavailable.push((view, owner, reason));
     }
 
     fn frame_lifecycle(&mut self, event: &FrameLifecycle, _: &mut Outbox) {
@@ -584,13 +588,7 @@ fn native_bridge() {
     // An extension-owned view binds its own page world.
     let background = webkit2gtk::WebView::with_context(&context);
     let owned = bridge
-        .attach_extension_view(
-            install(),
-            ViewKind::Background,
-            &background,
-            &own_plan(),
-            true,
-        )
+        .attach_extension_view(install(), ViewKind::Background, &background, &own_plan())
         .expect("owned");
     load(
         &background,
@@ -609,8 +607,6 @@ fn native_bridge() {
         .expect("deliver");
     pump_until(|| ack_for(&runtime, &sender.context_key(), "to-background") == 1);
     println!("WEBEXT bridge_extension_owned kind=Background roundtrip=true");
-
-    fallback(&fixture);
 
     // Teardown: detach, drop the views, drain until every renderer exited.
     page.stop_loading();
@@ -632,23 +628,106 @@ fn native_bridge() {
         drain.pending_messages()
     );
     drop(context);
+    pump_until(|| support::web_processes().is_empty());
+    crash_then_drain(&module, &fixture);
+    unavailable_module(&fixture);
 }
 
-fn fallback(fixture: &Fixture) {
+fn crash_then_drain(module: &ModuleDirectory, fixture: &Fixture) {
+    for owned in [false, true] {
+        let context = context();
+        serve_extension(&context, "<!doctype html><p>crash teardown</p>");
+        let runtime = TestRuntime::default();
+        let bridge = bridge(&context, module, 3, runtime.clone());
+        let page = webkit2gtk::WebView::with_context(&context);
+        let id = if owned {
+            bridge
+                .attach_extension_view(install(), ViewKind::Background, &page, &own_plan())
+                .expect("owned")
+        } else {
+            bridge
+                .attach_tab(ItemId::from(11), &page, &tab_plan(fixture))
+                .expect("tab")
+        };
+        let url = if owned {
+            format!("chrome-extension://{EXTENSION}/crash.html")
+        } else {
+            format!("{}/frame?crash-drain", fixture.origin)
+        };
+        load(&page, &url);
+        pump_until(|| !runtime.0.borrow().received.is_empty());
+        let key = runtime.0.borrow().received[0].0.context_key();
+        // Leave a native reply outstanding when the renderer terminates.
+        bridge
+            .deliver(&key, b"crash-with-reply-pending".to_vec())
+            .expect("deliver before crash");
+        page.terminate_web_process();
+        pump_until(|| {
+            runtime
+                .0
+                .borrow()
+                .closed
+                .iter()
+                .any(|(closed, reason)| *closed == key && *reason == CloseReason::ProcessGone)
+        });
+        assert_eq!(bridge.transport(id), Some(Transport::Attaching));
+        pump_for(Duration::from_millis(150));
+        assert!(
+            support::web_processes().is_empty(),
+            "a crash must not start another renderer"
+        );
+        let mut drain = bridge.shutdown();
+        drop(page);
+        drop(bridge);
+        assert!(
+            drain.run(Duration::from_secs(10)),
+            "crash drain settled without a recovery load"
+        );
+        assert_eq!(drain.remaining_views(), 0);
+        assert_eq!(drain.pending_messages(), 0);
+        drop(context);
+        pump_until(|| support::web_processes().is_empty());
+        println!("WEBEXT bridge_crash_drain owned={owned} drained=true pending=0 renderers=0");
+    }
+}
+
+fn unavailable_module(fixture: &Fixture) {
     let empty = ModuleDirectory::empty();
     let context = context();
-    serve_extension(&context, FALLBACK_PAGE);
+    let config = BridgeConfig {
+        profile: ProfileId::from(2),
+        incognito: false,
+        scheme: ExtensionScheme::CHROME_EXTENSION,
+        module_directory: empty.path().to_path_buf(),
+    };
+    let error = match ProfileBridge::new(&context, config.clone(), TestRuntime::default()) {
+        Err(error) => error,
+        Ok(_) => panic!("a missing module must fail before creating any views"),
+    };
+    assert!(matches!(
+        error,
+        BridgeError::ModuleUnavailable(UnavailableReason::MissingModule)
+    ));
+    assert!(error
+        .to_string()
+        .contains("extensions unavailable on WebKitGTK"));
+    assert!(error.to_string().contains("module is missing"));
+
+    // An existing but unloadable module must also fail closed after attachment.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(empty.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        empty.path().join("libzephium_webkit_web_process.so"),
+        b"invalid module",
+    )
+    .unwrap();
+    std::fs::set_permissions(empty.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    serve_extension(&context, "<!doctype html><p>unavailable background</p>");
     let runtime = TestRuntime::default();
     let bridge = bridge(&context, &empty, 2, runtime.clone());
     let background = webkit2gtk::WebView::with_context(&context);
     let owned = bridge
-        .attach_extension_view(
-            install(),
-            ViewKind::Background,
-            &background,
-            &own_plan(),
-            true,
-        )
+        .attach_extension_view(install(), ViewKind::Background, &background, &own_plan())
         .expect("owned");
     let tab = webkit2gtk::WebView::with_context(&context);
     let tab_view = bridge
@@ -658,29 +737,31 @@ fn fallback(fixture: &Fixture) {
         &background,
         &format!("chrome-extension://{EXTENSION}/_zephium/background.html"),
     );
-    pump_until(|| bridge.transport(owned) == Some(Transport::Fallback));
-    pump_until(|| runtime.hellos(None).len() == 1);
-    let (sender, _) = runtime.hellos(None).pop().unwrap();
-    assert_eq!(sender.kind(), ContextKind::Background);
-    bridge
-        .deliver(&sender.context_key(), b"pulled".to_vec())
-        .expect("deliver");
-    bridge.ring(owned);
-    pump_until(|| ack_for(&runtime, &sender.context_key(), "pulled") == 1);
     load(&tab, &format!("{}/frame?no-module", fixture.origin));
-    assert_eq!(
-        bridge.transport(tab_view),
-        Some(Transport::Refused),
-        "tabs never fall back"
-    );
-    assert!(runtime.hellos(Some(ItemId::from(9))).is_empty());
-    println!("WEBEXT bridge_fallback pull_roundtrip=true tab_refused=true");
+    pump_until(|| {
+        bridge.transport(owned) == Some(Transport::Refused)
+            && bridge.transport(tab_view) == Some(Transport::Refused)
+    });
+    for id in [owned, tab_view] {
+        assert!(runtime
+            .0
+            .borrow()
+            .unavailable
+            .iter()
+            .any(|(view, _, reason)| *view == id && *reason == UnavailableReason::ModuleUnhandled));
+    }
+    assert_eq!(runtime.count(), 0);
     let mut drain = bridge.shutdown();
     drop(background);
     drop(tab);
     drop(bridge);
-    assert!(drain.run(Duration::from_secs(10)), "fallback drain settled");
+    assert!(
+        drain.run(Duration::from_secs(10)),
+        "unavailable module drain settled"
+    );
     drop(context);
+    pump_until(|| support::web_processes().is_empty());
+    println!("WEBEXT bridge_unavailable missing=true unloadable=true tab_refused=true owner_refused=true");
 }
 
 fn evaluate_with(page: &webkit2gtk::WebView, body: &str, path: &str) -> String {

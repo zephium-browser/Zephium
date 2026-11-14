@@ -23,7 +23,6 @@ mod frames;
 mod host;
 mod plan;
 mod policy;
-mod pull;
 mod runtime;
 mod scripts;
 
@@ -40,10 +39,10 @@ pub use self::core::{
 pub use self::frames::MAX_FRAMES_PER_VIEW;
 pub use self::host::{
     BridgeConfig, BridgeError, Busy, ProfileBridge, Reattach, ShutdownDrain, Transport,
+    UnavailableReason,
 };
 pub use self::plan::{world_name, AttachPlan, ExtensionPages, PlanError, WorldGrant};
 pub use self::policy::{PolicyError, SealedPolicy};
-pub use self::pull::{PULL_MAX_INTERVAL, PULL_MIN_INTERVAL};
 pub use self::runtime::{
     BridgeViewId, CloseReason, DeliverError, DispatchRuntime, FrameLifecycle, Outbox, PortTraffic,
     Ports, Runtime, ViewRef,

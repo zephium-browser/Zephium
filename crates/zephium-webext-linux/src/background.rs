@@ -14,7 +14,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 use zephium_webext::manifest::{Background, Manifest};
 use zephium_webext_runtime::context::{ContextKind, ExtensionId};
-use zephium_webext_runtime::js::{surface, BUNDLE};
+use zephium_webext_runtime::js::{surface, BUNDLE, OWNER_BUNDLE, WORKER_BUNDLE};
 
 use crate::scheme::{MemoryResource, SchemeError, WORKER_QUERY};
 
@@ -187,7 +187,7 @@ const c=g.console;if(c&&typeof c.error==='function'){const original=c.error;cons
 g.addEventListener('unhandledrejection',(e)=>send('rejection','Uncaught (in promise) '+text(e.reason)));
 const w=D&&D.worker,ni=g.importScripts;
 if(w&&w.install===true&&w.type!=='module'&&typeof ni==='function'){g.importScripts=function importScripts(...u){const r=apply(ni,this,u);try{send('imported',u.map((x)=>new U(St(x),w.scriptURL).href));}catch(e){}return r;};}
-const context=B('worker',S,D);client=context.client;
+const context=B(S,D);client=context.client;
 for(const d of early.splice(0))send(d[0],d[1]);
 send('booted',null);
 })"#;
@@ -199,6 +199,7 @@ pub(crate) fn launch(
     install: bool,
     installed_scripts: &[String],
     unlimited_storage: bool,
+    worker_surface: &str,
 ) -> Result<Launch, SchemeError> {
     let scope = script_url(extension, &script.path);
     let kind = if script.module { "module" } else { "classic" };
@@ -211,12 +212,12 @@ pub(crate) fn launch(
         "storage": {"quota": quota, "usage": 0, "persisted": true},
     });
     let boot = bootstrap.to_value(Some(worker));
-    let worker_js = format!("{WORKER_HOOKS}({BUNDLE},{},{});", surface(), boot);
+    let worker_js = format!("{WORKER_HOOKS}({WORKER_BUNDLE},{worker_surface},{boot});");
     let owner = json!({
         "workerURL": format!("{scope}?{WORKER_QUERY}"),
         "type": kind,
     });
-    let owner_js = format!("({BUNDLE})('owner',null,{owner});");
+    let owner_js = format!("({OWNER_BUNDLE})({owner});");
     let worker_url = script_url(extension, &WORKER_SCRIPT[1..]);
     let quoted = |url: &str| serde_json::to_string(url).unwrap_or_default();
     let wrapper = if script.module {
@@ -317,7 +318,10 @@ mod tests {
                 path: "js/sw.js".into(),
                 module,
             };
-            let launch = launch(&id, &script, &bootstrap, true, &[], false).unwrap();
+            let worker_surface =
+                zephium_webext_runtime::js::background_surface(&manifest(raw.clone()));
+            let launch =
+                launch(&id, &script, &bootstrap, true, &[], false, &worker_surface).unwrap();
             assert_eq!(launch.script, "/js/sw.js");
             assert_eq!(
                 launch.url,

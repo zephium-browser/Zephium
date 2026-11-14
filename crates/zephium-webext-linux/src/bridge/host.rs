@@ -1,18 +1,17 @@
 //! GTK side of a profile bridge: context configuration, view signals, user
-//! messages, the pull fallback and teardown.
+//! messages and teardown.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gio::prelude::*;
 use glib::variant::ToVariant;
 use glib::VariantTy;
 use gtk::prelude::WidgetExt;
-use javascriptcore::ValueExt;
 use webkit2gtk::{
     LoadEvent, UserMessage, UserMessageError, UserMessageExt, WebContextExt, WebViewExt,
 };
@@ -30,7 +29,6 @@ use super::core::{
 };
 use super::plan::AttachPlan;
 use super::policy::{PolicyError, SealedPolicy};
-use super::pull::{self, PULL_MIN_INTERVAL};
 use super::runtime::{BridgeViewId, DeliverError, Outbox, Runtime};
 use super::scripts::{ScriptTableError, SealedScripts};
 use super::ReplyToken;
@@ -58,6 +56,10 @@ pub struct BridgeConfig {
 pub enum BridgeError {
     /// The module directory is not an absolute UTF-8 path to a directory.
     ModuleDirectory,
+    /// The installed WebKitGTK cannot support the module.
+    UnsupportedRuntime(zephium_core::webkitgtk::AdmissionError),
+    /// The configured module is absent.
+    ModuleUnavailable(UnavailableReason),
     /// No randomness for the process token.
     Random(std::io::Error),
 }
@@ -86,42 +88,58 @@ pub enum Transport {
     Module,
     /// The module refused the attachment; retried at the next navigation.
     Refused,
-    /// Host pulls, for an extension-owned view without a usable module.
-    Fallback,
 }
 
-struct PullState {
-    cancellable: RefCell<gio::Cancellable>,
-    inflight: Cell<bool>,
-    interval: Cell<Duration>,
-    timer: RefCell<Option<glib::SourceId>>,
+/// Why a view has no extension transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnavailableReason {
+    /// No web-process module exists in the configured directory.
+    MissingModule,
+    /// No module handled the attachment, including a module load failure.
+    ModuleUnhandled,
+    /// The module rejected the attachment or protocol.
+    ModuleRefused,
 }
 
-impl PullState {
-    fn new() -> Self {
-        Self {
-            cancellable: RefCell::new(gio::Cancellable::new()),
-            inflight: Cell::new(false),
-            interval: Cell::new(PULL_MIN_INTERVAL),
-            timer: RefCell::new(None),
-        }
-    }
-
-    fn cancel(&self) {
-        if let Some(timer) = self.timer.borrow_mut().take() {
-            timer.remove();
-        }
-        let old = self.cancellable.replace(gio::Cancellable::new());
-        old.cancel();
-        self.inflight.set(false);
+impl std::fmt::Display for UnavailableReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            Self::MissingModule => "the web-process module is missing",
+            Self::ModuleUnhandled => "the web-process module could not be loaded",
+            Self::ModuleRefused => "the web-process module rejected the attachment",
+        };
+        let version = runtime_version();
+        write!(
+            formatter,
+            "extensions unavailable on WebKitGTK {}.{}.{}: {reason}",
+            version[0], version[1], version[2]
+        )
     }
 }
+
+impl std::fmt::Display for BridgeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModuleDirectory => {
+                formatter.write_str("extensions unavailable: invalid web-process module directory")
+            }
+            Self::UnsupportedRuntime(error) => write!(formatter, "extensions unavailable: {error}"),
+            Self::ModuleUnavailable(reason) => reason.fmt(formatter),
+            Self::Random(error) => {
+                write!(formatter, "extensions unavailable: process token: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BridgeError {}
 
 struct HostView {
     view: glib::WeakRef<webkit2gtk::WebView>,
     handlers: Vec<glib::SignalHandlerId>,
     owned: bool,
-    pull: Option<Rc<PullState>>,
+    cancellable: gio::Cancellable,
+    process_alive: bool,
 }
 
 struct Shared<R> {
@@ -130,7 +148,7 @@ struct Shared<R> {
     effects: RefCell<VecDeque<Effect>>,
     draining: Cell<bool>,
     hosts: RefCell<HashMap<u64, HostView>>,
-    replies: RefCell<HashMap<u64, UserMessage>>,
+    replies: RefCell<HashMap<u64, (u64, UserMessage)>>,
     next_reply: Cell<u64>,
     pending: Rc<Cell<usize>>,
     tick: RefCell<Option<glib::SourceId>>,
@@ -148,6 +166,17 @@ impl<R: Runtime + 'static> Clone for ProfileBridge<R> {
         Self {
             shared: self.shared.clone(),
         }
+    }
+}
+
+fn runtime_version() -> [u32; 3] {
+    // SAFETY: No-argument WebKitGTK ABI functions return immutable library version constants.
+    unsafe {
+        [
+            webkit2gtk::ffi::webkit_get_major_version(),
+            webkit2gtk::ffi::webkit_get_minor_version(),
+            webkit2gtk::ffi::webkit_get_micro_version(),
+        ]
     }
 }
 
@@ -178,6 +207,18 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
             .to_str()
             .filter(|_| config.module_directory.is_absolute() && config.module_directory.is_dir())
             .ok_or(BridgeError::ModuleDirectory)?;
+        let version = runtime_version();
+        zephium_core::webkitgtk::admit_runtime(version[0], version[1], version[2])
+            .map_err(BridgeError::UnsupportedRuntime)?;
+        if !config
+            .module_directory
+            .join("libzephium_webkit_web_process.so")
+            .is_file()
+        {
+            return Err(BridgeError::ModuleUnavailable(
+                UnavailableReason::MissingModule,
+            ));
+        }
         let token = token()?;
         context.add_path_to_sandbox(&config.module_directory, true);
         context.set_web_extensions_directory(directory);
@@ -237,22 +278,19 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
     }
 
     /// Attaches a runtime-owned extension view. Call before its first load.
-    /// With `allow_fallback`, a view whose module refuses or is missing uses
-    /// host pulls instead.
     pub fn attach_extension_view(
         &self,
         install: ExtensionInstallId,
         kind: ViewKind,
         view: &webkit2gtk::WebView,
         plan: &AttachPlan,
-        allow_fallback: bool,
     ) -> Result<BridgeViewId, RegisterError> {
         self.check_view(view)?;
-        let result =
-            self.shared
-                .core
-                .borrow_mut()
-                .register_owned(install, kind, plan, allow_fallback);
+        let result = self
+            .shared
+            .core
+            .borrow_mut()
+            .register_owned(install, kind, plan);
         self.finish_register(view, result, true)
     }
 
@@ -297,7 +335,8 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
                 view: view.downgrade(),
                 handlers,
                 owned,
-                pull: None,
+                cancellable: gio::Cancellable::new(),
+                process_alive: true,
             },
         );
         self.shared.collect();
@@ -382,25 +421,6 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         Ok(generation)
     }
 
-    /// A fallback view has something queued: pull now.
-    pub fn ring(&self, view: BridgeViewId) {
-        let pull = self
-            .shared
-            .hosts
-            .borrow()
-            .get(&view.0)
-            .and_then(|host| host.pull.clone());
-        if let Some(pull) = pull {
-            pull.interval.set(PULL_MIN_INTERVAL);
-            if !pull.inflight.get() {
-                if let Some(timer) = pull.timer.borrow_mut().take() {
-                    timer.remove();
-                }
-                start_pull(&self.shared, view.0);
-            }
-        }
-    }
-
     /// Runs `work` against the runtime, then delivers what it queued.
     /// Refused when the runtime is already borrowed further up the stack.
     pub fn with_runtime<T>(&self, work: impl FnOnce(&mut R, &mut Outbox) -> T) -> Result<T, Busy> {
@@ -429,21 +449,15 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
                 Phase::Pending | Phase::InFlight(_) => Transport::Attaching,
                 Phase::Live(_) => Transport::Module,
                 Phase::Refused(_) => Transport::Refused,
-                Phase::Fallback => Transport::Fallback,
             })
     }
 
-    /// Ends the bridge: stops pulls, ends every context (the runtime
+    /// Ends the bridge: ends every context (the runtime
     /// cancels calls and disconnects ports), detaches every view,
     /// disconnects its signals and terminates extension-owned views' web
     /// processes. Then the view owners drop their views, and the caller
     /// keeps the GTK loop running until the returned drain settles.
     pub fn shutdown(&self) -> ShutdownDrain {
-        for host in self.shared.hosts.borrow().values() {
-            if let Some(pull) = &host.pull {
-                pull.cancel();
-            }
-        }
         if let Some(tick) = self.shared.tick.borrow_mut().take() {
             tick.remove();
         }
@@ -458,6 +472,7 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
             .collect();
         let mut views = Vec::new();
         for host in hosts {
+            host.cancellable.cancel();
             if let Some(view) = host.view.upgrade() {
                 for handler in host.handlers {
                     view.disconnect(handler);
@@ -468,7 +483,7 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
             }
             views.push(host.view);
         }
-        for (_, message) in self.shared.replies.borrow_mut().drain() {
+        for (_, (_, message)) in self.shared.replies.borrow_mut().drain() {
             message.send_reply(&UserMessage::new(EVENT_MESSAGE, None));
         }
         ShutdownDrain {
@@ -550,8 +565,7 @@ fn connect<R: Runtime + 'static>(
     let terminated = weak.clone();
     handlers.push(view.connect_web_process_terminated(move |_, _| {
         if let Some(shared) = terminated.upgrade() {
-            shared.cancel_pull(id);
-            shared.core.borrow_mut().process_gone(id);
+            shared.process_gone(id);
             shared.collect();
         }
     }));
@@ -561,8 +575,10 @@ fn connect<R: Runtime + 'static>(
             return;
         }
         if let Some(shared) = swapped.upgrade() {
-            shared.cancel_pull(id);
-            shared.core.borrow_mut().process_gone(id);
+            shared.process_gone(id);
+            if view.page_id() != 0 {
+                shared.process_started(id);
+            }
             shared.collect();
         }
     }));
@@ -573,8 +589,7 @@ fn connect<R: Runtime + 'static>(
         };
         match event {
             LoadEvent::Started => {
-                shared.cancel_pull(id);
-                shared.core.borrow_mut().load_started(id);
+                shared.process_started(id);
             }
             LoadEvent::Committed => {
                 let uri = view.uri();
@@ -583,9 +598,6 @@ fn connect<R: Runtime + 'static>(
                     .core
                     .borrow_mut()
                     .load_committed(id, uri.as_deref(), now);
-                if shared.core.borrow().phase(id) == Some(Phase::Fallback) {
-                    start_pull(&shared, id);
-                }
             }
             _ => return,
         }
@@ -622,7 +634,9 @@ impl<R: Runtime + 'static> Shared<R> {
         }
         let token = ReplyToken(self.next_reply.get() + 1);
         self.next_reply.set(token.0);
-        self.replies.borrow_mut().insert(token.0, message.clone());
+        self.replies
+            .borrow_mut()
+            .insert(token.0, (id, message.clone()));
         let event = message
             .parameters()
             .filter(|parameters| {
@@ -645,23 +659,29 @@ impl<R: Runtime + 'static> Shared<R> {
         self.collect();
     }
 
-    fn cancel_pull(&self, id: u64) {
-        if let Some(pull) = self
-            .hosts
-            .borrow()
-            .get(&id)
-            .and_then(|host| host.pull.clone())
-        {
-            pull.cancel();
+    fn process_gone(&self, id: u64) {
+        let cancelled = self.hosts.borrow_mut().get_mut(&id).map(|host| {
+            host.process_alive = false;
+            std::mem::replace(&mut host.cancellable, gio::Cancellable::new())
+        });
+        self.core.borrow_mut().process_gone(id);
+        self.replies.borrow_mut().retain(|_, (view, _)| *view != id);
+        if let Some(cancelled) = cancelled {
+            cancelled.cancel();
         }
+    }
+
+    fn process_started(&self, id: u64) {
+        if let Some(host) = self.hosts.borrow_mut().get_mut(&id) {
+            host.process_alive = true;
+        }
+        self.core.borrow_mut().load_started(id);
     }
 
     fn forget_host(&self, id: u64) {
         let host = self.hosts.borrow_mut().remove(&id);
         if let Some(host) = host {
-            if let Some(pull) = &host.pull {
-                pull.cancel();
-            }
+            host.cancellable.cancel();
             if let Some(view) = host.view.upgrade() {
                 for handler in host.handlers {
                     view.disconnect(handler);
@@ -757,23 +777,10 @@ impl<R: Runtime + 'static> Shared<R> {
                     .or_else(|| scripts.as_ref().map(|scripts| scripts.fd())),
             ),
             Effect::Reply(token) => {
-                if let Some(message) = self.replies.borrow_mut().remove(&token.0) {
+                if let Some((_, message)) = self.replies.borrow_mut().remove(&token.0) {
                     message.send_reply(&UserMessage::new(EVENT_MESSAGE, None));
                 }
             }
-            Effect::StartFallback { view } => {
-                if let Some(host) = self.hosts.borrow_mut().get_mut(&view) {
-                    host.pull.get_or_insert_with(|| Rc::new(PullState::new()));
-                }
-                if self.core.borrow().fallback_ready(view) {
-                    start_pull(self, view);
-                }
-            }
-            Effect::PullDeliver {
-                view,
-                context,
-                frame,
-            } => self.pull_deliver(view, context, &frame),
             effect => {
                 let Ok(mut runtime) = self.runtime.try_borrow_mut() else {
                     return Err(Box::new(effect));
@@ -805,10 +812,12 @@ impl<R: Runtime + 'static> Shared<R> {
                         document,
                         fields,
                     } => runtime.form_submitted(BridgeViewId(view), owner, frame, document, fields),
-                    Effect::Send { .. }
-                    | Effect::Reply(_)
-                    | Effect::StartFallback { .. }
-                    | Effect::PullDeliver { .. } => {}
+                    Effect::Unavailable {
+                        view,
+                        owner,
+                        reason,
+                    } => runtime.transport_unavailable(BridgeViewId(view), owner, reason),
+                    Effect::Send { .. } | Effect::Reply(_) => {}
                 }
                 drop(runtime);
                 self.deliver_outbox(outbox);
@@ -825,12 +834,11 @@ impl<R: Runtime + 'static> Shared<R> {
         outgoing: Outgoing,
         descriptor: Option<BorrowedFd<'_>>,
     ) {
-        let view = self
-            .hosts
-            .borrow()
-            .get(&id)
-            .and_then(|host| host.view.upgrade());
-        let Some(view) = view else {
+        let host = self.hosts.borrow().get(&id).and_then(|host| {
+            host.process_alive
+                .then(|| (host.view.upgrade(), host.cancellable.clone()))
+        });
+        let Some((Some(view), cancellable)) = host else {
             self.settle(id, outgoing, Err(None));
             return;
         };
@@ -850,8 +858,12 @@ impl<R: Runtime + 'static> Shared<R> {
         let weak = Rc::downgrade(self);
         let pending = self.pending.clone();
         let delivery = matches!(outgoing, Outgoing::Deliver { .. });
-        view.send_message_to_page(&message, None::<&gio::Cancellable>, move |reply| {
+        let cancelled = cancellable.clone();
+        view.send_message_to_page(&message, Some(&cancellable), move |reply| {
             pending.set(pending.get().saturating_sub(1));
+            if cancelled.is_cancelled() {
+                return;
+            }
             let Some(shared) = weak.upgrade() else {
                 return;
             };
@@ -907,132 +919,4 @@ impl<R: Runtime + 'static> Shared<R> {
             Outgoing::Detach => {}
         }
     }
-
-    fn pull_deliver(self: &Rc<Self>, id: u64, context: ContextKey, frame: &[u8]) {
-        let host = self
-            .hosts
-            .borrow()
-            .get(&id)
-            .and_then(|host| Some((host.view.upgrade()?, host.pull.clone()?)));
-        let Some((view, pull)) = host else {
-            self.core
-                .borrow_mut()
-                .delivery_settled(id, &context, DeliveryStatus::Denied);
-            return;
-        };
-        let arguments = glib::VariantDict::new(None);
-        arguments.insert_value("bytes", &pull::encode(frame).to_variant());
-        let cancellable = pull.cancellable.borrow().clone();
-        self.pending.set(self.pending.get() + 1);
-        let pending = self.pending.clone();
-        let weak = Rc::downgrade(self);
-        view.call_async_javascript_function(
-            pull::DELIVER_BODY,
-            Some(&arguments.end()),
-            None,
-            None,
-            Some(&cancellable),
-            move |result| {
-                pending.set(pending.get().saturating_sub(1));
-                let Some(shared) = weak.upgrade() else {
-                    return;
-                };
-                let accepted = result.is_ok_and(|value| value.is_boolean() && value.to_boolean());
-                shared.core.borrow_mut().delivery_settled(
-                    id,
-                    &context,
-                    if accepted {
-                        DeliveryStatus::Delivered
-                    } else {
-                        DeliveryStatus::NoReceiver
-                    },
-                );
-                shared.collect();
-            },
-        );
-    }
-}
-
-fn start_pull<R: Runtime + 'static>(shared: &Rc<Shared<R>>, id: u64) {
-    let host = shared
-        .hosts
-        .borrow()
-        .get(&id)
-        .and_then(|host| Some((host.view.upgrade()?, host.pull.clone()?)));
-    let Some((view, pull)) = host else {
-        return;
-    };
-    if pull.inflight.replace(true) {
-        return;
-    }
-    let cancellable = pull.cancellable.borrow().clone();
-    let cancelled = cancellable.clone();
-    shared.pending.set(shared.pending.get() + 1);
-    let pending = shared.pending.clone();
-    let weak = Rc::downgrade(shared);
-    view.call_async_javascript_function(
-        &pull::pull_body(),
-        None,
-        None,
-        None,
-        Some(&cancellable),
-        move |result| {
-            pending.set(pending.get().saturating_sub(1));
-            let Some(shared) = weak.upgrade() else {
-                return;
-            };
-            if cancelled.is_cancelled() {
-                return;
-            }
-            pull.inflight.set(false);
-            let envelope = result
-                .ok()
-                .filter(|value| value.is_string())
-                .and_then(|value| {
-                    let text = value.to_string_as_bytes()?;
-                    pull::decode(&text)
-                });
-            let received = match envelope {
-                Some(envelope) if !envelope.is_empty() => {
-                    let accepted = shared.core.borrow_mut().fallback_post(id, envelope).is_ok();
-                    shared.collect();
-                    accepted
-                }
-                _ => false,
-            };
-            let interval = if received {
-                Duration::ZERO
-            } else {
-                let next = pull::next_interval(pull.interval.get());
-                pull.interval.set(next);
-                next
-            };
-            if received {
-                pull.interval.set(PULL_MIN_INTERVAL);
-            }
-            schedule_pull(&shared, id, &pull, interval);
-        },
-    );
-}
-
-fn schedule_pull<R: Runtime + 'static>(
-    shared: &Rc<Shared<R>>,
-    id: u64,
-    pull: &Rc<PullState>,
-    interval: Duration,
-) {
-    if let Some(timer) = pull.timer.borrow_mut().take() {
-        timer.remove();
-    }
-    let weak: Weak<Shared<R>> = Rc::downgrade(shared);
-    let state = Rc::downgrade(pull);
-    let source = glib::timeout_add_local_once(interval, move || {
-        if let Some(state) = state.upgrade() {
-            state.timer.borrow_mut().take();
-        }
-        if let Some(shared) = weak.upgrade() {
-            start_pull(&shared, id);
-        }
-    });
-    *pull.timer.borrow_mut() = Some(source);
 }

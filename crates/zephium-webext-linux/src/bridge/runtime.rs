@@ -183,6 +183,16 @@ pub trait Runtime {
         let _ = (event, out);
     }
 
+    /// The module could not attach; this view cannot run extensions.
+    fn transport_unavailable(
+        &mut self,
+        view: BridgeViewId,
+        owner: ViewRef,
+        reason: super::UnavailableReason,
+    ) {
+        let _ = (view, owner, reason);
+    }
+
     /// A delivery the bridge could not complete.
     fn undeliverable(&mut self, context: &ContextKey, error: DeliverError) {
         let _ = (context, error);

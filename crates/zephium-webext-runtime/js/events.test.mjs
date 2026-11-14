@@ -159,6 +159,23 @@ test('held events wait for release and keep their order', () => {
   assert.equal(host.acks.length, 2);
 });
 
+test('selective release dispatches installed events while preserving other held events', () => {
+  const { chrome, host, context } = extensionContext();
+  const heard = [];
+  chrome.runtime.onInstalled.addListener((details) => heard.push(details.reason));
+  chrome.runtime.onStartup.addListener(() => heard.push('startup'));
+  context.hub.hold();
+  const startup = host.event('runtime.onStartup', []);
+  const install = host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  context.hub.release('runtime.onInstalled');
+  const update = host.event('runtime.onInstalled', [{ reason: 'update' }]);
+  assert.deepEqual(heard, ['install', 'update']);
+  assert.deepEqual(host.acks, [install, update]);
+  context.hub.release();
+  assert.deepEqual(heard, ['install', 'update', 'startup']);
+  assert.deepEqual(host.acks, [install, update, startup]);
+});
+
 test('windowTypes listener filters retain exact host-selected callback identities', () => {
   const { chrome, host } = extensionContext('background');
   const heard = [];
