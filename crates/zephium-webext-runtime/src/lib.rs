@@ -2,8 +2,8 @@
 //! calling, what they may do, the bridge wire format and its limits, and
 //! the API dispatch pipeline.
 //!
-//! No I/O, threads or async runtime. Engine adapters supply host facts,
-//! bytes and time; this crate decides.
+//! Engine adapters supply host facts, bytes and time. Services are synchronous;
+//! the SQLite storage backend performs bounded durable transactions.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -13,14 +13,21 @@
     deny(clippy::panic, clippy::unreachable, clippy::unwrap_used)
 )]
 
+pub mod alarms;
 pub mod api;
 pub mod context;
 pub mod dispatch;
 pub mod envelope;
 pub mod errors;
+pub mod events;
+pub mod i18n;
+pub mod lifecycle;
 pub mod limits;
 pub mod pattern;
 pub mod permissions;
+pub mod ports;
+pub mod scripting_registry;
+pub mod storage;
 
 pub use context::{
     Authority, BindError, ClaimedWorld, CommittedDocument, ContextKey, ContextKind, ContextMask,
