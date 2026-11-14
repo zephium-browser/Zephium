@@ -4,7 +4,7 @@
 pub(crate) mod geometry;
 mod idle;
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 mod model;
 #[cfg(target_os = "windows")]
 mod viewport;
@@ -737,6 +737,7 @@ impl Overlay {
             .get_webview_window(crate::MAIN_LABEL);
         #[cfg(target_os = "linux")]
         let supports_position = self.window.gtk_window().is_ok_and(|window| {
+            linux::set_switcher(&window, self.state().model.switcher.is_some());
             let owner = owner.as_ref().and_then(|owner| owner.gtk_window().ok());
             linux::prepare(&window, owner.as_ref())
         });
@@ -815,6 +816,11 @@ impl Overlay {
                         f64::from(work.position.y) + placement.y * scale,
                     )
                 }),
+                placement
+                    .x
+                    .min(placement.y)
+                    .min(f64::from(work.size.width) / scale - placement.x - placement.width)
+                    .min(f64::from(work.size.height) / scale - placement.y - height),
             );
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -868,7 +874,11 @@ impl Overlay {
         let height = placement.height(content);
         #[cfg(target_os = "macos")]
         crate::panel::set_height(&self.window, height);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if let Ok(window) = self.window.gtk_window() {
+            linux::resize(&window, LogicalSize::new(placement.width, height));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = self
             .window
             .set_size(LogicalSize::new(placement.width, height));

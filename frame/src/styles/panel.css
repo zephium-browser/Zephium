@@ -70,12 +70,11 @@ button:focus-visible {
   color: var(--color-danger);
 }
 
-/* Once Linux reports its material, let the launcher and switcher paint their
-   own rounded surfaces on the transparent WebView. */
+/* GTK clips the opaque Linux WebView and draws its shadow. */
 @media not (forced-colors: active) {
   :root[data-platform="linux"][data-material="none"],
   :root[data-platform="linux"][data-material="none"] :is(body, #root) {
-    background: transparent;
+    background: var(--color-canvas);
   }
 }
 

@@ -8035,6 +8035,7 @@ pub fn run() {
 
             #[cfg(target_os = "linux")]
             {
+                overlay::linux::install(&panel_window).map_err(std::io::Error::other)?;
                 // When portal/direct-X11 registration is unavailable the
                 // focused fallback must also close a launcher whose panel,
                 // rather than the main window, owns keyboard focus.
