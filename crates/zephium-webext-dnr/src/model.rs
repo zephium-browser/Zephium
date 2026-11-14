@@ -12,16 +12,20 @@ pub const MAX_NUMBER_OF_DISABLED_STATIC_RULES: usize = 5_000;
 pub const DYNAMIC_RULESET_ID: &str = "_dynamic";
 pub const SESSION_RULESET_ID: &str = "_session";
 
-/// Approximation of Chrome's RE2 compiled-program limit using Rust regex's NFA cap.
-pub const MAX_REGEX_MEMORY_BYTES: usize = 2 * 1024;
-pub const MAX_REGEX_SOURCE_BYTES: usize = 64 * 1024;
-/// Implementation resource bounds, separate from Chrome's quotas.
+/// Rust implementation bounds; RE2's program-memory accounting is unrelated.
+pub const MAX_REGEX_SOURCE_BYTES: usize = 4 * 1024;
+pub const MAX_REGEX_NFA_BYTES: usize = 256 * 1024;
+pub const MAX_REGEX_DFA_CACHE_BYTES: usize = 512 * 1024;
+pub const MAX_REGEX_NFA_BYTES_PER_RULESET: usize = 16 * 1024 * 1024;
+pub const MAX_REGEX_NFA_BYTES_PER_EXTENSION: usize = 64 * 1024 * 1024;
+/// Other implementation resource bounds, separate from Chrome's quotas.
 pub const MAX_RULESET_JSON_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_RULES_PER_RULESET: usize = 1_000_000;
 pub const MAX_HEADER_PATTERNS_PER_RULE: usize = 64;
 pub const MAX_HEADER_PATTERNS_PER_RULESET: usize = 4_096;
 pub const MAX_HEADER_PATTERN_MEMORY_BYTES: usize = 8 * 1024;
 pub const MAX_HEADER_PATTERN_BYTES: usize = 8 * 1024;
+pub const MAX_DECODED_ACTION_BYTES_PER_RULESET: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "compile", derive(serde::Serialize, serde::Deserialize))]

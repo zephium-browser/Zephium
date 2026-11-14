@@ -7880,9 +7880,11 @@ dependencies = [
 name = "zephium-webext-dnr"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
+ "crc32fast",
  "memchr",
  "regex",
+ "regex-automata",
+ "regex-syntax",
  "serde",
  "serde_json",
  "url",

@@ -36,6 +36,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -448,9 +457,11 @@ dependencies = [
 name = "zephium-webext-dnr"
 version = "0.1.0"
 dependencies = [
- "aho-corasick",
+ "crc32fast",
  "memchr",
  "regex",
+ "regex-automata",
+ "regex-syntax",
  "serde",
  "serde_json",
  "url",
@@ -460,6 +471,7 @@ dependencies = [
 name = "zephium-webext-dnr-fuzz"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "libfuzzer-sys",
  "zephium-webext-dnr",
 ]

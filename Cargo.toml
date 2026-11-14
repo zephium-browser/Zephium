@@ -94,6 +94,10 @@ strip = "symbols"
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
 
+# The synchronous renderer request matcher prioritizes latency over code size.
+[profile.release.package.zephium-webext-dnr]
+opt-level = 3
+
 # Stripped proc-macro libraries fail to load with the macOS 27 toolchain
 # ("mis-aligned LINKEDIT string pool"); build-time code never ships.
 [profile.release.build-override]

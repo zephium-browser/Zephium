@@ -2,10 +2,10 @@
 
 use serde_json::{json, Value};
 use zephium_webext_dnr::{
-    evaluate, evaluate_linear, parse_rules_json, validate_extension_rulesets, Action,
-    CompiledRuleset, Condition, DomainType, Extension, FrameAllow, Header, Request, RequestMethod,
-    ResourceType, Rule, RulesetKind, Stage, GUARANTEED_MINIMUM_STATIC_RULES,
-    MAX_NUMBER_OF_REGEX_RULES,
+    evaluate, evaluate_candidates, evaluate_linear, parse_rules_json, validate_extension_rulesets,
+    Action, Candidate, CompiledRuleset, Condition, DomainType, Extension, FrameAllow, Header,
+    PreparedRule, Request, RequestMethod, ResourceType, Rule, RulesetKind, Stage,
+    GUARANTEED_MINIMUM_STATIC_RULES, MAX_NUMBER_OF_REGEX_RULES,
 };
 
 struct Generator(u64);
@@ -129,7 +129,7 @@ fn generated_rules(seed: u64, kind: RulesetKind) -> Vec<Value> {
         .collect()
 }
 
-fn compile(seed: u64, kind: RulesetKind, id: &str) -> CompiledRuleset {
+fn compile(seed: u64, kind: RulesetKind, id: &str) -> Vec<u8> {
     let source =
         serde_json::to_vec(&generated_rules(seed, kind)).expect("serialize generated rules");
     let parsed = parse_rules_json(&source, kind).expect("parse generated rules");
@@ -143,7 +143,7 @@ fn compile(seed: u64, kind: RulesetKind, id: &str) -> CompiledRuleset {
     let bytes = compiled.to_bytes();
     let loaded = CompiledRuleset::load(&bytes).expect("load generated rules");
     assert_eq!(bytes, loaded.to_bytes(), "binary round trip, seed {seed}");
-    loaded
+    bytes
 }
 
 #[test]
@@ -163,9 +163,12 @@ fn generated_compiled_decisions_equal_linear_reference() {
         priority: 3,
     }];
     for seed in 1..=24 {
-        let static_set = compile(seed, RulesetKind::Static, "static");
-        let dynamic_set = compile(seed ^ 0xabcd, RulesetKind::Dynamic, "_dynamic");
-        let session_set = compile(seed ^ 0xef01, RulesetKind::Session, "_session");
+        let static_bytes = compile(seed, RulesetKind::Static, "static");
+        let dynamic_bytes = compile(seed ^ 0xabcd, RulesetKind::Dynamic, "_dynamic");
+        let session_bytes = compile(seed ^ 0xef01, RulesetKind::Session, "_session");
+        let static_set = CompiledRuleset::load(&static_bytes).expect("borrow static index");
+        let dynamic_set = CompiledRuleset::load(&dynamic_bytes).expect("borrow dynamic index");
+        let session_set = CompiledRuleset::load(&session_bytes).expect("borrow session index");
         let older = [&static_set, &session_set];
         let newer = [&dynamic_set];
         let extensions = [
@@ -180,6 +183,25 @@ fn generated_compiled_decisions_equal_linear_reference() {
                 rulesets: &newer,
             },
         ];
+        let reference_sets: Vec<_> = [
+            (seed, RulesetKind::Static, "static", "older", 1),
+            (seed ^ 0xef01, RulesetKind::Session, "_session", "older", 1),
+            (seed ^ 0xabcd, RulesetKind::Dynamic, "_dynamic", "newer", 2),
+        ]
+        .into_iter()
+        .map(
+            |(rule_seed, kind, ruleset_id, extension_id, install_order)| {
+                let source = serde_json::to_vec(&generated_rules(rule_seed, kind)).unwrap();
+                let rules = parse_rules_json(&source, kind)
+                    .unwrap()
+                    .rules
+                    .into_iter()
+                    .map(|rule| PreparedRule::new(rule).unwrap())
+                    .collect::<Vec<_>>();
+                (ruleset_id, extension_id, install_order, rules)
+            },
+        )
+        .collect();
         let mut generator = Generator(seed ^ 0xfedc_ba98);
         for case in 0..192 {
             let domain = generator.pick(8);
@@ -235,6 +257,24 @@ fn generated_compiled_decisions_equal_linear_reference() {
             };
             request.response_headers = if case % 4 < 2 { &headers } else { &[] };
             request.frame_allow = if case % 7 == 0 { &allow } else { &[] };
+            let reference = evaluate_candidates(
+                &request,
+                reference_sets.iter().flat_map(
+                    |(ruleset_id, extension_id, install_order, rules)| {
+                        rules.iter().map(move |rule| Candidate {
+                            extension_id,
+                            install_order: *install_order,
+                            ruleset_id,
+                            rule,
+                        })
+                    },
+                ),
+            );
+            assert_eq!(
+                evaluate(&request, &extensions),
+                reference,
+                "serialized/original model difference, seed {seed}, case {case}"
+            );
             assert_eq!(
                 evaluate(&request, &extensions),
                 evaluate_linear(&request, &extensions),
@@ -305,8 +345,8 @@ fn many_domain_postings_reload_and_match_case_insensitively() {
     }];
     let compiled =
         CompiledRuleset::compile("domains", RulesetKind::Static, rules).expect("compile domains");
-    let compiled =
-        CompiledRuleset::load(&compiled.to_bytes()).expect("many buckets for one rule reload");
+    let bytes = compiled.to_bytes();
+    let compiled = CompiledRuleset::load(&bytes).expect("many buckets for one rule reload");
     let sets = [&compiled];
     let extensions = [Extension {
         id: "test",

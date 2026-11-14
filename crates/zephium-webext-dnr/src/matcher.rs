@@ -247,7 +247,7 @@ impl PreparedRule {
     }
 }
 
-fn contains_literal(haystack: &[u8], needle: &[u8], case_sensitive: bool) -> bool {
+pub(crate) fn contains_literal(haystack: &[u8], needle: &[u8], case_sensitive: bool) -> bool {
     if case_sensitive {
         return memchr::memmem::find(haystack, needle).is_some();
     }
@@ -371,7 +371,7 @@ fn host_suffix(url: &str) -> Option<&str> {
     rest.get(start..)
 }
 
-fn url_filter_matches(filter: &str, url: &str, case_sensitive: bool) -> bool {
+pub(crate) fn url_filter_matches(filter: &str, url: &str, case_sensitive: bool) -> bool {
     let (pattern, domain_anchor, left_anchor) = if let Some(rest) = filter.strip_prefix("||") {
         (rest, true, true)
     } else if let Some(rest) = filter.strip_prefix('|') {
@@ -555,12 +555,21 @@ pub struct Candidate<'a> {
     pub rule: &'a PreparedRule,
 }
 
-impl<'a> Candidate<'a> {
+#[derive(Clone, Copy)]
+pub(crate) struct MatchingCandidate<'a, 'rule> {
+    pub extension_id: &'a str,
+    pub install_order: u64,
+    pub ruleset_id: &'a str,
+    pub rule: &'rule Rule,
+    pub regex: Option<&'rule Regex>,
+}
+
+impl<'a> MatchingCandidate<'a, '_> {
     fn feedback(self) -> MatchedRule<'a> {
         MatchedRule {
             extension_id: self.extension_id,
             ruleset_id: self.ruleset_id,
-            rule_id: self.rule.rule.id,
+            rule_id: self.rule.id,
         }
     }
 }
@@ -586,10 +595,10 @@ pub enum DecisionAction {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeaderEdit<'a> {
     pub matched_rule: MatchedRule<'a>,
-    pub modification: &'a HeaderModification,
+    pub modification: HeaderModification,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -614,6 +623,27 @@ pub fn evaluate_candidates<'a>(
     request: &Request<'_>,
     candidates: impl Iterator<Item = Candidate<'a>>,
 ) -> Decision<'a> {
+    evaluate_matching_candidates(
+        request,
+        candidates.filter_map(|candidate| {
+            candidate
+                .rule
+                .matches(request)
+                .then_some(MatchingCandidate {
+                    extension_id: candidate.extension_id,
+                    install_order: candidate.install_order,
+                    ruleset_id: candidate.ruleset_id,
+                    rule: &candidate.rule.rule,
+                    regex: candidate.rule.compiled_regex(),
+                })
+        }),
+    )
+}
+
+pub(crate) fn evaluate_matching_candidates<'a, 'rule>(
+    request: &Request<'_>,
+    candidates: impl Iterator<Item = MatchingCandidate<'a, 'rule>>,
+) -> Decision<'a> {
     let mut decision = Decision {
         action: DecisionAction::Allow,
         stage: request.stage,
@@ -622,16 +652,14 @@ pub fn evaluate_candidates<'a>(
         unsupported_response_headers: Vec::new(),
         frame_allow_updates: Vec::new(),
     };
-    let mut matching: Vec<_> = candidates
-        .filter(|candidate| candidate.rule.matches(request))
-        .collect();
+    let mut matching: Vec<_> = candidates.collect();
     matching.sort_unstable_by(candidate_order);
     matching.dedup_by(|left, right| {
         left.extension_id == right.extension_id
             && left.ruleset_id == right.ruleset_id
-            && left.rule.rule.id == right.rule.rule.id
+            && left.rule.id == right.rule.id
     });
-    let mut winning: Option<(Candidate<'a>, DecisionAction)> = None;
+    let mut winning: Option<(MatchingCandidate<'a, 'rule>, DecisionAction)> = None;
     let mut header_rules = Vec::new();
     let mut offset = 0;
     while offset < matching.len() {
@@ -653,32 +681,28 @@ pub fn evaluate_candidates<'a>(
             .iter()
             .filter(|candidate| {
                 matches!(
-                    candidate.rule.rule.action,
+                    candidate.rule.action,
                     Action::Allow | Action::AllowAllRequests
                 )
             })
-            .map(|candidate| candidate.rule.rule.priority)
+            .map(|candidate| candidate.rule.priority)
             .max()
             .unwrap_or_default()
             .max(inherited);
         // Chrome DNR #rule-evaluation: allow exempts this extension only;
         // modifyHeaders must have strictly higher priority than matching allow.
         header_rules.extend(group.iter().copied().filter(|candidate| {
-            matches!(candidate.rule.rule.action, Action::ModifyHeaders { .. })
-                && candidate.rule.rule.priority > allow_priority
+            matches!(candidate.rule.action, Action::ModifyHeaders { .. })
+                && candidate.rule.priority > allow_priority
         }));
         if let Some(priority) = group
             .iter()
             .filter(|candidate| {
-                matches!(candidate.rule.rule.action, Action::AllowAllRequests)
+                matches!(candidate.rule.action, Action::AllowAllRequests)
                     && (request.stage == Stage::BeforeRequest
-                        || candidate
-                            .rule
-                            .rule
-                            .condition
-                            .has_response_header_condition())
+                        || candidate.rule.condition.has_response_header_condition())
             })
-            .map(|candidate| candidate.rule.rule.priority)
+            .map(|candidate| candidate.rule.priority)
             .filter(|priority| *priority > inherited)
             .max()
         {
@@ -688,7 +712,7 @@ pub fn evaluate_candidates<'a>(
             });
         }
         for candidate in group {
-            let rule = &candidate.rule.rule;
+            let rule = &candidate.rule;
             if matches!(rule.action, Action::ModifyHeaders { .. })
                 || (request.stage == Stage::ResponseHeaders
                     && !rule.condition.has_response_header_condition())
@@ -725,7 +749,7 @@ pub fn evaluate_candidates<'a>(
         let Action::ModifyHeaders {
             request_headers,
             response_headers,
-        } = &candidate.rule.rule.action
+        } = &candidate.rule.action
         else {
             continue;
         };
@@ -740,7 +764,7 @@ pub fn evaluate_candidates<'a>(
             if header_operation_allowed(edits, candidate.extension_id, modification) {
                 edits.push(HeaderEdit {
                     matched_rule: candidate.feedback(),
-                    modification,
+                    modification: modification.clone(),
                 });
                 applied = true;
             }
@@ -752,19 +776,20 @@ pub fn evaluate_candidates<'a>(
     decision
 }
 
-fn candidate_order(left: &Candidate<'_>, right: &Candidate<'_>) -> Ordering {
+fn candidate_order(
+    left: &MatchingCandidate<'_, '_>,
+    right: &MatchingCandidate<'_, '_>,
+) -> Ordering {
     right
         .install_order
         .cmp(&left.install_order)
         .then_with(|| left.extension_id.cmp(right.extension_id))
-        .then_with(|| right.rule.rule.priority.cmp(&left.rule.rule.priority))
-        .then_with(|| {
-            action_rank(&right.rule.rule.action).cmp(&action_rank(&left.rule.rule.action))
-        })
+        .then_with(|| right.rule.priority.cmp(&left.rule.priority))
+        .then_with(|| action_rank(&right.rule.action).cmp(&action_rank(&left.rule.action)))
         // Chrome explicitly leaves same-action, same-priority order unspecified,
         // including across static/dynamic/session rulesets. Use stable local IDs.
         .then_with(|| left.ruleset_id.cmp(right.ruleset_id))
-        .then_with(|| left.rule.rule.id.cmp(&right.rule.rule.id))
+        .then_with(|| left.rule.id.cmp(&right.rule.id))
 }
 
 fn action_rank(action: &Action) -> u8 {
@@ -777,14 +802,17 @@ fn action_rank(action: &Action) -> u8 {
     }
 }
 
-fn across_extensions(left: Candidate<'_>, right: Candidate<'_>) -> Ordering {
+fn across_extensions(
+    left: MatchingCandidate<'_, '_>,
+    right: MatchingCandidate<'_, '_>,
+) -> Ordering {
     let rank = |action: &Action| match action {
         Action::Block => 3,
         Action::UpgradeScheme | Action::Redirect { .. } => 2,
         _ => 1,
     };
-    rank(&left.rule.rule.action)
-        .cmp(&rank(&right.rule.rule.action))
+    rank(&left.rule.action)
+        .cmp(&rank(&right.rule.action))
         .then_with(|| left.install_order.cmp(&right.install_order))
         .then_with(|| left.extension_id.cmp(right.extension_id))
 }
@@ -811,8 +839,11 @@ fn header_operation_allowed(
     }
 }
 
-fn terminal_action(candidate: Candidate<'_>, request: &Request<'_>) -> Option<DecisionAction> {
-    let action = match &candidate.rule.rule.action {
+fn terminal_action(
+    candidate: MatchingCandidate<'_, '_>,
+    request: &Request<'_>,
+) -> Option<DecisionAction> {
+    let action = match &candidate.rule.action {
         Action::Allow | Action::AllowAllRequests => DecisionAction::Allow,
         Action::Block => DecisionAction::Block,
         Action::UpgradeScheme => {
@@ -838,7 +869,19 @@ fn terminal_action(candidate: Candidate<'_>, request: &Request<'_>) -> Option<De
             } else if let Some(transform) = &redirect.transform {
                 transform_url(request.url, transform)?
             } else if let Some(substitution) = &redirect.regex_substitution {
-                regex_substitute(candidate.rule.compiled_regex()?, request.url, substitution)?
+                let compiled;
+                let regex = if let Some(regex) = candidate.regex {
+                    regex
+                } else {
+                    let condition = &candidate.rule.condition;
+                    compiled = compile_regex(
+                        condition.regex_filter.as_deref()?,
+                        condition.is_url_filter_case_sensitive,
+                    )
+                    .ok()?;
+                    &compiled
+                };
+                regex_substitute(regex, request.url, substitution)?
             } else {
                 return None;
             };

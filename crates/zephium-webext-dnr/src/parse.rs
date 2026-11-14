@@ -4,8 +4,26 @@ use std::collections::HashSet;
 use std::fmt;
 
 use regex::bytes::{Regex, RegexBuilder};
+use regex_automata::{nfa::thompson, util::syntax, PatternID};
 
 use crate::model::*;
+
+#[derive(Clone, Copy)]
+struct HeaderName<'a>(&'a str);
+impl PartialEq for HeaderName<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(other.0)
+    }
+}
+impl Eq for HeaderName<'_> {}
+impl std::hash::Hash for HeaderName<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(self.0.len());
+        for byte in self.0.bytes() {
+            state.write_u8(byte.to_ascii_lowercase());
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError {
@@ -27,6 +45,18 @@ impl std::error::Error for ParseError {}
 
 /// ASCII URL matching avoids Rust's Unicode `\w`/case-folding semantics.
 pub fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, String> {
+    compile_regex_with_cache(pattern, case_sensitive, MAX_REGEX_DFA_CACHE_BYTES)
+}
+
+pub(crate) fn compile_capture_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, String> {
+    compile_regex_with_cache(pattern, case_sensitive, 0)
+}
+
+fn compile_regex_with_cache(
+    pattern: &str,
+    case_sensitive: bool,
+    cache_bytes: usize,
+) -> Result<Regex, String> {
     if pattern.is_empty() {
         return Err("regexFilter must not be empty".into());
     }
@@ -37,20 +67,64 @@ pub fn compile_regex(pattern: &str, case_sensitive: bool) -> Result<Regex, Strin
     RegexBuilder::new(&pattern)
         .unicode(false)
         .case_insensitive(!case_sensitive)
-        .size_limit(MAX_REGEX_MEMORY_BYTES)
-        .dfa_size_limit(MAX_REGEX_MEMORY_BYTES * 16)
+        .size_limit(MAX_REGEX_NFA_BYTES)
+        .dfa_size_limit(cache_bytes)
         .build()
         .map_err(|error| match error {
-            regex::Error::CompiledTooBig(_) => {
-                "regexFilter exceeds the compiled-size limit (RE2 size approximation)".into()
-            }
+            regex::Error::CompiledTooBig(_) => "regexFilter exceeds the Rust NFA size limit".into(),
             _ => "regexFilter has invalid or unsupported RE2 syntax".into(),
+        })
+}
+
+/// Final Thompson NFA bytes, for compilation and aggregate admission budgets.
+pub fn regex_nfa_memory_usage(pattern: &str, case_sensitive: bool) -> Result<usize, String> {
+    compile_regex_nfa(pattern, case_sensitive).map(|nfa| nfa.memory_usage())
+}
+
+/// Validate a lazy fallback's grammar without constructing an automaton.
+pub(crate) fn validate_regex_source(pattern: &str, case_sensitive: bool) -> Result<(), String> {
+    let pattern = normalize_regex(pattern)?;
+    syntax::parse_with(
+        &pattern,
+        &syntax::Config::new()
+            .utf8(false)
+            .unicode(false)
+            .case_insensitive(!case_sensitive),
+    )
+    .map(|_| ())
+    .map_err(|_| "regexFilter has invalid or unsupported RE2 syntax".into())
+}
+
+fn compile_regex_nfa(pattern: &str, case_sensitive: bool) -> Result<thompson::NFA, String> {
+    let pattern = normalize_regex(pattern)?;
+    thompson::Compiler::new()
+        .configure(
+            thompson::Config::new()
+                .utf8(false)
+                .nfa_size_limit(Some(MAX_REGEX_NFA_BYTES)),
+        )
+        .syntax(
+            syntax::Config::new()
+                .utf8(false)
+                .unicode(false)
+                .case_insensitive(!case_sensitive),
+        )
+        .build(&pattern)
+        .map_err(|error| {
+            if error.size_limit().is_some() {
+                "regexFilter exceeds the Rust NFA size limit".into()
+            } else {
+                "regexFilter has invalid or unsupported RE2 syntax".into()
+            }
         })
 }
 
 /// Translate RE2 escapes and refuse Rust extensions whose interpretation differs.
 /// The caller must use this same normalization for a regex-set prefilter.
 pub fn normalize_regex(pattern: &str) -> Result<String, String> {
+    if pattern.is_empty() {
+        return Err("regexFilter must not be empty".into());
+    }
     if pattern.len() > MAX_REGEX_SOURCE_BYTES {
         return Err("regexFilter exceeds the implementation source-size limit".into());
     }
@@ -314,6 +388,10 @@ fn normalize_escape(
 }
 
 pub fn validate_rule(rule: &Rule, kind: RulesetKind) -> Result<(), String> {
+    validate_rule_with_regex_memory(rule, kind).map(|_| ())
+}
+
+fn validate_rule_with_regex_memory(rule: &Rule, kind: RulesetKind) -> Result<usize, String> {
     if rule.id == 0 || rule.id > i32::MAX as u32 {
         return Err("id must be an integer from 1 to 2147483647".into());
     }
@@ -395,10 +473,58 @@ pub fn validate_rule(rule: &Rule, kind: RulesetKind) -> Result<(), String> {
     let regex = c
         .regex_filter
         .as_deref()
-        .map(|filter| compile_regex(filter, c.is_url_filter_case_sensitive))
+        .map(|filter| compile_regex_nfa(filter, c.is_url_filter_case_sensitive))
         .transpose()?;
+    validate_action(
+        rule,
+        regex
+            .as_ref()
+            .map(|nfa| nfa.group_info().group_len(PatternID::ZERO)),
+    )?;
+    Ok(regex.as_ref().map_or(0, thompson::NFA::memory_usage))
+}
+
+/// Validate decoded action fields without building renderer-side automata.
+pub(crate) fn validate_loaded_action(rule: &Rule) -> Result<(), String> {
+    nonempty("responseHeaders", &rule.condition.response_headers)?;
+    nonempty(
+        "excludedResponseHeaders",
+        &rule.condition.excluded_response_headers,
+    )?;
+    validate_response_headers_with_patterns(&rule.condition, false)?;
+    let captures = rule
+        .condition
+        .regex_filter
+        .as_deref()
+        .map(|pattern| {
+            let normalized = normalize_regex(pattern)?;
+            syntax::parse_with(
+                &normalized,
+                &syntax::Config::new()
+                    .utf8(false)
+                    .unicode(false)
+                    .case_insensitive(!rule.condition.is_url_filter_case_sensitive),
+            )
+            .map(|hir| {
+                let mut count = 1;
+                let mut pending = vec![&hir];
+                while let Some(node) = pending.pop() {
+                    if let regex_syntax::hir::HirKind::Capture(capture) = node.kind() {
+                        count = count.max(capture.index as usize + 1);
+                    }
+                    pending.extend(node.kind().subs());
+                }
+                count
+            })
+            .map_err(|_| "regexFilter has invalid or unsupported RE2 syntax".to_owned())
+        })
+        .transpose()?;
+    validate_action(rule, captures)
+}
+
+fn validate_action(rule: &Rule, captures: Option<usize>) -> Result<(), String> {
     match &rule.action {
-        Action::Redirect { redirect } => validate_redirect(redirect, regex.as_ref())?,
+        Action::Redirect { redirect } => validate_redirect(redirect, captures)?,
         Action::ModifyHeaders {
             request_headers,
             response_headers,
@@ -406,7 +532,7 @@ pub fn validate_rule(rule: &Rule, kind: RulesetKind) -> Result<(), String> {
             if request_headers.is_empty() && response_headers.is_empty() {
                 return Err("modifyHeaders requires requestHeaders or responseHeaders".into());
             }
-            if c.has_response_header_condition() && !request_headers.is_empty() {
+            if rule.condition.has_response_header_condition() && !request_headers.is_empty() {
                 return Err("response-header conditions cannot modify request headers".into());
             }
             validate_header_modifications(request_headers, true)?;
@@ -425,6 +551,13 @@ fn nonempty<T>(name: &str, values: &Option<Vec<T>>) -> Result<(), String> {
 }
 
 fn validate_response_headers(condition: &Condition) -> Result<(), String> {
+    validate_response_headers_with_patterns(condition, true)
+}
+
+fn validate_response_headers_with_patterns(
+    condition: &Condition,
+    compile_patterns: bool,
+) -> Result<(), String> {
     if header_pattern_count(condition) > MAX_HEADER_PATTERNS_PER_RULE {
         return Err("MAX_HEADER_PATTERNS_PER_RULE exceeded".into());
     }
@@ -449,24 +582,25 @@ fn validate_response_headers(condition: &Condition) -> Result<(), String> {
             if value.len() > MAX_HEADER_PATTERN_BYTES {
                 return Err("MAX_HEADER_PATTERN_BYTES exceeded".into());
             }
-            crate::matcher::compile_header_pattern(value)?;
+            if compile_patterns {
+                crate::matcher::compile_header_pattern(value)?;
+            }
         }
     }
-    if condition
-        .excluded_response_headers
-        .iter()
-        .flatten()
-        .any(|excluded| {
+    if let Some(excluded_headers) = &condition.excluded_response_headers {
+        let required: HashSet<_> = condition
+            .response_headers
+            .iter()
+            .flatten()
+            .map(|included| HeaderName(&included.header))
+            .collect();
+        if excluded_headers.iter().any(|excluded| {
             excluded.values.is_none()
                 && excluded.excluded_values.is_none()
-                && condition
-                    .response_headers
-                    .iter()
-                    .flatten()
-                    .any(|included| included.header.eq_ignore_ascii_case(&excluded.header))
-        })
-    {
-        return Err("response header cannot be required and excluded by name".into());
+                && required.contains(&HeaderName(&excluded.header))
+        }) {
+            return Err("response header cannot be required and excluded by name".into());
+        }
     }
     Ok(())
 }
@@ -552,7 +686,7 @@ fn validate_header_modifications(
     Ok(())
 }
 
-fn validate_redirect(redirect: &Redirect, regex: Option<&Regex>) -> Result<(), String> {
+fn validate_redirect(redirect: &Redirect, captures: Option<usize>) -> Result<(), String> {
     // Chromium indexed_rule.cc ParseRedirect chooses the first present target.
     if let Some(target) = &redirect.url {
         let url = url::Url::parse(target).map_err(|_| "invalid redirect URL")?;
@@ -568,8 +702,8 @@ fn validate_redirect(redirect: &Redirect, regex: Option<&Regex>) -> Result<(), S
     } else if let Some(transform) = &redirect.transform {
         validate_transform(transform)?;
     } else if let Some(substitution) = &redirect.regex_substitution {
-        let regex = regex.ok_or("regexSubstitution requires regexFilter")?;
-        validate_substitution(substitution, regex.captures_len())?;
+        let captures = captures.ok_or("regexSubstitution requires regexFilter")?;
+        validate_substitution(substitution, captures)?;
     } else {
         return Err("redirect requires url, extensionPath, transform or regexSubstitution".into());
     }
@@ -638,9 +772,12 @@ pub fn validate_rules(rules: &[Rule], kind: RulesetKind) -> Vec<RuleRejection> {
     let mut regex_count = 0;
     let mut unsafe_count = 0;
     let mut header_patterns = 0usize;
+    let mut regex_nfa_bytes = 0usize;
     let mut rejected = Vec::new();
     for (index, rule) in rules.iter().enumerate() {
-        let reason = validate_rule(rule, kind).err().or_else(|| {
+        let validation = validate_rule_with_regex_memory(rule, kind);
+        let rule_regex_nfa_bytes = validation.as_ref().copied().unwrap_or(0);
+        let reason = validation.err().or_else(|| {
             if seen.contains(&rule.id) {
                 Some("duplicate rule id".into())
             } else if accepted >= MAX_RULES_PER_RULESET {
@@ -662,6 +799,10 @@ pub fn validate_rules(rules: &[Rule], kind: RulesetKind) -> Vec<RuleRejection> {
                 > MAX_HEADER_PATTERNS_PER_RULESET
             {
                 Some("MAX_HEADER_PATTERNS_PER_RULESET exceeded".into())
+            } else if regex_nfa_bytes.saturating_add(rule_regex_nfa_bytes)
+                > MAX_REGEX_NFA_BYTES_PER_RULESET
+            {
+                Some("MAX_REGEX_NFA_BYTES_PER_RULESET exceeded".into())
             } else {
                 None
             }
@@ -678,6 +819,7 @@ pub fn validate_rules(rules: &[Rule], kind: RulesetKind) -> Vec<RuleRejection> {
             regex_count += usize::from(rule.condition.regex_filter.is_some());
             unsafe_count += usize::from(!rule.action.is_safe());
             header_patterns += header_pattern_count(&rule.condition);
+            regex_nfa_bytes += rule_regex_nfa_bytes;
         }
     }
     rejected
@@ -967,9 +1109,10 @@ mod tests {
         assert!(compile_regex("é", false).is_err());
         assert!(compile_regex("(?=foo)", false).is_err());
         assert!(compile_regex(r"(foo)\1", false).is_err());
+        assert!(compile_regex("(?:ab|cd|ef){200}", false).is_ok());
         assert!(compile_regex("(?:ab|cd|ef){1000}", false)
             .unwrap_err()
-            .contains("compiled-size"));
+            .contains("Rust NFA"));
         assert!(compile_regex(r"\w+", false).unwrap().is_match(b"abc"));
         assert!(!compile_regex(r"^\w+$", false)
             .unwrap()
@@ -1028,6 +1171,100 @@ mod tests {
         assert!(!compile_regex(r"[\p{Latin}\d]+", false)
             .unwrap()
             .is_match("١".as_bytes()));
+    }
+
+    #[test]
+    fn source_and_rust_nfa_limits_bound_different_resources() {
+        let literal = "a".repeat(MAX_REGEX_SOURCE_BYTES);
+        assert!(compile_regex(&literal, true).is_ok());
+        assert!(compile_regex(&(literal + "a"), true)
+            .unwrap_err()
+            .contains("source-size"));
+        for pattern in ["(?:abcdefghijklmnop){1000}", "(?:a{1000}){1000}"] {
+            assert!(compile_regex(pattern, true)
+                .unwrap_err()
+                .contains("Rust NFA"));
+            assert!(regex_nfa_memory_usage(pattern, true)
+                .unwrap_err()
+                .contains("Rust NFA"));
+        }
+        let pattern = "(?:abc|def|ghi){200}";
+        let bytes = regex_nfa_memory_usage(pattern, true).unwrap();
+        assert!(bytes > 2 * 1024 && bytes <= MAX_REGEX_NFA_BYTES);
+        assert!(compile_regex(pattern, true)
+            .unwrap()
+            .is_match("abc".repeat(200).as_bytes()));
+        assert!(validate_regex_source("(?:abcdefghijklmnop){1000}", true).is_ok());
+        for pattern in ["(", "[z-a]", r"test\i", "(?=test)", r"(a)\1"] {
+            assert!(validate_regex_source(pattern, true).is_err(), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn loaded_redirect_capture_numbers_survive_eliminated_groups() {
+        let mut rule = block(1);
+        rule.condition.regex_filter = Some("(a){0}(b)".into());
+        rule.action = Action::Redirect {
+            redirect: Box::new(Redirect {
+                regex_substitution: Some(r"https://target.test/\2".into()),
+                ..Redirect::default()
+            }),
+        };
+        assert!(validate_rule(&rule, RulesetKind::Static).is_ok());
+        assert!(validate_loaded_action(&rule).is_ok());
+    }
+
+    #[test]
+    fn capture_only_compilation_preserves_substitution_groups() {
+        for (pattern, value) in [
+            (
+                r"^https://example[.]test/([a-z]+)/([0-9]+)$",
+                "https://example.test/PATH/123",
+            ),
+            (r"\Qliteral?\E/(a+)(b*)", "literal?/aaaabbb"),
+            (r"(a){0}(b)", "b"),
+        ] {
+            let regular = compile_regex(pattern, false).unwrap();
+            let capture = compile_capture_regex(pattern, false).unwrap();
+            let regular = regular.captures(value.as_bytes()).unwrap();
+            let capture = capture.captures(value.as_bytes()).unwrap();
+            let values = |captures: regex::bytes::Captures<'_>| {
+                captures
+                    .iter()
+                    .map(|value| value.map(|m| m.as_bytes().to_vec()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(values(regular), values(capture), "{pattern}");
+        }
+    }
+
+    #[test]
+    fn aggregate_nfa_budget_skips_static_rules_and_updates_atomically() {
+        let pattern = "(?:abcdefgh){500}";
+        let nfa_bytes = regex_nfa_memory_usage(pattern, true).unwrap();
+        let accepted = MAX_REGEX_NFA_BYTES_PER_RULESET / nfa_bytes;
+        assert!(accepted < MAX_NUMBER_OF_REGEX_RULES);
+        let mut rules = (1..=accepted + 1)
+            .map(|id| {
+                let mut rule = block(id as u32);
+                rule.condition.regex_filter = Some(pattern.into());
+                rule.condition.is_url_filter_case_sensitive = true;
+                rule
+            })
+            .collect::<Vec<_>>();
+        rules.push(block((accepted + 2) as u32));
+        let parsed = validate_and_filter_rules(rules.clone(), RulesetKind::Static).unwrap();
+        assert_eq!(parsed.rejected.len(), 1);
+        assert_eq!(parsed.rejected[0].index, accepted);
+        assert_eq!(
+            parsed.rejected[0].reason,
+            "MAX_REGEX_NFA_BYTES_PER_RULESET exceeded"
+        );
+        assert_eq!(parsed.rules.len(), accepted + 1);
+        let original = vec![block(u32::MAX / 4)];
+        let mut current = original.clone();
+        assert!(update_rules(&mut current, RulesetKind::Dynamic, &[], rules).is_err());
+        assert_eq!(current, original);
     }
 
     #[test]

@@ -10,6 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
+crc32fast = "=1.5.0"
 zephium-webext-dnr = { path = "..", version = "=0.1.0", default-features = false, features = ["compile"] }
 
 [workspace]
