@@ -7678,6 +7678,7 @@ dependencies = [
  "dirs",
  "dispatch2",
  "flate2",
+ "gdk",
  "gtk",
  "image",
  "javascriptcore-rs",

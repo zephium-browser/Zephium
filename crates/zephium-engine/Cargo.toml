@@ -163,6 +163,8 @@ windows-core = "0.61"
 windows-numerics = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Anchored popup placement (`gdk_window_move_to_rect`) needs the GTK 3.24 API.
+gdk = { version = "0.18", features = ["v3_24"] }
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
