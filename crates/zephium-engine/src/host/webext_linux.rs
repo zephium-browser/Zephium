@@ -27,8 +27,8 @@ use zephium_core::ports::engine::{EngineEvent, Partition, WebExtensionLoad, WebE
 use zephium_webext::manifest::Manifest;
 use zephium_webext_linux::bridge::BridgeViewId;
 use zephium_webext_linux::runtime::{
-    ActionActivation, BrowserCall, BrowserSettlement, InstallSpec, Notice, ProfileRuntime,
-    ProfileRuntimeConfig, RuntimeDrain, RuntimeEngine,
+    ActionActivation, BrowserCall, BrowserSettlement, InstallSpec, Notice, PermissionUpdate,
+    ProfileRuntime, ProfileRuntimeConfig, RuntimeDrain, RuntimeEngine,
 };
 use zephium_webext_linux::scheme::Requester;
 use zephium_webext_linux::views::PageKind;
@@ -347,6 +347,9 @@ impl RuntimeEngine for EngineSide {
     }
 }
 
+/// Grants being replaced on a running install, and what it reports once done.
+type GrantChange = Result<(PermissionUpdate, WebExtensionLoaded), String>;
+
 struct Install {
     load: WebExtensionLoad,
     generation: ExtensionRuntimeGeneration,
@@ -563,7 +566,8 @@ impl LinuxExtensions {
             return;
         }
         self.create_runtime(partition, context, profile_directory, sink);
-        for work in self.queued.remove(&profile).unwrap_or_default() {
+        let queued = self.queued.remove(&profile).unwrap_or_default();
+        for work in queued {
             match work {
                 Queued::Load(load) => self.load(profile, load, sink),
                 Queued::Unload(install) => self.unload(profile, install, sink),
@@ -573,6 +577,10 @@ impl LinuxExtensions {
                     self.remove(profile, load, manager, sink);
                 }
             }
+        }
+        // The profile's installs restored with its first view: browser start.
+        if let Some(entry) = self.profiles.get(&profile) {
+            entry.runtime.browser_started();
         }
     }
 
@@ -789,6 +797,37 @@ impl LinuxExtensions {
         let Some(load) = self.queue_or(profile, load, Queued::Load) else {
             return;
         };
+        if let Some(changed) = self.change_grants(profile, &load) {
+            let sink = sink.clone();
+            match changed {
+                Ok((update, loaded)) => {
+                    // Success is reported only once the grants are in force.
+                    let started = Instant::now();
+                    glib::timeout_add_local(Duration::from_millis(10), move || {
+                        let result = match update.poll() {
+                            None if started.elapsed() < DRAIN_TIMEOUT => {
+                                return glib::ControlFlow::Continue;
+                            }
+                            None => Err("The extension's access did not update in time.".into()),
+                            Some(result) => result.map(|()| loaded.clone()),
+                        };
+                        sink.emit(EngineEvent::WebExtensionSettled {
+                            profile,
+                            install,
+                            result,
+                        });
+                        sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+                        glib::ControlFlow::Break
+                    });
+                }
+                Err(error) => sink.emit(EngineEvent::WebExtensionSettled {
+                    profile,
+                    install,
+                    result: Err(error),
+                }),
+            }
+            return;
+        }
         let result = self.load_install(profile, load);
         if let Err(error) = &result {
             eprintln!("extensions: {install} failed to load: {error}");
@@ -799,6 +838,36 @@ impl LinuxExtensions {
             result,
         });
         sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+    }
+
+    /// A load of an install already running at the same version: only its
+    /// access changed, so its grants are replaced in place.
+    fn change_grants(
+        &mut self,
+        profile: ProfileId,
+        load: &WebExtensionLoad,
+    ) -> Option<GrantChange> {
+        let entry = self.profiles.get_mut(&profile)?;
+        entry.installs.get(&load.install)?;
+        let manifest = Manifest::load(&load.root).ok()?;
+        let loaded = WebExtensionLoaded {
+            name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
+            version: manifest.version().unwrap_or_default().to_owned(),
+        };
+        let recorded =
+            std::fs::read_to_string(entry.state.join("versions").join(hex(load.install))).ok()?;
+        if recorded != loaded.version {
+            return None;
+        }
+        let update = entry
+            .runtime
+            .permissions_changed(load.install, install_permissions(&manifest, load));
+        if update.is_ok() {
+            if let Some(install) = entry.installs.get_mut(&load.install) {
+                install.load = load.clone();
+            }
+        }
+        Some(update.map(|update| (update, loaded)))
     }
 
     fn load_install(
@@ -838,6 +907,13 @@ impl LinuxExtensions {
             unpacked: false,
             manifest,
         };
+        // Install ids are ULIDs: their leading bytes order installs by time.
+        let mut ordinal = [0; 8];
+        ordinal.copy_from_slice(&load.install.bytes()[..8]);
+        // An update keeps the order its install was activated with.
+        let _ = entry
+            .runtime
+            .set_install_order(load.install, u64::from_be_bytes(ordinal));
         let result = match previous.as_deref() {
             None => entry.runtime.install_admitted(spec),
             Some(version) if version != loaded.version => {
