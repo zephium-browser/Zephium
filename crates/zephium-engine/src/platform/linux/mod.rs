@@ -4,10 +4,8 @@
 mod content_filter;
 mod find;
 mod guide;
-mod memory;
 mod stage;
 pub(crate) mod tab_preview;
-pub use memory::configure_memory_pressure;
 
 pub(crate) fn open_external_app(_url: &str) -> bool {
     false

@@ -126,7 +126,3 @@ paths = ["src/lib.rs", "src/native_bounds.rs", "src/wkwebview/mod.rs", "src/wkwe
 [[patch_sets]]
 name = "opt-in macOS media return to inline callback"
 paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
-
-[[patch_sets]]
-name = "embedder-set WebKitGTK Web-process memory-pressure policy at context construction"
-paths = ["src/lib.rs", "src/webkitgtk/mod.rs", "src/webkitgtk/web_context.rs"]

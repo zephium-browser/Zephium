@@ -25,7 +25,6 @@ use std::{
   env::current_dir,
   path::{Path, PathBuf},
   rc::Rc,
-  sync::OnceLock,
 };
 use webkit2gtk::{
   ApplicationInfo, AutomationSessionExt, CookiePersistentStorage, DownloadExt, SecurityManagerExt,
@@ -60,38 +59,6 @@ fn finish_scheme_request_with_empty_status(request: &URISchemeRequest, status: S
   request.finish_with_response(&response);
 }
 
-/// Web-process memory-pressure policy applied to every context this process
-/// builds afterwards. WebKit accepts it only at context construction.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WebProcessMemoryPressure {
-  /// Per-process memory limit in MiB; thresholds are fractions of it.
-  pub memory_limit_mib: u32,
-  pub conservative_threshold: f64,
-  pub strict_threshold: f64,
-  /// Seconds between footprint checks.
-  pub poll_interval: f64,
-}
-
-static WEB_PROCESS_MEMORY_PRESSURE: OnceLock<WebProcessMemoryPressure> = OnceLock::new();
-
-/// Sets the policy once, before the first context; later calls are ignored.
-/// No kill threshold is ever configured: pressure releases caches only.
-pub fn set_web_process_memory_pressure(policy: WebProcessMemoryPressure) -> bool {
-  WEB_PROCESS_MEMORY_PRESSURE.set(policy).is_ok()
-}
-
-fn with_memory_pressure(builder: webkit2gtk::WebContextBuilder) -> webkit2gtk::WebContextBuilder {
-  let Some(policy) = WEB_PROCESS_MEMORY_PRESSURE.get() else {
-    return builder;
-  };
-  let mut settings = webkit2gtk::MemoryPressureSettings::new();
-  settings.set_memory_limit(policy.memory_limit_mib);
-  settings.set_conservative_threshold(policy.conservative_threshold);
-  settings.set_strict_threshold(policy.strict_threshold);
-  settings.set_poll_interval(policy.poll_interval);
-  builder.memory_pressure_settings(&settings)
-}
-
 #[derive(Debug)]
 pub struct WebContextImpl {
   context: WebContext,
@@ -109,9 +76,8 @@ impl WebContextImpl {
     // Zephium security patch: this property is construct-only and defaults to
     // false in WebKit2GTK 4.1. Every persistent context must opt into
     // a fresh Web process when the top-level site changes.
-    let mut context_builder = with_memory_pressure(
-      WebContext::builder().process_swap_on_cross_site_navigation_enabled(true),
-    );
+    let mut context_builder =
+      WebContext::builder().process_swap_on_cross_site_navigation_enabled(true);
     let data_manager = WebsiteDataManager::builder()
       // TODO: Consider taking a cache_directory so this can be in XDG_CACHE_HOME.
       .base_cache_directory(data_directory.to_string_lossy())
@@ -140,7 +106,7 @@ impl WebContextImpl {
     // process policy. Recreate its documented shape with an ephemeral data
     // manager and the mandatory process-swap property in one construction.
     let data_manager = webkit2gtk::WebsiteDataManager::new_ephemeral();
-    let context = with_memory_pressure(WebContext::builder())
+    let context = WebContext::builder()
       .process_swap_on_cross_site_navigation_enabled(true)
       .website_data_manager(&data_manager)
       .build();
