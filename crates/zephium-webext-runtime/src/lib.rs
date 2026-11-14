@@ -21,6 +21,7 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod i18n;
+pub mod js;
 pub mod lifecycle;
 pub mod limits;
 pub mod pattern;
