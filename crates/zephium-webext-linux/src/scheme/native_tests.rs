@@ -204,6 +204,40 @@ fn native_package_scheme_acceptance() {
         json!([true, false, false, false])
     );
     assert_eq!(frames(&tab.page, &alias, &["dynamic.html"]), json!([true]));
+    let private_fetch = format!(
+        "try{{return (await fetch('chrome-extension://{ALPHA}/data.txt',{{cache:'no-store'}})).ok}}catch{{return false}}"
+    );
+    assert_eq!(
+        observe(&tab.page, "unframed_tab_private_fetch", &private_fetch),
+        false
+    );
+    // A live frame of the extension admits its non-public resources to the tab.
+    *host.framed.borrow_mut() = vec![ALPHA.to_owned()];
+    assert_eq!(
+        frames(&tab.page, ALPHA, &["private.html", "_zephium/runtime.html"]),
+        json!([true, false])
+    );
+    let private_script = format!(
+        "return await new Promise(resolve=>{{const s=document.createElement('script');s.onload=()=>resolve(true);s.onerror=()=>resolve(false);s.src='chrome-extension://{ALPHA}/entry.js?'+Math.random();document.head.append(s);}});"
+    );
+    // The scheme cannot tell the frame from its embedder: this is the coarse layer.
+    println!(
+        "WEBEXT package_framed_embedding_page private_fetch={} private_script={}",
+        observe(&tab.page, "framed_tab_private_fetch", &private_fetch),
+        observe(&tab.page, "framed_tab_private_script", &private_script)
+    );
+    *host.framed.borrow_mut() = vec![BETA.to_owned()];
+    assert_eq!(frames(&tab.page, ALPHA, &["private.html"]), json!([false]));
+    host.framed.borrow_mut().clear();
+    assert_eq!(frames(&tab.page, ALPHA, &["private.html"]), json!([false]));
+    assert_eq!(
+        observe(&tab.page, "unframed_again_private_fetch", &private_fetch),
+        false
+    );
+    assert_eq!(
+        observe(&tab.page, "unframed_private_script", &private_script),
+        false
+    );
     load(
         &tab.page,
         &format!(
@@ -295,6 +329,7 @@ fn prepare_package(root: &Path, label: &str) -> Manifest {
 #[derive(Default)]
 struct TestHost {
     requesters: RefCell<BTreeMap<usize, Requester>>,
+    framed: RefCell<Vec<String>>,
 }
 
 impl RequestHost for TestHost {
@@ -303,6 +338,10 @@ impl RequestHost for TestHost {
             .borrow()
             .get(&(view.as_ptr() as usize))
             .cloned()
+    }
+
+    fn framed_extensions(&self, _: &webkit2gtk::WebView) -> Vec<String> {
+        self.framed.borrow().clone()
     }
 }
 

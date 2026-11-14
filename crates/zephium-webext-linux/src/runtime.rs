@@ -307,12 +307,13 @@ impl ProfileRuntime {
             return Err(RuntimeError::PrivateState);
         }
         let views = Rc::new(Views::default());
-        let requests: Rc<dyn RequestHost> = Rc::new(ViewRequests {
+        let requests = Rc::new(ViewRequests {
             views: views.clone(),
             engine: Rc::downgrade(&engine),
+            framed: RefCell::new(None),
         });
-        let scheme =
-            Scheme::register(context, requests.clone(), None).map_err(RuntimeError::Scheme)?;
+        let scheme = Scheme::register(context, requests.clone() as Rc<dyn RequestHost>, None)
+            .map_err(RuntimeError::Scheme)?;
         let scale = u64::from(config.time_scale.max(1));
         let origin = Instant::now();
         let clock: Rc<dyn Fn() -> u64> = Rc::new(move || {
@@ -362,6 +363,17 @@ impl ProfileRuntime {
             content: RefCell::new(TabContent::default()),
             script_generation: Cell::new(0),
         });
+        let weak = Rc::downgrade(&inner);
+        *requests.framed.borrow_mut() = Some(Box::new(move |view| {
+            let Some(inner) = weak.upgrade() else {
+                return Vec::new();
+            };
+            let id = inner.tabs.borrow().iter().find_map(|(id, entry)| {
+                (entry.view.upgrade().as_ref() == Some(view)).then_some(*id)
+            });
+            id.map(|id| inner.browser.framed_extensions(id))
+                .unwrap_or_default()
+        }));
         let weak = Rc::downgrade(&inner);
         let kick: Rc<dyn Fn()> = Rc::new(move || {
             if let Some(inner) = weak.upgrade() {

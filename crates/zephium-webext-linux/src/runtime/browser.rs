@@ -404,6 +404,22 @@ impl Shared {
         }
     }
 
+    /// Hosts of the non-opaque extension documents live in a tab view's frames.
+    pub(crate) fn framed_extensions(&self, view: BridgeViewId) -> Vec<String> {
+        let state = self.state.borrow();
+        let Some(frames) = state.views.get(&view).and_then(|tab| state.frames.get(tab)) else {
+            return Vec::new();
+        };
+        let mut hosts: Vec<String> = frames
+            .values()
+            .filter(|frame| !frame.opaque && frame.url.scheme() == "chrome-extension")
+            .filter_map(|frame| frame.url.host_str().map(str::to_owned))
+            .collect();
+        hosts.sort_unstable();
+        hosts.dedup();
+        hosts
+    }
+
     pub(crate) fn view_of(&self, tab: ItemId) -> Option<BridgeViewId> {
         self.state
             .borrow()

@@ -50,6 +50,15 @@ pub trait RequestHost {
     /// Refuse opaque/sandboxed origins; a document URL alone is not origin authority.
     /// Retire owned identity on cross-origin navigation and install replacement.
     fn requester(&self, view: &webkit2gtk::WebView) -> Option<Requester>;
+
+    /// Hosts of the extension documents live in this tab view's frames, as the
+    /// bridge recorded them; opaque and sandboxed documents excluded. Their
+    /// installs' non-public resources are served to the tab, never navigations
+    /// promoting it.
+    fn framed_extensions(&self, view: &webkit2gtk::WebView) -> Vec<String> {
+        let _ = view;
+        Vec::new()
+    }
 }
 
 pub trait FaviconProvider {
@@ -312,7 +321,7 @@ impl Scheme {
             return false;
         };
         let installs = self.installs.borrow();
-        admitted(&installs, requester, &uri).is_some()
+        admitted(&installs, requester, &[], &uri).is_some()
     }
 
     /// Host API injection must refuse sandbox documents, including alias URLs.
@@ -359,15 +368,21 @@ impl Scheme {
             refuse(request, 403);
             return;
         };
-        let Some(requester) = request
-            .web_view()
-            .and_then(|view| self.host.requester(&view))
-        else {
+        let Some(view) = request.web_view() else {
             refuse(request, 403);
             return;
         };
+        let Some(requester) = self.host.requester(&view) else {
+            refuse(request, 403);
+            return;
+        };
+        let framed = if matches!(requester, Requester::Tab { .. }) {
+            self.host.framed_extensions(&view)
+        } else {
+            Vec::new()
+        };
         let installs = self.installs.borrow();
-        let Some((install, entry, public)) = admitted(&installs, &requester, &uri) else {
+        let Some((install, entry, public)) = admitted(&installs, &requester, &framed, &uri) else {
             refuse(request, 403);
             return;
         };
@@ -529,6 +544,7 @@ fn valid_id(value: &str) -> bool {
 fn admitted<'a>(
     installs: &'a BTreeMap<ExtensionInstallId, Install>,
     requester: &Requester,
+    framed: &[String],
     uri: &ExtensionUri,
 ) -> Option<(ExtensionInstallId, &'a Install, bool)> {
     if uri.resource().as_str() == "_metadata" || uri.resource().as_str().starts_with("_metadata/") {
@@ -567,6 +583,13 @@ fn admitted<'a>(
     }
     if uri.resource().is_favicon() {
         return None;
+    }
+    if matches!(requester, Requester::Tab { .. })
+        && framed
+            .iter()
+            .any(|host| host == &entry.id || host == &entry.alias)
+    {
+        return Some((install, entry, false));
     }
     let allowed = entry.war.iter().any(|war| {
         if war.dynamic && uri.host() != entry.alias {

@@ -159,7 +159,11 @@ impl Views {
 pub(crate) struct ViewRequests {
     pub views: Rc<Views>,
     pub engine: Weak<dyn crate::runtime::RuntimeEngine>,
+    /// The runtime's bridge-recorded extension frames of an attached tab view.
+    pub framed: RefCell<Option<FramedExtensions>>,
 }
+
+pub(crate) type FramedExtensions = Box<dyn Fn(&webkit2gtk::WebView) -> Vec<String>>;
 
 impl RequestHost for ViewRequests {
     fn requester(&self, view: &webkit2gtk::WebView) -> Option<Requester> {
@@ -167,6 +171,14 @@ impl RequestHost for ViewRequests {
             return Some(Requester::ExtensionOwned { install });
         }
         self.engine.upgrade()?.requester(view)
+    }
+
+    fn framed_extensions(&self, view: &webkit2gtk::WebView) -> Vec<String> {
+        self.framed
+            .borrow()
+            .as_ref()
+            .map(|framed| framed(view))
+            .unwrap_or_default()
     }
 }
 

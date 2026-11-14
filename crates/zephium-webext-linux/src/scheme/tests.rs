@@ -224,3 +224,31 @@ fn new_admission_rotates_alias_and_rejects_duplicate_identity() {
         Err(SchemeError::Retired)
     ));
 }
+
+#[test]
+fn a_live_extension_frame_admits_its_own_resources_to_the_tab_only() {
+    let (_directory, scheme) =
+        fixture(json!([{ "resources":["public*"], "matches":["https://example.test/*"] }]));
+    let installs = scheme.installs.borrow();
+    let check = |requester: &Requester, framed: &[&str], host: &str, path: &str| {
+        let framed: Vec<String> = framed.iter().map(|host| (*host).to_owned()).collect();
+        let uri = ExtensionUri::parse(&uri(host, path)).unwrap();
+        admitted(&installs, requester, &framed, &uri).map(|(install, _, public)| (install, public))
+    };
+    let web = tab("https://example.test/");
+    assert_eq!(check(&web, &[], A, "private.txt"), None);
+    assert_eq!(check(&web, &[A], A, "private.txt"), Some((1.into(), false)));
+    assert_eq!(
+        check(&web, &[ALIAS], A, "private.txt"),
+        Some((1.into(), false))
+    );
+    assert_eq!(check(&web, &[B], A, "private.txt"), None);
+    assert_eq!(check(&web, &[A], B, "private.txt"), None);
+    assert_eq!(check(&web, &[A], A, "_zephium/background.html"), None);
+    assert_eq!(check(&web, &[A], A, "_favicon/icon.png"), None);
+    let other = Requester::ExtensionOwned { install: 2.into() };
+    assert_eq!(check(&other, &[A], A, "private.txt"), None);
+    drop(installs);
+    // Navigation admission never consults frames.
+    assert!(!scheme.allows(&web, &uri(A, "private.txt")));
+}
