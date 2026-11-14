@@ -14,6 +14,7 @@ pub mod offscreen;
 pub mod package;
 pub mod runtime;
 pub mod scheme;
+mod settings;
 pub mod views;
 
 #[cfg(feature = "native-tests")]

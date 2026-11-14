@@ -928,6 +928,27 @@ impl Shared {
     }
 }
 
+fn action_icon_path(
+    facts: &InstallFacts,
+    kind: ContextKind,
+    caller: &Url,
+    path: &str,
+) -> Option<String> {
+    let base = if kind == ContextKind::Background {
+        let worker = facts.manifest["background"]["service_worker"].as_str()?;
+        caller.join("/").ok()?.join(worker).ok()?
+    } else {
+        caller.clone()
+    };
+    let resolved = base.join(path).ok()?;
+    if resolved.scheme() != "chrome-extension"
+        || resolved.host_str() != Some(facts.extension_id.as_str())
+    {
+        return None;
+    }
+    Some(resolved.path().trim_start_matches('/').to_owned())
+}
+
 fn action_defaults(facts: &InstallFacts) -> ActionStore {
     let mut store = ActionStore::default();
     let manifest = &facts.manifest;
@@ -1491,13 +1512,8 @@ impl BrowserState {
                     .iter()
                     .min_by_key(|(size, _)| i32::from(**size).abs_diff(32))
                     .map(|(_, path)| path.clone())?;
-                let resolved = base.join(&path).ok()?;
-                if resolved.scheme() != "chrome-extension"
-                    || resolved.host_str() != Some(facts.extension_id.as_str())
-                {
-                    return None;
-                }
-                super::icons::package_icon(&facts.root, resolved.path().trim_start_matches('/'))
+                let path = action_icon_path(facts, invocation.sender().kind(), &base, &path)?;
+                super::icons::package_icon(&facts.root, &path)
             });
             let Some(raster) = raster else {
                 return invocation.reply(Err(ApiError::other("Failed to set icon.")));

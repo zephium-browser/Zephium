@@ -639,11 +639,13 @@ fn ubol() {
     assert!(drain.run(Duration::from_secs(10)));
 }
 
-fn password_package(id: &str) -> PathBuf {
+fn password_package(id: &str, reference: &Value) -> PathBuf {
     let output = std::process::Command::new("python3")
         .args(["-I", "-c", r#"
 import hashlib, io, json, os, pathlib, sys, tomllib, zipfile
 pin = next(e for e in tomllib.load(open(sys.argv[1], 'rb'))['extension'] if e['id'] == sys.argv[2])
+reference = json.loads(sys.argv[3])['package']
+assert all(reference[k] == pin[k] for k in ['id','version','sha256']), 'Chromium reference pin is stale'
 assert pin['version'] and pin['sha256'], 'unresolved package pin: run fetch-pinned.sh --pin-missing --extract'
 root = pathlib.Path(os.environ['ZEPHIUM_WEBEXT_PINNED_DIR']) / (pin['id'] + '-' + pin['version'])
 data = root.with_name(root.name + '.crx').read_bytes()
@@ -661,6 +663,7 @@ print(root)
 "#])
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/webext/pinned-crx.toml"))
         .arg(id)
+        .arg(reference.to_string())
         .output()
         .expect("python3 pin verification");
     assert!(
@@ -718,6 +721,291 @@ fn diagnostic_rows(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+fn password_reference(id: &str) -> Value {
+    [
+        include_str!("../../../eval/webext-conformance/reference/password-managers/bitwarden.json"),
+        include_str!(
+            "../../../eval/webext-conformance/reference/password-managers/onepassword.json"
+        ),
+        include_str!(
+            "../../../eval/webext-conformance/reference/password-managers/proton_pass.json"
+        ),
+    ]
+    .into_iter()
+    .map(|source| serde_json::from_str::<Value>(source).unwrap())
+    .find(|reference| reference["package"]["id"] == id)
+    .expect("pinned Chromium package reference")
+}
+
+fn reference_rejection(row: &Value, rows: &[Value], reference: &Value, used: &mut usize) -> bool {
+    // bitwarden.json cites instrumented lines 73/145/153 and passive line 32.
+    let Some(expected) = reference["backgroundUnhandled"]
+        .as_array()
+        .and_then(|items| items.first())
+    else {
+        return false;
+    };
+    let detail = &row["event"]["detail"];
+    let matches = row["context"] == "Background"
+        && detail["kind"] == "unhandled-rejection"
+        && detail["message"]
+            .as_str()
+            .and_then(|text| text.lines().next())
+            == expected["message"].as_str()
+        && *used < expected["maximum"].as_u64().unwrap() as usize
+        && rows
+            .iter()
+            .rev()
+            .find(|call| {
+                call["context"] == "Background"
+                    && call["event"]["sender"] == row["event"]["sender"]
+                    && call["sequence"].as_u64() < row["sequence"].as_u64()
+                    && call["event"]["detail"]["kind"] == "api-failure"
+                    && call["event"]["detail"]["message"] == expected["message"]
+            })
+            .is_some_and(|call| {
+                let failure = &call["event"]["detail"];
+                call["context"] == "Background"
+                    && call["event"]["sender"] == row["event"]["sender"]
+                    && call["sequence"].as_u64() < row["sequence"].as_u64()
+                    && failure["kind"] == "api-failure"
+                    && failure["namespace"] == "runtime"
+                    && failure["method"] == "sendMessage"
+                    && failure["command"] == expected["command"]
+                    && failure["message"] == expected["message"]
+            });
+    if matches {
+        *used += 1;
+    }
+    matches
+}
+
+fn console_message(message: &str) -> String {
+    message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|word| {
+            if word.starts_with("https://") || word.starts_with("http://") {
+                "<network-url>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("[network-url]", "<network-url>")
+        .replace("TypeError: Load failed", "Load failed")
+}
+
+fn proxy_refusals(row: &Value, rows: &[Value], origin: &Value) -> usize {
+    let context = if row["context"] == "Background" {
+        "BackgroundOwner"
+    } else {
+        row["context"].as_str().unwrap_or_default()
+    };
+    rows.iter()
+        .filter(|failure| {
+            failure["context"] == context
+                && failure["sequence"].as_u64() < row["sequence"].as_u64()
+                && failure["event"]["kind"] == "resource-failed"
+                && failure["event"]["resource"] == *origin
+                && failure["event"]["domain"] == "g-io-error-quark"
+                && failure["event"]["message"]
+                    == "Could not connect to proxy server 127.0.0.1: Connection refused"
+        })
+        .count()
+}
+
+fn reference_offline(row: &Value, rows: &[Value], reference: &Value, used: &mut [usize]) -> bool {
+    let event = &row["event"];
+    let detail = if event["kind"] == "javascript" {
+        &event["detail"]
+    } else {
+        event
+    };
+    for (index, expected) in reference["offlineErrors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        if row["context"] != expected["context"]
+            || detail["kind"] != expected["kind"]
+            || used[index] >= expected["maximum"].as_u64().unwrap() as usize
+        {
+            continue;
+        }
+        // Each rule cites a real blocked request/console line in the reference.
+        // Local package failures, other origins, other errors and extra calls fail.
+        let matches = match detail["kind"].as_str() {
+            Some("resource-failed" | "load-failed") => {
+                detail["resource"] == expected["origin"]
+                    && detail["domain"] == "g-io-error-quark"
+                    && detail["message"]
+                        == "Could not connect to proxy server 127.0.0.1: Connection refused"
+            }
+            Some("fetch-failed") => {
+                detail["origin"] == expected["origin"]
+                    && detail["message"] == "Load failed"
+                    && proxy_refusals(row, rows, &expected["origin"]) > used[index]
+            }
+            Some("console-error") => {
+                console_message(detail["message"].as_str().unwrap_or_default())
+                    == expected["message"].as_str().unwrap()
+                    && rows.iter().any(|failure| {
+                        failure["context"] == row["context"]
+                            && event["sender"].is_string()
+                            && failure["event"]["sender"] == event["sender"]
+                            && proxy_refusals(failure, rows, &expected["origin"]) > 0
+                            && failure["sequence"].as_u64() < row["sequence"].as_u64()
+                            && failure["event"]["detail"]["kind"] == "fetch-failed"
+                            && failure["event"]["detail"]["origin"] == expected["origin"]
+                            && failure["event"]["detail"]["message"] == "Load failed"
+                    })
+            }
+            _ => false,
+        };
+        if matches {
+            used[index] += 1;
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn reference_offline_requires_the_recorded_origin_error_context_and_count() {
+    let reference = password_reference("nngceckbapebfimnlniiiahkandclblb");
+    let mut used = vec![0; reference["offlineErrors"].as_array().unwrap().len()];
+    let row = json!({"context":"BackgroundOwner","event":{"kind":"resource-failed",
+        "resource":"https://api.bitwarden.com","domain":"g-io-error-quark",
+        "message":"Could not connect to proxy server 127.0.0.1: Connection refused"}});
+    assert!(reference_offline(&row, &[], &reference, &mut used));
+    assert!(!reference_offline(&row, &[], &reference, &mut used));
+    for (key, value) in [
+        ("resource", "https://unexpected.test"),
+        ("resource", "chrome-extension://id/missing.js"),
+        ("message", "Forbidden"),
+        ("domain", "WebKitPolicyError"),
+    ] {
+        let mut changed = row.clone();
+        changed["event"][key] = json!(value);
+        assert!(!reference_offline(
+            &changed,
+            &[],
+            &reference,
+            &mut vec![0; used.len()]
+        ));
+    }
+    let fetch = json!({"sequence":2,"context":"Background","event":{"kind":"javascript","sender":"worker-1","detail":{"kind":"fetch-failed","origin":"https://api.bitwarden.com","message":"Load failed"}}});
+    assert!(!reference_offline(
+        &fetch,
+        &[],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    let mut proxy = row.clone();
+    proxy["sequence"] = json!(1);
+    assert!(reference_offline(
+        &fetch,
+        &[proxy.clone()],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    let mut console = json!({"sequence":3,"context":"Background","event":{"kind":"javascript","sender":"worker-2","detail":{"kind":"console-error","message":"Unable to fetch ServerConfig from <network-url> Load failed"}}});
+    assert!(!reference_offline(
+        &console,
+        &[proxy.clone(), fetch.clone()],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    console["event"]["sender"] = json!("worker-1");
+    assert!(reference_offline(
+        &console,
+        &[proxy, fetch],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    assert_eq!(console_message("Unable to fetch ServerConfig from https://api.bitwarden.com/config TypeError: Load failed"), "Unable to fetch ServerConfig from <network-url> Load failed");
+    let mut changed = row;
+    changed["context"] = json!("ContentScript");
+    assert!(!reference_offline(
+        &changed,
+        &[],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+}
+
+#[test]
+fn reference_rejection_requires_the_same_command_context_and_single_error() {
+    let reference = password_reference("nngceckbapebfimnlniiiahkandclblb");
+    let message = reference["backgroundUnhandled"][0]["message"]
+        .as_str()
+        .unwrap();
+    let call = json!({"sequence":1,"context":"Background","event":{"sender":"worker","detail":{
+        "kind":"api-failure","namespace":"runtime","method":"sendMessage",
+        "command":"getUserPremiumStatus","message":message}}});
+    let rejection = json!({"sequence":2,"context":"Background","event":{"sender":"worker","detail":{
+        "kind":"unhandled-rejection","message":format!("{message}\nworker.js:1:1")}}});
+    let mut used = 0;
+    assert!(reference_rejection(
+        &rejection,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut used
+    ));
+    assert!(!reference_rejection(
+        &rejection,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut used
+    ));
+    for (field, value) in [
+        ("command", "syncStarted"),
+        ("namespace", "tabs"),
+        ("method", "connect"),
+    ] {
+        let mut other = call.clone();
+        other["event"]["detail"][field] = json!(value);
+        assert!(!reference_rejection(
+            &rejection,
+            &[other],
+            &reference,
+            &mut 0
+        ));
+    }
+    let mut other = rejection.clone();
+    other["context"] = json!("Popup");
+    assert!(!reference_rejection(
+        &other,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut 0
+    ));
+    other = rejection.clone();
+    other["event"]["sender"] = json!("another worker");
+    assert!(!reference_rejection(
+        &other,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut 0
+    ));
+    let mut intervening = call.clone();
+    intervening["sequence"] = json!(2);
+    intervening["event"]["detail"]["command"] = json!("syncStarted");
+    other = rejection.clone();
+    other["sequence"] = json!(3);
+    assert!(!reference_rejection(
+        &other,
+        &[call, intervening],
+        &reference,
+        &mut 0
+    ));
+}
+
 fn password_manager(id: &str, name: &str, signal: &str) {
     use zephium_webext_linux::diagnostics;
     let evidence = PathBuf::from(
@@ -730,12 +1018,22 @@ fn password_manager(id: &str, name: &str, signal: &str) {
         "host",
         json!({"kind":"popup-signal", "extensionName":name, "signal":signal}),
     );
-    let directory = password_package(id);
+    let reference = password_reference(id);
+    let directory = password_package(id, &reference);
     let _session = support::init();
     let module = ModuleDirectory::new();
     let fixture = Fixture::new();
     let state = tempfile::tempdir().unwrap();
-    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let web_context = context();
+    let mut proxy = webkit2gtk::NetworkProxySettings::new(
+        Some("http://127.0.0.1:9"),
+        &["127.0.0.1", "localhost"],
+    );
+    web_context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    let (mut host, _engine) = host(web_context, &module, state.path(), id);
     let install = ExtensionInstallId::from(INSTALL);
     let spec = spec(&directory, id, 1);
     let options_declared = spec.manifest.options_page().is_some();
@@ -770,43 +1068,92 @@ fn password_manager(id: &str, name: &str, signal: &str) {
         json!({"kind":"expected-content", "files":expected_content}),
     );
     let mut failures = Vec::new();
+    let observing = Instant::now();
     match host.runtime.install_admitted(spec) {
         Err(error) => failures.push(format!("install: {error}")),
         Ok(()) => {
-            let tab = host.open(&fixture.url("/password-form"), true);
+            let tab = host.open("about:blank", true);
+            let fixture_view = host.shell.borrow().tabs[&tab].view.clone();
+            let fixture_window = MappedPage::new(&fixture_view);
+            fixture_window.0.resize(1000, 700);
+            fixture_view.load_uri(&fixture.url("/password-form"));
             pump(&mut host, Duration::from_secs(5));
+            assert_eq!(
+                evaluate(&fixture_view, "return document.visibilityState;"),
+                "visible"
+            );
+            // Match the reference's settled installation page before clicking
+            // an action that can navigate that same page again.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let views: Vec<_> = host
+                    .shell
+                    .borrow()
+                    .tabs
+                    .values()
+                    .filter(|tab| {
+                        tab.url.as_ref().is_some_and(|url| {
+                            url.scheme() == "chrome-extension" && url.host_str() == Some(id)
+                        })
+                    })
+                    .map(|tab| tab.view.clone())
+                    .collect();
+                if views.iter().all(|view| {
+                    !view.is_loading()
+                        && evaluate(view, "return document.readyState === 'complete';") == "true"
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    failures.push("installation page did not finish loading before action".into());
+                    break;
+                }
+                pump(&mut host, Duration::from_millis(200));
+            }
+            host.shell.borrow_mut().active = Some(tab);
+            host.publish();
             match host.runtime.invoke_action(install, tab) {
                 Ok(zephium_webext_linux::runtime::ActionActivation::Click) => {
+                    assert_eq!(reference["action"], "click");
                     diagnostics::record(
                         id,
                         "host",
                         json!({"kind":"action-invoked","activation":"click"}),
                     );
                     pump(&mut host, Duration::from_secs(15));
+                    let active = host.shell.borrow().active;
                     let views: Vec<_> = host
                         .shell
                         .borrow()
                         .tabs
-                        .values()
-                        .filter(|tab| {
-                            tab.url.as_ref().is_some_and(|url| {
-                                url.scheme() == "chrome-extension" && url.host_str() == Some(id)
-                            })
+                        .iter()
+                        .filter(|(tab_id, tab)| {
+                            Some(**tab_id) == active
+                                && tab.url.as_ref().is_some_and(|url| {
+                                    url.scheme() == "chrome-extension" && url.host_str() == Some(id)
+                                })
                         })
-                        .map(|tab| tab.view.clone())
+                        .map(|(_, tab)| tab.view.clone())
                         .collect();
+                    let mut interactive = false;
                     for view in views {
                         let _mapped = MappedPage::new(&view);
                         pump(&mut host, Duration::from_secs(5));
                         let state = evaluate(&view, "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),path:location.pathname,controls:[...document.querySelectorAll('button,[role=button],a[href]')].filter(e=>e.getClientRects().length && !e.disabled).slice(0,24).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,120))});");
+                        let ready = evaluate(&view, signal) == "true";
+                        interactive |= ready;
                         diagnostics::record(
                             id,
                             "ExtensionTab",
-                            json!({"kind":"action-tab-state","state":state,"interactive":evaluate(&view, signal) == "true"}),
+                            json!({"kind":"action-tab-state","state":state,"interactive":ready}),
                         );
+                    }
+                    if !interactive {
+                        failures.push("action did not open its interactive extension tab".into());
                     }
                 }
                 Ok(zephium_webext_linux::runtime::ActionActivation::Popup(path)) => {
+                    assert_eq!(reference["action"], "popup");
                     diagnostics::record(
                         id,
                         "host",
@@ -826,7 +1173,9 @@ fn password_manager(id: &str, name: &str, signal: &str) {
                         "Popup",
                         json!({"kind":"view-mapped","mapped":popup.view().is_mapped()}),
                     );
-                    let deadline = Instant::now() + Duration::from_secs(45);
+                    let reference_empty = reference["forcedPopup"]["interactive"] == false;
+                    let deadline =
+                        Instant::now() + Duration::from_secs(if reference_empty { 5 } else { 45 });
                     let mut ready = false;
                     while Instant::now() < deadline {
                         pump(&mut host, Duration::from_millis(200));
@@ -861,8 +1210,19 @@ fn password_manager(id: &str, name: &str, signal: &str) {
                             "Popup",
                             json!({"kind":"popup-state","state":state}),
                         );
-                        failures
-                            .push("popup did not reach its signed-out interactive screen".into());
+                        // onepassword.json: passive lines 349/505 prove welcome-tab
+                        // action and a complete, empty forced manifest popup.
+                        let state: Value = serde_json::from_str(&state).unwrap_or(Value::Null);
+                        let matches_reference = reference_empty
+                            && state["ready"] == "complete"
+                            && state["text"] == reference["forcedPopup"]["text"]
+                            && serde_json::from_str::<Value>(&controls).ok().as_ref()
+                                == Some(&reference["forcedPopup"]["controls"]);
+                        if !matches_reference {
+                            failures.push(
+                                "popup did not match its Chromium first-screen reference".into(),
+                            );
+                        }
                     }
                     pump(&mut host, Duration::from_secs(2));
                 }
@@ -894,13 +1254,23 @@ fn password_manager(id: &str, name: &str, signal: &str) {
             } else {
                 diagnostics::record(id, "Options", json!({"kind":"options-not-declared"}));
             }
+            pump(
+                &mut host,
+                Duration::from_secs(22).saturating_sub(observing.elapsed()),
+            );
             host.close(tab);
         }
     }
-    for error in host.runtime.errors(install) {
-        failures.push(format!("runtime {:?} in {:?}", error.kind, error.context));
-    }
+    let runtime_errors = host.runtime.errors(install);
     let rows = diagnostic_rows(&diagnostic.0);
+    let api_rows = diagnostic_rows(&diagnostic.0.with_extension("api.jsonl"));
+    if !api_rows.iter().any(|row| {
+        row["context"] == "Background"
+            && row["event"]["detail"]["complete"] == true
+            && row["event"]["detail"]["durationMs"] == 20000
+    }) {
+        failures.push("first 20 seconds of background APIs were not fully captured".into());
+    }
     if !rows
         .iter()
         .any(|row| row["event"]["kind"] == "background-started")
@@ -930,7 +1300,22 @@ fn password_manager(id: &str, name: &str, signal: &str) {
             ));
         }
     }
+    let mut reference_rejections = 0;
+    let mut offline_used = vec![0; reference["offlineErrors"].as_array().unwrap().len()];
+    let mut reference_console = Vec::new();
     for row in &rows {
+        if reference_rejection(row, &rows, &reference, &mut reference_rejections) {
+            continue;
+        }
+        if reference_offline(row, &rows, &reference, &mut offline_used) {
+            if row["event"]["detail"]["kind"] == "console-error" {
+                reference_console.push((
+                    row["context"].as_str().unwrap().to_owned(),
+                    console_message(row["event"]["detail"]["message"].as_str().unwrap()),
+                ));
+            }
+            continue;
+        }
         let event = &row["event"];
         let kind = if event["kind"] == "javascript" {
             event["detail"]["kind"].as_str()
@@ -961,7 +1346,8 @@ fn password_manager(id: &str, name: &str, signal: &str) {
                     | "context-truncated"
                     | "record-too-large"
             )
-        ) || (kind == Some("content-evaluation") && event["success"] == false)
+        ) || (kind == Some("api-failure") && event["detail"]["method"] == "setIcon")
+            || (kind == Some("content-evaluation") && event["success"] == false)
         {
             failures.push(format!(
                 "diagnostic {} ({})",
@@ -969,6 +1355,42 @@ fn password_manager(id: &str, name: &str, signal: &str) {
                 row["context"]
             ));
         }
+    }
+    let mut remaining_reference_errors = reference_rejections;
+    for error in runtime_errors {
+        if error.kind == zephium_webext_linux::runtime::ExtensionErrorKind::Console {
+            if let Some(index) = reference_console.iter().position(|(context, message)| {
+                *context == format!("{:?}", error.context)
+                    && *message == console_message(&error.message)
+            }) {
+                reference_console.remove(index);
+                continue;
+            }
+        }
+        let matches = remaining_reference_errors > 0
+            && error.kind == zephium_webext_linux::runtime::ExtensionErrorKind::UnhandledRejection
+            && error.context == zephium_webext_runtime::context::ContextKind::Background
+            && reference["backgroundUnhandled"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|expected| {
+                        error.message.strip_prefix("Uncaught (in promise) Error: ")
+                            == expected["message"].as_str()
+                    })
+                });
+        if matches {
+            remaining_reference_errors -= 1;
+        } else {
+            failures.push(format!("runtime {:?} in {:?}", error.kind, error.context));
+        }
+    }
+    let api = std::fs::read_to_string(diagnostic.0.with_extension("api.jsonl")).unwrap();
+    if !api
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|row| row["event"]["detail"]["complete"] == true)
+    {
+        failures.push("first 20 seconds of background API trace incomplete".into());
     }
     diagnostics::record(
         id,
@@ -1277,13 +1699,25 @@ fn platform_capabilities() {
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]}]
     }).to_string()).unwrap();
     std::fs::write(package.path().join("empty.js"), "void 0;").unwrap();
+    let icon =
+        gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 2, 2).unwrap();
+    icon.fill(0xff00ffff);
+    icon.savev(package.path().join("icon.png"), "png", &[])
+        .unwrap();
     std::fs::write(
         package.path().join("popup.html"),
         "<!doctype html><title>Own package page</title><button>Ready</button>",
     )
     .unwrap();
     std::fs::write(package.path().join("worker.js"), r#"
-const seen=[]; let clicks=0, matchingWindow=0, foreignWindow=0;
+const seen=[]; let clicks=0, matchingWindow=0, foreignWindow=0, iconResult=null;
+(async()=>{
+ await chrome.action.setIcon({path:'./icon.png'});
+ let missing=false, foreign=false;
+ try{await chrome.action.setIcon({path:'./missing.png'});}catch{missing=true;}
+ try{await chrome.action.setIcon({path:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/icon.png'});}catch{foreign=true;}
+ iconResult={loaded:true,missing,foreign};
+})().catch(error=>iconResult={error:error.message});
 chrome.windows.getAll().then(windows=>{
  chrome.webRequest.onBeforeRequest.addListener(()=>matchingWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id});
  chrome.webRequest.onBeforeRequest.addListener(()=>foreignWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id+1000});
@@ -1294,7 +1728,7 @@ for(const event of ['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived',
 }
 chrome.contextMenus.create({id:'fill',title:'Fill',contexts:['editable']});
 chrome.contextMenus.onClicked.addListener(info=>{if(info.menuItemId==='fill')clicks++;});
-chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.report)respond({seen,clicks,matchingWindow,foreignWindow}); });
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.report)respond({seen,clicks,matchingWindow,foreignWindow,iconResult}); });
 "#).unwrap();
     let (mut host, _engine) = host(context(), &module, state.path(), id);
     let _initial_tab = host.open("about:blank", true);
@@ -1337,8 +1771,15 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const created=await chrome.tabs.create({url:'popup.html#created'});
  await chrome.tabs.update(created.id,{url:'popup.html#updated'});
  const window=await chrome.windows.create({url:'popup.html#window',type:'popup'});
+ let cancelledIdle=false;
+ const cancelled=requestIdleCallback(()=>cancelledIdle=true);
+ cancelIdleCallback(cancelled);
+ const idle=await new Promise(resolve=>requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining(),cancelled:cancelledIdle}),{timeout:1000}));
+ const image=new Image();
+ const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
+ image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,window,foreign,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={created,window,foreign,idle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1356,10 +1797,20 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     );
     assert!(result.get("error").is_none(), "{result}");
     assert_eq!(result["foreign"], true);
+    assert_eq!(result["inlineImage"], true);
+    assert_eq!(result["idle"]["cancelled"], false);
+    assert!(result["idle"]["didTimeout"].is_boolean());
+    assert!(result["idle"]["remaining"]
+        .as_f64()
+        .is_some_and(|value| (0.0..=50.0).contains(&value)));
     assert_eq!(result["window"]["type"], "normal");
     assert_eq!(result["clear"], false);
     assert_eq!(result["all"], json!({}));
     assert_eq!(result["report"]["clicks"], 1);
+    assert_eq!(
+        result["report"]["iconResult"],
+        json!({"loaded":true,"missing":true,"foreign":true})
+    );
     assert!(result["report"]["matchingWindow"].as_u64().unwrap() >= 2);
     assert_eq!(result["report"]["foreignWindow"], 0);
     for event in [

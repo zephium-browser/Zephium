@@ -137,3 +137,35 @@ fn package_files_outside_the_package_are_never_read() {
     assert!(read_package_file(&facts, "_metadata/x.js").is_err());
     assert!(read_package_file(&facts, "missing.js").is_err());
 }
+
+#[test]
+fn action_icons_use_the_worker_or_calling_page_directory() {
+    let facts = InstallFacts {
+        extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
+        root: PathBuf::from("/nonexistent"),
+        manifest: json!({"background":{"service_worker":"scripts/worker.js"}}),
+    };
+    let owner =
+        Url::parse("chrome-extension://abcdefghijklmnopabcdefghijklmnop/_zephium/background.html")
+            .unwrap();
+    let popup = owner.join("/ui/popup.html").unwrap();
+    assert_eq!(
+        action_icon_path(&facts, ContextKind::Background, &owner, "./assets/icon.png").as_deref(),
+        Some("scripts/assets/icon.png")
+    );
+    assert_eq!(
+        action_icon_path(&facts, ContextKind::Popup, &popup, "./assets/icon.png").as_deref(),
+        Some("ui/assets/icon.png")
+    );
+    assert_eq!(
+        action_icon_path(&facts, ContextKind::Background, &owner, "/assets/icon.png").as_deref(),
+        Some("assets/icon.png")
+    );
+    for path in [
+        "https://example.test/icon.png",
+        "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/icon.png",
+        "data:image/png;base64,AA",
+    ] {
+        assert!(action_icon_path(&facts, ContextKind::Background, &owner, path).is_none());
+    }
+}

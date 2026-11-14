@@ -1,0 +1,613 @@
+{
+  "package": {
+    "id": "nngceckbapebfimnlniiiahkandclblb",
+    "name": "Bitwarden",
+    "version": "2026.10.2",
+    "sha256": "1c995179f75863104c8a6e389e1050568a82c0d2c07d6acf6b62703d249430c9",
+    "license": "LicenseRef-Bitwarden",
+    "source": "https://github.com/bitwarden/clients"
+  },
+  "engine": {
+    "name": "Chromium",
+    "version": "153.0.8010.12",
+    "playwright": "1.63.0",
+    "revision": "1243",
+    "headless": false,
+    "sandbox": true
+  },
+  "action": "popup",
+  "backgroundUnhandled": [
+    {
+      "message": "Could not establish connection. Receiving end does not exist.",
+      "command": "getUserPremiumStatus",
+      "maximum": 1
+    }
+  ],
+  "traces": [
+    {
+      "file": "chromium-round5-20261114T190715Z-I02Y/bitwarden.jsonl",
+      "sha256": "55f56fa9ff794630fd02356a05f664c988ea14a8c9ce05ca8392b8f57e308f62",
+      "rows": [
+        {
+          "line": 73,
+          "record": {
+            "seq": 73,
+            "ms": 1162,
+            "kind": "instrument",
+            "session": "D40FBAF6B1E32011C16CBB638D2822B7",
+            "target": {
+              "targetId": "F6873E263115FD250D5D3EB06A3A9191",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "context": 1,
+            "event": {
+              "kind": "api-call",
+              "call": 19,
+              "api": "chrome.runtime.sendMessage",
+              "args": [
+                {
+                  "command": "getUserPremiumStatus"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "line": 145,
+          "record": {
+            "seq": 145,
+            "ms": 1245,
+            "kind": "instrument",
+            "session": "D40FBAF6B1E32011C16CBB638D2822B7",
+            "target": {
+              "targetId": "F6873E263115FD250D5D3EB06A3A9191",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "context": 1,
+            "event": {
+              "kind": "api-reject",
+              "call": 19,
+              "api": "chrome.runtime.sendMessage",
+              "error": {
+                "name": "Error",
+                "message": "Could not establish connection. Receiving end does not exist.",
+                "stack": "Error: Could not establish connection. Receiving end does not exist."
+              }
+            }
+          }
+        },
+        {
+          "line": 153,
+          "record": {
+            "seq": 153,
+            "ms": 1246,
+            "kind": "Runtime.exceptionThrown",
+            "session": "D40FBAF6B1E32011C16CBB638D2822B7",
+            "target": {
+              "targetId": "F6873E263115FD250D5D3EB06A3A9191",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "timestamp": 1794683241011.656,
+              "exceptionDetails": {
+                "exceptionId": 1,
+                "text": "Uncaught (in promise)",
+                "lineNumber": 0,
+                "columnNumber": 0,
+                "scriptId": "1",
+                "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+                "exception": {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "Error",
+                  "description": "Error: Could not establish connection. Receiving end does not exist.",
+                  "objectId": "-9002632321531600955.1.23",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "Error: Could not establish connection. Receiving end does not exist.",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "Error: Could not establish connection. Receiving end does not exist."
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "Could not establish connection. Receiving end does not exist."
+                      }
+                    ]
+                  }
+                },
+                "executionContextId": 1
+              }
+            }
+          }
+        },
+        {
+          "line": 994,
+          "record": {
+            "seq": 994,
+            "ms": 36260,
+            "kind": "page-state",
+            "phase": "forced-popup",
+            "session": "BB4936BB760DF3B89DC01F636AF089DF",
+            "state": "{\"url\":\"chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/index.html#/intro-carousel\",\"ready\":\"complete\",\"text\":\"Security, prioritized\\n\\nSave logins, cards, and identities to your secure vault. Bitwarden uses zero-knowledge, end-to-end encryption to protect what\u2019s important to you.\\n\\nCreate account\\nLog in\",\"controls\":[\"Pop out to a new window\",\"Back\",\"Security, prioritized\",\"Quick and easy login\",\"Level up your logins\",\"Your data, when and where you need it\",\"Next\",\"Create account\",\"Log in\"]}"
+          }
+        }
+      ]
+    },
+    {
+      "file": "chromium-round5-20261114T190522Z-mcGq/bitwarden.jsonl",
+      "sha256": "3d0827ec23c954949c2cbb7620c3f6585703f6d407dac2d4e4ae2d4e9d7fcb93",
+      "rows": [
+        {
+          "line": 32,
+          "record": {
+            "seq": 32,
+            "ms": 1267,
+            "kind": "Runtime.exceptionThrown",
+            "session": "B5BE218799F96F904479220C783A5DA0",
+            "target": {
+              "targetId": "8853915CCA7B682A67BAEB7A926AF328",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://hjagaokgjekiokkmadnefhngmkicnjek/background.js",
+              "url": "chrome-extension://hjagaokgjekiokkmadnefhngmkicnjek/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1146CBBBD2D978727475981C7C66F14B"
+            },
+            "data": {
+              "timestamp": 1794683127215.453,
+              "exceptionDetails": {
+                "exceptionId": 1,
+                "text": "Uncaught (in promise)",
+                "lineNumber": 0,
+                "columnNumber": 0,
+                "scriptId": "1",
+                "url": "chrome-extension://hjagaokgjekiokkmadnefhngmkicnjek/background.js",
+                "exception": {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "Error",
+                  "description": "Error: Could not establish connection. Receiving end does not exist.",
+                  "objectId": "-6253752926193286025.1.1",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "Error: Could not establish connection. Receiving end does not exist.",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "Error: Could not establish connection. Receiving end does not exist."
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "Could not establish connection. Receiving end does not exist."
+                      }
+                    ]
+                  }
+                },
+                "executionContextId": 1
+              }
+            }
+          }
+        },
+        {
+          "line": 170,
+          "record": {
+            "seq": 170,
+            "ms": 36225,
+            "kind": "page-state",
+            "phase": "forced-popup",
+            "session": "80DBF1DA8896B6EE6C3ABAE6676BC784",
+            "state": "{\"url\":\"chrome-extension://hjagaokgjekiokkmadnefhngmkicnjek/popup/index.html#/intro-carousel\",\"ready\":\"complete\",\"text\":\"Security, prioritized\\n\\nSave logins, cards, and identities to your secure vault. Bitwarden uses zero-knowledge, end-to-end encryption to protect what\u2019s important to you.\\n\\nCreate account\\nLog in\",\"controls\":[\"Pop out to a new window\",\"Back\",\"Security, prioritized\",\"Quick and easy login\",\"Level up your logins\",\"Your data, when and where you need it\",\"Next\",\"Create account\",\"Log in\"]}"
+          }
+        }
+      ]
+    },
+    {
+      "file": "chromium-round5-20261114T190715Z-I02Y/bitwarden.jsonl",
+      "sha256": "55f56fa9ff794630fd02356a05f664c988ea14a8c9ce05ca8392b8f57e308f62",
+      "rows": [
+        {
+          "line": 241,
+          "record": {
+            "seq": 241,
+            "ms": 1282,
+            "kind": "Network.loadingFailed",
+            "session": "D40FBAF6B1E32011C16CBB638D2822B7",
+            "target": {
+              "targetId": "F6873E263115FD250D5D3EB06A3A9191",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "requestId": "2015559.4",
+              "timestamp": 68729.494352,
+              "type": "Fetch",
+              "errorText": "net::ERR_PROXY_CONNECTION_FAILED",
+              "canceled": false
+            }
+          }
+        },
+        {
+          "line": 242,
+          "record": {
+            "seq": 242,
+            "ms": 1282,
+            "kind": "Runtime.consoleAPICalled",
+            "session": "D40FBAF6B1E32011C16CBB638D2822B7",
+            "target": {
+              "targetId": "F6873E263115FD250D5D3EB06A3A9191",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "type": "error",
+              "args": [
+                {
+                  "type": "string",
+                  "value": "Unable to fetch ServerConfig from https://api.bitwarden.com"
+                },
+                {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "TypeError",
+                  "description": "TypeError: Failed to fetch\n    at sA.nativeFetch (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524559)\n    at i (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524452)\n    at sA.<anonymous> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524530)\n    at Generator.next (<anonymous>)\n    at s (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2505233)",
+                  "objectId": "-9002632321531600955.1.46",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "TypeError: Failed to fetch\n    at sA.nativeFetch (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524559)\n    at i (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524452)\n    at sA.<anonymous> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2524530)\n    at Generator.next (<anonymous>)\n    at s (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js:2:2505233)",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "TypeError: Failed to fetch\n    at sA.nativeFetch (\u2026paeckmlgidcgfmkgidhbgmna/background.js:2:2505233)"
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "Failed to fetch"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "executionContextId": 1,
+              "timestamp": 1794683241046.865,
+              "stackTrace": {
+                "callFrames": [
+                  {
+                    "functionName": "write",
+                    "scriptId": "3",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+                    "lineNumber": 1,
+                    "columnNumber": 1527153
+                  },
+                  {
+                    "functionName": "error",
+                    "scriptId": "3",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+                    "lineNumber": 1,
+                    "columnNumber": 1526934
+                  },
+                  {
+                    "functionName": "",
+                    "scriptId": "3",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+                    "lineNumber": 1,
+                    "columnNumber": 2220533
+                  },
+                  {
+                    "functionName": "o",
+                    "scriptId": "3",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/background.js",
+                    "lineNumber": 1,
+                    "columnNumber": 2216592
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "line": 644,
+          "record": {
+            "seq": 644,
+            "ms": 2426,
+            "kind": "Network.loadingFailed",
+            "session": "45B3D3F96A5220C53EC1C5CDF525BB88",
+            "target": {
+              "targetId": "1E812645D71C096B97DF250D15A0088F",
+              "type": "page",
+              "title": "",
+              "url": "https://bitwarden.com/browser-start/",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "requestId": "2FC65586139D7048BE96AC8EEDC780E5",
+              "timestamp": 68730.643107,
+              "type": "Document",
+              "errorText": "net::ERR_PROXY_CONNECTION_FAILED",
+              "canceled": false
+            }
+          }
+        },
+        {
+          "line": 764,
+          "record": {
+            "seq": 764,
+            "ms": 6472,
+            "kind": "Network.loadingFailed",
+            "session": "AF593D926CBF3063AAE34F77538D2DE0",
+            "target": {
+              "targetId": "7E044CD3A6AFDBE3EE30104BECE291F8",
+              "type": "other",
+              "title": "",
+              "url": "",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "requestId": "2015559.29",
+              "timestamp": 68734.690115,
+              "type": "Fetch",
+              "errorText": "net::ERR_PROXY_CONNECTION_FAILED",
+              "canceled": false
+            }
+          }
+        },
+        {
+          "line": 766,
+          "record": {
+            "seq": 766,
+            "ms": 6473,
+            "kind": "Runtime.consoleAPICalled",
+            "session": "AF593D926CBF3063AAE34F77538D2DE0",
+            "target": {
+              "targetId": "7E044CD3A6AFDBE3EE30104BECE291F8",
+              "type": "other",
+              "title": "",
+              "url": "",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "1D18B7D0D43CA623DDB578C0EDFFDB4B"
+            },
+            "data": {
+              "type": "error",
+              "args": [
+                {
+                  "type": "string",
+                  "value": "Unable to fetch ServerConfig from https://api.bitwarden.com"
+                },
+                {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "TypeError",
+                  "description": "TypeError: Failed to fetch\n    at chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:28548\n    at I.o.<computed> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:13774)\n    at lhe.nativeFetch (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194690)\n    at n (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194596)\n    at lhe.<anonymous> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194661)\n    at Generator.next (<anonymous>)\n    at o (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:175056)\n    at a.invoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:6933)\n    at Object.onInvoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/vendor-angular.js:2:494045)\n    at a.invoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:6873)",
+                  "objectId": "2141419142076336467.2.768",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "TypeError: Failed to fetch\n    at chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:28548\n    at I.o.<computed> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:13774)\n    at lhe.nativeFetch (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194690)\n    at n (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194596)\n    at lhe.<anonymous> (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:194661)\n    at Generator.next (<anonymous>)\n    at o (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js:611:175056)\n    at a.invoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:6933)\n    at Object.onInvoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/vendor-angular.js:2:494045)\n    at a.invoke (chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:6873)",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "TypeError: Failed to fetch\n    at chrome-extension\u2026eckmlgidcgfmkgidhbgmna/popup/polyfills.js:2:6873)"
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "Failed to fetch"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "executionContextId": 2,
+              "timestamp": 1794683246242.728,
+              "stackTrace": {
+                "callFrames": [
+                  {
+                    "functionName": "write",
+                    "scriptId": "6",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js",
+                    "lineNumber": 610,
+                    "columnNumber": 1633810
+                  },
+                  {
+                    "functionName": "error",
+                    "scriptId": "6",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js",
+                    "lineNumber": 610,
+                    "columnNumber": 1633581
+                  },
+                  {
+                    "functionName": "",
+                    "scriptId": "6",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js",
+                    "lineNumber": 610,
+                    "columnNumber": 43696
+                  },
+                  {
+                    "functionName": "a",
+                    "scriptId": "6",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/main.js",
+                    "lineNumber": 610,
+                    "columnNumber": 39514
+                  },
+                  {
+                    "functionName": "invoke",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 6932
+                  },
+                  {
+                    "functionName": "onInvoke",
+                    "scriptId": "5",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/vendor-angular.js",
+                    "lineNumber": 1,
+                    "columnNumber": 494044
+                  },
+                  {
+                    "functionName": "invoke",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 6872
+                  },
+                  {
+                    "functionName": "run",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 1819
+                  },
+                  {
+                    "functionName": "",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 25910
+                  },
+                  {
+                    "functionName": "invokeTask",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 7550
+                  },
+                  {
+                    "functionName": "onInvokeTask",
+                    "scriptId": "5",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/vendor-angular.js",
+                    "lineNumber": 1,
+                    "columnNumber": 493860
+                  },
+                  {
+                    "functionName": "invokeTask",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 7471
+                  },
+                  {
+                    "functionName": "runTask",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 2459
+                  },
+                  {
+                    "functionName": "g",
+                    "scriptId": "4",
+                    "url": "chrome-extension://lanbjfdjpaeckmlgidcgfmkgidhbgmna/popup/polyfills.js",
+                    "lineNumber": 1,
+                    "columnNumber": 9621
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "offlineErrors": [
+    {
+      "kind": "resource-failed",
+      "context": "BackgroundOwner",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 241
+    },
+    {
+      "kind": "fetch-failed",
+      "context": "Background",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 241
+    },
+    {
+      "kind": "resource-failed",
+      "context": "Popup",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 764
+    },
+    {
+      "kind": "fetch-failed",
+      "context": "Popup",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 764
+    },
+    {
+      "kind": "resource-failed",
+      "context": "ContentScript",
+      "origin": "https://bitwarden.com",
+      "maximum": 1,
+      "traceLine": 644
+    },
+    {
+      "kind": "load-failed",
+      "context": "ContentScript",
+      "origin": "https://bitwarden.com",
+      "maximum": 1,
+      "traceLine": 644
+    },
+    {
+      "kind": "console-error",
+      "context": "Background",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 242,
+      "message": "Unable to fetch ServerConfig from <network-url> Load failed"
+    },
+    {
+      "kind": "console-error",
+      "context": "Popup",
+      "origin": "https://api.bitwarden.com",
+      "maximum": 1,
+      "traceLine": 766,
+      "message": "Unable to fetch ServerConfig from <network-url> Load failed"
+    }
+  ]
+}

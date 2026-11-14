@@ -344,6 +344,7 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
                 return Err(error);
             }
         };
+        crate::settings::configure(view);
         let page = Rc::new(Cell::new(view.page_id()));
         let handlers = connect(&self.shared, id, view, page);
         self.shared.hosts.borrow_mut().insert(

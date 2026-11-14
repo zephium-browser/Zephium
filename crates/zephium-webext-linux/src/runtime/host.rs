@@ -771,6 +771,16 @@ impl BrowserPort for State {
             None => ExtensionInfo::default(),
         };
         info.manifest = install.manifest.clone();
+        info.management["installType"] = json!(if install.unpacked {
+            "development"
+        } else {
+            "normal"
+        });
+        info.management["enabled"] = json!(true);
+        info.management["isApp"] = json!(false);
+        if info.management.get("mayDisable").is_none() {
+            info.management["mayDisable"] = json!(true);
+        }
         info.incognito_mode = match install.manifest["incognito"].as_str() {
             Some("split") => IncognitoMode::Split,
             Some("not_allowed") => IncognitoMode::NotAllowed,

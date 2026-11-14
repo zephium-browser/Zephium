@@ -76,6 +76,20 @@ test('capture saturation emits an explicit truncation record and stops', () => {
   assert.equal(f.records.at(-1).kind, 'context-truncated');
 });
 
+test('SVG resource errors preserve the href and background API traces contain shapes', async () => {
+  const timers = [];
+  const f = fixture(true, {setTimeout(callback) { timers.push(callback); }});
+  f.listeners.get('error')({target: {localName:'image', href:{baseVal:'chrome-extension://id/image.png'}}});
+  assert.equal(f.records.at(-1).resource, 'chrome-extension://id/image.png');
+  await assert.rejects(f.context.client.call('storage.local.set', '[{"secret":"do-not-record"}]', false));
+  timers[2]();
+  const batch = f.records.find(e => e.kind === 'api-trace');
+  assert.equal(batch.complete, true);
+  assert.equal(batch.records[0].name, 'storage.local.set');
+  assert.equal(batch.records[1].phase, 'rejected');
+  assert(!JSON.stringify(batch).includes('do-not-record'));
+});
+
 test('global replacement snapshots do not read or restore package-owned proxies', () => {
   const timers = [];
   const f = fixture(false, {setTimeout(callback) { timers.push(callback); }});

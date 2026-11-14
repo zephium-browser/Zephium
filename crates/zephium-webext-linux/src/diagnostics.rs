@@ -14,6 +14,8 @@ const MAX_ROW_BYTES: usize = 16 * 1024;
 struct Log {
     file: File,
     rows: usize,
+    api_file: File,
+    api_rows: usize,
 }
 
 thread_local! {
@@ -31,13 +33,25 @@ pub fn begin(directory: &Path, extension: &str) -> std::io::Result<PathBuf> {
         .write(true)
         .create_new(true)
         .open(&path)?;
+    let api_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(format!("{extension}.api.jsonl")))?;
     LOGS.with_borrow_mut(|logs| {
         if logs.len() >= 16 || logs.contains_key(extension) {
             return Err(std::io::Error::other(
                 "diagnostic log already active or full",
             ));
         }
-        logs.insert(extension.into(), Log { file, rows: 0 });
+        logs.insert(
+            extension.into(),
+            Log {
+                file,
+                rows: 0,
+                api_file,
+                api_rows: 0,
+            },
+        );
         Ok(())
     })?;
     record(
@@ -70,6 +84,17 @@ pub(crate) fn enabled() -> bool {
 pub fn record(extension: &str, context: &str, event: Value) {
     LOGS.with_borrow_mut(|logs| {
         let Some(log) = logs.get_mut(extension) else { return };
+        if event["kind"] == "javascript" && event["detail"]["kind"] == "api-trace" {
+            if log.api_rows <= MAX_ROWS {
+                let row = json!({"extension":extension,"context":context,"event":event});
+                let text = row.to_string();
+                if text.len() <= MAX_ROW_BYTES {
+                    let _ = writeln!(log.api_file, "{text}");
+                }
+                log.api_rows += 1;
+            }
+            return;
+        }
         if log.rows > MAX_ROWS { return; }
         let event = if log.rows == MAX_ROWS { json!({"kind":"capture-truncated"}) } else { event };
         let row = json!({"sequence":log.rows,"extension":extension,"context":context,"event":event});
@@ -166,10 +191,19 @@ pub(crate) fn argument_shape(args: &[u8]) -> Value {
 
 /// Resource failures from a test view, including loads outside the JS error events.
 pub fn observe_view(view: &webkit2gtk::WebView, extension: &str, context: &str) {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use webkit2gtk::{URIResponseExt, WebResourceExt, WebViewExt};
     if !enabled() {
         return;
     }
+    let generation = Rc::new(Cell::new(0_u64));
+    let loading = generation.clone();
+    view.connect_load_changed(move |_, event| {
+        if event == webkit2gtk::LoadEvent::Started {
+            loading.set(loading.get().saturating_add(1));
+        }
+    });
     let (id, kind) = (extension.to_owned(), context.to_owned());
     view.connect_load_failed(move |_, _, uri, error| {
         record(&id, &kind, json!({"kind":"load-failed", "resource":resource(uri), "domain":error.domain().as_str().to_string(), "message":redact(error.message())}));
@@ -177,10 +211,12 @@ pub fn observe_view(view: &webkit2gtk::WebView, extension: &str, context: &str) 
     });
     let (id, kind) = (extension.to_owned(), context.to_owned());
     view.connect_resource_load_started(move |_, resource, _| {
+        let document = generation.get();
+        let current = generation.clone();
         let (id, kind) = (id.clone(), kind.clone());
         let (failed_id, failed_kind) = (id.clone(), kind.clone());
         resource.connect_failed(move |item, error| {
-            record(&failed_id, &failed_kind, json!({"kind":"resource-failed", "resource":self::resource(item.uri().as_deref().unwrap_or("")), "domain":error.domain().as_str().to_string(), "message":redact(error.message())}));
+            record(&failed_id, &failed_kind, json!({"kind":"resource-failed", "resource":self::resource(item.uri().as_deref().unwrap_or("")), "document":document,"currentDocument":current.get(),"cancelled":error.matches(webkit2gtk::NetworkError::Cancelled),"domain":error.domain().as_str().to_string(), "message":redact(error.message())}));
         });
         resource.connect_finished(move |item| {
             if let Some(response) = item.response() {
@@ -199,6 +235,7 @@ fn resource(value: &str) -> String {
             url.host_str().unwrap_or(""),
             url.path()
         ),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url.origin().ascii_serialization(),
         Ok(url) => format!("{}://[redacted]", url.scheme()),
         Err(_) => "[unknown]".into(),
     }

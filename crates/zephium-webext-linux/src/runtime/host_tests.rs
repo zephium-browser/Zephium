@@ -257,6 +257,25 @@ fn replies(out: &Outbox) -> Vec<Result<Value, String>> {
         .collect()
 }
 
+#[test]
+fn management_reports_the_admitted_install_provenance() {
+    let mut h = Harness::new();
+    let (sender, _, _) = h.running(&[]);
+    for (unpacked, expected) in [(true, "development"), (false, "normal")] {
+        h.host.state.installs.get_mut(&h.install).unwrap().unpacked = unpacked;
+        let out = h.call(&sender, "management.getSelf", json!([]));
+        let values = replies(&out);
+        let value = values[0].as_ref().unwrap();
+        assert_eq!(value["id"], ID);
+        assert_eq!(value["installType"], expected);
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["mayDisable"], true);
+        assert_eq!(value["isApp"], false);
+    }
+    h.host.state.installs.remove(&h.install);
+    assert!(h.host.state.extension_info(&sender).is_err());
+}
+
 fn events(out: &Outbox) -> Vec<(EventSeq, String, Value)> {
     decoded(out)
         .into_iter()
