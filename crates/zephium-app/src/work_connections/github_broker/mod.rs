@@ -266,7 +266,9 @@ fn failure_note(error: Failure) -> &'static str {
         Failure::Failed => "Public GitHub data could not be read without an account; use the website if it needs sign-in",
         Failure::Limit => "The public GitHub CLI call or response exceeded its bound",
         Failure::Sensitive => "Recognizable credential content in the GitHub response was withheld",
-        Failure::Storage | Failure::Launch => "The confined GitHub CLI process could not be prepared",
+        Failure::Storage => "The confined GitHub CLI process could not be prepared",
+        #[cfg(any(target_os = "macos", windows, test))]
+        Failure::Launch => "The confined GitHub CLI process could not be prepared",
         other => other.note(),
     }
 }

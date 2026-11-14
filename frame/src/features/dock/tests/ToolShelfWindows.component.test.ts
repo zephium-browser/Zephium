@@ -8,7 +8,7 @@ const native = vi.hoisted(() => ({
   run: vi.fn(async () => ({ accepted: true, operation_id: null })),
 }));
 
-vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
+vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true, IS_LINUX: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({

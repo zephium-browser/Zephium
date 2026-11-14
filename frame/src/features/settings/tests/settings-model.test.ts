@@ -113,10 +113,49 @@ it("takes each feature's pages out of navigation and search while its switch is 
   vi.doUnmock("$domain/preferences");
 });
 
+it.each([
+  ["Linux", true],
+  ["macOS", false],
+  ["Windows", false],
+] as const)("offers Graphics on %s: %s", async (platform, offered) => {
+  vi.resetModules();
+  vi.doMock("$shared/platform", () => ({
+    IS_LINUX: platform === "Linux",
+    IS_MAC: platform === "macOS",
+    IS_WINDOWS: platform === "Windows",
+  }));
+  try {
+    const model = await import("../lib/settings-model");
+    const listed = model.shownSections().filter((section) => section.group === "app");
+    expect(listed.map((section) => section.id)).toEqual(
+      offered ? ["features", "shortcuts", "graphics", "about"] : ["features", "shortcuts", "about"],
+    );
+    for (const query of ["graphics", "rendering mode", "GPU", "graphics report"]) {
+      expect(model.searchSettings(query).some((result) => result.section === "graphics")).toBe(
+        offered,
+      );
+      expect(model.searchSections(query).some((section) => section.id === "graphics")).toBe(
+        offered,
+      );
+    }
+    if (offered)
+      expect(model.searchSettings("rendering mode").map((result) => result.target)).toEqual([
+        "graphics.mode",
+      ]);
+  } finally {
+    vi.doUnmock("$shared/platform");
+    vi.resetModules();
+  }
+});
+
 it("offers SmartScreen search results only on Windows", async () => {
   for (const windows of [false, true]) {
     vi.resetModules();
-    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows, IS_MAC: !windows }));
+    vi.doMock("$shared/platform", () => ({
+      IS_WINDOWS: windows,
+      IS_MAC: !windows,
+      IS_LINUX: false,
+    }));
     const model = await import("../lib/settings-model");
     expect(
       model.searchSettings("SmartScreen").some((field) => field.target === "privacy.smartscreen"),
@@ -132,7 +171,7 @@ it.each([true, false])(
   "About localizes update reasons and install timing (mac=%s)",
   async (mac) => {
     vi.resetModules();
-    vi.doMock("$shared/platform", () => ({ IS_MAC: mac, IS_WINDOWS: !mac }));
+    vi.doMock("$shared/platform", () => ({ IS_MAC: mac, IS_WINDOWS: !mac, IS_LINUX: false }));
     let reason: "previousInstallIncomplete" | "workNotSaved" | "activityCheckFailed" =
       "previousInstallIncomplete";
     vi.doMock("$domain/updates", () => ({
@@ -180,7 +219,11 @@ it.each([
   "update install timing uses native OS %s despite the user agent",
   async (os, windows) => {
     vi.resetModules();
-    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows, IS_MAC: !windows }));
+    vi.doMock("$shared/platform", () => ({
+      IS_WINDOWS: windows,
+      IS_MAC: !windows,
+      IS_LINUX: false,
+    }));
     try {
       const { fields } = await import("../lib/catalog");
       expect(fields["updates.auto-check"].description(os)).toBe(

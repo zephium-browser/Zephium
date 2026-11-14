@@ -259,6 +259,8 @@
   /* One plate, as wide as the cards on it: each card the top of its page as
      it was last seen, landscape like the page itself, its name under it. */
   section {
+    --plate-padding: 12px;
+
     position: fixed;
     inset: 0;
     display: grid;
@@ -282,7 +284,7 @@
     max-block-size: 100%;
     overflow: hidden auto;
     gap: 4px;
-    padding: 12px;
+    padding: var(--plate-padding);
     outline: none;
     overscroll-behavior: contain;
     scrollbar-width: none;
@@ -307,6 +309,9 @@
   /* Without a native plate the window is the plate: the page tints all of it,
      and the system draws its rim. */
   [data-layout="fused"] {
+    --plate-wash: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
+    --plate-rim: inset 0 0 0 1px var(--color-border-strong);
+
     place-items: stretch;
   }
 
@@ -314,12 +319,27 @@
     inline-size: 100%;
     block-size: 100%;
     place-content: safe center;
-    background: color-mix(in srgb, var(--color-chrome) var(--wash-launcher), transparent);
-    box-shadow: inset 0 0 0 1px var(--color-border-strong);
+    background: var(--plate-wash);
+    box-shadow: var(--plate-rim);
   }
 
   :global(:root:is([data-material="acrylic"], [data-material="mica"])) .cards {
     box-shadow: none;
+  }
+
+  /* Linux supplies a transparent window. Keep the rounded plate underneath
+     the scroller so the scroll mask fades only the previews. */
+  @media not (forced-colors: active) {
+    :global(:root[data-platform="linux"][data-material="none"]) [data-layout="fused"] {
+      border-radius: calc(var(--radius-control) + var(--plate-padding));
+      background: var(--plate-wash);
+      box-shadow: var(--plate-rim);
+    }
+
+    :global(:root[data-platform="linux"][data-material="none"]) [data-layout="fused"] .cards {
+      background: transparent;
+      box-shadow: none;
+    }
   }
 
   /* Each card stands in a slot that also holds its close control, which

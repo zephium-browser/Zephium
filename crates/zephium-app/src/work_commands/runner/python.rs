@@ -1,17 +1,20 @@
 //! Selected stdlib unittest modules in a read-only text snapshot. No shell,
 //! dependency installation, arbitrary interpreter options or project startup hook.
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(test, target_os = "macos")))]
 use super::Snapshot;
 use super::{Failure, Output};
 use crate::work_files::{protected_path, read_text_limited, WorkFileGrant};
+#[cfg(any(target_os = "macos", windows))]
+use std::sync::atomic::Ordering;
 use std::{
     collections::BTreeSet,
     future::Future,
     path::{Component, Path, PathBuf},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
     time::Duration,
 };
 
+#[cfg(any(target_os = "macos", windows))]
 pub(super) const BOOTSTRAP: &str = include_str!("python_bootstrap.py");
 #[derive(Clone)]
 pub(crate) struct UnittestRequest {
@@ -134,6 +137,7 @@ where
             }
             control.check()?;
             control.native();
+            #[cfg(any(target_os = "macos", windows))]
             let cancelled = || async { control.cancelled.load(Ordering::Acquire) };
             #[cfg(target_os = "macos")]
             let output = super::guard::run(&files, &request.modules, &cancelled).await?;

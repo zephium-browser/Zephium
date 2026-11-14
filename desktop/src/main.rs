@@ -5,6 +5,10 @@
 )]
 
 fn main() -> std::process::ExitCode {
+    #[cfg(target_os = "linux")]
+    if let Some(status) = zephium_desktop_lib::linux_graphics::prepare() {
+        return status;
+    }
     #[cfg(all(target_os = "macos", feature = "work-product"))]
     zephium_app::work_commands::private_guard_main();
     #[cfg(all(target_os = "macos", feature = "work-integration-qa", debug_assertions))]

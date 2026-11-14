@@ -1,7 +1,7 @@
 //! Bounded generic matching, pulled by native and resolved on the style worker.
 //! A visible page owns at most one asynchronous request; DOM mutations resolve
 //! it. Unchanged or hidden pages do not cause periodic native/renderer work.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod supported {
     use super::super::content_styles::{DocumentStyleState, StyleKey};
     use super::super::dispatch::with_generic_style;
@@ -155,14 +155,19 @@ mod supported {
             let pending = Mutex::new(Some(pull));
             // The platform call never blocks its native UI thread. It returns
             // a JSON string only when new bounded tokens exist, or cancellation.
-            let _ =
-                crate::platform::cosmetic_pull::evaluate(&view.view, &expression, move |result| {
-                    let Some(pull) = pending.lock().unwrap_or_else(|p| p.into_inner()).take()
-                    else {
-                        return;
-                    };
-                    let _ = with_generic_style(id, move |host| host.generic_tokens(pull, result));
-                });
+            #[cfg(not(target_os = "linux"))]
+            use crate::platform::cosmetic_pull::evaluate;
+            #[cfg(target_os = "linux")]
+            use crate::platform::cosmetic_pull::evaluate_until_navigation as evaluate;
+            // Generic pulls wait for document mutations, not a wall-clock deadline.
+            // Page visibility/policy changes settle the JS waiter; navigation and
+            // destruction also retire the Linux native evaluation.
+            let _ = evaluate(&view.view, &expression, move |result| {
+                let Some(pull) = pending.lock().unwrap_or_else(|p| p.into_inner()).take() else {
+                    return;
+                };
+                let _ = with_generic_style(id, move |host| host.generic_tokens(pull, result));
+            });
         }
         pub(crate) fn refresh_visible_generic_styles(&mut self) {
             let ids: Vec<_> = self.views.keys().copied().collect();
@@ -237,6 +242,263 @@ mod supported {
             });
         }
     }
+    #[cfg(all(test, target_os = "linux"))]
+    mod native_tests {
+        use super::decode;
+        use gtk::prelude::*;
+        use std::sync::mpsc::{self, Receiver};
+        use std::time::{Duration, Instant};
+        use webkit2gtk::WebViewExt;
+        use wry::{WebViewBuilder, WebViewBuilderExtUnix, WebViewExtUnix};
+
+        fn wait<T>(receiver: Receiver<T>) -> T {
+            let context = gtk::glib::MainContext::default();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(value) = receiver.try_recv() {
+                    return value;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native generic operation did not settle"
+                );
+                while context.pending() {
+                    context.iteration(false);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn evaluate(view: &wry::WebView, expression: &str) -> String {
+            let (sent, received) = mpsc::channel();
+            assert!(crate::platform::cosmetic_pull::evaluate(
+                view,
+                expression,
+                move |value| {
+                    let _ = sent.send(value);
+                }
+            ));
+            wait(received).expect("fixed native fixture evaluation failed")
+        }
+
+        fn call(view: &wry::WebView, method: &str, arguments: serde_json::Value) -> String {
+            evaluate(
+                view,
+                &format!(
+                "JSON.stringify(globalThis.__zephium_content_style_v1__.{method}(...{arguments}))"
+            ),
+            )
+        }
+
+        fn pull(
+            view: &wry::WebView,
+            token: &str,
+            url: &str,
+            fingerprint: &str,
+        ) -> Receiver<Option<String>> {
+            let arguments = serde_json::json!([token, url, fingerprint]);
+            let expression =
+                format!("globalThis.__zephium_content_style_v1__.pullGeneric(...{arguments})");
+            let (sent, received) = mpsc::channel();
+            assert!(crate::platform::cosmetic_pull::evaluate_until_navigation(
+                view,
+                &expression,
+                move |value| {
+                    let _ = sent.send(value);
+                }
+            ));
+            received
+        }
+
+        fn apply(view: &wry::WebView, encoded: &str, selectors: &[&str]) -> String {
+            let batch = decode(encoded).expect("native token batch satisfies host bounds");
+            call(
+                view,
+                "applyGeneric",
+                serde_json::json!([
+                    batch.token,
+                    batch.url,
+                    batch.subscription,
+                    batch.serial,
+                    selectors
+                ]),
+            )
+        }
+
+        fn load(view: &wry::WebView, html: &str) {
+            let page = view.webview();
+            let (sent, received) = mpsc::channel();
+            let handler = page.connect_load_changed(move |_, event| {
+                if event == webkit2gtk::LoadEvent::Finished {
+                    let _ = sent.send(());
+                }
+            });
+            page.load_html(html, Some("https://generic-fixture.invalid/"));
+            wait(received);
+            page.disconnect(handler);
+        }
+
+        struct Close(gtk::Window);
+        impl Drop for Close {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+
+        #[test]
+        #[ignore = "requires isolated Xvfb and admitted WebKitGTK"]
+        fn linux_generic_pull_handles_dynamic_dom_pause_navigation_and_visibility() {
+            crate::platform::linux::enforce_runtime_security_floor().unwrap();
+            gtk::init().unwrap();
+            let window = gtk::Window::new(gtk::WindowType::Toplevel);
+            let _close = Close(window.clone());
+            window.set_default_size(480, 320);
+            let container = gtk::Fixed::new();
+            window.add(&container);
+            let mut context = wry::WebContext::new_ephemeral().unwrap();
+            let view = WebViewBuilder::new_with_web_context(&mut context)
+                .with_incognito(true)
+                .with_initialization_script(include_str!("content_style.js"))
+                .build_gtk(&container)
+                .unwrap();
+            window.show_all();
+            load(
+                &view,
+                "<!doctype html><div class='advert'>ad</div><div class='except'>exception</div>",
+            );
+            let identity: serde_json::Value = serde_json::from_str(&evaluate(
+                &view,
+                "globalThis.__zephium_content_style_v1__.inspectEncoded()",
+            ))
+            .unwrap();
+            let token = identity["token"].as_str().unwrap();
+            let url = identity["url"].as_str().unwrap();
+            let fingerprint = "a".repeat(64);
+            assert_eq!(
+                call(
+                    &view,
+                    "subscription",
+                    serde_json::json!([token, url, "0000000000000001", fingerprint, "", true, ""])
+                ),
+                "true"
+            );
+            let initial = wait(pull(&view, token, url, &fingerprint)).unwrap();
+            let batch = decode(&initial).unwrap();
+            assert!(batch.tokens.iter().any(|token| token == ".advert"));
+            assert!(batch.tokens.iter().any(|token| token == ".except"));
+            // Native supplies only approved selectors; exception tokens do not
+            // make the page hide anything by themselves.
+            assert_eq!(apply(&view, &initial, &[".advert"]), "true");
+            assert_eq!(
+                evaluate(
+                    &view,
+                    "getComputedStyle(document.querySelector('.advert')).display"
+                ),
+                "none"
+            );
+            assert_ne!(
+                evaluate(
+                    &view,
+                    "getComputedStyle(document.querySelector('.except')).display"
+                ),
+                "none"
+            );
+
+            let pending = pull(&view, token, url, &fingerprint);
+            assert_eq!(evaluate(&view, "'idle barrier'"), "idle barrier");
+            assert!(matches!(pending.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            evaluate(&view, "(()=>{const e=document.createElement('div');e.className='later';document.body.append(e);return 'added'})()");
+            let dynamic = wait(pending).unwrap();
+            assert!(decode(&dynamic)
+                .unwrap()
+                .tokens
+                .iter()
+                .any(|token| token == ".later"));
+            assert_eq!(apply(&view, &dynamic, &[".later"]), "true");
+            assert_eq!(
+                evaluate(
+                    &view,
+                    "getComputedStyle(document.querySelector('.later')).display"
+                ),
+                "none"
+            );
+
+            let hidden = pull(&view, token, url, &fingerprint);
+            window.hide();
+            assert!(
+                wait(hidden).is_none(),
+                "visibilitychange must clear the JS waiter"
+            );
+            assert_eq!(evaluate(&view, "String(document.hidden)"), "true");
+            window.show_all();
+            // GTK mapping reaches WebKit asynchronously. Observe the page's
+            // actual visibility before issuing the replacement pull.
+            assert_eq!(
+                evaluate(
+                    &view,
+                    "new Promise(resolve=>{const shown=()=>{if(!document.hidden){document.removeEventListener('visibilitychange',shown);resolve('visible')}};document.addEventListener('visibilitychange',shown);shown()})"
+                ),
+                "visible"
+            );
+            let resumed = pull(&view, token, url, &fingerprint);
+            evaluate(&view, "(()=>{const e=document.createElement('div');e.className='after_show';document.body.append(e);return 'added'})()");
+            let resumed = wait(resumed).unwrap();
+            assert!(decode(&resumed)
+                .unwrap()
+                .tokens
+                .iter()
+                .any(|token| token == ".after_show"));
+            assert_eq!(apply(&view, &resumed, &[".after_show"]), "true");
+
+            let paused = pull(&view, token, url, &fingerprint);
+            let next = "b".repeat(64);
+            assert_eq!(
+                call(
+                    &view,
+                    "subscription",
+                    serde_json::json!([token, url, "0000000000000002", next, "", false, ""])
+                ),
+                "true"
+            );
+            assert!(wait(paused).is_none());
+            assert_ne!(
+                evaluate(
+                    &view,
+                    "getComputedStyle(document.querySelector('.advert')).display"
+                ),
+                "none"
+            );
+            assert_eq!(
+                apply(&view, &initial, &[".except"]),
+                "false",
+                "old policy reply must be refused"
+            );
+            assert!(wait(pull(&view, token, url, &next)).is_none());
+
+            let next = "c".repeat(64);
+            assert_eq!(
+                call(
+                    &view,
+                    "subscription",
+                    serde_json::json!([token, url, "0000000000000003", next, "", true, ""])
+                ),
+                "true"
+            );
+            let restored = wait(pull(&view, token, url, &next)).unwrap();
+            assert_eq!(apply(&view, &restored, &[".advert"]), "true");
+            let navigating = pull(&view, token, url, &next);
+            load(
+                &view,
+                "<!doctype html><div class='advert'>new document</div>",
+            );
+            assert!(wait(navigating).is_none());
+            assert_eq!(
+                apply(&view, &restored, &[".advert"]),
+                "false",
+                "old document reply must be refused"
+            );
+        }
+    }
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -261,7 +523,7 @@ mod supported {
         }
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 impl super::EngineHost {
     pub(crate) fn refresh_generic_styles(&mut self, _: zephium_core::ids::ItemId) {}
     pub(crate) fn refresh_visible_generic_styles(&mut self) {}

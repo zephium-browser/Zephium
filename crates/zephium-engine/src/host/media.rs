@@ -337,17 +337,6 @@ mod supported {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-impl super::EngineHost {
-    pub(crate) fn watch_media(&mut self, _id: zephium_core::ids::ItemId) {}
-    pub(crate) fn media_action(
-        &self,
-        _id: zephium_core::ids::ItemId,
-        _action: zephium_core::ports::engine::MediaAction,
-    ) {
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

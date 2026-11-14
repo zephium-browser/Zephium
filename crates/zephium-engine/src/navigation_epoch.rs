@@ -206,6 +206,7 @@ impl NavigationEpochTracker {
     /// the refusal can name what it refuses. Before the load starts only its
     /// own address is it; once started, a redirect anywhere still is. Nothing
     /// is named after commit, when the request is fulfilled.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(crate) fn refused_request(&self, target: &str) -> Option<NavigationRequestId> {
         let target = canonical_navigation_target(target)?;
         let state = self

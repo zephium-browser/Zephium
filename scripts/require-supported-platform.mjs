@@ -1,7 +1,8 @@
-// Linux builds do not compile yet, so stop before Cargo with a clear note.
-if (process.platform === "linux") {
-  console.error(
-    "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news.",
-  );
+export function isSupportedPlatform(platform) {
+  return ["darwin", "win32", "linux"].includes(platform);
+}
+
+if (!isSupportedPlatform(process.platform)) {
+  console.error("Zephium supports macOS, Windows, and Linux (experimental).");
   process.exit(1);
 }

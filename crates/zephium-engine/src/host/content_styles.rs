@@ -240,7 +240,7 @@ impl DocumentStyleState {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn begin_generic(&self) -> Option<(StyleKey, String, String, u64)> {
         let mut state = self.lock();
         let key = state.applied_key.clone()?;
@@ -255,7 +255,7 @@ impl DocumentStyleState {
             state.generic_visibility_revision,
         ))
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn generic_visibility(&self, visible: bool) -> u64 {
         let mut state = self.lock();
         if state.generic_visible != visible {
@@ -264,11 +264,11 @@ impl DocumentStyleState {
         }
         state.generic_visibility_revision
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn end_generic(&self) {
         self.lock().generic_active = false;
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn generic_current(&self, key: &StyleKey, fingerprint: &str) -> bool {
         let state = self.lock();
         state.generic_enabled
@@ -723,17 +723,17 @@ fn document_style_script(
     page_style: &str,
     reuse: bool,
 ) -> String {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     let index = serde_json::json!(!reuse && plan.generic_index.as_ref() != "[]");
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let index = serde_json::json!(if reuse {
         ""
     } else {
         plan.generic_index.as_ref()
     });
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     let exceptions = "";
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let exceptions = if reuse { "" } else { plan.exceptions.as_ref() };
     let arguments = serde_json::json!([
         identity.token,
@@ -988,9 +988,9 @@ mod tests {
         );
         assert!(reuse.contains("a.apply('page-style',p[0],p[1],p[2],p[9],p[10])"));
         assert!(reuse.contains("body{color:#eee}"));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         assert!(full.len() < 1024);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         assert!(full.len() > 487_107);
         assert!(reuse.len() < 1024);
         assert!(!reuse.contains(".site-ad"));
@@ -1045,7 +1045,7 @@ mod tests {
         );
     }
     #[test]
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn one_generic_pull_survives_visibility_changes_without_overlapping_requests() {
         let tracker = NavigationEpochTracker::new();
         let key = StyleKey {
@@ -1084,5 +1084,60 @@ mod tests {
             "a changed document cannot accept old tokens"
         );
         state.end_generic();
+        state.lock().applied_key = Some(key.clone());
+        assert!(state.generic_current(&key, &"a".repeat(64)));
+        assert!(!state.generic_current(&key, &"c".repeat(64)));
+        let mut paused = key;
+        paused.paused = true;
+        state.lock().applied_key = Some(paused);
+        assert!(
+            state.begin_generic().is_none(),
+            "paused sites cannot pull tokens"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn selective_delivery_omits_a_representative_valid_generic_index_and_exceptions() {
+        // Representative bounded fixture, not a shipped-corpus or RSS measurement.
+        let entries: Vec<_> = (0..4096)
+            .map(|i| {
+                (
+                    format!(".advert_{i}"),
+                    vec![format!(".advert_{i} > .creative")],
+                )
+            })
+            .collect();
+        let generic_index = serde_json::to_string(&entries).unwrap();
+        let exceptions = serde_json::to_string(&vec![".advert_7 > .creative"]).unwrap();
+        let plan = zephium_core::blocker::DocumentStylePlan {
+            css: Arc::from(".site-ad{display:none!important}"),
+            generic_index_digest: ContentRuleDigest::from_bytes(
+                Sha256::digest(generic_index.as_bytes()).into(),
+            ),
+            generic_index: Arc::from(generic_index.as_str()),
+            exceptions: Arc::from(exceptions.as_str()),
+        };
+        let identity = DocumentIdentity {
+            token: "a".repeat(32),
+            url: "https://example.com/".into(),
+            subscription: None,
+        };
+        let script = document_style_script(&identity, 1, &"b".repeat(64), &plan, "", "", false);
+        let start = script.rfind(")([").unwrap() + 2;
+        let mut arguments: serde_json::Value =
+            serde_json::from_str(&script[start..script.len() - 1]).unwrap();
+        assert_eq!(arguments[5], true);
+        assert_eq!(arguments[6], "");
+        let selective_bytes = serde_json::to_string(&arguments).unwrap().len();
+        arguments[5] = generic_index.into();
+        arguments[6] = exceptions.into();
+        let legacy_bytes = serde_json::to_string(&arguments).unwrap().len();
+        assert!(legacy_bytes > 200_000);
+        assert!(selective_bytes < 512);
+        eprintln!(
+            "representative 4096-entry generic fixture: serialized arguments {legacy_bytes} -> {selective_bytes} bytes; {} bytes omitted per full delivery",
+            legacy_bytes - selective_bytes
+        );
     }
 }

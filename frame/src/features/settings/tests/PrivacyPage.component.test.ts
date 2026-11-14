@@ -3,7 +3,7 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import PrivacyPage from "../components/sections/PrivacyPage.svelte";
 
-vi.mock("$shared/platform", () => ({ IS_WINDOWS: false }));
+vi.mock("$shared/platform", () => ({ IS_WINDOWS: false, IS_LINUX: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings();

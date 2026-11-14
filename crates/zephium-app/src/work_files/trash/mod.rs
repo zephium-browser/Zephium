@@ -21,10 +21,9 @@ use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
-use zephium_core::work::{
-    runtime::{WorkLocalStepV1, WorkStepKindV1},
-    WorkArtifactId,
-};
+use zephium_core::work::runtime::{WorkLocalStepV1, WorkStepKindV1};
+#[cfg(any(target_os = "macos", windows, test))]
+use zephium_core::work::WorkArtifactId;
 const MAX_BYTES: usize = zephium_core::work::runtime::MAX_WORK_FILE_CONTENT_BYTES;
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 
@@ -41,6 +40,7 @@ pub(crate) enum Failure {
     Storage,
     Capacity,
     Changed,
+    #[cfg(any(target_os = "macos", windows))]
     CrossVolume,
     RecoveryPending,
     Destination,
@@ -69,6 +69,7 @@ impl Failure {
             Self::Storage => "The private recovery journal could not be verified",
             Self::Capacity => "The private recovery journal is full; no file was removed",
             Self::Changed => "The file changed since it was read; no new change was admitted",
+            #[cfg(any(target_os = "macos", windows))]
             Self::CrossVolume => "Trash across volumes is not supported; no file was removed",
             Self::RecoveryPending => {
                 "The file change is not confirmed; its native worker or recovery state is still unresolved"
@@ -77,6 +78,7 @@ impl Failure {
         }
     }
 }
+#[cfg(any(target_os = "macos", windows, test))]
 fn recovery_id() -> String {
     format!(
         "{:032x}",

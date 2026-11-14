@@ -1,8 +1,8 @@
 # Contributing to Zephium
 
 Zephium is a native Rust browser with a Tauri + Svelte interface. Windows and
-macOS are supported with equal priority. Linux is not supported; Linux CI
-runners handle platform-neutral checks, not browser builds.
+macOS are supported with equal priority. Linux has a foundation build/test job;
+it is not yet a supported browser release target.
 
 Keep a contribution focused on one problem. Small fixes and documentation
 changes can go straight to a PR. Discuss larger features, default changes,
@@ -23,6 +23,25 @@ Their versions are pinned in [ci.yml](.github/workflows/ci.yml).
 | --- | --- |
 | Windows | Windows 10/11, MSVC C++ Build Tools with the Desktop development with C++ workload and Windows SDK, and the Evergreen WebView2 runtime. Use a normal user session for native storage qualification. |
 | macOS | Xcode Command Line Tools and a supported macOS/Safari combination. Published macOS releases currently target Apple Silicon. Startup checks both the OS and the installed system WebKit; see [macOS admission policy](crates/zephium-core/src/macos.rs). |
+
+For Linux foundation builds, install these native packages in addition to the
+pinned Rust, Node and pnpm tools (package installation needs administrator access):
+
+```sh
+# Ubuntu 24.04
+sudo apt-get install --no-install-recommends build-essential cmake pkg-config \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf libssl-dev libdbus-1-dev libxdo-dev xvfb xauth dbus-daemon
+# Fedora
+sudo dnf install gcc gcc-c++ make cmake pkgconf-pkg-config gtk3-devel \
+  webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel \
+  patchelf openssl-devel dbus-devel libxdo-devel xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon
+```
+
+Development headers permit compilation; they do not establish runtime admission.
+Linux startup enforces the [WebKitGTK admission policy](crates/zephium-core/src/webkitgtk.rs),
+including its reviewed security floor. Install an admitted runtime before native
+browser execution; do not lower the floor or disable sandboxing to start a build.
 
 Keep supported systems and engines updated. The
 [WebView2 admission policy](crates/zephium-core/src/webview2.rs) distinguishes
@@ -167,6 +186,53 @@ runner constraints. Those cases require the Windows QA environment. Preserve
 the documented exceptions; do not add exclusions to hide a failure. Native
 behavior changes need checks on both hosts, including affected excluded paths.
 Record any platform not exercised explicitly.
+
+### Linux foundation
+
+The Ubuntu 24.04 job builds the frontend assets, then runs the default-feature
+workspace graph without feature exclusions:
+
+```sh
+cargo build --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+scripts/ci/linux-test.sh cargo test --workspace --locked
+scripts/ci/linux-test.sh cargo test -p zephium-engine --locked \
+  platform::linux::stage::tests::stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all \
+  -- --exact --ignored --test-threads=1
+```
+
+The wrapper creates a disposable Xvfb display, D-Bus session, home and XDG data
+directories. Tests must use temporary stores and in-memory keys, and must not
+access a personal keyring, installed application or host desktop focus. The
+explicit GTK placement test uses ephemeral WebContexts; it does not qualify
+browser admission or security isolation. The ignored principal-world and
+sandbox/process tests require an admitted WebKitGTK runtime and a separate
+isolated native run. A foundation job passing on older distro libraries does
+not establish those runtime guarantees or Linux release support.
+
+#### Linux graphics startup
+
+Linux Graphics settings save a renderer preference for the next process. Explicit
+renderer environment overrides take priority; Automatic also observes startup
+recovery. The policy lives in `crates/zephium-core/src/linux_graphics.rs` and is
+applied by `desktop/src/linux_graphics.rs` before any WebKit process starts.
+
+On virtio/virgl with a known WebKitGTK version of 2.53.2 or newer, policy keeps
+the default DMA-BUF renderer and independently sets `WEBKIT_DISABLE_DMABUF_ATLAS=1`
+to prevent missing small images. This atlas workaround also applies when GPU mode
+is selected explicitly. Other GPUs and older or unknown WebKitGTK versions get
+no automatic atlas switch. Any existing atlas environment value is preserved;
+only exactly `1` disables DMA-BUF atlas textures. WebKit reads this switch once
+per process, so changes require a restart. Zephium removes only its own graphics
+environment additions when restarting, allowing policy to be evaluated again.
+
+The Graphics page's review/copy report describes the active atlas workaround and
+user overrides separately from the renderer path. `--gpu-report` describes what
+policy would apply without starting WebKit or recording a launch. For manual
+comparisons, use a disposable profile and explicitly set the atlas variable to
+`0` (default atlas) or `1` (workaround); merely unsetting it allows policy to apply.
+An existing recovery hold still requires the Graphics page's faster-mode retry
+before Automatic can return to the default renderer.
 
 ### Local aggregate and specialized gates
 

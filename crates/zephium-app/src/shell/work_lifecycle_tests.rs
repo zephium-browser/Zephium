@@ -226,6 +226,7 @@ async fn page(
 ) -> Result<WorkBrowserOutcome, WorkError> {
     let session = probe.browser_session();
     assert!(session.is_current() && probe.deadline() > Instant::now());
+    #[cfg(feature = "work-execution")]
     let _admission = probe.admit_read_page(request.id).await?;
     loop {
         if probe.cancellation_requested().await? {

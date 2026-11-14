@@ -1,7 +1,7 @@
 import * as m from "$shared/i18n/messages";
 import { preferences } from "$domain/preferences";
 import { fields } from "./catalog";
-import { IS_WINDOWS } from "$shared/platform";
+import { IS_LINUX, IS_WINDOWS } from "$shared/platform";
 import {
   Settings01Icon,
   PaintBoardIcon,
@@ -22,6 +22,7 @@ import {
   Brain01Icon,
   Plug01Icon,
   DashboardSquare02Icon,
+  GraphicCardIcon,
 } from "@hugeicons/core-free-icons";
 /** Navigation order: groups in `groups` order, sections within a group as
  *  listed here. Ids are deep-link targets, so a rename changes titles only. */
@@ -146,6 +147,13 @@ const allSections = [
     icon: KeyboardIcon,
   },
   {
+    id: "graphics",
+    group: "app",
+    title: m.section_graphics,
+    description: m.section_graphics_description,
+    icon: GraphicCardIcon,
+  },
+  {
     id: "about",
     group: "app",
     title: m.section_about,
@@ -167,8 +175,11 @@ export type SettingsSection = (typeof allSections)[number]["id"];
 export const showPreviews = import.meta.env.DEV;
 /** Sections that hold nothing but placeholders today. */
 const previewSections = new Set<SettingsSection>();
+/** Sections about one platform's own system, absent everywhere else. */
+const platformSections: Partial<Record<SettingsSection, boolean>> = { graphics: IS_LINUX };
 export const sections = allSections.filter(
-  (section) => showPreviews || !previewSections.has(section.id),
+  (section) =>
+    (showPreviews || !previewSections.has(section.id)) && (platformSections[section.id] ?? true),
 );
 /** Pages that leave with their feature's switch. */
 const featureSections: Partial<Record<SettingsSection, () => boolean>> = {

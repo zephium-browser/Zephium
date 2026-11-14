@@ -43,6 +43,7 @@ const PAGES = [
   "mcp",
   "features",
   "shortcuts",
+  "graphics",
   "about",
   "account",
 ] as const satisfies readonly SettingsSection[];

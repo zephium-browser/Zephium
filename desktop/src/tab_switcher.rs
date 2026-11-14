@@ -53,7 +53,11 @@ pub(crate) fn control_down() -> bool {
             ) < 0
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::platform::imp::control_down()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }

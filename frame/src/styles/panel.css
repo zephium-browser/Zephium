@@ -69,6 +69,15 @@ button:focus-visible {
   font-size: 12px;
   color: var(--color-danger);
 }
+
+/* GTK clips the opaque Linux WebView and draws its shadow. */
+@media not (forced-colors: active) {
+  :root[data-platform="linux"][data-material="none"],
+  :root[data-platform="linux"][data-material="none"] :is(body, #root) {
+    background: var(--color-canvas);
+  }
+}
+
 @media (forced-colors: active) {
   body,
   .panel-root {

@@ -191,21 +191,27 @@ impl Capture {
 
     /// Releases the microphone and returns the words or the audio. With the
     /// on-device recognizer this waits briefly for its final words.
-    pub fn finish(mut self) -> Result<Outcome, Fault> {
+    pub fn finish(self) -> Result<Outcome, Fault> {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        return match self.inner.take() {
-            Some(inner) => inner.finish(),
-            None => Ok(Outcome::Nothing),
-        };
+        {
+            let mut capture = self;
+            match capture.inner.take() {
+                Some(inner) => inner.finish(),
+                None => Ok(Outcome::Nothing),
+            }
+        }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         Ok(Outcome::Nothing)
     }
 
     /// Releases the microphone and discards everything.
-    pub fn cancel(mut self) {
+    pub fn cancel(self) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        if let Some(inner) = self.inner.take() {
-            inner.cancel();
+        {
+            let mut capture = self;
+            if let Some(inner) = capture.inner.take() {
+                inner.cancel();
+            }
         }
     }
 }

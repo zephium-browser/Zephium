@@ -591,6 +591,9 @@ export const commands = {
 	os: string,
 	arch: string,
 } | null>("about_info"),
+	gpuReport: () => typedError<GpuReport, string>(__TAURI_INVOKE("gpu_report")),
+	rendererPreferenceSet: (preference: RendererPreference) => typedError<GpuReport, string>(__TAURI_INVOKE("renderer_preference_set", { preference })),
+	rendererRetryFaster: () => typedError<GpuReport, string>(__TAURI_INVOKE("renderer_retry_faster")),
 	/**
 	 *  `None` where the system has no such setting to read: the page then keeps
 	 *  its language's own hour cycle.
@@ -1300,6 +1303,16 @@ export type ClosedTabView = {
 	icon: IconRef | null,
 };
 
+export type CrashRecovery = {
+	fallback_steps: number,
+	previous_incomplete_path: RendererPath | null,
+	/**
+	 *  The path Automatic keeps because a faster one failed to start twice with this
+	 *  graphics fingerprint, until the fingerprint changes or the person retries.
+	 */
+	held_path: RendererPath | null,
+};
+
 export type DefaultBrowserStatus = {
 	is_default: boolean,
 	/**
@@ -1307,6 +1320,20 @@ export type DefaultBrowserStatus = {
 	 *  which the system cannot register.
 	 */
 	can_request: boolean,
+};
+
+export type Detection = {
+	kernel: KernelGraphics,
+	gl: GlInfo | null,
+	session: SessionType,
+	gtk_version: string,
+	webkit_version: string,
+	monitors: MonitorInfo[],
+	monitors_truncated: boolean,
+	compositor: string | null,
+	video_decode: VideoDecodeInfo,
+	probe_outcome: ProbeOutcome,
+	driver_class: DriverClass,
 };
 
 /**
@@ -1443,6 +1470,8 @@ export type DownloadView = {
 export type DownloadsChanged = {
 	profile: string,
 };
+
+export type DriverClass = "mesa_radeonsi" | "mesa_iris" | "mesa_crocus" | "mesa_i915" | "nvidia_proprietary" | "nouveau" | "nvk" | "virtio_virgl" | "software" | "asahi" | "other_mesa" | "unknown";
 
 export type ExportKindView = "bookmarks" | "history";
 
@@ -1611,6 +1640,38 @@ export type FocusView = {
 	allowed: string[],
 };
 
+export type GlApi = "desktop" | "gles";
+
+export type GlInfo = {
+	vendor: string | null,
+	renderer: string | null,
+	version: string | null,
+	api: GlApi,
+	mesa_version: string | null,
+	nvidia_version: string | null,
+	zink: boolean,
+	software: boolean,
+};
+
+export type GpuReport = {
+	detection: Detection,
+	preference: RendererPreference,
+	running_preference: RendererPreference,
+	selection: RendererSelection,
+	environment: GraphicsEnvironmentOverride[],
+	restart_required: boolean,
+	/**  The person asked the next automatic start to try a held-back faster path again. */
+	retry_requested: boolean,
+	startup_status: string,
+	state_warnings: string[],
+	text: string,
+};
+
+export type GraphicsEnvironmentOverride = {
+	name: string,
+	value: string,
+};
+
 export type HapticKind = "align" | "level";
 
 /**
@@ -1736,6 +1797,23 @@ export type ItemsState = {
 	active: string | null,
 	split_group: SplitGroupView | null,
 };
+
+export type KernelDevice = {
+	driver: string | null,
+	driver_version: string | null,
+	vendor_id: string | null,
+	device_id: string | null,
+	card_nodes: string[],
+	render_nodes: string[],
+};
+
+export type KernelGraphics = {
+	status: KernelStatus,
+	devices: KernelDevice[],
+	truncated: boolean,
+};
+
+export type KernelStatus = "available" | "no_gpu" | "partial" | "unavailable";
 
 /**  The keymap changed; read it again. */
 export type KeymapChanged = {
@@ -1886,6 +1964,18 @@ export type MediaPlayerView = {
 	in_pip: boolean,
 	muted: boolean,
 	can_mute: boolean,
+};
+
+export type MonitorInfo = {
+	index: number,
+	x: number,
+	y: number,
+	width: number,
+	height: number,
+	integer_scale: number,
+	fractional_scale: number | null,
+	refresh_rate_millihertz: number,
+	primary: boolean,
 };
 
 export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } |
@@ -2638,6 +2728,10 @@ export type PersonalHideView = {
 	enabled: boolean,
 };
 
+export type PluginPresence = "present_in_system_directory" | "not_found_in_system_directories" | "unknown";
+
+export type ProbeOutcome = "supported" | "unavailable" | "inconclusive";
+
 export type ProfileAvatarInputV1 = {
 	style: ProfileAvatarStyleView,
 	color: number,
@@ -2709,6 +2803,17 @@ export type Rejection = "invalid" |
 "unavailable" |
 /**  This platform's shortcut is managed elsewhere. */
 "unsupported";
+
+export type RendererPath = "default" | "force_shm" | "disable_dmabuf";
+
+export type RendererPreference = "automatic" | "gpu" | "compatibility" | "safe";
+
+export type RendererSelection = {
+	path: RendererPath,
+	source: SelectionSource,
+	reason: string,
+	crash_recovery: CrashRecovery,
+};
 
 export type ResourceCall = ResourceCall_Serialize | ResourceCall_Deserialize;
 
@@ -3067,6 +3172,10 @@ export type SearchShortcut_Serialize = {
 	suggestions?: SearchEngine | null,
 	enabled: boolean,
 };
+
+export type SelectionSource = "environment" | "preference" | "policy" | "crash_recovery" | "repeated_failure";
+
+export type SessionType = "wayland" | "x11" | "unknown";
 
 export type ShutSiteView = {
 	site: string,
@@ -3529,6 +3638,12 @@ export type UpdateStatus = UpdateStatus_Serialize | UpdateStatus_Deserialize;
 export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
 export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
+
+export type VideoDecodeInfo = {
+	va_plugin: PluginPresence,
+	vaapi_plugin: PluginPresence,
+	capabilities_queried: boolean,
+};
 
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {

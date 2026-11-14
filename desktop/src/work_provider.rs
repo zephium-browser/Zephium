@@ -248,6 +248,7 @@ async fn public_decision_settings(
     }))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 async fn credential() -> Result<zephium_agentic::AgentProviderCredential, WorkError> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {

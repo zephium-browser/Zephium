@@ -12,6 +12,7 @@ mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;
@@ -41,6 +42,7 @@ mod generic_styles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod http_auth;
 mod lifecycle;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod media;
 mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -86,7 +88,10 @@ pub(crate) mod work_frames;
     any(target_os = "macos", target_os = "windows")
 ))]
 mod work_resource;
-#[cfg(feature = "agentic-browser")]
+#[cfg(all(
+    feature = "agentic-browser",
+    any(target_os = "macos", target_os = "windows")
+))]
 pub(crate) use work_resource::visual_store::{FreshNativeStore, FreshStoreLoss};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod work_session_presence;
@@ -202,12 +207,14 @@ struct ObservedView {
     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
     // Which icon watch of this view's document is current; an older watch's
     // reports are ignored.
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     favicon_watch: Cell<u64>,
     // The document an AutoFill warning was shown for; an approval fills only
     // that document.
     #[cfg(target_os = "macos")]
     insecure_autofill: Cell<Option<crate::navigation_epoch::NavigationEpoch>>,
     // The media watch's generation, and whether it is running.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     media_watch: Cell<(u64, bool)>,
     replay_safety: Rc<discard::ReplaySafety>,
     discard_probe_lease: std::cell::RefCell<Option<discard::ProbeLease>>,
@@ -389,6 +396,8 @@ impl Drop for ObservedView {
         // rejected even if the shell reuses the same logical ItemId.
         self.event_permit.revoke();
         self.navigation.revoke();
+        #[cfg(target_os = "linux")]
+        crate::platform::cosmetic_pull::cancel(&self.view);
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -824,5 +833,5 @@ mod tests;
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 pub(crate) mod anonymous_session_probe;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod tab_preview;

@@ -29,10 +29,8 @@ fn launch_owned(
     work: impl FnOnce() -> Result<Output, Failure> + Send + 'static,
 ) -> tokio::task::JoinHandle<Result<Output, Failure>> {
     super::worker_slots::launch(permit, work, |result| {
-        !matches!(
-            result,
-            Err(Failure::CleanupPending | Failure::StopUnconfirmed)
-        )
+        use super::worker::WorkerError;
+        !result.as_ref().is_err_and(|failure| failure.unsettled())
     })
 }
 

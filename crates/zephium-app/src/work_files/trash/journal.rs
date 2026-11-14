@@ -83,6 +83,7 @@ impl Journal {
             directory,
         }))
     }
+    #[cfg(any(target_os = "macos", windows, test))]
     pub fn prepare(&self, receipt: Receipt, bytes: &[u8]) -> Result<Record, Failure> {
         if !receipt.valid()
             || bytes.len() != receipt.bytes
@@ -147,11 +148,13 @@ impl Journal {
     }
 }
 impl Record {
+    #[cfg(any(target_os = "macos", windows, test))]
     pub fn stage(&self) -> Result<PrivateDirectory, Failure> {
         self.directory
             .create_new_private_child(&component("stage")?)
             .map_err(|_| Failure::Storage)
     }
+    #[cfg(any(target_os = "macos", windows))]
     pub fn backup(&self) -> Result<PrivateDirectory, Failure> {
         let directory = self
             .directory

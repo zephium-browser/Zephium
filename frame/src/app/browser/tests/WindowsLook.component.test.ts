@@ -10,7 +10,7 @@ import Shell from "../Shell.svelte";
 import { paint, settle, shot, wallpaper } from "./look-bench";
 
 const native = vi.hoisted(() => ({ settings: {} as Record<string, string> }));
-vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
+vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true, IS_LINUX: false }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     isMaximized: async () => false,
