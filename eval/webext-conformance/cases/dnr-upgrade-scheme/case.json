@@ -1,0 +1,10 @@
+{
+  "id": "dnr-upgrade-scheme",
+  "title": "An upgradeScheme rule upgrades a localhost navigation",
+  "apis": [
+    "declarativeNetRequest.updateDynamicRules",
+    "webNavigation.onErrorOccurred",
+    "declarativeNetRequest.getDynamicRules"
+  ],
+  "permissions": ["declarativeNetRequest", "webNavigation"]
+}

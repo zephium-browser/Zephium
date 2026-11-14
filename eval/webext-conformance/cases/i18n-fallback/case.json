@@ -1,0 +1,6 @@
+{
+  "id": "i18n-fallback",
+  "title": "Regional catalog overrides and default-locale fallback",
+  "apis": ["i18n.getMessage", "i18n.getUILanguage"],
+  "permissions": []
+}

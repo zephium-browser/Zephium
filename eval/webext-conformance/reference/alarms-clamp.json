@@ -1,0 +1,156 @@
+{
+  "caseId": "alarms-clamp",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "below-minimum.create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "below-minimum.create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "below-minimum.get:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "below-minimum.get:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "below-minimum",
+          "periodInMinutes": 0.1,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "at-minimum.create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "at-minimum.create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "at-minimum.get:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "at-minimum.get:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "at-minimum",
+          "periodInMinutes": 0.5,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "below-one-second.create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "below-one-second.create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "below-one-second.get:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "below-one-second.get:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "below-one-second",
+          "periodInMinutes": 0.001,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "negative-period.create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "negative-period.create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "negative-period.get:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "negative-period.get:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "negative-period",
+          "periodInMinutes": -1,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "console.alarmDiagnostics",
+      "value": [
+        "Alarm period is less than the minimum duration of 1 second. Alarm \"below-one-second\" will fire after the minimum duration.",
+        "Alarm period is less than the minimum duration of 1 second. Alarm \"negative-period\" will fire after the minimum duration."
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

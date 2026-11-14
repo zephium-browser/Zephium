@@ -1,0 +1,11 @@
+{
+  "id": "i18n-predefined",
+  "title": "Predefined messages, accepted languages, and manifest localization",
+  "apis": [
+    "i18n.getMessage",
+    "i18n.getUILanguage",
+    "i18n.getAcceptLanguages",
+    "runtime.getManifest"
+  ],
+  "permissions": []
+}

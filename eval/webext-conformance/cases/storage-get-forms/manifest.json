@@ -1,0 +1,6 @@
+{
+  "manifest_version": 3,
+  "name": "Storage get forms",
+  "version": "1.0",
+  "permissions": ["storage"]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "origin-context-csp",
+  "title": "Extension pages have a secure origin and block inline and eval scripts",
+  "apis": ["runtime.getURL"],
+  "permissions": []
+}

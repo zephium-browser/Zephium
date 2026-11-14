@@ -1,0 +1,6 @@
+{
+  "id": "i18n-placeholders",
+  "title": "Named and positional placeholders, dollar escaping, and missing substitutions",
+  "apis": ["i18n.getMessage"],
+  "permissions": []
+}

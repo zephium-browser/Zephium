@@ -1,0 +1,6 @@
+{
+  "id": "runtime-sender-frames",
+  "title": "MessageSender fields in top, origin, blank, and srcdoc frames",
+  "apis": ["runtime.sendMessage", "runtime.onMessage", "tabs.create"],
+  "permissions": ["tabs"]
+}

@@ -1,0 +1,62 @@
+{
+  "caseId": "worker-classic-environment",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "service worker facts:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "service worker facts:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "clients": {
+            "claim": "function",
+            "matchAll": "function",
+            "openWindow": "function"
+          },
+          "documentType": "undefined",
+          "importScriptsType": "function",
+          "initialImport": {
+            "ok": true,
+            "value": "classic import executed"
+          },
+          "isSecureContext": true,
+          "isServiceWorker": true,
+          "lateImport": {
+            "error": {
+              "message": "Failed to execute 'importScripts' on 'WorkerGlobalScope': The script at 'chrome-extension://<extension>/late-import.js' failed to load.",
+              "name": "NetworkError"
+            },
+            "ok": false
+          },
+          "navigatorStorage": {
+            "estimate": "function",
+            "persisted": "function",
+            "type": "object"
+          },
+          "origin": "chrome-extension://<extension>",
+          "registration": {
+            "activeState": "activated",
+            "installing": false,
+            "scope": "chrome-extension://<extension>/",
+            "updateType": "function",
+            "waiting": false
+          },
+          "windowType": "undefined"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

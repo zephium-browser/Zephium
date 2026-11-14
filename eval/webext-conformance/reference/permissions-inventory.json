@@ -1,0 +1,131 @@
+{
+  "caseId": "permissions-inventory",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "get all permissions:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get all permissions:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "origins": [
+            "http://127.0.0.1/*"
+          ],
+          "permissions": [
+            "storage"
+          ]
+        }
+      }
+    },
+    {
+      "label": "contains granted storage:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains granted storage:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "contains ungranted alarms:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains ungranted alarms:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    },
+    {
+      "label": "contains collector origin:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains collector origin:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "contains optional origin:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains optional origin:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    },
+    {
+      "label": "contains callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains callback:callback",
+      "value": {
+        "args": [
+          true
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "contains callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "contains callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "contains unknown permission:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "contains unknown permission:error",
+      "value": {
+        "lastError": null,
+        "message": "'conformanceUnknownPermission' is not a recognized permission."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

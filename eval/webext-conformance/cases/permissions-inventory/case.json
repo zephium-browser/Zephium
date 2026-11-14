@@ -1,0 +1,6 @@
+{
+  "id": "permissions-inventory",
+  "title": "Granted optional and unknown permission queries",
+  "apis": ["permissions.getAll", "permissions.contains"],
+  "permissions": ["storage"]
+}
