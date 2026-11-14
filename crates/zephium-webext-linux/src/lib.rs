@@ -9,6 +9,7 @@
 pub mod background;
 pub mod bridge;
 pub mod csp;
+pub mod network;
 pub mod offscreen;
 pub mod package;
 pub mod runtime;

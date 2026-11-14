@@ -1,6 +1,8 @@
 #![cfg(all(target_os = "linux", feature = "native-tests"))]
 #![forbid(unsafe_code)]
 
+#[path = "runtime_support/network.rs"]
+mod network_fixture;
 #[path = "runtime_support/mod.rs"]
 mod support;
 
@@ -646,4 +648,210 @@ fn native_runtime_real_extensions_smoke() {
     wait("no renderers", Duration::from_secs(10), || {
         web_processes().is_empty()
     });
+}
+
+#[test]
+#[ignore = "sandboxed WebKitGTK DNR runtime; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_runtime_dnr_updates_and_persistence() {
+    use serde_json::json;
+    use zephium_core::ids::ItemId;
+    use zephium_webext_linux::bridge::AttachPlan;
+
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let server = network_fixture::Server::new();
+    let package = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), serde_json::to_vec(&json!({
+        "manifest_version":3,"name":"DNR native fixture","version":"1.0",
+        "permissions":["declarativeNetRequest","declarativeNetRequestFeedback"],
+        "host_permissions":["<all_urls>"],
+        "background":{"service_worker":"sw.js"},"options_ui":{"page":"options.html"},
+        "action":{},"declarative_net_request":{"rule_resources":[{"id":"static","enabled":true,"path":"rules.json"}]}
+    })).unwrap()).unwrap();
+    std::fs::write(
+        package.path().join("sw.js"),
+        "chrome.runtime.onMessage.addListener(()=>false);",
+    )
+    .unwrap();
+    std::fs::write(
+        package.path().join("options.html"),
+        "<!doctype html><p>DNR fixture</p>",
+    )
+    .unwrap();
+    std::fs::write(package.path().join("rules.json"), r#"[{"id":1,"action":{"type":"block"},"condition":{"urlFilter":"/static-block"}},{"id":2,"action":{"type":"modifyHeaders","responseHeaders":[{"header":"content-security-policy","operation":"append","value":"script-src none"}]},"condition":{"urlFilter":"/unsupported-response"}}]"#).unwrap();
+    let install = ExtensionInstallId::from(0x301);
+    let engine = Rc::new(Engine::default());
+    let native_context = context();
+    let profile = runtime(&native_context, &module, Some(storage.path()), &engine, 1);
+    profile.set_browser(Box::new(network_fixture::Browser::new(&server.origin)));
+    profile
+        .install_admitted(spec(0x301, 2, package.path()))
+        .unwrap();
+    wait("DNR background ready", Duration::from_secs(30), || {
+        ready(&profile, install)
+    });
+    assert!(
+        profile
+            .network_status(install)
+            .unwrap()
+            .unsupported_rule_count
+            > 0
+    );
+    let options = open(&profile, install);
+    assert_eq!(
+        script(
+            &options,
+            "return await chrome.declarativeNetRequest.getEnabledRulesets();"
+        )["ok"],
+        json!(["static"])
+    );
+
+    let tab = webkit2gtk::WebView::with_context(&native_context);
+    let bridge_view = profile
+        .attach_tab_with_id(ItemId::from(1), 1, &tab, &AttachPlan::default())
+        .unwrap();
+    tab.load_uri(&format!("{}/page", server.origin));
+    wait("DNR tab load", Duration::from_secs(20), || {
+        !tab.is_loading() && tab.uri().is_some()
+    });
+    // Attachment completes asynchronously; wait before testing first policy use.
+    pump_for(Duration::from_millis(500));
+    assert!(!network_fetch(&tab, "/static-block"));
+    assert_eq!(script(&options, "globalThis.dnrDebug=[];chrome.declarativeNetRequest.onRuleMatchedDebug.addListener(info=>dnrDebug.push(info));return true;")["ok"], true);
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.setExtensionActionOptions({displayActionCountAsBadgeText:true});return true;")["ok"], true);
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateDynamicRules({addRules:[{id:7,action:{type:'block'},condition:{urlFilter:'/dynamic-block'}}]});return true;")["ok"], true);
+    assert!(
+        !network_fetch(&tab, "/dynamic-block"),
+        "resolved API must enforce the next request without reload"
+    );
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateSessionRules({addRules:[{id:8,action:{type:'block'},condition:{urlFilter:'/session-block',tabIds:[1]}}]});return true;")["ok"], true);
+    assert!(!network_fetch(&tab, "/session-block"));
+    let duplicate = script(&options, "return await chrome.declarativeNetRequest.updateDynamicRules({removeRuleIds:[7],addRules:[{id:9,action:{type:'block'},condition:{urlFilter:'/duplicate'}},{id:9,action:{type:'allow'},condition:{urlFilter:'/duplicate'}}]});");
+    assert!(duplicate["error"].is_string());
+    assert!(!network_fetch(&tab, "/dynamic-block?after-rejection"));
+    assert_eq!(script(&options, "return (await chrome.declarativeNetRequest.getDynamicRules({ruleIds:[7]})).map(rule=>rule.id);")["ok"], json!([7]));
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateStaticRules({rulesetId:'static',disableRuleIds:[1]});return true;")["ok"], true);
+    assert!(network_fetch(&tab, "/static-block?disabled"));
+    assert_eq!(
+        script(
+            &options,
+            "return await chrome.declarativeNetRequest.getDisabledRuleIds({rulesetId:'static'});"
+        )["ok"],
+        json!([1])
+    );
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateEnabledRulesets({disableRulesetIds:['static']});return true;")["ok"], true);
+    pump_for(Duration::from_millis(500));
+    let feedback = script(
+        &options,
+        "return await chrome.declarativeNetRequest.getMatchedRules({tabId:1});",
+    );
+    assert!(
+        feedback["ok"]["rulesMatchedInfo"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["rule"]["ruleId"] == 7)),
+        "{feedback}"
+    );
+    assert_eq!(
+        script(
+            &options,
+            "return dnrDebug.some(info=>info.rule.ruleId===7 && info.request.type==='xmlhttprequest' && info.request.requestId.length>0);"
+        )["ok"],
+        true
+    );
+    let badge = script(
+        &options,
+        "return await chrome.action.getBadgeText({tabId:1});",
+    );
+    assert!(
+        badge["ok"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|count| count > 0),
+        "{badge}"
+    );
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateDynamicRules({removeRuleIds:[7]});return true;")["ok"], true);
+    assert!(network_fetch(&tab, "/dynamic-block?removed"));
+    assert_eq!(script(&options, "await chrome.declarativeNetRequest.updateDynamicRules({addRules:[{id:10,action:{type:'block'},condition:{urlFilter:'/persisted'}}]});return true;")["ok"], true);
+    assert!(!server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|path| path == "/dynamic-block" || path == "/session-block"));
+    profile.detach_tab(bridge_view);
+    tab.stop_loading();
+    drop(tab);
+    drop(options);
+    assert!(profile.retire().run(Duration::from_secs(10)));
+    drop(profile);
+    drop(native_context);
+    wait("DNR first runtime drained", Duration::from_secs(10), || {
+        web_processes().is_empty()
+    });
+
+    let native_context = context();
+    let profile = runtime(&native_context, &module, Some(storage.path()), &engine, 1);
+    profile
+        .install_enabled(spec(0x301, 2, package.path()))
+        .unwrap();
+    wait("DNR restored background", Duration::from_secs(30), || {
+        ready(&profile, install)
+    });
+    let options = open(&profile, install);
+    assert_eq!(
+        script(
+            &options,
+            "return (await chrome.declarativeNetRequest.getDynamicRules()).map(rule=>rule.id);"
+        )["ok"],
+        json!([10])
+    );
+    assert_eq!(
+        script(
+            &options,
+            "return await chrome.declarativeNetRequest.getSessionRules();"
+        )["ok"],
+        json!([])
+    );
+    assert_eq!(
+        script(
+            &options,
+            "return await chrome.declarativeNetRequest.getEnabledRulesets();"
+        )["ok"],
+        json!([])
+    );
+    assert_eq!(
+        script(
+            &options,
+            "return await chrome.declarativeNetRequest.getDisabledRuleIds({rulesetId:'static'});"
+        )["ok"],
+        json!([1])
+    );
+    drop(options);
+    assert!(profile.retire().run(Duration::from_secs(10)));
+    drop(profile);
+    drop(native_context);
+    println!("DNR runtime next_request=true static_toggle=true duplicate_atomicity=true dynamic_persisted=true session_ephemeral=true feedback=true badge=true");
+}
+
+fn network_fetch(page: &webkit2gtk::WebView, path: &str) -> bool {
+    use javascriptcore::ValueExt;
+    let result = Rc::new(RefCell::new(None));
+    let captured = result.clone();
+    page.call_async_javascript_function(
+        &format!(
+            "try {{ await fetch({}); return true; }} catch {{ return false; }}",
+            serde_json::to_string(path).unwrap()
+        ),
+        None,
+        None,
+        None,
+        None::<&gtk::gio::Cancellable>,
+        move |reply| *captured.borrow_mut() = Some(reply.unwrap().to_boolean()),
+    );
+    wait("native DNR fetch", Duration::from_secs(20), || {
+        result.borrow().is_some()
+    });
+    let completed = result.borrow_mut().take().unwrap();
+    completed
 }

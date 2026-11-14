@@ -212,6 +212,21 @@ pub trait Runtime {
         let _ = (view, owner, observations);
     }
 
+    /// Request observations with event deliveries collected by the bridge.
+    fn observed_requests(
+        &mut self,
+        view: BridgeViewId,
+        owner: ViewRef,
+        observations: Vec<RequestEvent>,
+        out: &mut Outbox,
+    ) {
+        let _ = out;
+        self.requests(view, owner, observations);
+    }
+
+    /// Profile reporting overflow; lost matches make action counts incomplete.
+    fn request_loss(&mut self, _observations: u64, _matches: u64) {}
+
     /// A form submission from a view attached with `observe_forms`. The
     /// fields can hold credentials: never log them.
     fn form_submitted(

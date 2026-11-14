@@ -8,9 +8,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use serde_json::{json, Value};
-use zephium_core::ids::{ExtensionInstallId, ProfileId};
+use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
 use zephium_webext::manifest::Manifest;
 use zephium_webext_runtime::alarms::{AlarmEnvironment, AlarmHost, Alarms};
+use zephium_webext_runtime::api::declarative_net_request::{
+    DnrHost, DnrState, Request as DnrRequest,
+};
 use zephium_webext_runtime::api::runtime::Request as RuntimeRequest;
 use zephium_webext_runtime::browser::{
     unsupported, BrowserPort, BrowserRequest, BrowserSnapshot, ExtensionInfo, IncognitoMode,
@@ -45,10 +48,12 @@ use zephium_webext_runtime::ContextMask;
 use super::errors::{truncate, ErrorLog, ExtensionError, ExtensionErrorKind};
 use super::errors::{MAX_ERROR_MESSAGE_BYTES, MAX_ERROR_SOURCE_BYTES};
 use super::storage::{Done, Job, StorageExecutor};
+use super::PermissionUpdate;
 use crate::background::{self, BackgroundScript, Bootstrap, Launch};
 use crate::bridge::{
     CloseReason, DeliverError, FrameLifecycle, Outbox, PortTraffic, Ports, Runtime, ViewRef,
 };
+use crate::network::{self, NetworkExecutor, NetworkStatus};
 
 /// Direct (unqueued) event deliveries take sequence numbers from here, far
 /// from any install queue's, because each context de-duplicates by number.
@@ -96,6 +101,11 @@ pub(crate) enum NativeOp {
 /// What the engine host hears about.
 #[derive(Clone, Debug)]
 pub enum Notice {
+    /// Rule preparation or unsupported-rule information changed.
+    NetworkStatus {
+        install: ExtensionInstallId,
+        status: NetworkStatus,
+    },
     /// A new error record.
     Error(ExtensionError),
     /// The runtime disabled the background after repeated crashes.
@@ -181,6 +191,11 @@ struct PendingScripts {
 }
 
 pub(crate) struct InstallState {
+    dnr: DnrState,
+    network_status: NetworkStatus,
+    network_epoch: u64,
+    network_ready: bool,
+    pending_network_start: Option<u64>,
     extension_id: ExtensionId,
     manifest: Value,
     root: PathBuf,
@@ -221,21 +236,29 @@ impl InstallState {
     }
 
     fn bootstrap(&self, kind: ContextKind, ui_language: &str, incognito: bool) -> Value {
-        Bootstrap {
+        let mut value = Bootstrap {
             extension_id: &self.extension_id,
             kind,
             manifest: &self.manifest,
             messages: &self.catalog,
             ui_language,
             incognito,
+            unpacked: self.unpacked,
             permissions: &self.granted,
         }
-        .to_value(None)
+        .to_value(None);
+        value["unpacked"] = Value::Bool(self.unpacked);
+        value
     }
 }
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    Dnr {
+        responder: Responder,
+        sender: Box<Sender>,
+        request: DnrRequest,
+    },
     Scripts(ScriptCall),
     Storage {
         responder: Responder,
@@ -302,6 +325,7 @@ enum Work {
 
 /// The services handlers run against.
 pub(crate) struct State {
+    network_tabs: HashMap<ItemId, i32>,
     profile: ProfileId,
     incognito: bool,
     ui_language: String,
@@ -341,6 +365,37 @@ impl State {
         let (handled, responder) = invocation.defer();
         self.work.push(work(responder));
         handled
+    }
+}
+
+impl DnrHost for State {
+    fn dnr_state(&self, sender: &Sender) -> Result<&DnrState, ApiError> {
+        self.installs
+            .get(&sender.install())
+            .filter(|state| {
+                sender.profile() == self.profile
+                    && sender.incognito() == self.incognito
+                    && &state.extension_id == sender.extension_id()
+            })
+            .ok_or_else(ApiError::context_invalidated)
+            .and_then(|state| {
+                if state.network_ready {
+                    Ok(&state.dnr)
+                } else {
+                    Err(ApiError::other(
+                        "Declarative network request rules are still loading.",
+                    ))
+                }
+            })
+    }
+
+    fn dnr_request(&mut self, request: DnrRequest, invocation: Invocation<'_>) -> Handled {
+        let sender = Box::new(invocation.sender().clone());
+        self.defer(invocation, |responder| Work::Dnr {
+            responder,
+            sender,
+            request,
+        })
     }
 }
 
@@ -851,6 +906,13 @@ pub struct RuntimeHost {
     clock: Rc<dyn Fn() -> u64>,
     unix_millis: Rc<dyn Fn() -> u64>,
     storage: StorageExecutor,
+    network: NetworkExecutor,
+    network_tickets: HashMap<u64, (ExtensionInstallId, Responder, DnrRequest)>,
+    network_permission_tickets: HashMap<u64, (InstallPermissions, PermissionUpdate)>,
+    network_orders: HashMap<ExtensionInstallId, u64>,
+    network_retiring: HashMap<ExtensionInstallId, Option<PathBuf>>,
+    next_network_epoch: u64,
+    next_network_request: u64,
     tickets: HashMap<u64, (Responder, Box<Sender>)>,
     next_ticket: u64,
     retired_script_writes: HashMap<ExtensionInstallId, u64>,
@@ -1061,6 +1123,7 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::sessions::register(&mut table)?;
     api::top_sites::register(&mut table)?;
     api::search::register(&mut table)?;
+    api::declarative_net_request::register(&mut table)?;
     for name in STORAGE_METHODS {
         table.register_generated(name, storage_call)?;
     }
@@ -1150,10 +1213,12 @@ impl RuntimeHost {
     pub(crate) fn new(config: HostConfig) -> Result<Self, String> {
         let table = table().map_err(|error| format!("{error:?}"))?;
         let storage = StorageExecutor::start().map_err(|error| error.to_string())?;
+        let network = NetworkExecutor::start().map_err(|error| error.to_string())?;
         let now = (config.clock)();
         Ok(Self {
             dispatcher: Dispatcher::new(table),
             state: State {
+                network_tabs: HashMap::new(),
                 profile: config.profile,
                 incognito: config.incognito,
                 ui_language: config.ui_language,
@@ -1177,6 +1242,13 @@ impl RuntimeHost {
             clock: config.clock,
             unix_millis: config.unix_millis,
             storage,
+            network,
+            network_tickets: HashMap::new(),
+            network_permission_tickets: HashMap::new(),
+            network_orders: HashMap::new(),
+            network_retiring: HashMap::new(),
+            next_network_epoch: 0,
+            next_network_request: 0,
             tickets: HashMap::new(),
             next_ticket: 0,
             retired_script_writes: HashMap::new(),
@@ -1215,6 +1287,216 @@ impl RuntimeHost {
 
     pub(crate) fn storage_take(&self) -> Vec<Done> {
         self.storage.take()
+    }
+
+    pub(crate) fn network_fd(&self) -> std::os::fd::RawFd {
+        self.network.fd()
+    }
+
+    pub(crate) fn set_install_order(
+        &mut self,
+        install: ExtensionInstallId,
+        order: u64,
+    ) -> Result<(), String> {
+        if self.state.installs.contains_key(&install) {
+            return Err("Installation order must be supplied before activation.".into());
+        }
+        self.network_orders.insert(install, order);
+        Ok(())
+    }
+
+    pub(crate) fn update_network_permissions(
+        &mut self,
+        install: ExtensionInstallId,
+        permissions: InstallPermissions,
+        completion: PermissionUpdate,
+    ) -> Result<(), String> {
+        let state = self
+            .state
+            .installs
+            .get(&install)
+            .filter(|state| state.network_ready)
+            .ok_or("The extension's network rules are unavailable.")?;
+        self.next_ticket += 1;
+        let ticket = self.next_ticket;
+        if !self.network.submit(network::Job::Permissions {
+            install,
+            epoch: state.network_epoch,
+            ticket,
+            permissions: permissions.clone(),
+        }) {
+            return Err("The network worker is unavailable.".into());
+        }
+        self.network_permission_tickets
+            .insert(ticket, (permissions, completion));
+        Ok(())
+    }
+
+    pub(crate) fn stop_network(&mut self) {
+        self.network.stop();
+        for (install, directory) in self.network_retiring.drain() {
+            self.storage.submit(Job::Destroy { install, directory });
+        }
+    }
+
+    pub(crate) fn network_tab(&mut self, tab: ItemId, tab_id: i32) {
+        self.state.network_tabs.insert(tab, tab_id);
+    }
+
+    pub(crate) fn network_tab_closed(&mut self, tab: ItemId) {
+        if let Some(tab_id) = self.state.network_tabs.remove(&tab) {
+            for (install, state) in &mut self.state.installs {
+                state.dnr.tab_closed(tab_id, self.state.unix_millis);
+                if let Some(browser) = &mut self.state.browser {
+                    let _ = browser.set_dnr_badge(*install, tab_id, None);
+                }
+            }
+            self.network.submit(network::Job::TabClosed {
+                tab_id,
+                now_ms: self.state.unix_millis,
+            });
+        }
+    }
+
+    pub(crate) fn network_take(&self) -> Vec<network::Done> {
+        self.network.take()
+    }
+
+    pub(crate) fn network_finish(&self, revision: u64, commit: bool) -> bool {
+        self.network.finish(revision, commit)
+    }
+
+    pub(crate) fn network_accepts(&self, done: &network::Done) -> bool {
+        if self.shutting_down {
+            return false;
+        }
+        if done.removed {
+            return !self.state.installs.contains_key(&done.install);
+        }
+        self.state
+            .installs
+            .get(&done.install)
+            .is_some_and(|state| state.network_epoch == done.epoch)
+    }
+
+    pub(crate) fn network_status(&self, install: ExtensionInstallId) -> Option<NetworkStatus> {
+        self.state
+            .installs
+            .get(&install)
+            .map(|state| state.network_status.clone())
+    }
+
+    pub(crate) fn network_done(&mut self, done: network::Done, out: &mut Outbox) {
+        let pending = done
+            .ticket
+            .and_then(|ticket| self.network_tickets.remove(&ticket));
+        let permissions = done
+            .ticket
+            .and_then(|ticket| self.network_permission_tickets.remove(&ticket));
+        if !self.network_accepts(&done) {
+            if let Some((_, responder, _)) = pending {
+                self.settle(responder, Err(ApiError::context_invalidated()), out);
+            }
+            if let Some((_, completion)) = permissions {
+                completion.settle(Err("Extension context invalidated.".into()));
+            }
+            return;
+        }
+        if done.removed {
+            if done.result.is_ok() {
+                if let Some(directory) = self.network_retiring.get(&done.install).cloned() {
+                    self.storage.submit(Job::Destroy {
+                        install: done.install,
+                        directory,
+                    });
+                }
+            }
+            return;
+        }
+        let install = done.install;
+        let mut start = None;
+        let result = match done.result {
+            Ok(mut update) => {
+                if let Some((permissions, _)) = &permissions {
+                    self.permissions.insert(install, permissions.clone());
+                    if let Some(state) = self.state.installs.get_mut(&install) {
+                        state.granted = permissions.snapshot().permissions;
+                        state.unlimited = permissions.has_api("unlimitedStorage");
+                        state.clipboard = permissions.has_api("clipboardRead")
+                            || permissions.has_api("clipboardWrite");
+                    }
+                }
+                if let Some(state) = self.state.installs.get_mut(&install) {
+                    // Request observations may arrive while the worker prepares an update.
+                    update.state.badge_counts = state.dnr.badge_counts.clone();
+                    update.status.dropped_observations = state.network_status.dropped_observations;
+                    update.status.dropped_matches = state.network_status.dropped_matches;
+                    if let Some((_, _, request @ DnrRequest::SetExtensionActionOptions { .. })) =
+                        &pending
+                    {
+                        if let Ok(candidate) = state.dnr.prepare(request) {
+                            update.state.badge_counts = candidate.badge_counts;
+                        }
+                    }
+                    state.dnr = update.state;
+                    state.network_status = update.status;
+                    state.network_status.loading = false;
+                    state.network_ready = true;
+                    start = state.pending_network_start.take();
+                }
+                self.sync_dnr_badges(install);
+                Ok(update.value)
+            }
+            Err(error) => {
+                if let Some(state) = self.state.installs.get_mut(&install) {
+                    state.network_status.loading = false;
+                    state.network_status.error = Some(error.message().to_owned());
+                }
+                self.record_error(
+                    install,
+                    ExtensionErrorKind::Startup,
+                    ContextKind::Background,
+                    error.message().to_owned(),
+                    Value::Null,
+                );
+                Err(error)
+            }
+        };
+        if let Some(status) = self.network_status(install) {
+            self.op(NativeOp::Notify(Notice::NetworkStatus { install, status }));
+        }
+        if let Some((_, completion)) = permissions {
+            completion.settle(
+                result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| error.message().to_owned()),
+            );
+        }
+        if let Some((_, responder, _)) = pending {
+            self.settle(responder, result, out);
+        }
+        if let Some(generation) = start {
+            self.start(install, generation, out);
+        }
+        self.settle_blockers(out);
+    }
+
+    fn sync_dnr_badges(&mut self, install: ExtensionInstallId) {
+        let Some(state) = self.state.installs.get(&install) else {
+            return;
+        };
+        let badges: Vec<_> = state
+            .dnr
+            .badge_counts
+            .keys()
+            .map(|tab| (*tab, state.dnr.badge_text(*tab)))
+            .collect();
+        if let Some(browser) = &mut self.state.browser {
+            for (tab, text) in badges {
+                let _ = browser.set_dnr_badge(install, tab, text.as_deref());
+            }
+        }
     }
 
     pub(crate) fn take_ops(&mut self) -> Vec<NativeOp> {
@@ -1287,8 +1569,13 @@ impl RuntimeHost {
 
     // ---- installs -------------------------------------------------------
 
+    pub(crate) fn network_retiring(&self, install: ExtensionInstallId) -> bool {
+        self.network_retiring.contains_key(&install)
+    }
+
     pub(crate) fn has_pending_script_writes(&self, install: ExtensionInstallId) -> bool {
-        self.retired_script_writes.contains_key(&install)
+        self.network_retiring(install)
+            || self.retired_script_writes.contains_key(&install)
             || self
                 .state
                 .installs
@@ -1303,6 +1590,33 @@ impl RuntimeHost {
         let unlimited = admitted.permissions.has_api("unlimitedStorage");
         let clipboard = admitted.permissions.has_api("clipboardRead")
             || admitted.permissions.has_api("clipboardWrite");
+        self.next_network_epoch += 1;
+        let network_epoch = self.next_network_epoch;
+        let needs_network = admitted.permissions.has_api("declarativeNetRequest")
+            || admitted
+                .permissions
+                .has_api("declarativeNetRequestWithHostAccess")
+            || admitted
+                .manifest
+                .raw()
+                .get("declarative_net_request")
+                .is_some();
+        let network_install = needs_network.then(|| network::Install {
+            install,
+            epoch: network_epoch,
+            extension_id: admitted.extension_id.as_str().to_owned(),
+            install_order: self
+                .network_orders
+                .get(&install)
+                .copied()
+                .unwrap_or(network_epoch),
+            root: admitted.root.clone(),
+            manifest: admitted.manifest.clone(),
+            permissions: admitted.permissions.clone(),
+            state_directory: admitted.state_directory.clone(),
+            fresh: matches!(activation, Activation::Installed),
+            updated: matches!(activation, Activation::Updated { .. }),
+        });
         let worker_surface = admitted
             .background
             .as_ref()
@@ -1316,6 +1630,14 @@ impl RuntimeHost {
         })
         .unwrap_or_default();
         let mut state = InstallState {
+            dnr: DnrState::default(),
+            network_status: NetworkStatus {
+                loading: needs_network,
+                ..NetworkStatus::default()
+            },
+            network_epoch,
+            network_ready: !needs_network,
+            pending_network_start: None,
             extension_id: admitted.extension_id,
             catalog: binding_catalog(&admitted.messages),
             manifest: admitted.manifest.raw().clone(),
@@ -1421,6 +1743,17 @@ impl RuntimeHost {
         };
         let has_background = state.background.is_some();
         self.state.installs.insert(install, state);
+        if let Some(network_install) = network_install {
+            if !self.network.submit(network::Job::Install(network_install)) {
+                self.record_error(
+                    install,
+                    ExtensionErrorKind::Startup,
+                    ContextKind::Background,
+                    "Declarative network request worker is unavailable.".into(),
+                    Value::Null,
+                );
+            }
+        }
         if script_restore_failed {
             self.record_error(
                 install,
@@ -1485,6 +1818,8 @@ impl RuntimeHost {
         let Some(state) = self.state.installs.remove(&install) else {
             return;
         };
+        // Removal is a FIFO barrier even when installation preparation failed.
+        self.network.submit(network::Job::Remove { install });
         if let Some(pending) = &state.script_pending {
             self.retired_script_writes.insert(install, pending.ticket);
         }
@@ -1505,10 +1840,7 @@ impl RuntimeHost {
         self.lifecycle.forget(install);
         self.permissions.remove(&install);
         if erase {
-            self.storage.submit(Job::Destroy {
-                install,
-                directory: state.state_directory,
-            });
+            self.network_retiring.insert(install, state.state_directory);
         } else {
             self.storage.submit(Job::Close { install });
         }
@@ -1745,6 +2077,19 @@ impl RuntimeHost {
         self.tick_clock();
         for done in done {
             match done {
+                Done::Destroyed { install, failed } => {
+                    if failed {
+                        self.record_error(
+                            install,
+                            ExtensionErrorKind::Console,
+                            ContextKind::Background,
+                            "Extension storage could not be removed.".into(),
+                            Value::Null,
+                        );
+                    } else {
+                        self.network_retiring.remove(&install);
+                    }
+                }
                 Done::Scripts { ticket, result } => {
                     self.retired_script_writes
                         .retain(|_, pending| *pending != ticket);
@@ -1986,6 +2331,10 @@ impl RuntimeHost {
         let Some(state) = self.state.installs.get_mut(&install) else {
             return;
         };
+        if !state.network_ready {
+            state.pending_network_start = Some(generation);
+            return;
+        }
         let Some(script) = state.background.clone() else {
             return;
         };
@@ -1996,6 +2345,7 @@ impl RuntimeHost {
             messages: &state.catalog,
             ui_language: &ui_language,
             incognito,
+            unpacked: state.unpacked,
             permissions: &state.granted,
         };
         let launch = background::launch(
@@ -2598,6 +2948,32 @@ impl RuntimeHost {
 
     fn work(&mut self, work: Work, out: &mut Outbox) {
         match work {
+            Work::Dnr {
+                responder,
+                sender,
+                request,
+            } => {
+                let epoch = self
+                    .state
+                    .installs
+                    .get(&sender.install())
+                    .map(|state| state.network_epoch);
+                self.next_ticket += 1;
+                let ticket = self.next_ticket;
+                if epoch.is_some_and(|epoch| {
+                    self.network.submit(network::Job::Call {
+                        install: sender.install(),
+                        epoch,
+                        ticket,
+                        request: request.clone(),
+                    })
+                }) {
+                    self.network_tickets
+                        .insert(ticket, (sender.install(), responder, request));
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
             Work::Scripts(call) => {
                 let install = call.sender.install();
                 if let Some(state) = self.state.installs.get_mut(&install) {
@@ -3066,6 +3442,99 @@ impl RuntimeHost {
 }
 
 impl Runtime for RuntimeHost {
+    fn request_loss(&mut self, observations: u64, matches: u64) {
+        if observations == 0 && matches == 0 {
+            return;
+        }
+        let mut notices = Vec::new();
+        for (install, state) in &mut self.state.installs {
+            state.network_status.dropped_observations = state
+                .network_status
+                .dropped_observations
+                .saturating_add(observations);
+            state.network_status.dropped_matches =
+                state.network_status.dropped_matches.saturating_add(matches);
+            notices.push((*install, state.network_status.clone()));
+        }
+        for (install, status) in notices {
+            self.op(NativeOp::Notify(Notice::NetworkStatus { install, status }));
+        }
+    }
+
+    fn observed_requests(
+        &mut self,
+        _: crate::bridge::BridgeViewId,
+        owner: ViewRef,
+        observations: Vec<zephium_webkit_web_process_protocol::protocol::RequestEvent>,
+        out: &mut Outbox,
+    ) {
+        self.tick_clock();
+        let tab_id = match owner {
+            ViewRef::Tab(tab) => self.state.network_tabs.get(&tab).copied().unwrap_or(-1),
+            _ => -1,
+        };
+        let time_stamp = self.state.unix_millis as f64;
+        for observation in observations {
+            self.next_network_request = self.next_network_request.saturating_add(1);
+            let request_id = self.next_network_request.to_string();
+            let resource_type = match observation.resource_type.as_str() {
+                "MainFrame" => "main_frame",
+                "SubFrame" => "sub_frame",
+                "Script" | "Worker" => "script",
+                "Stylesheet" => "stylesheet",
+                "Image" => "image",
+                "Font" => "font",
+                "Media" => "media",
+                "Fetch" => "xmlhttprequest",
+                "Object" => "object",
+                "Ping" => "ping",
+                "CspReport" => "csp_report",
+                _ => "other",
+            };
+            for matched in observation.matched_rules {
+                let install = self.state.installs.iter().find_map(|(id, state)| {
+                    (state.extension_id.as_str() == matched.extension_id).then_some(*id)
+                });
+                let Some(install) = install else {
+                    continue;
+                };
+                let Some(state) = self.state.installs.get_mut(&install) else {
+                    continue;
+                };
+                if !state
+                    .dnr
+                    .record_match(&matched.ruleset_id, matched.rule_id, tab_id, time_stamp)
+                {
+                    continue;
+                }
+                self.network.submit(network::Job::Feedback {
+                    install,
+                    epoch: state.network_epoch,
+                    ruleset_id: matched.ruleset_id.clone(),
+                    rule_id: matched.rule_id,
+                    tab_id,
+                    time_stamp,
+                });
+                let debug = state.unpacked
+                    && self.permissions.get(&install).is_some_and(|permissions| {
+                        permissions.has_api("declarativeNetRequestFeedback")
+                    });
+                self.sync_dnr_badges(install);
+                if debug {
+                    let args = json!([{ "rule": { "ruleId": matched.rule_id, "rulesetId": matched.ruleset_id }, "request": { "requestId": request_id, "url": observation.url, "method": observation.method, "type": resource_type, "tabId": tab_id, "frameId": if observation.is_main_frame { 0 } else { -1 }, "parentFrameId": -1, "timeStamp": time_stamp, "initiator": observation.initiator } }]);
+                    self.emit(
+                        install,
+                        "declarativeNetRequest.onRuleMatchedDebug",
+                        &args,
+                        StartReason::Event,
+                        out,
+                    );
+                }
+            }
+        }
+        self.settle_blockers(out);
+    }
+
     fn transport_unavailable(
         &mut self,
         _view: crate::bridge::BridgeViewId,
@@ -3199,6 +3668,17 @@ impl Runtime for RuntimeHost {
     }
 
     fn frame_lifecycle(&mut self, event: &FrameLifecycle, _: &mut Outbox) {
+        if let FrameLifecycle::MainDocumentChanged { tab, .. } = event {
+            if let Some(tab_id) = self.state.network_tabs.get(tab).copied() {
+                for (install, state) in &mut self.state.installs {
+                    state.dnr.navigation_committed(tab_id);
+                    if let Some(browser) = &mut self.state.browser {
+                        let _ = browser.set_dnr_badge(*install, tab_id, None);
+                    }
+                }
+                self.network.submit(network::Job::Navigation { tab_id });
+            }
+        }
         // Resolve createDocument once the bridge saw the load: posts the
         // document made before it are handled by the next idle.
         if let FrameLifecycle::DocumentLoaded {

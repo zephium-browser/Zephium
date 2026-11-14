@@ -7912,6 +7912,7 @@ dependencies = [
  "webkit2gtk",
  "zephium-core",
  "zephium-webext",
+ "zephium-webext-dnr",
  "zephium-webext-runtime",
  "zephium-webkit-web-process-protocol",
 ]

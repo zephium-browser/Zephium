@@ -279,6 +279,7 @@ impl ResolvedPlan {
             protocol_version: PROTOCOL_VERSION,
             token: token.to_owned(),
             generation,
+            tab_id: -1,
             role,
             limits: limits(role),
             worlds: self

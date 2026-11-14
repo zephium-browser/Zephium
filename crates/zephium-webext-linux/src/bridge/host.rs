@@ -277,6 +277,23 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         self.finish_register(view, result, false)
     }
 
+    /// Attaches a tab with the browser's stable Chrome tab identity for DNR.
+    pub fn attach_tab_with_id(
+        &self,
+        tab: ItemId,
+        tab_id: i32,
+        view: &webkit2gtk::WebView,
+        plan: &AttachPlan,
+    ) -> Result<BridgeViewId, RegisterError> {
+        self.check_view(view)?;
+        let result = self
+            .shared
+            .core
+            .borrow_mut()
+            .register_tab_with_id(tab, tab_id, plan);
+        self.finish_register(view, result, false)
+    }
+
     /// Attaches a runtime-owned extension view. Call before its first load.
     pub fn attach_extension_view(
         &self,
@@ -407,10 +424,24 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
     /// plan applies it, now and on every later attachment. Returns its
     /// policy generation.
     pub fn publish_policy(&self, bytes: &[u8]) -> Result<u64, PolicyError> {
-        let policy = Rc::new(SealedPolicy::new(bytes)?);
+        Ok(self.publish_sealed_policy(SealedPolicy::new(bytes)?))
+    }
+
+    /// Publishes a snapshot prepared and sealed by a worker thread.
+    pub fn publish_sealed_policy(&self, policy: SealedPolicy) -> u64 {
+        self.publish_prepared_policy(Rc::new(policy))
+    }
+
+    /// Publishes an already sealed snapshot, retaining shared rollback ownership.
+    pub fn publish_prepared_policy(&self, policy: Rc<SealedPolicy>) -> u64 {
         let generation = self.shared.core.borrow_mut().publish_policy(policy);
         self.shared.collect();
-        Ok(generation)
+        generation
+    }
+
+    /// `None` means unknown; `Err(false)` pending; `Err(true)` refused.
+    pub fn policy_status(&self, generation: u64) -> Option<Result<(), bool>> {
+        self.shared.core.borrow().policy_status(generation)
     }
 
     /// Publishes this profile's immutable script snapshot to future documents.
@@ -804,7 +835,17 @@ impl<R: Runtime + 'static> Shared<R> {
                         view,
                         owner,
                         observations,
-                    } => runtime.requests(BridgeViewId(view), owner, observations),
+                        dropped_observations,
+                        dropped_matches,
+                    } => {
+                        runtime.request_loss(dropped_observations, dropped_matches);
+                        runtime.observed_requests(
+                            BridgeViewId(view),
+                            owner,
+                            observations,
+                            &mut outbox,
+                        );
+                    }
                     Effect::Form {
                         view,
                         owner,
@@ -909,7 +950,9 @@ impl<R: Runtime + 'static> Shared<R> {
             Outgoing::Deliver { context } => {
                 core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied));
             }
-            Outgoing::Policy { .. } => core.policy_settled(reply == Ok(DeliveryStatus::Delivered)),
+            Outgoing::Policy { policy_generation } => {
+                core.policy_settled(policy_generation, reply == Ok(DeliveryStatus::Delivered))
+            }
             Outgoing::Scripts { table_generation } => {
                 core.scripts_settled(id, table_generation, reply == Ok(DeliveryStatus::Delivered))
             }
