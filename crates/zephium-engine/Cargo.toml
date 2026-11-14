@@ -170,6 +170,7 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 javascriptcore-rs = "=1.1.2"
+libc = "0.2"
 tempfile.workspace = true
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 zephium-webext-linux = { path = "../zephium-webext-linux", version = "=0.1.0" }

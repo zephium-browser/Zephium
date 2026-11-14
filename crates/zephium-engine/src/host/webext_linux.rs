@@ -1026,6 +1026,21 @@ impl LinuxExtensions {
         sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
     }
 
+    /// Stops idle extension backgrounds: the least recently active one on a
+    /// warning, all idle ones when critical.
+    pub(crate) fn memory_pressure(&self, pressure: zephium_core::ports::engine::MemoryPressure) {
+        use zephium_core::ports::engine::MemoryPressure as Engine;
+        use zephium_webext_linux::runtime::MemoryPressure;
+        let pressure = match pressure {
+            Engine::Normal => return,
+            Engine::Warning => MemoryPressure::Moderate,
+            Engine::Critical => MemoryPressure::Critical,
+        };
+        for entry in self.profiles.values() {
+            entry.runtime.memory_pressure(pressure);
+        }
+    }
+
     fn reload(&mut self, profile: ProfileId, install: ExtensionInstallId, sink: &Sink) {
         let Some(load) = self.stop(profile, install, false) else {
             return;
