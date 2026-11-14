@@ -16,6 +16,7 @@
 <body>Font fixture
 <script>
 globalThis.dnrProbes = {};
+document.querySelector('audio').load();
 fetch('/dnr-resource?probe=fetch').then(() => dnrProbes.fetch = true);
 const xhr = new XMLHttpRequest();
 xhr.open('GET', '/dnr-resource?probe=xhr');
@@ -27,13 +28,4 @@ worker.onmessage = () => { dnrProbes.worker = true; worker.terminate(); };
 const socket = new WebSocket(location.origin.replace('http:', 'ws:') + '/dnr-resource?probe=websocket');
 socket.onerror = () => { dnrProbes.websocket = true; socket.close(); };
 window.addEventListener('load', () => document.getElementById('ping').click());
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.addEventListener('message', () => dnrProbes.serviceWorker = true);
-  navigator.serviceWorker.register('/dnr-sw.js?probe=service_worker_script')
-    .then(() => navigator.serviceWorker.ready)
-    .then(registration => registration.active.postMessage('fetch'))
-    .catch(error => dnrProbes.serviceWorkerError = String(error));
-} else {
-  dnrProbes.serviceWorkerError = 'unavailable';
-}
 </script>

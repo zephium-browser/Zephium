@@ -47,7 +47,15 @@ impl Drop for NativeSession {
         let mut drained = false;
         let mut busy_iterations = 0u64;
         let mut renderer_iterations = 0u64;
+        let mut exits: Vec<(u32, Option<u128>)> =
+            web_processes().into_iter().map(|pid| (pid, None)).collect();
         while Instant::now() < deadline {
+            let live = web_processes();
+            for (pid, exited) in &mut exits {
+                if exited.is_none() && !live.contains(pid) {
+                    *exited = Some(start.elapsed().as_millis());
+                }
+            }
             while gtk::events_pending() && Instant::now() < deadline {
                 gtk::main_iteration_do(false);
                 busy_iterations += 1;
@@ -67,7 +75,7 @@ impl Drop for NativeSession {
             std::thread::sleep(Duration::from_millis(1));
         }
         println!(
-            "WEBEXT native_shutdown drained={drained} elapsed_ms={:.3} remaining={:?} busy_iterations={busy_iterations} renderer_iterations={renderer_iterations}",
+            "WEBEXT native_shutdown drained={drained} elapsed_ms={:.3} remaining={:?} busy_iterations={busy_iterations} renderer_iterations={renderer_iterations} renderer_exit_ms={exits:?}",
             start.elapsed().as_secs_f64() * 1000.0,
             web_processes()
         );
@@ -265,6 +273,8 @@ pub fn assert_sandbox(module: &ModuleDirectory) {
 pub struct Request {
     pub path: String,
     pub header: String,
+    pub destination: String,
+    pub accept: String,
 }
 
 pub struct Fixture {
@@ -286,60 +296,17 @@ impl Fixture {
         let recorded = requests.clone();
         let thread = std::thread::spawn(move || {
             while !stopped.load(Ordering::Relaxed) {
-                let (mut socket, _) = match listener.accept() {
+                let (socket, _) = match listener.accept() {
                     Ok(socket) => socket,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(2));
+                        std::thread::sleep(Duration::from_millis(1));
                         continue;
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                socket
-                    .set_write_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                let mut chunk = [0; 1024];
-                while bytes.len() < 8192 && !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
-                    match socket.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(count) => bytes.extend_from_slice(&chunk[..count]),
-                    }
-                }
-                let request = String::from_utf8_lossy(&bytes);
-                let path = request.split_ascii_whitespace().nth(1).unwrap_or("");
-                let header = request
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("x-native-test")
-                            .then(|| value.trim())
-                    })
-                    .unwrap_or("no-native-header");
-                {
-                    let mut records = recorded.lock().unwrap();
-                    assert!(records.len() < 4096, "bounded fixture request capture");
-                    records.push(Request {
-                        path: path.into(),
-                        header: header.into(),
-                    });
-                }
-                let (mime, body) = response(path, header, port);
-                let csp = if path.starts_with("/dnr-csp") {
-                    "Content-Security-Policy: script-src 'none'; report-uri /dnr-resource?probe=csp_report\r\n"
-                } else if path.starts_with("/csp-sandbox") {
-                    "Content-Security-Policy: sandbox allow-scripts\r\n"
-                } else {
-                    ""
-                };
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\n{csp}Content-Type: {mime}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = socket.write_all(head.as_bytes());
-                let _ = socket.write_all(body.as_bytes());
+                // Connections are served concurrently, as a browser expects of a site.
+                let recorded = recorded.clone();
+                std::thread::spawn(move || serve(socket, &recorded, port));
             }
         });
         Self {
@@ -359,12 +326,82 @@ impl Drop for Fixture {
     }
 }
 
+fn serve(mut socket: std::net::TcpStream, recorded: &Mutex<Vec<Request>>, port: u16) {
+    socket.set_nonblocking(false).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 1024];
+    while bytes.len() < 8192 && !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+        match socket.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => bytes.extend_from_slice(&chunk[..count]),
+        }
+    }
+    let request = String::from_utf8_lossy(&bytes);
+    let path = request.split_ascii_whitespace().nth(1).unwrap_or("");
+    let field = |wanted: &str| {
+        request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(wanted).then(|| value.trim())
+        })
+    };
+    let header = field("x-native-test").unwrap_or("no-native-header");
+    {
+        let mut records = recorded.lock().unwrap();
+        assert!(records.len() < 4096, "bounded fixture request capture");
+        records.push(Request {
+            path: path.into(),
+            header: header.into(),
+            destination: field("sec-fetch-dest").unwrap_or("").into(),
+            accept: field("accept").unwrap_or("").into(),
+        });
+    }
+    let (mime, body) = response(path, header, port);
+    let csp = if path.starts_with("/dnr-csp") {
+        "Content-Security-Policy: script-src 'none'; report-uri /dnr-resource?probe=csp_report\r\n"
+    } else if path.starts_with("/csp-sandbox") {
+        "Content-Security-Policy: sandbox allow-scripts\r\n"
+    } else {
+        ""
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n{csp}Content-Type: {mime}\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(head.as_bytes());
+    let _ = socket.write_all(body.as_bytes());
+}
+
 fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
     let path = path
         .strip_prefix("http://")
         .and_then(|value| value.find('/').map(|at| &value[at..]))
         .unwrap_or(path);
     let route = path.split('?').next().unwrap_or(path);
+    if route == "/news" {
+        return ("text/html", news_page());
+    }
+    if let Some(kind) = path
+        .split("nt=")
+        .nth(1)
+        .map(|rest| rest.split('&').next().unwrap())
+    {
+        return match kind {
+            "js" => ("text/javascript", "void 0;".into()),
+            "css" => ("text/css", "p{margin:0}".into()),
+            "img" => (
+                "image/svg+xml",
+                "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>".into(),
+            ),
+            "json" => ("application/json", "{}".into()),
+            _ => ("text/html", "<!doctype html><p>embed</p>".into()),
+        };
+    }
     if route == "/dnr-types" {
         return ("text/html", include_str!("../dnr-resources.html").into());
     }
@@ -373,6 +410,9 @@ fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
             "text/html",
             "<!doctype html><script>globalThis.shouldBeBlocked=true;</script>".into(),
         );
+    }
+    if route == "/dnr-sw-page" {
+        return ("text/html", "<!doctype html><script>globalThis.dnrProbes={};navigator.serviceWorker.addEventListener('message',()=>dnrProbes.serviceWorker=true);navigator.serviceWorker.register('/dnr-sw.js?probe=service_worker_script').then(()=>navigator.serviceWorker.ready).then(r=>r.active.postMessage('fetch')).catch(e=>dnrProbes.serviceWorkerError=String(e));</script>".into());
     }
     if route == "/dnr-sw.js" {
         return ("text/javascript", "self.addEventListener('install',e=>e.waitUntil(self.skipWaiting()));self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));self.addEventListener('message',e=>e.waitUntil(fetch('/dnr-resource?probe=service_worker_fetch').then(()=>e.source.postMessage('sw-fetched'))));".into());
@@ -467,4 +507,50 @@ fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
         "/policy-headers" => ("text/plain", header.into()),
         _ => ("text/html", "<!doctype html><p>native fixture</p>".into()),
     }
+}
+
+/// A news-shaped page: 240 subresources over first-party, CDN, media and
+/// common advertising/analytics hosts, all served by this fixture via proxy.
+pub fn news_page() -> String {
+    let trackers = [
+        "www.googletagmanager.com/gtag/js?id=G-N",
+        "www.google-analytics.com/analytics.js?v=",
+        "securepubads.g.doubleclick.net/tag/js/gpt.js?v=",
+        "sb.scorecardresearch.com/beacon.js?v=",
+        "static.chartbeat.com/js/chartbeat.js?v=",
+        "connect.facebook.net/en_US/fbevents.js?v=",
+        "c.amazon-adsystem.com/aax2/apstag.js?v=",
+        "cdn.taboola.com/libtrc/news/loader.js?v=",
+        "widgets.outbrain.com/outbrain.js?v=",
+        "script.hotjar.com/modules.js?v=",
+    ];
+    let mut page = String::from("<!doctype html><meta charset=utf-8><title>news</title>");
+    for i in 0..3 {
+        page += &format!("<link rel=stylesheet href='http://news.test/n/site{i}.css?nt=css'>");
+        page +=
+            &format!("<link rel=stylesheet href='http://cdn.newsstatic.test/n/lib{i}.css?nt=css'>");
+    }
+    for (i, tracker) in trackers.iter().enumerate() {
+        page += &format!("<script src='http://news.test/n/app{i}.js?nt=js'></script>");
+        page += &format!(
+            "<script async src='http://cdn.newsstatic.test/n/vendor{i}.js?nt=js'></script>"
+        );
+        page += &format!("<script async src='http://{tracker}{i}&nt=js'></script>");
+    }
+    for i in 0..150 {
+        page += &format!("<img alt='' src='http://img.newsmedia.test/n/photo{i}.svg?nt=img'>");
+    }
+    for i in 0..20 {
+        page += &format!(
+            "<img alt='' src='http://pagead2.googlesyndication.com/pagead/imgad?id={i}&nt=img'>"
+        );
+    }
+    for i in 0..6 {
+        page += &format!("<iframe src='http://tpc.googlesyndication.com/safeframe/1-0-40/html/container.html?n={i}&nt=html'></iframe>");
+    }
+    for i in 0..4 {
+        page += &format!("<iframe src='http://news.test/n/embed{i}.html?nt=html'></iframe>");
+    }
+    page += "<script>for (let i = 0; i < 10; i++) { fetch('http://news.test/n/api' + i + '.json?nt=json').catch(() => {}); fetch('http://www.google-analytics.com/g/collect?v=2&n=' + i + '&nt=json').catch(() => {}); }</script>";
+    page
 }

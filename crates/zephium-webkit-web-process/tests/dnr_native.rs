@@ -166,9 +166,16 @@ fn native_dnr_enforcement_and_resource_coverage() {
     security.register_uri_scheme_as_secure("chrome-extension");
     security.register_uri_scheme_as_cors_enabled("chrome-extension");
     context.register_uri_scheme("chrome-extension", |request| {
-        assert_eq!(request.path().as_deref(), Some("/public.js"));
-        let bytes =
-            glib::Bytes::from_static(b"globalThis.dnrExtensionBody='public-extension-resource';");
+        let path = request.path().unwrap_or_default();
+        // uBOL redirect targets get an inert body: corpus files are never executed.
+        let bytes = if path.starts_with("/web_accessible_resources/")
+            && std::env::var_os("ZEPHIUM_DNR_UBOL_ROOT").is_some()
+        {
+            glib::Bytes::from_static(b"/* uBOL web-accessible resource placeholder */")
+        } else {
+            assert_eq!(path, "/public.js");
+            glib::Bytes::from_static(b"globalThis.dnrExtensionBody='public-extension-resource';")
+        };
         request.finish(
             &gio::MemoryInputStream::from_bytes(&bytes),
             bytes.len().try_into().unwrap(),
@@ -320,34 +327,120 @@ fn native_dnr_enforcement_and_resource_coverage() {
     println!("DNR native actions block=true priority_allow=true transform=true extension_redirect=true private_war_refused=true request_headers=true two_extensions=true atomic_next_request=true per_tab=true builtin_union=true main_frame=true allow_tree=true upgrade_failure_https=true feedback=true");
 
     publish(&page, 8, &[]);
-    resource_coverage(&page, &fixture, &events);
+    resource_coverage(&page, &fixture, &events, &fixture.origin, true);
+    let mut proxy = webkit2gtk::NetworkProxySettings::new(Some(&fixture.origin), &[]);
+    context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    // Public HTTP hosts are not potentially trustworthy: WebKit sends no fetch metadata.
+    resource_coverage(&page, &fixture, &events, "http://dnr-insecure.test", false);
     if let Some(root) = std::env::var_os("ZEPHIUM_DNR_UBOL_ROOT") {
-        corpus_smoke(&page, &context, &fixture, &events, Path::new(&root));
+        corpus_smoke(&page, &fixture, &events, Path::new(&root));
     }
     load(&page, "about:blank");
     page.stop_loading();
     drop(page);
-    let cleared = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let completed = cleared.clone();
-    context.website_data_manager().unwrap().clear(
-        WebsiteDataTypes::SERVICE_WORKER_REGISTRATIONS | WebsiteDataTypes::DOM_CACHE,
-        glib::TimeSpan(0),
-        None::<&gio::Cancellable>,
-        move |result| *completed.lock().unwrap() = Some(result),
-    );
-    pump_until(|| cleared.lock().unwrap().is_some());
-    cleared.lock().unwrap().take().unwrap().unwrap();
     drop(context);
 }
 
-fn resource_coverage(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events) {
-    events.borrow_mut().clear();
+#[test]
+#[ignore = "sandboxed WebKitGTK DNR; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_dnr_service_worker_coverage() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    let events = observe(&page);
+    load(&page, &format!("{}/frame?inert", fixture.origin));
+    attach(&page, 43);
+    load(&page, &format!("{}/dnr-sw-page", fixture.origin));
+    pump_until(|| {
+        evaluate(&page, "return String(globalThis.dnrProbes?.serviceWorker === true || 'serviceWorkerError' in globalThis.dnrProbes);", None) == "true"
+    });
+    pump_until(|| hit(&fixture, "probe=service_worker_fetch"));
+    pump_for(Duration::from_millis(350));
+    for kind in ["service_worker_script", "service_worker_fetch"] {
+        let native: Vec<_> = events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Requests { observations, .. } => Some(observations),
+                _ => None,
+            })
+            .flatten()
+            .filter(|row| row.url.split("probe=").nth(1) == Some(kind))
+            .map(|row| row.resource_type.clone())
+            .collect();
+        println!(
+            "DNR resource {}",
+            json!({"kind":kind,"trustworthy":true,"server":hit(&fixture, &format!("probe={kind}")),"module_types":native})
+        );
+        // The registration script fetch reaches the page hook only when WebKit
+        // runs the job in the client's page context; worker fetches never do.
+        let allowed: &[&str] = if kind == "service_worker_script" {
+            &["Worker"]
+        } else {
+            &[]
+        };
+        assert!(
+            native
+                .iter()
+                .all(|observed| allowed.contains(&observed.as_str())),
+            "update the documented {kind} limitation: {native:?}"
+        );
+    }
+    evaluate(&page, "await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister())); return true;", None);
+    let stopped = clear_service_workers(&page);
+    // A cross-site navigation leaves the worker's host process without pages.
     load(
-        page,
-        &format!("{}/dnr-types?probe=main_frame", fixture.origin),
+        &page,
+        &format!("{}/frame?after-service-worker", fixture.cross_origin),
     );
+    // WebKit keeps a process that hosted a service worker alive for a delay
+    // after the worker stops; await exactly that, so the generic teardown check
+    // still proves nothing else outlives the test.
+    support::pump_until(|| support::web_processes().len() <= 1);
+    println!(
+        "DNR service_worker_host_exit_after_stop_ms={}",
+        stopped.elapsed().as_millis()
+    );
+    page.stop_loading();
+    drop(page);
+    drop(context);
+}
+
+fn clear_service_workers(page: &webkit2gtk::WebView) -> Instant {
+    let cleared = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let completed = cleared.clone();
+    page.context()
+        .unwrap()
+        .website_data_manager()
+        .unwrap()
+        .clear(
+            WebsiteDataTypes::SERVICE_WORKER_REGISTRATIONS | WebsiteDataTypes::DOM_CACHE,
+            glib::TimeSpan(0),
+            None::<&gio::Cancellable>,
+            move |result| *completed.lock().unwrap() = Some(result),
+        );
+    pump_until(|| cleared.lock().unwrap().is_some());
+    cleared.lock().unwrap().take().unwrap().unwrap();
+    Instant::now()
+}
+
+fn resource_coverage(
+    page: &webkit2gtk::WebView,
+    fixture: &Fixture,
+    events: &Events,
+    origin: &str,
+    trustworthy: bool,
+) {
+    events.borrow_mut().clear();
+    fixture.requests.lock().unwrap().clear();
+    load(page, &format!("{origin}/dnr-types?probe=main_frame"));
     pump_for(Duration::from_secs(2));
-    println!("DNR resource_script {}", evaluate(page, "return JSON.stringify({...dnrProbes,mediaSupported:document.querySelector('audio').canPlayType('audio/wav'),mediaError:document.querySelector('audio').error?.message,webTransport:typeof WebTransport,webBundle:HTMLScriptElement.supports?.('webbundle')});", None));
+    println!("DNR resource_script {}", evaluate(page, "const audio=document.querySelector('audio');return JSON.stringify({...dnrProbes,origin:location.origin,mediaSupported:audio.canPlayType('audio/wav'),mediaNetworkState:audio.networkState,mediaReadyState:audio.readyState,mediaError:audio.error?.message,webTransport:typeof WebTransport,webBundle:HTMLScriptElement.supports?.('webbundle')});", None));
     for kind in [
         "main_frame",
         "sub_frame",
@@ -370,8 +463,6 @@ fn resource_coverage(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Eve
         "preload",
         "prefetch",
         "favicon",
-        "service_worker_script",
-        "service_worker_fetch",
         "websocket",
     ] {
         let suffix = format!("probe={kind}");
@@ -386,48 +477,51 @@ fn resource_coverage(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Eve
             .filter(|row| row.url.split("probe=").nth(1) == Some(kind))
             .map(|row| row.resource_type.clone())
             .collect();
+        let served: Vec<_> = fixture
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.path.contains(&suffix))
+            .map(|request| (request.destination.clone(), request.accept.clone()))
+            .collect();
         println!(
             "DNR resource {}",
-            json!({"kind":kind,"server":hit(fixture,&suffix),"module_types":native})
+            json!({"kind":kind,"trustworthy":trustworthy,"server":!served.is_empty(),"module_types":native,"fetch_dest_accept":served})
         );
-        if [
-            "main_frame",
-            "script",
-            "stylesheet",
-            "image",
-            "fetch",
-            "xhr",
-            "worker_fetch",
-            "beacon",
-            "preload",
-        ]
-        .contains(&kind)
-        {
-            assert!(hit(fixture, &suffix), "fixture must issue {kind}");
-            assert!(!native.is_empty(), "module must observe {kind}");
+        let expected = match kind {
+            "main_frame" => Some("MainFrame"),
+            "sub_frame" => Some("SubFrame"),
+            "object" => Some("Object"),
+            "stylesheet" => Some("Stylesheet"),
+            "image" => Some("Image"),
+            "script" | "preload" if trustworthy => Some("Script"),
+            "fetch" | "xhr" | "worker_fetch" if trustworthy => Some("Fetch"),
+            "beacon" if trustworthy => Some("Ping"),
+            _ => None,
+        };
+        if let Some(expected) = expected {
+            assert!(!served.is_empty(), "fixture must issue {kind}");
+            assert!(
+                native.iter().all(|observed| observed == expected) && !native.is_empty(),
+                "{kind} must be observed as {expected}: {native:?}"
+            );
         }
-        if kind == "websocket" {
-            assert!(hit(fixture, &suffix));
+        if kind == "websocket" && trustworthy {
+            assert!(!served.is_empty());
             assert!(
                 native.is_empty(),
                 "update documented limitation if WebKit gains WebSocket interception"
             );
         }
     }
-    evaluate(page, "if ('serviceWorker' in navigator) await Promise.all((await navigator.serviceWorker.getRegistrations()).map(r=>r.unregister())); return true;", None);
     load(
         page,
         &format!("{}/frame?coverage-finished", fixture.cross_origin),
     );
 }
 
-fn corpus_smoke(
-    page: &webkit2gtk::WebView,
-    context: &webkit2gtk::WebContext,
-    fixture: &Fixture,
-    events: &Events,
-    root: &Path,
-) {
+fn corpus_smoke(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events, root: &Path) {
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
     let started = Instant::now();
@@ -474,11 +568,6 @@ fn corpus_smoke(
                 extension_ids: vec![],
             })
             .collect();
-    let mut proxy = webkit2gtk::NetworkProxySettings::new(Some(&fixture.origin), &[]);
-    context
-        .website_data_manager()
-        .unwrap()
-        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
     let measured_url = "http://dnr-fixture.test/dnr-types";
     for (generation, enabled) in (9..).zip([false, true]) {
         publish(
@@ -526,6 +615,59 @@ fn corpus_smoke(
                 "DNR module_cost {}",
                 json!({"ubol":enabled,"samples":timing.len(),"p50_ns":timing[timing.len()/2],"p99_ns":timing[(timing.len()-1)*99/100]})
             );
+        }
+    }
+    for (generation, enabled) in (11..).zip([false, true]) {
+        publish(
+            page,
+            generation,
+            if enabled {
+                std::slice::from_ref(&policy)
+            } else {
+                &[]
+            },
+        );
+        load(page, "http://news.test/news?warm");
+        pump_for(Duration::from_millis(200));
+        let mut samples = Vec::new();
+        let mut timing = Vec::new();
+        let mut blocked = 0usize;
+        let mut redirected = 0usize;
+        let mut observed = 0usize;
+        for round in 0..20 {
+            events.borrow_mut().clear();
+            fixture.requests.lock().unwrap().clear();
+            let start = Instant::now();
+            load(page, &format!("http://news.test/news?round={round}"));
+            samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            pump_for(Duration::from_millis(150));
+            for row in events
+                .borrow()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Requests { observations, .. } => Some(observations),
+                    _ => None,
+                })
+                .flatten()
+            {
+                observed += 1;
+                blocked += usize::from(row.decision == "cancel");
+                redirected += usize::from(row.decision == "redirect");
+                if row.evaluation_time_ns > 0 {
+                    timing.push(row.evaluation_time_ns);
+                }
+            }
+        }
+        let mut sorted = samples.clone();
+        sorted.sort_by(f64::total_cmp);
+        timing.sort_unstable();
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        println!(
+            "DNR news_load {}",
+            json!({"ubol":enabled,"build":if cfg!(debug_assertions){"debug"}else{"release"},"loads":samples.len(),"mean_ms":mean,"p95_ms":sorted[(sorted.len()*95).div_ceil(100)-1],"samples_ms":samples,"observed_requests":observed,"blocked_requests":blocked,"redirected_requests":redirected,"module_p50_ns":timing.get(timing.len()/2),"module_p99_ns":timing.get(timing.len().saturating_sub(1)*99/100)})
+        );
+        if enabled {
+            assert!(blocked > 0, "uBOL defaults must block news trackers");
         }
     }
     // Corpus sample rules are selected from the read-only package, never synthesized.

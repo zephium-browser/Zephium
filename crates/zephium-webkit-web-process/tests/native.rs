@@ -645,12 +645,15 @@ fn assert_request_policy(
     for source in ["page", "classic", "module"] {
         assert!(requests.iter().any(|request| request.path
             == format!("/policy-headers?source={source}&kind=fetch")
-            && request.header == "rewritten-in-web-process"));
+            && request.header == "rewritten-in-web-process"
+            && !request.accept.is_empty()));
     }
     for kind in ["document", "script", "image"] {
         assert!(requests.iter().any(|request| request.path
             == format!("/policy-headers?source=page&kind={kind}")
-            && request.header == "rewritten-in-web-process"));
+            && request.header == "rewritten-in-web-process"
+            // Loopback is potentially trustworthy, so WebKit sends fetch metadata.
+            && !request.destination.is_empty()));
     }
     drop(requests);
     pump_for(Duration::from_millis(100));
