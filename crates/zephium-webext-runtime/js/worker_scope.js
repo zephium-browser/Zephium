@@ -364,8 +364,6 @@
       }, () => {});
     };
     const lifecycle = () => {
-      I.removeEventListener(global, 'error', onStartupError);
-      if (startupError !== null) return finish('failed', startupError);
       if (own(config, 'install') !== true) return finish('activated', null);
       const timer = I.setTimeout(() => finish('timedOut', null), LIFECYCLE_TIMEOUT_MS);
       I.PromiseThen(classes.run(global, new classes.InstallEvent('install')), (installed) => {
@@ -393,7 +391,16 @@
       });
       return undefined;
     };
-    I.setTimeout(lifecycle, 0);
+    I.setTimeout(() => {
+      I.removeEventListener(global, 'error', onStartupError);
+      if (startupError !== null) return finish('failed', startupError);
+      // Channels open after the first pass, independently of install/activate promises.
+      const channels = ['runtime.onMessage', 'runtime.onMessageExternal', 'runtime.onUserScriptMessage',
+        'runtime.onConnect', 'runtime.onConnectExternal', 'runtime.onUserScriptConnect', 'runtime.onConnectNative'];
+      for (let i = 0; i < channels.length; i++) context.hub.release(channels[i]);
+      I.PromiseThen(report('scriptReady', null), lifecycle, (error) => finish('failed', Z.errors.messageOf(error)));
+      return undefined;
+    }, 0);
     return context;
   }
 

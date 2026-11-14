@@ -1170,6 +1170,8 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
             });
             #[cfg(feature = "native-tests")]
             super::diagnostics::scope(page, frame_id, sequence, &request.world, "executeScript");
+            #[cfg(feature = "native-tests")]
+            super::diagnostics::request(request.request_id);
             let value = if request.kind == InjectionKind::Function {
                 let Ok(args_json) = CString::new(request.args_json.as_str()) else {
                     finish(id, InjectionStatus::InvalidArguments, "null".into());

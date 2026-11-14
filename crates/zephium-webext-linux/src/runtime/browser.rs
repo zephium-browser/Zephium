@@ -224,6 +224,7 @@ enum Reply {
     Tab(i32),
     Tabs(Vec<i32>, bool),
     Window(i32),
+    PopulatedWindow(i32),
 }
 
 struct FrameJob {
@@ -297,6 +298,8 @@ pub(crate) struct BrowserState {
     installs: HashMap<ExtensionInstallId, InstallFacts>,
     actions: HashMap<ExtensionInstallId, ActionStore>,
     panels: HashMap<ExtensionInstallId, zephium_webext_runtime::api::side_panel::OptionsStore>,
+    menu_generation: u64,
+    menus: HashMap<ExtensionInstallId, zephium_webext_runtime::api::context_menus::MenuStore>,
     pending: HashMap<u64, Pending>,
     injections: HashMap<u64, (u64, usize)>,
     outgoing: VecDeque<Outgoing>,
@@ -331,6 +334,79 @@ fn extension_url(extension: &str, path: &str) -> Option<String> {
 }
 
 impl Shared {
+    pub(crate) fn menu_generation(&self) -> u64 {
+        self.state.borrow().menu_generation
+    }
+    pub(crate) fn menu_document(&self, tab: ItemId) -> Option<String> {
+        self.state
+            .borrow()
+            .snapshot()
+            .ok()?
+            .tabs
+            .into_iter()
+            .find(|item| item.tab.id() == tab)
+            .map(|item| item.document_id)
+    }
+    pub(crate) fn menu_items(
+        &self,
+        tab: ItemId,
+        context: &zephium_webext_runtime::api::context_menus::MenuContext,
+    ) -> Vec<(
+        ExtensionInstallId,
+        zephium_webext_runtime::api::context_menus::MenuItem,
+    )> {
+        let state = self.state.borrow();
+        if context.menu_generation != state.menu_generation
+            || !state.snapshot().is_ok_and(|snapshot| {
+                snapshot.tabs.iter().any(|item| {
+                    item.tab.id() == tab
+                        && context.document_id.as_ref() == Some(&item.document_id)
+                        && item.committed_url() == Some(context.page_url.as_str())
+                })
+            })
+        {
+            return Vec::new();
+        }
+        state
+            .menus
+            .iter()
+            .flat_map(|(install, menu)| {
+                menu.visible(context)
+                    .into_iter()
+                    .map(|item| (*install, item))
+            })
+            .collect()
+    }
+
+    pub(crate) fn menu_clicked(
+        &self,
+        install: ExtensionInstallId,
+        tab: ItemId,
+        id: &str,
+        context: &zephium_webext_runtime::api::context_menus::MenuContext,
+    ) -> Result<(Value, BrowserTab), ApiError> {
+        let mut state = self.state.borrow_mut();
+        let snapshot = state.snapshot()?;
+        let tab = snapshot
+            .tabs
+            .into_iter()
+            .find(|item| {
+                item.tab.id() == tab
+                    && context.document_id.as_ref() == Some(&item.document_id)
+                    && item.committed_url() == Some(context.page_url.as_str())
+            })
+            .ok_or_else(ApiError::context_invalidated)?;
+        if context.menu_generation != state.menu_generation {
+            return Err(ApiError::context_invalidated());
+        }
+        let data = state
+            .menus
+            .get_mut(&install)
+            .ok_or_else(ApiError::context_invalidated)?
+            .click(id, context)?;
+        Ok((data, tab))
+    }
+
     pub(crate) fn set_profile(&self, profile: ProfileId) {
         self.state.borrow_mut().profile = Some(profile);
     }
@@ -373,6 +449,8 @@ impl Shared {
     pub(crate) fn forget(&self, install: ExtensionInstallId) -> Vec<Responder> {
         let mut state = self.state.borrow_mut();
         state.installs.remove(&install);
+        state.menu_generation = state.menu_generation.saturating_add(1);
+        state.menus.remove(&install);
         state.actions.remove(&install);
         state.panels.remove(&install);
         let ids: Vec<u64> = state
@@ -1055,6 +1133,20 @@ impl BrowserState {
                     )
                 })
                 .unwrap_or(Value::Null),
+            Reply::PopulatedWindow(id) => snapshot
+                .windows
+                .iter()
+                .find(|window| window.id == *id)
+                .map(|window| {
+                    windows::project_for(
+                        &snapshot,
+                        window,
+                        true,
+                        &pending.sender,
+                        &pending.permissions,
+                    )
+                })
+                .unwrap_or(Value::Null),
         }
     }
 
@@ -1238,12 +1330,46 @@ impl BrowserState {
     fn tabs_request(&mut self, request: tabs::Request, invocation: Invocation<'_>) -> Handled {
         use tabs::Request;
         match request {
-            Request::Create { action, .. } => {
+            Request::Create {
+                mut action,
+                properties,
+            } => {
+                if matches!(action, CoreAction::OpenExtensionPage) {
+                    let window = self.snapshot().ok().and_then(|snapshot| {
+                        snapshot
+                            .window(properties.window_id?)
+                            .ok()
+                            .map(|window| window.native_id)
+                    });
+                    action = CoreAction::CreateTab {
+                        window,
+                        url: properties.url.map(std::sync::Arc::from),
+                        active: properties.active.or(properties.selected).unwrap_or(true),
+                    };
+                }
                 self.mutate(invocation, VecDeque::from([action]), Reply::Created)
             }
             Request::Update {
-                tab_id, actions, ..
-            } => self.mutate(invocation, actions.into(), Reply::Tab(tab_id)),
+                tab_id,
+                mut actions,
+                properties,
+            } => {
+                for action in &mut actions {
+                    if matches!(action, CoreAction::OpenExtensionPage) {
+                        let Some(tab) = self.tabs.key(tab_id) else {
+                            return invocation.reply(Err(ApiError::context_invalidated()));
+                        };
+                        let Some(url) = properties.url.as_deref() else {
+                            return invocation.reply(Err(ApiError::context_invalidated()));
+                        };
+                        *action = CoreAction::LoadTabUrl {
+                            tab,
+                            url: url.into(),
+                        };
+                    }
+                }
+                self.mutate(invocation, actions.into(), Reply::Tab(tab_id))
+            }
             Request::Remove { actions, .. } => self.mutate(invocation, actions.into(), Reply::Null),
             Request::Reload { action, .. }
             | Request::Navigate { action, .. }
@@ -1324,9 +1450,21 @@ impl BrowserState {
                     )))),
                 }
             }
-            windows::Request::Create { .. } | windows::Request::Remove { .. } => {
-                self.refuse(invocation)
+            windows::Request::Create { properties } => {
+                let result = self.snapshot().and_then(|snapshot| {
+                    windows::tab_fallback(&snapshot, invocation.sender(), &properties)
+                });
+                match result {
+                    Ok((window, actions)) => {
+                        self.mutate(invocation, actions.into(), Reply::PopulatedWindow(window))
+                    }
+                    Err(error) if error.message() == unsupported().message() => {
+                        self.refuse(invocation)
+                    }
+                    Err(error) => invocation.reply(Err(error)),
+                }
             }
+            windows::Request::Remove { .. } => self.refuse(invocation),
         }
     }
 
@@ -1604,9 +1742,10 @@ impl Browser {
             BrowserRequest::Service(ServiceRequest::FontList) => {
                 invocation.reply(Ok(Value::Array(font_list())))
             }
-            BrowserRequest::Notifications(_)
-            | BrowserRequest::Service(_)
-            | BrowserRequest::Runtime(_) => state.refuse(invocation),
+            BrowserRequest::Notifications(request) => invocation.reply(
+                zephium_webext_runtime::api::notifications::unavailable(request),
+            ),
+            BrowserRequest::Service(_) | BrowserRequest::Runtime(_) => state.refuse(invocation),
         }
     }
 }
@@ -1617,7 +1756,7 @@ impl BrowserPort for Browser {
         sender: &Sender,
         request: zephium_webext_runtime::api::context_menus::Request,
     ) -> Result<Value, ApiError> {
-        let state = self.shared.state.borrow();
+        let mut state = self.shared.state.borrow_mut();
         if state.profile != Some(sender.profile())
             || state
                 .installs
@@ -1626,7 +1765,15 @@ impl BrowserPort for Browser {
         {
             return Err(ApiError::context_invalidated());
         }
-        zephium_webext_runtime::api::context_menus::unavailable(request)
+        let result = state
+            .menus
+            .entry(sender.install())
+            .or_default()
+            .apply(request);
+        if result.is_ok() {
+            state.menu_generation = state.menu_generation.saturating_add(1);
+        }
+        result
     }
 
     fn side_panel(

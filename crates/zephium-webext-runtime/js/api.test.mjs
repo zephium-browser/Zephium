@@ -419,3 +419,16 @@ test('adapter compatibility identity is confined to extension realms', () => {
   const ordinary = extensionContext('popup', {}, {globals:{navigator:{userAgent:'original'}}});
   assert.equal(ordinary.run('navigator.userAgent'), 'original');
 });
+
+test('menu inline callbacks are refused instead of disappearing during serialization', async () => {
+  const {chrome, host} = extensionContext('background', {permissions:['contextMenus']});
+  let calls = 0;
+  host.handlers['contextMenus.create'] = () => { calls++; };
+  host.handlers['contextMenus.update'] = () => { calls++; };
+  let error;
+  chrome.contextMenus.create({id:'inline', title:'Item', onclick() {}}, () => { error = chrome.runtime.lastError.message; });
+  await flush();
+  assert.equal(error, 'This function is not supported.');
+  await assert.rejects(chrome.contextMenus.update('inline', {onclick() {}}), /not supported/);
+  assert.equal(calls, 0);
+});

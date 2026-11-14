@@ -175,7 +175,7 @@
     let heldHead = 0;
     let heldTail = 0;
     let holding = false;
-    let releasedName = null;
+    let releasedNames = new I.Set();
     let nextId = 0;
 
     const report = (verb, args) => {
@@ -231,11 +231,11 @@
       // While held, deliveries queue (bounded) instead of dispatching.
       hold() {
         holding = true;
-        releasedName = null;
+        releasedNames = new I.Set();
       },
       release(name) {
         if (typeof name === 'string') {
-          releasedName = name;
+          I.SetAdd(releasedNames, name);
           I.MapForEach(held, (entry, key) => {
             if (entry.name !== name) return;
             I.MapDelete(held, key);
@@ -244,7 +244,7 @@
           return;
         }
         holding = false;
-        releasedName = null;
+        releasedNames = new I.Set();
         while (heldHead < heldTail && !holding) {
           const entry = I.MapGet(held, heldHead);
           I.MapDelete(held, heldHead);
@@ -258,7 +258,7 @@
           host.ack(seq);
           return;
         }
-        if (holding && name !== releasedName) {
+        if (holding && !I.SetHas(releasedNames, name)) {
           if (I.MapSize(held) >= HELD_LIMIT) return;
           I.MapSet(held, heldTail++, { __proto__: null, seq, name, text });
           return;

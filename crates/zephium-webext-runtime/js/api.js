@@ -547,7 +547,9 @@
           const properties = values[0];
           const callback = values[values.length - 1];
           const id = own(properties, 'id') === undefined ? ++nextMenuId : properties.id;
-          const promise = client.call(fullName, I.JSONStringify([properties]), false);
+          const promise = own(properties, 'onclick') === undefined
+            ? client.call(fullName, I.JSONStringify([properties]), false)
+            : I.PromiseReject(new I.Error('This function is not supported.'));
           settle(promise, callback, spec);
           return id;
         };
@@ -585,7 +587,9 @@
           const callback = takesCallback ? values[values.length - 1] : null;
           const callValues = takesCallback ? I.ArraySlice(values, 0, values.length - 1) : values;
           let promise;
-          if (local !== undefined) {
+          if (fullName === 'contextMenus.update' && own(callValues[1], 'onclick') !== undefined) {
+            promise = I.PromiseReject(new I.Error('This function is not supported.'));
+          } else if (local !== undefined) {
             promise = local(callValues, fullName, signature);
           } else {
             let text;

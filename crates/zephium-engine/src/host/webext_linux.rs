@@ -2,6 +2,7 @@
 //! context, attached to ordinary tab views only. Private profiles run no
 //! extensions. Work, agent, preview and privileged views never reach here.
 
+mod menu;
 mod popup;
 
 use std::cell::{Cell, RefCell};
@@ -713,7 +714,8 @@ impl LinuxExtensions {
             }
             false
         });
-        entry.handlers.insert(tab, vec![loaded, failed]);
+        let menu = menu::attach(&entry.side, tab, &webview);
+        entry.handlers.insert(tab, vec![loaded, failed, menu]);
         match entry.runtime.attach_tab(tab, &webview) {
             Ok(id) => {
                 entry.tabs.insert(tab, id);

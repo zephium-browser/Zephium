@@ -244,7 +244,11 @@ fn internal_registration_preserves_event_permissions_contexts_and_ids() {
             Some(ContextMask::of(ContextKind::Background))
         );
     }
-    for args in [json!(["activated", null]), json!(["failed", "error"])] {
+    for args in [
+        json!(["scriptReady", null]),
+        json!(["activated", null]),
+        json!(["failed", "error"]),
+    ] {
         assert!(invoke(
             &mut dispatcher,
             &mut host,
@@ -386,6 +390,10 @@ fn malformed_internal_reports_never_reach_the_host() {
         ("zephium.respond", json!(["1",1,{"async":"yes"}])),
         ("zephium.eventResult", json!([1, 1, {}])),
         ("zephium.workerLifecycle", json!(["running", null])),
+        (
+            "zephium.workerLifecycle",
+            json!(["scriptReady", "unexpected"]),
+        ),
         (
             "zephium.workerLifecycle",
             json!(["installed", "unexpected"]),

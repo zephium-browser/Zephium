@@ -104,7 +104,7 @@ test('install settles before onInstalled, which precedes activate and its waitUn
     `chrome-extension://${EXTENSION_ID}/chunk-1.js`,
     `chrome-extension://${EXTENSION_ID}/chunk-2.js`,
   ]);
-  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['activated', null]]);
   assert.equal(typeof self.onfetch, 'object');
 });
 
@@ -121,6 +121,26 @@ test('ordinary events wait for activation; replies to calls do not', async () =>
   assert.deepEqual(heard, ['startup']);
 });
 
+test('message listeners run after the first pass while installation is still pending', async () => {
+  const { chrome, host, inWorker, self } = workerRealm();
+  const heard = [];
+  let finishInstall;
+  self.installation = new Promise((resolve) => { finishInstall = resolve; });
+  inWorker('self.addEventListener("install", (event) => event.waitUntil(self.installation))');
+  chrome.runtime.onMessage.addListener(() => { heard.push('message'); });
+  chrome.runtime.onStartup.addListener(() => heard.push('startup'));
+  const listener = host.callsTo('zephium.addListener').find((call) => call.args[0] === 'runtime.onMessage').args[1];
+  host.event('runtime.onMessage', ['{}', {}, '123', [listener]]);
+  host.event('runtime.onStartup', []);
+  assert.deepEqual(heard, []);
+  await flush();
+  assert.deepEqual(lifecycle(host), [['scriptReady', null]]);
+  assert.deepEqual(heard, ['message']);
+  finishInstall();
+  await flush();
+  assert.deepEqual(heard, ['message', 'startup']);
+});
+
 test('activation waits for host acceptance of the delivered onInstalled event', async () => {
   const { chrome, host, inWorker, self } = workerRealm();
   const order = [];
@@ -130,16 +150,16 @@ test('activation waits for host acceptance of the delivered onInstalled event', 
   inWorker('self.addEventListener("activate", () => self.order.push("activate"))');
   await flush();
   assert.deepEqual(order, []);
-  assert.deepEqual(lifecycle(host), [['installed', null]]);
-  const call = host.callsTo('zephium.workerLifecycle')[0];
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null]]);
+  const call = host.callsTo('zephium.workerLifecycle').find((call) => call.args[0] === 'installed');
   const sequence = host.event('runtime.onInstalled', [{ reason: 'install' }]);
   assert.deepEqual(order, ['onInstalled']);
   assert.ok(host.acks.includes(sequence));
-  assert.deepEqual(lifecycle(host), [['installed', null]]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null]]);
   host.reply(call.id, null);
   await flush();
   assert.deepEqual(order, ['onInstalled', 'activate']);
-  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['activated', null]]);
 });
 
 test('host refusal of installation prevents activation and keeps ordinary events held', async () => {
@@ -154,7 +174,7 @@ test('host refusal of installation prevents activation and keeps ordinary events
   host.event('runtime.onStartup', []);
   await flush();
   assert.deepEqual(plain(self.fired), []);
-  assert.deepEqual(lifecycle(host), [['installed', null], ['failed', 'Installation context expired.']]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['failed', 'Installation context expired.']]);
   assert.deepEqual(host.acks, []);
 });
 
@@ -175,14 +195,14 @@ test('a later start of an installed worker fires no install event', async () => 
   inWorker('self.addEventListener("install", () => self.fired.push("install"))');
   await flush();
   assert.deepEqual(plain(self.fired), []);
-  assert.deepEqual(lifecycle(host), [['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['activated', null]]);
 });
 
 test('a failing install or a startup error is reported to the host', async () => {
   const failing = workerRealm();
   failing.inWorker('self.addEventListener("install", (e) => e.waitUntil(Promise.reject(new Error("no"))))');
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(lifecycle(failing.host), [['failed', 'install']]);
+  assert.deepEqual(lifecycle(failing.host), [['scriptReady', null], ['failed', 'install']]);
 
   const broken = workerRealm();
   broken.self.dispatchEvent(Object.assign(new Event('error'), { message: 'Uncaught SyntaxError' }));
@@ -197,20 +217,20 @@ test('activation failure retains queued events and reports failure', async () =>
   host.event('runtime.onStartup', []);
   inWorker('self.addEventListener("activate", (event) => event.waitUntil(Promise.reject(new Error("no"))))');
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(lifecycle(host), [['installed', null], ['failed', 'activate']]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['failed', 'activate']]);
   assert.equal(called, 0);
   assert.deepEqual(host.acks, []);
 });
 
 test('event release waits for host acceptance of worker activation', async () => {
   const { chrome, host } = workerRealm({ install: false });
-  host.handlers['zephium.workerLifecycle'] = () => host.LATER;
+  host.handlers['zephium.workerLifecycle'] = ([state]) => state === 'activated' ? host.LATER : null;
   let called = 0;
   chrome.runtime.onStartup.addListener(() => called++);
   host.event('runtime.onStartup', []);
   await flush();
   assert.equal(called, 0);
-  const call = host.callsTo('zephium.workerLifecycle')[0];
+  const call = host.callsTo('zephium.workerLifecycle').find((call) => call.args[0] === 'activated');
   host.reply(call.id, null);
   await flush();
   assert.equal(called, 1);
@@ -235,7 +255,7 @@ test('classic workers reuse installation imports and refuse fresh imports after 
     }, 0)));
   })`);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['activated', null]]);
   inWorker('importScripts("./initial.js#again", "during-install.js")');
   assert.deepEqual(plain(self.imported), [
     `chrome-extension://${EXTENSION_ID}/initial.js`,

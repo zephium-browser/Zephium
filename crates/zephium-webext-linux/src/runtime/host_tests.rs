@@ -435,6 +435,86 @@ fn a_message_with_no_receiver_fails_like_chrome() {
 }
 
 #[test]
+fn worker_self_messages_wait_for_first_pass_and_exclude_its_own_listener() {
+    let mut harness = Harness::new();
+    let mut out = Outbox::default();
+    harness
+        .host
+        .admit(admitted(harness.install), &Activation::Installed, &mut out);
+    harness.ops();
+    let (_view, sender) = harness.sender(ViewKind::Background, "_zephium/background.html");
+    harness.call(&sender, "zephium.workerReport", json!(["booted", null]));
+    assert!(
+        replies(&harness.call(&sender, "runtime.sendMessage", json!([null, "1", null]))).is_empty()
+    );
+    harness.call(
+        &sender,
+        "zephium.addListener",
+        json!(["runtime.onMessage", 1, null, null]),
+    );
+    assert!(
+        replies(&harness.call(&sender, "runtime.sendMessage", json!([null, "2", null]))).is_empty()
+    );
+    let ready = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["scriptReady", null]),
+    );
+    let errors: Vec<_> = replies(&ready)
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
+    assert_eq!(
+        errors,
+        vec!["Could not establish connection. Receiving end does not exist."; 2]
+    );
+    assert!(events(&ready).is_empty());
+    assert_eq!(harness.state(), Some(BackgroundState::Starting));
+    assert!(!harness.host.status(harness.install).unwrap().ready);
+    let during_install = harness.call(&sender, "runtime.sendMessage", json!([null, "3", null]));
+    assert_eq!(
+        replies(&during_install),
+        vec![Err(
+            "Could not establish connection. Receiving end does not exist.".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn failed_first_pass_settles_parked_self_message_and_drops_its_authority() {
+    let mut harness = Harness::new();
+    let mut out = Outbox::default();
+    harness
+        .host
+        .admit(admitted(harness.install), &Activation::Installed, &mut out);
+    harness.ops();
+    let (_view, sender) = harness.sender(ViewKind::Background, "_zephium/background.html");
+    harness.call(&sender, "zephium.workerReport", json!(["booted", null]));
+    assert!(
+        replies(&harness.call(&sender, "runtime.sendMessage", json!([null, "1", null]))).is_empty()
+    );
+    let failed = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["failed", "script"]),
+    );
+    assert!(replies(&failed).iter().any(Result::is_err));
+    assert!(harness.host.state.installs[&harness.install]
+        .parked
+        .is_empty());
+    let stale = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["scriptReady", null]),
+    );
+    assert!(events(&stale).is_empty());
+    assert!(!harness.host.state.installs[&harness.install]
+        .live
+        .as_ref()
+        .is_some_and(|live| live.script_ready));
+}
+
+#[test]
 fn blockers_keep_a_background_running_past_the_idle_timeout() {
     let mut harness = Harness::new();
     let (background, _, out) = harness.running(&["runtime.onInstalled"]);
@@ -1173,4 +1253,69 @@ fn linux_dispatch_includes_menu_and_panel_apis() {
     for name in shared.names() {
         assert_eq!(linux.contexts(name), shared.contexts(name), "{name}");
     }
+}
+
+#[test]
+fn context_menu_registration_survives_background_stop_and_restart() {
+    let mut harness = Harness::new();
+    let mut install = admitted(harness.install);
+    let mut raw = install.manifest.raw().clone();
+    raw["permissions"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("contextMenus"));
+    install.manifest = Manifest::from_value(raw);
+    let (declaration, _) = PermissionDeclaration::from_manifest(&install.manifest);
+    install.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    let mut out = Outbox::default();
+    harness
+        .host
+        .admit(install, &Activation::Installed, &mut out);
+    let (background, first, out) = harness.boot(&["contextMenus.onClicked"]);
+    for (seq, ..) in events(&out) {
+        harness.ack(&background, seq);
+    }
+    let out = harness.call(
+        &background,
+        "contextMenus.create",
+        json!([{"id":"retained","title":"Before restart"}]),
+    );
+    assert_eq!(replies(&out), vec![Ok(json!("retained"))]);
+    harness.advance(IDLE_TIMEOUT_NANOS);
+    harness.tick();
+    assert_eq!(stops(&harness.ops()), vec![first]);
+    harness
+        .host
+        .background_stopped(harness.install, first, &mut Outbox::default());
+    harness.host.observe(
+        Observation::Wake {
+            install: harness.install,
+            reason: StartReason::Event,
+        },
+        &mut Outbox::default(),
+    );
+    let (background, second, _) = harness.boot(&["contextMenus.onClicked"]);
+    assert!(second > first);
+    let out = harness.call(
+        &background,
+        "contextMenus.create",
+        json!([{"id":"retained","title":"Duplicate"}]),
+    );
+    assert!(replies(&out)[0]
+        .as_ref()
+        .unwrap_err()
+        .contains("duplicate id"));
+    let out = harness.call(
+        &background,
+        "contextMenus.update",
+        json!(["retained",{"title":"After restart"}]),
+    );
+    assert_eq!(replies(&out), vec![Ok(Value::Null)]);
+    let out = harness.call(&background, "contextMenus.remove", json!(["retained"]));
+    assert_eq!(replies(&out), vec![Ok(Value::Null)]);
 }

@@ -155,6 +155,7 @@ struct Live {
     generation: u64,
     sender: Option<Sender>,
     booted: bool,
+    script_ready: bool,
     activated: bool,
     installed: bool,
     installing: Option<Responder>,
@@ -2197,6 +2198,7 @@ impl RuntimeHost {
             message.to_owned(),
             Value::Null,
         );
+        self.fail_parked(install, &no_receiver(), out);
         self.observe(
             Observation::WorkerFailed {
                 install,
@@ -2589,6 +2591,7 @@ impl RuntimeHost {
             generation,
             sender: None,
             booted: false,
+            script_ready: false,
             activated: false,
             installed: false,
             installing: None,
@@ -2629,6 +2632,7 @@ impl RuntimeHost {
             .filter(|live| live.generation == generation)
         {
             live.sender = None;
+            live.script_ready = false;
             live.activated = false;
             live.installing = None;
             live.delivering = None;
@@ -2893,14 +2897,14 @@ impl RuntimeHost {
     }
 
     /// Whether a request to `install`'s pages must first wake its background.
-    fn needs_background(&self, install: ExtensionInstallId, source: &Sender, event: &str) -> bool {
+    fn needs_background(&self, install: ExtensionInstallId, event: &str) -> bool {
         let Some(state) = self.state.installs.get(&install) else {
             return false;
         };
-        if state.background.is_none() || source.kind() == ContextKind::Background {
+        if state.background.is_none() {
             return false;
         }
-        let ready = state.live.as_ref().is_some_and(|live| live.activated);
+        let ready = state.live.as_ref().is_some_and(|live| live.script_ready);
         // A background already starting has not registered its listeners
         // yet: wait for it, as Chrome waits for a starting service worker.
         let starting = self.lifecycle.state(install) == Some(BackgroundState::Starting);
@@ -2947,7 +2951,7 @@ impl RuntimeHost {
         out: &mut Outbox,
     ) {
         let install = sender.install();
-        if self.needs_background(install, &sender, "runtime.onMessage") {
+        if self.needs_background(install, "runtime.onMessage") {
             let parked = Parked::Send {
                 sender,
                 payload,
@@ -3071,7 +3075,7 @@ impl RuntimeHost {
         };
         self.settle(responder, Ok(Value::String(port.get().to_string())), out);
         let install = sender.install();
-        if self.needs_background(install, &sender, "runtime.onConnect") {
+        if self.needs_background(install, "runtime.onConnect") {
             let parked = Parked::Connect {
                 port,
                 deadline: self.state.now.saturating_add(PARKED_TIMEOUT_NANOS),
@@ -3535,6 +3539,17 @@ impl RuntimeHost {
             return;
         };
         match report {
+            WorkerLifecycle::ScriptReady => {
+                if let Some(live) = self
+                    .state
+                    .installs
+                    .get_mut(&install)
+                    .and_then(|state| state.live.as_mut())
+                {
+                    live.script_ready = true;
+                }
+                self.release_parked(install, out);
+            }
             WorkerLifecycle::Installed => {}
             WorkerLifecycle::Activated => {
                 let _ = self.state.registry.finish_registration(sender);
@@ -3549,6 +3564,7 @@ impl RuntimeHost {
                     }
                     state.fresh = false;
                     if let Some(live) = state.live.as_mut() {
+                        live.script_ready = true;
                         live.activated = true;
                         live.booted = true;
                         state.startup_ms =
@@ -3636,6 +3652,10 @@ impl RuntimeHost {
         self.awaiting.retain(|_, waiting| waiting != context);
         self.state.registry.cancel_context(context);
         if let Some(state) = self.state.installs.get_mut(&context.install()) {
+            state.parked.retain(|call| match call {
+                Parked::Send { responder, .. } => responder.context() != context,
+                Parked::Connect { .. } => true,
+            });
             state
                 .script_calls
                 .retain(|call| call.responder.context() != context);
@@ -3747,6 +3767,12 @@ impl Runtime for RuntimeHost {
         };
         let time_stamp = self.state.unix_millis as f64;
         for observation in observations {
+            #[cfg(feature = "native-tests")]
+            if std::env::var_os("ZEPHIUM_WEBEXT_MEASURE_REQUESTS").is_some() {
+                for install in self.state.installs.keys() {
+                    self.diagnostic(*install, "host", json!({"kind":"request-cost", "nanoseconds":observation.evaluation_time_ns, "listeners":self.state.registry.has_web_request_listeners()}));
+                }
+            }
             self.next_network_request = self.next_network_request.saturating_add(1);
             let request_id = self.next_network_request.to_string();
             let resource_type = match observation.resource_type.as_str() {

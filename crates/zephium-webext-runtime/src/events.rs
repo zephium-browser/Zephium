@@ -99,9 +99,34 @@ pub struct EventRegistry {
     live: HashMap<ContextKey, HashMap<(String, ListenerId), Listener>>,
     evaluating: HashSet<ContextKey>,
     durable: HashMap<ExtensionInstallId, Vec<Listener>>,
+    request_interest: bool,
 }
 
 impl EventRegistry {
+    /// Cached live or saved request interest; polling never scans the registry.
+    pub fn has_web_request_listeners(&self) -> bool {
+        self.request_interest
+    }
+
+    fn refresh_request_interest(&mut self) {
+        self.request_interest = self.live.values().any(|items| {
+            items
+                .values()
+                .any(|item| item.spec.event.starts_with("webRequest."))
+        }) || self.durable.values().any(|items| {
+            items
+                .iter()
+                .any(|item| item.spec.event.starts_with("webRequest."))
+        });
+    }
+
+    /// Extra information admitted for one exact registered callback.
+    pub fn extra_info(&self, sender: &Sender, event: &str, id: ListenerId) -> &[String] {
+        self.live
+            .get(&sender.context_key())
+            .and_then(|items| items.get(&(event.to_owned(), id)))
+            .map_or(&[], |item| item.spec.extra.as_slice())
+    }
     /// An empty registry.
     pub fn new() -> Self {
         Self::default()
@@ -116,6 +141,7 @@ impl EventRegistry {
         }
         self.live.remove(&sender.context_key());
         self.evaluating.insert(sender.context_key());
+        self.refresh_request_interest();
         Ok(())
     }
 
@@ -156,6 +182,7 @@ impl EventRegistry {
         )?;
         self.evaluating.remove(&key);
         self.durable.insert(sender.install(), listeners);
+        self.refresh_request_interest();
         Ok(())
     }
 
@@ -216,6 +243,7 @@ impl EventRegistry {
                 cost,
             },
         );
+        self.refresh_request_interest();
         Ok(true)
     }
 
@@ -238,6 +266,7 @@ impl EventRegistry {
                 durable.retain(|l| l.spec != removed.spec);
             }
         }
+        self.refresh_request_interest();
         true
     }
 
@@ -384,6 +413,7 @@ impl EventRegistry {
     pub fn cancel_context(&mut self, context: &ContextKey) {
         self.live.remove(context);
         self.evaluating.remove(context);
+        self.refresh_request_interest();
     }
 
     /// Erases all listener state when an install is removed.
@@ -391,6 +421,7 @@ impl EventRegistry {
         self.live.retain(|key, _| key.install() != install);
         self.evaluating.retain(|key| key.install() != install);
         self.durable.remove(&install);
+        self.refresh_request_interest();
     }
 
     /// Snapshot to persist under the adapter-supplied install identity.
@@ -444,6 +475,7 @@ impl EventRegistry {
         }
         check_snapshot(&listeners)?;
         self.durable.insert(install, listeners);
+        self.refresh_request_interest();
         Ok(())
     }
 
@@ -967,6 +999,7 @@ event_catalog!(
     "webRequest.onBeforeSendHeaders",
     "webRequest.onSendHeaders",
     "webRequest.onHeadersReceived",
+    "webRequest.onBeforeRedirect",
     "webRequest.onResponseStarted",
     "webRequest.onCompleted",
     "webRequest.onErrorOccurred",

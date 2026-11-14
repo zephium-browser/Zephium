@@ -167,12 +167,17 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("webRequest")],
-        "Can't watch the requests pages make",
+        "Request observation covers main documents with all-host access and active listeners only",
         LIN,
     ),
     (
         &[Permission("tabs")],
-        "Can't open its own pages in browser tabs",
+        "Opens separate extension windows as browser tabs",
+        LIN,
+    ),
+    (
+        &[Permission("webRequest")],
+        "Request observation omits subresources, workers, WebSockets, redirects and authentication",
         LIN,
     ),
     (
@@ -181,9 +186,14 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
-        // Linux accepts listeners and clears the empty registry; creation is refused.
+        // Menus survive worker restarts; full browser-session restoration is not implemented.
         &[Permission("contextMenus"), Permission("menus")],
-        "Can't add items to the right-click menu",
+        "Right-click menus lack frame details, selected text and browser-session restoration",
+        LIN,
+    ),
+    (
+        &[Permission("contextMenus"), Permission("menus")],
+        "Right-click menus require explicit IDs and onClicked listeners",
         LIN,
     ),
     (
@@ -286,11 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn own_page_tab_limitation_is_linux_only() {
+    fn window_tab_fallback_limitation_is_linux_only() {
         let raw = json!({"manifest_version":3,"permissions":["tabs"]});
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
-            ["Can't open its own pages in browser tabs"]
+            ["Opens separate extension windows as browser tabs"]
         );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
@@ -401,7 +411,7 @@ mod tests {
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
-                "Can't open its own pages in browser tabs",
+                "Opens separate extension windows as browser tabs",
                 "Can't show notifications",
             ]
         );

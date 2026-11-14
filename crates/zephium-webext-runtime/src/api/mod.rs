@@ -24,6 +24,7 @@ pub mod side_panel;
 pub mod tabs;
 pub mod top_sites;
 pub mod web_navigation;
+pub mod web_request;
 pub mod windows;
 
 /// Registers every implemented namespace using generated schemas and feature metadata.

@@ -216,7 +216,8 @@
   },
   "contextMenus": {
     "functions": [
-      "create"
+      "create",
+      "update"
     ],
     "events": [
       "onClicked"

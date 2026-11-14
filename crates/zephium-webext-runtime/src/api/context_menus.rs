@@ -4,6 +4,9 @@ use crate::dispatch::{ApiTable, RegistrationError};
 use crate::ApiError;
 use serde_json::Value;
 
+mod model;
+pub use model::{MenuContext, MenuItem, MenuStore};
+
 pub(crate) const METHODS: &[&str] = &[
     "contextMenus.create",
     "contextMenus.update",
@@ -78,6 +81,79 @@ mod tests {
     };
     use serde_json::json;
     use zephium_webext::manifest::Manifest;
+
+    #[test]
+    fn generated_menu_calls_reach_the_install_scoped_fake_port_model() {
+        let mut host = FakeBrowser::new(profile());
+        host.menus = Some(Default::default());
+        let manifest = Manifest::from_value(
+            json!({"manifest_version":3,"permissions":["contextMenus"],"background":{"service_worker":"worker.js"}}),
+        );
+        host.info.manifest = manifest.raw().clone();
+        let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+        let permissions = InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::OnAllSites,
+            false,
+        );
+        let mut table = ApiTable::new();
+        register(&mut table).unwrap();
+        let mut dispatcher = Dispatcher::new(table);
+        let sender = background_sender();
+        assert_eq!(
+            host.call(
+                &mut dispatcher,
+                &sender,
+                &permissions,
+                "contextMenus.create",
+                json!([{"id":"item","title":"Before"}])
+            )
+            .unwrap(),
+            json!("item")
+        );
+        assert!(host
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions,
+                "contextMenus.create",
+                json!([{"id":"item","title":"Duplicate"}])
+            )
+            .unwrap_err()
+            .contains("duplicate id"));
+        assert_eq!(
+            host.call(
+                &mut dispatcher,
+                &sender,
+                &permissions,
+                "contextMenus.update",
+                json!(["item",{"title":"After"}])
+            )
+            .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            host.call(
+                &mut dispatcher,
+                &sender,
+                &permissions,
+                "contextMenus.remove",
+                json!(["item"])
+            )
+            .unwrap(),
+            Value::Null
+        );
+        assert!(host
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions,
+                "contextMenus.update",
+                json!(["item",{"title":"Missing"}])
+            )
+            .is_err());
+    }
 
     #[test]
     fn unavailable_native_menu_is_defined_permission_checked_and_never_created() {

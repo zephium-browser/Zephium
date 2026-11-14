@@ -91,6 +91,9 @@ impl Fixture {
                 if path.contains("ubol-") {
                     collected.lock().unwrap().push(json!({"hit": path.clone()}));
                 }
+                if path.starts_with("/request-error") {
+                    continue;
+                }
                 if path == "/delayed.js" {
                     std::thread::sleep(Duration::from_secs(2));
                     let body = "globalThis.fixtureParsed=true;";
@@ -1252,4 +1255,184 @@ chrome.runtime.sendMessage({probe:true}, result=>{
     assert!(diagnostic_rows(&diagnostic.0)
         .iter()
         .any(|row| row["event"]["kind"] == "background-started"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn platform_capabilities() {
+    use zephium_webext_linux::diagnostics;
+    use zephium_webext_runtime::api::context_menus::MenuContext;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").unwrap());
+    let _diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Platform capabilities","version":"1.0",
+        "permissions":["tabs","webRequest","contextMenus","notifications"],"host_permissions":["<all_urls>"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]}]
+    }).to_string()).unwrap();
+    std::fs::write(package.path().join("empty.js"), "void 0;").unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><title>Own package page</title><button>Ready</button>",
+    )
+    .unwrap();
+    std::fs::write(package.path().join("worker.js"), r#"
+const seen=[]; let clicks=0, matchingWindow=0, foreignWindow=0;
+chrome.windows.getAll().then(windows=>{
+ chrome.webRequest.onBeforeRequest.addListener(()=>matchingWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id});
+ chrome.webRequest.onBeforeRequest.addListener(()=>foreignWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id+1000});
+});
+for(const event of ['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred']) {
+ const extra=event==='onBeforeSendHeaders'?['requestHeaders']:event==='onHeadersReceived'?['responseHeaders']:[];
+ chrome.webRequest[event].addListener(details=>seen.push({event,id:details.requestId,type:details.type,headers:details.responseHeaders}),{urls:['http://127.0.0.1/*']},extra);
+}
+chrome.contextMenus.create({id:'fill',title:'Fill',contexts:['editable']});
+chrome.contextMenus.onClicked.addListener(info=>{if(info.menuItemId==='fill')clicks++;});
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.report)respond({seen,clicks,matchingWindow,foreignWindow}); });
+"#).unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let _initial_tab = host.open("about:blank", true);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    let tab = host.open(&fixture.url("/password-form"), true);
+    pump(&mut host, Duration::from_secs(2));
+    let menu_context = MenuContext {
+        menu_generation: host.runtime.context_menu_generation(),
+        document_id: host.runtime.context_menu_document(tab),
+        page_url: fixture.url("/password-form"),
+        editable: true,
+        ..Default::default()
+    };
+    assert_eq!(host.runtime.context_menu_items(tab, &menu_context).len(), 1);
+    host.runtime
+        .context_menu_clicked(install, tab, "fill", &menu_context)
+        .unwrap();
+    let mut stale = menu_context.clone();
+    stale.document_id = Some("stale-document".into());
+    assert!(host
+        .runtime
+        .context_menu_clicked(install, tab, "fill", &stale)
+        .is_err());
+    let failed_tab = host.open(&fixture.url("/request-error"), false);
+    pump(&mut host, Duration::from_secs(2));
+    host.close(failed_tab);
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            r#"globalThis.result=null;(async()=>{
+ const created=await chrome.tabs.create({url:'popup.html#created'});
+ await chrome.tabs.update(created.id,{url:'popup.html#updated'});
+ const window=await chrome.windows.create({url:'popup.html#window',type:'popup'});
+ let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
+ globalThis.result={created,window,foreign,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+})().catch(e=>globalThis.result={error:e.message});return 'started';"#
+        ),
+        "started"
+    );
+    pump(&mut host, Duration::from_secs(4));
+    let result: Value = serde_json::from_str(&evaluate(
+        popup.view(),
+        "return JSON.stringify(globalThis.result);",
+    ))
+    .unwrap();
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"platform-capabilities","result":result}),
+    );
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["foreign"], true);
+    assert_eq!(result["window"]["type"], "normal");
+    assert_eq!(result["clear"], false);
+    assert_eq!(result["all"], json!({}));
+    assert_eq!(result["report"]["clicks"], 1);
+    assert!(result["report"]["matchingWindow"].as_u64().unwrap() >= 2);
+    assert_eq!(result["report"]["foreignWindow"], 0);
+    for event in [
+        "onBeforeRequest",
+        "onBeforeSendHeaders",
+        "onHeadersReceived",
+        "onCompleted",
+        "onErrorOccurred",
+    ] {
+        assert!(
+            result["report"]["seen"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["event"] == event),
+            "missing {event}: {result}"
+        );
+    }
+    let tabs: Vec<_> = host.shell.borrow().tabs.keys().copied().collect();
+    for tab in tabs {
+        host.close(tab);
+    }
+    drop(popup);
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn request_cost() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").unwrap());
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"),json!({"manifest_version":3,"name":"Zero request listeners","version":"1.0","content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]}],"host_permissions":["http://127.0.0.1/*"]}).to_string()).unwrap();
+    std::fs::write(package.path().join("empty.js"), "void 0;").unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    let tab = host.open(&fixture.url("/password-form"), true);
+    pump(&mut host, Duration::from_secs(1));
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    evaluate(&view,"globalThis.costDone=false;(async()=>{for(let i=0;i<256;i++)await fetch('/password-form?cost='+i,{cache:'no-store'});globalThis.costDone=true;})();return 'started';");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline
+        && evaluate(&view, "return globalThis.costDone===true;") != "true"
+    {
+        pump(&mut host, Duration::from_millis(100));
+    }
+    assert_eq!(
+        evaluate(&view, "return globalThis.costDone===true;"),
+        "true"
+    );
+    pump(&mut host, Duration::from_secs(1));
+    let rows = diagnostic_rows(&diagnostic.0);
+    let mut values: Vec<u64> = rows
+        .iter()
+        .filter(|row| row["event"]["kind"] == "request-cost" && row["event"]["listeners"] == false)
+        .filter_map(|row| row["event"]["nanoseconds"].as_u64())
+        .filter(|value| *value > 0)
+        .collect();
+    values.sort_unstable();
+    assert!(values.len() >= 256, "{} samples", values.len());
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"request-cost-summary","samples":values.len(),"p50_ns":values[values.len()/2],"p99_ns":values[(values.len()-1)*99/100],"mean_ns":values.iter().sum::<u64>()/values.len() as u64}),
+    );
+    host.close(tab);
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
 }

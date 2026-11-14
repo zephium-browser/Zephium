@@ -39,6 +39,10 @@ export const omittedCalls = {
 };
 
 const missing = {
+  "runtime-self-message":
+    "Real worker startup and native sender-context exclusion; checked by both browser runners.",
+  "scripting-repeat-file":
+    "Real manifest and programmatic execution in the same document and isolated world.",
   "dnr-block-allow": "Real network interception requires the native browser runner.",
   "dnr-extension-redirect":
     "Real extension resource network redirect requires the native browser runner.",

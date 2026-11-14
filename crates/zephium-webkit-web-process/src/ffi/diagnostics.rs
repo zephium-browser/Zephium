@@ -19,6 +19,14 @@ pub(super) fn scope(page: u64, frame: u64, document: u64, world: &str, trigger: 
 
 static RECORDS: AtomicUsize = AtomicUsize::new(0);
 
+pub(super) fn request(id: u64) {
+    SCOPE.with_borrow_mut(|scope| {
+        if let Some(scope) = scope {
+            scope["requestId"] = id.into();
+        }
+    });
+}
+
 fn bounded(pointer: *const c_char) -> String {
     if pointer.is_null() {
         return String::new();

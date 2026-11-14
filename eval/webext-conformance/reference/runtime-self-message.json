@@ -1,0 +1,46 @@
+{
+  "caseId": "runtime-self-message",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "worker self messages:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "worker self messages:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "after": {
+            "afterFirstPass": true,
+            "afterMicrotask": true,
+            "argumentCount": 0,
+            "error": "Could not establish connection. Receiving end does not exist.",
+            "value": null
+          },
+          "before": {
+            "afterFirstPass": true,
+            "afterMicrotask": true,
+            "error": "Could not establish connection. Receiving end does not exist."
+          },
+          "duringInstall": {
+            "afterFirstPass": true,
+            "afterMicrotask": true,
+            "error": "Could not establish connection. Receiving end does not exist."
+          },
+          "ownDeliveries": 0
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}
