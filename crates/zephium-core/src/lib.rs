@@ -20,6 +20,7 @@ pub mod injection;
 pub mod item;
 pub mod items;
 pub mod layout;
+pub mod linux_graphics;
 pub mod macos;
 /// What a tab's media is doing, and which tab the sidebar's player follows.
 pub mod media;
