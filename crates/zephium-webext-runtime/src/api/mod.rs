@@ -3,6 +3,8 @@
 
 use crate::dispatch::{ApiTable, RegistrationError};
 
+pub mod generated;
+
 /// Registers every implemented namespace.
 pub fn register<S>(_table: &mut ApiTable<S>) -> Result<(), RegistrationError> {
     Ok(())

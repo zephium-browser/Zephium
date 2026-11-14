@@ -21,6 +21,7 @@ pub mod errors;
 pub mod limits;
 pub mod pattern;
 pub mod permissions;
+pub mod schema;
 
 pub use context::{
     Authority, BindError, ClaimedWorld, CommittedDocument, ContextKey, ContextKind, ContextMask,
