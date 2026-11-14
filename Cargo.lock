@@ -7883,10 +7883,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-dnr"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "memchr",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "url",
+]
+
+[[package]]
 name = "zephium-webext-linux"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "gio",
  "glib",
  "gtk",

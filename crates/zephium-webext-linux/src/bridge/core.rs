@@ -13,10 +13,9 @@ use zephium_webext_runtime::context::{
     InstallAdmission, Sender, TabDocument, ViewKind,
 };
 use zephium_webext_runtime::limits::message_limit;
-use zephium_webext_runtime::pattern::DocumentOrigin;
 use zephium_webkit_web_process_protocol::protocol::{
-    document_origin, encode_ui, Deliver, Detach, Event, FormEvent, PageRole, PolicyUpdate, Post,
-    UiMessage, ATTACH_MESSAGE, DELIVER_MESSAGE, DETACH_MESSAGE, MAX_MESSAGE_BYTES, POLICY_MESSAGE,
+    encode_ui, Deliver, Detach, Event, FormEvent, PageRole, PolicyUpdate, Post, UiMessage,
+    ATTACH_MESSAGE, DELIVER_MESSAGE, DETACH_MESSAGE, MAX_MESSAGE_BYTES, POLICY_MESSAGE,
 };
 
 use super::buffer::{Buffered, PostBuffer, BUFFER_TIMEOUT_MS};
@@ -43,7 +42,6 @@ pub const MAX_INFLIGHT_PER_CONTEXT: usize = 16;
 pub const MAX_INFLIGHT_PER_VIEW: usize = 64;
 
 const TAB_MESSAGE_CAP: u64 = 8 * 1024 * 1024;
-const FALLBACK_GENERATION: u64 = 0;
 
 /// Transport-level counts. Refusals are per reason.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -132,13 +130,10 @@ pub(crate) enum Effect {
         document: DocumentGeneration,
         fields: Vec<(String, String)>,
     },
-    StartFallback {
+    Unavailable {
         view: u64,
-    },
-    PullDeliver {
-        view: u64,
-        context: ContextKey,
-        frame: Vec<u8>,
+        owner: ViewRef,
+        reason: super::UnavailableReason,
     },
 }
 
@@ -180,7 +175,6 @@ pub(crate) enum Phase {
     InFlight(u64),
     Live(u64),
     Refused(u64),
-    Fallback,
 }
 
 struct View {
@@ -189,11 +183,10 @@ struct View {
     attached: Option<(u64, ResolvedPlan)>,
     phase: Phase,
     reattach_on_navigation: bool,
-    allow_fallback: bool,
+    awaiting_process: bool,
     frames: FrameTable,
     buffer: PostBuffer,
     host_main: Option<Url>,
-    fallback_document: Option<DocumentGeneration>,
     contexts: HashSet<ContextKey>,
     inflight: usize,
     sent_tables: BTreeSet<u64>,
@@ -328,13 +321,6 @@ impl Core {
         self.views.get(&view).map(|view| view.phase)
     }
 
-    /// Whether a fallback view has a committed document to pull from.
-    pub fn fallback_ready(&self, view: u64) -> bool {
-        self.views
-            .get(&view)
-            .is_some_and(|view| view.phase == Phase::Fallback && view.fallback_document.is_some())
-    }
-
     pub fn views(&self) -> Vec<u64> {
         self.views.keys().copied().collect()
     }
@@ -397,7 +383,7 @@ impl Core {
         }
         let resolved = ResolvedPlan::resolve(plan, self.authority_scheme(), None)
             .map_err(RegisterError::Plan)?;
-        self.register(Role::Tab(tab), resolved, false)
+        self.register(Role::Tab(tab), resolved)
     }
 
     pub fn register_owned(
@@ -405,7 +391,6 @@ impl Core {
         install: ExtensionInstallId,
         kind: ViewKind,
         plan: &AttachPlan,
-        allow_fallback: bool,
     ) -> Result<u64, RegisterError> {
         if self.closed {
             return Err(RegisterError::Closed);
@@ -422,7 +407,7 @@ impl Core {
             .authority
             .open_view(install, kind)
             .map_err(RegisterError::Bind)?;
-        self.register(Role::Owned(view), resolved, allow_fallback)
+        self.register(Role::Owned(view), resolved)
     }
 
     fn installed_extension(&self, install: ExtensionInstallId) -> Option<ExtensionId> {
@@ -433,12 +418,7 @@ impl Core {
         self.scheme
     }
 
-    fn register(
-        &mut self,
-        role: Role,
-        plan: ResolvedPlan,
-        allow_fallback: bool,
-    ) -> Result<u64, RegisterError> {
+    fn register(&mut self, role: Role, plan: ResolvedPlan) -> Result<u64, RegisterError> {
         if self.closed {
             if let Role::Owned(view) = role {
                 self.authority.close_view(view);
@@ -461,11 +441,10 @@ impl Core {
                 attached: None,
                 phase: Phase::Pending,
                 reattach_on_navigation: false,
-                allow_fallback,
+                awaiting_process: false,
                 frames: FrameTable::default(),
                 buffer: PostBuffer::default(),
                 host_main: None,
-                fallback_document: None,
                 contexts: HashSet::new(),
                 inflight: 0,
                 sent_tables: BTreeSet::new(),
@@ -500,7 +479,7 @@ impl Core {
             .attached
             .as_ref()
             .is_some_and(|(_, attached)| *attached == view.plan);
-        view.reattach_on_navigation = !unchanged && view.phase != Phase::Fallback;
+        view.reattach_on_navigation = !unchanged;
         let revoked: Vec<ContextKey> = view
             .contexts
             .iter()
@@ -529,13 +508,6 @@ impl Core {
     }
 
     fn still_granted(view: &View, target: &Target) -> bool {
-        if target.generation == FALLBACK_GENERATION {
-            return view
-                .host_main
-                .as_ref()
-                .and_then(|url| document_origin(url.as_str()))
-                .is_some_and(|origin| view.plan.admits_page(&origin).is_some());
-        }
         let Some(frame) = view
             .frames
             .get(target.module_frame)
@@ -629,7 +601,7 @@ impl Core {
         let Some(view) = self.views.get(&id) else {
             return;
         };
-        if view.phase == Phase::Fallback {
+        if view.awaiting_process {
             return;
         }
         let reason = if view.generation().is_some() {
@@ -682,40 +654,20 @@ impl Core {
                     }
                 }
             }
-            AttachOutcome::Refused | AttachOutcome::Unhandled
-                if view.allow_fallback && matches!(view.role, Role::Owned(_)) =>
-            {
-                self.stats.attach_refused += 1;
-                self.reset_view(id, CloseReason::Reattached);
-                let document = self.mint_document();
-                if let Some(view) = self.views.get_mut(&id) {
-                    view.phase = Phase::Fallback;
-                    view.attached = None;
-                    if let Some(url) = view.host_main.clone() {
-                        view.fallback_document = document;
-                        let owner = view.role.owner();
-                        if let Some(document) = document {
-                            self.effects
-                                .push(Effect::Lifecycle(FrameLifecycle::DocumentCreated {
-                                    view: BridgeViewId(id),
-                                    owner,
-                                    frame: FrameId::MAIN,
-                                    parent: None,
-                                    opaque: false,
-                                    creator: None,
-                                    document,
-                                    url,
-                                }));
-                        }
-                    }
-                }
-                self.effects.push(Effect::StartFallback { view: id });
-            }
             AttachOutcome::Refused | AttachOutcome::Unhandled => {
                 self.stats.attach_refused += 1;
                 self.reset_view(id, CloseReason::Reattached);
                 if let Some(view) = self.views.get_mut(&id) {
                     view.phase = Phase::Refused(generation);
+                    self.effects.push(Effect::Unavailable {
+                        view: id,
+                        owner: view.role.owner(),
+                        reason: if outcome == AttachOutcome::Unhandled {
+                            super::UnavailableReason::ModuleUnhandled
+                        } else {
+                            super::UnavailableReason::ModuleRefused
+                        },
+                    });
                 }
             }
             AttachOutcome::Failed => {
@@ -731,69 +683,35 @@ impl Core {
     /// The main frame started a navigation: a pending attachment applies to
     /// the documents it creates.
     pub fn load_started(&mut self, id: u64) {
-        let Some(view) = self.views.get(&id) else {
+        let Some(view) = self.views.get_mut(&id) else {
             return;
         };
+        view.awaiting_process = false;
         let attach =
             view.reattach_on_navigation || matches!(view.phase, Phase::Pending | Phase::Refused(_));
-        if view.phase == Phase::Fallback {
-            self.reset_view(id, CloseReason::DocumentGone);
-        } else if attach {
+        if attach {
             self.attach_now(id);
         }
     }
 
     /// The host saw the main frame commit `uri`.
     pub fn load_committed(&mut self, id: u64, uri: Option<&str>, now_ms: u64) {
-        let fallback = {
-            let Some(view) = self.views.get_mut(&id) else {
-                return;
-            };
-            view.host_main = uri.and_then(|uri| Url::parse(uri).ok());
-            view.phase == Phase::Fallback
+        let Some(view) = self.views.get_mut(&id) else {
+            return;
         };
-        if fallback {
-            self.reset_view(id, CloseReason::DocumentGone);
-            let document = self.mint_document();
-            let Some(view) = self.views.get_mut(&id) else {
-                return;
-            };
-            view.fallback_document = document;
-            if let (Some(document), Some(url)) = (document, view.host_main.clone()) {
-                let owner = view.role.owner();
-                self.effects
-                    .push(Effect::Lifecycle(FrameLifecycle::DocumentCreated {
-                        view: BridgeViewId(id),
-                        owner,
-                        frame: FrameId::MAIN,
-                        parent: None,
-                        opaque: false,
-                        creator: None,
-                        document,
-                        url,
-                    }));
-            }
-        } else {
-            self.reassess(id, now_ms);
-        }
+        view.host_main = uri.and_then(|uri| Url::parse(uri).ok());
+        self.reassess(id, now_ms);
     }
 
     /// The view's web process went away or was replaced.
     pub fn process_gone(&mut self, id: u64) {
-        let Some(view) = self.views.get_mut(&id) else {
-            return;
-        };
-        if view.phase == Phase::Fallback {
-            view.host_main = None;
-            self.reset_view(id, CloseReason::ProcessGone);
-            return;
-        }
         self.reset_view(id, CloseReason::ProcessGone);
         if let Some(view) = self.views.get_mut(&id) {
             view.phase = Phase::Pending;
+            view.attached = None;
             view.host_main = None;
+            view.awaiting_process = true;
         }
-        self.attach_now(id);
     }
 
     /// Closes every context and frame of a view and answers its waiting
@@ -814,11 +732,11 @@ impl Core {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
+        view.inflight = 0;
         let mut changes = Vec::new();
         view.frames.clear(&mut changes);
         view.sent_tables
             .retain(|generation| *generation == self.current_scripts);
-        view.fallback_document = None;
         let buffered = view.buffer.take();
         let had_state = !changes.is_empty() || !view.contexts.is_empty() || !buffered.is_empty();
         let contexts: Vec<ContextKey> = view.contexts.iter().cloned().collect();
@@ -1001,9 +919,6 @@ impl Core {
         let Some(view) = self.views.get(&id) else {
             return Admission::Refused(Refusal::Closed);
         };
-        if view.phase == Phase::Fallback {
-            return Admission::Refused(Refusal::Unattached);
-        }
         let Some(generation) = view.generation() else {
             return Admission::Refused(Refusal::Unattached);
         };
@@ -1125,57 +1040,6 @@ impl Core {
         true
     }
 
-    /// A host-pulled envelope from an extension-owned view in fallback.
-    pub fn fallback_post(&mut self, id: u64, envelope: Vec<u8>) -> Result<(), Refusal> {
-        let view = self.views.get(&id).ok_or(Refusal::Closed)?;
-        let (Role::Owned(owned), Phase::Fallback) = (&view.role, view.phase) else {
-            return Err(Refusal::Unattached);
-        };
-        let (Some(document), Some(url)) = (view.fallback_document, view.host_main.clone()) else {
-            return Err(Refusal::HostMismatch);
-        };
-        let origin = document_origin(url.as_str()).ok_or(Refusal::NotAdmitted)?;
-        let pages = view.plan.admits_page(&origin).ok_or(Refusal::NotAdmitted)?;
-        let origin = if pages.sandboxed.contains(url.path()) {
-            DocumentOrigin::opaque(Some(&url))
-        } else {
-            DocumentOrigin::of_url(&url)
-        };
-        let committed = CommittedDocument {
-            generation: document,
-            url,
-            origin,
-        };
-        let sender = self
-            .authority
-            .bind_view(owned, &committed)
-            .map_err(|_| Refusal::Unbound)?;
-        if envelope.len() as u64 > message_limit(sender.kind()) {
-            return Err(Refusal::Oversized);
-        }
-        let key = sender.context_key();
-        let target = Target {
-            view: id,
-            module_frame: 0,
-            world: String::new(),
-            external_install: None,
-            document_seq: 0,
-            generation: FALLBACK_GENERATION,
-            kind: sender.kind(),
-            frame: FrameId::MAIN,
-            document,
-            queue: VecDeque::new(),
-            queued_bytes: 0,
-            inflight: 0,
-        };
-        if !self.bind_target(id, key, target) {
-            return Err(Refusal::Unbound);
-        }
-        self.stats.admitted += 1;
-        self.effects.push(Effect::Receive { sender, envelope });
-        Ok(())
-    }
-
     /// Re-evaluates waiting posts after host state moved, and expires them.
     pub fn reassess(&mut self, id: u64, now_ms: u64) {
         let Some(view) = self.views.get_mut(&id) else {
@@ -1212,11 +1076,6 @@ impl Core {
     fn refuse(&mut self, reply: ReplyToken, refusal: Refusal) {
         *self.stats.refused.entry(refusal).or_default() += 1;
         self.effects.push(Effect::Reply(reply));
-    }
-
-    fn mint_document(&mut self) -> Option<DocumentGeneration> {
-        self.next_document = self.next_document.checked_add(1)?;
-        DocumentGeneration::new(self.next_document)
     }
 
     fn apply_changes(&mut self, id: u64, changes: Vec<FrameChange>, reason: CloseReason) {
@@ -1537,11 +1396,8 @@ impl Core {
         let Some(view) = self.views.get(&target.view) else {
             return Err(DeliverError::Stale);
         };
-        let current = match view.phase {
-            Phase::Fallback => target.generation == FALLBACK_GENERATION,
-            Phase::Live(generation) => target.generation == generation,
-            _ => false,
-        };
+        let current =
+            matches!(view.phase, Phase::Live(generation) if target.generation == generation);
         if !current {
             self.close_context(key, CloseReason::Reattached);
             return Err(DeliverError::Stale);
@@ -1572,7 +1428,6 @@ impl Core {
             return;
         };
         let keys: Vec<ContextKey> = view.contexts.iter().cloned().collect();
-        let fallback = view.phase == Phase::Fallback;
         for key in keys {
             loop {
                 let Some(view) = self.views.get(&id) else {
@@ -1592,40 +1447,32 @@ impl Core {
                 };
                 target.queued_bytes -= frame.len();
                 self.queued_bytes = self.queued_bytes.saturating_sub(frame.len());
-                let effect = if fallback {
-                    Effect::PullDeliver {
+                let message = UiMessage::Deliver(Deliver {
+                    token: self.token.clone(),
+                    generation: target.generation,
+                    frame_id: target.module_frame,
+                    document_seq: target.document_seq,
+                    world: target.world.clone(),
+                    external_install: target.external_install.clone(),
+                    bytes: frame,
+                });
+                let effect = match encode_ui(&message) {
+                    Ok(bytes) => Effect::Send {
                         view: id,
-                        context: key.clone(),
-                        frame,
-                    }
-                } else {
-                    let message = UiMessage::Deliver(Deliver {
-                        token: self.token.clone(),
-                        generation: target.generation,
-                        frame_id: target.module_frame,
-                        document_seq: target.document_seq,
-                        world: target.world.clone(),
-                        external_install: target.external_install.clone(),
-                        bytes: frame,
-                    });
-                    match encode_ui(&message) {
-                        Ok(bytes) => Effect::Send {
-                            view: id,
-                            name: DELIVER_MESSAGE,
-                            bytes,
-                            outgoing: Outgoing::Deliver {
-                                context: key.clone(),
-                            },
-                            policy: None,
-                            scripts: None,
+                        name: DELIVER_MESSAGE,
+                        bytes,
+                        outgoing: Outgoing::Deliver {
+                            context: key.clone(),
                         },
-                        Err(_) => {
-                            self.effects.push(Effect::Undeliverable {
-                                context: key.clone(),
-                                error: DeliverError::TooLarge,
-                            });
-                            continue;
-                        }
+                        policy: None,
+                        scripts: None,
+                    },
+                    Err(_) => {
+                        self.effects.push(Effect::Undeliverable {
+                            context: key.clone(),
+                            error: DeliverError::TooLarge,
+                        });
+                        continue;
                     }
                 };
                 target.inflight += 1;

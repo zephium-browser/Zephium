@@ -611,6 +611,11 @@ impl EventQueue {
         Ok(sequence)
     }
 
+    /// The next event's name, before claiming its delivery.
+    pub fn next_name(&self) -> Option<&str> {
+        self.queued.front().map(|event| event.name.as_str())
+    }
+
     /// Returns the head for delivery or retry. A fresh background may receive
     /// it only after `cancel_context` invalidates the previous delivery.
     pub fn deliver(&mut self, background: &Sender) -> Result<Option<QueuedEvent>, ApiError> {

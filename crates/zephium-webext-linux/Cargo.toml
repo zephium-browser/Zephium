@@ -14,7 +14,6 @@ zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0
 native-tests = []
 
 [target.'cfg(target_os = "linux")'.dependencies]
-base64.workspace = true
 gio = "0.18"
 glib = "0.18"
 gtk = "0.18"

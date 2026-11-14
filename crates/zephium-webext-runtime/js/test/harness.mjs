@@ -17,6 +17,7 @@ const MODULES = [
   ['api', 'api.js', 'Z'],
   ['content', 'content.js', 'Z'],
   ['workerScope', 'worker_scope.js', 'Z'],
+  ['ownerRelay', 'owner_relay.js', 'Z'],
 ];
 export const sources = Object.fromEntries(MODULES.map(([key, file]) => [key === 'I' ? 'intrinsics' : key, read(file)]));
 export const fixtureSurface = JSON.parse(read('test/surface.fixture.json'));
@@ -29,12 +30,15 @@ export const surface = process.env.ZEPHIUM_WEBEXT_TEST_SURFACE === 'fixture' ? f
 
 export const EXTENSION_ID = 'abcdefghijklmnopabcdefghijklmnop';
 
-export const modulesSource = () =>
+export const modulesSource = (modules = MODULES) =>
   'const Z={__proto__:null};' +
-  MODULES.map(([key, file, argument]) => {
+  modules.map(([key, file, argument]) => {
     const source = sources[key === 'I' ? 'intrinsics' : key];
     return source === null ? '' : `Z.${key}=(${source})(${argument});`;
   }).join('');
+
+export const workerModulesSource = () => modulesSource(MODULES.filter(([key]) => !['content', 'ownerRelay'].includes(key)));
+export const ownerModulesSource = () => modulesSource(MODULES.filter(([key]) => ['I', 'transport', 'ownerRelay'].includes(key)));
 
 export function createRealm(extra = {}) {
   const logs = { error: [], warn: [] };

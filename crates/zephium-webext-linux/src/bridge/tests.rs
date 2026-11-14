@@ -126,7 +126,7 @@ impl Harness {
     fn owned(&mut self, kind: ViewKind) -> (u64, u64) {
         let id = self
             .core
-            .register_owned(install(), kind, &own_plan(), true)
+            .register_owned(install(), kind, &own_plan())
             .expect("register");
         let generation = self.accept(id);
         (id, generation)
@@ -589,7 +589,22 @@ fn navigation_reattachment_and_crashes_end_contexts() {
     h.core.process_gone(id);
     let effects = h.core.take_effects();
     assert!(closed(&effects).contains(&(sender.context_key(), CloseReason::ProcessGone)));
-    assert!(matches!(h.core.phase(id), Some(Phase::InFlight(g)) if g > next));
+    assert_eq!(h.core.phase(id), Some(Phase::Pending));
+    assert!(!effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Send { .. })));
+    h.core.attach_settled(id, next, AttachOutcome::Accepted);
+    h.core
+        .update_plan(id, &tab_plan(&[SITE]), true)
+        .expect("plan while dead");
+    assert_eq!(h.core.phase(id), Some(Phase::Pending));
+    assert!(!h
+        .core
+        .take_effects()
+        .iter()
+        .any(|effect| matches!(effect, Effect::Send { .. })));
+    h.core.load_started(id);
+    assert!(h.accept(id) > next);
 }
 
 #[test]
@@ -701,76 +716,59 @@ fn oversized_posts_are_refused_by_context_class() {
 }
 
 #[test]
-fn owned_views_without_a_module_fall_back_to_host_pulls() {
+fn missing_or_refused_modules_leave_all_views_unavailable() {
+    for outcome in [AttachOutcome::Unhandled, AttachOutcome::Refused] {
+        let mut h = Harness::new();
+        let owned = h
+            .core
+            .register_owned(install(), ViewKind::Background, &own_plan())
+            .expect("owned");
+        let tab = h
+            .core
+            .register_tab(ItemId::from(9), &tab_plan(&[SITE]))
+            .expect("tab");
+        let attachments: Vec<_> = h
+            .core
+            .take_effects()
+            .into_iter()
+            .filter_map(|effect| match effect {
+                Effect::Send {
+                    view,
+                    outgoing: Outgoing::Attach { generation },
+                    ..
+                } => Some((view, generation)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attachments.len(), 2);
+        for (id, generation) in attachments {
+            h.core.attach_settled(id, generation, outcome);
+            assert_eq!(h.core.phase(id), Some(Phase::Refused(generation)));
+            let effects = h.core.take_effects();
+            assert!(effects.iter().any(|effect| matches!(effect,
+                Effect::Unavailable { view, reason, .. } if *view == id && *reason == if outcome == AttachOutcome::Unhandled {
+                    super::UnavailableReason::ModuleUnhandled
+                } else { super::UnavailableReason::ModuleRefused }
+            )));
+            assert!(senders(&h.post(id, post(generation, 1, 1, &world(), SITE))).is_empty());
+        }
+        assert!(h.core.phase(owned).is_some());
+        assert!(h.core.phase(tab).is_some());
+    }
+}
+
+#[test]
+fn crash_then_detach_never_sends_to_a_dead_process() {
     let mut h = Harness::new();
-    let id = h
-        .core
-        .register_owned(install(), ViewKind::Background, &own_plan(), true)
-        .expect("register");
-    let generation = h
-        .core
-        .take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::Send {
-                outgoing: Outgoing::Attach { generation },
-                ..
-            } => Some(generation),
-            _ => None,
-        })
-        .expect("attach");
-    h.core
-        .attach_settled(id, generation, AttachOutcome::Refused);
-    assert_eq!(h.core.phase(id), Some(Phase::Fallback));
-    assert_eq!(
-        h.core.fallback_post(id, b"x".to_vec()),
-        Err(Refusal::HostMismatch),
-        "nothing to bind before the host sees a commit"
-    );
-    h.core.load_committed(
-        id,
-        Some(&format!(
-            "chrome-extension://{EXTENSION}/_zephium/background.html"
-        )),
-        0,
-    );
-    assert!(h.core.fallback_ready(id));
+    let (id, _) = h.owned(ViewKind::Background);
+    h.core.process_gone(id);
     h.core.take_effects();
-    h.core.fallback_post(id, b"x".to_vec()).expect("bound");
-    let sender = senders(&h.core.take_effects()).pop().expect("sender");
-    assert_eq!(sender.kind(), ContextKind::Background);
-    h.core
-        .deliver(&sender.context_key(), vec![1])
-        .expect("deliver");
-    assert!(h
+    h.core.detach(id);
+    assert!(!h
         .core
         .take_effects()
         .iter()
-        .any(|effect| matches!(effect, Effect::PullDeliver { .. })));
-
-    let tab = h
-        .core
-        .register_tab(ItemId::from(9), &tab_plan(&[SITE]))
-        .expect("tab");
-    let generation = h
-        .core
-        .take_effects()
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::Send {
-                outgoing: Outgoing::Attach { generation },
-                ..
-            } => Some(generation),
-            _ => None,
-        })
-        .expect("attach");
-    h.core
-        .attach_settled(tab, generation, AttachOutcome::Unhandled);
-    assert_eq!(
-        h.core.phase(tab),
-        Some(Phase::Refused(generation)),
-        "tabs never fall back"
-    );
+        .any(|effect| matches!(effect, Effect::Send { .. })));
 }
 
 #[test]
@@ -794,6 +792,7 @@ fn policies_reach_live_views_and_every_later_attachment() {
     };
     assert_eq!(sends(h.core.take_effects()), vec![first]);
     h.core.process_gone(id);
+    h.core.load_started(id);
     let generation = h
         .core
         .take_effects()

@@ -83,6 +83,7 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
         listeners: None,
         alarms: None,
         imports: None,
+        scripts: Ok(None),
     }
 }
 
@@ -280,21 +281,79 @@ fn stops(ops: &[NativeOp]) -> Vec<u64> {
 }
 
 #[test]
-fn a_fresh_install_starts_its_background_and_delivers_on_installed_after_activation() {
+fn a_fresh_install_delivers_on_installed_before_activation_and_waits_for_its_ack() {
     let mut harness = Harness::new();
-    let (sender, _, out) = harness.running(&["runtime.onInstalled"]);
+    let mut out = Outbox::default();
+    harness
+        .host
+        .admit(admitted(harness.install), &Activation::Installed, &mut out);
+    assert!(events(&out).is_empty());
+    harness.ops();
+    let (view, stale) = harness.sender(ViewKind::Background, "_zephium/background.html");
+    harness.documents += 1;
+    let sender = harness
+        .authority
+        .bind_view(
+            &view,
+            &CommittedDocument {
+                generation: DocumentGeneration::new(harness.documents).unwrap(),
+                origin: DocumentOrigin::of_url(stale.url()),
+                url: stale.url().clone(),
+            },
+        )
+        .unwrap();
+    harness.call(&sender, "zephium.workerReport", json!(["booted", null]));
+    harness.call(
+        &sender,
+        "zephium.addListener",
+        json!(["runtime.onInstalled", 1, null, null]),
+    );
+    assert!(harness.host.enqueue(
+        harness.install,
+        "runtime.onStartup",
+        &json!([]),
+        EventImportance::Critical,
+    ));
+    let out = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["installed", null]),
+    );
     let delivered = events(&out);
     assert_eq!(delivered.len(), 1, "{delivered:?}");
     let (seq, name, args) = &delivered[0];
     assert_eq!(name, "runtime.onInstalled");
     assert_eq!(args, &json!([{"reason": "install"}]));
+    assert!(
+        replies(&out).is_empty(),
+        "installation awaits the event ack"
+    );
+    assert_eq!(harness.state(), Some(BackgroundState::Starting));
+    assert!(!harness.host.status(harness.install).unwrap().ready);
+    let duplicate = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["installed", null]),
+    );
+    assert!(replies(&duplicate)[0].is_err());
+    assert!(replies(&harness.ack(&stale, *seq)).is_empty());
+    let acknowledged = harness.ack(&sender, *seq);
+    assert_eq!(replies(&acknowledged), vec![Ok(Value::Null)]);
+    assert!(
+        events(&acknowledged).is_empty(),
+        "ordinary events still wait"
+    );
+    assert!(!harness.host.status(harness.install).unwrap().ready);
+    let activated = harness.call(
+        &sender,
+        "zephium.workerLifecycle",
+        json!(["activated", null]),
+    );
     let status = harness.host.status(harness.install).unwrap();
     assert!(status.ready);
     assert_eq!(status.state, BackgroundState::Running);
-    assert!(events(&harness.ack(&sender, *seq)).is_empty());
-    // A second start of the same version is not a fresh install.
-    let launch = harness.host.state.installs[&harness.install].fresh;
-    assert!(!launch);
+    assert_eq!(events(&activated)[0].1, "runtime.onStartup");
+    assert!(!harness.host.state.installs[&harness.install].fresh);
 }
 
 #[test]
@@ -618,4 +677,370 @@ fn the_binding_catalog_applies_named_placeholders_only() {
         binding_catalog(&messages),
         json!({"greeting": "Hi you, $1 $$"})
     );
+}
+
+#[test]
+fn script_snapshot_read_errors_surface_without_filesystem_details() {
+    for kind in [
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::InvalidData,
+    ] {
+        let mut harness = Harness::new();
+        let mut admission = admitted(harness.install);
+        admission.scripts = Err(std::io::Error::new(kind, "private filesystem details"));
+        harness
+            .host
+            .admit(admission, &Activation::Enabled, &mut Outbox::default());
+        let errors = harness.host.errors(harness.install);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].kind, ExtensionErrorKind::Startup);
+        assert_eq!(
+            errors[0].message,
+            "Persisted script registrations could not be restored."
+        );
+    }
+}
+
+#[test]
+fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let mut harness = Harness::new();
+    let mut admission = admitted(harness.install);
+    admission.root = root.path().to_owned();
+    admission.state_directory = Some(durable.path().to_owned());
+    let manifest = Manifest::from_value(json!({"manifest_version":3,"permissions":["scripting"]}));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::default(),
+        false,
+    );
+    harness
+        .host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = harness.sender(ViewKind::Options, "options.html");
+    let request = |id: &str, persist| json!({"id":id,"matches":["https://example.com/*"],"js":["content.js"],"persistAcrossSessions":persist});
+    let first = harness.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([[request("saved", true), request("temporary", false)]]),
+    );
+    assert!(replies(&first).is_empty());
+    let second = harness.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([[request("second", true)]]),
+    );
+    assert!(replies(&second).is_empty());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut out = Outbox::default();
+    while replies(&out).len() < 2 {
+        assert!(std::time::Instant::now() < deadline);
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(replies(&out), vec![Ok(Value::Null), Ok(Value::Null)]);
+    let bytes = std::fs::read(durable.path().join("scripts.json")).unwrap();
+    let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.as_array().unwrap().len(), 2);
+    assert_eq!(
+        harness.host.state.installs[&harness.install]
+            .scripts
+            .get_registered(None)
+            .len(),
+        3
+    );
+    harness
+        .host
+        .forget(harness.install, false, &mut Outbox::default());
+    let mut admission = admitted(harness.install);
+    admission.root = root.path().to_owned();
+    admission.scripts = Ok(Some(bytes));
+    harness
+        .host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let restored = harness.host.state.installs[&harness.install]
+        .scripts
+        .get_registered(None);
+    assert_eq!(
+        restored.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+        vec!["saved", "second"]
+    );
+    let state = harness
+        .host
+        .state
+        .installs
+        .get_mut(&harness.install)
+        .unwrap();
+    state.state_directory = Some(durable.path().to_owned());
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    harness.host.permissions.insert(
+        harness.install,
+        InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::default(),
+            false,
+        ),
+    );
+    let (_, sender) = harness.sender(ViewKind::Options, "options.html");
+    let update = harness.call(
+        &sender,
+        "scripting.updateContentScripts",
+        json!([[{"id":"saved", "persistAcrossSessions":false}]]),
+    );
+    assert!(replies(&update).is_empty());
+    let remove = harness.call(
+        &sender,
+        "scripting.unregisterContentScripts",
+        json!([{"ids":["second"]}]),
+    );
+    assert!(replies(&remove).is_empty());
+    let mut out = Outbox::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while replies(&out).len() < 2 {
+        assert!(std::time::Instant::now() < deadline);
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(replies(&out), vec![Ok(Value::Null), Ok(Value::Null)]);
+    let bytes = std::fs::read(durable.path().join("scripts.json")).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), json!([]));
+}
+
+#[test]
+fn dynamic_scripts_failed_write_keeps_registry_and_malformed_restore_is_atomic() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let mut harness = Harness::new();
+    let mut admission = admitted(harness.install);
+    admission.root = root.path().to_owned();
+    admission.scripts = Ok(Some(br#"[{"id":"bad","matches":["invalid"]}]"#.to_vec()));
+    harness
+        .host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = harness.sender(ViewKind::Options, "options.html");
+    let state = harness
+        .host
+        .state
+        .installs
+        .get_mut(&harness.install)
+        .unwrap();
+    assert!(state.scripts.get_registered(None).is_empty());
+    assert_eq!(
+        state.errors.records()[0].message,
+        "Persisted script registrations could not be restored."
+    );
+    let blocked = root.path().join("not-a-directory");
+    std::fs::write(&blocked, "occupied").unwrap();
+    state.state_directory = Some(blocked);
+    let mut candidate = state.scripts.clone();
+    candidate
+        .register(
+            serde_json::from_value(
+                json!([{"id":"saved","matches":["https://example.com/*"],"js":["content.js"]}]),
+            )
+            .unwrap(),
+            |_, _| Ok(()),
+        )
+        .unwrap();
+    // Dispatch through the ordinary authenticated API to exercise deferred failure.
+    let manifest = Manifest::from_value(json!({"manifest_version":3,"permissions":["scripting"]}));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    harness.host.permissions.insert(
+        harness.install,
+        InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::default(),
+            false,
+        ),
+    );
+    let out = harness.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([candidate.get_registered(None)]),
+    );
+    assert!(replies(&out).is_empty());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut out = Outbox::default();
+    while replies(&out).is_empty() {
+        assert!(std::time::Instant::now() < deadline);
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(replies(&out)[0].is_err());
+    assert!(harness.host.state.installs[&harness.install]
+        .scripts
+        .get_registered(None)
+        .is_empty());
+}
+
+fn admit_scripting(harness: &mut Harness, root: &std::path::Path) -> Sender {
+    let mut admission = admitted(harness.install);
+    admission.root = root.to_owned();
+    let manifest =
+        Manifest::from_value(json!({"manifest_version": 3, "permissions": ["scripting"]}));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::default(),
+        false,
+    );
+    harness
+        .host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    harness.sender(ViewKind::Options, "options.html").1
+}
+
+#[test]
+fn closed_context_releases_queued_script_calls_before_the_durable_write_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let mut harness = Harness::new();
+    let sender = admit_scripting(&mut harness, root.path());
+    harness
+        .host
+        .state
+        .installs
+        .get_mut(&harness.install)
+        .unwrap()
+        .state_directory = Some(durable.path().to_owned());
+    let script = |id: &str| {
+        json!([[
+            {"id": id, "matches": ["https://example.com/*"], "js": ["content.js"]}
+        ]])
+    };
+    for id in ["submitted", "queued"] {
+        let out = harness.call(&sender, "scripting.registerContentScripts", script(id));
+        assert!(replies(&out).is_empty());
+    }
+    let state = &harness.host.state.installs[&harness.install];
+    assert!(state.script_pending.is_some());
+    assert_eq!(state.script_calls.len(), 1);
+    harness
+        .host
+        .close_context(&sender.context_key(), &mut Outbox::default());
+    let state = &harness.host.state.installs[&harness.install];
+    assert!(
+        state.script_pending.is_some(),
+        "submitted disk writes keep their serialization slot"
+    );
+    assert!(
+        state.script_calls.is_empty(),
+        "cancellation releases queued arguments and authority"
+    );
+    let mut out = Outbox::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.host.has_pending_script_writes(harness.install) {
+        assert!(std::time::Instant::now() < deadline);
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        replies(&out).is_empty(),
+        "the closed context receives no reply"
+    );
+    assert_eq!(
+        harness.host.state.installs[&harness.install]
+            .scripts
+            .get_registered(None)
+            .iter()
+            .map(|script| script.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["submitted"]
+    );
+}
+
+#[test]
+fn script_write_failure_before_rename_preserves_the_existing_snapshot() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let snapshot = durable.path().join("scripts.json");
+    std::fs::write(&snapshot, b"[]").unwrap();
+    let mut harness = Harness::new();
+    let sender = admit_scripting(&mut harness, root.path());
+    harness
+        .host
+        .state
+        .installs
+        .get_mut(&harness.install)
+        .unwrap()
+        .state_directory = Some(durable.path().to_owned());
+    std::fs::set_permissions(durable.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+    let out = harness.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([[
+            {"id": "rejected", "matches": ["https://example.com/*"], "js": ["content.js"]}
+        ]]),
+    );
+    assert!(replies(&out).is_empty());
+    let mut out = Outbox::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while replies(&out).is_empty() && std::time::Instant::now() < deadline {
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    std::fs::set_permissions(durable.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(replies(&out).len(), 1, "write must settle");
+    assert!(replies(&out)[0].is_err());
+    assert_eq!(std::fs::read(snapshot).unwrap(), b"[]");
+    assert!(harness.host.state.installs[&harness.install]
+        .scripts
+        .get_registered(None)
+        .is_empty());
+}
+
+#[test]
+fn retired_installs_keep_the_script_write_barrier_until_io_completion() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let mut harness = Harness::new();
+    let sender = admit_scripting(&mut harness, root.path());
+    harness
+        .host
+        .state
+        .installs
+        .get_mut(&harness.install)
+        .unwrap()
+        .state_directory = Some(durable.path().to_owned());
+    let out = harness.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([[
+            {"id": "submitted", "matches": ["https://example.com/*"], "js": ["content.js"]}
+        ]]),
+    );
+    assert!(replies(&out).is_empty());
+    assert!(harness.host.has_pending_script_writes(harness.install));
+    let mut out = Outbox::default();
+    harness.host.forget(harness.install, false, &mut out);
+    assert!(harness.host.has_pending_script_writes(harness.install));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while harness.host.has_pending_script_writes(harness.install) {
+        assert!(std::time::Instant::now() < deadline);
+        let done = harness.host.storage_take();
+        harness.host.storage_done(done, &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(replies(&out).is_empty());
+    assert!(!harness.host.state.installs.contains_key(&harness.install));
+    let snapshot: Value =
+        serde_json::from_slice(&std::fs::read(durable.path().join("scripts.json")).unwrap())
+            .unwrap();
+    assert_eq!(snapshot[0]["id"], "submitted");
 }

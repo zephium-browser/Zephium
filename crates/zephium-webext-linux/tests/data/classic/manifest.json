@@ -4,6 +4,6 @@
   "version": "1.0",
   "default_locale": "en",
   "background": { "service_worker": "sw.js" },
-  "permissions": ["storage", "alarms", "offscreen", "clipboardWrite"],
+  "permissions": ["storage", "alarms", "offscreen", "clipboardWrite", "scripting"],
   "options_page": "options.html"
 }

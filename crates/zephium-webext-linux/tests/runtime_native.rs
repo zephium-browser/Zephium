@@ -257,6 +257,17 @@ fn native_runtime_classic_background() {
     assert_eq!(probe["helper"], 42);
     assert_eq!(probe["greeting"], "Hello fixture, now");
     assert_eq!(probe["id"], extension_id(0).as_str());
+    assert_eq!(
+        probe["lifecycle"],
+        serde_json::json!([
+            "install",
+            "install settled",
+            "runtime.onInstalled:install",
+            "activate",
+            "activate settled"
+        ]),
+        "{probe}"
+    );
     assert!(
         probe["sender"].as_str().unwrap().ends_with("/options.html"),
         "{probe}"
@@ -511,6 +522,19 @@ fn native_runtime_browser_restart() {
         });
         let page = open(&runtime, install);
         installed(&page);
+        assert_eq!(
+            script(
+                &page,
+                r#"
+            await chrome.scripting.registerContentScripts([
+                {id:'persistent',matches:['https://example.com/*'],js:['lib/helper.js']},
+                {id:'session',matches:['https://example.com/*'],js:['lib/helper.js'],persistAcrossSessions:false}
+            ]);
+            return (await chrome.scripting.getRegisteredContentScripts()).map(s=>s.id);
+        "#
+            )["ok"],
+            serde_json::json!(["persistent", "session"])
+        );
         drop(page);
         let mut drain = runtime.retire();
         assert!(drain.run(Duration::from_secs(10)));
@@ -529,6 +553,13 @@ fn native_runtime_browser_restart() {
     runtime.browser_started();
     assert_eq!(state(&runtime, install), Some(BackgroundState::Stopped));
     let page = open(&runtime, install);
+    assert_eq!(
+        script(
+            &page,
+            "return (await chrome.scripting.getRegisteredContentScripts()).map(s=>s.id);"
+        )["ok"],
+        serde_json::json!(["persistent"])
+    );
     let woken = Instant::now();
     let probe = ask(&page, "{type: 'probe'}");
     report("restart_message_wake_ms", woken.elapsed().as_millis());

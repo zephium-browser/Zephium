@@ -38,6 +38,7 @@ zephium-private-fs = { path = "crates/zephium-private-fs", version = "=0.1.0" }
 zephium-store = { path = "crates/zephium-store", version = "=0.1.0" }
 zephium-voice = { path = "crates/zephium-voice", version = "=0.1.0" }
 zephium-update-transport = { path = "crates/zephium-update-transport", version = "=0.1.0", default-features = false }
+zephium-webext-dnr = { path = "crates/zephium-webext-dnr", version = "=0.1.0", default-features = false }
 zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
 zephium-work-composition = { path = "crates/zephium-work-composition", version = "=0.1.0" }
 zephium-page-assist = { path = "crates/zephium-page-assist", version = "=0.1.0" }
@@ -92,6 +93,10 @@ strip = "symbols"
 # Bounds checks remain enabled independently; retain integer overflow checks
 # as well so release builds do not silently wrap security/resource counters.
 overflow-checks = true
+
+# The synchronous renderer request matcher prioritizes latency over code size.
+[profile.release.package.zephium-webext-dnr]
+opt-level = 3
 
 # Stripped proc-macro libraries fail to load with the macOS 27 toolchain
 # ("mis-aligned LINKEDIT string pool"); build-time code never ships.

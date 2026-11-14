@@ -1,5 +1,20 @@
 importScripts('lib/helper.js');
 const startedAt = Date.now();
+const lifecycle = [];
+addEventListener('install', (event) => {
+  lifecycle.push('install');
+  event.waitUntil(new Promise((resolve) => setTimeout(() => {
+    lifecycle.push('install settled');
+    resolve();
+  }, 10)));
+});
+addEventListener('activate', (event) => {
+  lifecycle.push('activate');
+  event.waitUntil(new Promise((resolve) => setTimeout(() => {
+    lifecycle.push('activate settled');
+    resolve();
+  }, 10)));
+});
 const scope = {
   serviceWorker: self instanceof ServiceWorkerGlobalScope,
   window: typeof window,
@@ -7,9 +22,11 @@ const scope = {
   helper: self.helperValue,
   module: false,
   greeting: chrome.i18n.getMessage('greeting', ['now']),
+  lifecycle,
 };
 
 chrome.runtime.onInstalled.addListener(async (details) => {
+  lifecycle.push(`runtime.onInstalled:${details.reason}`);
   const { installs = 0 } = await chrome.storage.local.get('installs');
   await chrome.storage.local.set({ installs: installs + 1, lastReason: details.reason });
 });

@@ -69,9 +69,14 @@ test('the worker passes the service-worker identity checks real extensions use',
   assert.equal(inWorker('location instanceof WorkerLocation'), true);
 });
 
-test('install then activate run once the script finished, with waitUntil and handler attributes', async () => {
-  const { inWorker, host, self } = workerRealm();
+test('install settles before onInstalled, which precedes activate and its waitUntil settlement', async () => {
+  const { inWorker, host, self, chrome } = workerRealm();
   const order = [];
+  chrome.runtime.onInstalled.addListener((details) => order.push(`runtime.onInstalled:${details.reason}`));
+  host.handlers['zephium.workerLifecycle'] = ([state]) => {
+    if (state === 'installed') host.event('runtime.onInstalled', [{ reason: 'install' }]);
+    return null;
+  };
   self.order = order;
   inWorker(`(() => {
     self.oninstall = (event) => {
@@ -81,33 +86,76 @@ test('install then activate run once the script finished, with waitUntil and han
       self.skipWaiting();
     };
     self.addEventListener('install', () => self.order.push('install listener'));
-    self.addEventListener('activate', (event) => { self.order.push('activate'); event.waitUntil(clients.claim()); });
+    self.addEventListener('activate', (event) => {
+      self.order.push('activate');
+      event.waitUntil(new Promise((resolve) => setTimeout(() => { self.order.push('activate settled'); resolve(); }, 5)));
+    });
     self.addEventListener('fetch', () => self.order.push('fetch'));
     self.addEventListener('message', () => self.order.push('message'));
     self.order.push('script done');
   })()`);
   assert.deepEqual(order, ['script done']);
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.deepEqual(order, ['script done', 'oninstall:true', 'install listener', 'install settled', 'activate']);
+  assert.deepEqual(order, [
+    'script done', 'oninstall:true', 'install listener', 'install settled',
+    'runtime.onInstalled:install', 'activate', 'activate settled',
+  ]);
   assert.deepEqual(plain(self.imported), [
     `chrome-extension://${EXTENSION_ID}/chunk-1.js`,
     `chrome-extension://${EXTENSION_ID}/chunk-2.js`,
   ]);
-  assert.deepEqual(lifecycle(host), [['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
   assert.equal(typeof self.onfetch, 'object');
 });
 
-test('events wait for activation; replies to calls do not', async () => {
+test('ordinary events wait for activation; replies to calls do not', async () => {
   const { chrome, host, inWorker } = workerRealm();
   const heard = [];
-  chrome.runtime.onInstalled.addListener((details) => heard.push(details.reason));
+  chrome.runtime.onStartup.addListener(() => heard.push('startup'));
   host.handlers['runtime.getPlatformInfo'] = () => ({ os: 'linux' });
   inWorker('self.addEventListener("install", (e) => e.waitUntil(new Promise((r) => setTimeout(r, 10))))');
-  host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  host.event('runtime.onStartup', []);
   assert.deepEqual(plain(await chrome.runtime.getPlatformInfo()), { os: 'linux' });
   assert.deepEqual(heard, []);
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.deepEqual(heard, ['install']);
+  assert.deepEqual(heard, ['startup']);
+});
+
+test('activation waits for host acceptance of the delivered onInstalled event', async () => {
+  const { chrome, host, inWorker, self } = workerRealm();
+  const order = [];
+  self.order = order;
+  chrome.runtime.onInstalled.addListener(() => order.push('onInstalled'));
+  host.handlers['zephium.workerLifecycle'] = ([state]) => state === 'installed' ? host.LATER : null;
+  inWorker('self.addEventListener("activate", () => self.order.push("activate"))');
+  await flush();
+  assert.deepEqual(order, []);
+  assert.deepEqual(lifecycle(host), [['installed', null]]);
+  const call = host.callsTo('zephium.workerLifecycle')[0];
+  const sequence = host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  assert.deepEqual(order, ['onInstalled']);
+  assert.ok(host.acks.includes(sequence));
+  assert.deepEqual(lifecycle(host), [['installed', null]]);
+  host.reply(call.id, null);
+  await flush();
+  assert.deepEqual(order, ['onInstalled', 'activate']);
+  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
+});
+
+test('host refusal of installation prevents activation and keeps ordinary events held', async () => {
+  const { chrome, host, inWorker, self } = workerRealm();
+  self.fired = [];
+  host.handlers['zephium.workerLifecycle'] = ([state]) => {
+    if (state === 'installed') throw { error: 'Installation context expired.' };
+    return null;
+  };
+  chrome.runtime.onStartup.addListener(() => self.fired.push('startup'));
+  inWorker('self.addEventListener("activate", () => self.fired.push("activate"))');
+  host.event('runtime.onStartup', []);
+  await flush();
+  assert.deepEqual(plain(self.fired), []);
+  assert.deepEqual(lifecycle(host), [['installed', null], ['failed', 'Installation context expired.']]);
+  assert.deepEqual(host.acks, []);
 });
 
 test('waitUntil outside dispatch throws InvalidStateError', async () => {
@@ -145,11 +193,11 @@ test('a failing install or a startup error is reported to the host', async () =>
 test('activation failure retains queued events and reports failure', async () => {
   const { chrome, host, inWorker } = workerRealm();
   let called = 0;
-  chrome.runtime.onInstalled.addListener(() => called++);
-  host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  chrome.runtime.onStartup.addListener(() => called++);
+  host.event('runtime.onStartup', []);
   inWorker('self.addEventListener("activate", (event) => event.waitUntil(Promise.reject(new Error("no"))))');
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(lifecycle(host), [['failed', 'activate']]);
+  assert.deepEqual(lifecycle(host), [['installed', null], ['failed', 'activate']]);
   assert.equal(called, 0);
   assert.deepEqual(host.acks, []);
 });
@@ -187,7 +235,7 @@ test('classic workers reuse installation imports and refuse fresh imports after 
     }, 0)));
   })`);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(lifecycle(host), [['activated', null]]);
+  assert.deepEqual(lifecycle(host), [['installed', null], ['activated', null]]);
   inWorker('importScripts("./initial.js#again", "during-install.js")');
   assert.deepEqual(plain(self.imported), [
     `chrome-extension://${EXTENSION_ID}/initial.js`,
@@ -313,13 +361,21 @@ test('the worker takes its port from the owner and talks through it', async () =
   self.dispatchEvent(new MessageEvent('message', { data: Z.workerScope.PORT_MARKER, ports: [port2] }));
   assert.equal(extensionSaw, false);
   const host = new FakeHost(Z, 'background');
+  let activated;
+  const activation = new Promise((resolve) => (activated = resolve));
+  host.handlers['zephium.workerLifecycle'] = ([state]) => {
+    if (state === 'activated') activated();
+    return null;
+  };
   port1.onmessage = (event) => host.receive(new Uint8Array(event.data));
   host.deliver = (bytes) => port1.postMessage(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
   host.handlers['tabs.query'] = () => [{ id: 1 }];
   assert.deepEqual(plain(await pending), [{ id: 1 }]);
   self.dispatchEvent(new MessageEvent('message', { data: 'from elsewhere' }));
   assert.equal(extensionSaw, true);
+  await activation;
   port1.close();
+  port2.close();
 });
 
 test('the owner relays frames both ways, keeps its own replies and reports worker errors', async () => {
@@ -332,7 +388,7 @@ test('the owner relays frames both ways, keeps its own replies and reports worke
   worker.postMessage = (data, transfer) => posted.push({ data, transfer });
   const channel = new MessageChannel();
   const started = [];
-  const owner = Z.workerScope.owner(
+  const owner = Z.ownerRelay.owner(
     { workerURL: `${SCRIPT_URL}?zephium-worker`, type: 'module' },
     {
       link: host.link,
@@ -409,7 +465,7 @@ test('worker diagnostics obey host UTF8 byte limits, including startup failures'
   const channel = new MessageChannel();
   const worker = new EventTarget();
   worker.postMessage = () => {};
-  const owner = realm.Z.workerScope.owner({ workerURL: SCRIPT_URL }, {
+  const owner = realm.Z.ownerRelay.owner({ workerURL: SCRIPT_URL }, {
     link: host.link,
     createWorker: () => worker,
     createChannel: () => channel,
