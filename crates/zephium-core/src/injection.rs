@@ -1608,6 +1608,35 @@ mod tests {
     }
 
     #[test]
+    fn host_dependent_sets_never_pass_the_native_unconditional_gate() {
+        // Native adapters admit only unconditional sets, so host comparison
+        // is never consulted for delivery while this holds.
+        let host_dependent = [
+            set(
+                &["<all_urls>"],
+                &["*://bank.test/*"],
+                MatchOptions::default(),
+            ),
+            set(
+                &["<all_urls>"],
+                &["*://bank.test./*"],
+                MatchOptions::default(),
+            ),
+            set(&["*://bank.test/*"], &[], MatchOptions::default()),
+            set(&["*://*.bank.test/*"], &[], MatchOptions::default()),
+            set(
+                &["*://*/*"],
+                &["*://*.bank.test/*"],
+                MatchOptions::default(),
+            ),
+        ];
+        for candidate in host_dependent {
+            assert!(!candidate.is_unconditional_all_urls(), "{candidate:?}");
+        }
+        assert!(MatchSet::all_urls().matches_url(&url("https://bank.test./")));
+    }
+
+    #[test]
     fn match_set_requires_a_positive_pattern_and_caps_combined_count() {
         assert_eq!(
             MatchSet::new(Vec::new(), Vec::new(), MatchOptions::default()),
