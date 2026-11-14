@@ -100,6 +100,8 @@ struct Entry {
 pub struct Injection<'a> {
     /// Bundle metadata; static identifiers use a reserved underscore prefix.
     pub script: &'a RegisteredScript,
+    /// The complete compiled declaration, retaining static globs and related-frame options.
+    pub matcher: &'a ContentScriptMatcher,
 }
 
 /// One install's registry. Clone to stage a mutation before durable publication.
@@ -261,6 +263,19 @@ impl ScriptRegistry {
         Ok(())
     }
 
+    /// All compiled declarations in static manifest order, then dynamic ID order.
+    /// Adapters may publish these for future documents only after applying host
+    /// permissions and view admission; this iterator itself grants no authority.
+    pub fn declarations(&self) -> impl Iterator<Item = Injection<'_>> {
+        self.static_scripts
+            .iter()
+            .chain(self.dynamic.values())
+            .map(|entry| Injection {
+                script: &entry.script,
+                matcher: &entry.matcher,
+            })
+    }
+
     /// Produces a plan only after the adapter verifies current host/site access.
     /// `authorized` must include ordinary-tab ownership and current generation;
     /// Work views, interface views and revoked hosts must pass false.
@@ -283,6 +298,7 @@ impl ScriptRegistry {
             })
             .map(|entry| Injection {
                 script: &entry.script,
+                matcher: &entry.matcher,
             })
             .collect()
     }
@@ -572,6 +588,23 @@ mod tests {
             json!({"content_scripts":[{"matches":["https://example.com/*"],"include_globs":["*/news/*"],"exclude_globs":["*private*"],"js":["x.js"],"css":["x.css"],"all_frames":true,"match_about_blank":true}]}),
         );
         let registry = ScriptRegistry::from_manifest(&manifest, accept).unwrap();
+        let declarations: Vec<_> = registry.declarations().collect();
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(
+            declarations[0].matcher.include_globs()[0].as_str(),
+            "*/news/*"
+        );
+        assert_eq!(
+            declarations[0].matcher.exclude_globs()[0].as_str(),
+            "*private*"
+        );
+        assert!(
+            declarations[0]
+                .matcher
+                .match_set()
+                .options()
+                .match_about_blank
+        );
         let creator = Url::parse("https://example.com/news/story").unwrap();
         let origin = DocumentOrigin::of_url(&creator);
         let url = Url::parse("about:blank").unwrap();

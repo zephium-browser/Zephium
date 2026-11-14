@@ -7572,6 +7572,7 @@ dependencies = [
  "ulid",
  "url",
  "winreg 0.56.0",
+ "zephium-webext-matcher",
  "zeroize",
 ]
 
@@ -7920,6 +7921,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-matcher"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "url",
+]
+
+[[package]]
 name = "zephium-webext-runtime"
 version = "0.1.0"
 dependencies = [
@@ -7932,6 +7941,7 @@ dependencies = [
  "url",
  "zephium-core",
  "zephium-webext",
+ "zephium-webext-matcher",
 ]
 
 [[package]]
