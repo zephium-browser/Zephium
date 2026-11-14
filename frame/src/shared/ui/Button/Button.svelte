@@ -158,7 +158,9 @@
   }
 
   @media (forced-colors: active) {
+    /* Opted out of forcing, or the system's text backplate hides the label. */
     .ui-button[data-variant="primary"] {
+      forced-color-adjust: none;
       background: Highlight;
       color: HighlightText;
     }
