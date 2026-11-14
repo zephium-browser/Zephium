@@ -8,7 +8,7 @@ const reports = (host) =>
     .filter((call) => call.name === 'zephium.addListener' || call.name === 'zephium.removeListener')
     .map((call) => [call.name, ...call.args]);
 
-test('listener interest reaches the host on the first add and the last remove', () => {
+test('listener interest reports exact callback identities to the host', () => {
   const { chrome, host } = extensionContext();
   const event = chrome.alarms.onAlarm;
   const a = () => {};
@@ -24,8 +24,10 @@ test('listener interest reaches the host on the first add and the last remove', 
   event.removeListener(b);
   assert.equal(event.hasListener(b), false);
   assert.deepEqual(reports(host), [
-    ['zephium.addListener', 'alarms.onAlarm', null, null, null],
-    ['zephium.removeListener', 'alarms.onAlarm', null],
+    ['zephium.addListener', 'alarms.onAlarm', 1, null, null],
+    ['zephium.addListener', 'alarms.onAlarm', 2, null, null],
+    ['zephium.removeListener', 'alarms.onAlarm', 1],
+    ['zephium.removeListener', 'alarms.onAlarm', 2],
   ]);
 });
 
@@ -33,9 +35,8 @@ test('event methods check their receiver and argument', () => {
   const { chrome, run } = extensionContext();
   const { addListener } = chrome.tabs.onRemoved;
   assert.throws(() => addListener(() => {}), run('TypeError'));
-  assert.throws(() => chrome.tabs.onRemoved.addListener('nope'), {
-    message: 'Error in invocation of tabs.onRemoved.addListener(function callback): No matching signature.',
-  });
+  chrome.tabs.onRemoved.addListener('nope');
+  assert.equal(chrome.tabs.onRemoved.hasListeners(), false);
   assert.throws(() => chrome.tabs.onRemoved.addRules([]), { message: 'This event does not support rules.' });
 });
 
@@ -98,7 +99,7 @@ test('filtered listeners are reported one by one and only the matched ones run',
   event.addListener((details) => heard.push(['all', details.url]));
   assert.throws(
     () => event.addListener(() => {}, { url: 'example.com' }),
-    /Error in invocation of webNavigation.onCommitted.addListener/,
+    /filters.url should be an array/,
   );
   assert.deepEqual(reports(host), [
     ['zephium.addListener', 'webNavigation.onCommitted', 1, { url: [{ hostSuffix: 'example.com' }] }, null],
@@ -156,4 +157,19 @@ test('held events wait for release and keep their order', () => {
   context.hub.release();
   assert.deepEqual(heard, ['install', 'update']);
   assert.equal(host.acks.length, 2);
+});
+
+test('windowTypes listener filters retain exact host-selected callback identities', () => {
+  const { chrome, host } = extensionContext('background');
+  const heard = [];
+  const event = chrome.windows.onCreated;
+  event.addListener((window) => heard.push(['normal', window.id]), { windowTypes: ['normal'] });
+  event.addListener((window) => heard.push(['popup', window.id]), { windowTypes: ['popup'] });
+  assert.deepEqual(reports(host), [
+    ['zephium.addListener', 'windows.onCreated', 1, { windowTypes: ['normal'] }, null],
+    ['zephium.addListener', 'windows.onCreated', 2, { windowTypes: ['popup'] }, null],
+  ]);
+  host.event('windows.onCreated', [{ id: 7, type: 'popup' }, [2]]);
+  host.event('windows.onCreated', [{ id: 8, type: 'normal' }, [1]]);
+  assert.deepEqual(heard, [['popup', 7], ['normal', 8]]);
 });

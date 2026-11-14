@@ -17,7 +17,9 @@ use crate::envelope::PortId;
 use crate::errors::ApiError;
 use crate::limits::{message_limit, Charge, Clock, Limiter, Reservation, MAX_PORTS_PER_INSTALL};
 
-pub use api::{parse_request, register, MessageRequest, MessageTarget, MessagingHost};
+pub use api::{
+    parse_request, register, resolve_tab_request, MessageRequest, MessageTarget, MessagingHost,
+};
 pub use messages::{
     ListenerOutcome, MessageId, MessageListener, MessageService, MessageSettlement, OneShotDelivery,
 };
@@ -951,3 +953,6 @@ fn disconnected() -> ApiError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod browser_tests;

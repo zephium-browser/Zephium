@@ -1,0 +1,87 @@
+{
+  "caseId": "i18n-fallback",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "uiLanguage",
+      "value": "en-US"
+    },
+    {
+      "label": "regional.override:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "regional.override:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "regional US English value"
+      }
+    },
+    {
+      "label": "regional.only:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "regional.only:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "available in the regional catalog"
+      }
+    },
+    {
+      "label": "default.fallback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "default.fallback:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "fallback from default catalog"
+      }
+    },
+    {
+      "label": "default.placeholderFallback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "default.placeholderFallback:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "Default greets Ada."
+      }
+    },
+    {
+      "label": "missing.everyCatalog:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing.everyCatalog:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": ""
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

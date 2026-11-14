@@ -66,6 +66,7 @@ pub struct PermissionDeclaration {
     optional_api: BTreeSet<ApiPermission>,
     required_hosts: Vec<HostPattern>,
     optional_hosts: Vec<HostPattern>,
+    manifest_features: BTreeSet<String>,
 }
 
 impl PermissionDeclaration {
@@ -102,6 +103,14 @@ impl PermissionDeclaration {
             optional_api,
             required_hosts: hosts(manifest.host_permissions()),
             optional_hosts: hosts(manifest.optional_host_permissions()),
+            manifest_features: manifest
+                .raw()
+                .as_object()
+                .into_iter()
+                .flat_map(|object| object.iter())
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, _)| key.clone())
+                .collect(),
         };
         (declaration, issues)
     }
@@ -123,6 +132,7 @@ impl PermissionRequest {
             .iter()
             .map(|name| {
                 ApiPermission::parse(name.as_ref())
+                    .filter(|permission| crate::schema::known_permission(permission.as_str()))
                     .ok_or_else(|| ApiError::unknown_permission(name.as_ref()))
             })
             .collect::<Result<_, _>>()?;
@@ -333,6 +343,22 @@ impl InstallPermissions {
         (url.scheme() != "file" || self.file_access)
             && self.granted_hosts().any(|pattern| pattern.matches_url(url))
             && self.site_allows(url)
+    }
+
+    /// Capture requires effective all-host access or an invoked activeTab grant.
+    /// Privileged browser surfaces remain excluded by the browser projection.
+    pub fn may_capture_tab(&self, tab: ItemId, document: DocumentGeneration, url: &Url) -> bool {
+        if !matches!(url.scheme(), "http" | "https" | "file")
+            || (url.scheme() == "file" && !self.file_access)
+        {
+            return false;
+        }
+        (self
+            .effective_origins()
+            .iter()
+            .any(|origin| origin.as_str() == "<all_urls>")
+            && self.has_host_access(url))
+            || (self.has_api(ACTIVE_TAB) && self.active_tab_covers(tab, document, url))
     }
 
     /// Whether site access lets the install's content scripts run in a
@@ -702,6 +728,8 @@ pub enum Gate {
     Open,
     /// Requires this permission.
     Requires(&'static str),
+    /// Requires a feature declared in the authenticated manifest.
+    RequiresManifest(&'static str),
     /// Requires any one of these.
     RequiresAny(&'static [&'static str]),
 }
@@ -718,6 +746,9 @@ impl Gate {
         let granted = match self {
             Self::Open => true,
             Self::Requires(name) => permissions.has_api(name),
+            Self::RequiresManifest(name) => {
+                permissions.declaration.manifest_features.contains(*name)
+            }
             Self::RequiresAny(names) => names.iter().any(|name| permissions.has_api(name)),
         };
         if !granted {
@@ -785,6 +816,38 @@ mod tests {
         permissions
             .check_target(&background_sender(), &target(&at, &origin, main))
             .map_err(|error| error.kind())
+    }
+
+    #[test]
+    fn optional_request_names_use_generated_permission_inventory() {
+        assert!(PermissionRequest::parse(&["tabs", "topSites", "clipboardRead"], &[]).is_ok());
+        assert_eq!(
+            PermissionRequest::parse(&["plausibleUnknown"], &[]),
+            Err(ApiError::unknown_permission("plausibleUnknown"))
+        );
+    }
+
+    #[test]
+    fn capture_requires_all_urls_or_an_invoked_active_tab() {
+        let tab = ItemId::from(5);
+        let page = url("https://example.com/");
+        let narrow = state(json!({"host_permissions":["https://example.com/*"]}));
+        assert!(narrow.has_host_access(&page));
+        assert!(!narrow.may_capture_tab(tab, doc(1), &page));
+        let mut broad = state(json!({"host_permissions":["<all_urls>"]}));
+        assert!(broad.may_capture_tab(tab, doc(1), &page));
+        let effect = broad.set_site_access(SiteAccess::OnClick);
+        assert!(!effect.is_empty());
+        assert!(!broad.may_capture_tab(tab, doc(1), &page));
+        assert!(broad.grant_active_tab(tab, doc(1), &page));
+        assert!(!broad.may_capture_tab(tab, doc(1), &page));
+        let mut active = state(json!({"permissions":["activeTab"]}));
+        assert!(!active.may_capture_tab(tab, doc(1), &page));
+        assert!(active.grant_active_tab(tab, doc(1), &page));
+        assert!(active.may_capture_tab(tab, doc(1), &page));
+        assert!(!active.may_capture_tab(tab, doc(2), &page));
+        assert!(!active.may_capture_tab(ItemId::from(6), doc(1), &page));
+        assert!(!active.may_capture_tab(tab, doc(1), &url("chrome://settings/")));
     }
 
     #[test]

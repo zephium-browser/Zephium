@@ -1,0 +1,6 @@
+{
+  "id": "permissions-request-gesture",
+  "title": "Optional permission requests without a user gesture",
+  "apis": ["permissions.request", "permissions.contains"],
+  "permissions": []
+}

@@ -51,6 +51,21 @@
   const isOwnerCall = (bytes) =>
     I.TypedArrayLength(bytes) >= 10 && bytes[5] === 1 && peekCallId(bytes) >= OWNER_ID_BASE;
 
+  const diagnosticText = (value, limit) => {
+    const string = typeof value === 'string' ? value : value === undefined || value === null ? '' : I.String(value);
+    const bytes = I.encodeUtf8(I.StringSlice(string, 0, limit));
+    let end = I.TypedArrayLength(bytes);
+    if (end > limit) end = limit;
+    while (end > 0) {
+      try {
+        return I.decodeUtf8(I.TypedArraySubarray(bytes, 0, end));
+      } catch {
+        end--;
+      }
+    }
+    return '';
+  };
+
   function defineEventClasses(global) {
     const Base = I.Event || global.Event;
     const states = new I.WeakMap();
@@ -130,7 +145,9 @@
       const tabs = chrome && chrome.tabs;
       if (!tabs || typeof tabs.create !== 'function') {
         return I.PromiseReject(
-          new I.TypeError("Failed to execute 'openWindow' on 'Clients': Not allowed to open a window."),
+          I.DOMException
+            ? new I.DOMException('Not allowed to open a window.', 'InvalidAccessError')
+            : new I.Error('Not allowed to open a window.'),
         );
       }
       return I.PromiseThen(tabs.create({ url: I.String(url) }), () => null);
@@ -310,17 +327,14 @@
 
     let finished = false;
     const report = (state, detail) => {
-      I.PromiseThen(
-        context.client.call('zephium.workerLifecycle', I.JSONStringify([state, detail]), true),
-        undefined,
-        () => {},
-      );
+      return context.client.call('zephium.workerLifecycle', I.JSONStringify([state, detail === null ? null : diagnosticText(detail, 1024)]), true);
     };
     const finish = (state, detail) => {
       if (finished) return;
       finished = true;
-      context.hub.release();
-      report(state, detail);
+      I.PromiseThen(report(state, detail), () => {
+        if (state === 'activated') context.hub.release();
+      }, () => {});
     };
     const lifecycle = () => {
       I.removeEventListener(global, 'error', onStartupError);
@@ -332,9 +346,9 @@
           I.clearTimeout(timer);
           return finish('failed', 'install');
         }
-        return I.PromiseThen(classes.run(global, new classes.ExtendableEvent('activate')), () => {
+        return I.PromiseThen(classes.run(global, new classes.ExtendableEvent('activate')), (activated) => {
           I.clearTimeout(timer);
-          finish('activated', null);
+          finish(activated ? 'activated' : 'failed', activated ? null : 'activate');
         });
       });
       return undefined;
@@ -383,15 +397,11 @@
     const reportError = (fields) => {
       if (reports >= MAX_ERROR_REPORTS) return;
       reports++;
-      const text = (value, limit) => {
-        const string = typeof value === 'string' ? value : value === undefined || value === null ? '' : I.String(value);
-        return string.length > limit ? I.StringSlice(string, 0, limit) : string;
-      };
       const detail = {
-        message: text(fields.message, 1024),
-        filename: text(fields.filename, 2048),
-        lineno: I.isInteger(fields.lineno) ? fields.lineno : 0,
-        colno: I.isInteger(fields.colno) ? fields.colno : 0,
+        message: diagnosticText(fields.message, 1024),
+        filename: diagnosticText(fields.filename, 2048),
+        lineno: I.isInteger(fields.lineno) && fields.lineno >= 0 && fields.lineno <= 0xffffffff ? fields.lineno : 0,
+        colno: I.isInteger(fields.colno) && fields.colno >= 0 && fields.colno <= 0xffffffff ? fields.colno : 0,
       };
       I.PromiseThen(client.call('zephium.workerError', I.JSONStringify([detail]), true), undefined, () => {});
     };

@@ -1,0 +1,259 @@
+{
+  "caseId": "scripting-register-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "register:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "register:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "registered:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "registered:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "allFrames": false,
+            "id": "probe",
+            "js": [
+              "registered-a.js"
+            ],
+            "matchOriginAsFallback": false,
+            "matches": [
+              "http://127.0.0.1/*"
+            ],
+            "persistAcrossSessions": false,
+            "runAt": "document_start",
+            "world": "ISOLATED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "duplicate id:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "duplicate id:error",
+      "value": {
+        "lastError": null,
+        "message": "Duplicate script ID 'probe'"
+      }
+    },
+    {
+      "label": "existing document is unchanged:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "existing document is unchanged:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "new document uses registered script:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "new document uses registered script:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:2>",
+            "frameId": 0,
+            "result": "a"
+          }
+        ]
+      }
+    },
+    {
+      "label": "update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "updated registration:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "updated registration:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "allFrames": false,
+            "id": "probe",
+            "js": [
+              "registered-b.js"
+            ],
+            "matchOriginAsFallback": false,
+            "matches": [
+              "http://127.0.0.1/*"
+            ],
+            "persistAcrossSessions": false,
+            "runAt": "document_start",
+            "world": "ISOLATED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "new document uses updated script:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "new document uses updated script:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:3>",
+            "frameId": 0,
+            "result": "b"
+          }
+        ]
+      }
+    },
+    {
+      "label": "unregister:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unregister:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "empty registrations:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "empty registrations:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "unregistration preserves existing injection:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unregistration preserves existing injection:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:3>",
+            "frameId": 0,
+            "result": "b"
+          }
+        ]
+      }
+    },
+    {
+      "label": "later document has no injection:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "later document has no injection:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:4>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "update missing id:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update missing id:error",
+      "value": {
+        "lastError": null,
+        "message": "Script with ID 'missing' does not exist or is not fully registered"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

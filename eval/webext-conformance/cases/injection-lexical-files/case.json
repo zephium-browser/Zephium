@@ -1,0 +1,6 @@
+{
+  "id": "injection-lexical-files",
+  "title": "Top-level lexical bindings and strict directives survive separate script files",
+  "apis": ["manifest.content_scripts", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

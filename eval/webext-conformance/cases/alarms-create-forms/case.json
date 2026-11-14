@@ -1,0 +1,12 @@
+{
+  "id": "alarms-create-forms",
+  "title": "Named and unnamed alarm creation, callbacks, replacement, and clearing",
+  "apis": [
+    "alarms.create",
+    "alarms.get",
+    "alarms.getAll",
+    "alarms.clear",
+    "alarms.clearAll"
+  ],
+  "permissions": ["alarms"]
+}

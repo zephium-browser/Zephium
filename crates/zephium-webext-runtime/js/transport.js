@@ -39,7 +39,7 @@
 
   const ERRORS = I.freeze({
     __proto__: null,
-    tooLarge: 'Message length exceeded maximum allowed length.',
+    tooLarge: 'Message exceeded maximum allowed size of 64MiB.',
     tooManyPending: 'Too many extension API calls are pending.',
     invalidated: 'Extension context invalidated.',
     malformedReply: 'Access to extension API denied.',

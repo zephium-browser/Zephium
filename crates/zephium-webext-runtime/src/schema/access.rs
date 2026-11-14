@@ -101,7 +101,9 @@ fn project(
                 let dependency = dependency.as_str()?;
                 let required = if let Some(permission) = dependency.strip_prefix("permission:") {
                     // Recover the static string from the source rules, not the merged copy.
-                    Gate::Requires(permission_name(rules, permission)?)
+                    Gate::Requires(dependency_name(rules, "permission:", permission)?)
+                } else if let Some(feature) = dependency.strip_prefix("manifest:") {
+                    Gate::RequiresManifest(dependency_name(rules, "manifest:", feature)?)
                 } else if let Some(api) = dependency.strip_prefix("api:") {
                     let inherited = project(namespaces.get(api)?, namespaces, depth + 1)?;
                     mask = mask.intersection(inherited.contexts);
@@ -135,7 +137,7 @@ fn project(
     result
 }
 
-fn permission_name(rules: &'static [Value], permission: &str) -> Option<&'static str> {
+fn dependency_name(rules: &'static [Value], prefix: &str, required: &str) -> Option<&'static str> {
     for entry in rules {
         let rule = entry.get("rules")?;
         let choices = rule
@@ -143,8 +145,8 @@ fn permission_name(rules: &'static [Value], permission: &str) -> Option<&'static
             .map_or_else(|| vec![rule], |v| v.iter().collect());
         for choice in choices {
             for dependency in array(choice, "dependencies") {
-                if let Some(name) = dependency.as_str()?.strip_prefix("permission:") {
-                    if name == permission {
+                if let Some(name) = dependency.as_str()?.strip_prefix(prefix) {
+                    if name == required {
                         return Some(name);
                     }
                 }
@@ -199,6 +201,42 @@ mod tests {
             .contexts
             .contains(ContextKind::UserScript));
         assert!(access("unknown.call").is_none());
+    }
+
+    #[test]
+    fn manifest_features_remain_authorization_requirements() {
+        use crate::context::tests::background_sender;
+        use crate::permissions::{
+            InstallPermissions, PermissionDeclaration, PermissionRequest, SiteAccess,
+        };
+        use zephium_webext::manifest::Manifest;
+        for (name, feature) in [
+            ("action.setTitle", "action"),
+            ("action.onClicked.addListener", "action"),
+            ("commands.getAll", "commands"),
+        ] {
+            let gate = access(name).unwrap().gate;
+            assert_eq!(gate, Gate::RequiresManifest(feature));
+            for present in [false, true] {
+                let manifest = if present {
+                    json!({feature:{}})
+                } else {
+                    json!({})
+                };
+                let (declaration, _) =
+                    PermissionDeclaration::from_manifest(&Manifest::from_value(manifest));
+                let permissions = InstallPermissions::new(
+                    declaration,
+                    &PermissionRequest::default(),
+                    SiteAccess::OnAllSites,
+                    false,
+                );
+                assert_eq!(
+                    gate.check(&permissions, &background_sender(), None).is_ok(),
+                    present
+                );
+            }
+        }
     }
 
     #[test]

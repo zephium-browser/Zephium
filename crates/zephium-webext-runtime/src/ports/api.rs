@@ -13,6 +13,11 @@ pub enum MessageTarget {
         /// Explicit receiver package, if supplied.
         extension_id: Option<ExtensionId>,
     },
+    /// Resolved, permission-checked exact document routes; produced by registration.
+    ResolvedTab {
+        /// One route per current authorized frame, each fenced by document generation.
+        routes: Vec<super::MessageRoute>,
+    },
     /// Content scripts within a Chrome tab id.
     Tab {
         /// Chrome tab id from the argument, still requiring host resolution.
@@ -63,7 +68,7 @@ pub trait MessagingHost {
 }
 
 /// Registers messaging against the generated surface and Zephium policy.
-pub fn register<S: MessagingHost + 'static>(
+pub fn register<S: MessagingHost + crate::browser::BrowserPort + 'static>(
     table: &mut ApiTable<S>,
 ) -> Result<(), RegistrationError> {
     for name in [
@@ -76,14 +81,23 @@ pub fn register<S: MessagingHost + 'static>(
     ] {
         table.register_generated(
             name,
-            move |host: &mut S, invocation| match normalized_request(name, invocation.args()) {
+            move |host: &mut S, invocation| match normalized_request(name, invocation.args(), true)
+            {
                 Ok(request) => {
                     if invocation.sender().kind() == ContextKind::ExternalPage
                         && !explicit_target(&request, invocation.sender().extension_id())
                     {
                         invocation.reply(Err(ApiError::malformed_arguments()))
                     } else {
-                        host.message_request(request, invocation)
+                        match resolve_tab_request(
+                            host,
+                            invocation.sender(),
+                            invocation.permissions(),
+                            request,
+                        ) {
+                            Ok(request) => host.message_request(request, invocation),
+                            Err(error) => invocation.reply(Err(error)),
+                        }
                     }
                 }
                 Err(error) => invocation.reply(Err(error)),
@@ -93,6 +107,79 @@ pub fn register<S: MessagingHost + 'static>(
     Ok(())
 }
 
+/// Resolves tab-side frame/document targeting using the ordinary browser graph.
+/// Adapters must recheck these exact routes immediately before native delivery.
+pub fn resolve_tab_request(
+    host: &impl crate::browser::BrowserPort,
+    sender: &crate::Sender,
+    permissions: &crate::InstallPermissions,
+    mut request: MessageRequest,
+) -> Result<MessageRequest, ApiError> {
+    let target = match &mut request {
+        MessageRequest::Connect { target, .. } | MessageRequest::Send { target, .. } => target,
+        _ => return Ok(request),
+    };
+    let MessageTarget::Tab {
+        tab_id,
+        frame_id,
+        document_id,
+    } = target
+    else {
+        return Ok(request);
+    };
+    let snapshot = crate::browser::snapshot(host, sender)?;
+    let tab = snapshot.tab(i32::try_from(*tab_id).map_err(|_| super::no_receiver())?)?;
+    if tab.tab.discarded() {
+        return Err(super::no_receiver());
+    }
+    let frames = crate::api::web_navigation::frames(host, sender, tab)?;
+    let explicit = frame_id.is_some() || document_id.is_some();
+    let mut routes = Vec::new();
+    for frame in frames {
+        if frame.tab != tab.tab.id()
+            || frame_id.is_some_and(|id| frame.frame.get() != id)
+            || document_id
+                .as_ref()
+                .is_some_and(|id| &frame.document_id != id)
+        {
+            continue;
+        }
+        if frame.document_lifecycle != "active" {
+            if explicit {
+                return Err(super::no_receiver());
+            }
+            continue;
+        }
+        let access = permissions.check_target(
+            sender,
+            &crate::Target {
+                profile: snapshot.profile,
+                tab: tab.tab.id(),
+                frame: frame.frame,
+                main_document: tab.document,
+                url: &frame.url,
+                origin: &frame.origin,
+            },
+        );
+        if let Err(error) = access {
+            if explicit {
+                return Err(error);
+            }
+            continue;
+        }
+        routes.push(super::MessageRoute::Tab {
+            tab: tab.tab.id(),
+            frame: Some(frame.frame),
+            document: Some(frame.document),
+        });
+    }
+    if routes.is_empty() {
+        return Err(super::no_receiver());
+    }
+    *target = MessageTarget::ResolvedTab { routes };
+    Ok(request)
+}
+
 fn explicit_target(request: &MessageRequest, bound: &ExtensionId) -> bool {
     matches!(request, MessageRequest::Connect { target: MessageTarget::Runtime { extension_id: Some(target) }, .. }
         | MessageRequest::Send { target: MessageTarget::Runtime { extension_id: Some(target) }, .. } if target == bound)
@@ -100,10 +187,14 @@ fn explicit_target(request: &MessageRequest, bound: &ExtensionId) -> bool {
 
 /// Validates Chrome overloads, then resolves service-specific target identities.
 pub fn parse_request(method: &str, args: &[Value]) -> Result<MessageRequest, ApiError> {
-    normalized_request(method, &crate::schema::normalize(method, args)?)
+    normalized_request(method, &crate::schema::normalize(method, args)?, false)
 }
 
-fn normalized_request(method: &str, args: &[Value]) -> Result<MessageRequest, ApiError> {
+fn normalized_request(
+    method: &str,
+    args: &[Value],
+    wire: bool,
+) -> Result<MessageRequest, ApiError> {
     let bad = ApiError::malformed_arguments;
     match method {
         "runtime.connect" | "runtime.sendMessage" => {
@@ -120,7 +211,7 @@ fn normalized_request(method: &str, args: &[Value]) -> Result<MessageRequest, Ap
             } else {
                 Ok(MessageRequest::Send {
                     target,
-                    payload: serialize(&args[1])?,
+                    payload: serialize(&args[1], wire)?,
                 })
             }
         }
@@ -150,7 +241,7 @@ fn normalized_request(method: &str, args: &[Value]) -> Result<MessageRequest, Ap
             } else {
                 Ok(MessageRequest::Send {
                     target,
-                    payload: serialize(&args[1])?,
+                    payload: serialize(&args[1], wire)?,
                 })
             }
         }
@@ -165,7 +256,7 @@ fn normalized_request(method: &str, args: &[Value]) -> Result<MessageRequest, Ap
             } else {
                 Ok(MessageRequest::SendNative {
                     host,
-                    payload: serialize(&args[1])?,
+                    payload: serialize(&args[1], wire)?,
                 })
             }
         }
@@ -184,6 +275,11 @@ fn connection_name(options: &Value) -> Result<String, ApiError> {
     Ok(name.to_owned())
 }
 
-fn serialize(value: &Value) -> Result<Vec<u8>, ApiError> {
-    serde_json::to_vec(value).map_err(|_| ApiError::other("Could not serialize message."))
+fn serialize(value: &Value, wire: bool) -> Result<Vec<u8>, ApiError> {
+    if wire {
+        let text = value.as_str().ok_or_else(ApiError::malformed_arguments)?;
+        Ok(text.as_bytes().to_vec())
+    } else {
+        serde_json::to_vec(value).map_err(|_| ApiError::other("Could not serialize message."))
+    }
 }

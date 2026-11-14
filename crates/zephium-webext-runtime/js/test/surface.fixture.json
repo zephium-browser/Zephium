@@ -1,1091 +1,1350 @@
 {
- "version": 1,
- "namespaces": {
-  "runtime": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript",
-    "userScript",
-    "externalPage"
-   ],
-   "functions": {
-    "getURL": {
-     "parameters": [
-      {
-       "name": "path",
-       "type": "string"
-      }
-     ],
-     "returns": "sync",
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame",
-      "contentScript"
-     ]
-    },
-    "getManifest": {
-     "parameters": [],
-     "returns": "sync",
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame",
-      "contentScript"
-     ]
-    },
-    "sendMessage": {
-     "parameters": [
-      {
-       "name": "extensionId",
-       "type": "string",
-       "optional": true
+  "namespaces": {
+    "action": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onClicked": {}
       },
-      {
-       "name": "message",
-       "type": "any"
+      "functions": {
+        "getBadgeText": {
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "signature": "action.TabDetails details, optional function callback"
+        },
+        "openPopup": {
+          "parameters": [
+            {
+              "name": "options",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "optional action.OpenPopupOptions options, optional function callback"
+        },
+        "setBadgeText": {
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false
+        },
+        "setIcon": {
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false
+        },
+        "setPopup": {
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false
+        }
       },
-      {
-       "name": "options",
-       "type": "object",
-       "optional": true
-      }
-     ]
+      "manifest": [
+        "action"
+      ]
     },
-    "connect": {
-     "parameters": [
-      {
-       "name": "extensionId",
-       "type": "string",
-       "optional": true
+    "alarms": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onAlarm": {}
       },
-      {
-       "name": "connectInfo",
-       "type": "object",
-       "optional": true
-      }
-     ],
-     "returns": "sync"
-    },
-    "connectNative": {
-     "parameters": [
-      {
-       "name": "application",
-       "type": "string"
-      }
-     ],
-     "returns": "sync",
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen"
-     ],
-     "permissions": [
-      "nativeMessaging"
-     ]
-    },
-    "sendNativeMessage": {
-     "parameters": [
-      {
-       "name": "application",
-       "type": "string"
+      "functions": {
+        "clear": {
+          "parameters": [
+            {
+              "name": "name",
+              "optional": true,
+              "type": "string"
+            }
+          ]
+        },
+        "clearAll": {
+          "optionalResult": true
+        },
+        "create": {
+          "parameters": [
+            {
+              "name": "name",
+              "optional": true,
+              "type": "string"
+            },
+            {
+              "name": "alarmInfo",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "optional string name, alarms.AlarmCreateInfo alarmInfo, optional function callback"
+        },
+        "get": {
+          "optionalResult": true,
+          "parameters": [
+            {
+              "name": "name",
+              "optional": true,
+              "type": "string"
+            }
+          ]
+        },
+        "getAll": {}
       },
-      {
-       "name": "message",
-       "type": "object"
-      }
-     ],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen"
-     ],
-     "permissions": [
-      "nativeMessaging"
-     ]
+      "permissions": [
+        "alarms"
+      ]
     },
-    "getPlatformInfo": {
-     "parameters": [],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "openOptionsPage": {
-     "parameters": [],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ],
-     "result": false
-    },
-    "reload": {
-     "parameters": [],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ],
-     "callback": false
-    },
-    "getContexts": {
-     "parameters": [
-      {
-       "name": "filter",
-       "type": "object"
-      }
-     ],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen"
-     ]
-    },
-    "setUninstallURL": {
-     "parameters": [
-      {
-       "name": "url",
-       "type": "string"
-      }
-     ],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ],
-     "result": false
-    }
-   },
-   "events": {
-    "onMessage": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame",
-      "contentScript"
-     ]
-    },
-    "onConnect": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame",
-      "contentScript"
-     ]
-    },
-    "onMessageExternal": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "onConnectExternal": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "onInstalled": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "onStartup": {
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    }
-   },
-   "properties": {
-    "OnInstalledReason": {
-     "INSTALL": "install",
-     "UPDATE": "update",
-     "CHROME_UPDATE": "chrome_update",
-     "SHARED_MODULE_UPDATE": "shared_module_update"
-    },
-    "PlatformOs": {
-     "MAC": "mac",
-     "WIN": "win",
-     "ANDROID": "android",
-     "CROS": "cros",
-     "LINUX": "linux",
-     "OPENBSD": "openbsd",
-     "FUCHSIA": "fuchsia"
-    }
-   }
-  },
-  "storage": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "permissions": [
-    "storage"
-   ],
-   "events": {
-    "onChanged": {}
-   }
-  },
-  "storage.local": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "get": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array",
-        "object"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "getKeys": {
-     "parameters": []
-    },
-    "getBytesInUse": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "set": {
-     "parameters": [
-      {
-       "name": "items",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "remove": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ]
-      }
-     ],
-     "result": false
-    },
-    "clear": {
-     "parameters": [],
-     "result": false
-    }
-   },
-   "events": {
-    "onChanged": {}
-   },
-   "properties": {
-    "QUOTA_BYTES": 10485760
-   }
-  },
-  "storage.sync": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "get": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array",
-        "object"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "getKeys": {
-     "parameters": []
-    },
-    "getBytesInUse": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "set": {
-     "parameters": [
-      {
-       "name": "items",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "remove": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ]
-      }
-     ],
-     "result": false
-    },
-    "clear": {
-     "parameters": [],
-     "result": false
-    }
-   },
-   "events": {
-    "onChanged": {}
-   },
-   "properties": {
-    "QUOTA_BYTES": 102400
-   }
-  },
-  "storage.session": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "get": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array",
-        "object"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "getKeys": {
-     "parameters": []
-    },
-    "getBytesInUse": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ],
-       "optional": true
-      }
-     ]
-    },
-    "set": {
-     "parameters": [
-      {
-       "name": "items",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "remove": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array"
-       ]
-      }
-     ],
-     "result": false
-    },
-    "clear": {
-     "parameters": [],
-     "result": false
-    },
-    "setAccessLevel": {
-     "parameters": [
-      {
-       "name": "accessOptions",
-       "type": "object"
-      }
-     ],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen"
-     ],
-     "result": false
-    }
-   },
-   "events": {
-    "onChanged": {}
-   },
-   "properties": {
-    "QUOTA_BYTES": 10485760
-   }
-  },
-  "storage.managed": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "get": {
-     "parameters": [
-      {
-       "name": "keys",
-       "type": [
-        "string",
-        "array",
-        "object"
-       ],
-       "optional": true
-      }
-     ]
-    }
-   },
-   "events": {
-    "onChanged": {}
-   }
-  },
-  "tabs": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "functions": {
-    "query": {
-     "parameters": [
-      {
-       "name": "queryInfo",
-       "type": "object"
-      }
-     ]
-    },
-    "get": {
-     "parameters": [
-      {
-       "name": "tabId",
-       "type": "integer"
-      }
-     ]
-    },
-    "getCurrent": {
-     "parameters": []
-    },
-    "create": {
-     "parameters": [
-      {
-       "name": "createProperties",
-       "type": "object"
-      }
-     ]
-    },
-    "update": {
-     "parameters": [
-      {
-       "name": "tabId",
-       "type": "integer",
-       "optional": true
+    "commands": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "getAll": {}
       },
-      {
-       "name": "updateProperties",
-       "type": "object"
-      }
-     ]
+      "manifest": [
+        "commands"
+      ]
     },
-    "remove": {
-     "parameters": [
-      {
-       "name": "tabIds",
-       "type": [
-        "integer",
-        "array"
-       ]
-      }
-     ],
-     "result": false
-    },
-    "sendMessage": {
-     "parameters": [
-      {
-       "name": "tabId",
-       "type": "integer"
+    "contextMenus": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onClicked": {}
       },
-      {
-       "name": "message",
-       "type": "any"
+      "functions": {
+        "create": {
+          "callback": true,
+          "parameters": [
+            {
+              "name": "createProperties",
+              "type": "object"
+            }
+          ],
+          "promise": false,
+          "result": false,
+          "returns": "sync",
+          "signature": "contextMenus.CreateProperties createProperties, optional function callback"
+        }
       },
-      {
-       "name": "options",
-       "type": "object",
-       "optional": true
-      }
-     ]
+      "permissions": [
+        "contextMenus"
+      ]
     },
-    "connect": {
-     "parameters": [
-      {
-       "name": "tabId",
-       "type": "integer"
+    "dom": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "functions": {
+        "openOrClosedShadowRoot": {
+          "parameters": [
+            {
+              "name": "element",
+              "type": "object"
+            }
+          ],
+          "returns": "sync",
+          "signature": "HTMLElement element"
+        }
+      }
+    },
+    "extension": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "functions": {
+        "getViews": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ],
+          "parameters": [
+            {
+              "name": "fetchProperties",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "returns": "sync"
+        },
+        "isAllowedFileSchemeAccess": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        },
+        "isAllowedIncognitoAccess": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        }
+      }
+    },
+    "i18n": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "functions": {
+        "detectLanguage": {
+          "parameters": [
+            {
+              "name": "text",
+              "type": "string"
+            }
+          ]
+        },
+        "getAcceptLanguages": {},
+        "getMessage": {
+          "parameters": [
+            {
+              "name": "messageName",
+              "type": "string"
+            },
+            {
+              "name": "substitutions",
+              "optional": true,
+              "type": "any"
+            },
+            {
+              "name": "options",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "returns": "sync"
+        },
+        "getUILanguage": {
+          "returns": "sync"
+        }
+      }
+    },
+    "permissions": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onAdded": {},
+        "onRemoved": {}
       },
-      {
-       "name": "connectInfo",
-       "type": "object",
-       "optional": true
+      "functions": {
+        "contains": {
+          "parameters": [
+            {
+              "name": "permissions",
+              "type": "object"
+            }
+          ],
+          "signature": "permissions.Permissions permissions, optional function callback"
+        },
+        "getAll": {},
+        "remove": {
+          "parameters": [
+            {
+              "name": "permissions",
+              "type": "object"
+            }
+          ],
+          "signature": "permissions.Permissions permissions, optional function callback"
+        },
+        "request": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "permissions",
+              "type": "object"
+            }
+          ],
+          "signature": "permissions.Permissions permissions, optional function callback"
+        }
       }
-     ],
-     "returns": "sync"
-    }
-   },
-   "events": {
-    "onUpdated": {},
-    "onRemoved": {},
-    "onActivated": {},
-    "onCreated": {}
-   },
-   "properties": {
-    "TAB_ID_NONE": -1
-   }
-  },
-  "alarms": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "permissions": [
-    "alarms"
-   ],
-   "functions": {
-    "create": {
-     "parameters": [
-      {
-       "name": "name",
-       "type": "string",
-       "optional": true
+    },
+    "privacy": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "permissions": [
+        "privacy"
+      ]
+    },
+    "privacy.network": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "permissions": [
+        "privacy"
+      ]
+    },
+    "privacy.network.webRTCIPHandlingPolicy": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "set": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "setting": {
+            "properties": {
+              "scope": {
+                "enum": [
+                  "regular",
+                  "regular_only",
+                  "incognito_persistent",
+                  "incognito_session_only"
+                ],
+                "optional": true,
+                "type": "string"
+              },
+              "value": {
+                "enum": [
+                  "default",
+                  "default_public_and_private_interfaces",
+                  "default_public_interface_only",
+                  "disable_non_proxied_udp"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
       },
-      {
-       "name": "alarmInfo",
-       "type": "object"
-      }
-     ],
-     "result": false
+      "permissions": [
+        "privacy"
+      ]
     },
-    "get": {
-     "parameters": [
-      {
-       "name": "name",
-       "type": "string",
-       "optional": true
-      }
-     ]
+    "privacy.services": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "permissions": [
+        "privacy"
+      ]
     },
-    "getAll": {
-     "parameters": []
-    },
-    "clear": {
-     "parameters": [
-      {
-       "name": "name",
-       "type": "string",
-       "optional": true
-      }
-     ]
-    },
-    "clearAll": {
-     "parameters": []
-    }
-   },
-   "events": {
-    "onAlarm": {}
-   }
-  },
-  "i18n": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript",
-    "userScript"
-   ],
-   "functions": {
-    "getMessage": {
-     "parameters": [
-      {
-       "name": "messageName",
-       "type": "string"
+    "privacy.services.autofillSettings": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "set": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "setting": {
+            "properties": {
+              "scope": {
+                "enum": [
+                  "regular",
+                  "regular_only",
+                  "incognito_persistent",
+                  "incognito_session_only"
+                ],
+                "optional": true,
+                "type": "string"
+              },
+              "value": {
+                "items": {
+                  "properties": {
+                    "blockedTypes": {
+                      "items": {
+                        "enum": [
+                          "contact_info",
+                          "payments",
+                          "identity_docs",
+                          "travel",
+                          "all"
+                        ],
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "urlPattern": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          }
+        }
       },
-      {
-       "name": "substitutions",
-       "type": "any",
-       "optional": true
+      "permissions": [
+        "privacy"
+      ]
+    },
+    "privacy.services.passwordSavingEnabled": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "get": {
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ]
+        },
+        "set": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "setting": {
+            "properties": {
+              "scope": {
+                "enum": [
+                  "regular",
+                  "regular_only",
+                  "incognito_persistent",
+                  "incognito_session_only"
+                ],
+                "optional": true,
+                "type": "string"
+              },
+              "value": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          }
+        }
       },
-      {
-       "name": "options",
-       "type": "object",
-       "optional": true
+      "permissions": [
+        "privacy"
+      ]
+    },
+    "runtime": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "offscreen",
+        "extensionFrame",
+        "contentScript",
+        "userScript",
+        "externalPage"
+      ],
+      "events": {
+        "onConnect": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "offscreen",
+            "extensionFrame",
+            "contentScript",
+            "userScript"
+          ]
+        },
+        "onConnectExternal": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "offscreen",
+            "extensionFrame"
+          ]
+        },
+        "onInstalled": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        },
+        "onMessage": {
+          "blocking": true,
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "offscreen",
+            "extensionFrame",
+            "contentScript",
+            "userScript"
+          ]
+        },
+        "onMessageExternal": {
+          "blocking": true,
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "offscreen",
+            "extensionFrame"
+          ]
+        },
+        "onStartup": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        }
+      },
+      "functions": {
+        "connect": {
+          "parameters": [
+            {
+              "name": "extensionId",
+              "optional": true,
+              "type": "string"
+            },
+            {
+              "name": "connectInfo",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "returns": "sync"
+        },
+        "connectNative": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "application",
+              "type": [
+                "string",
+                "object"
+              ]
+            }
+          ],
+          "permissions": [
+            "nativeMessaging"
+          ],
+          "returns": "sync",
+          "signature": "[string|runtime.NativeMessageTarget] application"
+        },
+        "getContexts": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ],
+          "parameters": [
+            {
+              "name": "filter",
+              "type": "object"
+            }
+          ],
+          "signature": "runtime.ContextFilter filter, optional function callback"
+        },
+        "getManifest": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame",
+            "contentScript"
+          ],
+          "returns": "sync"
+        },
+        "getPlatformInfo": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        },
+        "getURL": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "offscreen",
+            "extensionFrame",
+            "contentScript"
+          ],
+          "parameters": [
+            {
+              "name": "path",
+              "type": "string"
+            }
+          ],
+          "returns": "sync"
+        },
+        "openOptionsPage": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ],
+          "result": false
+        },
+        "reload": {
+          "callback": false,
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ]
+        },
+        "sendMessage": {
+          "parameters": [
+            {
+              "name": "extensionId",
+              "optional": true,
+              "type": "string"
+            },
+            {
+              "name": "message",
+              "type": "any"
+            },
+            {
+              "name": "options",
+              "optional": true,
+              "type": "object"
+            }
+          ]
+        },
+        "sendNativeMessage": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "application",
+              "type": [
+                "string",
+                "object"
+              ]
+            },
+            {
+              "name": "message",
+              "type": "object"
+            }
+          ],
+          "permissions": [
+            "nativeMessaging"
+          ],
+          "signature": "[string|runtime.NativeMessageTarget] application, object message, optional function callback"
+        },
+        "setUninstallURL": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab",
+            "extensionFrame"
+          ],
+          "parameters": [
+            {
+              "name": "url",
+              "type": "string"
+            }
+          ],
+          "result": false
+        }
+      },
+      "properties": {
+        "OnInstalledReason": {
+          "CHROME_UPDATE": "chrome_update",
+          "INSTALL": "install",
+          "SHARED_MODULE_UPDATE": "shared_module_update",
+          "UPDATE": "update"
+        },
+        "PlatformOs": {
+          "ANDROID": "android",
+          "CROS": "cros",
+          "LINUX": "linux",
+          "MAC": "mac",
+          "OPENBSD": "openbsd",
+          "WIN": "win"
+        }
       }
-     ],
-     "returns": "sync"
     },
-    "getUILanguage": {
-     "parameters": [],
-     "returns": "sync"
-    },
-    "getAcceptLanguages": {
-     "parameters": []
-    },
-    "detectLanguage": {
-     "parameters": [
-      {
-       "name": "text",
-       "type": "string"
+    "scripting": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "executeScript": {
+          "parameters": [
+            {
+              "name": "injection",
+              "serializeFunctions": [
+                "func",
+                "function"
+              ],
+              "type": "object"
+            }
+          ],
+          "signature": "scripting.ScriptInjection injection, optional function callback"
+        },
+        "getRegisteredContentScripts": {
+          "parameters": [
+            {
+              "name": "filter",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "signature": "optional scripting.ContentScriptFilter filter, optional function callback"
+        },
+        "insertCSS": {
+          "parameters": [
+            {
+              "name": "injection",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "scripting.CSSInjection injection, optional function callback"
+        },
+        "registerContentScripts": {
+          "parameters": [
+            {
+              "name": "scripts",
+              "type": "array"
+            }
+          ],
+          "result": false
+        },
+        "removeCSS": {
+          "parameters": [
+            {
+              "name": "injection",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "scripting.CSSInjection injection, optional function callback"
+        },
+        "unregisterContentScripts": {
+          "parameters": [
+            {
+              "name": "filter",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "optional scripting.ContentScriptFilter filter, optional function callback"
+        },
+        "updateContentScripts": {
+          "parameters": [
+            {
+              "name": "scripts",
+              "type": "array"
+            }
+          ],
+          "result": false
+        }
+      },
+      "permissions": [
+        "scripting"
+      ],
+      "properties": {
+        "ExecutionWorld": {
+          "ISOLATED": "ISOLATED",
+          "MAIN": "MAIN"
+        }
       }
-     ]
+    },
+    "storage": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "events": {
+        "onChanged": {}
+      },
+      "permissions": [
+        "storage"
+      ]
+    },
+    "storage.local": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "events": {
+        "onChanged": {}
+      },
+      "functions": {
+        "clear": {
+          "result": false
+        },
+        "get": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array",
+                "object"
+              ]
+            }
+          ]
+        },
+        "getBytesInUse": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ]
+        },
+        "getKeys": {},
+        "remove": {
+          "parameters": [
+            {
+              "name": "keys",
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ],
+          "result": false
+        },
+        "set": {
+          "parameters": [
+            {
+              "name": "items",
+              "type": "object"
+            }
+          ],
+          "result": false
+        }
+      },
+      "permissions": [
+        "storage"
+      ],
+      "properties": {
+        "QUOTA_BYTES": 10485760
+      }
+    },
+    "storage.managed": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "events": {
+        "onChanged": {}
+      },
+      "functions": {
+        "get": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array",
+                "object"
+              ]
+            }
+          ]
+        }
+      },
+      "permissions": [
+        "storage"
+      ]
+    },
+    "storage.session": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "events": {
+        "onChanged": {}
+      },
+      "functions": {
+        "clear": {
+          "result": false
+        },
+        "get": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array",
+                "object"
+              ]
+            }
+          ]
+        },
+        "getBytesInUse": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ]
+        },
+        "getKeys": {},
+        "remove": {
+          "parameters": [
+            {
+              "name": "keys",
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ],
+          "result": false
+        },
+        "set": {
+          "parameters": [
+            {
+              "name": "items",
+              "type": "object"
+            }
+          ],
+          "result": false
+        },
+        "setAccessLevel": {
+          "parameters": [
+            {
+              "name": "accessOptions",
+              "type": "object"
+            }
+          ],
+          "result": false
+        }
+      },
+      "permissions": [
+        "storage"
+      ],
+      "properties": {
+        "QUOTA_BYTES": 10485760
+      }
+    },
+    "storage.sync": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame",
+        "contentScript"
+      ],
+      "events": {
+        "onChanged": {}
+      },
+      "functions": {
+        "clear": {
+          "result": false
+        },
+        "get": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array",
+                "object"
+              ]
+            }
+          ]
+        },
+        "getBytesInUse": {
+          "parameters": [
+            {
+              "name": "keys",
+              "optional": true,
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ]
+        },
+        "getKeys": {},
+        "remove": {
+          "parameters": [
+            {
+              "name": "keys",
+              "type": [
+                "string",
+                "array"
+              ]
+            }
+          ],
+          "result": false
+        },
+        "set": {
+          "parameters": [
+            {
+              "name": "items",
+              "type": "object"
+            }
+          ],
+          "result": false
+        }
+      },
+      "permissions": [
+        "storage"
+      ],
+      "properties": {
+        "QUOTA_BYTES": 102400
+      }
+    },
+    "tabs": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onActivated": {},
+        "onCreated": {},
+        "onRemoved": {},
+        "onUpdated": {}
+      },
+      "functions": {
+        "connect": {
+          "parameters": [
+            {
+              "name": "tabId",
+              "type": "integer"
+            },
+            {
+              "name": "connectInfo",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "returns": "sync"
+        },
+        "create": {
+          "parameters": [
+            {
+              "name": "createProperties",
+              "type": "object"
+            }
+          ]
+        },
+        "get": {
+          "parameters": [
+            {
+              "name": "tabId",
+              "type": "integer"
+            }
+          ]
+        },
+        "getCurrent": {
+          "optionalResult": true
+        },
+        "query": {
+          "parameters": [
+            {
+              "name": "queryInfo",
+              "type": "object"
+            }
+          ]
+        },
+        "remove": {
+          "parameters": [
+            {
+              "name": "tabIds",
+              "type": [
+                "integer",
+                "array"
+              ]
+            }
+          ],
+          "result": false
+        },
+        "sendMessage": {
+          "parameters": [
+            {
+              "name": "tabId",
+              "type": "integer"
+            },
+            {
+              "name": "message",
+              "type": "any"
+            },
+            {
+              "name": "options",
+              "optional": true,
+              "type": "object"
+            }
+          ]
+        },
+        "update": {
+          "optionalResult": true,
+          "parameters": [
+            {
+              "name": "tabId",
+              "optional": true,
+              "type": "integer"
+            },
+            {
+              "name": "updateProperties",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "TAB_ID_NONE": -1
+      }
+    },
+    "webNavigation": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onCommitted": {
+          "filter": "url"
+        },
+        "onCompleted": {
+          "filter": "url"
+        }
+      },
+      "functions": {
+        "getAllFrames": {
+          "optionalResult": true,
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ]
+        },
+        "getFrame": {
+          "optionalResult": true,
+          "parameters": [
+            {
+              "name": "details",
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "permissions": [
+        "webNavigation"
+      ]
+    },
+    "webRequest": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onAuthRequired": {
+          "blocking": true,
+          "filter": "request"
+        },
+        "onBeforeRequest": {
+          "blocking": true,
+          "filter": "request"
+        }
+      },
+      "permissions": [
+        "webRequest"
+      ]
+    },
+    "windows": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onCreated": {
+          "filter": "window"
+        }
+      }
     }
-   }
   },
-  "scripting": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "permissions": [
-    "scripting"
-   ],
-   "functions": {
-    "executeScript": {
-     "parameters": [
-      {
-       "name": "injection",
-       "type": "object",
-       "serializeFunctions": [
-        "func"
-       ]
-      }
-     ]
-    },
-    "insertCSS": {
-     "parameters": [
-      {
-       "name": "injection",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "removeCSS": {
-     "parameters": [
-      {
-       "name": "injection",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "registerContentScripts": {
-     "parameters": [
-      {
-       "name": "scripts",
-       "type": "array"
-      }
-     ],
-     "result": false
-    },
-    "unregisterContentScripts": {
-     "parameters": [
-      {
-       "name": "filter",
-       "type": "object",
-       "optional": true
-      }
-     ],
-     "result": false
-    },
-    "getRegisteredContentScripts": {
-     "parameters": [
-      {
-       "name": "filter",
-       "type": "object",
-       "optional": true
-      }
-     ]
-    },
-    "updateContentScripts": {
-     "parameters": [
-      {
-       "name": "scripts",
-       "type": "array"
-      }
-     ],
-     "result": false
-    }
-   },
-   "properties": {
-    "ExecutionWorld": {
-     "ISOLATED": "ISOLATED",
-     "MAIN": "MAIN"
-    }
-   }
-  },
-  "action": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "functions": {
-    "setBadgeText": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "getBadgeText": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ]
-    },
-    "setIcon": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "setPopup": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ],
-     "result": false
-    },
-    "openPopup": {
-     "parameters": [
-      {
-       "name": "options",
-       "type": "object",
-       "optional": true
-      }
-     ],
-     "result": false
-    }
-   },
-   "events": {
-    "onClicked": {}
-   }
-  },
-  "permissions": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "functions": {
-    "contains": {
-     "parameters": [
-      {
-       "name": "permissions",
-       "type": "object"
-      }
-     ]
-    },
-    "getAll": {
-     "parameters": []
-    },
-    "request": {
-     "parameters": [
-      {
-       "name": "permissions",
-       "type": "object"
-      }
-     ],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen"
-     ]
-    },
-    "remove": {
-     "parameters": [
-      {
-       "name": "permissions",
-       "type": "object"
-      }
-     ]
-    }
-   },
-   "events": {
-    "onAdded": {},
-    "onRemoved": {}
-   }
-  },
-  "extension": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "getViews": {
-     "parameters": [
-      {
-       "name": "fetchProperties",
-       "type": "object",
-       "optional": true
-      }
-     ],
-     "returns": "sync",
-     "contexts": [
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "isAllowedIncognitoAccess": {
-     "parameters": [],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    },
-    "isAllowedFileSchemeAccess": {
-     "parameters": [],
-     "contexts": [
-      "background",
-      "popup",
-      "options",
-      "extensionTab",
-      "offscreen",
-      "extensionFrame"
-     ]
-    }
-   }
-  },
-  "dom": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame",
-    "contentScript"
-   ],
-   "functions": {
-    "openOrClosedShadowRoot": {
-     "parameters": [
-      {
-       "name": "element",
-       "type": "object"
-      }
-     ],
-     "returns": "sync"
-    }
-   }
-  },
-  "webNavigation": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "permissions": [
-    "webNavigation"
-   ],
-   "functions": {
-    "getFrame": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ]
-    },
-    "getAllFrames": {
-     "parameters": [
-      {
-       "name": "details",
-       "type": "object"
-      }
-     ]
-    }
-   },
-   "events": {
-    "onCommitted": {
-     "filter": "url"
-    },
-    "onCompleted": {
-     "filter": "url"
-    }
-   }
-  },
-  "webRequest": {
-   "contexts": [
-    "background",
-    "popup",
-    "options",
-    "extensionTab",
-    "offscreen",
-    "extensionFrame"
-   ],
-   "permissions": [
-    "webRequest"
-   ],
-   "events": {
-    "onBeforeRequest": {
-     "filter": "request"
-    },
-    "onAuthRequired": {
-     "filter": "request",
-     "blocking": true
-    }
-   }
-  }
- }
+  "version": 1
 }

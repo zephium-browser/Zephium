@@ -1,0 +1,11 @@
+{
+  "id": "injection-css",
+  "title": "Manifest CSS and programmatic insert/removeCSS cascade",
+  "apis": [
+    "manifest.content_scripts.css",
+    "scripting.insertCSS",
+    "scripting.removeCSS",
+    "scripting.executeScript"
+  ],
+  "permissions": ["scripting"]
+}

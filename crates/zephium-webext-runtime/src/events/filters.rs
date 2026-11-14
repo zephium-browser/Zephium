@@ -117,7 +117,10 @@ impl ListenerFilter {
             }
         } else if matches!(
             event,
-            "windows.onCreated" | "windows.onRemoved" | "windows.onFocusChanged"
+            "windows.onCreated"
+                | "windows.onRemoved"
+                | "windows.onFocusChanged"
+                | "windows.onBoundsChanged"
         ) {
             let types = object
                 .get("windowTypes")

@@ -68,17 +68,17 @@
 
   const portStates = new I.WeakMap();
   const portPrototype = I.create(I.ObjectPrototype);
-  const portState = (port, method) => {
+  const portState = (port) => {
     const state = port !== null && typeof port === 'object' ? I.WeakMapGet(portStates, port) : undefined;
     if (state === undefined)
-      throw new I.TypeError(`Illegal invocation: Port.${method} called on an object that is not a port`);
+      throw new I.TypeError('Illegal invocation: Function must be called on an object of type Port');
     return state;
   };
   I.defineProperty(portPrototype, 'postMessage', {
     configurable: true,
     writable: true,
     value: function postMessage(message) {
-      const state = portState(this, 'postMessage');
+      const state = portState(this);
       state.owner.post(state, message);
     },
   });
@@ -86,7 +86,7 @@
     configurable: true,
     writable: true,
     value: function disconnect() {
-      const state = portState(this, 'disconnect');
+      const state = portState(this);
       state.owner.disconnect(state);
     },
   });
@@ -237,60 +237,80 @@
       });
     }
 
-    const respond = (token, response) => {
-      I.PromiseThen(client.call('zephium.respond', I.JSONStringify([token, response]), true), undefined, (error) =>
+    const respond = (token, listener, response) => {
+      I.PromiseThen(client.call('zephium.respond', I.JSONStringify([token, listener, response]), true), undefined, (error) =>
         I.consoleError(`Unchecked runtime.lastError: ${E.messageOf(error)}`),
       );
     };
 
-    // `[messageJson, sender, token]`: every listener gets the same message,
-    // sender and sendResponse. A listener keeps the channel open by
-    // returning true or a promise; the first response wins.
+    // `[messageJson, sender, messageId, listenerIds]`: Rust selects the exact
+    // callbacks. Each reports its outcome so one closed callback cannot close
+    // another callback's asynchronous response channel.
     function receiveMessage(event, args) {
-      const token = typeof args[2] === 'string' ? args[2] : null;
+      const token = parsePortId(args[2]) !== null ? args[2] : null;
+      if (token === null || !I.isArray(args[3])) return;
+      const selected = new I.Set();
+      for (let i = 0; i < args[3].length; i++) {
+        const id = args[3][i];
+        if (I.isInteger(id) && id > 0 && id <= 9007199254740991) I.SetAdd(selected, id);
+      }
       const parsed = typeof args[0] === 'string' ? parseMessage(args[0]) : { ok: false };
       const sender = args[1] !== null && typeof args[1] === 'object' ? args[1] : {};
-      if (!parsed.ok || EV.count(event) === 0) {
-        if (token !== null) respond(token, null);
-        return;
-      }
-      let answered = false;
-      let channelOpen = true;
-      const sendResponse = function sendResponse(response) {
-        if (answered || !channelOpen || token === null) return;
-        const encoded = response === undefined ? null : serialize(response, limit);
-        answered = true;
-        respond(token, { response: encoded === null ? null : encoded.text });
-      };
-      let keepOpen = false;
-      hub.dispatch(hub.stateOf(event), [parsed.value, sender, sendResponse], (result) => {
+      const entries = event === undefined ? [] : hub.messageListeners(event);
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const id = entry.record.id;
+        if (!I.SetHas(selected, id)) continue;
+        I.SetDelete(selected, id);
+        if (!parsed.ok) {
+          respond(token, id, null);
+          continue;
+        }
+        let answered = false;
+        let channelOpen = true;
+        const sendResponse = function sendResponse(response) {
+          if (answered || !channelOpen) return;
+          const encoded = response === undefined ? null : serialize(response, limit);
+          answered = true;
+          respond(token, id, { response: encoded === null ? null : encoded.text });
+        };
+        let result;
+        try {
+          result = I.apply(entry.listener, undefined, [parsed.value, sender, sendResponse]);
+        } catch (error) {
+          E.reportListenerError(error);
+        }
+        if (answered) {
+          if (isThenable(result)) I.PromiseThen(I.PromiseResolve(result), undefined, () => {});
+          continue;
+        }
         if (result === true) {
-          keepOpen = true;
+          respond(token, id, { async: 'callback' });
         } else if (isThenable(result)) {
-          keepOpen = true;
+          respond(token, id, { async: 'promise' });
           I.PromiseThen(
             I.PromiseResolve(result),
             (value) => {
-              if (answered || !channelOpen || token === null) return;
+              if (answered || !channelOpen) return;
               try {
                 sendResponse(value);
               } catch (error) {
                 answered = true;
-                respond(token, { error: E.messageOf(error) });
+                respond(token, id, { error: E.messageOf(error) });
               }
             },
             (error) => {
-              if (answered || !channelOpen || token === null) return;
+              if (answered || !channelOpen) return;
               answered = true;
-              respond(token, { error: E.messageOf(error) });
+              respond(token, id, { error: E.messageOf(error) });
             },
           );
+        } else {
+          channelOpen = false;
+          respond(token, id, null);
         }
-      });
-      if (!keepOpen && !answered) {
-        channelOpen = false;
-        if (token !== null) respond(token, null);
       }
+      I.SetForEach(selected, (id) => respond(token, id, null));
     }
 
     // `[portId, name, sender]`: a port opened towards this context.
@@ -312,10 +332,6 @@
       const name = MESSAGE_EVENTS[i];
       hub.handle(name, (args) => {
         const event = context.eventFor(name);
-        if (event === undefined) {
-          if (typeof args[2] === 'string') respond(args[2], null);
-          return;
-        }
         receiveMessage(event, args);
       });
     }

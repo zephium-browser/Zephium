@@ -5,13 +5,15 @@
 - Commit: `4b3d0dabb8250b6f152d2d85d79e7706e309d087`
 - Tree: `1390557da6bf6cb630528eac294f338b887ad81a`
 - Licence: BSD-3-Clause; the unchanged upstream root `LICENSE` is included.
-- Upstream files: 46 (677753 bytes), including 32 schemas, 13 feature metadata files and `LICENSE`.
+- Upstream files: 47 (678966 bytes), including 33 schemas, 13 feature metadata files and `LICENSE`.
 - Local modifications to upstream files: none.
 
 The pin was selected from the [official 11 November 2026 stable release](https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_01744469280.html).
 The tag was resolved through the official Gitiles JSON endpoint; every file was then
 downloaded from the immutable commit using HTTPS `?format=TEXT` and base64-decoded
-without newline, comment or formatting changes. Retrieval date: 2026-11-14.
+without newline, comment or formatting changes. Retrieval date: 2026-11-14. The topSites schema was added at the same pin;
+its Git blob `632076e53a1cc1a5b5e3791e0169a8ace17ab2ac` was checked against
+the immutable API-directory tree.
 
 The snapshot covers the API inventory used by the runtime and the transitive
 schema references `events`, `extensionTypes` and `types`. Both API roots retain
@@ -55,6 +57,7 @@ upstream files.
 | `chrome/common/extensions/api/sessions.json` | `a81c446b0d4768e572c39eb5ea2834ef3dc2bb6f762bde85c273e82f52cca52a` | 4813 |
 | `chrome/common/extensions/api/side_panel.idl` | `92e7591b8f4560567978002066b24ae36293890947c4a2207eb2e9e83ad5bfa5` | 7716 |
 | `chrome/common/extensions/api/tabs.json` | `5380b79db1c0078e99ca5f97f55bde46d357e07d76d3afcf886020c69a8c4b23` | 61413 |
+| `chrome/common/extensions/api/top_sites.json` | `163c6ed6731e9fbb8f671cacbe8e4a5517abdd47a57581db8b9f257a887bc5a0` | 1213 |
 | `chrome/common/extensions/api/web_navigation.json` | `fc55f4b97176d7c45e0dfcd59bb67753eecc37d664eb0d1aefe3045d31c1727b` | 24234 |
 | `chrome/common/extensions/api/windows.json` | `8825ea2a367f892ce76c58931b1d2da3c2408bbbed751ec3ce727d1f9597e8de` | 18268 |
 | `extensions/common/api/_api_features.json` | `6157faf0bdd37519175567875a004f4a848d54d6a05d4c55a2b19490ba7f3324` | 34390 |

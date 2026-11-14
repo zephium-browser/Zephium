@@ -1,0 +1,6 @@
+{
+  "id": "tabs-message-frames",
+  "title": "Tab messages target frame and document identifiers",
+  "apis": ["tabs.sendMessage", "webNavigation.getAllFrames"],
+  "permissions": ["webNavigation"]
+}

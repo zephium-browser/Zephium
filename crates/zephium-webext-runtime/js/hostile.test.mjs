@@ -114,7 +114,7 @@ test('replacing built-ins after bootstrap does not break calls, events, messages
 
   host.handlers['zephium.respond'] = (args) => (heard.push(args), null);
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => sendResponse({ echo: message }));
-  host.event('runtime.onMessage', ['"ping"', { id: 'x' }, '3']);
+  host.event('runtime.onMessage', ['"ping"', { id: 'x' }, '3', [3]]);
 
   const port = chrome.runtime.connect({ name: 'p' });
   const portMessages = [];
@@ -126,7 +126,7 @@ test('replacing built-ins after bootstrap does not break calls, events, messages
   assert.deepEqual(portMessages, [{ back: 1 }]);
   assert.deepEqual(host.portMessages, [{ port: 31n, message: { queued: true } }]);
   assert.deepEqual(host.disconnects, [31n]);
-  assert.deepEqual(heard[1], ['3', { response: '{"echo":"ping"}' }]);
+  assert.deepEqual(heard[1], ['3', 3, { response: '{"echo":"ping"}' }]);
   assert.equal(chrome.i18n.getMessage('greeting', ['A', 'B']), 'Hello A, you have B messages');
   assert.equal(chrome.runtime.getURL('x.html'), 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/x.html');
 });

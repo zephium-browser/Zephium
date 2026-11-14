@@ -1,0 +1,114 @@
+{
+  "caseId": "storage-session-access",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "content.defaultAccess:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "content.defaultAccess:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "error": "Access to storage is not allowed from this context.",
+          "localPresent": true,
+          "sessionPresent": true
+        }
+      }
+    },
+    {
+      "label": "session.allowUntrusted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.allowUntrusted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "content.grantedAccess:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "content.grantedAccess:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "localPresent": true,
+          "sessionPresent": true,
+          "value": {
+            "sessionProbe": "visible-only-when-authorized"
+          }
+        }
+      }
+    },
+    {
+      "label": "session.revokeUntrusted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.revokeUntrusted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "content.revokedAccess:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "content.revokedAccess:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "error": "Access to storage is not allowed from this context.",
+          "localPresent": true,
+          "sessionPresent": true
+        }
+      }
+    },
+    {
+      "label": "session.invalidAccessLevel:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.invalidAccessLevel:error",
+      "value": {
+        "lastError": null,
+        "message": "Error in invocation of storage.setAccessLevel(object accessOptions, optional function callback): Error at parameter 'accessOptions': Error at property 'accessLevel': Value must be one of TRUSTED_AND_UNTRUSTED_CONTEXTS, TRUSTED_CONTEXTS."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

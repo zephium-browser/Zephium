@@ -32,7 +32,13 @@ const EXTERNAL_PAGE_METHODS: [&str; 2] = ["runtime.sendMessage", "runtime.connec
 /// writes or declarative-net-request mutation; external pages get only
 /// `runtime.sendMessage` and `runtime.connect`.
 pub fn permitted_contexts(name: &str) -> ContextMask {
-    if name == "events.completeRegistration" {
+    if matches!(
+        name,
+        "events.completeRegistration"
+            | "runtime.markListenerRegistrationComplete"
+            | "zephium.workerLifecycle"
+            | "zephium.workerError"
+    ) {
         return ContextMask::of(ContextKind::Background);
     }
     let mut mask = ContextMask::ALL;
@@ -600,7 +606,7 @@ impl<S> Dispatcher<S> {
             Err(_) => return Handled(Answer::Now(Err(ApiError::malformed_arguments()))),
         };
         if spec.generated_schema {
-            args = match crate::schema::normalize(name, &args) {
+            args = match crate::schema::normalize_wire(name, &args) {
                 Ok(args) => args,
                 Err(error) => return Handled(Answer::Now(Err(error))),
             };

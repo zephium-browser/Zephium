@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "permissions": ["declarativeNetRequest"],
+  "web_accessible_resources": [
+    {
+      "resources": ["redirected.txt"],
+      "matches": ["http://127.0.0.1/*"]
+    }
+  ]
+}

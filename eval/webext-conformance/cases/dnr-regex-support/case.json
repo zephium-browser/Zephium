@@ -1,0 +1,6 @@
+{
+  "id": "dnr-regex-support",
+  "title": "Regex support checks distinguish valid and unsupported syntax",
+  "apis": ["declarativeNetRequest.isRegexSupported"],
+  "permissions": ["declarativeNetRequest"]
+}

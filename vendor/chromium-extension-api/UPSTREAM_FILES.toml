@@ -112,6 +112,11 @@ sha256 = "5380b79db1c0078e99ca5f97f55bde46d357e07d76d3afcf886020c69a8c4b23"
 bytes = 61413
 
 [[files]]
+path = "chrome/common/extensions/api/top_sites.json"
+sha256 = "163c6ed6731e9fbb8f671cacbe8e4a5517abdd47a57581db8b9f257a887bc5a0"
+bytes = 1213
+
+[[files]]
 path = "chrome/common/extensions/api/web_navigation.json"
 sha256 = "fc55f4b97176d7c45e0dfcd59bb67753eecc37d664eb0d1aefe3045d31c1727b"
 bytes = 24234

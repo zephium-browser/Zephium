@@ -110,7 +110,7 @@ test("oversize calls are refused before sending with Chrome's text", async () =>
   const big = JSON.stringify(['x'.repeat(8 * 1024 * 1024)]);
   await assert.rejects(
     client.call('storage.local.set', big),
-    (error) => error === 'Message length exceeded maximum allowed length.',
+    (error) => error === 'Message exceeded maximum allowed size of 64MiB.',
   );
   assert.equal(host.frames.length, 0);
   assert.equal(Z.transport.messageLimit('background'), 32 * 1024 * 1024);
