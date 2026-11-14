@@ -48,6 +48,8 @@ pub enum StopReason {
     EventTimeout,
     /// Background construction did not complete within its deadline.
     StartupTimeout,
+    /// A worker reported evaluation or execution failure while still alive.
+    WorkerFailure,
     /// A queued extension needs its profile slot.
     Capacity,
     /// The adapter reported system memory pressure.
@@ -195,6 +197,13 @@ pub enum Observation {
         /// Previously started event.
         event: u64,
     },
+    /// A worker reported failure; native destruction still needs acknowledgment.
+    WorkerFailed {
+        /// Target install.
+        install: ExtensionInstallId,
+        /// Live or constructing process generation.
+        generation: u64,
+    },
     /// Native process death, including construction failure.
     Crashed {
         /// Target install.
@@ -243,6 +252,7 @@ struct Background {
     retry_at: u64,
     wake: Option<(u64, StartReason)>,
     disabled: bool,
+    failed_while_alive: bool,
 }
 
 impl Background {
@@ -259,6 +269,7 @@ impl Background {
             retry_at: 0,
             wake: None,
             disabled: false,
+            failed_while_alive: false,
         }
     }
 
@@ -316,6 +327,27 @@ impl Background {
         self.blockers = Blockers::default();
         self.events.clear();
         self.idle_since = None;
+    }
+
+    fn crashed(&mut self, install: ExtensionInstallId, now: u64, commands: &mut Vec<Command>) {
+        self.failed_while_alive = false;
+        self.clear_resources();
+        if self.disabled {
+            self.state = BackgroundState::Disabled;
+            return;
+        }
+        self.prune_crashes(now);
+        self.crashes.push_back(now);
+        if self.crashes.len() >= MAX_CRASHES {
+            self.state = BackgroundState::Disabled;
+            self.disabled = true;
+            self.wake = None;
+            commands.push(Command::Disabled { install });
+        } else {
+            self.state = BackgroundState::Crashed;
+            let backoff = CRASH_BACKOFF_NANOS[(self.crashes.len() - 1).min(2)];
+            self.retry_at = now.saturating_add(backoff);
+        }
     }
 
     fn prune_crashes(&mut self, now: u64) {
@@ -487,6 +519,7 @@ impl Lifecycle {
             | Observation::Blockers { install, .. }
             | Observation::EventStarted { install, .. }
             | Observation::EventFinished { install, .. }
+            | Observation::WorkerFailed { install, .. }
             | Observation::Crashed { install, .. }
             | Observation::Terminated { install, .. }
             | Observation::Disable { install }
@@ -556,6 +589,16 @@ impl Lifecycle {
             } if live(background, generation) && background.events.remove(&event).is_some() => {
                 background.activity(now);
             }
+            Observation::WorkerFailed { generation, .. }
+                if background.generation == generation
+                    && matches!(
+                        background.state,
+                        BackgroundState::Starting | BackgroundState::Running
+                    ) =>
+            {
+                background.failed_while_alive = true;
+                background.terminate(install, StopReason::WorkerFailure, commands);
+            }
             Observation::Crashed { generation, .. } => {
                 if background.generation != generation || !background.occupies_slot() {
                     return Ok(());
@@ -564,34 +607,22 @@ impl Lifecycle {
                     install,
                     generation,
                 });
-                background.clear_resources();
-                if background.disabled {
-                    background.state = BackgroundState::Disabled;
-                    return Ok(());
-                }
-                background.prune_crashes(now);
-                background.crashes.push_back(now);
-                if background.crashes.len() >= MAX_CRASHES {
-                    background.state = BackgroundState::Disabled;
-                    background.disabled = true;
-                    background.wake = None;
-                    commands.push(Command::Disabled { install });
-                } else {
-                    background.state = BackgroundState::Crashed;
-                    let backoff = CRASH_BACKOFF_NANOS[(background.crashes.len() - 1).min(2)];
-                    background.retry_at = now.saturating_add(backoff);
-                }
+                background.crashed(install, now, commands);
             }
             Observation::Terminated { generation, .. }
                 if background.generation == generation
                     && background.state == BackgroundState::Terminating =>
             {
-                background.state = if background.disabled {
-                    BackgroundState::Disabled
+                if background.failed_while_alive {
+                    background.crashed(install, now, commands);
                 } else {
-                    BackgroundState::Stopped
-                };
-                background.clear_resources();
+                    background.state = if background.disabled {
+                        BackgroundState::Disabled
+                    } else {
+                        BackgroundState::Stopped
+                    };
+                    background.clear_resources();
+                }
             }
             Observation::Disable { .. } => {
                 background.disabled = true;
@@ -916,6 +947,117 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn reported_worker_failure_holds_native_slot_until_termination_and_keeps_backoff() {
+        let clock = ManualClock::default();
+        let mut machine = Lifecycle::new(ProfileId::from(1));
+        let id = install(1);
+        let mut generation = started(&mut machine, id, &clock);
+        for attempt in 0..MAX_CRASHES {
+            assert!(machine
+                .observe(
+                    Observation::WorkerFailed {
+                        install: id,
+                        generation: generation + 1
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            assert_eq!(machine.state(id), Some(BackgroundState::Running));
+            assert_eq!(
+                machine
+                    .observe(
+                        Observation::WorkerFailed {
+                            install: id,
+                            generation
+                        },
+                        &clock
+                    )
+                    .unwrap(),
+                [
+                    Command::CancelWork {
+                        install: id,
+                        generation
+                    },
+                    Command::Terminate {
+                        install: id,
+                        generation,
+                        reason: StopReason::WorkerFailure
+                    },
+                ]
+            );
+            assert_eq!(machine.state(id), Some(BackgroundState::Terminating));
+            assert_eq!(machine.occupied_slots(), 1);
+            assert!(machine
+                .observe(
+                    Observation::WorkerFailed {
+                        install: id,
+                        generation
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            clock.advance_nanos(10);
+            assert!(machine
+                .observe(Observation::Tick, &clock)
+                .unwrap()
+                .is_empty());
+            assert_eq!(machine.occupied_slots(), 1);
+            let terminated = machine
+                .observe(
+                    Observation::Terminated {
+                        install: id,
+                        generation,
+                    },
+                    &clock,
+                )
+                .unwrap();
+            assert_eq!(machine.occupied_slots(), 0);
+            if attempt == MAX_CRASHES - 1 {
+                assert_eq!(terminated, [Command::Disabled { install: id }]);
+                assert_eq!(machine.state(id), Some(BackgroundState::Disabled));
+                break;
+            }
+            assert_eq!(machine.state(id), Some(BackgroundState::Crashed));
+            assert!(machine
+                .observe(
+                    Observation::Wake {
+                        install: id,
+                        reason: StartReason::Event
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            let backoff = CRASH_BACKOFF_NANOS[attempt.min(2)];
+            clock.advance_nanos(backoff - 1);
+            assert!(machine
+                .observe(Observation::Tick, &clock)
+                .unwrap()
+                .is_empty());
+            clock.advance_nanos(1);
+            let effects = machine.observe(Observation::Tick, &clock).unwrap();
+            let Command::Start {
+                generation: next, ..
+            } = effects[0]
+            else {
+                panic!("expected restart");
+            };
+            generation = next;
+            machine
+                .observe(
+                    Observation::Started {
+                        install: id,
+                        generation,
+                    },
+                    &clock,
+                )
+                .unwrap();
+        }
     }
 
     #[test]

@@ -61,6 +61,8 @@ impl ListenerId {
 struct ListenerSpec {
     event: String,
     filter: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -133,13 +135,17 @@ impl EventRegistry {
             .cloned()
             .collect();
         listeners.sort_by(|a, b| {
-            a.spec.event.cmp(&b.spec.event).then_with(|| {
-                a.spec
-                    .filter
-                    .as_ref()
-                    .map(Value::to_string)
-                    .cmp(&b.spec.filter.as_ref().map(Value::to_string))
-            })
+            a.spec
+                .event
+                .cmp(&b.spec.event)
+                .then_with(|| {
+                    a.spec
+                        .filter
+                        .as_ref()
+                        .map(Value::to_string)
+                        .cmp(&b.spec.filter.as_ref().map(Value::to_string))
+                })
+                .then_with(|| a.spec.extra.cmp(&b.spec.extra))
         });
         listeners.dedup_by(|a, b| a.spec == b.spec);
         check_snapshot(&listeners)?;
@@ -161,6 +167,19 @@ impl EventRegistry {
         event: &str,
         filter: Option<&Value>,
     ) -> Result<bool, ApiError> {
+        self.add_with_options(sender, id, event, filter, &[])
+    }
+
+    /// Registers a callback and the generated event's extra information modes.
+    pub fn add_with_options(
+        &mut self,
+        sender: &Sender,
+        id: ListenerId,
+        event: &str,
+        filter: Option<&Value>,
+        extra: &[String],
+    ) -> Result<bool, ApiError> {
+        validate_extra(event, id, filter, extra)?;
         if !EVENT_APIS.contains(&event) || !event_contexts(event).contains(sender.kind()) {
             return Err(ApiError::not_available_in_context(event));
         }
@@ -179,7 +198,7 @@ impl EventRegistry {
         {
             return Err(ApiError::too_many_pending());
         }
-        let cost = ListenerFilter::cost(filter)?;
+        let cost = listener_cost(filter, extra)?;
         self.check_budget(sender.install(), [cost], false)?;
         let parsed = ListenerFilter::parse(event, filter)?;
         let listeners = self.live.entry(key.clone()).or_default();
@@ -189,6 +208,7 @@ impl EventRegistry {
                 spec: ListenerSpec {
                     event: event.to_owned(),
                     filter: filter.cloned(),
+                    extra: extra.to_vec(),
                 },
                 filter: parsed,
                 persistent: sender.kind() == ContextKind::Background
@@ -226,6 +246,20 @@ impl EventRegistry {
         self.live
             .get(&sender.context_key())
             .is_some_and(|listeners| listeners.contains_key(&(event.to_owned(), id)))
+    }
+
+    /// Whether this callback registered a blocking result mode for the event.
+    pub fn is_blocking(&self, sender: &Sender, id: ListenerId, event: &str) -> bool {
+        self.live
+            .get(&sender.context_key())
+            .and_then(|listeners| listeners.get(&(event.to_owned(), id)))
+            .is_some_and(|listener| {
+                listener
+                    .spec
+                    .extra
+                    .iter()
+                    .any(|mode| mode == "blocking" || mode == "asyncBlocking")
+            })
     }
 
     /// Whether this exact context has any registered callback for the event.
@@ -385,7 +419,7 @@ impl EventRegistry {
         let costs = snapshot
             .listeners
             .iter()
-            .map(|spec| ListenerFilter::cost(spec.filter.as_ref()))
+            .map(|spec| listener_cost(spec.filter.as_ref(), &spec.extra))
             .collect::<Result<Vec<_>, _>>()?;
         self.check_budget(install, costs.iter().copied(), true)?;
         check_snapshot_specs(&snapshot.listeners)?;
@@ -395,6 +429,12 @@ impl EventRegistry {
                 return Err(ApiError::other("Invalid extension listener snapshot."));
             }
             let filter = ListenerFilter::parse(&spec.event, spec.filter.as_ref())?;
+            validate_extra(
+                &spec.event,
+                ListenerId::new(1).ok_or_else(ApiError::malformed_arguments)?,
+                spec.filter.as_ref(),
+                &spec.extra,
+            )?;
             listeners.push(Listener {
                 spec,
                 filter,
@@ -689,6 +729,8 @@ pub enum ListenerRequest {
         id: ListenerId,
         /// Validated filter input.
         filter: Option<Value>,
+        /// Generated event-specific extra information modes.
+        extra: Vec<String>,
     },
     /// Remove one callback identity.
     Remove {
@@ -735,19 +777,46 @@ pub fn register<S: EventsHost + 'static>(table: &mut ApiTable<S>) -> Result<(), 
             if let Some(name) = name {
                 table.register_generated(name, move |host: &mut S, invocation| {
                     match parse_listener_request(event, operation, invocation.args()) {
-                        Ok(request) => host.listener_request(request, invocation),
+                        Ok(request) => match check_listener_permissions(&request, &invocation) {
+                            Ok(()) => host.listener_request(request, invocation),
+                            Err(error) => invocation.reply(Err(error)),
+                        },
                         Err(error) => invocation.reply(Err(error)),
                     }
                 })?;
             }
         }
     }
-    table.register_generated("events.completeRegistration", |host: &mut S, invocation| {
-        host.listener_request(ListenerRequest::CompleteRegistration, invocation)
-    })
+    if table.contexts("events.completeRegistration").is_none() {
+        table.register_generated("events.completeRegistration", |host: &mut S, invocation| {
+            host.listener_request(ListenerRequest::CompleteRegistration, invocation)
+        })?;
+    }
+    Ok(())
 }
 
-fn parse_listener_request(
+pub(crate) fn check_listener_permissions(
+    request: &ListenerRequest,
+    invocation: &Invocation<'_>,
+) -> Result<(), ApiError> {
+    let ListenerRequest::Add { extra, .. } = request else {
+        return Ok(());
+    };
+    if extra.iter().any(|mode| mode == "blocking") {
+        crate::permissions::Gate::Requires("webRequestBlocking").check(
+            invocation.permissions(),
+            invocation.sender(),
+            None,
+        )?;
+    }
+    if extra.iter().any(|mode| mode == "asyncBlocking") {
+        crate::permissions::Gate::RequiresAny(&["webRequestBlocking", "webRequestAuthProvider"])
+            .check(invocation.permissions(), invocation.sender(), None)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_listener_request(
     event: &'static str,
     operation: &str,
     args: &[Value],
@@ -762,13 +831,29 @@ fn parse_listener_request(
         .and_then(ListenerId::new)
         .ok_or_else(ApiError::malformed_arguments)?;
     match operation {
-        "addListener" if args.get(2).is_none_or(|value| value.is_null()) => {
+        "addListener" if args.len() <= 3 => {
             let filter = args.get(1).filter(|value| !value.is_null());
+            let extra = match args.get(2).filter(|value| !value.is_null()) {
+                Some(value) => value
+                    .as_array()
+                    .ok_or_else(ApiError::malformed_arguments)?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(ApiError::malformed_arguments)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            };
             ListenerFilter::parse(event, filter)?;
+            validate_extra(event, id, filter, &extra)?;
             Ok(ListenerRequest::Add {
                 event,
                 id,
                 filter: filter.cloned(),
+                extra,
             })
         }
         "removeListener" if args.len() == 1 => Ok(ListenerRequest::Remove { event, id }),
@@ -777,7 +862,7 @@ fn parse_listener_request(
     }
 }
 
-fn event_contexts(event: &str) -> ContextMask {
+pub(crate) fn event_contexts(event: &str) -> ContextMask {
     crate::schema::access(&format!("{event}.addListener"))
         .map(|access| {
             access
@@ -785,6 +870,37 @@ fn event_contexts(event: &str) -> ContextMask {
                 .intersection(crate::dispatch::permitted_contexts(event))
         })
         .unwrap_or(ContextMask::NONE)
+}
+
+fn listener_cost(filter: Option<&Value>, extra: &[String]) -> Result<FilterCost, ApiError> {
+    let mut cost = ListenerFilter::cost(filter)?;
+    cost.bytes = cost
+        .bytes
+        .saturating_add(extra.iter().map(String::len).sum::<usize>());
+    Ok(cost)
+}
+
+fn validate_extra(
+    event: &str,
+    id: ListenerId,
+    filter: Option<&Value>,
+    extra: &[String],
+) -> Result<(), ApiError> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    if extra.len() > 16 || extra.iter().any(|value| value.len() > 64) {
+        return Err(ApiError::malformed_arguments());
+    }
+    crate::schema::normalize(
+        &format!("{event}.addListener"),
+        &[
+            json!(id.get()),
+            filter.cloned().unwrap_or(Value::Null),
+            json!(extra),
+        ],
+    )?;
+    Ok(())
 }
 
 fn is_storage_event(event: &str) -> bool {

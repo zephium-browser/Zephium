@@ -28,6 +28,7 @@ pub mod limits;
 pub mod pattern;
 pub mod permissions;
 pub mod ports;
+pub mod protocol;
 pub mod schema;
 pub mod scripting_registry;
 pub mod storage;

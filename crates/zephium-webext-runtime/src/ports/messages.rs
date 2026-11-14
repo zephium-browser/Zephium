@@ -18,6 +18,12 @@ const LISTENER_METADATA_BYTES: u64 = 512;
 pub struct MessageId(u64);
 
 impl MessageId {
+    /// Validates a nonzero binding correlation token. The service still checks
+    /// its authenticated recipient before accepting any outcome.
+    pub fn new(value: u64) -> Option<Self> {
+        (value != 0).then_some(Self(value))
+    }
+
     /// Numeric identity for binding correlation.
     pub fn get(self) -> u64 {
         self.0
@@ -48,6 +54,21 @@ pub struct OneShotDelivery {
     pub payload: Arc<[u8]>,
     /// `runtime.onMessage` or `runtime.onMessageExternal`.
     pub event: &'static str,
+}
+
+impl OneShotDelivery {
+    /// Binding event arguments, including the exact callbacks selected by Rust.
+    /// `sender` is the adapter's projection of this delivery's authenticated sender.
+    pub fn arguments(&self, sender: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        let text =
+            std::str::from_utf8(&self.payload).map_err(|_| ApiError::malformed_arguments())?;
+        Ok(serde_json::json!([
+            text,
+            sender,
+            self.message.get().to_string(),
+            [self.listener.get()]
+        ]))
+    }
 }
 
 /// Binding observations of a listener invocation or its asynchronous completion.

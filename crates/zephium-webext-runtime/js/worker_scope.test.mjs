@@ -135,6 +135,41 @@ test('a failing install or a startup error is reported to the host', async () =>
   assert.deepEqual(lifecycle(broken.host), [['failed', 'Uncaught SyntaxError']]);
 });
 
+test('activation failure retains queued events and reports failure', async () => {
+  const { chrome, host, inWorker } = workerRealm();
+  let called = 0;
+  chrome.runtime.onInstalled.addListener(() => called++);
+  host.event('runtime.onInstalled', [{ reason: 'install' }]);
+  inWorker('self.addEventListener("activate", (event) => event.waitUntil(Promise.reject(new Error("no"))))');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(lifecycle(host), [['failed', 'activate']]);
+  assert.equal(called, 0);
+  assert.deepEqual(host.acks, []);
+});
+
+test('event release waits for host acceptance of worker activation', async () => {
+  const { chrome, host } = workerRealm({ install: false });
+  host.handlers['zephium.workerLifecycle'] = () => host.LATER;
+  let called = 0;
+  chrome.runtime.onStartup.addListener(() => called++);
+  host.event('runtime.onStartup', []);
+  await flush();
+  assert.equal(called, 0);
+  const call = host.callsTo('zephium.workerLifecycle')[0];
+  host.reply(call.id, null);
+  await flush();
+  assert.equal(called, 1);
+});
+
+test('clients.openWindow without tabs authority rejects with InvalidAccessError', async () => {
+  const { chrome, inWorker } = workerRealm();
+  delete chrome.tabs.create;
+  await assert.rejects(inWorker('clients.openWindow("https://example.com/")'), {
+    name: 'InvalidAccessError',
+    message: 'Not allowed to open a window.',
+  });
+});
+
 test("module workers refuse importScripts with Chrome's message", () => {
   const { inWorker } = workerRealm({ type: 'module' });
   assert.throws(() => inWorker('importScripts("x.js")'), {
@@ -242,4 +277,37 @@ test('the owner relays frames both ways, keeps its own replies and reports worke
   assert.equal(toWorker.length, 1, "the owner's own reply stays with the owner");
   channel.port1.close();
   workerPort.close();
+});
+
+test('worker diagnostics obey host UTF8 byte limits, including startup failures', async () => {
+  const startup = workerRealm();
+  startup.self.dispatchEvent(Object.assign(new Event('error'), { message: '🌍'.repeat(2000) }));
+  await flush();
+  assert.deepEqual(lifecycle(startup.host), [['failed', '🌍'.repeat(256)]]);
+
+  const realm = createRealm();
+  const host = new FakeHost(realm.Z, 'background');
+  host.handlers['zephium.workerError'] = ([detail]) => {
+    assert.ok(Buffer.byteLength(detail.message) <= 1024);
+    assert.ok(Buffer.byteLength(detail.filename) <= 2048);
+    assert.equal(detail.lineno, 0);
+    assert.equal(detail.colno, 0);
+    return null;
+  };
+  const channel = new MessageChannel();
+  const worker = new EventTarget();
+  worker.postMessage = () => {};
+  const owner = realm.Z.workerScope.owner({ workerURL: SCRIPT_URL }, {
+    link: host.link,
+    createWorker: () => worker,
+    createChannel: () => channel,
+  });
+  owner.reportError({ message: '漢'.repeat(2048), filename: '🌍'.repeat(2048), lineno: -1, colno: 0x100000000 });
+  const [detail] = host.callsTo('zephium.workerError')[0].args;
+  assert.equal(detail.message, '漢'.repeat(341));
+  assert.equal(detail.filename, '🌍'.repeat(512));
+  owner.reportError({ message: String.fromCharCode(0xd800) });
+  assert.equal(host.callsTo('zephium.workerError')[1].args[0].message, '�');
+  channel.port1.close();
+  channel.port2.close();
 });
