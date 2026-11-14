@@ -287,6 +287,58 @@ impl Shell {
     }
 
     #[cfg(target_os = "windows")]
+    pub(super) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: String) {
+        if !self.web_extension_profile_admitted(profile)
+            || self
+                .windows
+                .focused()
+                .is_none_or(|window| window.profile != profile)
+        {
+            return;
+        }
+        let Some(install) = self
+            .web_extensions
+            .loaded
+            .get(&profile)
+            .and_then(|installs| {
+                installs
+                    .values()
+                    .find(|load| load.extension_id == extension_id)
+            })
+        else {
+            return;
+        };
+        let Some(WebExtensionStatus::Running(loaded)) =
+            self.web_extensions.status.get(&install.install)
+        else {
+            return;
+        };
+        let Some(url) = loaded
+            .options
+            .as_deref()
+            .filter(|url| navigation::extension_document_id(url) == Some(extension_id.as_str()))
+        else {
+            return;
+        };
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
+            if self.browser_after_return.is_none() {
+                self.browser_after_return = Some(Box::new(Command::OpenWebExtensionOptions {
+                    profile,
+                    extension_id,
+                }));
+                let _ = self.operation_show_browser_page(None);
+            }
+            return;
+        }
+        let input = url.as_str().to_owned();
+        let Some((id, mut effects)) = self.open_tab_with_id() else {
+            return;
+        };
+        effects.extend(self.items.navigate(id, &input));
+        self.commit(effects);
+    }
+
+    #[cfg(target_os = "windows")]
     pub(super) fn extension_document_may_close(&self, id: ItemId) -> bool {
         let Some(profile) = self.profile_of_item(id) else {
             return false;

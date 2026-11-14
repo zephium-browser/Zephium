@@ -81,10 +81,76 @@ fn typed_extension_tab_close_requires_running_install_in_its_profile() {
         Ok(WebExtensionLoaded {
             name: "fixture".into(),
             version: "1".into(),
+            options: None,
         }),
     );
     shell.close_owned_native_tab(tab);
     assert!(shell.items.get(tab).is_none());
+}
+
+#[test]
+fn extension_options_wait_for_browser_return_and_work_from_a_fresh_tab() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let new_tab = active_id(&screen);
+    let profile = shell.profile_of_item(new_tab).unwrap();
+    let extension = load(1);
+    let extension_id = extension.extension_id.clone();
+    let install = extension.install;
+    let target = format!("chrome-extension://{extension_id}/options.html");
+    let options = Command::OpenWebExtensionOptions {
+        profile,
+        extension_id,
+    };
+    shell.set_web_extensions(profile, vec![extension]);
+    shell.on_web_extension_settled(
+        profile,
+        install,
+        Ok(WebExtensionLoaded {
+            name: "fixture".into(),
+            version: "1".into(),
+            options: Some(Box::new(url::Url::parse(&target).unwrap())),
+        }),
+    );
+    shell.operation_show_browser_page(Some(crate::BrowserPage::Extensions));
+    let manager = active_id(&screen);
+    let before = engine.calls().len();
+
+    let other_profile = add_inactive_named_profile(&mut shell, 900);
+    shell.handle(Command::OpenWebExtensionOptions {
+        profile: other_profile,
+        extension_id: load(1).extension_id,
+    });
+    assert!(shell.browser_return.is_none());
+
+    shell.handle(options.clone());
+    assert_eq!(active_id(&screen), manager);
+    assert!(!engine.calls()[before..]
+        .iter()
+        .any(|call| call.contains(&target)));
+    let (revision, _) = chrome.complete_browser_return(false);
+    shell.browser_chrome_restored(revision, false);
+    assert_eq!(active_id(&screen), manager);
+    assert!(!engine.calls()[before..]
+        .iter()
+        .any(|call| call.contains(&target)));
+
+    shell.handle(options.clone());
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+    let tab = active_id(&screen);
+    assert_ne!(tab, new_tab);
+    assert_ne!(tab, manager);
+    assert!(shell.items.tab(manager).is_some());
+    assert!(engine.calls()[before..]
+        .iter()
+        .any(|call| call.starts_with(&format!("create {tab} {target} "))));
+
+    shell.set_web_extensions(profile, vec![]);
+    let before = engine.calls().len();
+    shell.handle(options);
+    assert_eq!(active_id(&screen), tab);
+    assert_eq!(engine.calls().len(), before);
 }
 
 #[test]
