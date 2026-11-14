@@ -33,7 +33,7 @@
       .map((tab) => tab.url!)
       .filter((url, index, all) => url.length <= 2048 && all.indexOf(url) === index)
       .slice(0, LIMIT);
-    if (open.length > 0) invalid = !(await save(open));
+    if (open.length > 0) await save(open);
   }
 </script>
 
@@ -73,8 +73,7 @@
             variant="ghost"
             disabled={preferences.saving()}
             aria-label={`${m.action_remove()} ${page}`}
-            onclick={() =>
-              void save(pages.filter((kept) => kept !== page)).then((ok) => (invalid = !ok))}
+            onclick={() => void save(pages.filter((kept) => kept !== page))}
           >
             {m.action_remove()}
           </Button>
