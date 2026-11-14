@@ -40,6 +40,8 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use platform::linux::configure_memory_pressure;
 #[cfg(all(target_os = "macos", feature = "blocker-bench"))]
 pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;

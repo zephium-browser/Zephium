@@ -155,6 +155,10 @@ Its security-relevant deltas currently enforce these invariants:
   focus, and input remain revoked, then proves the Stage-compatible offscreen
   first-map and attributed reveal produce a rendered native snapshot. Source
   ordering tests supplement this native gate; they do not replace it.
+- `set_web_process_memory_pressure` lets the embedder set, once, the
+  construction-only WebKitGTK Web-process memory-pressure settings that every
+  later regular and ephemeral context receives. It has no kill threshold
+  field; sandbox and process-swap construction are unchanged.
 
 The standalone `Cargo.lock` is intentional. Fork CI invokes this manifest with
 `--locked` so it cannot silently resolve a graph different from the reviewed

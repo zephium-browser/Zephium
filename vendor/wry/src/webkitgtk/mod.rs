@@ -57,7 +57,7 @@ use webkit2gtk_sys::{
 #[cfg(feature = "x11")]
 use x11_dl::xlib::*;
 
-pub use web_context::WebContextImpl;
+pub use web_context::{set_web_process_memory_pressure, WebContextImpl, WebProcessMemoryPressure};
 
 #[cfg(test)]
 pub(crate) use self::web_context::WebContextExt;

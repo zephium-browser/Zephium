@@ -6913,6 +6913,9 @@ pub fn run() {
         // until the app-managed shell publishes authoritative ownership.
         .manage(StartupBlocker::default())
         .setup(move |app| {
+            // Before Tauri builds the first WebContext.
+            #[cfg(target_os = "linux")]
+            zephium_engine::configure_memory_pressure();
             let setup_result: SetupResult = (|| {
                 let shutdown = app
                     .try_state::<ShutdownCoordinator>()
