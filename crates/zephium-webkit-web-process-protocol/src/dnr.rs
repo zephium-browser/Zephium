@@ -14,10 +14,11 @@ pub const MAX_DNR_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_DNR_EXTENSIONS: usize = 64;
 pub const MAX_DNR_MATCHED_RULES: usize = 256;
 pub const LINUX_DNR_LIMITATIONS: &[&str] = &[
-    "WebSocket handshakes and service-worker-initiated fetches bypass the page request hook.",
+    "WebSocket handshakes, service-worker-initiated fetches and usually the service-worker script fetch bypass the page request hook.",
     "Response headers cannot be modified; response-header rule conditions are not evaluated.",
     "Subframe allowAllRequests cannot establish a subtree exemption without request frame identity.",
-    "Resource types use loader fetch metadata; missing metadata is other (including unqualified public HTTP). Object documents can appear as sub_frame.",
+    "Non-HTTPS public hosts get no fetch metadata: only documents, frames, objects, stylesheets and images are typed from WebKit's Accept header; scripts, fonts, fetches, workers and pings there are other.",
+    "Media and prefetch requests were not issued by WebKitGTK in qualification and are unverified.",
     "Beacon and no-cors POST fetches share ping classification when loader metadata cannot distinguish them.",
     "Absent or opaque initiators remain unknown; host-requiring subresource actions are refused.",
     "WebTransport and WebBundle request attribution is unavailable.",

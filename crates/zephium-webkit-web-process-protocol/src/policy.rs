@@ -64,6 +64,26 @@ impl ResourceType {
             _ => Self::Other,
         }
     }
+
+    /// WebKit omits fetch metadata for requests to non-trustworthy URLs. Its
+    /// loader then still sets a type-specific `Accept`; pages can spoof that
+    /// value only for their own fetches, and `*/*` stays unknown.
+    pub fn infer_without_metadata(accept: Option<&str>, page_navigation: bool) -> Self {
+        let accept = accept.unwrap_or_default();
+        if accept.starts_with("text/html") {
+            if page_navigation {
+                Self::MainFrame
+            } else {
+                Self::SubFrame
+            }
+        } else if accept.starts_with("text/css") {
+            Self::Stylesheet
+        } else if accept.starts_with("image/") {
+            Self::Image
+        } else {
+            Self::Other
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -465,6 +485,29 @@ mod tests {
         assert!(PolicySnapshot::new(vec![rule(Decision::Allow); 2]).is_err());
         assert!(PolicySnapshot::decode(&vec![0; MAX_SNAPSHOT_BYTES + 1]).is_err());
         assert_eq!(ResourceType::infer(None), ResourceType::Other);
+        let document = Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        assert_eq!(
+            ResourceType::infer_without_metadata(document, true),
+            ResourceType::MainFrame
+        );
+        assert_eq!(
+            ResourceType::infer_without_metadata(document, false),
+            ResourceType::SubFrame
+        );
+        assert_eq!(
+            ResourceType::infer_without_metadata(Some("text/css,*/*;q=0.1"), false),
+            ResourceType::Stylesheet
+        );
+        assert_eq!(
+            ResourceType::infer_without_metadata(Some("image/webp,image/avif,*/*;q=0.5"), false),
+            ResourceType::Image
+        );
+        for accept in [None, Some("*/*"), Some("application/json")] {
+            assert_eq!(
+                ResourceType::infer_without_metadata(accept, true),
+                ResourceType::Other
+            );
+        }
         assert_eq!(ResourceType::infer(Some("worker")), ResourceType::Worker);
     }
 

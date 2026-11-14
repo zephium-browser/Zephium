@@ -1588,7 +1588,7 @@ fn map_region(
 unsafe extern "C" fn send_request(
     page: *mut Object,
     request: *mut Object,
-    _: *mut Object,
+    redirected_response: *mut Object,
     _: *mut c_void,
 ) -> c_int {
     boundary(|| unsafe {
@@ -1624,9 +1624,27 @@ unsafe extern "C" fn send_request(
         let destination = header(c"Sec-Fetch-Dest", 64);
         let fetch_mode = header(c"Sec-Fetch-Mode", 64);
         let content_type = header(c"Content-Type", 128);
-        let mut resource_type = ResourceType::infer(destination.as_deref());
-        // These headers are supplied by WebKit's loader; URL suffixes and Accept
-        // values cannot establish a resource type.
+        let mut resource_type = match destination.as_deref() {
+            Some(destination) => ResourceType::infer(Some(destination)),
+            None => {
+                let page_uri = raw::webkit_web_page_get_uri(page);
+                let navigation = !page_uri.is_null()
+                    && (std::ffi::CStr::from_ptr(page_uri).to_bytes() == url.as_bytes()
+                        || (!redirected_response.is_null() && {
+                            let previous = raw::webkit_uri_response_get_uri(redirected_response);
+                            !previous.is_null()
+                                && std::ffi::CStr::from_ptr(previous)
+                                    == std::ffi::CStr::from_ptr(page_uri)
+                        }));
+                ResourceType::infer_without_metadata(header(c"Accept", 256).as_deref(), navigation)
+            }
+        };
+        // WebKit labels object/embed documents as iframe navigations.
+        if resource_type == ResourceType::SubFrame && embedded_by_plugin_element(page_id, &url) {
+            resource_type = ResourceType::Object;
+        }
+        // These headers are supplied by WebKit's loader; URL suffixes never
+        // establish a resource type, and Accept is consulted only without them.
         if destination.as_deref() == Some("empty") {
             resource_type = if content_type.as_deref().is_some_and(|value| {
                 value.starts_with("application/csp-report")
@@ -1835,6 +1853,61 @@ unsafe extern "C" fn send_request(
             });
         }
         c_int::from(cancel)
+    })
+}
+
+const EMBED_SOURCE: &str = "(url => { for (const element of document.querySelectorAll('object,embed')) { if ((element instanceof HTMLObjectElement ? element.data : element.src) === url) return true; } return false; })";
+
+/// Runs only for sub-frame navigations, in the private facts world of each
+/// live non-opaque frame, so page scripts cannot alter the DOM accessors used.
+fn embedded_by_plugin_element(page_id: u64, url: &str) -> bool {
+    let Ok(url) = CString::new(url) else {
+        return false;
+    };
+    let Some((world, frames)) = with_runtime(|runtime| {
+        let world = *runtime.worlds.get(FACT_WORLD)?;
+        let native = runtime.pages.get(&page_id)?;
+        let frames: Vec<_> = native
+            .frames
+            .iter()
+            .filter(|(id, _)| {
+                runtime
+                    .state
+                    .frame(page_id, **id)
+                    .is_some_and(|frame| !frame.opaque)
+            })
+            .map(|(_, frame)| frame.pointer)
+            .take(64)
+            .collect();
+        Some((world, frames))
+    })
+    .flatten() else {
+        return false;
+    };
+    let frames: Vec<_> = frames.into_iter().filter_map(Owned::borrowed).collect();
+    frames.iter().any(|frame| unsafe {
+        let Some(context) = Owned::full(raw::webkit_frame_get_js_context_for_script_world(
+            frame.0, world,
+        )) else {
+            return false;
+        };
+        let Some(helper) = Owned::full(raw::jsc_context_evaluate(
+            context.0,
+            EMBED_SOURCE.as_ptr().cast(),
+            EMBED_SOURCE.len() as isize,
+        )) else {
+            return false;
+        };
+        let Some(argument) = Owned::full(raw::jsc_value_new_string(context.0, url.as_ptr())) else {
+            return false;
+        };
+        let mut argument = argument.0;
+        let result = Owned::full(raw::jsc_value_function_callv(helper.0, 1, &mut argument));
+        if !raw::jsc_context_get_exception(context.0).is_null() {
+            raw::jsc_context_clear_exception(context.0);
+            return false;
+        }
+        result.is_some_and(|value| raw::jsc_value_to_boolean(value.0) != 0)
     })
 }
 

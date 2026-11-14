@@ -20,6 +20,8 @@ unsafe extern "C" {
         world: *mut Object,
     ) -> *mut Object;
     pub fn webkit_web_page_get_id(page: *mut Object) -> u64;
+    pub fn webkit_web_page_get_uri(page: *mut Object) -> *const c_char;
+    pub fn webkit_uri_response_get_uri(response: *mut Object) -> *const c_char;
     pub fn webkit_web_page_get_form_manager(page: *mut Object, world: *mut Object) -> *mut Object;
     pub fn webkit_web_page_send_message_to_view(
         page: *mut Object,
@@ -114,6 +116,7 @@ unsafe extern "C" {
     pub fn jsc_value_is_array(value: *mut Object) -> c_int;
     pub fn jsc_value_to_string(value: *mut Object) -> *mut c_char;
     pub fn jsc_value_is_string(value: *mut Object) -> c_int;
+    pub fn jsc_value_new_string(context: *mut Object, string: *const c_char) -> *mut Object;
     pub fn jsc_value_object_get_property(value: *mut Object, name: *const c_char) -> *mut Object;
     pub fn jsc_value_is_function(value: *mut Object) -> c_int;
     pub fn jsc_value_function_callv(

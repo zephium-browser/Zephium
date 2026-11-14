@@ -647,7 +647,7 @@ fn prepare_install(install: Install) -> Result<Prepared, ApiError> {
             "Static capacity is the guaranteed 30000 rules per install; an additional shared pool is not allocated.".into(),
             "Publication swaps each page atomically, but pages acknowledge asynchronously; a failed final durable commit requires rollback.".into(),
             "Subframe allowAllRequests cannot establish a frame-subtree exemption; top-document inheritance is supported.".into(),
-            "Object resources may be classified as subframe; originating frame identities are unavailable for subresources.".into(),
+            "Originating frame identities are unavailable for subresources; on non-HTTPS public hosts scripts, fonts, fetches, workers and pings are typed other.".into(),
         ],
         ..NetworkStatus::default()
     };
