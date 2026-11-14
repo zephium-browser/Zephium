@@ -3,6 +3,8 @@
 
 #[path = "native/content.rs"]
 mod content;
+#[path = "native/scheme_requests.rs"]
+mod scheme_requests;
 mod support;
 
 use gio::prelude::UnixFDListExtManual;
@@ -179,6 +181,31 @@ fn native_web_process_module() {
     content::frame_facts(&module, &fixture);
     page.stop_loading();
     println!("WEBEXT native_module inert=true hostile_posts=true frame_roundtrip=true stale_drop=true request_policy=true");
+}
+
+#[test]
+#[ignore = "sandboxed native WebKitGTK; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_send_request_sees_extension_scheme() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let result = scheme_requests::run(&module, &fixture);
+    println!("WEBEXT native_scheme_requests={result}");
+    let fired = result["send_request"].as_array().unwrap();
+    for path in [
+        "war.html",
+        "own.js",
+        "own-data",
+        "page.js",
+        "page-inner.html",
+    ] {
+        assert!(
+            fired
+                .iter()
+                .any(|url| url.as_str().unwrap().ends_with(&format!("/{path}"))),
+            "send-request did not fire for {path}"
+        );
+    }
 }
 
 fn assert_extension_owned_default_world(module: &ModuleDirectory, fixture: &Fixture) {
