@@ -7921,6 +7921,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webkit-web-process"
+version = "0.1.0"
+dependencies = [
+ "gio",
+ "glib",
+ "gtk",
+ "javascriptcore-rs",
+ "libc",
+ "pkg-config",
+ "rustix",
+ "serde_json",
+ "tempfile",
+ "url",
+ "webkit2gtk",
+]
+
+[[package]]
 name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [
