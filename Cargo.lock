@@ -7880,13 +7880,21 @@ dependencies = [
 name = "zephium-webext-linux"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "gio",
  "glib",
  "gtk",
+ "javascriptcore-rs",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "url",
  "webkit2gtk",
  "zephium-core",
  "zephium-webext",
  "zephium-webext-runtime",
+ "zephium-webkit-web-process-protocol",
 ]
 
 [[package]]

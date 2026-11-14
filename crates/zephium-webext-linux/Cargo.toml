@@ -10,8 +10,21 @@ zephium-core.workspace = true
 zephium-webext = { path = "../zephium-webext", version = "=0.1.0" }
 zephium-webext-runtime = { path = "../zephium-webext-runtime", version = "=0.1.0" }
 
+[features]
+native-tests = []
+
 [target.'cfg(target_os = "linux")'.dependencies]
+base64.workspace = true
 gio = "0.18"
 glib = "0.18"
 gtk = "0.18"
+javascriptcore-rs = "=1.1.2"
+rustix = { version = "=1.1.6", features = ["fs", "rand"] }
+sha2 = "=0.10.9"
+url.workspace = true
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+zephium-webkit-web-process-protocol = { path = "../zephium-webkit-web-process-protocol", version = "=0.1.0" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
