@@ -7663,7 +7663,9 @@ dependencies = [
  "zephium-store",
  "zephium-voice",
  "zephium-webext",
+ "zephium-webext-linux",
  "zephium-webext-macos",
+ "zephium-webext-runtime",
  "zephium-work-composition",
 ]
 

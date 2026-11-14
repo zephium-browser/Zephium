@@ -810,14 +810,10 @@ impl LinuxExtensions {
             unpacked: false,
             manifest,
         };
-        let replacing = entry.installs.contains_key(&load.install);
         let result = match previous.as_deref() {
             None => entry.runtime.install_admitted(spec),
             Some(version) if version != loaded.version => {
                 entry.runtime.install_updated(spec, version)
-            }
-            Some(_) if replacing || load.start_background => {
-                entry.runtime.install_updated(spec, &loaded.version)
             }
             Some(_) => entry.runtime.install_enabled(spec),
         };

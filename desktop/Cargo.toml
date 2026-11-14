@@ -178,6 +178,8 @@ gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+zephium-webext-linux = { path = "../crates/zephium-webext-linux", version = "=0.1.0" }
+zephium-webext-runtime = { path = "../crates/zephium-webext-runtime", version = "=0.1.0" }
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
 x11rb = { version = "=0.13.2", features = ["xkb"] }
