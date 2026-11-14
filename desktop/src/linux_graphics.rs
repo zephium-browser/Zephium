@@ -21,6 +21,7 @@ const PROBE_INCONCLUSIVE: u8 = 21;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PROBE_BYTES: u64 = 64 * 1024;
 static RUNTIME: OnceLock<Mutex<Runtime>> = OnceLock::new();
+static APPLIED: OnceLock<&'static str> = OnceLock::new();
 
 struct Runtime {
     report: GpuReport,
@@ -176,11 +177,29 @@ fn version(value: &str) -> Option<GraphicsVersion> {
 
 fn apply_path(path: RendererPath) {
     // Only called in the single-threaded entry point, and only without user overrides.
-    match path {
-        RendererPath::Default => {}
-        RendererPath::ForceShm => std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1"),
-        RendererPath::DisableDmabuf => std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1"),
+    let name = match path {
+        RendererPath::Default => return,
+        RendererPath::ForceShm => "WEBKIT_DMABUF_RENDERER_FORCE_SHM",
+        RendererPath::DisableDmabuf => "WEBKIT_DISABLE_DMABUF_RENDERER",
+    };
+    std::env::set_var(name, "1");
+    let _ = APPLIED.set(name);
+}
+
+/// Starts the next process without the renderer variable this one set for
+/// itself, so it selects again instead of reading it as the person's override.
+pub(crate) fn restart(env: &tauri::Env) -> ! {
+    if let Ok(path) = tauri::process::current_binary(env) {
+        let mut command = Command::new(path);
+        command.args(env.args_os.iter().skip(1));
+        if let Some(name) = APPLIED.get() {
+            command.env_remove(name);
+        }
+        if let Err(error) = command.spawn() {
+            eprintln!("graphics: could not restart Zephium: {error}");
+        }
     }
+    std::process::exit(0);
 }
 
 pub(crate) fn window_shown() {
@@ -317,6 +336,18 @@ mod tests {
                 outcome(ExitStatus::from_raw(raw)),
                 ProbeOutcome::Inconclusive
             );
+        }
+    }
+
+    #[test]
+    fn a_restart_leaves_the_renderer_this_launch_chose_behind() {
+        let restart = include_str!("linux_graphics.rs")
+            .split("pub(crate) fn restart")
+            .nth(1)
+            .unwrap();
+        assert!(restart.contains("command.env_remove(name)"));
+        for caller in [include_str!("relaunch.rs"), include_str!("updates.rs")] {
+            assert!(caller.contains("crate::linux_graphics::restart(&app.env());"));
         }
     }
 

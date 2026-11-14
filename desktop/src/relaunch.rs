@@ -40,6 +40,9 @@ pub(crate) fn exit_refused() {
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn finish_on_exit(app: &tauri::AppHandle) {
     if AFTER_EXIT.swap(false, Ordering::AcqRel) && closed_cleanly(app) {
+        #[cfg(target_os = "linux")]
+        crate::linux_graphics::restart(&app.env());
+        #[cfg(not(target_os = "linux"))]
         tauri::process::restart(&app.env());
     }
 }

@@ -546,6 +546,9 @@ pub(crate) fn finish_on_exit(app: &tauri::AppHandle) {
         });
     if RELAUNCH_AFTER_EXIT.swap(false, Ordering::AcqRel) {
         if clean {
+            #[cfg(target_os = "linux")]
+            crate::linux_graphics::restart(&app.env());
+            #[cfg(not(target_os = "linux"))]
             tauri::process::restart(&app.env());
         }
         return;
