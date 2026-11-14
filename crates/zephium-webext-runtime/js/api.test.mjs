@@ -55,6 +55,26 @@ test('granted and revoked permissions add and remove namespaces in a live contex
   assert.equal(chrome.alarms, alarms, 'the same namespace object returns');
 });
 
+test('DNR alternatives retain feedback conjunction and unpacked-only APIs', () => {
+  for (const permission of ['declarativeNetRequest', 'declarativeNetRequestWithHostAccess']) {
+    const packed = extensionContext('background', { permissions: [permission], unpacked: false });
+    assert.equal(typeof packed.chrome.declarativeNetRequest.updateDynamicRules, 'function');
+    assert.equal(packed.chrome.declarativeNetRequest.testMatchOutcome, undefined);
+    assert.equal(packed.chrome.declarativeNetRequest.onRuleMatchedDebug, undefined);
+    const unpacked = extensionContext('background', { permissions: [permission], unpacked: true });
+    assert.equal(typeof unpacked.chrome.declarativeNetRequest.testMatchOutcome, 'function');
+    assert.equal(unpacked.chrome.declarativeNetRequest.onRuleMatchedDebug, undefined);
+    unpacked.host.event('zephium.onPermissionsChanged', [[permission, 'declarativeNetRequestFeedback']]);
+    assert.equal(typeof unpacked.chrome.declarativeNetRequest.onRuleMatchedDebug.addListener, 'function');
+    unpacked.host.event('zephium.onPermissionsChanged', [[permission]]);
+    assert.equal(unpacked.chrome.declarativeNetRequest.onRuleMatchedDebug, undefined);
+    const packedFeedback = extensionContext('background', { permissions: [permission, 'declarativeNetRequestFeedback'], unpacked: false });
+    assert.equal(packedFeedback.chrome.declarativeNetRequest.onRuleMatchedDebug, undefined);
+  }
+  const feedbackOnly = extensionContext('background', { permissions: ['declarativeNetRequestFeedback'], unpacked: true });
+  assert.equal(feedbackOnly.chrome.declarativeNetRequest, undefined);
+});
+
 test("a promise is returned without a callback and rejects with Chrome's Error", async () => {
   const { chrome, host, run } = extensionContext();
   host.handlers['tabs.get'] = ([tabId]) => {

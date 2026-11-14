@@ -19,7 +19,85 @@ pub struct Access {
 pub fn access(name: &str) -> Option<Access> {
     let catalog = catalog().ok()?;
     let method = catalog.methods.get(super::source_method(name))?;
-    project(&method.feature_rules, &catalog.namespace_rules, 0)
+    if name.starts_with("declarativeNetRequest.") {
+        project_dnr(&method.feature_rules)
+    } else {
+        project(&method.feature_rules, &catalog.namespace_rules, 0)
+    }
+}
+
+fn project_dnr(rules: &[Value]) -> Option<Access> {
+    let mut ordered: Vec<_> = rules.iter().collect();
+    ordered.sort_by_key(|rule| rule.get("name").and_then(Value::as_str).map(str::len));
+    let mut parent = Map::new();
+    let mut alternatives = Vec::new();
+    for entry in ordered {
+        let choices = entry.get("rules")?.as_array()?;
+        alternatives.clear();
+        for choice in choices {
+            let mut inherited = parent.clone();
+            inherited.extend(choice.as_object()?.clone());
+            alternatives.push(inherited);
+        }
+        if let Some(index) = choices
+            .iter()
+            .position(|choice| flag(choice, "default_parent"))
+        {
+            parent = alternatives[index].clone();
+        }
+    }
+    if alternatives.len() != 2 {
+        return None;
+    }
+    let mut feedback = None;
+    let mut unpacked = None;
+    let mut permissions = Vec::new();
+    for rule in alternatives {
+        if rule.get("contexts")? != &serde_json::json!(["privileged_extension"]) {
+            return None;
+        }
+        let dependencies = rule.get("dependencies")?.as_array()?;
+        let has_feedback = dependencies
+            .iter()
+            .any(|value| value == "permission:declarativeNetRequestFeedback");
+        let names: Vec<_> = dependencies
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "permission:declarativeNetRequestFeedback")
+            .collect();
+        if names.len() != 1 || dependencies.len() != 1 + usize::from(has_feedback) {
+            return None;
+        }
+        permissions.push(names[0].to_owned());
+        let development = match rule.get("location").and_then(Value::as_str) {
+            None => false,
+            Some("unpacked") => true,
+            _ => return None,
+        };
+        if feedback.is_some_and(|old| old != has_feedback)
+            || unpacked.is_some_and(|old| old != development)
+        {
+            return None;
+        }
+        feedback = Some(has_feedback);
+        unpacked = Some(development);
+    }
+    permissions.sort_unstable();
+    if permissions
+        != [
+            "permission:declarativeNetRequest",
+            "permission:declarativeNetRequestWithHostAccess",
+        ]
+    {
+        return None;
+    }
+    Some(Access {
+        gate: Gate::DeclarativeNetRequest {
+            feedback: feedback?,
+            unpacked: unpacked?,
+        },
+        contexts: ContextMask::EXTENSION_PAGES.without(ContextKind::Offscreen),
+    })
 }
 
 fn project(

@@ -4,6 +4,9 @@ export const fullCases = [
   "alarms-create-forms",
   "alarms-order",
   "commands-inventory",
+  "dnr-dynamic-session",
+  "dnr-matched-permission",
+  "dnr-regex-support",
   "i18n-fallback",
   "i18n-placeholders",
   "i18n-predefined",
@@ -36,16 +39,11 @@ export const omittedCalls = {
 };
 
 const missing = {
-  "dnr-block-allow": "Real network interception and no installed DNR backend.",
-  "dnr-dynamic-session":
-    "Unavailable runtime: no installed DNR registry backend.",
+  "dnr-block-allow": "Real network interception requires the native browser runner.",
   "dnr-extension-redirect":
-    "Real extension resource network redirect and no installed DNR backend.",
-  "dnr-matched-permission":
-    "Unavailable runtime: no installed DNR feedback backend.",
-  "dnr-regex-support": "Unavailable runtime: no installed DNR regex backend.",
+    "Real extension resource network redirect requires the native browser runner.",
   "dnr-upgrade-scheme":
-    "Real network scheme upgrade and no installed DNR backend.",
+    "Real network scheme upgrade requires the native browser runner.",
   "injection-all-frames": "Native content injection into a real frame tree.",
   "injection-css": "Native isolated CSS injection and computed page styles.",
   "injection-exclusions-globs": "Native document matching and page injection.",

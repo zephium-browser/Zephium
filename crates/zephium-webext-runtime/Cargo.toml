@@ -8,6 +8,7 @@ build = false
 
 [dependencies]
 zephium-webext-matcher = { path = "../zephium-webext-matcher", version = "=0.1.0" }
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0" }
 regex = "=1.12.4"
 rusqlite.workspace = true
 serde.workspace = true

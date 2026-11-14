@@ -1005,6 +1005,7 @@ event_catalog!(
     "webNavigation.onTabReplaced",
     "windows.onBoundsChanged",
     "runtime.onUpdateAvailable",
+    "declarativeNetRequest.onRuleMatchedDebug",
 );
 
 #[cfg(test)]

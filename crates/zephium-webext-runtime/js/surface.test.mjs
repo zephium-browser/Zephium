@@ -34,7 +34,7 @@ test('generated surface has the binding format and excludes host-only metadata',
   for (const namespace of Object.values(namespaces)) {
     for (const key of Object.keys(namespace)) assert.ok(['contexts', 'permissions', 'manifest', 'functions', 'events', 'properties'].includes(key), key);
     for (const fn of Object.values(namespace.functions || {})) {
-      for (const key of Object.keys(fn)) assert.ok(['contexts', 'permissions', 'manifest', 'parameters', 'returns', 'callback', 'callbackRequired', 'promise', 'result', 'optionalResult', 'signature', 'setting'].includes(key), key);
+      for (const key of Object.keys(fn)) assert.ok(['contexts', 'permissions', 'requiredPermissions', 'unpackedOnly', 'manifest', 'parameters', 'returns', 'callback', 'callbackRequired', 'promise', 'result', 'optionalResult', 'signature', 'setting'].includes(key), key);
       assert.equal(Boolean(fn.parameters?.some((parameter) => parameter.name === 'callback')), false);
     }
   }

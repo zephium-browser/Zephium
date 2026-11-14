@@ -325,6 +325,11 @@
     const available = (node) => {
       const contexts = own(node, 'contexts');
       const features = own(node, 'manifest');
+      if (own(node, 'unpackedOnly') === true && own(bootstrap, 'unpacked') !== true) return false;
+      const required = own(node, 'requiredPermissions');
+      if (I.isArray(required)) {
+        for (let i = 0; i < required.length; i++) if (!contains(granted, required[i])) return false;
+      }
       if (I.isArray(features)) {
         for (let i = 0; i < features.length; i++) if (!I.hasOwn(manifest, features[i]) || manifest[features[i]] === null) return false;
       }

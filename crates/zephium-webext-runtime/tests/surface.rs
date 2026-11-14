@@ -134,6 +134,36 @@ fn projected_members_match_host_access_and_invocation_signatures() {
                                 && features.iter().all(|feature| *feature == required),
                             "{public_name}: {features:?}, expected {required}"
                         ),
+                        Gate::DeclarativeNetRequest { feedback, unpacked } => {
+                            assert_eq!(
+                                permissions,
+                                [
+                                    "declarativeNetRequest",
+                                    "declarativeNetRequestWithHostAccess"
+                                ],
+                                "{public_name}"
+                            );
+                            let required: Vec<_> = ancestors
+                                .iter()
+                                .filter_map(|node| node["requiredPermissions"].as_array())
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect();
+                            assert_eq!(
+                                required,
+                                if feedback {
+                                    vec!["declarativeNetRequestFeedback"]
+                                } else {
+                                    vec![]
+                                },
+                                "{public_name}"
+                            );
+                            assert_eq!(
+                                ancestors.iter().any(|node| node["unpackedOnly"] == true),
+                                unpacked,
+                                "{public_name}"
+                            );
+                        }
                         other => panic!("unprojectable gate for {public_name}: {other:?}"),
                     }
                 }

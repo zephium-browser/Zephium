@@ -164,6 +164,55 @@
         "contextMenus"
       ]
     },
+    "declarativeNetRequest": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "events": {
+        "onRuleMatchedDebug": {
+          "requiredPermissions": [
+            "declarativeNetRequestFeedback"
+          ],
+          "unpackedOnly": true
+        }
+      },
+      "functions": {
+        "testMatchOutcome": {
+          "parameters": [
+            {
+              "name": "request",
+              "type": "object"
+            }
+          ],
+          "signature": "declarativeNetRequest.TestMatchRequestDetails request, optional function callback",
+          "unpackedOnly": true
+        },
+        "updateDynamicRules": {
+          "contexts": [
+            "background",
+            "popup",
+            "options",
+            "extensionTab"
+          ],
+          "parameters": [
+            {
+              "name": "options",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "declarativeNetRequest.UpdateRuleOptions options, optional function callback"
+        }
+      },
+      "permissions": [
+        "declarativeNetRequest",
+        "declarativeNetRequestWithHostAccess"
+      ]
+    },
     "dom": {
       "contexts": [
         "background",
