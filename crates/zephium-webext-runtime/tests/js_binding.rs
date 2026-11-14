@@ -1,12 +1,15 @@
 //! The JavaScript binding against the Rust side: envelope byte fixtures that
-//! both codecs must agree on.
+//! both codecs must agree on, and the binding's own tests in Node with the
+//! bundle exactly as [`zephium_webext_runtime::js`] assembles it.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::Value;
 use zephium_webext_runtime::envelope::{
     ApiName, CallId, DecodeError, Direction, Envelope, EventSeq, PortId,
 };
+use zephium_webext_runtime::js::{BUNDLE, MATCHER};
 
 fn js_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("js")
@@ -124,4 +127,45 @@ fn envelope_fixtures_match_the_rust_codec() {
         let variant = printed.split('(').next().unwrap_or_default();
         assert_eq!(variant, case["error"].as_str().expect("error"), "{name}");
     }
+}
+
+#[test]
+fn binding_tests_pass_in_node() {
+    let bundles = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("webext-js-bundles");
+    std::fs::create_dir_all(&bundles).expect("bundle directory");
+    std::fs::write(bundles.join("bundle.js"), BUNDLE).expect("write bundle");
+    std::fs::write(bundles.join("matcher.js"), MATCHER).expect("write matcher");
+    let mut tests: Vec<PathBuf> = std::fs::read_dir(js_dir())
+        .expect("js directory")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".test.mjs"))
+        })
+        .collect();
+    tests.sort();
+    assert!(!tests.is_empty());
+    let output = match Command::new("node")
+        .arg("--test")
+        .args(&tests)
+        .env("ZEPHIUM_WEBEXT_BUNDLE_DIR", &bundles)
+        .output()
+    {
+        Ok(output) => output,
+        // CI must run them; elsewhere Node is optional.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound && std::env::var_os("CI").is_none() =>
+        {
+            eprintln!("skipping: node is not installed");
+            return;
+        }
+        Err(error) => panic!("could not run node: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "binding tests failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
