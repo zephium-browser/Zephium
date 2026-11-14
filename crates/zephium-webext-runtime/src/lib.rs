@@ -15,6 +15,7 @@
 
 pub mod alarms;
 pub mod api;
+pub mod browser;
 pub mod context;
 pub mod dispatch;
 pub mod envelope;

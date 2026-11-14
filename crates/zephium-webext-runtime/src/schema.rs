@@ -1,5 +1,7 @@
 //! Chromium argument matching over the JSON bridge. Callbacks stay in the
 //! binding; JSON cannot prove a function, Date or binary object's identity.
+//! Only generated `serializableFunction` fields accept bounded source strings;
+//! the binding must serialize actual functions before calling the bridge.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
@@ -134,9 +136,19 @@ impl Catalog {
             );
             for kind in array(schema, "types") {
                 let id = kind.get("id").and_then(Value::as_str).ok_or(())?;
+                let mut kind = kind.clone();
+                if namespace == "scripting" && id == "ScriptInjection" {
+                    // Function arguments follow JSON serialization, including object nulls.
+                    if let Some(items) = kind
+                        .pointer_mut("/properties/args/items")
+                        .and_then(Value::as_object_mut)
+                    {
+                        items.insert("preserveNull".into(), Value::Bool(true));
+                    }
+                }
                 if result
                     .references
-                    .insert(qualify(namespace, id), (namespace.to_owned(), kind.clone()))
+                    .insert(qualify(namespace, id), (namespace.to_owned(), kind))
                     .is_some()
                 {
                     return Err(());
@@ -238,6 +250,7 @@ impl Catalog {
             Some("number") => value.is_number(),
             Some("boolean") => value.is_boolean(),
             Some("string") => value.is_string(),
+            Some("function") => flag(spec, "serializableFunction") && value.is_string(),
             Some("object") => value.is_object(),
             Some("array") => value.is_array(),
             Some("any") => true,
@@ -390,6 +403,13 @@ impl Catalog {
             return Err("Value did not match any choice.".into());
         }
         match spec.get("type").and_then(Value::as_str) {
+            Some("function") if flag(spec, "serializableFunction") => {
+                let source = value.as_str().ok_or("Value is unserializable.")?;
+                if source.is_empty() || source.len() > 1024 * 1024 || source.contains('\0') {
+                    return Err("Value is unserializable.".into());
+                }
+                Ok(value.clone())
+            }
             Some("integer" | "number") => {
                 let number = value
                     .as_f64()
@@ -678,6 +698,32 @@ fn json_value(value: &Value, preserve_null: bool, depth: usize) -> Result<Value,
     }
 }
 
+/// Whether Chromium's generated permission metadata recognizes this API name.
+pub fn known_permission(name: &str) -> bool {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            let Ok(Value::Object(files)) = serde_json::from_str::<Value>(generated::FEATURES_JSON)
+            else {
+                return HashSet::new();
+            };
+            files
+                .into_iter()
+                .filter(|(path, _)| {
+                    path.ends_with("/_permission_features.json")
+                        || path.ends_with("/_permission_features.override.json")
+                })
+                .flat_map(|(_, features)| {
+                    features
+                        .as_object()
+                        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .contains(name)
+}
+
 /// Checks a generated method's arguments using Chromium's type-first optional
 /// argument shifting, then full schema validation. The binding must check
 /// callback presence and remove the callback before JSON serialization.
@@ -919,6 +965,33 @@ mod tests {
             json!([{"target":{"tabId":1},"func":{"__function":"spoof"}}])
         )
         .contains("Invalid type: expected function, found object."));
+    }
+
+    #[test]
+    fn only_serializable_function_fields_accept_bounded_source() {
+        let injection = json!([{"target":{"tabId":1},"func":"(value) => value","args":[42,{"nested":{"key":null}}]}]);
+        assert_eq!(
+            converted("scripting.executeScript", injection.clone()),
+            injection.as_array().unwrap().clone()
+        );
+        for source in [
+            String::new(),
+            "x".repeat(1024 * 1024 + 1),
+            "x\0y".to_owned(),
+        ] {
+            assert!(validate(
+                "scripting.executeScript",
+                arguments(&json!([{"target":{"tabId":1},"func":source}]))
+            )
+            .is_err());
+        }
+        let catalog = fixture(
+            json!([{"name":"value","type":"object","properties":{"callback":{"type":"function"}}}]),
+            json!([]),
+        );
+        assert!(catalog
+            .normalize("test.call", &[json!({"callback":"() => 1"})])
+            .is_err());
     }
 
     #[test]

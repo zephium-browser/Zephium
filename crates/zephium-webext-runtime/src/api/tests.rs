@@ -39,6 +39,22 @@ impl Host {
     }
 }
 
+impl crate::browser::BrowserPort for Host {
+    fn snapshot(&self, _: &Sender) -> Result<crate::browser::BrowserSnapshot, ApiError> {
+        Err(self.reached())
+    }
+    fn extension_info(&self, _: &Sender) -> Result<crate::browser::ExtensionInfo, ApiError> {
+        Err(self.reached())
+    }
+    fn request(
+        &mut self,
+        _: crate::browser::BrowserRequest,
+        invocation: Invocation<'_>,
+    ) -> Handled {
+        invocation.reply(Err(self.reached()))
+    }
+}
+
 impl StorageHost for Host {
     fn storage(&mut self, _: &Sender) -> Result<&mut Storage, ApiError> {
         Err(self.reached())
@@ -143,44 +159,7 @@ fn methods() -> Vec<String> {
         .into_iter()
         .map(str::to_owned),
     );
-    for event in [
-        "runtime.onMessage",
-        "runtime.onConnect",
-        "runtime.onMessageExternal",
-        "runtime.onConnectExternal",
-        "runtime.onInstalled",
-        "runtime.onStartup",
-        "runtime.onSuspend",
-        "runtime.onSuspendCanceled",
-        "storage.onChanged",
-        "storage.local.onChanged",
-        "storage.sync.onChanged",
-        "storage.session.onChanged",
-        "storage.managed.onChanged",
-        "alarms.onAlarm",
-        "tabs.onCreated",
-        "tabs.onUpdated",
-        "tabs.onRemoved",
-        "tabs.onActivated",
-        "windows.onCreated",
-        "windows.onRemoved",
-        "windows.onFocusChanged",
-        "webNavigation.onBeforeNavigate",
-        "webNavigation.onCommitted",
-        "webNavigation.onDOMContentLoaded",
-        "webNavigation.onCompleted",
-        "webNavigation.onErrorOccurred",
-        "webNavigation.onHistoryStateUpdated",
-        "webNavigation.onReferenceFragmentUpdated",
-        "webRequest.onBeforeRequest",
-        "webRequest.onBeforeSendHeaders",
-        "webRequest.onSendHeaders",
-        "webRequest.onHeadersReceived",
-        "webRequest.onResponseStarted",
-        "webRequest.onCompleted",
-        "webRequest.onErrorOccurred",
-        "webRequest.onAuthRequired",
-    ] {
+    for event in crate::events::EVENT_APIS {
         for operation in [
             "addListener",
             "removeListener",
@@ -190,6 +169,81 @@ fn methods() -> Vec<String> {
             methods.push(format!("{event}.{operation}"));
         }
     }
+    methods.extend(super::tabs::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(
+        super::windows::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::runtime::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(super::action::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(
+        super::commands::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::permissions::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::extension::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::management::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(super::idle::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(super::dom::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(
+        super::font_settings::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::notifications::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::scripting::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::web_navigation::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::history::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::bookmarks::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::sessions::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::top_sites::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
     methods
 }
 
@@ -520,7 +574,7 @@ fn generated_methods_without_handlers_are_an_explicit_backlog() {
     let mut table = ApiTable::<Host>::new();
     register(&mut table).unwrap();
     let implemented: std::collections::BTreeSet<_> = table.names().collect();
-    let namespaces: std::collections::BTreeSet<_> = table
+    let mut namespaces: std::collections::BTreeSet<_> = table
         .names()
         .filter_map(|name| {
             crate::schema::source_method(name)
@@ -528,6 +582,7 @@ fn generated_methods_without_handlers_are_an_explicit_backlog() {
                 .map(|(namespace, _)| namespace)
         })
         .collect();
+    namespaces.insert("dom");
     let missing: Vec<_> = generated::METHOD_VALIDATORS
         .iter()
         .map(|(name, _)| *name)
@@ -538,63 +593,39 @@ fn generated_methods_without_handlers_are_an_explicit_backlog() {
     assert_eq!(
         missing,
         [
+            "dom.openOrClosedShadowRoot",
+            "extension.sendRequest",
+            "fontSettings.clearDefaultFixedFontSize",
+            "fontSettings.clearDefaultFontSize",
+            "fontSettings.clearFont",
+            "fontSettings.clearMinimumFontSize",
+            "fontSettings.getDefaultFixedFontSize",
+            "fontSettings.getDefaultFontSize",
+            "fontSettings.getFont",
+            "fontSettings.getMinimumFontSize",
+            "fontSettings.setDefaultFixedFontSize",
+            "fontSettings.setDefaultFontSize",
+            "fontSettings.setFont",
+            "fontSettings.setMinimumFontSize",
             "i18n.detectLanguage",
-            "runtime.getBackgroundPage",
-            "runtime.getContexts",
-            "runtime.getManifest",
-            "runtime.getPackageDirectoryEntry",
-            "runtime.getPlatformInfo",
-            "runtime.getURL",
-            "runtime.getVersion",
+            "management.createAppShortcut",
+            "management.generateAppForLink",
+            "management.get",
+            "management.getAll",
+            "management.getPermissionWarningsById",
+            "management.getPermissionWarningsByManifest",
+            "management.installReplacementWebApp",
+            "management.launchApp",
+            "management.setEnabled",
+            "management.setLaunchType",
+            "management.uninstall",
+            "management.uninstallSelf",
             "runtime.markListenerRegistrationComplete",
-            "runtime.openOptionsPage",
-            "runtime.reload",
-            "runtime.requestUpdateCheck",
-            "runtime.restart",
-            "runtime.restartAfterDelay",
-            "runtime.setUninstallURL",
-            "scripting.executeScript",
-            "scripting.insertCSS",
-            "scripting.removeCSS",
-            "tabs.captureVisibleTab",
-            "tabs.create",
-            "tabs.createSplit",
-            "tabs.detectLanguage",
-            "tabs.discard",
-            "tabs.duplicate",
             "tabs.executeScript",
-            "tabs.get",
-            "tabs.getAllInWindow",
-            "tabs.getCurrent",
-            "tabs.getSelected",
-            "tabs.getZoom",
-            "tabs.getZoomSettings",
-            "tabs.goBack",
-            "tabs.goForward",
-            "tabs.group",
-            "tabs.highlight",
             "tabs.insertCSS",
-            "tabs.move",
-            "tabs.query",
-            "tabs.reload",
-            "tabs.remove",
             "tabs.removeCSS",
             "tabs.sendRequest",
-            "tabs.setZoom",
-            "tabs.setZoomSettings",
-            "tabs.ungroup",
-            "tabs.unsplit",
-            "tabs.update",
-            "webNavigation.getAllFrames",
-            "webNavigation.getFrame",
             "webRequest.handlerBehaviorChanged",
-            "windows.create",
-            "windows.get",
-            "windows.getAll",
-            "windows.getCurrent",
-            "windows.getLastFocused",
-            "windows.remove",
-            "windows.update",
         ]
     );
 }
