@@ -391,15 +391,114 @@
       return (contexts === undefined || contains(contexts, kind)) && permitted(own(node, 'permissions'));
     };
 
-    function getURL(path) {
-      try {
-        const absolute = new I.URL(path);
-        return I.URLHref(absolute);
-      } catch {
-        // Relative: resolved as a standard URL under the extension origin.
+    const dynamicResources = own(bootstrap, 'dynamicResources');
+    const dynamicPatterns = own(dynamicResources, 'patterns');
+    function normalResourcePath(path) {
+      let output = '', index = 0;
+      while (index < path.length) {
+        const pair = I.StringSlice(path, index + 1, index + 3);
+        const byte = path[index] === '%' ? I.parseInt(pair, 16) : -1;
+        if ((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte === 34 || byte === 45 || byte === 60 || byte === 62 || byte === 95 || byte === 126) {
+          output += I.StringFromCharCode(byte); index += 3; continue;
+        }
+        if (byte >= 128) {
+          const start = index;
+          do { index += 3; } while (path[index] === '%' && I.parseInt(I.StringSlice(path,index+1,index+3),16) >= 128);
+          const encoded = I.StringSlice(path,start,index);
+          try { output += I.decodeURIComponent(encoded); } catch { output += encoded; }
+          continue;
+        }
+        output += path[index++];
       }
-      const resolved = I.URLHref(new I.URL(path, `https://${extensionId}/`));
-      return `${scheme}://${I.StringSlice(resolved, 8)}`;
+      return output;
+    }
+    function unsupportedResourceCharacter(cp) {
+      return cp === 0x85
+        || cp === 0xa0
+        || cp === 0xad
+        || cp === 0x34f
+        || (cp >= 0x600 && cp <= 0x605)
+        || cp === 0x61c
+        || cp === 0x6dd
+        || cp === 0x70f
+        || cp === 0x8e2
+        || (cp >= 0x115f && cp <= 0x1160)
+        || cp === 0x1680
+        || (cp >= 0x17b4 && cp <= 0x17b5)
+        || (cp >= 0x180b && cp <= 0x180e)
+        || (cp >= 0x2000 && cp <= 0x200f)
+        || (cp >= 0x2028 && cp <= 0x202f)
+        || (cp >= 0x205f && cp <= 0x206f)
+        || cp === 0x2800
+        || cp === 0x3000
+        || cp === 0x3164
+        || (cp >= 0xfe00 && cp <= 0xfe0f)
+        || cp === 0xfeff
+        || cp === 0xffa0
+        || (cp >= 0xfff0 && cp <= 0xfffb)
+        || cp === 0x110bd
+        || cp === 0x110cd
+        || (cp >= 0x13430 && cp <= 0x13438)
+        || (cp >= 0x1bca0 && cp <= 0x1bca3)
+        || (cp >= 0x1d173 && cp <= 0x1d17a)
+        || (cp >= 0x1f50f && cp <= 0x1f510)
+        || (cp >= 0x1f512 && cp <= 0x1f513)
+        || (cp >= 0xe0000 && cp <= 0xe0fff);
+    }
+    function resourceMatchPath(path) {
+      try {
+        const base = `${scheme}://${extensionId}/`;
+        const first = I.URLPathname(new I.URL(path, base));
+        for (let i = 0; i < first.length; i++) {
+          if (first[i] !== '%') continue;
+          const byte = I.parseInt(I.StringSlice(first,i+1,i+3),16);
+          if (byte < 32 || byte === 47 || byte === 92) return null;
+        }
+        const decoded = I.decodeURIComponent(first);
+        let start = 0;
+        while (decoded[start] === '/' || decoded[start] === '\\') start++;
+        if (start === decoded.length) return null;
+        const resolved = new I.URL(I.StringSlice(decoded,start), base);
+        if (I.URLProtocol(resolved) !== `${scheme}:` || I.URLHost(resolved) !== extensionId) return null;
+        const normal = normalResourcePath(I.URLPathname(resolved) + I.URLSearch(resolved));
+        for (let i = 0; i < normal.length; i++)
+          if (unsupportedResourceCharacter(I.StringCodePointAt(normal, i))) return null;
+        return normal;
+      } catch { return null; }
+    }
+    function resourceMatches(pattern, path) {
+      if (I.StringEndsWith(pattern, '/*') && I.StringSlice(pattern,0,-2) === path) return true;
+      let position = 0, cursor = 0;
+      while (true) {
+        const star = I.StringIndexOf(pattern, '*', cursor);
+        const part = I.StringSlice(pattern, cursor, star === -1 ? pattern.length : star);
+        if (cursor === 0) {
+          if (!I.StringStartsWith(path, part)) return false;
+          position = part.length;
+        } else if (star === -1) {
+          return I.StringEndsWith(I.StringSlice(path, position), part);
+        } else {
+          const found = I.StringIndexOf(path, part, position);
+          if (found === -1) return false;
+          position = found + part.length;
+        }
+        if (star === -1) return position === path.length;
+        cursor = star + 1;
+      }
+    }
+    function getURL(path) {
+      const slash = I.StringStartsWith(path, '/') ? '' : '/';
+      const resolved = new I.URL(`https://${extensionId}${slash}${path}`);
+      if (I.isArray(dynamicPatterns)) {
+        const pathname = resourceMatchPath(I.URLPathname(resolved));
+        for (let i = 0; i < dynamicPatterns.length; i++) {
+          if (pathname !== null && resourceMatches(dynamicPatterns[i], pathname)) {
+            I.URLSetHostname(resolved, own(dynamicResources, 'alias'));
+            break;
+          }
+        }
+      }
+      return `${scheme}://${I.StringSlice(I.URLHref(resolved), 8)}`;
     }
 
     const predefined = () => {
@@ -557,9 +656,9 @@
       if (invalid) throw new I.Error(T.ERRORS.invalidated);
     };
 
-    function settle(promise, callback, spec) {
+    function settle(promise, callback, spec, name) {
       const withResult = own(spec, 'result') !== false;
-      const optionalResult = own(spec, 'optionalResult') === true;
+      const optionalResult = own(spec, 'optionalResult') === true && name !== 'cookies.get';
       const resultValue = (value) => optionalResult && value === null ? undefined : value;
       if (callback !== null) {
         I.PromiseThen(
@@ -588,12 +687,6 @@
 
     let nextMenuId = 0;
     function makeFunction(fullName, spec) {
-      if (own(bootstrap, 'userScriptsEnabled') === false && I.StringStartsWith(fullName, 'userScripts.')) {
-        return function () {
-          ensureValid();
-          throw new I.Error(`'${fullName}' is not available in this context.`);
-        };
-      }
       const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
       if (fullName === 'contextMenus.create') {
         const params = normalizeParams(own(spec, 'parameters'));
@@ -668,9 +761,17 @@
             }
             promise = client.call(fullName, text, false);
           }
-          return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET);
+          return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET, fullName);
         },
       }[member];
+      if (I.StringStartsWith(fullName, 'userScripts.')) {
+        return { [member](...args) {
+          ensureValid();
+          if (own(bootstrap, 'userScriptsEnabled') === false)
+            throw new I.Error(`'${fullName}' is not available in this context.`);
+          return I.apply(fn, this, args);
+        } }[member];
+      }
       return fn;
     }
 
@@ -719,7 +820,8 @@
         const parent = parentKey === null ? chrome : I.MapGet(objects, parentKey);
         const leaf = I.StringSlice(key, dot + 1);
         let target = I.MapGet(objects, key);
-        if ((parentKey !== null && !isPresent(parentKey)) || !available(node)) {
+        if ((parentKey !== null && !isPresent(parentKey)) || !available(node)
+          || (key === 'userScripts' && own(bootstrap, 'userScriptsEnabled') === false)) {
           if (target !== undefined && parent !== undefined && parent[leaf] === target) I.deleteProperty(parent, leaf);
           I.MapSet(presence, key, false);
           continue;

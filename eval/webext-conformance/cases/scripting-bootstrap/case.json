@@ -1,0 +1,1 @@
+{"id":"scripting-bootstrap","title":"Programmatic worlds bootstrap APIs without static content scripts","apis":["scripting.executeScript","runtime.sendMessage"],"permissions":["scripting"]}

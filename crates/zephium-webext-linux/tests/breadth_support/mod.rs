@@ -3,6 +3,145 @@ use zephium_webext_linux::diagnostics;
 
 const SNAPSHOT: &str = "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),path:location.pathname,controls:[...document.querySelectorAll('button,[role=button],a[href],input,select,textarea')].filter(e=>e.getClientRects().length&&!e.disabled).slice(0,40).map(e=>(e.getAttribute('aria-label')||e.textContent||e.getAttribute('placeholder')||'').trim().slice(0,120)),dark:getComputedStyle(document.body).backgroundColor,cookieBanner:(()=>{const e=document.getElementById('cookieBanner'),s=document.getElementById('fixtureSentinel');return e?{exists:true,display:getComputedStyle(e).display,visibility:getComputedStyle(e).visibility,rects:e.getClientRects().length,sentinelVisible:!!s?.getClientRects().length}:null})(),videoSpeed:document.querySelector('video')?.playbackRate});";
 
+#[test]
+#[ignore = "release-only pinned package capacity measurement in a private native session"]
+fn capacity20() {
+    if cfg!(debug_assertions) {
+        panic!("capacity measurements require a release host");
+    }
+    let id = std::env::var("ZEPHIUM_WEBEXT_DIAGNOSTIC_EXTENSION").unwrap();
+    let evidence = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").unwrap());
+    let directory = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_BREADTH_PACKAGE").unwrap());
+    let _diagnostic = DiagnosticDump(diagnostics::begin(&evidence, &id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let web_context = context();
+    let mut proxy = webkit2gtk::NetworkProxySettings::new(
+        Some("http://127.0.0.1:9"),
+        &["127.0.0.1", "localhost"],
+    );
+    web_context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    let (mut host, _engine) = host(web_context, &module, state.path(), &id);
+    let tabs: Vec<_> = (0..20)
+        .map(|_| host.open(&fixture.url("/breadth"), true))
+        .collect();
+    let views: Vec<_> = tabs
+        .iter()
+        .map(|tab| host.shell.borrow().tabs[tab].view.clone())
+        .collect();
+    let mapped: Vec<_> = views.iter().map(MappedPage::new).collect();
+    pump(&mut host, Duration::from_secs(6));
+    let wait_ready = |host: &mut Host| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            if views.iter().all(|view| !view.is_loading()) {
+                break;
+            }
+            pump(host, Duration::from_millis(100));
+        }
+        pump(host, Duration::from_secs(2));
+    };
+    wait_ready(&mut host);
+    let sample = |phase: &str| {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let ticks: u64 = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let namespace = std::fs::read_link("/proc/self/ns/pid").unwrap();
+        let ready: Vec<_> = views
+            .iter()
+            .map(|view| evaluate_bounded(view, "return document.readyState;"))
+            .collect();
+        println!(
+            "CAPACITY_SAMPLE {}",
+            json!({"extension":id,"phase":phase,"pid":std::process::id(),"startTicks":ticks,"pidNamespace":namespace.to_string_lossy(),"tabs":20,"ready":ready})
+        );
+    };
+    sample("without-extension");
+    pump(&mut host, Duration::from_secs(1));
+    match host.runtime.install_admitted(spec(&directory, &id, 1)) {
+        Ok(()) => {
+            pump(&mut host, Duration::from_secs(3));
+            for view in &views {
+                view.reload();
+            }
+            pump(&mut host, Duration::from_secs(10));
+            wait_ready(&mut host);
+            if let Ok(files) = std::env::var("ZEPHIUM_WEBEXT_CAPACITY_FILES") {
+                use zephium_webkit_web_process_protocol::protocol::{
+                    InjectRequest, InjectionKind, InjectionTarget, MAX_SCRIPT_SOURCE_BYTES,
+                };
+                let install = ExtensionInstallId::from(INSTALL);
+                for file in files.split_whitespace() {
+                    let path = zephium_webext::manifest::normalize_resource(file)
+                        .expect("package source path");
+                    let source = std::fs::read_to_string(directory.join(&path))
+                        .expect("verified package file");
+                    assert!(source.len() <= MAX_SCRIPT_SOURCE_BYTES);
+                    let source: Arc<str> = source.into();
+                    println!(
+                        "CAPACITY_FORCED_SOURCE {}",
+                        json!({"path":path,"bytes":source.len(),"tabs":tabs.len(),"scope":"synthetic localhost evaluation, not extension feature acceptance"})
+                    );
+                    for tab in &tabs {
+                        let attached = host.shell.borrow().tabs[tab].attached;
+                        host.runtime
+                            .bridge()
+                            .inject(
+                                attached,
+                                install,
+                                InjectRequest {
+                                    install_id: String::new(),
+                                    token: String::new(),
+                                    generation: 0,
+                                    request_id: 0,
+                                    target: InjectionTarget::AllFrames,
+                                    world: zephium_webext_linux::bridge::world_name(
+                                        install,
+                                        &zephium_webext_runtime::context::InjectedWorld::Isolated,
+                                    ),
+                                    kind: InjectionKind::Script,
+                                    source: source.clone(),
+                                    source_fd: None,
+                                    source_url: format!("chrome-extension://{id}/{path}"),
+                                    args_json: "[]".into(),
+                                    timeout_ms: 30000,
+                                },
+                            )
+                            .expect("admitted native document source");
+                    }
+                    pump(&mut host, Duration::from_secs(30));
+                }
+                wait_ready(&mut host);
+            }
+            sample("with-extension");
+            pump(&mut host, Duration::from_secs(1));
+            snapshot(&id, "CapacityFirstTab", &views[0]);
+            snapshot(&id, "CapacityLastTab", &views[19]);
+        }
+        Err(error) => panic!(
+            "CAPACITY_INSTALL_ERROR {}",
+            json!({"extension":id,"error":error.to_string()})
+        ),
+    }
+    drop(mapped);
+    drop(views);
+    for tab in tabs {
+        host.close(tab);
+    }
+}
+
 fn evaluate_bounded(view: &webkit2gtk::WebView, source: &str) -> String {
     let result = Rc::new(RefCell::new(None));
     let observed = result.clone();

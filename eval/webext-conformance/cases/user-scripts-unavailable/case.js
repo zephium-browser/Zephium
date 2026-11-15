@@ -1,5 +1,6 @@
 export async function run(h) {
   const held = chrome.userScripts;
+  h.assert(Array.isArray(await held.getScripts()), "user scripts must start enabled");
   await h.host("disableUserScripts");
   let denied = false;
   for(let i=0;i<100;i++) {

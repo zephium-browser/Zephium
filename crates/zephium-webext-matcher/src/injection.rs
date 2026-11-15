@@ -16,7 +16,7 @@ use url::{Host, Url};
 /// Maximum UTF-8 byte length accepted for one source match pattern.
 pub const MAX_MATCH_PATTERN_BYTES: usize = 2 * 1024;
 /// Maximum total positive and excluded patterns accepted for one script.
-pub const MAX_MATCH_PATTERNS_PER_SET: usize = 128;
+pub const MAX_MATCH_PATTERNS_PER_SET: usize = 768;
 /// Maximum number of `*` tokens compiled for one path glob.
 pub const MAX_MATCH_PATTERN_WILDCARDS: usize = 64;
 /// Maximum URL path-and-query length examined by direct URL matching.

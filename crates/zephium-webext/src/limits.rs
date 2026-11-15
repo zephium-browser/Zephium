@@ -46,7 +46,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[ArrayFlag("web_accessible_resources", "use_dynamic_url")],
-        "Dynamic public resource URLs aren't returned by runtime.getURL, and rule redirects to those resources aren't available",
+        "Dynamic resource URLs are session locators; alias documents have no privileged extension binding, spoof-sensitive Unicode filenames do not receive dynamic locators, and rule redirects to dynamic resources aren't available",
         LIN,
     ),
     (
@@ -177,7 +177,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("privacy")],
-        "Can't change privacy settings",
+        "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
         LIN,
     ),
     (
@@ -277,7 +277,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("background.service_worker")],
-        "Background workers lack service-worker registrations, push, extension fetch interception and static routes",
+        "Background registrations expose lifecycle state; worker update/unregister, messaging, push, extension fetch interception and static routes are unsupported",
         LIN,
     ),
     (
@@ -287,7 +287,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("content_scripts"), Permission("scripting")],
-        "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
+        "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns",
         LIN,
     ),
     (
@@ -298,7 +298,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (&[Key("incognito")], "Can't run in private windows", LIN),
     (
         &[Permission("cookies")],
-        "Can't read or change cookies or report cookie changes",
+        "Linux cookie access requires an explicit granted-host URL; writes require HTTPS and confirmed read-back. Private/partitioned cookies, global enumeration and onChanged are unavailable. SameSite is omitted where Soup cannot distinguish Lax from unspecified",
         LIN,
     ),
     (&[Permission("downloads")], "Can't manage downloads", LIN),
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn dynamic_resource_warning_requires_a_declared_dynamic_entry() {
         let dynamic = json!({"manifest_version":3,"web_accessible_resources":[{"resources":["public.js"],"matches":["https://example.test/*"],"use_dynamic_url":true}]});
-        assert_eq!(assess(dynamic.clone(), Platform::Linux), ["Dynamic public resource URLs aren't returned by runtime.getURL, and rule redirects to those resources aren't available"]);
+        assert_eq!(assess(dynamic.clone(), Platform::Linux), ["Dynamic resource URLs are session locators; alias documents have no privileged extension binding, spoof-sensitive Unicode filenames do not receive dynamic locators, and rule redirects to dynamic resources aren't available"]);
         assert!(assess(dynamic.clone(), Platform::Macos).is_empty());
         assert!(assess(dynamic.clone(), Platform::Windows).is_empty());
         let mut fixed = dynamic;
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
             [
-                "Can't change privacy settings",
+                "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
@@ -561,7 +561,7 @@ mod tests {
                 "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
-                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
+                "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns",
             ]
         );
         assert_eq!(
@@ -574,7 +574,7 @@ mod tests {
             [
                 "Can't change font settings",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
-                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns"
+                "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns"
             ]
         );
     }

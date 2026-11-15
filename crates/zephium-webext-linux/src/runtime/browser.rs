@@ -44,7 +44,8 @@ use crate::bridge::{BridgeViewId, FrameLifecycle, ViewRef};
 /// Bounded wait for a programmatic injection, per file.
 const INJECTION_TIMEOUT_MS: u32 = 10_000;
 /// Package files read for one `executeScript` or `insertCSS` call.
-const MAX_INJECTED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_INJECTED_FILE_BYTES: u64 =
+    zephium_webkit_web_process_protocol::protocol::MAX_SCRIPT_SOURCE_BYTES as u64;
 /// Requests waiting for the engine at once, per profile.
 const MAX_PENDING: usize = 1024;
 /// Frames remembered per tab.
@@ -133,7 +134,7 @@ pub(crate) enum Outgoing {
 pub(crate) struct Step {
     pub world: String,
     pub kind: InjectionKind,
-    pub source: String,
+    pub source: std::sync::Arc<str>,
     pub source_url: String,
     pub args_json: String,
 }
@@ -1550,7 +1551,7 @@ impl BrowserState {
                         } else {
                             InjectionKind::FunctionAtIdle
                         },
-                        source: source.clone(),
+                        source: source.clone().into(),
                         source_url: format!("chrome-extension://{}/", facts.extension_id),
                         args_json: Value::Array(args.clone()).to_string(),
                     }]),
@@ -1565,7 +1566,7 @@ impl BrowserState {
                                 } else {
                                     InjectionKind::ScriptAtIdle
                                 },
-                                source,
+                                source: source.into(),
                                 source_url: url,
                                 args_json: "[]".into(),
                             })
@@ -1624,10 +1625,27 @@ fn read_package_file(facts: &InstallFacts, file: &str) -> Result<(String, String
         .ok_or_else(missing)?;
     let full = facts.root.join(&path);
     let metadata = std::fs::symlink_metadata(&full).map_err(|_| missing())?;
-    if !metadata.is_file() || metadata.len() > MAX_INJECTED_FILE_BYTES {
+    if !metadata.is_file() {
         return Err(missing());
     }
-    let bytes = std::fs::read(&full).map_err(|_| missing())?;
+    if metadata.len() > MAX_INJECTED_FILE_BYTES {
+        return Err(ApiError::other(format!(
+            "Script '{file}' exceeds the {MAX_INJECTED_FILE_BYTES}-byte source limit."
+        )));
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&full)
+        .and_then(|file| {
+            file.take(MAX_INJECTED_FILE_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|_| missing())?;
+    if bytes.len() as u64 > MAX_INJECTED_FILE_BYTES {
+        return Err(ApiError::other(format!(
+            "Script '{file}' exceeds the {MAX_INJECTED_FILE_BYTES}-byte source limit."
+        )));
+    }
     let text = String::from_utf8(bytes).map_err(|_| missing())?;
     Ok((
         text,
@@ -1746,6 +1764,9 @@ impl Browser {
                 )
             }
             BrowserRequest::Permissions(_) => state.refuse(invocation),
+            BrowserRequest::Service(ServiceRequest::FormPrivacy(_)) => invocation.reply(Ok(
+                json!({"value":false,"levelOfControl":"not_controllable"}),
+            )),
             BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => {
                 invocation.reply(Ok(json!("active")))
             }

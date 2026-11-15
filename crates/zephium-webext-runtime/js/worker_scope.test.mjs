@@ -65,7 +65,8 @@ test('the worker passes the service-worker identity checks real extensions use',
   assert.equal(inWorker('"name" in self'), false);
   assert.equal(inWorker('self instanceof WorkerGlobalScope'), true);
   assert.equal(inWorker('typeof importScripts === "function"'), true);
-  assert.equal(inWorker('self.registration == null'), true, 'Bitwarden takes its unsupported Web Push path');
+  assert.equal(inWorker('self.registration instanceof ServiceWorkerRegistration'), true);
+  assert.equal(self.registration.scope, `chrome-extension://${EXTENSION_ID}/`);
   assert.equal(inWorker('typeof self.skipWaiting'), 'function');
   assert.equal(inWorker('self.clients instanceof Clients'), true);
   assert.equal(inWorker('typeof chrome.runtime.id === "string" && browser === chrome'), true);
@@ -366,15 +367,11 @@ test("module workers refuse importScripts before and after installation with Chr
   assert.throws(() => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "x.js")'), error);
 });
 
-test("navigator.storage is shimmed with the host's figures; clients are inert", async () => {
+test("unavailable native storage refuses without inventing quota or persistence", async () => {
   const { inWorker } = workerRealm({ storage: { quota: 1073741824, usage: 4096, persisted: true } });
-  assert.deepEqual(plain(await inWorker('navigator.storage.estimate()')), {
-    quota: 1073741824,
-    usage: 4096,
-    usageDetails: {},
-  });
-  assert.equal(await inWorker('navigator.storage.persist()'), true);
-  assert.equal(await inWorker('navigator.storage.persisted()'), true);
+  await assert.rejects(inWorker('navigator.storage.estimate()'), {name:'NotSupportedError'});
+  await assert.rejects(inWorker('navigator.storage.persist()'), {name:'NotSupportedError'});
+  await assert.rejects(inWorker('navigator.storage.persisted()'), {name:'NotSupportedError'});
   assert.deepEqual(plain(await inWorker('clients.matchAll({ includeUncontrolled: true })')), []);
   assert.equal(await inWorker('clients.get("x")'), undefined);
   assert.equal(await inWorker('self.skipWaiting()'), undefined);
@@ -610,4 +607,25 @@ test('onstatechange occupies its assignment position and null removes that posit
   worker.dispatchEvent(new Event('statechange'));
   assert.deepEqual(order, ['first','last','reassigned']);
   await until(() => worker.state === 'activated');
+});
+
+
+test('registration follows host lifecycle without inventing another worker', async () => {
+  const { self, inWorker, host } = workerRealm();
+  const registration = self.registration;
+  assert.equal(registration.installing, self.serviceWorker);
+  assert.equal(registration.active, null);
+  assert.equal(registration.waiting, null);
+  assert.throws(() => inWorker('new ServiceWorkerRegistration()'), /Illegal constructor/);
+  await assert.rejects(registration.update(), { name: 'InvalidStateError' });
+  await until(() => lifecycle(host).some(([state]) => state === 'activated'));
+  await until(() => self.serviceWorker.state === 'activated');
+  assert.equal(registration, self.registration);
+  assert.equal(registration.active, self.serviceWorker);
+  assert.equal(registration.installing, null);
+  assert.equal(registration.waiting, null);
+  await assert.rejects(registration.update(), { name: 'NotSupportedError' });
+  const restarted = workerRealm({ install: false });
+  assert.equal(restarted.self.registration.active, restarted.self.serviceWorker);
+  assert.equal(restarted.self.registration.installing, null);
 });

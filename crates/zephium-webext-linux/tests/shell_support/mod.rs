@@ -28,7 +28,7 @@ const WINDOW: u64 = 1;
 
 pub struct Tab {
     pub view: webkit2gtk::WebView,
-    attached: zephium_webext_linux::bridge::BridgeViewId,
+    pub attached: zephium_webext_linux::bridge::BridgeViewId,
     pub url: Option<url::Url>,
     pub title: String,
     pub loading: bool,

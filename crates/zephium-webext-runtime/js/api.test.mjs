@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EXTENSION_ID, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
+import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
 
 const keys = (object) => Object.keys(object).sort();
 
@@ -486,12 +486,26 @@ test('menu inline callbacks are refused instead of disappearing during serializa
   assert.equal(calls, 0);
 });
 
-test('disabled user scripts throw synchronously before validation or transport', () => {
+test('fresh disabled user scripts namespace is absent', () => {
   const { chrome, host } = extensionContext('background', { permissions: ['userScripts'], userScriptsEnabled: false });
-  assert.equal(typeof chrome.userScripts.getScripts, 'function');
+  assert.equal(chrome.userScripts, undefined);
+  assert.equal(Object.hasOwn(chrome, 'userScripts'), false);
+  assert.equal(host.calls.length, 0);
+});
+
+test('held user scripts throw after revocation before validation or transport', () => {
+  const { Z } = createRealm();
+  const host = new FakeHost(Z);
+  const data = bootstrap({permissions: ['userScripts'], userScriptsEnabled: true});
+  const context = Z.api.create(surface, data, host.link);
+  const held = context.chrome.userScripts;
+  assert.equal(typeof held.getScripts, 'function');
+  data.userScriptsEnabled = false;
+  context.refresh();
+  assert.equal(context.chrome.userScripts, undefined);
   let callback = false;
   for (const method of ['getScripts', 'register', 'configureWorld', 'execute', 'getWorldConfigurations', 'resetWorldConfiguration', 'unregister', 'update']) {
-    assert.throws(() => chrome.userScripts[method](Symbol(), () => { callback = true; }),
+    assert.throws(() => held[method](Symbol(), () => { callback = true; }),
       { message: `'userScripts.${method}' is not available in this context.` });
   }
   assert.equal(callback, false);
@@ -554,4 +568,29 @@ test('unavailable declarative constructors are defined, gated and never inspect 
     assert.equal(extensionContext(kind, {permissions:['declarativeContent'], unavailableSyncApis:true}).chrome.declarativeContent, undefined);
   }
   assert.equal(extensionContext('background', {permissions:[], unavailableSyncApis:true}).chrome.declarativeContent, undefined);
+});
+
+
+test('cookies get preserves null while an empty set result is absent', async () => {
+  const {chrome, host} = extensionContext('background', {permissions:['cookies']});
+  host.handlers['cookies.get'] = () => null;
+  host.handlers['cookies.set'] = () => null;
+  assert.equal(await chrome.cookies.get({url:'https://example.com/',name:'missing'}), null);
+  const args = await new Promise(resolve => chrome.cookies.get({url:'https://example.com/',name:'missing'}, (...args)=>resolve(args)));
+  assert.deepEqual(plain(args), [null]);
+  assert.equal(await chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}), undefined);
+  assert.deepEqual(plain(await new Promise(resolve => chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}, (...args)=>resolve(args)))), []);
+});
+
+test('dynamic resource locators match canonical paths without changing extension identity', () => {
+  const alias = 'b'.repeat(32);
+  const {chrome} = extensionContext('popup', {dynamicResources:{alias,patterns:['/public/*','/café.txt']}});
+  for (const path of ['public/a.js', '/public/a.js?x=1#fragment','folder/../public/a.js','public/a/../b.js','café.txt','caf%c3%a9.txt','public/%64ata.txt','public','//remote.test/public/a.js']) {
+    assert.equal(new URL(chrome.runtime.getURL(path)).hostname, alias);
+  }
+  for (const path of ['private.txt','public/../private.txt','https://remote.test/public/a.js','public/%2Fdata.txt','public/%00data.txt','public/\u202ex.txt','public/%E2%80%AEx.txt','public/%25E2%2580%25AEx.txt']) {
+    assert.equal(new URL(chrome.runtime.getURL(path)).hostname, EXTENSION_ID);
+  }
+  assert.equal(chrome.runtime.id, EXTENSION_ID);
+  assert.equal(chrome.runtime.getURL('///icons/../popup.html'), `chrome-extension://${EXTENSION_ID}///popup.html`);
 });

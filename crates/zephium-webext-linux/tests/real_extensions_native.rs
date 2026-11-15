@@ -446,9 +446,36 @@ fn dark_reader() {
             .open_page(ExtensionInstallId::from(INSTALL), PageKind::Popup, None)
             .expect("popup");
         pump(&mut host, Duration::from_secs(2));
-        let _ = evaluate(popup.view(), "return chrome.runtime.sendMessage({type:'ui-bg-toggle-active-tab'}).then(()=> 'sent');");
+        let persisted_disabled = format!(
+            "const p = await chrome.storage.local.get({{syncSettings:true}}); const v = await chrome.storage[p.syncSettings ? 'sync' : 'local'].get('disabledFor'); return Array.isArray(v.disabledFor) ? v.disabledFor.includes(new URL({}).host) : 'missing';",
+            serde_json::to_string(&fixture.url("/page")).unwrap(),
+        );
+        assert_eq!(
+            evaluate(popup.view(), &persisted_disabled),
+            "true",
+            "disabled site was saved"
+        );
+        let toggled = evaluate(popup.view(), "return chrome.runtime.sendMessage({type:'ui-bg-toggle-active-tab'}).then(()=> 'sent');");
+        assert_eq!(toggled, "sent");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut saved = String::new();
+        while Instant::now() < deadline {
+            pump(&mut host, Duration::from_millis(100));
+            saved = evaluate(popup.view(), &persisted_disabled);
+            if saved == "false" {
+                break;
+            }
+        }
+        assert_eq!(saved, "false", "re-enabled site was saved before shutdown");
+        println!("WEBEXT dark_reader reenabled_persisted=true");
         drop(popup);
-        pump(&mut host, Duration::from_secs(1));
+        let reenabled = frames(&mut host, &fixture, tab);
+        assert!(
+            reenabled
+                .iter()
+                .any(|(where_, l)| where_ == "top" && *l < 0.3),
+            "dark before restart: {reenabled:?}"
+        );
 
         host.close(tab);
         let mut drain = host.runtime.retire();
@@ -1600,6 +1627,14 @@ fn runtime_compatibility() {
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
     }).to_string()).unwrap();
     std::fs::write(package.path().join("build.info"), "package-only").unwrap();
+    std::fs::write(
+        package.path().join("large.js"),
+        format!(
+            "/*{}*/globalThis.largeRuns=(globalThis.largeRuns||0)+1;globalThis.largeRuns;",
+            "x".repeat(1024 * 1024)
+        ),
+    )
+    .unwrap();
     std::fs::write(package.path().join("worker.js"), r#"
 const packageReady = fetch(chrome.runtime.getURL('build.info')).then(r=>r.text());
 chrome.contextMenus.onClicked.addListener(()=>{});
@@ -1615,8 +1650,10 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       userAgent:navigator.userAgent,chrome:typeof globalThis.chrome,browser:typeof globalThis.browser,
       nativePost:typeof globalThis.__zephiumPost,nativeReceiver:typeof globalThis.__zephiumRegisterReceiver
     })});
+    const large = [];
+    for(let i=0;i<2;i++) large.push((await chrome.scripting.executeScript({target,files:['large.js']}))[0].result);
     await configurationReady;
-    respond({main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
+    respond({large,main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
       panel:await chrome.sidePanel.getOptions({}),native:await nativeReady,port:await portReady});
   })().catch(e=>respond({error:String(e)}));
   return true;
@@ -1659,6 +1696,7 @@ chrome.runtime.sendMessage({probe:true}, result=>{
         .open_page(install, PageKind::Popup, None)
         .unwrap();
     pump(&mut host, Duration::from_secs(1));
+    assert_eq!(result["large"], json!([1, 2]), "{result}");
     let popup_ua = evaluate(popup.view(), "return navigator.userAgent;");
     let main_ua = evaluate(&view, "return navigator.userAgent;");
     let remote = evaluate(
@@ -1734,7 +1772,7 @@ fn platform_capabilities() {
     let package = tempfile::tempdir().unwrap();
     std::fs::write(package.path().join("manifest.json"), json!({
         "manifest_version":3,"name":"Platform capabilities","version":"1.0",
-        "permissions":["tabs","webRequest","contextMenus","notifications","sessions","declarativeContent","management","cookies","downloads"],"host_permissions":["<all_urls>"],
+        "permissions":["tabs","webRequest","contextMenus","notifications","sessions","declarativeContent","management","cookies","downloads","privacy"],"host_permissions":["<all_urls>"],
         "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]},{"matches":["http://127.0.0.1/*"],"js":["main.js"],"world":"MAIN"}]
     }).to_string()).unwrap();
@@ -1870,6 +1908,15 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             popup.view(),
             r#"globalThis.result=null;(async()=>{
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
+ const privacy={};
+ for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled']){
+   privacy[name]=await chrome.privacy.services[name].get({});
+ }
+ const privacyErrors=[];
+ for(const run of [()=>chrome.privacy.services.passwordSavingEnabled.set({value:true}),()=>chrome.privacy.services.passwordSavingEnabled.clear({}),()=>chrome.privacy.services.passwordSavingEnabled.get({incognito:true})]){
+   try{await run();privacyErrors.push('unexpected success')}catch(error){privacyErrors.push(error.message)}
+ }
+
  const captureErrors=[];
  const captureWindow=await chrome.windows.getCurrent();
  for(const format of ['png','jpeg']){
@@ -1904,7 +1951,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1926,13 +1973,36 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert_eq!(result["restoreError"], "This function is not supported.");
     assert_eq!(result["languageError"], "This function is not supported.");
     assert_eq!(result["managementError"], "This function is not supported.");
+    for name in [
+        "passwordSavingEnabled",
+        "autofillEnabled",
+        "autofillAddressEnabled",
+        "autofillCreditCardEnabled",
+    ] {
+        assert_eq!(
+            result["privacy"][name],
+            json!({"value":false,"levelOfControl":"not_controllable"})
+        );
+    }
+    assert_eq!(
+        result["privacyErrors"],
+        json!([
+            "This function is not supported.",
+            "This function is not supported.",
+            "This function is not supported."
+        ])
+    );
+
     assert_eq!(
         result["captureErrors"],
         json!(vec!["This function is not supported."; 2])
     );
     assert_eq!(
         result["unavailableErrors"],
-        json!(vec!["This function is not supported."; 2])
+        json!([
+            "Cookie access requires an explicit HTTP(S) URL.",
+            "This function is not supported."
+        ])
     );
     assert_eq!(
         result["constructorErrors"],
@@ -1978,8 +2048,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             "missing {event}: {result}"
         );
     }
-    // An extension document in an ordinary tab keeps that view's defaults,
-    // including after it navigates back to a web page.
+    // Extension storage features are restored on return to ordinary web content.
     let package_tab = host.open(&format!("chrome-extension://{id}/popup.html"), true);
     pump(&mut host, Duration::from_secs(1));
     let package_view = host.shell.borrow().tabs[&package_tab].view.clone();
@@ -1991,11 +2060,26 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         evaluate(&package_view, "return typeof requestIdleCallback;"),
         default_idle
     );
+    assert_eq!(
+        evaluate(&package_view, "return typeof navigator.storage;"),
+        "object"
+    );
+    let storage: Value = serde_json::from_str(&evaluate(
+        &package_view,
+        "return JSON.stringify(await navigator.storage.estimate());",
+    ))
+    .unwrap();
+    assert!(storage["quota"].as_f64().is_some_and(|quota| quota > 0.0));
+    assert!(storage["usage"].as_f64().is_some_and(|usage| usage >= 0.0));
     package_view.load_uri(&fixture.url("/password-form"));
     pump(&mut host, Duration::from_secs(1));
     assert_eq!(
         evaluate(&package_view, "return typeof requestIdleCallback;"),
         default_idle
+    );
+    assert_eq!(
+        evaluate(&package_view, "return typeof navigator.storage;"),
+        "undefined"
     );
     drop(package_view);
     diagnostics::record(

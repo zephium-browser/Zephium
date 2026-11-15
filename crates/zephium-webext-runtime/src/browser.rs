@@ -377,6 +377,10 @@ pub enum BrowserRequest {
 /// Small native desktop services with no Shell mutation counterpart.
 #[derive(Clone, Debug)]
 pub enum ServiceRequest {
+    /// Read or mutate URL-scoped cookies in the authenticated profile.
+    Cookies(crate::api::cookies::Request),
+    /// Query the actual state and controllability of a browser form service.
+    FormPrivacy(crate::api::privacy::FormSetting),
     /// Invalidate native memory caches after webRequest handler changes.
     HandlerBehaviorChanged,
     /// Query active/idle/locked using the supplied threshold in seconds.
@@ -399,6 +403,10 @@ pub trait BrowserPort {
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError>;
     /// Returns current installation/bootstrap facts for the authenticated generation.
     fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError>;
+    /// Resolves a package locator using this admitted installation's session aliases.
+    fn extension_resource_url(&self, sender: &Sender, path: &str) -> Result<String, ApiError> {
+        crate::api::runtime::get_url(sender, path)
+    }
     /// Executes or queues a validated typed request, rechecking identity and document generations.
     /// Data replies must be converted with the namespace's reply helper before settlement.
     /// Shell history-add and restore admissions are not completion evidence: wait

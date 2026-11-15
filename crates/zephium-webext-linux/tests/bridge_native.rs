@@ -9,7 +9,8 @@ use gtk::glib::{self, prelude::ObjectExt, variant::ToVariant};
 use serde_json::Value;
 use support::{evaluate, load, pump_for, pump_until, Fixture, ModuleDirectory};
 use webkit2gtk::{
-    SecurityManagerExt, URISchemeRequestExt, UserMessageExt, WebContextExt, WebViewExt,
+    SecurityManagerExt, URISchemeRequestExt, UserContentManagerExt, UserMessageExt, WebContextExt,
+    WebViewExt,
 };
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
@@ -236,6 +237,19 @@ fn ack_for(runtime: &TestRuntime, key: &ContextKey, value: &str) -> usize {
         .count()
 }
 
+fn document_start_sentinel(view: &webkit2gtk::WebView) {
+    use zephium_webkit_web_process_protocol::protocol::{DOCUMENT_START_SCRIPT, FACT_WORLD};
+    let script = webkit2gtk::UserScript::for_world(
+        DOCUMENT_START_SCRIPT,
+        webkit2gtk::UserContentInjectedFrames::AllFrames,
+        webkit2gtk::UserScriptInjectionTime::Start,
+        FACT_WORLD,
+        &[],
+        &[],
+    );
+    view.user_content_manager().unwrap().add_script(&script);
+}
+
 #[test]
 #[ignore = "sandboxed native WebKitGTK; use timeout -k 10 420 scripts/ci/linux-test.sh"]
 fn native_bridge() {
@@ -248,13 +262,14 @@ fn native_bridge() {
     let bridge = bridge(&context, &module, 1, runtime.clone());
     let tab = ItemId::from(5);
     let page = webkit2gtk::WebView::with_context(&context);
+    document_start_sentinel(&page);
     let raw = observe_posts(&page);
     let view = bridge
         .attach_tab(tab, &page, &tab_plan(&fixture))
         .expect("attach");
 
     pump_until(|| bridge.transport(view) == Some(Transport::Module));
-    let table = ScriptTable { catalogs: Default::default(),
+    let table = ScriptTable { bootstraps: Default::default(), catalogs: Default::default(),
         generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
         run_at: RunAt::DocumentStart, rule: MatchRule { matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
@@ -263,7 +278,9 @@ fn native_bridge() {
         css: Vec::new(), bootstrap: String::new(),
     }] };
     assert_eq!(
-        bridge.publish_scripts(table).expect("publish native table"),
+        bridge
+            .publish_scripts(table.clone())
+            .expect("publish native table"),
         1
     );
     pump_for(Duration::from_millis(100));
@@ -321,7 +338,7 @@ fn native_bridge() {
     let request = InjectRequest { install_id: String::new(), token: String::new(), generation: 0, request_id: 0, target,
         world: world_name(install(), &InjectedWorld::Isolated), kind: InjectionKind::Function,
         source: "async (left, right) => { await Promise.resolve(); return {sum:left+right, href:location.href, count:globalThis.__nativeBridgeScriptCount}; }".into(),
-        source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
+        source_fd: None, source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
     };
     let request_id = bridge
         .inject(view, install(), request.clone())
@@ -402,6 +419,15 @@ fn native_bridge() {
             .len(),
         3
     );
+    for generation in 2..=20 {
+        let mut next = table.clone();
+        next.generation = generation;
+        bridge
+            .publish_scripts(next)
+            .expect("retired native mappings release publication capacity");
+        pump_for(Duration::from_millis(350));
+    }
+    assert_eq!(bridge.stats().scripts_refused, 0);
     println!("WEBEXT bridge_native_script_table documents=3 isolated=true execute_subframe_promise=42 all_frames=3");
 
     // Replies reach exactly the bound frame and world.
@@ -430,12 +456,25 @@ fn native_bridge() {
     // A second tab's renderer forging the first tab's claims binds nothing.
     let other_tab = ItemId::from(6);
     let other = webkit2gtk::WebView::with_context(&context);
+    document_start_sentinel(&other);
     let other_raw = observe_posts(&other);
     bridge
         .attach_tab(other_tab, &other, &tab_plan(&fixture))
         .expect("attach");
     load(&other, &format!("{}/frame?other", fixture.cross_origin));
     pump_until(|| runtime.hellos(Some(other_tab)).len() == 1);
+    pump_until(|| {
+        runtime
+            .0
+            .borrow()
+            .received
+            .iter()
+            .filter(|(sender, value)| {
+                sender.tab() == Some(other_tab) && value["phase"] == "native-script"
+            })
+            .count()
+            == 1
+    });
     let victim = raw
         .borrow()
         .iter()

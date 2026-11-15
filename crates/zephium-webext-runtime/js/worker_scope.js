@@ -175,24 +175,21 @@
     I.defineProperty(global, 'location', { value: location, enumerable: true, configurable: true, writable: false });
   }
 
-  function storageManager(global, details) {
+  function storageManager(global) {
     const navigator = global.navigator;
     if (!navigator || navigator.storage) return;
-    const quota = typeof own(details, 'quota') === 'number' ? details.quota : 0;
-    const usage = typeof own(details, 'usage') === 'number' ? details.usage : 0;
-    const persisted = own(details, 'persisted') === true;
     const StorageManager = function StorageManager() {
       illegal();
     };
     const proto = StorageManager.prototype;
     hidden(proto, 'estimate', function estimate() {
-      return I.PromiseResolve({ quota, usage, usageDetails: {} });
+      return I.PromiseReject(new I.DOMException('Native storage estimates are unavailable.', 'NotSupportedError'));
     });
     hidden(proto, 'persisted', function persistedState() {
-      return I.PromiseResolve(persisted);
+      return I.PromiseReject(new I.DOMException('Native storage persistence is unavailable.', 'NotSupportedError'));
     });
     hidden(proto, 'persist', function persist() {
-      return I.PromiseResolve(persisted);
+      return I.PromiseReject(new I.DOMException('Native storage persistence is unavailable.', 'NotSupportedError'));
     });
     I.defineProperty(proto, I.toStringTag, { value: 'StorageManager', configurable: true });
     if (!global.StorageManager) hidden(global, 'StorageManager', StorageManager);
@@ -289,6 +286,44 @@
     };
   }
 
+  function defineRegistration(global, config, serviceWorker) {
+    const key = {};
+    let registration;
+    let changed = null;
+    const check = value => { if (value !== registration) throw new I.TypeError('Illegal invocation'); };
+    const state = () => serviceWorker.worker.state;
+    const scope = I.URLHref(new I.URL('/', own(config, 'scriptURL')));
+    class ServiceWorkerRegistration extends I.EventTarget {
+      constructor(token) { super(); if (token !== key) illegal(); }
+      get scope() { check(this); return scope; }
+      get installing() { check(this); return state() === 'parsed' || state() === 'installing' ? serviceWorker.worker : null; }
+      get waiting() { check(this); return state() === 'installed' ? serviceWorker.worker : null; }
+      get active() { check(this); return state() === 'activating' || state() === 'activated' ? serviceWorker.worker : null; }
+      get updateViaCache() { check(this); return 'imports'; }
+      get onupdatefound() { check(this); return changed; }
+      set onupdatefound(value) { check(this); changed = typeof value === 'function' ? value : null; }
+      update() {
+        check(this);
+        const installing = state() === 'parsed' || state() === 'installing';
+        return I.PromiseReject(new I.DOMException(
+          installing ? "Failed to update a ServiceWorker for scope ('" + scope + "'): The service worker is still installing."
+            : 'Extension workers are updated by the browser extension installer.',
+          installing ? 'InvalidStateError' : 'NotSupportedError'));
+      }
+      unregister() {
+        check(this);
+        return I.PromiseReject(new I.DOMException('Extension workers are removed by the browser extension installer.', 'NotSupportedError'));
+      }
+    }
+    I.defineProperty(ServiceWorkerRegistration.prototype, I.toStringTag, { value: 'ServiceWorkerRegistration', configurable: true });
+    registration = new ServiceWorkerRegistration(key);
+    I.addEventListener(registration, 'updatefound', event => {
+      if (typeof changed === 'function') I.apply(changed, registration, [event]);
+    });
+    hidden(global, 'ServiceWorkerRegistration', ServiceWorkerRegistration);
+    return registration;
+  }
+
   function worker(surface, bootstrap, options) {
     options = options || {};
     const global = options.global || I.global;
@@ -356,6 +391,8 @@
 
     const serviceWorker = defineServiceWorker(global, config);
     I.defineProperty(members, 'serviceWorker', { get: () => serviceWorker.worker, configurable: true, enumerable: true });
+    const registration = defineRegistration(global, config, serviceWorker);
+    I.defineProperty(members, 'registration', { get: () => registration, configurable: true, enumerable: true });
     const classes = defineEventClasses(global);
     hidden(global, 'ExtendableEvent', classes.ExtendableEvent);
     hidden(global, 'InstallEvent', classes.InstallEvent);
@@ -387,7 +424,7 @@
     });
     const finishImports = workerImports(global, config);
     if (typeof own(config, 'scriptURL') === 'string') workerLocation(global, config.scriptURL);
-    storageManager(global, own(config, 'storage'));
+    storageManager(global);
 
     let startupError = null;
     const onStartupError = (event) => {

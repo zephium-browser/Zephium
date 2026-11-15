@@ -266,6 +266,12 @@ fn methods() -> Vec<String> {
             .iter()
             .map(|name| (*name).to_owned()),
     );
+    methods.extend(super::privacy::methods().map(str::to_owned));
+    methods.extend(
+        super::cookies::METHODS
+            .iter()
+            .map(|method| (*method).to_owned()),
+    );
     methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
     methods.push("webRequest.handlerBehaviorChanged".into());
     methods.extend(super::unavailable::methods().map(str::to_owned));
@@ -685,6 +691,7 @@ fn generated_methods_without_handlers_are_an_explicit_backlog() {
     assert_eq!(
         missing,
         [
+            "cookies.getPartitionKey",
             "dom.openOrClosedShadowRoot",
             "extension.sendRequest",
             "fontSettings.clearDefaultFixedFontSize",

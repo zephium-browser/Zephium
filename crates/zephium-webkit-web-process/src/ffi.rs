@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 use std::rc::{Rc, Weak as RcWeak};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use crate::dnr::{DnrFrameAllow, DnrPolicySnapshot, MAX_DNR_SNAPSHOT_BYTES};
 use crate::policy::{Decision, PolicySnapshot, RequestInfo, ResourceType};
@@ -47,7 +47,8 @@ struct Runtime {
     injections: BTreeMap<u64, scripts::PendingInjection>,
     next_injection: u64,
     idle_injections: usize,
-    script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
+    script_tables: BTreeMap<(u64, u64), RcWeak<PublishedScripts>>,
+    source_maps: BTreeMap<(u64, u64), RcWeak<PublishedSource>>,
     policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
 
@@ -66,7 +67,8 @@ struct NativePage {
     event_bytes: usize,
     batch_inflight: bool,
     form_connected: bool,
-    scripts: Option<Arc<protocol::ScriptTable>>,
+    scripts: Option<Rc<PublishedScripts>>,
+    retired_scripts: Vec<(u64, RcWeak<PublishedScripts>)>,
 }
 
 struct NativeFrame {
@@ -76,8 +78,9 @@ struct NativeFrame {
     weak_data: *mut (u64, u64),
     installed: BTreeSet<String>,
     receivers: BTreeMap<String, *mut Object>,
-    scripts: Option<Arc<protocol::ScriptTable>>,
+    scripts: Option<Rc<PublishedScripts>>,
     phases: [bool; 3],
+    sources: BTreeMap<(u64, u64), Rc<PublishedSource>>,
     bootstrapped: BTreeMap<String, bool>,
 }
 
@@ -96,6 +99,7 @@ struct Completion {
     post_id: Option<u64>,
     event_bytes: usize,
     batch: bool,
+    released_table: Option<u64>,
 }
 
 struct PanicGuard;
@@ -266,6 +270,7 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 next_injection: 0,
                 idle_injections: 0,
                 script_tables: BTreeMap::new(),
+                source_maps: BTreeMap::new(),
                 policy_maps: BTreeMap::new(),
             });
             true
@@ -320,6 +325,7 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
                     batch_inflight: false,
                     form_connected: false,
                     scripts: None,
+                    retired_scripts: Vec::new(),
                 },
             );
             true
@@ -496,6 +502,7 @@ fn flush_frame_events(id: u64) -> bool {
                 post_id: None,
                 event_bytes,
                 batch: false,
+                released_table: None,
             },
         );
     }
@@ -534,12 +541,21 @@ fn send_event_immediately(id: u64, event: Event) -> bool {
             post_id: None,
             event_bytes,
             batch: false,
+            released_table: None,
         },
     );
     true
 }
 
-fn send_bytes(page: &Owned, bytes: Vec<u8>, completion: Completion) {
+fn send_bytes(page: &Owned, bytes: Vec<u8>, mut completion: Completion) {
+    if bytes.get(4) == Some(&22) {
+        if let Ok(Event::ScriptsReleased {
+            table_generation, ..
+        }) = protocol::decode_event(&bytes)
+        {
+            completion.released_table = Some(table_generation);
+        }
+    }
     unsafe {
         let owned = Box::new(bytes);
         let parameters = raw::g_variant_new_from_data(
@@ -572,6 +588,7 @@ unsafe extern "C" fn message_finished(page: *mut Object, result: *mut Object, da
         let completion = Box::from_raw(data.cast::<Completion>());
         let mut error = ptr::null_mut();
         let reply = raw::webkit_web_page_send_message_to_view_finish(page, result, &mut error);
+        let delivered = !reply.is_null() && error.is_null();
         if !reply.is_null() {
             raw::g_object_unref(reply);
         }
@@ -595,6 +612,12 @@ unsafe extern "C" fn message_finished(page: *mut Object, result: *mut Object, da
             {
                 if let Some(page) = runtime.pages.get_mut(&completion.page) {
                     page.batch_inflight = false;
+                    if delivered {
+                        if let Some(table) = completion.released_table {
+                            page.retired_scripts
+                                .retain(|(generation, _)| *generation != table);
+                        }
+                    }
                 }
             }
         });
@@ -636,6 +659,27 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                             native.events.push_back(bytes);
                         }
                     }
+                }
+                if native.events.is_empty() && !native.retired_scripts.is_empty() {
+                    native.retired_scripts.retain(|(table_generation, table)| {
+                        if table.strong_count() != 0 {
+                            return true;
+                        }
+                        let Ok(bytes) = protocol::encode_event(&Event::ScriptsReleased {
+                            generation,
+                            table_generation: *table_generation,
+                        }) else {
+                            return true;
+                        };
+                        if native.event_bytes.saturating_add(bytes.len()) > MAX_PENDING_EVENT_BYTES
+                            || native.events.len() >= MAX_PENDING_EVENTS
+                        {
+                            return true;
+                        }
+                        native.event_bytes += bytes.len();
+                        native.events.push_back(bytes);
+                        true
+                    });
                 }
                 if native.events.is_empty()
                     && (!native.requests.is_empty() || native.requests_dropped != 0)
@@ -700,6 +744,7 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                         post_id: None,
                         event_bytes,
                         batch: true,
+                        released_table: None,
                     },
                 );
             }
@@ -796,6 +841,7 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 }
                 let native = runtime.pages.get_mut(&id)?;
                 native.scripts = None;
+                native.retired_scripts.clear();
                 native.policy = None;
                 native.frame_allow.clear();
                 native.pending_allow = None;
@@ -820,7 +866,26 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
         UiMessage::Deliver(deliver) => {
             deliver_to_frame(id, &deliver) == protocol::DeliveryStatus::Delivered
         }
-        UiMessage::Inject(request) => scripts::inject(id, request),
+        UiMessage::Inject(request) => {
+            if !with_runtime(|runtime| {
+                runtime
+                    .state
+                    .validate_message(id, &request.token, request.generation)
+            })
+            .unwrap_or(false)
+            {
+                return false;
+            }
+            let source = if let Some(fd) = &request.source_fd {
+                let Some(source) = map_source(message, fd.index, fd.length as usize) else {
+                    return false;
+                };
+                Some(source)
+            } else {
+                None
+            };
+            scripts::inject(id, request, source)
+        }
         UiMessage::Scripts(update) => {
             if !with_runtime(|runtime| {
                 runtime
@@ -829,23 +894,17 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                     && runtime.pages.get(&id).is_some_and(|page| {
                         page.scripts
                             .as_ref()
-                            .is_none_or(|table| update.table_generation > table.generation)
+                            .is_none_or(|table| update.table_generation > table.table().generation)
                     })
             })
             .unwrap_or(false)
             {
                 return false;
             }
-            let Some(table) = map_sealed(
-                message,
-                update.fd_index,
-                update.length as usize,
-                protocol::MAX_SCRIPT_TABLE_BYTES,
-                protocol::ScriptTable::decode,
-            ) else {
+            let Some(table) = map_scripts(message, update.fd_index, update.length as usize) else {
                 return false;
             };
-            if table.generation != update.table_generation {
+            if table.table().generation != update.table_generation {
                 return false;
             }
             with_runtime(|runtime| {
@@ -855,38 +914,16 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 {
                     return false;
                 }
-                runtime
-                    .script_tables
-                    .retain(|_, (table, _)| table.strong_count() != 0);
-                let shared =
-                    if let Some((existing, _)) = runtime.script_tables.get(&table.generation) {
-                        let Some(existing) = existing.upgrade() else {
-                            return false;
-                        };
-                        if *existing != table {
-                            return false;
-                        }
-                        existing
-                    } else {
-                        let bytes = runtime
-                            .script_tables
-                            .values()
-                            .map(|(_, bytes)| bytes)
-                            .sum::<usize>();
-                        if bytes.saturating_add(update.length as usize) > MAX_PROCESS_SCRIPT_BYTES {
-                            return false;
-                        }
-                        let table = Arc::new(table);
-                        runtime.script_tables.insert(
-                            table.generation,
-                            (Arc::downgrade(&table), update.length as usize),
-                        );
-                        table
-                    };
                 let Some(page) = runtime.pages.get_mut(&id) else {
                     return false;
                 };
-                page.scripts = Some(shared);
+                if page.retired_scripts.len() >= 16 {
+                    return false;
+                }
+                if let Some(previous) = page.scripts.replace(table) {
+                    page.retired_scripts
+                        .push((previous.table().generation, Rc::downgrade(&previous)));
+                }
                 true
             })
             .unwrap_or(false)
@@ -967,6 +1004,7 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
             return Some(BTreeMap::new());
         }
         native.scripts = None;
+        native.retired_scripts.clear();
         native.policy = None;
         native.frame_allow.clear();
         native.pending_allow = None;
@@ -1068,7 +1106,10 @@ unsafe extern "C" fn window_cleared(
                     .map(|(_, allow)| allow)
                     .unwrap_or_default();
             }
-            let table_generation = native.scripts.as_ref().map_or(0, |table| table.generation);
+            let table_generation = native
+                .scripts
+                .as_ref()
+                .map_or(0, |table| table.table().generation);
             runtime
                 .state
                 .set_frame_script_table(page_id, frame_id, table_generation);
@@ -1092,6 +1133,7 @@ unsafe extern "C" fn window_cleared(
                     receivers: BTreeMap::new(),
                     scripts: native.scripts.clone(),
                     phases: [false; 3],
+                    sources: BTreeMap::new(),
                     bootstrapped: BTreeMap::new(),
                 },
             );
@@ -1378,6 +1420,7 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
                 post_id: Some(post_id),
                 event_bytes: 0,
                 batch: false,
+                released_table: None,
             },
         );
         1
@@ -1561,15 +1604,132 @@ fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<Rc<Publ
     Some(shared)
 }
 
-fn map_sealed<T, E>(
-    message: *mut Object,
-    index: u32,
-    length: usize,
-    maximum: usize,
-    decode: impl FnOnce(&[u8]) -> Result<T, E>,
-) -> Option<T> {
-    let mapping = map_region(message, index, length, maximum)?;
-    decode(unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) }).ok()
+struct PublishedScripts {
+    // Borrowed source spans never outlive this sealed read-only mapping.
+    data: protocol::ScriptTable<&'static str>,
+    mapping: MappedBytes,
+}
+
+impl PublishedScripts {
+    fn table(&self) -> &protocol::ScriptTable<&str> {
+        &self.data
+    }
+}
+
+fn map_scripts(message: *mut Object, index: u32, length: usize) -> Option<Rc<PublishedScripts>> {
+    let mapping = map_region(message, index, length, protocol::MAX_SCRIPT_TABLE_BYTES)?;
+    if let Some(Some(shared)) = with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .get(&mapping.identity)
+            .and_then(RcWeak::upgrade)
+    }) {
+        return Some(shared);
+    }
+    let allowed = with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .retain(|_, table| table.strong_count() != 0);
+        let total: usize = runtime
+            .script_tables
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .map(|table| table.mapping.length)
+            .chain(
+                runtime
+                    .source_maps
+                    .values()
+                    .filter_map(RcWeak::upgrade)
+                    .map(|source| source.mapping.length),
+            )
+            .sum();
+        total.saturating_add(length) <= MAX_PROCESS_SCRIPT_BYTES
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return None;
+    }
+    // The private descriptors borrow only immutable bytes owned by PublishedScripts.
+    let bytes: &'static [u8] =
+        unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) };
+    let data = protocol::ScriptTable::decode_borrowed(bytes).ok()?;
+    if with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .any(|table| table.table().generation == data.generation)
+    })
+    .unwrap_or(true)
+    {
+        return None;
+    }
+    let identity = mapping.identity;
+    let table = Rc::new(PublishedScripts { data, mapping });
+    with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .insert(identity, Rc::downgrade(&table));
+    });
+    Some(table)
+}
+
+struct PublishedSource {
+    data: &'static str,
+    mapping: MappedBytes,
+}
+
+impl PublishedSource {
+    fn source(&self) -> &str {
+        self.data
+    }
+}
+
+fn map_source(message: *mut Object, index: u32, length: usize) -> Option<Rc<PublishedSource>> {
+    let mapping = map_region(message, index, length, protocol::MAX_SCRIPT_SOURCE_BYTES)?;
+    if let Some(Some(source)) = with_runtime(|runtime| {
+        runtime
+            .source_maps
+            .get(&mapping.identity)
+            .and_then(RcWeak::upgrade)
+    }) {
+        return Some(source);
+    }
+    let allowed = with_runtime(|runtime| {
+        runtime
+            .source_maps
+            .retain(|_, source| source.strong_count() != 0);
+        let bytes: usize = runtime
+            .source_maps
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .map(|source| source.mapping.length)
+            .chain(
+                runtime
+                    .script_tables
+                    .values()
+                    .filter_map(RcWeak::upgrade)
+                    .map(|table| table.mapping.length),
+            )
+            .sum();
+        bytes.saturating_add(length) <= MAX_PROCESS_SCRIPT_BYTES
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return None;
+    }
+    // Only this owner keeps the validated immutable source span alive.
+    let bytes: &'static [u8] =
+        unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) };
+    let data = std::str::from_utf8(bytes)
+        .ok()
+        .filter(|source| !source.contains('\0'))?;
+    let identity = mapping.identity;
+    let source = Rc::new(PublishedSource { data, mapping });
+    with_runtime(|runtime| {
+        runtime.source_maps.insert(identity, Rc::downgrade(&source));
+    });
+    Some(source)
 }
 
 fn map_region(
@@ -2111,6 +2271,7 @@ fn deactivate_page(id: u64) {
         runtime.state.remove_page(id);
         let native = runtime.pages.get_mut(&id)?;
         native.scripts = None;
+        native.retired_scripts.clear();
         native.policy = None;
         native.frame_allow.clear();
         native.pending_allow = None;

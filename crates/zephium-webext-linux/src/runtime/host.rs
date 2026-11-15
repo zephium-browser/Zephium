@@ -74,6 +74,12 @@ pub(crate) enum NativeOp {
         request: PermissionRequest,
         responder: Responder,
     },
+    Cookies {
+        sender: Box<Sender>,
+        revision: u64,
+        request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
+    },
     HandlerCache {
         sender: Box<Sender>,
         responder: Responder,
@@ -180,6 +186,7 @@ pub enum Activation {
 
 /// What the façade knows about an install when it admits it.
 pub(crate) struct Admitted {
+    pub dynamic_resources: Option<crate::scheme::DynamicResources>,
     pub install: ExtensionInstallId,
     pub extension_id: ExtensionId,
     pub manifest: Manifest,
@@ -241,6 +248,7 @@ struct PendingScripts {
 }
 
 pub(crate) struct InstallState {
+    dynamic_resources: Option<crate::scheme::DynamicResources>,
     #[cfg(feature = "native-tests")]
     last_worker_activity: Option<(u64, String)>,
     dnr: DnrState,
@@ -249,6 +257,7 @@ pub(crate) struct InstallState {
     network_ready: bool,
     network_managed: bool,
     permission_pending: bool,
+    cookie_revision: u64,
     initial_fresh: bool,
     initial_updated: bool,
     pending_network_start: Option<u64>,
@@ -305,6 +314,7 @@ impl InstallState {
             incognito,
             unpacked: self.unpacked,
             permissions: &self.granted,
+            dynamic_resources: self.dynamic_resources.as_ref(),
         }
         .to_value(None);
         value["unpacked"] = Value::Bool(self.unpacked);
@@ -316,6 +326,12 @@ impl InstallState {
 enum Work {
     OffscreenReady {
         sender: Box<Sender>,
+    },
+    Cookies {
+        sender: Box<Sender>,
+        revision: u64,
+        request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
     },
     HandlerCache {
         sender: Box<Sender>,
@@ -688,21 +704,13 @@ impl ScriptingHost for State {
         &self,
         sender: &Sender,
         path: &str,
-        _: ResourceKind,
+        kind: ResourceKind,
     ) -> Result<(), ApiError> {
         let install = self
             .installs
             .get(&sender.install())
             .ok_or_else(ApiError::context_invalidated)?;
-        let normalized = zephium_webext::manifest::normalize_resource(path)
-            .filter(|path| !path.starts_with('_'))
-            .ok_or_else(|| ApiError::other(format!("Could not load file: '{path}'.")))?;
-        let file = install.root.join(&normalized);
-        if std::fs::symlink_metadata(file).is_ok_and(|meta| meta.is_file()) {
-            Ok(())
-        } else {
-            Err(ApiError::other(format!("Could not load file: '{path}'.")))
-        }
+        super::content::validate_file(&install.root, path, kind)
     }
 
     fn commit_script_registry(
@@ -832,6 +840,19 @@ impl BrowserPort for State {
         }
     }
 
+    fn extension_resource_url(&self, sender: &Sender, path: &str) -> Result<String, ApiError> {
+        let install = self
+            .installs
+            .get(&sender.install())
+            .filter(|install| &install.extension_id == sender.extension_id())
+            .ok_or_else(ApiError::context_invalidated)?;
+        let url = zephium_webext_runtime::api::runtime::get_url(sender, path)?;
+        match &install.dynamic_resources {
+            Some(resources) => resources.resolve(url),
+            None => Ok(url),
+        }
+    }
+
     fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError> {
         let install = self
             .installs
@@ -868,6 +889,22 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        if let BrowserRequest::Service(zephium_webext_runtime::browser::ServiceRequest::Cookies(
+            request,
+        )) = request
+        {
+            let sender = Box::new(invocation.sender().clone());
+            let revision = self
+                .installs
+                .get(&sender.install())
+                .map_or(0, |state| state.cookie_revision);
+            return self.defer(invocation, |responder| Work::Cookies {
+                revision,
+                sender,
+                request,
+                responder,
+            });
+        }
         if matches!(
             request,
             BrowserRequest::Service(
@@ -1109,7 +1146,7 @@ fn event_frame(kind: ContextKind, seq: u64, name: &str, args: &Value) -> Option<
 }
 
 /// The manifest as extensions see it, with Chrome's localized string fields.
-fn localized_manifest(manifest: &Manifest) -> Value {
+pub(super) fn localized_manifest(manifest: &Manifest) -> Value {
     let mut raw = manifest.raw().clone();
     let localize = |value: &mut Value| {
         if let Some(text) = value.as_str() {
@@ -1409,6 +1446,8 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::context_menus::register(&mut table)?;
     api::side_panel::register(&mut table)?;
     api::permissions::register(&mut table)?;
+    api::privacy::register(&mut table)?;
+    api::cookies::register(&mut table)?;
     api::extension::register(&mut table)?;
     api::management::register(&mut table)?;
     api::idle::register(&mut table)?;
@@ -1452,7 +1491,7 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
 
 /// Builds one message's text for the binding's synchronous lookup: named
 /// placeholders applied, positional ones left for call time.
-fn binding_catalog(messages: &Messages) -> Value {
+pub(super) fn binding_catalog(messages: &Messages) -> Value {
     let Value::Object(catalog) = messages.catalog() else {
         return json!({});
     };
@@ -1593,6 +1632,43 @@ impl RuntimeHost {
         self.settle(responder, result, out);
     }
 
+    pub(crate) fn cookies_allowed(&self, sender: &Sender, url: Option<&url::Url>) -> bool {
+        !self.shutting_down
+            && !sender.incognito()
+            && !self.state.incognito
+            && sender.profile() == self.state.profile
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .state
+                .installs
+                .get(&sender.install())
+                .is_some_and(|state| {
+                    !state.permission_pending && state.extension_id == *sender.extension_id()
+                })
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| {
+                    permissions.has_api("cookies")
+                        && url.is_none_or(|url| permissions.has_host_access(url))
+                })
+    }
+
+    pub(crate) fn cookie_revision(&self, sender: &Sender) -> Option<u64> {
+        self.state
+            .installs
+            .get(&sender.install())
+            .map(|state| state.cookie_revision)
+    }
+
+    pub(crate) fn cookie_stores(&self, sender: &Sender) -> Result<Value, ApiError> {
+        use zephium_webext_runtime::browser::BrowserPort;
+        let snapshot = self.state.snapshot(sender)?;
+        Ok(
+            serde_json::json!([{"id":"0", "tabIds":snapshot.tabs.iter().filter(|tab| !tab.incognito).map(|tab| tab.id).collect::<Vec<_>>()}]),
+        )
+    }
+
     pub(crate) fn handler_cache_allowed(&self, sender: &Sender) -> bool {
         sender.profile() == self.state.profile
             && sender.incognito() == self.state.incognito
@@ -1702,6 +1778,11 @@ impl RuntimeHost {
             .get_mut(&install)
             .expect("validated install")
             .permission_pending = true;
+        self.state
+            .installs
+            .get_mut(&install)
+            .expect("validated install")
+            .cookie_revision = ticket;
         self.network_permission_tickets
             .insert(ticket, (permissions, completion));
         Ok(())
@@ -2014,6 +2095,7 @@ impl RuntimeHost {
             .unwrap_or_default();
         let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
+            dynamic_resources: admitted.dynamic_resources,
             #[cfg(feature = "native-tests")]
             last_worker_activity: None,
             dnr: DnrState::default(),
@@ -2025,6 +2107,7 @@ impl RuntimeHost {
             network_ready: !needs_network,
             network_managed: needs_network,
             permission_pending: false,
+            cookie_revision: 0,
             initial_fresh: matches!(activation, Activation::Installed),
             initial_updated: matches!(activation, Activation::Updated { .. }),
             pending_network_start: None,
@@ -2858,6 +2941,7 @@ impl RuntimeHost {
             incognito,
             unpacked: state.unpacked,
             permissions: &state.granted,
+            dynamic_resources: state.dynamic_resources.as_ref(),
         };
         let launch = background::launch(
             &state.extension_id,
@@ -2865,7 +2949,6 @@ impl RuntimeHost {
             &bootstrap,
             state.fresh,
             &state.installed_scripts,
-            state.unlimited,
             &state.worker_surface,
         );
         state.live = Some(Live {
@@ -3654,6 +3737,23 @@ impl RuntimeHost {
                 }
             }
             Work::RequestInterest => self.kick(),
+            Work::Cookies {
+                revision,
+                sender,
+                request,
+                responder,
+            } => {
+                if self.cookies_allowed(&sender, request.url.as_ref()) {
+                    self.op(NativeOp::Cookies {
+                        revision,
+                        sender,
+                        request,
+                        responder,
+                    });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
             Work::HandlerCache { sender, responder } => {
                 if self.handler_cache_allowed(&sender) {
                     self.op(NativeOp::HandlerCache { sender, responder });
