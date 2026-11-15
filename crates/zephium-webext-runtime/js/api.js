@@ -687,12 +687,6 @@
 
     let nextMenuId = 0;
     function makeFunction(fullName, spec) {
-      if (own(bootstrap, 'userScriptsEnabled') === false && I.StringStartsWith(fullName, 'userScripts.')) {
-        return function () {
-          ensureValid();
-          throw new I.Error(`'${fullName}' is not available in this context.`);
-        };
-      }
       const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
       if (fullName === 'contextMenus.create') {
         const params = normalizeParams(own(spec, 'parameters'));
@@ -770,6 +764,14 @@
           return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET, fullName);
         },
       }[member];
+      if (I.StringStartsWith(fullName, 'userScripts.')) {
+        return { [member](...args) {
+          ensureValid();
+          if (own(bootstrap, 'userScriptsEnabled') === false)
+            throw new I.Error(`'${fullName}' is not available in this context.`);
+          return I.apply(fn, this, args);
+        } }[member];
+      }
       return fn;
     }
 
@@ -818,7 +820,8 @@
         const parent = parentKey === null ? chrome : I.MapGet(objects, parentKey);
         const leaf = I.StringSlice(key, dot + 1);
         let target = I.MapGet(objects, key);
-        if ((parentKey !== null && !isPresent(parentKey)) || !available(node)) {
+        if ((parentKey !== null && !isPresent(parentKey)) || !available(node)
+          || (key === 'userScripts' && own(bootstrap, 'userScriptsEnabled') === false)) {
           if (target !== undefined && parent !== undefined && parent[leaf] === target) I.deleteProperty(parent, leaf);
           I.MapSet(presence, key, false);
           continue;

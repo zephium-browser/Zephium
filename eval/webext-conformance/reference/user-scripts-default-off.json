@@ -1,0 +1,20 @@
+{
+  "caseId": "user-scripts-default-off",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "namespace",
+      "value": {
+        "own": false,
+        "type": "undefined"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

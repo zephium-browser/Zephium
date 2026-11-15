@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EXTENSION_ID, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
+import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
 
 const keys = (object) => Object.keys(object).sort();
 
@@ -486,12 +486,26 @@ test('menu inline callbacks are refused instead of disappearing during serializa
   assert.equal(calls, 0);
 });
 
-test('disabled user scripts throw synchronously before validation or transport', () => {
+test('fresh disabled user scripts namespace is absent', () => {
   const { chrome, host } = extensionContext('background', { permissions: ['userScripts'], userScriptsEnabled: false });
-  assert.equal(typeof chrome.userScripts.getScripts, 'function');
+  assert.equal(chrome.userScripts, undefined);
+  assert.equal(Object.hasOwn(chrome, 'userScripts'), false);
+  assert.equal(host.calls.length, 0);
+});
+
+test('held user scripts throw after revocation before validation or transport', () => {
+  const { Z } = createRealm();
+  const host = new FakeHost(Z);
+  const data = bootstrap({permissions: ['userScripts'], userScriptsEnabled: true});
+  const context = Z.api.create(surface, data, host.link);
+  const held = context.chrome.userScripts;
+  assert.equal(typeof held.getScripts, 'function');
+  data.userScriptsEnabled = false;
+  context.refresh();
+  assert.equal(context.chrome.userScripts, undefined);
   let callback = false;
   for (const method of ['getScripts', 'register', 'configureWorld', 'execute', 'getWorldConfigurations', 'resetWorldConfiguration', 'unregister', 'update']) {
-    assert.throws(() => chrome.userScripts[method](Symbol(), () => { callback = true; }),
+    assert.throws(() => held[method](Symbol(), () => { callback = true; }),
       { message: `'userScripts.${method}' is not available in this context.` });
   }
   assert.equal(callback, false);
