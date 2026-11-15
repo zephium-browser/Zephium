@@ -25,9 +25,15 @@ pub enum ScriptTableError {
     Generation,
     /// A source URL or install belongs to another admitted extension.
     InvalidOwner,
+    /// The staged ordinary-tab plan was refused before persistence.
+    Plan(super::plan::PlanError),
     /// The memory file could not be created, written or sealed.
     Io(std::io::Error),
 }
+
+/// An opaque, profile-local reservation for a sealed script publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedScriptsId(pub(crate) u64);
 
 impl From<rustix::io::Errno> for ScriptTableError {
     fn from(errno: rustix::io::Errno) -> Self {
@@ -47,6 +53,7 @@ pub struct SealedScripts {
 #[derive(Debug)]
 pub(crate) struct ScriptAuthority {
     pub generation: u64,
+    pub admissions: std::collections::BTreeMap<String, u64>,
     pub bootstraps: std::collections::BTreeMap<String, String>,
     pub entries: Vec<EntryAuthority>,
 }
@@ -67,6 +74,7 @@ impl From<ScriptTable> for ScriptAuthority {
     fn from(table: ScriptTable) -> Self {
         Self {
             generation: table.generation,
+            admissions: table.admissions,
             bootstraps: table
                 .bootstraps
                 .into_iter()

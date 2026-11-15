@@ -7,7 +7,7 @@ pub use crate::scripts::*;
 use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
 use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";
@@ -96,6 +96,7 @@ impl Limits {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct WorldRule {
     pub install_id: String,
+    pub install_generation: u64,
     pub name: String,
     pub matches: Vec<MatchRule>,
     pub bootstrap: String,
@@ -378,7 +379,7 @@ impl<'a> Reader<'a> {
         }
     }
     pub(crate) fn header(&mut self, kind: u8) -> Result<(), WireError> {
-        if self.take(4)? != b"ZWP4" {
+        if self.take(4)? != b"ZWP5" {
             return Err(WireError::Version);
         }
         if self.u8()? != kind {
@@ -433,7 +434,7 @@ pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
     pub(crate) fn new(kind: u8) -> Self {
-        let mut bytes = b"ZWP4".to_vec();
+        let mut bytes = b"ZWP5".to_vec();
         bytes.push(kind);
         Self(bytes)
     }
@@ -620,6 +621,7 @@ pub fn encode_ui(message: &UiMessage) -> Result<Vec<u8>, WireError> {
             w.count(v.worlds.len(), MAX_WORLDS)?;
             for world in &v.worlds {
                 w.string(&world.install_id, MAX_INSTALL_ID_BYTES)?;
+                w.u64(world.install_generation);
                 w.string(&world.name, MAX_WORLD_BYTES)?;
                 w.count(world.matches.len(), MAX_ORIGINS)?;
                 for rule in &world.matches {
@@ -713,6 +715,7 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
             let mut worlds = Vec::new();
             for _ in 0..count {
                 let install_id = r.string(MAX_INSTALL_ID_BYTES)?;
+                let install_generation = r.u64()?;
                 let name = r.string(MAX_WORLD_BYTES)?;
                 let n = r.count(MAX_ORIGINS)?;
                 let mut matches = Vec::new();
@@ -721,6 +724,7 @@ pub fn decode_ui(name: &str, bytes: &[u8]) -> Result<UiMessage, WireError> {
                 }
                 worlds.push(WorldRule {
                     install_id,
+                    install_generation,
                     name,
                     matches,
                     bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
@@ -973,7 +977,7 @@ pub fn encode_post_bytes_for_install(
 
 pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
     let mut r = Reader::new(bytes, MAX_UI_BYTES)?;
-    if r.take(4)? != b"ZWP4" {
+    if r.take(4)? != b"ZWP5" {
         return Err(WireError::Version);
     }
     let tag = r.u8()?;
@@ -1131,6 +1135,7 @@ mod tests {
                 token: "process-token".into(),
                 generation: 1,
                 worlds: vec![WorldRule {
+                    install_generation: 1,
                     install_id: "a".repeat(32),
                     name: "isolated".into(),
                     matches: vec![MatchRule::for_origin("https://example.com").expect("rule")],
@@ -1182,10 +1187,10 @@ mod tests {
 
     #[test]
     fn hostile_lengths_types_and_utf8_are_refused() {
-        let mut bytes = b"ZWP4\x04".to_vec();
+        let mut bytes = b"ZWP5\x04".to_vec();
         bytes.extend_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Oversized));
-        let mut bytes = b"ZWP4\x04".to_vec();
+        let mut bytes = b"ZWP5\x04".to_vec();
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(255);
         assert_eq!(decode_ui(DETACH_MESSAGE, &bytes), Err(WireError::Invalid));

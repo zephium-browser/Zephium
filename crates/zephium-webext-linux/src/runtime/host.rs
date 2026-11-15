@@ -191,6 +191,7 @@ pub enum Activation {
 
 /// What the façade knows about an install when it admits it.
 pub(crate) struct Admitted {
+    pub install_generation: u64,
     pub dynamic_resources: Option<crate::scheme::DynamicResources>,
     pub install: ExtensionInstallId,
     pub extension_id: ExtensionId,
@@ -254,6 +255,7 @@ struct PendingScripts {
 }
 
 pub(crate) struct InstallState {
+    install_generation: u64,
     dynamic_resources: Option<crate::scheme::DynamicResources>,
     #[cfg(feature = "native-tests")]
     last_worker_activity: Option<(u64, String)>,
@@ -2151,6 +2153,7 @@ impl RuntimeHost {
             .unwrap_or_default();
         let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
+            install_generation: admitted.install_generation,
             dynamic_resources: admitted.dynamic_resources,
             #[cfg(feature = "native-tests")]
             last_worker_activity: None,

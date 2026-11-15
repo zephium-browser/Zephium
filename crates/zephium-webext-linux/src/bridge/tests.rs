@@ -61,6 +61,7 @@ fn world() -> String {
 fn tab_plan(origins: &[&str]) -> AttachPlan {
     AttachPlan {
         worlds: vec![WorldGrant {
+            install_generation: 1,
             install: install(),
             world: InjectedWorld::Isolated,
             matches: origins
@@ -1192,6 +1193,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
         RunAt, ScriptEntry, ScriptFile, ScriptTable,
     };
     ScriptTable {
+        admissions: [(format!("{:032x}", 10), 1)].into(),
         generation,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -1244,6 +1246,153 @@ fn sealed_scripts_keep_source_bytes_only_in_the_sealed_file() {
         ScriptTable::decode(&retained).unwrap().entries[0].files[0].source,
         "void 0"
     );
+}
+
+#[test]
+fn reserved_script_publication_serializes_admission_and_keeps_revocation() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::BindError;
+    let mut h = Harness::new();
+    let plan = tab_plan(&[SITE]);
+    let (view, _) = h.tab(2, &plan);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(7)).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(8)).unwrap()), &plan)
+        .unwrap();
+    assert!(
+        h.core.take_effects().is_empty(),
+        "preparation must not publish"
+    );
+    assert!(h
+        .core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(9)).unwrap()))
+        .is_err());
+    assert!(h.core.check_script_capacity(1).is_err());
+    assert_eq!(
+        h.core.admit(admission(install(), EXTENSION)),
+        Err(BindError::PublicationPending)
+    );
+    let mut revoked = plan.clone();
+    revoked.worlds.clear();
+    h.core.update_plan(view, &revoked, true).unwrap();
+    let committed = h.core.commit_prepared_scripts(prepared).unwrap();
+    assert!(
+        committed.worlds.is_empty(),
+        "a save cannot restore a revoked grant"
+    );
+    assert!(h.core.commit_prepared_scripts(prepared).is_none());
+    assert!(h.core.check_script_capacity(1).is_ok());
+}
+
+#[test]
+fn reserved_user_worlds_require_explicit_owned_grants_and_retirement_is_inert() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::UserScriptWorldId;
+    let mut h = Harness::new();
+    let mut plan = tab_plan(&[SITE]);
+    let world_id = InjectedWorld::UserScript(UserScriptWorldId::parse("custom").unwrap());
+    let mut table = script_table(1);
+    table.entries[0].world = world_name(install(), &world_id);
+    table.entries[0].admission_world = table.entries[0].world.clone();
+    assert!(h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(table.clone()).unwrap()), &plan)
+        .is_err());
+    plan.worlds.push(WorldGrant {
+        install_generation: 1,
+        world: world_id,
+        ..plan.worlds[0].clone()
+    });
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(table).unwrap()), &plan)
+        .unwrap();
+    h.core.retire(install());
+    let committed = h.core.commit_prepared_scripts(prepared).unwrap();
+    assert!(committed.worlds.is_empty());
+    assert!(committed.extension_pages.is_empty());
+    assert_eq!(
+        h.core.admit(admission(install(), EXTENSION)),
+        Err(zephium_webext_runtime::context::BindError::GenerationNotNewer)
+    );
+}
+
+#[test]
+fn aborted_publication_handles_cannot_commit_or_abort_a_reused_generation() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let plan = tab_plan(&[SITE]);
+    let old = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(1)).unwrap()), &plan)
+        .unwrap();
+    h.core.abort_prepared_scripts(old);
+    let new = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(1)).unwrap()), &plan)
+        .unwrap();
+    assert_ne!(old, new);
+    h.core.abort_prepared_scripts(old);
+    assert!(h.core.commit_prepared_scripts(old).is_none());
+    assert!(h.core.commit_prepared_scripts(new).is_some());
+}
+
+#[test]
+fn replacement_admission_cannot_reuse_old_sources_or_cached_grants() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let old = tab_plan(&[SITE]);
+    let (view, _) = h.tab(2, &old);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(7)).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(8)).unwrap()), &old)
+        .unwrap();
+    h.core.retire(install());
+    let effects = h.core.take_effects();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { view: id, outgoing: Outgoing::Attach { .. }, .. } if *id == view)));
+    let stale_tab = h.core.register_tab(ItemId::from(99), &old).unwrap();
+    let effects = h.core.take_effects();
+    for effect in effects {
+        if let Effect::Send {
+            view: id,
+            name,
+            bytes,
+            ..
+        } = effect
+        {
+            if id == stale_tab {
+                if let UiMessage::Attach(attach) = decode_ui(name, &bytes).unwrap() {
+                    assert!(attach.worlds.is_empty());
+                    assert!(attach.extension_origins.is_empty());
+                }
+            }
+        }
+    }
+    h.core.commit_prepared_scripts(prepared).unwrap();
+    let mut replacement = admission(install(), EXTENSION);
+    replacement.generation = ExtensionRuntimeGeneration::INITIAL.next().unwrap();
+    h.core.admit(replacement).unwrap();
+    assert!(h
+        .core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(9)).unwrap()))
+        .is_err());
+    let mut current = script_table(9);
+    current.admissions.insert(format!("{:032x}", 10), 2);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(current).unwrap()))
+        .unwrap();
 }
 
 #[test]

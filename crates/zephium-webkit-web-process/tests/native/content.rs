@@ -144,6 +144,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         token: TOKEN.into(),
         generation: 1,
         worlds: vec![WorldRule {
+            install_generation: 1,
             install_id: INSTALL.into(),
             name: WORLD.into(),
             matches: vec![rule(true)],
@@ -173,7 +174,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut table=ScriptTable {bootstraps: Default::default(), catalogs: Default::default(),
+    let mut table=ScriptTable { admissions: [(INSTALL.into(), 1)].into(),bootstraps: Default::default(), catalogs: Default::default(),
         generation:1,entries:vec![
         entry("first",RunAt::DocumentStart,WORLD,"\"use strict\"; let sharedLexical=40; const sharedConstant=2; order.push('start'); globalThis.strictThis=(function(){return this;})()===undefined; globalThis.bootBefore=bootCount===1;"),
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
@@ -380,6 +381,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     catalog_entry.bootstrap =
         "(function(messages){globalThis.catalogText=messages.probe.message;})".into();
     let mut catalog_table = ScriptTable {
+        admissions: [(INSTALL.into(), 1)].into(),
         generation: 3,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -444,6 +446,7 @@ pub(super) fn timing(module: &ModuleDirectory, fixture: &Fixture) {
             token: TOKEN.into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -495,6 +498,7 @@ fn binding(page: &webkit2gtk::WebView, events: &Rc<RefCell<Vec<Event>>>, fixture
             token: TOKEN.into(),
             generation: 2,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -613,12 +617,13 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut attachment=Attach {token:TOKEN.into(),generation:1,worlds:vec![WorldRule {
+    let mut attachment=Attach {token:TOKEN.into(),generation:1,worlds:vec![WorldRule { install_generation: 1,
         install_id:INSTALL.into(),name:WORLD.into(),matches:vec![MatchRule{matcher,all_frames:true,file_access:false}],
         bootstrap:"globalThis.livePost=__zephiumPost;globalThis.bootCount=(globalThis.bootCount||0)+1;".into(),
     }],..Attach::default()};
     assert!(send(&page, &UiMessage::Attach(attachment.clone()), None));
     let table = ScriptTable {
+        admissions: [(INSTALL.into(), 1)].into(),
         bootstraps: Default::default(),
         catalogs: Default::default(),
         generation: 1,
@@ -659,6 +664,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     attachment.worlds[0].matches.push(rule(true));
     let added_world = "zephium-webext-added-world";
     attachment.worlds.push(WorldRule {
+        install_generation: 1,
         install_id: INSTALL.into(),
         name: added_world.into(),
         matches: vec![rule(true)],
@@ -731,6 +737,7 @@ pub(super) fn frame_facts(module: &ModuleDirectory, fixture: &Fixture) {
             token: TOKEN.into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -808,6 +815,7 @@ pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
             token: TOKEN.into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(false)],
@@ -831,6 +839,7 @@ pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
     assert!(publish(
         &page,
         &ScriptTable {
+            admissions: [(INSTALL.into(), 1)].into(),
             generation: 1,
             bootstraps: Default::default(),
             catalogs: Default::default(),
@@ -857,4 +866,72 @@ pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
         );
     }
     println!("WEBEXT native_world_csp eval_unrestricted=true function_unrestricted=true dom_inline_obeys_page_csp=true dom_style_obeys_page_csp=true import_scripts_absent=true");
+}
+
+pub(super) fn admission_epoch(module: &ModuleDirectory, fixture: &Fixture) {
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
+    page.connect_user_message_received(|_, message| {
+        if message.name().as_deref() != Some(EVENT_MESSAGE) {
+            return false;
+        }
+        message.send_reply(&webkit2gtk::UserMessage::new("observed", None));
+        true
+    });
+    load(&page, &format!("{}/frame?epoch-inert", fixture.origin));
+    assert!(send(
+        &page,
+        &UiMessage::Attach(Attach {
+            token: TOKEN.into(),
+            generation: 1,
+            worlds: vec![WorldRule {
+                install_generation: 2,
+                install_id: INSTALL.into(),
+                name: WORLD.into(),
+                matches: vec![rule(false)],
+                bootstrap: String::new()
+            }],
+            ..Attach::default()
+        }),
+        None
+    ));
+    let mut table = ScriptTable {
+        generation: 1,
+        admissions: [(INSTALL.into(), 1)].into(),
+        entries: vec![
+            entry(
+                "old-main",
+                RunAt::DocumentEnd,
+                "",
+                "globalThis.epochRan=true;",
+            ),
+            entry(
+                "old-isolated",
+                RunAt::DocumentEnd,
+                WORLD,
+                "globalThis.epochRan=true;",
+            ),
+        ],
+        ..ScriptTable::default()
+    };
+    assert!(publish(&page, &table, true));
+    load(&page, &format!("{}/frame?epoch-old", fixture.origin));
+    for world in [None, Some(WORLD)] {
+        assert_eq!(
+            evaluate(&page, "return typeof epochRan;", world),
+            "undefined"
+        );
+    }
+    table.generation = 2;
+    table.admissions.insert(INSTALL.into(), 2);
+    assert!(publish(&page, &table, true));
+    load(&page, &format!("{}/frame?epoch-new", fixture.origin));
+    for world in [None, Some(WORLD)] {
+        assert_eq!(
+            evaluate(&page, "return globalThis.epochRan === true;", world),
+            "true"
+        );
+    }
+    println!("WEBEXT native_admission_epoch old_main_refused=true old_isolated_refused=true fresh_sources_execute=true");
 }

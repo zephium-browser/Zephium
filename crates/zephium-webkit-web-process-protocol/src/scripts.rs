@@ -81,6 +81,8 @@ pub struct ScriptBootstrap<S = String> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScriptTable<S = String> {
     pub generation: u64,
+    /// Admitted runtime generation for every source owner.
+    pub admissions: BTreeMap<String, u64>,
     /// JSON catalogs passed as data to content bootstraps, shared per install.
     /// They count against the existing table and per-document byte budgets.
     pub catalogs: BTreeMap<String, Arc<str>>,
@@ -343,6 +345,14 @@ impl<S: AsRef<str>> ScriptTable<S> {
         if self.entries.len() > MAX_SCRIPT_ENTRIES {
             return Err(WireError::Oversized);
         }
+        if self.admissions.len() > MAX_SCRIPT_ENTRIES
+            || self
+                .admissions
+                .iter()
+                .any(|(owner, epoch)| !valid_install_id(owner) || *epoch == 0)
+        {
+            return Err(WireError::Invalid);
+        }
         let mut ids = BTreeSet::new();
         let mut worlds = std::collections::BTreeMap::new();
         if self.catalogs.len() > MAX_SCRIPT_ENTRIES {
@@ -356,6 +366,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
             if !valid_world_name(world)
                 || world.is_empty()
                 || !valid_install_id(&bootstrap.install_id)
+                || !self.admissions.contains_key(&bootstrap.install_id)
                 || bootstrap.source.as_ref().is_empty()
                 || bootstrap.source.as_ref().contains('\0')
             {
@@ -427,7 +438,8 @@ impl<S: AsRef<str>> ScriptTable<S> {
             }
         }
         for entry in &self.entries {
-            if !valid_install_id(&entry.install_id)
+            if !self.admissions.contains_key(&entry.install_id)
+                || !valid_install_id(&entry.install_id)
                 || entry.script_id.is_empty()
                 || entry.script_id.len() > MAX_SCRIPT_ID_BYTES
                 || entry.script_id.chars().any(char::is_control)
@@ -479,6 +491,11 @@ impl<S: AsRef<str>> ScriptTable<S> {
         self.validate()?;
         let mut w = Writer::new(48);
         w.u64(self.generation);
+        w.count(self.admissions.len(), MAX_SCRIPT_ENTRIES)?;
+        for (owner, epoch) in &self.admissions {
+            w.string(owner, MAX_INSTALL_ID_BYTES)?;
+            w.u64(*epoch);
+        }
         w.count(self.bootstraps.len(), MAX_SCRIPT_ENTRIES)?;
         for (world, bootstrap) in &self.bootstraps {
             w.string(world, MAX_WORLD_BYTES)?;
@@ -515,6 +532,15 @@ impl<S: AsRef<str>> ScriptTable<S> {
         let mut r = Reader::new(bytes, MAX_SCRIPT_TABLE_BYTES)?;
         r.header(48)?;
         let generation = r.u64()?;
+        let mut admissions = BTreeMap::new();
+        for _ in 0..r.count(MAX_SCRIPT_ENTRIES)? {
+            if admissions
+                .insert(r.string(MAX_INSTALL_ID_BYTES)?, r.u64()?)
+                .is_some()
+            {
+                return Err(WireError::Invalid);
+            }
+        }
         let n = r.count(MAX_SCRIPT_ENTRIES)?;
         let mut bootstraps = BTreeMap::new();
         for _ in 0..n {
@@ -554,6 +580,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
         r.end()?;
         let table = Self {
             generation,
+            admissions,
             catalogs,
             bootstraps,
             entries,
@@ -753,6 +780,7 @@ mod tests {
 
     fn table() -> ScriptTable {
         ScriptTable {
+            admissions: [("a".repeat(32), 1)].into(),
             bootstraps: Default::default(),
             catalogs: Default::default(),
             generation: 9,
@@ -902,6 +930,26 @@ mod tests {
         assert_eq!(
             ScriptTable::decode_borrowed(&invalid),
             Err(WireError::Invalid)
+        );
+    }
+
+    #[test]
+    fn table_requires_bounded_nonzero_admission_for_every_owner() {
+        let original = table();
+        for admissions in [
+            BTreeMap::new(),
+            [("a".repeat(32), 0)].into(),
+            [("wrong".into(), 1)].into(),
+        ] {
+            let mut candidate = original.clone();
+            candidate.admissions = admissions;
+            assert!(candidate.encode().is_err());
+        }
+        assert_eq!(
+            ScriptTable::decode(&original.encode().unwrap())
+                .unwrap()
+                .admissions,
+            original.admissions
         );
     }
 
@@ -1078,7 +1126,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
     }
 
     #[test]

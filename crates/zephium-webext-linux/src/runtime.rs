@@ -1733,6 +1733,7 @@ impl Inner {
         candidates.retain(|candidate| candidate.install != spec.install);
         let grants = spec.permissions.snapshot();
         candidates.push(host::glue::ContentInstall {
+            install_generation: spec.generation.get(),
             install: spec.install,
             extension_id: spec.extension_id.as_str().to_owned(),
             root: spec.directory.clone(),
@@ -1816,6 +1817,7 @@ impl Inner {
             },
         );
         let admitted = Admitted {
+            install_generation: spec.generation.get(),
             dynamic_resources: self.scheme.dynamic_resources(spec.install),
             install: spec.install,
             extension_id: spec.extension_id,
@@ -1869,7 +1871,38 @@ impl Inner {
             .with_runtime(|host, out| host.forget(install, erase, out));
         self.bridge.retire(install);
         self.scheme.remove_install(install);
-        self.records.borrow_mut().remove(&install);
+        let removed = self.records.borrow_mut().remove(&install);
+        let scripts: Vec<_> = self
+            .records
+            .borrow()
+            .keys()
+            .copied()
+            .filter_map(|id| self.page_script(id, ContextKind::ExtensionTab))
+            .collect();
+        {
+            let mut content = self.content.borrow_mut();
+            content.plan.worlds.retain(|grant| grant.install != install);
+            content.plan.external.retain(|rule| {
+                rule.install_id
+                    != install
+                        .bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+            });
+            if let Some(record) = removed {
+                content
+                    .plan
+                    .extension_pages
+                    .retain(|page| page.extension != record.extension_id);
+            }
+            content.scripts = scripts;
+            content.styles.retain(|style| style.install != install);
+        }
+        let views = self.tabs.borrow().keys().copied().collect::<Vec<_>>();
+        for view in views {
+            self.apply_tab_content(view);
+        }
         self.run();
         ExtensionStop {
             runtime: Rc::downgrade(self),

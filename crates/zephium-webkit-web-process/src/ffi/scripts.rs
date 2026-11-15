@@ -148,6 +148,12 @@ fn entry_admitted(document: &Document, entry: &protocol::ScriptEntry<&str>) -> b
         let Some(info) = runtime.state.frame(document.page, document.frame) else {
             return false;
         };
+        let epoch = runtime
+            .pages
+            .get(&document.page)
+            .and_then(|page| page.frames.get(&document.frame))
+            .and_then(|frame| frame.scripts.as_ref())
+            .and_then(|table| table.table().admissions.get(&entry.install_id));
         info.document_seq == document.sequence
             && entry.rule.matches(info)
             && runtime
@@ -156,6 +162,7 @@ fn entry_admitted(document: &Document, entry: &protocol::ScriptEntry<&str>) -> b
                 .is_some_and(|attach| {
                     attach.worlds.iter().any(|world| {
                         world.install_id == entry.install_id
+                            && epoch == Some(&world.install_generation)
                             && world.name == entry.admission_world
                             && world.matches.iter().any(|rule| rule.matches(info))
                     })
@@ -1080,11 +1087,13 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
                 .scripts
                 .as_ref()
                 .filter(|table| {
-                    table
-                        .table()
-                        .bootstraps
-                        .get(&request.world)
-                        .is_some_and(|bootstrap| bootstrap.install_id == request.install_id)
+                    table.table().admissions.get(&request.install_id)
+                        == Some(&grant.install_generation)
+                        && table
+                            .table()
+                            .bootstraps
+                            .get(&request.world)
+                            .is_some_and(|bootstrap| bootstrap.install_id == request.install_id)
                 })
                 .map(|table| (table.clone(), usize::MAX));
             current.or_else(|| {
@@ -1095,6 +1104,10 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
                     .get(&frame)?
                     .scripts
                     .as_ref()
+                    .filter(|table| {
+                        table.table().admissions.get(&request.install_id)
+                            == Some(&grant.install_generation)
+                    })
                     .and_then(|table| {
                         table
                             .table()

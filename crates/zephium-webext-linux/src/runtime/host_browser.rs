@@ -25,6 +25,7 @@ use crate::runtime::browser::{BrowserSettlement, Shared};
 
 /// What the GTK side needs to publish one install's content scripts.
 pub(crate) struct ContentInstall {
+    pub install_generation: u64,
     pub install: ExtensionInstallId,
     pub extension_id: String,
     pub root: PathBuf,
@@ -428,6 +429,7 @@ impl RuntimeHost {
             .filter_map(|(install, state)| {
                 let permissions = self.permissions.get(install)?;
                 Some(ContentInstall {
+                    install_generation: state.install_generation,
                     install: *install,
                     extension_id: state.extension_id.as_str().to_owned(),
                     root: state.root.clone(),

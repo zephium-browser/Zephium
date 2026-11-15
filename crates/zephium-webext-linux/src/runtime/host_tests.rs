@@ -195,6 +195,7 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
     let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
     let id = ExtensionId::parse(ID).unwrap();
     Admitted {
+        install_generation: 1,
         dynamic_resources: None,
         install,
         extension_id: id.clone(),

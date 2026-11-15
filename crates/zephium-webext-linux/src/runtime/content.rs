@@ -172,6 +172,7 @@ fn webkit_patterns(patterns: &[String]) -> Option<Vec<String>> {
 
 pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
     let mut entries = Vec::new();
+    let mut admissions = std::collections::BTreeMap::new();
     let mut catalogs = std::collections::BTreeMap::new();
     let mut bootstraps = std::collections::BTreeMap::new();
     let mut grants = Vec::new();
@@ -312,8 +313,10 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                 catalogs.insert(hex(install.install), catalog);
             }
         }
+        admissions.insert(hex(install.install), install.install_generation);
         entries.extend(own);
         grants.push(WorldGrant {
+            install_generation: install.install_generation,
             install: install.install,
             world: InjectedWorld::Isolated,
             matches: grant_rules,
@@ -322,6 +325,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
     }
     Content {
         table: ScriptTable {
+            admissions,
             generation,
             catalogs,
             bootstraps,

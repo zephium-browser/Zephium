@@ -47,7 +47,7 @@ pub use self::runtime::{
     BridgeViewId, CloseReason, DeliverError, DispatchRuntime, FrameLifecycle, Outbox, PortTraffic,
     Ports, Runtime, ViewRef,
 };
-pub use self::scripts::{ScriptTableError, SealedScripts};
+pub use self::scripts::{PreparedScriptsId, ScriptTableError, SealedScripts};
 
 /// Identifies a module event awaiting its reply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

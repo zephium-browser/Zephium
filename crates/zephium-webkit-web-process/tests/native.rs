@@ -180,6 +180,7 @@ fn native_web_process_module() {
     content::view_grants(&module, &fixture);
     content::frame_facts(&module, &fixture);
     content::world_csp(&module, &fixture);
+    content::admission_epoch(&module, &fixture);
     page.stop_loading();
     println!("WEBEXT native_module inert=true hostile_posts=true frame_roundtrip=true stale_drop=true request_policy=true");
 }
@@ -345,6 +346,7 @@ fn attach(fixture: &Fixture) -> Attach {
             ..Limits::default()
         },
         worlds: vec![WorldRule {
+            install_generation: 1,
             name: WORLD.into(),
             install_id: "00000000000000000000000000000001".into(),
             matches: vec![

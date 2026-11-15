@@ -66,6 +66,8 @@ fn hex(bytes: &[u8]) -> String {
 pub struct WorldGrant {
     /// The install whose scripts run in the world.
     pub install: ExtensionInstallId,
+    /// The exact admitted runtime generation owning these sources.
+    pub install_generation: u64,
     /// Which of its worlds.
     pub world: InjectedWorld,
     /// Chrome match declarations compiled by the shared runtime matcher.
@@ -130,6 +132,7 @@ pub enum PlanError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResolvedWorld {
     pub install: ExtensionInstallId,
+    pub install_generation: u64,
     pub world: InjectedWorld,
     pub matches: Vec<MatchRule>,
     pub bootstrap: Arc<str>,
@@ -176,6 +179,9 @@ impl ResolvedPlan {
         bootstrap(&plan.extension_bootstrap)?;
         let mut worlds = BTreeMap::new();
         for grant in &plan.worlds {
+            if grant.install_generation == 0 {
+                return Err(PlanError::EmptyWorld);
+            }
             bootstrap(&grant.bootstrap)?;
             if grant.matches.is_empty() {
                 return Err(PlanError::EmptyWorld);
@@ -185,6 +191,7 @@ impl ResolvedPlan {
             }
             let resolved = ResolvedWorld {
                 install: grant.install,
+                install_generation: grant.install_generation,
                 world: grant.world.clone(),
                 matches: grant.matches.clone(),
                 bootstrap: grant.bootstrap.clone(),
@@ -257,6 +264,7 @@ impl ResolvedPlan {
             && old.worlds.iter().all(|(name, prior)| {
                 self.worlds.get(name).is_some_and(|next| {
                     next.install == prior.install
+                        && next.install_generation == prior.install_generation
                         && next.world == prior.world
                         && next.bootstrap == prior.bootstrap
                         && prior.matches.iter().all(|rule| next.matches.contains(rule))
@@ -287,6 +295,7 @@ impl ResolvedPlan {
                 .iter()
                 .map(|(name, world)| WorldRule {
                     name: name.clone(),
+                    install_generation: world.install_generation,
                     install_id: hex(&world.install.bytes()),
                     matches: world.matches.clone(),
                     bootstrap: world.bootstrap.to_string(),
@@ -340,6 +349,7 @@ mod tests {
 
     fn grant(origins: &[&str]) -> WorldGrant {
         WorldGrant {
+            install_generation: 1,
             install: install(10),
             world: InjectedWorld::Isolated,
             matches: origins
@@ -401,6 +411,7 @@ mod tests {
         };
         let plan = AttachPlan {
             worlds: vec![WorldGrant {
+                install_generation: 1,
                 matches: vec![rule],
                 ..grant(&["https://example.com"])
             }],
@@ -457,6 +468,7 @@ mod tests {
         let many = AttachPlan {
             worlds: (0..=MAX_WORLDS as u128)
                 .map(|n| WorldGrant {
+                    install_generation: 1,
                     install: install(n),
                     ..grant(&["https://a.test"])
                 })
@@ -470,6 +482,7 @@ mod tests {
         let large = AttachPlan {
             worlds: (0..5u128)
                 .map(|n| WorldGrant {
+                    install_generation: 1,
                     install: install(n),
                     bootstrap: "x".repeat(MAX_BOOTSTRAP_BYTES).into(),
                     ..grant(&["https://a.test"])

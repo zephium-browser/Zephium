@@ -638,6 +638,7 @@ pub fn attachment_widens(old: &Attach, new: &Attach) -> bool {
             new.worlds.iter().any(|next| {
                 world.name == next.name
                     && world.install_id == next.install_id
+                    && world.install_generation == next.install_generation
                     && world.bootstrap == next.bootstrap
                     && world.matches.iter().all(|rule| next.matches.contains(rule))
             })
@@ -658,7 +659,8 @@ fn validate_attach(attach: &Attach) -> bool {
     }
     let mut names = BTreeSet::new();
     for world in &attach.worlds {
-        if !crate::protocol::valid_install_id(&world.install_id)
+        if world.install_generation == 0
+            || !crate::protocol::valid_install_id(&world.install_id)
             || world.name.is_empty()
             || world.name.len() > MAX_WORLD_BYTES
             || !(world.name.starts_with("zephium-principal-extension-")
@@ -703,6 +705,7 @@ mod tests {
             token: "process-token".into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 name: "zephium-webext-isolated".into(),
                 install_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                 matches: vec![crate::protocol::MatchRule {

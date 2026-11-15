@@ -180,6 +180,7 @@ fn bridge(
 fn tab_plan(fixture: &Fixture) -> AttachPlan {
     AttachPlan {
         worlds: vec![WorldGrant {
+            install_generation: 1,
             install: install(),
             world: InjectedWorld::Isolated,
             matches: [fixture.origin.as_str(), fixture.cross_origin.as_str()]
@@ -269,7 +270,7 @@ fn native_bridge() {
         .expect("attach");
 
     pump_until(|| bridge.transport(view) == Some(Transport::Module));
-    let table = ScriptTable { bootstraps: Default::default(), catalogs: Default::default(),
+    let table = ScriptTable { admissions: [(format!("{:032x}", 0x5a), 1)].into(), bootstraps: Default::default(), catalogs: Default::default(),
         generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
         admission_world: world_name(install(), &InjectedWorld::Isolated),
