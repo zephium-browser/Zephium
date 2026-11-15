@@ -230,10 +230,9 @@ mod native {
 
     /// How often a critical OS state is read again to notice it easing.
     const CRITICAL_RECHECK_MS: u32 = 10_000;
-    /// Process-family sample while the self budget is still Normal.
-    const SELF_SAMPLE_NORMAL_MS: u32 = 30_000;
-    /// Faster sample once soft/hard budget (or OS pressure) is elevated.
-    const SELF_SAMPLE_ELEVATED_MS: u32 = 5_000;
+    /// Process-family sample interval. A long Normal interval would miss a
+    /// burst that crosses soft/hard before the first elevated wait.
+    const SELF_SAMPLE_MS: u32 = 5_000;
 
     fn signaled(event: &Event) -> Option<bool> {
         let mut state = windows::core::BOOL::default();
@@ -352,15 +351,10 @@ mod native {
                         // Self-budget sampling always needs a finite timeout:
                         // Normal OS pressure previously waited forever.
                         let (watch_low, watch_high, os_recheck) = super::windows_watch(os_tier);
-                        let self_ms = if effective == MemoryPressure::Normal {
-                            SELF_SAMPLE_NORMAL_MS
-                        } else {
-                            SELF_SAMPLE_ELEVATED_MS
-                        };
                         let timeout = if os_recheck {
-                            CRITICAL_RECHECK_MS.min(self_ms)
+                            CRITICAL_RECHECK_MS.min(SELF_SAMPLE_MS)
                         } else {
-                            self_ms
+                            SELF_SAMPLE_MS
                         };
                         let mut handles = vec![stopped.handle()];
                         if watch_low {
