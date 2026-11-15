@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 use std::rc::{Rc, Weak as RcWeak};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use crate::dnr::{DnrFrameAllow, DnrPolicySnapshot, MAX_DNR_SNAPSHOT_BYTES};
 use crate::policy::{Decision, PolicySnapshot, RequestInfo, ResourceType};
@@ -47,7 +47,7 @@ struct Runtime {
     injections: BTreeMap<u64, scripts::PendingInjection>,
     next_injection: u64,
     idle_injections: usize,
-    script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
+    script_tables: BTreeMap<(u64, u64), RcWeak<PublishedScripts>>,
     policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
 
@@ -66,7 +66,7 @@ struct NativePage {
     event_bytes: usize,
     batch_inflight: bool,
     form_connected: bool,
-    scripts: Option<Arc<protocol::ScriptTable>>,
+    scripts: Option<Rc<PublishedScripts>>,
 }
 
 struct NativeFrame {
@@ -76,7 +76,7 @@ struct NativeFrame {
     weak_data: *mut (u64, u64),
     installed: BTreeSet<String>,
     receivers: BTreeMap<String, *mut Object>,
-    scripts: Option<Arc<protocol::ScriptTable>>,
+    scripts: Option<Rc<PublishedScripts>>,
     phases: [bool; 3],
     bootstrapped: BTreeMap<String, bool>,
 }
@@ -829,23 +829,17 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                     && runtime.pages.get(&id).is_some_and(|page| {
                         page.scripts
                             .as_ref()
-                            .is_none_or(|table| update.table_generation > table.generation)
+                            .is_none_or(|table| update.table_generation > table.table().generation)
                     })
             })
             .unwrap_or(false)
             {
                 return false;
             }
-            let Some(table) = map_sealed(
-                message,
-                update.fd_index,
-                update.length as usize,
-                protocol::MAX_SCRIPT_TABLE_BYTES,
-                protocol::ScriptTable::decode,
-            ) else {
+            let Some(table) = map_scripts(message, update.fd_index, update.length as usize) else {
                 return false;
             };
-            if table.generation != update.table_generation {
+            if table.table().generation != update.table_generation {
                 return false;
             }
             with_runtime(|runtime| {
@@ -855,38 +849,10 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 {
                     return false;
                 }
-                runtime
-                    .script_tables
-                    .retain(|_, (table, _)| table.strong_count() != 0);
-                let shared =
-                    if let Some((existing, _)) = runtime.script_tables.get(&table.generation) {
-                        let Some(existing) = existing.upgrade() else {
-                            return false;
-                        };
-                        if *existing != table {
-                            return false;
-                        }
-                        existing
-                    } else {
-                        let bytes = runtime
-                            .script_tables
-                            .values()
-                            .map(|(_, bytes)| bytes)
-                            .sum::<usize>();
-                        if bytes.saturating_add(update.length as usize) > MAX_PROCESS_SCRIPT_BYTES {
-                            return false;
-                        }
-                        let table = Arc::new(table);
-                        runtime.script_tables.insert(
-                            table.generation,
-                            (Arc::downgrade(&table), update.length as usize),
-                        );
-                        table
-                    };
                 let Some(page) = runtime.pages.get_mut(&id) else {
                     return false;
                 };
-                page.scripts = Some(shared);
+                page.scripts = Some(table);
                 true
             })
             .unwrap_or(false)
@@ -1068,7 +1034,10 @@ unsafe extern "C" fn window_cleared(
                     .map(|(_, allow)| allow)
                     .unwrap_or_default();
             }
-            let table_generation = native.scripts.as_ref().map_or(0, |table| table.generation);
+            let table_generation = native
+                .scripts
+                .as_ref()
+                .map_or(0, |table| table.table().generation);
             runtime
                 .state
                 .set_frame_script_table(page_id, frame_id, table_generation);
@@ -1561,15 +1530,67 @@ fn map_policy(message: *mut Object, index: u32, length: usize) -> Option<Rc<Publ
     Some(shared)
 }
 
-fn map_sealed<T, E>(
-    message: *mut Object,
-    index: u32,
-    length: usize,
-    maximum: usize,
-    decode: impl FnOnce(&[u8]) -> Result<T, E>,
-) -> Option<T> {
-    let mapping = map_region(message, index, length, maximum)?;
-    decode(unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) }).ok()
+struct PublishedScripts {
+    // Borrowed source spans never outlive this sealed read-only mapping.
+    data: protocol::ScriptTable<&'static str>,
+    mapping: MappedBytes,
+}
+
+impl PublishedScripts {
+    fn table(&self) -> &protocol::ScriptTable<&str> {
+        &self.data
+    }
+}
+
+fn map_scripts(message: *mut Object, index: u32, length: usize) -> Option<Rc<PublishedScripts>> {
+    let mapping = map_region(message, index, length, protocol::MAX_SCRIPT_TABLE_BYTES)?;
+    if let Some(Some(shared)) = with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .get(&mapping.identity)
+            .and_then(RcWeak::upgrade)
+    }) {
+        return Some(shared);
+    }
+    let allowed = with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .retain(|_, table| table.strong_count() != 0);
+        let total: usize = runtime
+            .script_tables
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .map(|table| table.mapping.length)
+            .sum();
+        total.saturating_add(length) <= MAX_PROCESS_SCRIPT_BYTES
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return None;
+    }
+    // The private descriptors borrow only immutable bytes owned by PublishedScripts.
+    let bytes: &'static [u8] =
+        unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) };
+    let data = protocol::ScriptTable::decode_borrowed(bytes).ok()?;
+    if with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .any(|table| table.table().generation == data.generation)
+    })
+    .unwrap_or(true)
+    {
+        return None;
+    }
+    let identity = mapping.identity;
+    let table = Rc::new(PublishedScripts { data, mapping });
+    with_runtime(|runtime| {
+        runtime
+            .script_tables
+            .insert(identity, Rc::downgrade(&table));
+    });
+    Some(table)
 }
 
 fn map_region(

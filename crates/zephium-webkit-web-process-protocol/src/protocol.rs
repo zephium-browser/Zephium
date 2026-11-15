@@ -357,11 +357,14 @@ impl<'a> Reader<'a> {
         self.take(n)
     }
     pub(crate) fn string(&mut self, max: usize) -> Result<String, WireError> {
+        self.borrowed_string(max).map(str::to_owned)
+    }
+    pub(crate) fn borrowed_string(&mut self, max: usize) -> Result<&'a str, WireError> {
         let value = std::str::from_utf8(self.blob(max)?).map_err(|_| WireError::Invalid)?;
         if value.contains('\0') {
             return Err(WireError::Invalid);
         }
-        Ok(value.to_owned())
+        Ok(value)
     }
     pub(crate) fn end(self) -> Result<(), WireError> {
         if self.at == self.bytes.len() {

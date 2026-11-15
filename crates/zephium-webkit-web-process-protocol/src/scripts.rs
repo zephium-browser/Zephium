@@ -51,31 +51,31 @@ impl RunAt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScriptFile {
-    pub source: String,
+pub struct ScriptFile<S = String> {
+    pub source: S,
     pub url: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScriptEntry {
+pub struct ScriptEntry<S = String> {
     pub install_id: String,
     pub script_id: String,
     /// An empty name selects MAIN, which receives no binding bootstrap.
     pub world: String,
     pub run_at: RunAt,
     pub rule: MatchRule,
-    pub files: Vec<ScriptFile>,
-    pub css: Vec<ScriptFile>,
+    pub files: Vec<ScriptFile<S>>,
+    pub css: Vec<ScriptFile<S>>,
     pub bootstrap: String,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ScriptTable {
+pub struct ScriptTable<S = String> {
     pub generation: u64,
     /// JSON catalogs passed as data to content bootstraps, shared per install.
     /// They count against the existing table and per-document byte budgets.
     pub catalogs: BTreeMap<String, Arc<str>>,
-    pub entries: Vec<ScriptEntry>,
+    pub entries: Vec<ScriptEntry<S>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,7 +302,7 @@ impl InjectRequest {
     }
 }
 
-impl ScriptTable {
+impl<S: AsRef<str>> ScriptTable<S> {
     pub fn validate(&self) -> Result<(), WireError> {
         if self.generation == 0 {
             return Err(WireError::Invalid);
@@ -393,14 +393,14 @@ impl ScriptTable {
             }
             bytes = bytes.saturating_add(entry.bootstrap.len());
             for file in entry.files.iter().chain(&entry.css) {
-                if !valid_source_url(&file.url) || file.source.contains('\0') {
+                if !valid_source_url(&file.url) || file.source.as_ref().contains('\0') {
                     return Err(WireError::Invalid);
                 }
-                if file.source.len() > MAX_SCRIPT_SOURCE_BYTES {
+                if file.source.as_ref().len() > MAX_SCRIPT_SOURCE_BYTES {
                     return Err(WireError::Oversized);
                 }
                 bytes = bytes
-                    .saturating_add(file.source.len())
+                    .saturating_add(file.source.as_ref().len())
                     .saturating_add(file.url.len());
             }
             if bytes > MAX_SCRIPT_TABLE_BYTES {
@@ -436,7 +436,10 @@ impl ScriptTable {
         Ok(w.0)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+    fn decode_sources<'a>(
+        bytes: &'a [u8],
+        source: impl Fn(&'a str) -> S,
+    ) -> Result<Self, WireError> {
         let mut r = Reader::new(bytes, MAX_SCRIPT_TABLE_BYTES)?;
         r.header(48)?;
         let generation = r.u64()?;
@@ -458,8 +461,8 @@ impl ScriptTable {
                 world: r.string(MAX_WORLD_BYTES)?,
                 run_at: RunAt::decode(r.u8()?)?,
                 rule: r.rule()?,
-                files: r.files()?,
-                css: r.files()?,
+                files: r.files(&source)?,
+                css: r.files(&source)?,
                 bootstrap: r.string(MAX_BOOTSTRAP_BYTES)?,
             });
         }
@@ -474,6 +477,19 @@ impl ScriptTable {
     }
 }
 
+impl ScriptTable {
+    pub fn decode(bytes: &[u8]) -> Result<Self, WireError> {
+        Self::decode_sources(bytes, str::to_owned)
+    }
+}
+
+impl<'a> ScriptTable<&'a str> {
+    /// Sources borrow the validated snapshot; callers must retain its backing.
+    pub fn decode_borrowed(bytes: &'a [u8]) -> Result<Self, WireError> {
+        Self::decode_sources(bytes, |source| source)
+    }
+}
+
 pub fn encode_script_table(table: &ScriptTable) -> Result<Vec<u8>, WireError> {
     table.encode()
 }
@@ -482,10 +498,10 @@ pub fn decode_script_table(bytes: &[u8]) -> Result<ScriptTable, WireError> {
 }
 
 impl Writer {
-    fn files(&mut self, files: &[ScriptFile]) -> Result<(), WireError> {
+    fn files<S: AsRef<str>>(&mut self, files: &[ScriptFile<S>]) -> Result<(), WireError> {
         self.count(files.len(), MAX_SCRIPT_FILES)?;
         for file in files {
-            self.string(&file.source, MAX_SCRIPT_SOURCE_BYTES)?;
+            self.string(file.source.as_ref(), MAX_SCRIPT_SOURCE_BYTES)?;
             self.string(&file.url, MAX_URI_BYTES)?;
         }
         Ok(())
@@ -542,13 +558,16 @@ impl Writer {
     }
 }
 
-impl Reader<'_> {
-    fn files(&mut self) -> Result<Vec<ScriptFile>, WireError> {
+impl<'a> Reader<'a> {
+    fn files<S>(
+        &mut self,
+        source: &impl Fn(&'a str) -> S,
+    ) -> Result<Vec<ScriptFile<S>>, WireError> {
         let n = self.count(MAX_SCRIPT_FILES)?;
         let mut files = Vec::new();
         for _ in 0..n {
             files.push(ScriptFile {
-                source: self.string(MAX_SCRIPT_SOURCE_BYTES)?,
+                source: source(self.borrowed_string(MAX_SCRIPT_SOURCE_BYTES)?),
                 url: self.string(MAX_URI_BYTES)?,
             });
         }
@@ -743,6 +762,35 @@ mod tests {
         assert_eq!(
             decoded.entries[0].files[0].source,
             "\"use strict\"; let shared = 1;"
+        );
+    }
+
+    #[test]
+    fn borrowed_sources_point_into_the_snapshot_and_keep_strict_validation() {
+        let mut input = table();
+        input.entries[0].files[0].source = "/* shared source */".repeat(4096);
+        let bytes = input.encode().unwrap();
+        let decoded = ScriptTable::decode_borrowed(&bytes).unwrap();
+        let source = decoded.entries[0].files[0].source;
+        assert_eq!(source, input.entries[0].files[0].source);
+        let start = bytes.as_ptr() as usize;
+        let pointer = source.as_ptr() as usize;
+        assert!(pointer >= start && pointer + source.len() <= start + bytes.len());
+        assert_eq!(decoded.encode().unwrap(), bytes);
+        for at in [0, 4, bytes.len() - 1] {
+            assert!(ScriptTable::decode_borrowed(&bytes[..at]).is_err());
+        }
+        let offset = pointer - start;
+        let mut invalid = bytes.clone();
+        invalid[offset] = 0;
+        assert_eq!(
+            ScriptTable::decode_borrowed(&invalid),
+            Err(WireError::Invalid)
+        );
+        invalid[offset] = 0xff;
+        assert_eq!(
+            ScriptTable::decode_borrowed(&invalid),
+            Err(WireError::Invalid)
         );
     }
 

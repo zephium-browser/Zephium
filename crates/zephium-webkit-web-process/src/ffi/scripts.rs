@@ -74,6 +74,7 @@ fn content_catalog(page: u64, frame: u64, install: &str) -> Option<Arc<str>> {
             .get(&frame)?
             .scripts
             .as_ref()?
+            .table()
             .catalogs
             .get(install)
             .cloned()
@@ -130,7 +131,7 @@ fn live(document: &Document) -> bool {
     .unwrap_or(false)
 }
 
-fn entry_admitted(document: &Document, entry: &protocol::ScriptEntry) -> bool {
+fn entry_admitted(document: &Document, entry: &protocol::ScriptEntry<&str>) -> bool {
     with_runtime(|runtime| {
         let Some(info) = runtime.state.frame(document.page, document.frame) else {
             return false;
@@ -382,9 +383,11 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
         let table = native.scripts.clone()?;
         let attach = runtime.state.attachment(page)?;
         let entries = table
+            .table()
             .entries
             .iter()
-            .filter(|entry| {
+            .enumerate()
+            .filter(|(_, entry)| {
                 entry.run_at == phase
                     && entry.rule.matches(&info)
                     && attach.worlds.iter().any(|world| {
@@ -393,24 +396,26 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                             && world.matches.iter().any(|rule| rule.matches(&info))
                     })
             })
-            .cloned()
+            .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        Some((table.generation, entries))
+        Some((table, entries))
     })
     .flatten();
-    let Some((table_generation, entries)) = work else {
+    let Some((table, entries)) = work else {
         return;
     };
     if !flush_frame_events(page) {
         return;
     }
-    'entries: for entry in entries {
+    let table_generation = table.table().generation;
+    'entries: for index in entries {
+        let entry = &table.table().entries[index];
         if with_runtime(|runtime| runtime.state.script_budget_exhausted(page, frame, sequence))
             .unwrap_or(true)
         {
             break;
         }
-        if !entry_admitted(&document, &entry) {
+        if !entry_admitted(&document, entry) {
             if !live(&document) {
                 break;
             }
@@ -500,7 +505,7 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             }
         }
         for (file_index, file) in entry.files.iter().enumerate() {
-            if !entry_admitted(&document, &entry) {
+            if !entry_admitted(&document, entry) {
                 break;
             }
             let charged = with_runtime(|runtime| {
@@ -512,7 +517,7 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             .unwrap_or(false);
             #[cfg(feature = "native-tests")]
             super::diagnostics::scope(page, frame, sequence, &entry.world, "manifest");
-            let success = charged && evaluate(&context, &file.source, &file.url).1;
+            let success = charged && evaluate(&context, file.source, &file.url).1;
             with_runtime(|runtime| {
                 runtime.state.queue_frame_event(
                     page,
@@ -560,6 +565,7 @@ pub(super) fn install_document_start(page: u64, frame: u64, sequence: u64, gener
     .flatten();
     if !entries.is_some_and(|table| {
         table
+            .table()
             .entries
             .iter()
             .any(|entry| entry.run_at == RunAt::DocumentStart && entry_admitted(&document, entry))
@@ -932,15 +938,17 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
                 .as_ref()
                 .and_then(|table| {
                     table
+                        .table()
                         .entries
                         .iter()
-                        .find(|entry| {
+                        .enumerate()
+                        .find(|(_, entry)| {
                             entry.install_id == request.install_id
                                 && entry.world == request.world
                                 && entry.rule.matches(info)
                                 && !entry.bootstrap.is_empty()
                         })
-                        .map(|entry| (table.generation, entry.clone()))
+                        .map(|(index, _)| (table.clone(), index))
                 })
         } else {
             None
@@ -964,9 +972,11 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
     ) {
         return false;
     }
-    let Some((table_generation, entry)) = fallback else {
+    let Some((table, index)) = fallback else {
         return true;
     };
+    let table_generation = table.table().generation;
+    let entry = &table.table().entries[index];
     if let Some(outcome) = with_runtime(|runtime| {
         runtime
             .pages
@@ -1015,9 +1025,9 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
         runtime.state.queue_frame_event(
             page,
             FrameEvent::Evaluated(Evaluation {
-                install_id: entry.install_id,
-                script_id: entry.script_id,
-                world: entry.world,
+                install_id: entry.install_id.clone(),
+                script_id: entry.script_id.clone(),
+                world: entry.world.clone(),
                 frame_id: frame,
                 document_seq: sequence,
                 table_generation,
