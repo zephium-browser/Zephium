@@ -521,7 +521,7 @@ pub(crate) fn install(
             webext: Default::default(),
             #[cfg(target_os = "macos")]
             scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),

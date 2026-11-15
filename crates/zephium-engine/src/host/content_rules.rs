@@ -1105,7 +1105,7 @@ impl EngineHost {
             });
             self.set_profile_navigation(profile, navigation);
             self.refresh_profile_document_styles(profile);
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             if self.wait_for_scriptlets(profile, generation) {
                 return;
             }
@@ -1345,7 +1345,7 @@ impl EngineHost {
         });
         self.set_profile_navigation(profile, navigation);
         self.refresh_profile_document_styles(profile);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if self.wait_for_scriptlets(profile, generation) {
             return;
         }
@@ -1478,7 +1478,7 @@ impl EngineHost {
         for waiters in self.declarative_content_policy_compilations.values_mut() {
             waiters.retain(|(waiting_profile, _)| *waiting_profile != profile);
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.refresh_profile_scriptlets(profile);
             self.scriptlets.forget(profile);
