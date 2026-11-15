@@ -247,7 +247,7 @@ impl EngineHost {
             if !spare.view.event_permit.allows_navigation(url) {
                 return;
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 // The spare took the program current when it was built.
                 self.ensure_view_scriptlets(
@@ -1657,7 +1657,7 @@ impl EngineHost {
         }
         #[cfg(all(
             feature = "blocker-bench",
-            any(target_os = "macos", target_os = "windows")
+            any(target_os = "macos", target_os = "windows", target_os = "linux")
         ))]
         for source in super::blocker_bench::preloads() {
             builder = builder.with_initialization_script_for_main_only(source, true);
@@ -2974,9 +2974,9 @@ impl EngineHost {
         // why an unstaged Linux warm spare remains disabled.
         #[cfg(not(all(unix, not(target_os = "macos"))))]
         let _ = view.set_visible(false);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let scriptlet = super::scriptlets::ViewScriptlet::default();
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         self.ensure_view_scriptlets(partition.profile(), &view, &scriptlet);
         if !event_permit.allows_navigation(url) {
             // WebView construction can pump WebView2 messages. Do not perform
@@ -3059,7 +3059,7 @@ impl EngineHost {
             discard_settle_timer: std::cell::RefCell::new(None),
             #[cfg(target_os = "windows")]
             request_witness,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             scriptlet,
             #[cfg(target_os = "windows")]
             extension_window: Cell::new(None),

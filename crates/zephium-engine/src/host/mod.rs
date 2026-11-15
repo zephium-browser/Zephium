@@ -6,7 +6,7 @@ mod agent_cookie_source;
 mod automatic_pip;
 #[cfg(all(
     feature = "blocker-bench",
-    any(target_os = "macos", target_os = "windows")
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
 ))]
 mod blocker_bench;
 mod blocker_statistics;
@@ -64,12 +64,15 @@ mod profiles;
 mod resources;
 #[cfg(target_os = "linux")]
 mod script_dialogs;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod scriptlet_source;
 #[cfg(target_os = "macos")]
 mod scriptlets;
 #[cfg(target_os = "windows")]
 #[path = "scriptlets_windows.rs"]
+mod scriptlets;
+#[cfg(target_os = "linux")]
+#[path = "scriptlets_linux.rs"]
 mod scriptlets;
 mod scripts;
 mod site_permissions;
@@ -233,7 +236,7 @@ struct ObservedView {
     discard_settle_timer: std::cell::RefCell<Option<crate::platform::imp::ContentPolicyTimeout>>,
     #[cfg(target_os = "windows")]
     request_witness: Option<crate::platform::imp::RequestWitness>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     scriptlet: scriptlets::ViewScriptlet,
     // The DevTools window id of this exact controller, which never changes:
     // asked once instead of on every extension toolbar refresh.
@@ -734,7 +737,7 @@ pub(crate) struct EngineHost {
     work_site_loads: HashMap<(ProfileId, String), u64>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,

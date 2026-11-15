@@ -2227,7 +2227,7 @@ impl WebviewEngine {
     /// result, or `None` when the page gave none within the engine's limits.
     #[cfg(all(
         feature = "blocker-bench",
-        any(target_os = "macos", target_os = "windows")
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
     ))]
     #[doc(hidden)]
     pub fn blocker_bench_evaluate(
@@ -2258,7 +2258,7 @@ impl WebviewEngine {
     /// took it.
     #[cfg(all(
         feature = "blocker-bench",
-        any(target_os = "macos", target_os = "windows")
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
     ))]
     #[doc(hidden)]
     pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {

@@ -1309,6 +1309,28 @@ impl zephium_core::ports::store::Store for DownloadFixtureStore {
 
 #[test]
 #[ignore = "requires isolated GTK/WebKitGTK host"]
+fn native_idle_download_manager_acknowledges_shutdown() {
+    let host = NativeHarness::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    until(|| {
+        let ready = Rc::new(std::cell::Cell::new(false));
+        let result = ready.clone();
+        assert!(super::super::try_with(move |host| {
+            result.set(host.downloads.is_some());
+        }));
+        ready.get()
+    });
+    // Drain the recovery reply before requesting shutdown with no future wake.
+    while gtk::events_pending() {
+        gtk::main_iteration_do(false);
+    }
+    drop(host);
+}
+
+#[test]
+#[ignore = "requires isolated GTK/WebKitGTK host"]
 fn native_download_uses_shared_confirmation_and_secure_publication() {
     use std::os::unix::fs::PermissionsExt;
     use zephium_core::downloads::{DownloadCall, DownloadCompletion, DownloadResponse};

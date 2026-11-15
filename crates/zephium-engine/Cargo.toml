@@ -168,6 +168,9 @@ gdk = { version = "0.18", features = ["v3_24"] }
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zephium-blocker = { workspace = true, features = ["webkit"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 javascriptcore-rs = "=1.1.2"
 libc = "0.2"
