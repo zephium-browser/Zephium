@@ -46,7 +46,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[ArrayFlag("web_accessible_resources", "use_dynamic_url")],
-        "Dynamic resource URLs are session locators; alias documents have no privileged extension binding, and rule redirects to dynamic resources aren't available",
+        "Dynamic resource URLs are session locators; alias documents have no privileged extension binding, spoof-sensitive Unicode filenames do not receive dynamic locators, and rule redirects to dynamic resources aren't available",
         LIN,
     ),
     (
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn dynamic_resource_warning_requires_a_declared_dynamic_entry() {
         let dynamic = json!({"manifest_version":3,"web_accessible_resources":[{"resources":["public.js"],"matches":["https://example.test/*"],"use_dynamic_url":true}]});
-        assert_eq!(assess(dynamic.clone(), Platform::Linux), ["Dynamic resource URLs are session locators; alias documents have no privileged extension binding, and rule redirects to dynamic resources aren't available"]);
+        assert_eq!(assess(dynamic.clone(), Platform::Linux), ["Dynamic resource URLs are session locators; alias documents have no privileged extension binding, spoof-sensitive Unicode filenames do not receive dynamic locators, and rule redirects to dynamic resources aren't available"]);
         assert!(assess(dynamic.clone(), Platform::Macos).is_empty());
         assert!(assess(dynamic.clone(), Platform::Windows).is_empty());
         let mut fixed = dynamic;

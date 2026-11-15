@@ -285,3 +285,20 @@ fn dynamic_locators_use_canonical_resource_paths_and_revoke_with_install() {
         .unwrap();
     assert_ne!(old, next);
 }
+
+#[test]
+fn dynamic_locators_refuse_spoofable_unicode_paths() {
+    let resources = super::DynamicResources {
+        alias: "b".repeat(32),
+        patterns: vec!["/*".into()],
+    };
+    for path in [
+        "/public/%E2%80%AE.txt",
+        "/public/%25E2%2580%25AE.txt",
+        "/%F0%9F%94%92.txt",
+        "/public/%C2%A0.txt",
+    ] {
+        let url = format!("chrome-extension://{A}{path}");
+        assert_eq!(resources.resolve(url.clone()).unwrap(), url);
+    }
+}

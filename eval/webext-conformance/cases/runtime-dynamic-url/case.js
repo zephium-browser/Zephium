@@ -1,6 +1,6 @@
 export async function run(h) {
   const id=chrome.runtime.id;
-  const paths=['public/data.txt','public','public/','public/%64ata.txt','caf%c3%a9.txt','public/%2Fdata.txt','public/%00data.txt','public/%23x.txt','public/%3Fx.txt','public/%252e%252e/private.txt','/public/data.txt?query=1#hash','x/../public/data.txt','public/../private.txt','static.txt','café.txt','https://foreign.example/public/data.txt','//foreign.example/public/data.txt','///icons/../popup.html'];
+  const paths=['\u202e.txt','%E2%80%AE.txt','public/data.txt','public','public/','public/%64ata.txt','caf%c3%a9.txt','public/%2Fdata.txt','public/%00data.txt','public/%23x.txt','public/%3Fx.txt','public/%252e%252e/private.txt','/public/data.txt?query=1#hash','x/../public/data.txt','public/../private.txt','static.txt','café.txt','https://foreign.example/public/data.txt','//foreign.example/public/data.txt','///icons/../popup.html'];
   for(const path of paths) {
     const url=new URL(chrome.runtime.getURL(path));
     h.record(path,{dynamic:url.hostname!==id,path:url.pathname,search:url.search,hash:url.hash});

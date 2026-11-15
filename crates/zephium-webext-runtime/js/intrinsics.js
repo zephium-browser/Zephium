@@ -95,6 +95,7 @@
     StringLastIndexOf: uncurry(StringProto.lastIndexOf),
     StringToLowerCase: uncurry(StringProto.toLowerCase),
     StringToUpperCase: uncurry(StringProto.toUpperCase),
+    StringCodePointAt: uncurry(StringProto.codePointAt),
     StringCharCodeAt: uncurry(StringProto.charCodeAt),
     StringStartsWith: uncurry(StringProto.startsWith),
     StringEndsWith: uncurry(StringProto.endsWith),

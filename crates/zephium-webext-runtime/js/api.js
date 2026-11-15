@@ -412,6 +412,39 @@
       }
       return output;
     }
+    function unsupportedResourceCharacter(cp) {
+      return cp === 0x85
+        || cp === 0xa0
+        || cp === 0xad
+        || cp === 0x34f
+        || (cp >= 0x600 && cp <= 0x605)
+        || cp === 0x61c
+        || cp === 0x6dd
+        || cp === 0x70f
+        || cp === 0x8e2
+        || (cp >= 0x115f && cp <= 0x1160)
+        || cp === 0x1680
+        || (cp >= 0x17b4 && cp <= 0x17b5)
+        || (cp >= 0x180b && cp <= 0x180e)
+        || (cp >= 0x2000 && cp <= 0x200f)
+        || (cp >= 0x2028 && cp <= 0x202f)
+        || (cp >= 0x205f && cp <= 0x206f)
+        || cp === 0x2800
+        || cp === 0x3000
+        || cp === 0x3164
+        || (cp >= 0xfe00 && cp <= 0xfe0f)
+        || cp === 0xfeff
+        || cp === 0xffa0
+        || (cp >= 0xfff0 && cp <= 0xfffb)
+        || cp === 0x110bd
+        || cp === 0x110cd
+        || (cp >= 0x13430 && cp <= 0x13438)
+        || (cp >= 0x1bca0 && cp <= 0x1bca3)
+        || (cp >= 0x1d173 && cp <= 0x1d17a)
+        || (cp >= 0x1f50f && cp <= 0x1f510)
+        || (cp >= 0x1f512 && cp <= 0x1f513)
+        || (cp >= 0xe0000 && cp <= 0xe0fff);
+    }
     function resourceMatchPath(path) {
       try {
         const base = `${scheme}://${extensionId}/`;
@@ -427,7 +460,10 @@
         if (start === decoded.length) return null;
         const resolved = new I.URL(I.StringSlice(decoded,start), base);
         if (I.URLProtocol(resolved) !== `${scheme}:` || I.URLHost(resolved) !== extensionId) return null;
-        return normalResourcePath(I.URLPathname(resolved) + I.URLSearch(resolved));
+        const normal = normalResourcePath(I.URLPathname(resolved) + I.URLSearch(resolved));
+        for (let i = 0; i < normal.length; i++)
+          if (unsupportedResourceCharacter(I.StringCodePointAt(normal, i))) return null;
+        return normal;
       } catch { return null; }
     }
     function resourceMatches(pattern, path) {

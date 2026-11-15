@@ -8,6 +8,24 @@
   },
   "observations": [
     {
+      "label": "‮.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/%E2%80%AE.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "%E2%80%AE.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/%E2%80%AE.txt",
+        "search": ""
+      }
+    },
+    {
       "label": "public/data.txt",
       "value": {
         "dynamic": true,

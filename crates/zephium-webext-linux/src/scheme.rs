@@ -754,6 +754,40 @@ fn normal_resource_path(path: &str) -> String {
     output
 }
 
+fn unsupported_resource_character(ch: char) -> bool {
+    matches!(ch as u32, 0x85
+            | 0xa0
+            | 0xad
+            | 0x34f
+            | 0x600..=0x605
+            | 0x61c
+            | 0x6dd
+            | 0x70f
+            | 0x8e2
+            | 0x115f..=0x1160
+            | 0x1680
+            | 0x17b4..=0x17b5
+            | 0x180b..=0x180e
+            | 0x2000..=0x200f
+            | 0x2028..=0x202f
+            | 0x205f..=0x206f
+            | 0x2800
+            | 0x3000
+            | 0x3164
+            | 0xfe00..=0xfe0f
+            | 0xfeff
+            | 0xffa0
+            | 0xfff0..=0xfffb
+            | 0x110bd
+            | 0x110cd
+            | 0x13430..=0x13438
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0x1f50f..=0x1f510
+            | 0x1f512..=0x1f513
+            | 0xe0000..=0xe0fff)
+}
+
 fn resource_match_path(url: &Url) -> Option<String> {
     let base = Url::parse(&format!("{}://{}/", url.scheme(), url.host_str()?)).ok()?;
     let first = base.join(url.path()).ok()?;
@@ -794,7 +828,8 @@ fn resource_match_path(url: &Url) -> Option<String> {
         path.push('?');
         path.push_str(query);
     }
-    Some(normal_resource_path(&path))
+    let path = normal_resource_path(&path);
+    (!path.chars().any(unsupported_resource_character)).then_some(path)
 }
 
 struct WarEntry {

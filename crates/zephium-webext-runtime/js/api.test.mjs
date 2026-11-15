@@ -574,7 +574,7 @@ test('dynamic resource locators match canonical paths without changing extension
   for (const path of ['public/a.js', '/public/a.js?x=1#fragment','folder/../public/a.js','public/a/../b.js','café.txt','caf%c3%a9.txt','public/%64ata.txt','public','//remote.test/public/a.js']) {
     assert.equal(new URL(chrome.runtime.getURL(path)).hostname, alias);
   }
-  for (const path of ['private.txt','public/../private.txt','https://remote.test/public/a.js','public/%2Fdata.txt','public/%00data.txt']) {
+  for (const path of ['private.txt','public/../private.txt','https://remote.test/public/a.js','public/%2Fdata.txt','public/%00data.txt','public/\u202ex.txt','public/%E2%80%AEx.txt','public/%25E2%2580%25AEx.txt']) {
     assert.equal(new URL(chrome.runtime.getURL(path)).hostname, EXTENSION_ID);
   }
   assert.equal(chrome.runtime.id, EXTENSION_ID);
