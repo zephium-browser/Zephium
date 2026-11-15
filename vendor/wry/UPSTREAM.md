@@ -405,3 +405,6 @@ then deliver Started before its redirect, commit or failure. Commit remains the
 only document-attribution boundary; no URL request is replayed.
 GTK print dialogs are transient for the content view's actual owning window;
 printing without an owner is refused rather than creating an unowned dialog.
+Unowned GTK script dialogs are retained and refused in one main-loop idle turn.
+Synchronous close during signal emission clears WebKit's current-dialog pointer
+before its emitter unreferences it; deferred close avoids that native crash.

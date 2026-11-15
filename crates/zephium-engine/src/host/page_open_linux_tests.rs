@@ -1883,6 +1883,45 @@ fn native_beforeunload_can_keep_or_leave_the_document() {
     });
 }
 
+#[test]
+#[ignore = "isolated GTK; unowned script dialog and beforeunload refusal"]
+fn native_unowned_dialogs_refuse_without_reentrant_close() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    host.window.hide();
+    script(
+        &page,
+        "alert('hidden');document.title=String(confirm('hidden'))+':'+String(prompt('hidden'))",
+    );
+    until(|| page.title().as_deref() == Some("false:null"));
+    host.window.show_all();
+    host.window.present();
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    script(&page, "document.querySelector('#script').onclick=()=>{onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture'};document.title='armed'};document.title='ready'");
+    until(|| page.title().as_deref() == Some("ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("armed"));
+    host.window.hide();
+    let request = zephium_core::ports::engine::NavigationRequestId(61);
+    assert!(host
+        .engine
+        .navigate(id, &format!("{}/leave", fixture.origin), request));
+    let mut settled = false;
+    until(|| {
+        for event in host.drain() {
+            if matches!(event, EngineEvent::NavigationFailed { request: failed, .. } if failed == request)
+            {
+                settled = true;
+            }
+        }
+        settled
+    });
+    script(&page, "document.title=location.pathname");
+    until(|| page.title().as_deref() == Some("/page"));
+}
+
 fn valid_digest_fixture(request: &str) -> bool {
     let Some(header) = request
         .lines()

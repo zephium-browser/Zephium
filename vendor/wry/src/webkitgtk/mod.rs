@@ -1377,7 +1377,10 @@ impl InnerWebView {
       }) {
         return true;
       }
-      dialog.close();
+      // Closing inside the signal clears WebKit's current-dialog pointer before
+      // its emitter unreferences it. Retain and refuse after emission returns.
+      let denied = dialog.clone();
+      gtk::glib::idle_add_local_once(move || denied.close());
       true
     });
     webview.connect_print(|_, _| true);
