@@ -136,9 +136,7 @@ fn self_budget_tier(
     use zephium_core::ports::engine::MemoryPressure;
     let exit = soft.saturating_sub(1 << 30);
     match previous {
-        MemoryPressure::Warning | MemoryPressure::Critical if private_bytes >= exit => {
-            MemoryPressure::Warning
-        }
+        MemoryPressure::Warning if private_bytes >= exit => MemoryPressure::Warning,
         _ if private_bytes >= soft => MemoryPressure::Warning,
         _ => MemoryPressure::Normal,
     }
@@ -294,8 +292,9 @@ mod native {
 
     /// Root plus descendants. Toolhelp builds the parent map cheaply; only the
     /// family is OpenProcess'd. Parent edges where the parent started after the
-    /// child are dropped (PID reuse). `None` if the root cannot be queried —
-    /// callers must keep the previous self tier instead of treating that as zero.
+    /// child are dropped (PID reuse). `None` if the root or any non-reuse child
+    /// cannot be queried — callers keep the previous self tier so a partial
+    /// undercount cannot clear Warning.
     fn family_private_bytes(root: u32) -> Option<u64> {
         // SAFETY: snapshot handle is owned and closed below.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
@@ -331,9 +330,7 @@ mod native {
                 if !seen.insert(pid) {
                     continue;
                 }
-                let Some((bytes, start)) = process_private_and_start(pid) else {
-                    continue;
-                };
+                let (bytes, start) = process_private_and_start(pid)?;
                 if parent_start > start {
                     continue;
                 }

@@ -443,7 +443,8 @@ impl EngineHost {
         // Hidden content tabs sleep through TrySuspend alone. Microsoft advises
         // not mixing MemoryUsageTargetLevel with TrySuspend/Resume; TrySuspend
         // sets Low itself. Low is reserved for tabs that refuse suspension
-        // (see discard). Showing restores Normal after a refuse-path Low.
+        // (see discard). Only those refuse-path Lows restore Normal here —
+        // successful suspend/resume must not get a MemoryUsageTargetLevel poke.
         #[cfg(target_os = "windows")]
         {
             use wry::{MemoryUsageLevel, WebViewExtWindows as _};
@@ -466,14 +467,16 @@ impl EngineHost {
                     // Keep the in-flight slot until its exact callback settles.
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
-                    self.suspend_failed.remove(id);
+                    let refused = self.suspend_failed.remove(id);
                     self.suspend_retries.remove(id);
-                    woken.push(*id);
+                    woken.push((*id, refused));
                 }
             }
-            for id in woken {
-                if let Some(view) = self.views.get(&id) {
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+            for (id, refused) in woken {
+                if refused {
+                    if let Some(view) = self.views.get(&id) {
+                        let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+                    }
                 }
                 self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);

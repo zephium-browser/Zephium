@@ -303,7 +303,15 @@ fn windows_content_tabs_do_not_mix_low_memory_with_try_suspend() {
         !windows.contains("MemoryUsageLevel::Low"),
         "hide must not set Low; TrySuspend owns that transition"
     );
-    assert!(windows.contains("MemoryUsageLevel::Normal"));
+    assert!(
+        windows.contains("let refused = self.suspend_failed.remove(id)"),
+        "Normal restore must gate on refuse-path Low only"
+    );
+    assert!(
+        windows.contains("if refused")
+            && windows.contains("MemoryUsageLevel::Normal"),
+        "show must not poke Normal after a successful TrySuspend"
+    );
 
     let discard = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/discard.rs"));
     let refuse = discard
