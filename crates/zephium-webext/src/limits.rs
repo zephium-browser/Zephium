@@ -287,7 +287,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("content_scripts"), Permission("scripting")],
-        "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
+        "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns",
         LIN,
     ),
     (
@@ -561,7 +561,7 @@ mod tests {
                 "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
-                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
+                "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns",
             ]
         );
         assert_eq!(
@@ -574,7 +574,7 @@ mod tests {
             [
                 "Can't change font settings",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
-                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns"
+                "Packaged scripts are limited to 16 MiB per file; code and translation data share a 32 MiB document budget; static source tables are limited to 32 MiB and live shared sources to 64 MiB per profile; inline code/CSS to 2 MiB; each content match-pattern set to 768 patterns"
             ]
         );
     }
