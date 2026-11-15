@@ -11,12 +11,17 @@ use zephium_core::blocker::{ContentRuleCoverage, ContentRuleDigest};
 struct Fixture {
     address: String,
     blocked_requests: Arc<AtomicUsize>,
+    allowed_requests: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_websocket(false)
+    }
+
+    fn with_websocket(websocket: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
@@ -24,6 +29,8 @@ impl Fixture {
         let stopping = stop.clone();
         let blocked_requests = Arc::new(AtomicUsize::new(0));
         let requests = blocked_requests.clone();
+        let allowed_requests = Arc::new(AtomicUsize::new(0));
+        let allowed = allowed_requests.clone();
         let worker = std::thread::spawn(move || {
             while !stopping.load(Ordering::Relaxed) {
                 let (mut stream, _) = match listener.accept() {
@@ -54,7 +61,13 @@ impl Fixture {
                     requests.fetch_add(1, Ordering::Relaxed);
                     "allowed"
                 } else if path.starts_with("/allowed.js") {
+                    allowed.fetch_add(1, Ordering::Relaxed);
                     "allowed"
+                } else if websocket {
+                    "<!doctype html><script>Promise.all(['/blocked.js','/allowed.js'].map(path=>\
+                     new Promise(resolve=>{const ws=new WebSocket(location.origin.replace(/^http/,'ws')+path);\
+                     ws.onopen=()=>{ws.close();resolve()};ws.onerror=()=>resolve()})))\
+                     .then(()=>document.title='settled');</script>"
                 } else {
                     "<!doctype html><script>Promise.all([\
                      fetch('/blocked.js').then(()=> 'allowed',()=> 'blocked'),\
@@ -71,6 +84,7 @@ impl Fixture {
         Self {
             address,
             blocked_requests,
+            allowed_requests,
             stop,
             worker: Some(worker),
         }
@@ -101,6 +115,72 @@ impl Fixture {
         }
         page.disconnect(token);
     }
+}
+
+#[test]
+#[ignore = "requires an isolated display and admitted sandboxed WebKitGTK"]
+fn native_filter_websocket_handshakes_obey_pause_and_retirement() {
+    crate::platform::linux::enforce_runtime_security_floor().expect("admitted WebKitGTK");
+    gtk::init().expect("isolated GTK display");
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().expect("test owns GTK main context");
+    let fixture = Fixture::with_websocket(true);
+    let cache = tempfile::tempdir().unwrap();
+    let rules = ContentRules::declarative(
+        ContentRuleDigest::from_bytes([0x5c; 32]),
+        ContentRuleCoverage {
+            source_rules: 1,
+            accepted_rules: 1,
+            blocking_rule_entries: 1,
+            ..Default::default()
+        },
+        DeclarativeRuleFormat::WebKitContentBlockerV1,
+        Arc::from(r#"[{"trigger":{"url-filter":"/blocked[.]js","resource-type":["websocket"]},"action":{"type":"block"}}]"#),
+    )
+    .unwrap();
+    let ContentRulesPayload::Declarative {
+        artifact_digest, ..
+    } = rules.payload()
+    else {
+        panic!("declarative fixture");
+    };
+    let policy = super::tests::wait_for_native_compilation(
+        &context,
+        cache.path(),
+        rules.clone(),
+        *artifact_digest.as_bytes(),
+    )
+    .unwrap();
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let view = wry::WebViewBuilder::new()
+        .with_incognito(true)
+        .build_gtk(&container)
+        .unwrap();
+    assert!(view.webview().context().unwrap().is_sandbox_enabled());
+    let pause = crate::platform::content_pause::ContentPause::default();
+    let registration = install_scoped_on_view(
+        &view,
+        &policy,
+        &pause,
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    fixture.load(&view, 1, "settled");
+    assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 0);
+    assert_eq!(fixture.allowed_requests.load(Ordering::Relaxed), 1);
+    pause.set(true);
+    fixture.load(&view, 2, "settled");
+    assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(fixture.allowed_requests.load(Ordering::Relaxed), 2);
+    pause.set(false);
+    fixture.load(&view, 3, "settled");
+    assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 1);
+    registration.retire().unwrap();
+    fixture.load(&view, 4, "settled");
+    assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 2);
+    assert_eq!(fixture.allowed_requests.load(Ordering::Relaxed), 4);
+    view.webview().terminate_web_process();
 }
 
 impl Drop for Fixture {
