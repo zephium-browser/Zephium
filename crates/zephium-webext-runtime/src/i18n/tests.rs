@@ -173,3 +173,77 @@ fn a_host_cannot_return_another_extensions_catalog() {
         Err(ApiError::context_invalidated().message().to_owned())
     );
 }
+
+#[test]
+fn css_file_replacement_preserves_dollars_and_stops_at_unknown_messages() {
+    let messages = Messages::new(
+        ExtensionId::parse(EXTENSION).unwrap(),
+        LocaleEnvironment {
+            ui_language: "en".into(),
+            accept_languages: vec![],
+            right_to_left: false,
+        },
+        Some("en"),
+        &BTreeMap::from([(
+            "en".into(),
+            json!({
+                "known": {"message":"ok"},
+                "empty": {"message":""},
+                "nested": {"message":"__MSG_known__"},
+                "dollars": {"message":"$name$/$1/$$", "placeholders":{"name":{"content":"value$2"}}}
+            }),
+        )]),
+    )
+    .unwrap();
+    assert_eq!(
+        messages
+            .localize_css("__MSG_KNOWN__ __MSG_dollars__ __MSG_nested__")
+            .unwrap(),
+        "ok value$2/$1/$$ __MSG_known__"
+    );
+    assert_eq!(
+        messages
+            .localize_css("__MSG_known__ __MSG_unknown__ __MSG_known__")
+            .unwrap(),
+        "ok __MSG_unknown__ __MSG_known__"
+    );
+    assert_eq!(
+        messages
+            .localize_css("__MSG_invalid-name__ __MSG_empty__ __MSG_known__")
+            .unwrap(),
+        "__MSG_invalid-name__  ok"
+    );
+    assert_eq!(
+        messages
+            .localize_css("__MSG_@@bidi_dir__ __MSG_@@extension_id__")
+            .unwrap(),
+        format!("ltr {EXTENSION}")
+    );
+    assert_eq!(
+        messages.localize_css("__MSG_unclosed").unwrap(),
+        "__MSG_unclosed"
+    );
+    assert!(messages
+        .localize_css(&"x".repeat(MAX_LOCALE_BYTES + 1))
+        .is_err());
+}
+
+#[test]
+fn long_ascii_message_names_use_the_catalog_budget_not_a_name_limit() {
+    let name = "long_message_".repeat(40);
+    let messages = Messages::new(
+        ExtensionId::parse(EXTENSION).unwrap(),
+        LocaleEnvironment {
+            ui_language: "en".into(),
+            accept_languages: vec!["en".into()],
+            right_to_left: false,
+        },
+        Some("en"),
+        &BTreeMap::from([("en".into(), json!({name.clone(): {"message": "loaded"}}))]),
+    )
+    .unwrap();
+    assert_eq!(messages.get_message(&name, &[], false).unwrap(), "loaded");
+    assert!(!valid_name("invalid-name"));
+    assert!(!valid_name(""));
+    assert!(!valid_name("mésage"));
+}

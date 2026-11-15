@@ -241,11 +241,60 @@ impl Messages {
         append(&mut out, rest)?;
         Ok(out)
     }
+
+    /// Localizes CSS files, preserving positional dollars and stopping at the
+    /// first valid unknown message, as Chromium's file loader does.
+    pub fn localize_css(&self, text: &str) -> Result<String, ApiError> {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("__MSG_") {
+            append(&mut out, &rest[..start])?;
+            let token = &rest[start..];
+            let after = &token[6..];
+            let Some(end) = after.find("__") else {
+                append(&mut out, token)?;
+                return Ok(out);
+            };
+            let name = &after[..end];
+            if !valid_name(name) {
+                append(&mut out, &token[..6 + end + 2])?;
+            } else if let Some(message) = self.messages.get(&name.to_ascii_lowercase()) {
+                let mut source = message.text.as_str();
+                while let Some(dollar) = source.find('$') {
+                    append(&mut out, &source[..dollar])?;
+                    let after_dollar = &source[dollar + 1..];
+                    let replacement = after_dollar.find('$').and_then(|end| {
+                        message
+                            .placeholders
+                            .get(&after_dollar[..end].to_ascii_lowercase())
+                            .map(|value| (end, value))
+                    });
+                    if let Some((end, value)) = replacement {
+                        append(&mut out, value)?;
+                        source = &after_dollar[end + 1..];
+                    } else {
+                        append(&mut out, "$")?;
+                        source = after_dollar;
+                    }
+                }
+                append(&mut out, source)?;
+            } else {
+                let predefined = self.get_message(name, &[], false)?;
+                if predefined.is_empty() {
+                    append(&mut out, token)?;
+                    return Ok(out);
+                }
+                append(&mut out, &predefined)?;
+            }
+            rest = &after[end + 2..];
+        }
+        append(&mut out, rest)?;
+        Ok(out)
+    }
 }
 
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 256
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'@'))
