@@ -7,8 +7,23 @@ mod guide;
 mod stage;
 pub(crate) mod tab_preview;
 
-pub(crate) fn open_external_app(_url: &str) -> bool {
-    false
+pub(crate) fn external_app_name(url: &str) -> Option<String> {
+    use gtk::gio::prelude::AppInfoExt;
+    let link = zephium_core::navigation::external_app_link(url)?;
+    let app = gtk::gio::AppInfo::default_for_uri_scheme(link.scheme())?;
+    let name = app.display_name();
+    (!name.is_empty() && name.len() <= 1024).then(|| name.to_string())
+}
+
+pub(crate) fn open_external_app(url: &str) -> bool {
+    use gtk::gio::prelude::AppInfoExt;
+    let Some(link) = zephium_core::navigation::external_app_link(url) else {
+        return false;
+    };
+    gtk::gio::AppInfo::default_for_uri_scheme(link.scheme()).is_some_and(|app| {
+        app.launch_uris(&[url], None::<&gtk::gio::AppLaunchContext>)
+            .is_ok()
+    })
 }
 
 pub(crate) use content_filter::{

@@ -812,11 +812,11 @@ impl EngineHost {
         // A page's link for another application never loads; it becomes a
         // request the person answers in chrome. One per second per view, so
         // a page cannot flood it.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let page_asked = Rc::new(std::cell::RefCell::new(
             std::collections::HashSet::<String>::new(),
         ));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let app_link = {
             let permit = event_permit.clone();
             let sink = self.sink.clone();
@@ -1333,6 +1333,18 @@ impl EngineHost {
                 }
             });
 
+        #[cfg(target_os = "linux")]
+        {
+            let action_app_link = app_link.clone();
+            builder = builder.with_linux_navigation_action_handler(move |target, gesture| {
+                action_app_link(
+                    target,
+                    gesture,
+                    zephium_core::navigation::AppLinkSource::Unknown,
+                )
+            });
+        }
+
         // WebKit consults this in place of the plain handler above and says
         // which frame is loading, so focus shuts only top-level documents.
         #[cfg(target_os = "macos")]
@@ -1453,7 +1465,7 @@ impl EngineHost {
             let burst = super::popup_sites::PopupBurst::new();
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             let popup_app_link = app_link.clone();
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
@@ -1467,7 +1479,7 @@ impl EngineHost {
                 );
                 // A new window does not say which frame asked, so no kept
                 // answer opens it.
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                 if features.user_initiated
                     && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
                 {
@@ -3344,7 +3356,7 @@ fn download_ask(
 /// What the shell hears about an app link's source, or None when it is not
 /// heard at all: a frame from another site, such as an ad, only when the
 /// person clicked in it. A frame of the tab's own site speaks for the tab.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn heard_app_link_source(
     source: zephium_core::navigation::AppLinkSource,
     committed: Option<&zephium_core::permissions::PageOrigin>,
@@ -3393,7 +3405,7 @@ fn webview2_app_link_source(origin: Option<&str>) -> zephium_core::navigation::A
 }
 
 /// The origin of the document the view has committed, if any.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn committed_origin(
     navigation: &crate::navigation_epoch::NavigationEpochTracker,
 ) -> Option<zephium_core::permissions::PageOrigin> {

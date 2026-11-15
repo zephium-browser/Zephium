@@ -595,3 +595,177 @@ fn native_navigation_failure_keeps_first_tab_and_can_recover() {
     super::super::make_unavailable_for_test();
     window.close();
 }
+
+struct NativeHarness {
+    engine: crate::WebviewEngine,
+    events: mpsc::Receiver<EngineEvent>,
+    window: gtk::Window,
+    profile: ProfileId,
+    _data: tempfile::TempDir,
+}
+impl NativeHarness {
+    fn new() -> Self {
+        let admission = crate::enforce_runtime_security_floor().unwrap();
+        gtk::init().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(800, 600);
+        let container = gtk::Fixed::new();
+        window.add(&container);
+        window.show_all();
+        crate::install_container(container).unwrap();
+        let (send, events) = mpsc::channel();
+        let engine = crate::install(
+            Arc::new(|job| {
+                gtk::glib::idle_add_once(job);
+                true
+            }),
+            data.path().to_owned(),
+            admission,
+            crate::InitialUserContent::new(
+                UserContentGeneration::new(1).unwrap(),
+                UserContent::default(),
+            ),
+            move |event| {
+                let _ = send.send(event);
+            },
+            |reason| panic!("native host sealed: {reason}"),
+        )
+        .unwrap();
+        let profile = ProfileId::generate();
+        assert_eq!(
+            engine.install_content_rules(
+                profile,
+                ContentPolicyGeneration::new(1).unwrap(),
+                ContentRules::allow_all(ContentRuleDigest::from_bytes([1; 32]))
+            ),
+            NativeDispatch::Scheduled
+        );
+        Self {
+            engine,
+            events,
+            window,
+            profile,
+            _data: data,
+        }
+    }
+    fn drain(&self) -> Vec<EngineEvent> {
+        let events: Vec<_> = self.events.try_iter().collect();
+        for event in &events {
+            if let EngineEvent::PresentationPending { id, navigation, .. }
+            | EngineEvent::PresentationReady { id, navigation, .. } = event
+            {
+                assert_eq!(
+                    self.engine.present_navigation(*id, *navigation),
+                    NativeDispatch::Scheduled
+                );
+            }
+        }
+        events
+    }
+    fn show(&self, url: &str) -> (ItemId, webkit2gtk::WebView) {
+        let id = ItemId::generate();
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        assert!(self
+            .engine
+            .create_view(id, Partition::Ephemeral(self.profile), url, bounds));
+        assert_eq!(
+            self.engine
+                .set_content(1, Some(Pane::leaf(id)), Some(bounds)),
+            NativeDispatch::Scheduled
+        );
+        until(|| {
+            self.drain();
+            has_view(id)
+        });
+        let page = native(id);
+        until(|| {
+            self.drain();
+            page.is_mapped() && !page.is_loading()
+        });
+        self.window.present();
+        self.window.window().unwrap().focus(0);
+        until(|| self.window.is_active());
+        (id, page)
+    }
+}
+impl Drop for NativeHarness {
+    fn drop(&mut self) {
+        let (send, done) = mpsc::channel();
+        self.engine.shutdown(Box::new(move |clean| {
+            let _ = send.send(clean);
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut clean = None;
+        while Instant::now() < deadline && clean.is_none() {
+            gtk::main_iteration_do(false);
+            clean = done.try_recv().ok();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        super::super::make_unavailable_for_test();
+        self.window.close();
+        if !std::thread::panicking() {
+            assert_eq!(clean, Some(true));
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires isolated GTK display and disposable XDG handler registry; localhost only"]
+fn native_external_link_uses_shared_confirmation_with_unknown_source() {
+    let data = std::path::PathBuf::from(std::env::var_os("XDG_DATA_HOME").unwrap());
+    let applications = data.join("applications");
+    std::fs::create_dir_all(&applications).unwrap();
+    std::fs::write(applications.join("zephium-test-handler.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Fixture handler\nExec=/bin/true %u\nMimeType=x-scheme-handler/local-fixture;\nNoDisplay=true\n").unwrap();
+    std::fs::write(
+        applications.join("mimeapps.list"),
+        "[Default Applications]\nx-scheme-handler/local-fixture=zephium-test-handler.desktop;\n",
+    )
+    .unwrap();
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#link').href='local-fixture:local-test';document.title='link-ready'");
+    until(|| page.title().as_deref() == Some("link-ready"));
+    click(&page, 80, 1, gtk::gdk::ModifierType::empty());
+    let mut heard = false;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::ExternalAppRequested {
+                id: source,
+                url,
+                app,
+                user_gesture,
+                initiator,
+            } = event
+            {
+                assert_eq!(source, id);
+                assert_eq!(url, "local-fixture:local-test");
+                assert_eq!(app.as_deref(), Some("Fixture handler"));
+                assert!(user_gesture);
+                assert!(matches!(
+                    initiator,
+                    zephium_core::navigation::AppLinkSource::Unknown
+                ));
+                heard = true;
+            }
+        }
+        heard
+    });
+    assert_eq!(
+        page.uri().as_deref(),
+        Some(format!("{}/page", fixture.origin).as_str())
+    );
+    assert!(crate::platform::imp::open_external_app(
+        "local-fixture:local-test"
+    ));
+    assert!(!crate::platform::imp::open_external_app(
+        "javascript:alert(1)"
+    ));
+}

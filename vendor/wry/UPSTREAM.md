@@ -365,3 +365,6 @@ Native cancellation and download conversion emit cancellation, never failure.
 An installed failure owner suppresses WebKit's default error document; provisional
 failures retain the previous document. TLS refusals remain fail-closed and are
 reported as insecure connections, without a context-wide certificate exception.
+The optional Linux navigation-action interceptor exposes native gesture evidence
+before ordinary navigation policy. A handled action remains natively denied;
+the host's existing external-application confirmation broker owns any launch.

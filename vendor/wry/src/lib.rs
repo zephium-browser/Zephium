@@ -780,6 +780,8 @@ struct WebViewAttributes<'a> {
   /// The closure take a `String` parameter as url and returns a `bool` to determine whether the navigation should happen.
   /// `true` allows to navigate and `false` does not.
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
+  #[cfg(target_os = "linux")]
+  pub linux_navigation_action_handler: Option<Box<dyn Fn(&str, bool) -> bool>>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1049,6 +1051,8 @@ impl Default for WebViewAttributes<'_> {
       ipc_handler: None,
       drag_drop_handler: None,
       navigation_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_navigation_action_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1128,6 +1132,16 @@ pub struct WebViewBuilder<'a> {
 }
 
 impl<'a> WebViewBuilder<'a> {
+  /// Intercept a GTK navigation action using native user-gesture evidence.
+  /// Returning true consumes the request; the native navigation is denied.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_navigation_action_handler(
+    mut self,
+    handler: impl Fn(&str, bool) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_navigation_action_handler = Some(Box::new(handler));
+    self
+  }
   /// Create a new [`WebViewBuilder`].
   pub fn new() -> Self {
     Self {

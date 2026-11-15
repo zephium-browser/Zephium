@@ -1134,6 +1134,8 @@ impl InnerWebView {
 
     // Navigation handler
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
+      #[cfg(target_os = "linux")]
+      let action_handler = attributes.linux_navigation_action_handler.take();
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
         let handler = match policy_type {
           PolicyDecisionType::NavigationAction => &navigation_handler,
@@ -1145,9 +1147,19 @@ impl InnerWebView {
         let allow = policy_decision
           .dynamic_cast_ref::<NavigationPolicyDecision>()
           .and_then(NavigationPolicyDecisionExt::navigation_action)
-          .and_then(|action| action.request())
-          .and_then(|request| bounded_request_uri(&request))
-          .map(handler)
+          .and_then(|action| {
+            let url = bounded_request_uri(&action.request()?)?;
+            #[cfg(target_os = "linux")]
+            if action_handler.as_ref().is_some_and(|handler| {
+              std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handler(&url, action.is_user_gesture())
+              }))
+              .unwrap_or(true)
+            }) {
+              return Some(false);
+            }
+            Some(handler(url))
+          })
           .unwrap_or(false);
         let pointer = policy_decision.as_ptr();
         unsafe {
