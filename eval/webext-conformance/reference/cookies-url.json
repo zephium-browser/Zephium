@@ -68,6 +68,21 @@
       }
     },
     {
+      "label": "expire path selects surviving root",
+      "value": {
+        "domain": "127.0.0.1",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "run4-cookie",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": "0",
+        "value": "test-only"
+      }
+    },
+    {
       "label": "all",
       "value": [
         {
@@ -95,6 +110,10 @@
           "value": "longer-path"
         }
       ]
+    },
+    {
+      "label": "multiple-dot domain filter",
+      "value": 0
     },
     {
       "label": "other host",
@@ -131,6 +150,13 @@
         "name": "run4-cookie",
         "storeId": "0",
         "url": "https://127.0.0.1/account/page"
+      }
+    },
+    {
+      "label": "expired set result",
+      "value": {
+        "callbackArguments": 0,
+        "type": "undefined"
       }
     },
     {

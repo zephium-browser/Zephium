@@ -557,12 +557,13 @@ test('unavailable declarative constructors are defined, gated and never inspect 
 });
 
 
-test('cookies preserve null results in promises and callbacks', async () => {
+test('cookies get preserves null while an empty set result is absent', async () => {
   const {chrome, host} = extensionContext('background', {permissions:['cookies']});
   host.handlers['cookies.get'] = () => null;
   host.handlers['cookies.set'] = () => null;
   assert.equal(await chrome.cookies.get({url:'https://example.com/',name:'missing'}), null);
   const args = await new Promise(resolve => chrome.cookies.get({url:'https://example.com/',name:'missing'}, (...args)=>resolve(args)));
   assert.deepEqual(plain(args), [null]);
-  assert.equal(await chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}), null);
+  assert.equal(await chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}), undefined);
+  assert.deepEqual(plain(await new Promise(resolve => chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}, (...args)=>resolve(args)))), []);
 });

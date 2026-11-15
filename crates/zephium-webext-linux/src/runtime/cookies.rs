@@ -192,7 +192,7 @@ fn matches(row: &Value, details: &Value) -> bool {
         .iter()
         .all(|field| details.get(field).is_none_or(|value| value == &row[field]))
         && details["domain"].as_str().is_none_or(|domain| {
-            let domain = domain.trim_start_matches('.');
+            let domain = domain.strip_prefix('.').unwrap_or(domain);
             let found = row["domain"].as_str().unwrap_or("").trim_start_matches('.');
             found == domain
                 || found
@@ -362,13 +362,10 @@ async fn perform(
                 .all(|key| row[key] == expected[key])
         });
         if expired {
-            return if found.is_none() {
-                Ok(Value::Null)
-            } else {
-                Err(error("Cookie expiry was not confirmed."))
-            };
-        }
-        if !found.is_some_and(|(_, row)| row == expected) {
+            if found.is_some() {
+                return Err(error("Cookie expiry was not confirmed."));
+            }
+        } else if !found.is_some_and(|(_, row)| row == expected) {
             return Err(error("The native cookie write could not be confirmed."));
         }
         if !allowed(inner, sender, Some(url), revision) {

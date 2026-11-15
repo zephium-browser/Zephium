@@ -559,7 +559,7 @@
 
     function settle(promise, callback, spec, name) {
       const withResult = own(spec, 'result') !== false;
-      const optionalResult = own(spec, 'optionalResult') === true && name !== 'cookies.get' && name !== 'cookies.set';
+      const optionalResult = own(spec, 'optionalResult') === true && name !== 'cookies.get';
       const resultValue = (value) => optionalResult && value === null ? undefined : value;
       if (callback !== null) {
         I.PromiseThen(
