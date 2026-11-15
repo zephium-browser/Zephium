@@ -1476,16 +1476,42 @@ fn native_permission_policy_requires_explicit_cross_origin_delegation() {
                 "blank" => format!("const f=document.createElement('iframe');document.body.append(f);f.contentDocument.write({});f.contentDocument.close();", serde_json::to_string(&format!("<body><script>{child}</script>")).unwrap()),
                 _ => unreachable!(),
             };
+            let expected_origin = serde_json::to_string(if frame.starts_with("cross-") {
+                &second.origin
+            } else {
+                &first.origin
+            })
+            .unwrap();
             let finished = Rc::new(std::cell::Cell::new(false));
             let done = finished.clone();
-            host.page.evaluate_javascript(&format!("window.addEventListener('message',e=>{{if(e.data==='permission-failed'||e.data==='notification-ready')document.title=e.data}});{source};document.querySelector('iframe')?.setAttribute('style','position:fixed;left:0;top:0;width:300px;height:100px;z-index:999999')"), None,None,None::<&gtk::gio::Cancellable>,move |result| { result.unwrap(); done.set(true); });
+            host.page.evaluate_javascript(&format!("window.addEventListener('message',e=>{{if(e.data==='permission-failed'||e.data==='notification-ready')document.title=e.origin==={expected_origin}?e.data:'wrong-origin'}});{source};document.querySelector('iframe')?.setAttribute('style','position:fixed;left:0;top:0;width:300px;height:100px;z-index:999999')"), None,None,None::<&gtk::gio::Cancellable>,move |result| { result.unwrap(); done.set(true); });
             if capability == "notifications" {
                 until(|| {
-                    finished.get() && host.page.title().as_deref() == Some("notification-ready")
+                    finished.get()
+                        && matches!(
+                            host.page.title().as_deref(),
+                            Some("notification-ready" | "wrong-origin")
+                        )
                 });
+                assert_ne!(
+                    host.page.title().as_deref(),
+                    Some("wrong-origin"),
+                    "{capability}/{frame}"
+                );
                 click(&host.page, 20, 1, gtk::gdk::ModifierType::empty());
             }
-            until(|| finished.get() && host.page.title().as_deref() == Some("permission-failed"));
+            until(|| {
+                finished.get()
+                    && matches!(
+                        host.page.title().as_deref(),
+                        Some("permission-failed" | "wrong-origin")
+                    )
+            });
+            assert_ne!(
+                host.page.title().as_deref(),
+                Some("wrong-origin"),
+                "{capability}/{frame}"
+            );
             let actual = count.get();
             let expected = if frame == "cross-deny"
                 || (capability == "notifications" && frame == "cross-allow")
