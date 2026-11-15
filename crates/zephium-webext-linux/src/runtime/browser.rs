@@ -1828,7 +1828,9 @@ impl Browser {
             BrowserRequest::Notifications(request) => invocation.reply(
                 zephium_webext_runtime::api::notifications::unavailable(request),
             ),
-            BrowserRequest::Service(_) | BrowserRequest::Runtime(_) => state.refuse(invocation),
+            BrowserRequest::Service(_)
+            | BrowserRequest::Runtime(_)
+            | BrowserRequest::Unavailable { .. } => state.refuse(invocation),
         }
     }
 }

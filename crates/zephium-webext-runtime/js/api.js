@@ -213,6 +213,51 @@
     return out;
   }
 
+  // ImageData uses prototype getters and typed pixels, neither of which JSON
+  // preserves. Copy only bounded raster data; Rust validates it again.
+  function iconDetails(details) {
+    const input = own(details, 'imageData');
+    if (input === undefined) return details;
+    const resembles = image => image !== null && typeof image === 'object' &&
+      'width' in image && 'height' in image && 'data' in image;
+    const invalid = () => new I.Error('The imageData property must contain an ImageData object or dictionary of ImageData objects.');
+    const image = value => {
+      if (!resembles(value)) throw invalid();
+      let rawWidth, rawHeight, pixels, native = false;
+      if (I.ImageDataWidth && I.ImageDataHeight && I.ImageDataData) {
+        try {
+          rawWidth = I.ImageDataWidth(value); rawHeight = I.ImageDataHeight(value);
+          pixels = I.ImageDataData(value); native = true;
+        } catch { /* Chrome also accepts structural ImageData objects. */ }
+      }
+      const width = (native ? rawWidth : value.width) | 0;
+      const height = (native ? rawHeight : value.height) | 0;
+      if (width <= 0 || height <= 0) throw new I.Error('ImageData has invalid dimensions.');
+      if (width > 256 || height > 256) throw new I.Error('Icon invalid.');
+      if (!native) pixels = value.data;
+      const length = width * height * 4;
+      if (pixels === null || pixels === undefined || ((native ? I.TypedArrayLength(pixels) : pixels.length) | 0) !== length)
+        throw new I.Error('ImageData data length does not match dimensions.');
+      const data = [];
+      for (let i = 0; i < length; i++) I.ArrayPush(data, pixels[i] & 255);
+      return { __proto__: null, width, height, data };
+    };
+    const images = { __proto__: null };
+    if (resembles(input)) {
+      const copied = image(input);
+      images[I.String(copied.width)] = copied;
+    } else {
+      if (input === null || typeof input !== 'object') throw invalid();
+      const keys = I.keys(input);
+      if (keys.length === 0) throw invalid();
+      if (keys.length > 16) throw new I.Error('Icon invalid.');
+      for (let i = 0; i < keys.length; i++) images[keys[i]] = image(input[keys[i]]);
+    }
+    const output = { __proto__: null, imageData: images };
+    if (own(details, 'tabId') !== undefined) output.tabId = details.tabId;
+    return output;
+  }
+
   function deepFreeze(value) {
     if (value === null || typeof value !== 'object') return value;
     const keys = I.keys(value);
@@ -299,6 +344,7 @@
         event: (seq, name, text) => handlers.event(seq, name, text),
         portMessage: (port, payload) => handlers.portMessage(port, payload),
         portDisconnect: (port, error) => handlers.portDisconnect(port, error),
+        invalidated: message => invalidate(message),
       },
     });
     if (!link) client.invalidate(T.ERRORS.invalidated);
@@ -423,6 +469,11 @@
       'runtime.getURL': (v) => getURL(I.String(v[0])),
       'extension.getURL': (v) => getURL(I.String(v[0])),
       'runtime.getManifest': () => I.JSONParse(manifestText),
+      'identity.getRedirectURL': (v) => {
+        let path = v[0] === null || v[0] === undefined ? '/' : v[0];
+        if (path[0] !== '/') path = '/' + path;
+        return `https://${extensionId}.chromiumapp.org${path}`;
+      },
       'i18n.getMessage': getMessage,
       'i18n.getUILanguage': () => uiLanguage,
       'extension.getViews': () => [],
@@ -537,6 +588,12 @@
 
     let nextMenuId = 0;
     function makeFunction(fullName, spec) {
+      if (own(bootstrap, 'userScriptsEnabled') === false && I.StringStartsWith(fullName, 'userScripts.')) {
+        return function () {
+          ensureValid();
+          throw new I.Error(`'${fullName}' is not available in this context.`);
+        };
+      }
       const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
       if (fullName === 'contextMenus.create') {
         const params = normalizeParams(own(spec, 'parameters'));
@@ -554,9 +611,18 @@
           return id;
         };
       }
-      if (returns === 'sync' && own(spec, 'callback') === true) return undefined;
       const local = LOCAL[fullName];
-      if (returns === 'sync' && local === undefined) return undefined;
+      if (returns === 'sync' && (local === undefined || own(spec, 'callback') === true)) {
+        if (own(bootstrap, 'unavailableSyncApis') !== true) return undefined;
+        const params = normalizeParams(own(spec, 'parameters'));
+        if (own(spec, 'callback') === true) I.ArrayPush(params,
+          own(spec, 'callbackRequired') === true ? { __proto__: null, name: 'callback', type: 'function', optional: false } : CALLBACK);
+        return function (...args) {
+          ensureValid();
+          resolveArguments(fullName, spec.signature || signatureOf(params, false), params, args);
+          throw new I.Error('This function is not supported.');
+        };
+      }
       const params = normalizeParams(own(spec, 'parameters'));
       const async = returns === 'async';
       const takesCallback = async && own(spec, 'callback') !== false;
@@ -586,6 +652,8 @@
           if (!async) return local(values, fullName, signature);
           const callback = takesCallback ? values[values.length - 1] : null;
           const callValues = takesCallback ? I.ArraySlice(values, 0, values.length - 1) : values;
+          if (fullName === 'action.setIcon' || fullName === 'browserAction.setIcon' || fullName === 'pageAction.setIcon')
+            callValues[0] = iconDetails(callValues[0]);
           let promise;
           if (fullName === 'contextMenus.update' && own(callValues[1], 'onclick') !== undefined) {
             promise = I.PromiseReject(new I.Error('This function is not supported.'));

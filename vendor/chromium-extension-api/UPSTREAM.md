@@ -5,7 +5,7 @@
 - Commit: `4b3d0dabb8250b6f152d2d85d79e7706e309d087`
 - Tree: `1390557da6bf6cb630528eac294f338b887ad81a`
 - Licence: BSD-3-Clause; the unchanged upstream root `LICENSE` is included.
-- Upstream files: 47 (678966 bytes), including 33 schemas, 13 feature metadata files and `LICENSE`.
+- Upstream files: 61 (795453 bytes), including 47 schemas, 13 feature metadata files and `LICENSE`.
 - Local modifications to upstream files: none.
 
 The pin was selected from the [official 11 November 2026 stable release](https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop_01744469280.html).
@@ -83,3 +83,22 @@ upstream files.
 | `extensions/common/api/types.json` | `e0eed741e4b912d1ef1e8c38781b5bbe3f9c2aef96293ce609d416e11244660f` | 6984 |
 | `extensions/common/api/user_scripts.webidl` | `44e4717d50ae5a9bbf88903d89aa087928cfc10812ce9009237df4f4f5d1a6bc` | 9524 |
 | `extensions/common/api/web_request.json` | `329b698fbfb894853f1ecd7120ffd3b845d9f1d0fdb82aeef05affcf78d6c12d` | 50082 |
+
+Additional breadth schemas were retrieved on 2026-11-15 at the same immutable commit. Each file’s Git blob was verified against its API directory tree and the directory chain against the pinned root tree. Existing upstream files are unchanged.
+
+| Additional upstream file | SHA-256 | Bytes |
+| --- | --- | ---: |
+| `chrome/common/extensions/api/declarative_content.json` | `2417ce709ee161f60443cfdbdda16967a82c188447fb13aa7ca533903d928454` | 10337 |
+| `chrome/common/extensions/api/desktop_capture.json` | `9c64346570865b8debf1ed6168487a7a65edb821c7e65d71b6d27baa255e5ea2` | 6109 |
+| `chrome/common/extensions/api/devtools/inspected_window.json` | `4ee29f628ab7fead8be2443de3d9cccd5e2d08f2d051e5867b494224929d8d48` | 11231 |
+| `chrome/common/extensions/api/devtools/network.json` | `e38aa9e7a0060a78e943deb52eb6f019a9bede124e2ab71884e98c27b8285a92` | 3105 |
+| `chrome/common/extensions/api/devtools/panels.json` | `140c94eef4c4a9e7dfd91696b6a69e63d74b03dfa92aad5ffae5b54aa28dd696` | 15270 |
+| `chrome/common/extensions/api/devtools/performance.json` | `ec04537b302a0867140c4f1b0ddf56003534738c0e383b17865fab89ed033b5e` | 761 |
+| `chrome/common/extensions/api/devtools/recorder.json` | `7a374b6e4cebdccfa12fc4f1afd07db31be5213836009907dda4b357944d8d89` | 4480 |
+| `chrome/common/extensions/api/identity.webidl` | `a4bf17a0b42463e5bc9f9c6b7ac4dbd559d88dda8f89d6edb0276270df7ba1ac` | 9912 |
+| `chrome/common/extensions/api/omnibox.json` | `f3901b7e295d60a0a805cd46155873c51c0343b3e00d517dda8a619122690431` | 10023 |
+| `chrome/common/extensions/api/reading_list.webidl` | `0db9b32cb27d91a99c88d16ca361c49abc183bc6b848bf41a2a503cc3af49ed8` | 4443 |
+| `chrome/common/extensions/api/tab_capture.idl` | `2ee2fe2a913b514bf3225ddf6205dd7d6b18246685d0c1581699f84762208fdc` | 5193 |
+| `chrome/common/extensions/api/tab_groups.json` | `8a9ef52d3f8325497b2ce1e3319424f38ea765e0d11a771b37d799d578f2ed66` | 8183 |
+| `chrome/common/extensions/api/tts.json` | `3be1def8ef2fa4384e7ea8c130ce10cc46701bca82eb5ee449cc986ce5f5a78a` | 11758 |
+| `extensions/common/api/cookies.json` | `55af34867fdeb62e97edf8d28c83acaec076f131ecd44713c54fc65be10ca768` | 15682 |

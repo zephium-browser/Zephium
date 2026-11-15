@@ -34,7 +34,7 @@ pub(crate) const METHODS: &[&str] = &[
     "action.openPopup",
     "action.getUserSettings",
 ];
-/// Each untrusted icon representation is bounded before native image decoding.
+/// Untrusted ImageData dimensions are bounded before allocating a raster.
 pub const MAX_ICON_DIMENSION: u16 = 256;
 /// A setIcon batch contains at most sixteen scale representations.
 pub const MAX_ICON_REPRESENTATIONS: usize = 16;
@@ -433,7 +433,7 @@ fn paths(value: &Value) -> Result<BTreeMap<u16, String>, ApiError> {
             let size = size
                 .parse::<u16>()
                 .ok()
-                .filter(|size| (1..=MAX_ICON_DIMENSION).contains(size))
+                .filter(|size| *size != 0)
                 .ok_or_else(invalid)?;
             let path = path
                 .as_str()

@@ -241,5 +241,27 @@
     "events": [
       "onRuleMatchedDebug"
     ]
+  },
+  "userScripts": {
+    "functions": [
+      "configureWorld",
+      "execute",
+      "getScripts",
+      "getWorldConfigurations",
+      "register",
+      "resetWorldConfiguration",
+      "unregister",
+      "update"
+    ]
+  },
+  "identity": {
+    "functions": [
+      "getRedirectURL"
+    ]
+  },
+  "desktopCapture": {
+    "functions": [
+      "chooseDesktopMedia"
+    ]
   }
 }

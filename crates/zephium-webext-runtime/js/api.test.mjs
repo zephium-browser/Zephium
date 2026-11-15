@@ -432,3 +432,52 @@ test('menu inline callbacks are refused instead of disappearing during serializa
   await assert.rejects(chrome.contextMenus.update('inline', {onclick() {}}), /not supported/);
   assert.equal(calls, 0);
 });
+
+test('disabled user scripts throw synchronously before validation or transport', () => {
+  const { chrome, host } = extensionContext('background', { permissions: ['userScripts'], userScriptsEnabled: false });
+  assert.equal(typeof chrome.userScripts.getScripts, 'function');
+  let callback = false;
+  for (const method of ['getScripts', 'register', 'configureWorld', 'execute', 'getWorldConfigurations', 'resetWorldConfiguration', 'unregister', 'update']) {
+    assert.throws(() => chrome.userScripts[method](Symbol(), () => { callback = true; }),
+      { message: `'userScripts.${method}' is not available in this context.` });
+  }
+  assert.equal(callback, false);
+  assert.equal(host.calls.length, 0);
+});
+
+
+test('action icons copy prototype ImageData getters and typed pixels before transport', async () => {
+  const { chrome, host } = extensionContext('background', { manifest: { manifest_version: 3, action: {} } });
+  host.handlers['action.setIcon'] = () => null;
+  const pixels = new Uint8ClampedArray([7, 12, 200, 255]);
+  const image = Object.create({get width(){return 1},get height(){return 1},get data(){return pixels}});
+  const pending = chrome.action.setIcon({imageData:image});
+  assert.deepEqual(host.calls.at(-1).args, [{imageData:{1:{width:1,height:1,data:[7,12,200,255]}}}]);
+  await pending;
+  assert.throws(()=>chrome.action.setIcon({imageData:{width:1,height:1,data:[]}}), /ImageData data length does not match dimensions/);
+  assert.throws(()=>chrome.action.setIcon({imageData:{width:257,height:1,get data(){throw Error('must not allocate')}}}), /Icon invalid/);
+  assert.throws(()=>chrome.action.setIcon({imageData:{}}), /must contain an ImageData/);
+});
+
+
+test('identity redirect URL is local, authenticated and does not normalize caller paths', () => {
+  const { chrome, host } = extensionContext('background', {permissions:['identity']});
+  const prefix = `https://${EXTENSION_ID}.chromiumapp.org`;
+  assert.equal(chrome.identity.getRedirectURL(), prefix + '/');
+  assert.equal(chrome.identity.getRedirectURL(''), prefix + '/');
+  assert.equal(chrome.identity.getRedirectURL('../a?b#c'), prefix + '/../a?b#c');
+  assert.equal(chrome.identity.getRedirectURL('//other.test'), prefix + '//other.test');
+  assert.throws(() => chrome.identity.getRedirectURL(7), /signature|parameter|invocation/);
+  assert.equal(host.calls.length, 0);
+});
+
+
+test('unavailable synchronous host APIs validate then refuse without fake cancellation', () => {
+  const {chrome,host}=extensionContext('background',{permissions:['desktopCapture'],unavailableSyncApis:true});
+  let called=false;
+  assert.equal(typeof chrome.desktopCapture.chooseDesktopMedia,'function');
+  assert.throws(()=>chrome.desktopCapture.chooseDesktopMedia(['screen'],()=>{called=true}), /This function is not supported/);
+  assert.throws(()=>chrome.desktopCapture.chooseDesktopMedia(7), /signature|parameter|invocation/);
+  assert.equal(called,false);
+  assert.equal(host.calls.length,0);
+});

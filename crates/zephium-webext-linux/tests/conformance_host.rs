@@ -44,6 +44,7 @@ fn control(
     args: &Value,
 ) -> Result<Value, String> {
     match operation {
+        "disableUserScripts" => Ok(json!({"enabled": false, "backendAvailable": false})),
         "consoleMessages" => Ok(Value::Array(
             host.runtime
                 .errors(ExtensionInstallId::from(INSTALL))

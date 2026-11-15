@@ -172,7 +172,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("tabs")],
-        "Opens separate extension windows as browser tabs",
+        "Can read browser windows but can't create, resize, focus or close them through the extension API",
         LIN,
     ),
     (
@@ -206,10 +206,45 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
         LIN,
     ),
+    (
+        &[Key("omnibox")],
+        "Can't add address-bar commands or suggestions",
+        LIN,
+    ),
+    (
+        &[Permission("tabCapture")],
+        "Can't capture tab audio or video",
+        LIN,
+    ),
+    (
+        &[Permission("declarativeContent")],
+        "Can't evaluate declarative page-content rules",
+        LIN,
+    ),
+    (
+        &[Key("background.service_worker")],
+        "Background workers lack service-worker registrations, push, extension fetch interception and static routes",
+        LIN,
+    ),
+    (
+        &[Key("action"), Key("browser_action")],
+        "Action ImageData is limited to 256 pixels per dimension and 16 representations; packaged icons to 1 MiB and 1024 pixels per dimension",
+        LIN,
+    ),
+    (
+        &[Key("content_scripts"), Permission("scripting")],
+        "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget",
+        LIN,
+    ),
+    (
+        &[Key("default_locale")],
+        "Translation catalogs are limited to 8 MiB and 16384 messages",
+        LIN,
+    ),
     (&[Key("incognito")], "Can't run in private windows", LIN),
     (
         &[Permission("cookies")],
-        "Can't read or change cookies",
+        "Can't read or change cookies or report cookie changes",
         LIN,
     ),
     (&[Permission("downloads")], "Can't manage downloads", LIN),
@@ -297,11 +332,11 @@ mod tests {
     }
 
     #[test]
-    fn window_tab_fallback_limitation_is_linux_only() {
+    fn window_mutation_limitation_is_linux_only() {
         let raw = json!({"manifest_version":3,"permissions":["tabs"]});
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
-            ["Opens separate extension windows as browser tabs"]
+            ["Can read browser windows but can't create, resize, focus or close them through the extension API"]
         );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
@@ -412,9 +447,10 @@ mod tests {
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
-                "Opens separate extension windows as browser tabs",
+                "Can read browser windows but can't create, resize, focus or close them through the extension API",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
+                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget",
             ]
         );
         assert_eq!(
@@ -426,7 +462,8 @@ mod tests {
             assess(reader, Platform::Linux),
             [
                 "Can't change font settings",
-                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)"
+                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
+                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget"
             ]
         );
     }

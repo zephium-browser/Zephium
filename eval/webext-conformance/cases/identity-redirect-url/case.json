@@ -1,0 +1,1 @@
+{"id": "identity-redirect-url", "title": "Identity redirect URL uses the authenticated extension identity without URL normalization", "apis": ["identity.getRedirectURL"], "permissions": ["identity"]}

@@ -267,6 +267,7 @@ fn methods() -> Vec<String> {
             .map(|name| (*name).to_owned()),
     );
     methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.extend(super::unavailable::methods().map(str::to_owned));
     methods.extend(
         super::declarative_net_request::METHODS
             .iter()
@@ -422,6 +423,11 @@ fn external_pages_reach_only_the_two_explicit_messaging_entry_points() {
         .into_iter()
         .filter(|method| !matches!(method.as_str(), "runtime.sendMessage" | "runtime.connect"))
     {
+        // This test isolates context admission; the expanded schema exceeds one
+        // sender's burst allowance, which has separate dispatcher coverage.
+        let mut table = ApiTable::<Host>::new();
+        register(&mut table).unwrap();
+        dispatcher = Dispatcher::new(table);
         assert_eq!(
             call(
                 &mut dispatcher,
@@ -601,9 +607,13 @@ fn normalized_optional_arguments_reach_services_and_invalid_shapes_do_not() {
 fn generated_methods_without_handlers_are_an_explicit_backlog() {
     let mut table = ApiTable::<Host>::new();
     register(&mut table).unwrap();
-    let implemented: std::collections::BTreeSet<_> = table.names().collect();
-    let mut namespaces: std::collections::BTreeSet<_> = table
+    let refused: std::collections::BTreeSet<_> = super::unavailable::methods().collect();
+    let implemented: std::collections::BTreeSet<_> = table
         .names()
+        .filter(|name| !refused.contains(name))
+        .collect();
+    let mut namespaces: std::collections::BTreeSet<_> = implemented
+        .iter()
         .filter_map(|name| {
             crate::schema::source_method(name)
                 .split_once('.')

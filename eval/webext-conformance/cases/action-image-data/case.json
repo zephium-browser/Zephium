@@ -1,0 +1,1 @@
+{"id": "action-image-data", "title": "Action icons accept canvas ImageData and dictionaries and reject malformed rasters", "apis": ["action.setIcon"], "permissions": []}

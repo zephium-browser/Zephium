@@ -240,3 +240,73 @@ bytes = 9524
 path = "extensions/common/api/web_request.json"
 sha256 = "329b698fbfb894853f1ecd7120ffd3b845d9f1d0fdb82aeef05affcf78d6c12d"
 bytes = 50082
+
+[[files]]
+path = "chrome/common/extensions/api/declarative_content.json"
+sha256 = "2417ce709ee161f60443cfdbdda16967a82c188447fb13aa7ca533903d928454"
+bytes = 10337
+
+[[files]]
+path = "chrome/common/extensions/api/desktop_capture.json"
+sha256 = "9c64346570865b8debf1ed6168487a7a65edb821c7e65d71b6d27baa255e5ea2"
+bytes = 6109
+
+[[files]]
+path = "chrome/common/extensions/api/devtools/inspected_window.json"
+sha256 = "4ee29f628ab7fead8be2443de3d9cccd5e2d08f2d051e5867b494224929d8d48"
+bytes = 11231
+
+[[files]]
+path = "chrome/common/extensions/api/devtools/network.json"
+sha256 = "e38aa9e7a0060a78e943deb52eb6f019a9bede124e2ab71884e98c27b8285a92"
+bytes = 3105
+
+[[files]]
+path = "chrome/common/extensions/api/devtools/panels.json"
+sha256 = "140c94eef4c4a9e7dfd91696b6a69e63d74b03dfa92aad5ffae5b54aa28dd696"
+bytes = 15270
+
+[[files]]
+path = "chrome/common/extensions/api/devtools/performance.json"
+sha256 = "ec04537b302a0867140c4f1b0ddf56003534738c0e383b17865fab89ed033b5e"
+bytes = 761
+
+[[files]]
+path = "chrome/common/extensions/api/devtools/recorder.json"
+sha256 = "7a374b6e4cebdccfa12fc4f1afd07db31be5213836009907dda4b357944d8d89"
+bytes = 4480
+
+[[files]]
+path = "chrome/common/extensions/api/identity.webidl"
+sha256 = "a4bf17a0b42463e5bc9f9c6b7ac4dbd559d88dda8f89d6edb0276270df7ba1ac"
+bytes = 9912
+
+[[files]]
+path = "chrome/common/extensions/api/omnibox.json"
+sha256 = "f3901b7e295d60a0a805cd46155873c51c0343b3e00d517dda8a619122690431"
+bytes = 10023
+
+[[files]]
+path = "chrome/common/extensions/api/reading_list.webidl"
+sha256 = "0db9b32cb27d91a99c88d16ca361c49abc183bc6b848bf41a2a503cc3af49ed8"
+bytes = 4443
+
+[[files]]
+path = "chrome/common/extensions/api/tab_capture.idl"
+sha256 = "2ee2fe2a913b514bf3225ddf6205dd7d6b18246685d0c1581699f84762208fdc"
+bytes = 5193
+
+[[files]]
+path = "chrome/common/extensions/api/tab_groups.json"
+sha256 = "8a9ef52d3f8325497b2ce1e3319424f38ea765e0d11a771b37d799d578f2ed66"
+bytes = 8183
+
+[[files]]
+path = "chrome/common/extensions/api/tts.json"
+sha256 = "3be1def8ef2fa4384e7ea8c130ce10cc46701bca82eb5ee449cc986ce5f5a78a"
+bytes = 11758
+
+[[files]]
+path = "extensions/common/api/cookies.json"
+sha256 = "55af34867fdeb62e97edf8d28c83acaec076f131ecd44713c54fc65be10ca768"
+bytes = 15682

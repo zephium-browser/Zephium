@@ -23,6 +23,7 @@ pub mod sessions;
 pub mod side_panel;
 pub mod tabs;
 pub mod top_sites;
+pub mod unavailable;
 pub mod web_navigation;
 pub mod web_request;
 pub mod windows;
@@ -68,6 +69,7 @@ where
     side_panel::register(table)?;
     top_sites::register(table)?;
     search::register(table)?;
+    unavailable::register(table)?;
     Ok(())
 }
 
