@@ -246,7 +246,15 @@ enum Offscreen {
     Open,
 }
 
+struct UserExecution {
+    permit: linux_browser::ExecutionPermit,
+    request: zephium_webext_runtime::api::scripting::Request,
+    sender: Sender,
+    permissions: InstallPermissions,
+}
+
 struct ScriptCall {
+    execution: Option<Box<UserExecution>>,
     responder: Responder,
     sender: Box<Sender>,
     name: &'static str,
@@ -256,11 +264,13 @@ struct ScriptCall {
 enum ScriptCandidate {
     Content(ScriptRegistry),
     User(zephium_webext_runtime::user_scripts::Registry),
+    UserWorlds(std::collections::BTreeSet<String>),
 }
 
 impl ScriptCandidate {
     fn record(&self, version: &str) -> Result<(&'static str, Vec<u8>), ApiError> {
         match self {
+            Self::UserWorlds(_) => Err(ApiError::malformed_arguments()),
             Self::Content(registry) => serde_json::to_vec(&registry.snapshot())
                 .map(|bytes| ("scripts.json", bytes))
                 .map_err(|_| ApiError::malformed_arguments()),
@@ -271,6 +281,7 @@ impl ScriptCandidate {
 }
 
 struct PendingScripts {
+    execution: Option<Box<UserExecution>>,
     ticket: u64,
     responder: Responder,
     candidate: ScriptCandidate,
@@ -311,6 +322,7 @@ pub(crate) struct InstallState {
     alarms: Alarms,
     scripts: ScriptRegistry,
     user_scripts: zephium_webext_runtime::user_scripts::Registry,
+    ephemeral_user_worlds: std::collections::BTreeSet<String>,
     user_script_guid: String,
     script_calls: VecDeque<ScriptCall>,
     script_pending: Option<PendingScripts>,
@@ -494,6 +506,7 @@ pub(crate) struct State {
     unix_millis: u64,
     contexts: HashMap<ContextKey, Value>,
     browser: Option<Box<dyn BrowserPort>>,
+    browser_shared: Rc<linux_browser::Shared>,
 }
 
 struct At(u64);
@@ -741,6 +754,7 @@ impl ScriptingHost for State {
         let args = invocation.take_args();
         self.defer(invocation, |responder| {
             Work::Scripts(ScriptCall {
+                execution: None,
                 responder,
                 sender,
                 name,
@@ -875,14 +889,37 @@ impl State {
 
 impl BrowserPort for State {
     fn user_scripts_request(&mut self, mut invocation: Invocation<'_>) -> Handled {
-        if invocation.name() == "userScripts.execute" {
-            return invocation.reply(Err(unsupported()));
-        }
+        let execution = if invocation.name() == "userScripts.execute" {
+            let request = match zephium_webext_runtime::api::scripting::prepare_user_execute(
+                self,
+                &invocation,
+            ) {
+                Ok(request) => request,
+                Err(error) => return invocation.reply(Err(error)),
+            };
+            let permit = match self.browser_shared.reserve_user_execution(&request) {
+                Ok(permit) => permit,
+                Err(error) => return invocation.reply(Err(error)),
+            };
+            Some(Box::new(UserExecution {
+                permit,
+                request,
+                sender: invocation.sender().clone(),
+                permissions: invocation.permissions().clone(),
+            }))
+        } else {
+            None
+        };
         let sender = Box::new(invocation.sender().clone());
         let name = invocation.name();
-        let args = invocation.take_args();
+        let args = if execution.is_some() {
+            Vec::new()
+        } else {
+            invocation.take_args()
+        };
         self.defer(invocation, |responder| {
             Work::Scripts(ScriptCall {
+                execution,
                 responder,
                 sender,
                 name,
@@ -1683,6 +1720,7 @@ impl RuntimeHost {
         Ok(Self {
             dispatcher: Dispatcher::new(table),
             state: State {
+                browser_shared: browser.clone(),
                 network_tabs: HashMap::new(),
                 profile: config.profile,
                 incognito: config.incognito,
@@ -2387,6 +2425,7 @@ impl RuntimeHost {
             alarms: Alarms::new(),
             scripts,
             user_scripts: admitted.user_scripts,
+            ephemeral_user_worlds: Default::default(),
             user_script_guid: admitted.user_script_guid,
             script_calls: VecDeque::new(),
             script_pending: None,
@@ -2960,6 +2999,9 @@ impl RuntimeHost {
                     .collect()
             }
             ScriptCandidate::User(registry) => projection.user_scripts = registry.clone(),
+            ScriptCandidate::UserWorlds(worlds) => {
+                projection.ephemeral_user_worlds = worlds.clone()
+            }
         }
         Some(installs)
     }
@@ -3019,6 +3061,7 @@ impl RuntimeHost {
         match pending.candidate {
             ScriptCandidate::Content(registry) => state.scripts = registry,
             ScriptCandidate::User(registry) => state.user_scripts = registry,
+            ScriptCandidate::UserWorlds(worlds) => state.ephemeral_user_worlds = worlds,
         }
         let revoked: Vec<_> = self
             .router
@@ -3033,7 +3076,11 @@ impl RuntimeHost {
         for context in revoked {
             self.close_context(&context, out);
         }
-        self.settle(pending.responder, Ok(pending.value), out);
+        if let Some(execution) = pending.execution {
+            self.launch_user_execution(execution, pending.responder, out);
+        } else {
+            self.settle(pending.responder, Ok(pending.value), out);
+        }
         self.resume_script_calls(out);
     }
 
@@ -3063,6 +3110,38 @@ impl RuntimeHost {
         self.resume_script_calls(out);
     }
 
+    pub(crate) fn user_execution_allowed(&self, sender: &Sender) -> bool {
+        self.state.user_scripts_allowed(sender)
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| permissions.has_api("userScripts"))
+    }
+
+    fn launch_user_execution(
+        &mut self,
+        execution: Box<UserExecution>,
+        responder: Responder,
+        out: &mut Outbox,
+    ) {
+        if !self.user_execution_allowed(&execution.sender)
+            || self.state.install(&execution.sender).is_err()
+        {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        if let Some(finished) = self.browser.scripting_deferred(
+            execution.request,
+            execution.sender,
+            execution.permissions,
+            responder,
+            execution.permit,
+        ) {
+            self.finish(finished, out);
+        }
+    }
+
     fn process_script_calls(&mut self, install: ExtensionInstallId, out: &mut Outbox) {
         loop {
             if self.script_publication_pending() {
@@ -3071,7 +3150,7 @@ impl RuntimeHost {
             let Some(state) = self.state.installs.get_mut(&install) else {
                 return;
             };
-            let Some(call) = state.script_calls.pop_front() else {
+            let Some(mut call) = state.script_calls.pop_front() else {
                 return;
             };
             if self
@@ -3089,7 +3168,44 @@ impl RuntimeHost {
                 );
                 continue;
             }
-            let prepared = if call.name.starts_with("userScripts.") {
+            let prepared = if let Some(execution) = &call.execution {
+                (|| {
+                    let state = self
+                        .state
+                        .installs
+                        .get(&install)
+                        .filter(|state| state.allow_user_scripts)
+                        .ok_or_else(ApiError::context_invalidated)?;
+                    let zephium_webext_runtime::api::scripting::Request::UserExecute {
+                        world,
+                        world_id,
+                        ..
+                    } = &execution.request
+                    else {
+                        return Err(ApiError::malformed_arguments());
+                    };
+                    let id = world_id.as_deref().unwrap_or("");
+                    let known = *world == zephium_webext_runtime::user_scripts::World::Main
+                        || state.user_scripts.world_ids().contains(id)
+                        || state.ephemeral_user_worlds.contains(id);
+                    if known {
+                        return Ok((Value::Null, None));
+                    }
+                    let mut worlds = state.ephemeral_user_worlds.clone();
+                    worlds.insert(id.to_owned());
+                    let all: std::collections::BTreeSet<_> = state
+                        .user_scripts
+                        .world_ids()
+                        .into_iter()
+                        .chain(worlds.iter().map(String::as_str))
+                        .filter(|id| !id.is_empty())
+                        .collect();
+                    if all.len() > zephium_webext_runtime::user_scripts::MAX_WORLDS {
+                        return Err(ApiError::too_many_pending());
+                    }
+                    Ok((Value::Null, Some(ScriptCandidate::UserWorlds(worlds))))
+                })()
+            } else if call.name.starts_with("userScripts.") {
                 self.state
                     .installs
                     .get(&install)
@@ -3106,7 +3222,25 @@ impl RuntimeHost {
                             )
                         })
                     })
-                    .map(|(value, candidate)| (value, candidate.map(ScriptCandidate::User)))
+                    .and_then(|(value, candidate)| {
+                        if let Some(registry) = &candidate {
+                            let state = self
+                                .state
+                                .installs
+                                .get(&install)
+                                .ok_or_else(ApiError::context_invalidated)?;
+                            let worlds: std::collections::BTreeSet<_> = registry
+                                .world_ids()
+                                .into_iter()
+                                .chain(state.ephemeral_user_worlds.iter().map(String::as_str))
+                                .filter(|id| !id.is_empty())
+                                .collect();
+                            if worlds.len() > zephium_webext_runtime::user_scripts::MAX_WORLDS {
+                                return Err(ApiError::too_many_pending());
+                            }
+                        }
+                        Ok((value, candidate.map(ScriptCandidate::User)))
+                    })
             } else {
                 zephium_webext_runtime::scripting_registry::prepare_registration(
                     &self.state,
@@ -3124,7 +3258,11 @@ impl RuntimeHost {
                 }
             };
             let Some(candidate) = candidate else {
-                self.settle(call.responder, Ok(value), out);
+                if let Some(execution) = call.execution.take() {
+                    self.launch_user_execution(execution, call.responder, out);
+                } else {
+                    self.settle(call.responder, Ok(value), out);
+                }
                 continue;
             };
             let state = self
@@ -3132,7 +3270,9 @@ impl RuntimeHost {
                 .installs
                 .get_mut(&install)
                 .expect("admitted install");
-            let write = if let Some(directory) = &state.state_directory {
+            let write = if matches!(candidate, ScriptCandidate::UserWorlds(_)) {
+                None
+            } else if let Some(directory) = &state.state_directory {
                 let (file, bytes) =
                     match candidate.record(state.manifest["version"].as_str().unwrap_or("")) {
                         Ok((file, bytes))
@@ -3155,6 +3295,7 @@ impl RuntimeHost {
             };
             self.next_ticket = ticket;
             state.script_pending = Some(PendingScripts {
+                execution: call.execution,
                 ticket,
                 responder: call.responder,
                 candidate,
@@ -4560,6 +4701,7 @@ impl RuntimeHost {
 
     fn close_context(&mut self, context: &ContextKey, out: &mut Outbox) {
         self.dispatcher.cancel_context(context);
+        self.browser.cancel_awaiting_injections(context);
         let limiter = self.dispatcher.limiter_mut();
         let actions = self.router.ports.cancel_context(context, limiter);
         self.router.port_actions(actions, limiter, out);

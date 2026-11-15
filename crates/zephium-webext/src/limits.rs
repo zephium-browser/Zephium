@@ -122,7 +122,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("userScripts")],
-        "User scripts require Allow user scripts. Their isolated evaluation, eval and Function ignore page CSP; DOM inline script and style obey page CSP. Only empty world CSP is accepted; Chromium's default user-world CSP is not enforced. Programmatic userScripts.execute is unavailable.",
+        "User scripts require Allow user scripts. Their isolated evaluation, eval and Function ignore page CSP; DOM inline script and style obey page CSP. Only empty world CSP is accepted; Chromium's default user-world CSP is not enforced. Programmatic execution requires effective host grants; activeTab-only targets are unavailable. Batches are limited to 256 sources and 16 MiB; pending preparation to 64 calls and 16 MiB per profile.",
         LIN,
     ),
     (

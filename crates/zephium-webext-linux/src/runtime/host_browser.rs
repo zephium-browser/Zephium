@@ -32,6 +32,7 @@ pub(crate) struct ContentInstall {
     pub messages: std::sync::Arc<zephium_webext_runtime::i18n::Messages>,
     pub scripts: Vec<(RegisteredScript, ContentScriptMatcher)>,
     pub user_scripts: zephium_webext_runtime::user_scripts::Registry,
+    pub ephemeral_user_worlds: std::collections::BTreeSet<String>,
     pub allow_user_scripts: bool,
     pub site_access: SiteAccess,
     pub origins: Vec<String>,
@@ -442,6 +443,7 @@ impl RuntimeHost {
                         .map(|injection| (injection.script.clone(), injection.matcher.clone()))
                         .collect(),
                     user_scripts: state.user_scripts.clone(),
+                    ephemeral_user_worlds: state.ephemeral_user_worlds.clone(),
                     allow_user_scripts: state.allow_user_scripts
                         && permissions.has_api("userScripts"),
                     site_access: permissions.site_access().clone(),

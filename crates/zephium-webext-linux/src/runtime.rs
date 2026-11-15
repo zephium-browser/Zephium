@@ -260,6 +260,8 @@ struct Inner {
     network_publication: RefCell<Option<NetworkPublication>>,
     network_tabs: RefCell<HashMap<BridgeViewId, ItemId>>,
     idle: Cell<bool>,
+    injection_waiters: RefCell<std::collections::BTreeSet<u64>>,
+    injection_poll: RefCell<Option<glib::SourceId>>,
     running: Cell<bool>,
     retired: Cell<bool>,
     events: RefCell<VecDeque<NativeEvent>>,
@@ -443,6 +445,8 @@ impl ProfileRuntime {
             network_publication: RefCell::new(None),
             network_tabs: RefCell::new(HashMap::new()),
             idle: Cell::new(false),
+            injection_waiters: RefCell::new(Default::default()),
+            injection_poll: RefCell::new(None),
             running: Cell::new(false),
             retired: Cell::new(false),
             events: RefCell::new(VecDeque::new()),
@@ -1863,6 +1867,7 @@ impl Inner {
                 .map(|declaration| (declaration.script.clone(), declaration.matcher.clone()))
                 .collect(),
             user_scripts: user_scripts.clone(),
+            ephemeral_user_worlds: Default::default(),
             allow_user_scripts: spec.allow_user_scripts && spec.permissions.has_api("userScripts"),
             site_access: spec.permissions.site_access().clone(),
             origins: grants.origins,
@@ -2194,8 +2199,79 @@ impl Inner {
 }
 
 impl Inner {
+    fn prepare_user_injection(self: &Rc<Self>, pending: u64) {
+        use zephium_webext_runtime::ApiError;
+        let Some(waiting) = self.browser.awaiting_injection(pending) else {
+            return;
+        };
+        let allowed = self
+            .bridge
+            .with_runtime(|host, _| host.user_execution_allowed(&waiting.sender))
+            .unwrap_or(false);
+        let outcome = if !allowed || self.retired.get() {
+            Err(ApiError::context_invalidated())
+        } else if std::time::Instant::now() >= waiting.deadline {
+            Err(ApiError::other("User-script world admission timed out."))
+        } else if let Some(view) = waiting.tab.and_then(|tab| self.browser.view_of(tab)) {
+            match self.bridge.user_execution_ready(
+                view,
+                waiting.sender.install(),
+                waiting.sender.generation().get(),
+                &waiting.admission_world,
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    self.injection_waiters.borrow_mut().insert(pending);
+                    return;
+                }
+                Err(_) => Err(ApiError::cannot_access_page()),
+            }
+        } else {
+            Err(ApiError::context_invalidated())
+        };
+        match self.browser.materialize_injection(pending, outcome) {
+            Ok(outgoing) => {
+                for item in outgoing {
+                    self.outgoing(item);
+                }
+            }
+            Err(finished) => {
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.finish(*finished, out));
+            }
+        }
+    }
+
+    fn arm_injection_wait(self: &Rc<Self>) {
+        if self.injection_waiters.borrow().is_empty() || self.injection_poll.borrow().is_some() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let source = glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let ids = std::mem::take(&mut *inner.injection_waiters.borrow_mut());
+            for id in ids {
+                inner.prepare_user_injection(id);
+            }
+            if inner.injection_waiters.borrow().is_empty() {
+                inner.injection_poll.borrow_mut().take();
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+        *self.injection_poll.borrow_mut() = Some(source);
+    }
+
     fn outgoing(self: &Rc<Self>, item: browser::Outgoing) {
         match item {
+            browser::Outgoing::PrepareInjection { pending } => {
+                self.prepare_user_injection(pending);
+                self.arm_injection_wait();
+            }
             browser::Outgoing::Language {
                 pending,
                 tab,
@@ -2230,7 +2306,7 @@ impl Inner {
                         source: step.source.clone(),
                         source_fd: None,
                         source_url: step.source_url.clone(),
-                        args_json: step.args_json.clone(),
+                        args_json: step.args_json.to_string(),
                         timeout_ms: step.timeout_ms(),
                     };
                     self.bridge.inject(view, install, request).ok()

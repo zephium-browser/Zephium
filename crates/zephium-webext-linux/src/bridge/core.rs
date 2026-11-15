@@ -89,6 +89,7 @@ pub(crate) enum AttachOutcome {
 pub(crate) enum Outgoing {
     Attach {
         generation: u64,
+        serial: u64,
     },
     Detach {
         generation: u64,
@@ -212,6 +213,8 @@ struct View {
     contexts: HashSet<ContextKey>,
     inflight: usize,
     sent_tables: BTreeSet<u64>,
+    accepted_scripts: Option<(u64, u64)>,
+    attach_serial: u64,
 }
 
 impl View {
@@ -604,6 +607,8 @@ impl Core {
                 contexts: HashSet::new(),
                 inflight: 0,
                 sent_tables: BTreeSet::new(),
+                accepted_scripts: None,
+                attach_serial: 0,
             },
         );
         self.attach_now(id);
@@ -797,6 +802,10 @@ impl Core {
         let Ok(bytes) = encode_ui(&UiMessage::Attach(attach)) else {
             return;
         };
+        let Some(serial) = view.attach_serial.checked_add(1) else {
+            return;
+        };
+        view.attach_serial = serial;
         view.attached = Some((generation, view.plan.clone()));
         view.phase = Phase::InFlight(generation);
         view.reattach_on_navigation = false;
@@ -804,7 +813,7 @@ impl Core {
             view: id,
             name: ATTACH_MESSAGE,
             bytes,
-            outgoing: Outgoing::Attach { generation },
+            outgoing: Outgoing::Attach { generation, serial },
             policy: None,
             scripts: None,
             source: None,
@@ -889,6 +898,10 @@ impl Core {
             self.stats.attach_refused += 1;
             return;
         };
+        let Some(serial) = view.attach_serial.checked_add(1) else {
+            return;
+        };
+        view.attach_serial = serial;
         view.attached = Some((generation, view.plan.clone()));
         view.phase = Phase::InFlight(generation);
         view.reattach_on_navigation = false;
@@ -896,18 +909,32 @@ impl Core {
             view: id,
             name: ATTACH_MESSAGE,
             bytes,
-            outgoing: Outgoing::Attach { generation },
+            outgoing: Outgoing::Attach { generation, serial },
             policy: None,
             scripts: None,
             source: None,
         });
     }
 
+    #[cfg(test)]
     pub fn attach_settled(&mut self, id: u64, generation: u64, outcome: AttachOutcome) {
+        let Some(serial) = self.views.get(&id).map(|view| view.attach_serial) else {
+            return;
+        };
+        self.attach_request_settled(id, generation, serial, outcome);
+    }
+
+    pub fn attach_request_settled(
+        &mut self,
+        id: u64,
+        generation: u64,
+        serial: u64,
+        outcome: AttachOutcome,
+    ) {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        if view.phase != Phase::InFlight(generation) {
+        if view.phase != Phase::InFlight(generation) || view.attach_serial != serial {
             return;
         }
         match outcome {
@@ -1013,6 +1040,7 @@ impl Core {
             return;
         };
         view.inflight = 0;
+        view.accepted_scripts = None;
         let mut changes = Vec::new();
         view.frames.clear(&mut changes);
 
@@ -1973,6 +2001,19 @@ impl Core {
         table_generation: u64,
         accepted: Option<bool>,
     ) {
+        if accepted == Some(true) {
+            if let Some(view) = self.views.get_mut(&id).filter(|view| {
+                view.generation() == Some(generation)
+                    && view.sent_tables.contains(&table_generation)
+            }) {
+                if view
+                    .accepted_scripts
+                    .is_none_or(|(epoch, table)| epoch != generation || table_generation >= table)
+                {
+                    view.accepted_scripts = Some((generation, table_generation));
+                }
+            }
+        }
         if accepted == Some(false) {
             if let Some(leases) = self.table_leases.get_mut(&(id, generation)) {
                 leases.remove(&table_generation);
@@ -2272,6 +2313,48 @@ pub enum InjectionError {
 }
 
 impl Core {
+    pub fn user_execution_ready(
+        &self,
+        id: u64,
+        install: ExtensionInstallId,
+        epoch: u64,
+        world: &str,
+    ) -> Result<bool, InjectionError> {
+        let view = self.views.get(&id).ok_or(InjectionError::Stale)?;
+        if self.closed
+            || self.install_generations.get(&install) != Some(&epoch)
+            || !matches!(view.role, Role::Tab(_))
+        {
+            return Err(InjectionError::Denied);
+        }
+        let grant = |plan: &ResolvedPlan| {
+            plan.worlds
+                .get(world)
+                .is_some_and(|grant| grant.install == install && grant.install_generation == epoch)
+        };
+        if !grant(&view.plan) {
+            return Err(InjectionError::Denied);
+        }
+        let generation = match view.phase {
+            Phase::Pending | Phase::InFlight(_) => return Ok(false),
+            Phase::Refused(_) => return Err(InjectionError::Denied),
+            Phase::Live(generation) => generation,
+        };
+        if !view.attached_plan().is_some_and(grant) {
+            return Err(InjectionError::Denied);
+        }
+        let owner = install_hex(install);
+        let Some(table) = self.scripts.get(&self.current_scripts) else {
+            return Ok(false);
+        };
+        if table.table.admissions.get(&owner) != Some(&epoch)
+            || table.table.bootstraps.get(world) != Some(&owner)
+        {
+            return Err(InjectionError::Denied);
+        }
+        Ok(view.accepted_scripts == Some((generation, self.current_scripts)))
+    }
+
     pub fn frame_target(
         &self,
         id: u64,

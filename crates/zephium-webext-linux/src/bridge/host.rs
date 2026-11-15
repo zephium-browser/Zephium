@@ -401,6 +401,19 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         result
     }
 
+    pub(crate) fn user_execution_ready(
+        &self,
+        view: BridgeViewId,
+        install: ExtensionInstallId,
+        epoch: u64,
+        world: &str,
+    ) -> Result<bool, InjectionError> {
+        self.shared
+            .core
+            .borrow()
+            .user_execution_ready(view.0, install, epoch, world)
+    }
+
     /// Resolves a Chrome frame and host document to an exact native target.
     pub fn frame_target(
         &self,
@@ -1007,14 +1020,14 @@ impl<R: Runtime + 'static> Shared<R> {
     fn settle(&self, id: u64, outgoing: Outgoing, reply: Result<DeliveryStatus, Option<bool>>) {
         let mut core = self.core.borrow_mut();
         match outgoing {
-            Outgoing::Attach { generation } => {
+            Outgoing::Attach { generation, serial } => {
                 let outcome = match reply {
                     Ok(DeliveryStatus::Delivered) => AttachOutcome::Accepted,
                     Ok(_) => AttachOutcome::Refused,
                     Err(Some(true)) => AttachOutcome::Unhandled,
                     Err(_) => AttachOutcome::Failed,
                 };
-                core.attach_settled(id, generation, outcome);
+                core.attach_request_settled(id, generation, serial, outcome);
             }
             Outgoing::Deliver { context, frame } => {
                 core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied), frame);

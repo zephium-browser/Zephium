@@ -1,0 +1,1 @@
+{"id":"user-scripts-execute","title":"Ordered classic user-script sources and dedicated execution worlds","apis":["userScripts.execute","userScripts.getScripts","userScripts.getWorldConfigurations"],"permissions":["userScripts","scripting","tabs"],"userScriptsAvailableInitially":true}

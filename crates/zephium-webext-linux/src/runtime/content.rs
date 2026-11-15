@@ -402,7 +402,13 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
             }
         };
         let mut worlds = std::collections::BTreeMap::new();
-        for id in install.user_scripts.world_ids() {
+        let user_worlds: std::collections::BTreeSet<_> = install
+            .user_scripts
+            .world_ids()
+            .into_iter()
+            .chain(install.ephemeral_user_worlds.iter().map(String::as_str))
+            .collect();
+        for id in user_worlds {
             let world = InjectedWorld::UserScript(
                 UserScriptWorldId::parse(id).expect("validated user world"),
             );

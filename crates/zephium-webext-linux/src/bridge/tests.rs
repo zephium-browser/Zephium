@@ -177,7 +177,7 @@ impl Harness {
             .find_map(|effect| match effect {
                 Effect::Send {
                     view,
-                    outgoing: Outgoing::Attach { generation },
+                    outgoing: Outgoing::Attach { generation, .. },
                     ..
                 } if view == id => Some(generation),
                 _ => None,
@@ -608,7 +608,7 @@ fn navigation_reattachment_and_crashes_end_contexts() {
         .iter()
         .find_map(|effect| match effect {
             Effect::Send {
-                outgoing: Outgoing::Attach { generation },
+                outgoing: Outgoing::Attach { generation, .. },
                 ..
             } => Some(*generation),
             _ => None,
@@ -782,7 +782,7 @@ fn missing_or_refused_modules_leave_all_views_unavailable() {
             .filter_map(|effect| match effect {
                 Effect::Send {
                     view,
-                    outgoing: Outgoing::Attach { generation },
+                    outgoing: Outgoing::Attach { generation, .. },
                     ..
                 } => Some((view, generation)),
                 _ => None,
@@ -847,7 +847,7 @@ fn policies_reach_live_views_and_every_later_attachment() {
         .into_iter()
         .find_map(|effect| match effect {
             Effect::Send {
-                outgoing: Outgoing::Attach { generation },
+                outgoing: Outgoing::Attach { generation, .. },
                 ..
             } => Some(generation),
             _ => None,
@@ -1073,7 +1073,7 @@ fn immediate_structural_widening_keeps_the_live_context_and_generation() {
         .expect("widen");
     let effects = h.core.take_effects();
     assert!(closed(&effects).is_empty());
-    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next }, .. } if *next == generation)));
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next, .. }, .. } if *next == generation)));
     h.core.deliver(&sender.context_key(), vec![1, 2]).unwrap();
     assert!(
         h.core.take_effects().is_empty(),
@@ -2035,4 +2035,80 @@ fn user_messaging_requires_the_document_bootstrap_not_a_later_configuration() {
             );
         }
     }
+}
+
+#[test]
+fn execution_readiness_requires_positive_table_ack_and_latest_attach_serial() {
+    use super::scripts::SealedScripts;
+    use zephium_webkit_web_process_protocol::protocol::ScriptBootstrap;
+    let mut h = Harness::new();
+    let (view, generation) = h.tab(5, &tab_plan(&[SITE]));
+    let mut table = script_table(7);
+    table.entries[0].bootstrap = "void 0".into();
+    table.bootstraps.insert(
+        world(),
+        ScriptBootstrap {
+            install_id: format!("{:032x}", 10),
+            source: "void 0".into(),
+        },
+    );
+    h.core
+        .publish_scripts(std::rc::Rc::new(SealedScripts::new(table).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core.scripts_settled(view, generation + 1, 7, Some(true));
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core.scripts_settled(view, generation, 7, Some(true));
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
+    let mut serials = Vec::new();
+    for sites in [
+        vec![SITE, "https://b.test"],
+        vec![SITE, "https://b.test", "https://c.test"],
+    ] {
+        h.core.update_plan(view, &tab_plan(&sites), true).unwrap();
+        serials.push(
+            h.core
+                .take_effects()
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Send {
+                        outgoing: Outgoing::Attach { serial, .. },
+                        ..
+                    } => Some(serial),
+                    _ => None,
+                })
+                .unwrap(),
+        );
+    }
+    h.core
+        .attach_request_settled(view, generation, serials[0], AttachOutcome::Accepted);
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core
+        .attach_request_settled(view, generation, serials[1], AttachOutcome::Accepted);
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
+    assert!(h
+        .core
+        .user_execution_ready(view, install(), 2, &world())
+        .is_err());
+    h.core.process_gone(view);
+    assert_ne!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
 }
