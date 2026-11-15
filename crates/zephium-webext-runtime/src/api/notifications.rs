@@ -45,6 +45,15 @@ pub enum Request {
     GetPermissionLevel,
 }
 
+/// Empty notification service: query/removal facts are known, presentation is unavailable.
+pub fn unavailable(request: Request) -> Result<Value, ApiError> {
+    match request {
+        Request::Clear { .. } | Request::Update { .. } => Ok(Value::Bool(false)),
+        Request::GetAll => Ok(serde_json::json!({})),
+        Request::Create { .. } | Request::GetPermissionLevel => Err(crate::browser::unsupported()),
+    }
+}
+
 /// Validate merged options again at the adapter edge for update operations.
 pub fn validate_options(options: &Value, creating: bool) -> Result<(), ApiError> {
     if creating
@@ -172,6 +181,23 @@ pub fn register<S: BrowserPort + 'static>(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn absent_service_never_claims_display_or_user_permission_denial() {
+        assert!(unavailable(Request::Create {
+            notification_id: None,
+            options: json!({})
+        })
+        .is_err());
+        assert!(unavailable(Request::GetPermissionLevel).is_err());
+        assert_eq!(
+            unavailable(Request::Clear {
+                notification_id: "missing".into()
+            })
+            .unwrap(),
+            false
+        );
+        assert_eq!(unavailable(Request::GetAll).unwrap(), json!({}));
+    }
     #[test]
     fn create_requires_complete_template_and_update_checks_merged_kind() {
         assert!(validate_options(&json!({"title":"a"}), true).is_err());

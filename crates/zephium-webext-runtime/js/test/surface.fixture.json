@@ -158,6 +158,22 @@
           "result": false,
           "returns": "sync",
           "signature": "contextMenus.CreateProperties createProperties, optional function callback"
+        },
+        "update": {
+          "parameters": [
+            {
+              "name": "id",
+              "type": [
+                "integer",
+                "string"
+              ]
+            },
+            {
+              "name": "updateProperties",
+              "type": "object"
+            }
+          ],
+          "result": false
         }
       },
       "permissions": [

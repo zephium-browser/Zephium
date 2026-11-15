@@ -422,6 +422,22 @@ pub trait BrowserPort {
     ) -> Result<(), ApiError> {
         Err(unsupported())
     }
+    /// Caller-scoped native menu registration and mutation.
+    fn context_menu(
+        &mut self,
+        _sender: &Sender,
+        _request: crate::api::context_menus::Request,
+    ) -> Result<Value, ApiError> {
+        Err(unsupported())
+    }
+    /// Install-scoped side-panel configuration and native presentation.
+    fn side_panel(
+        &mut self,
+        _sender: &Sender,
+        _request: crate::api::side_panel::Request,
+    ) -> Result<Value, ApiError> {
+        Err(unsupported())
+    }
     /// Unix time for history defaults and event timestamps.
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now()
@@ -438,7 +454,7 @@ pub fn snapshot(host: &impl BrowserPort, sender: &Sender) -> Result<BrowserSnaps
     Ok(snapshot)
 }
 
-/// Chrome's generic unavailable-function failure.
+/// Explicit unavailable-function failure for adapter gaps.
 pub fn unsupported() -> ApiError {
     ApiError::other("This function is not supported.")
 }

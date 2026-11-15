@@ -36,6 +36,101 @@ pub(crate) struct ContentInstall {
 }
 
 impl RuntimeHost {
+    pub(crate) fn request_interest(&self) -> bool {
+        self.state.registry.has_web_request_listeners()
+    }
+
+    pub(crate) fn request_observed(
+        &mut self,
+        tab: ItemId,
+        observation: &zephium_webext_runtime::api::web_request::Observation,
+        out: &mut Outbox,
+    ) {
+        let Some(tab_id) = self.browser.tab_id(tab) else {
+            return;
+        };
+        let facts = EventFacts {
+            url: Some(&observation.url),
+            resource_type: observation.details["type"].as_str(),
+            tab_id: Some(i64::from(tab_id)),
+            window_id: self
+                .browser
+                .sender_tab(tab)
+                .and_then(|tab| tab["windowId"].as_i64()),
+            ..Default::default()
+        };
+        let installs: Vec<_> = self.state.installs.keys().copied().collect();
+        for install in installs {
+            let Some(permissions) = self.permissions.get(&install) else {
+                continue;
+            };
+            for key in self
+                .state
+                .registry
+                .targets(install, observation.event, &facts)
+            {
+                let Some(sender) = self.router.contexts.get(&key) else {
+                    continue;
+                };
+                for listener in self
+                    .state
+                    .registry
+                    .listeners(sender, observation.event, &facts)
+                {
+                    let extra = self
+                        .state
+                        .registry
+                        .extra_info(sender, observation.event, listener);
+                    if extra
+                        .iter()
+                        .any(|option| matches!(option.as_str(), "blocking" | "asyncBlocking"))
+                    {
+                        continue;
+                    }
+                    let Some(mut details) = observation.project(permissions, extra) else {
+                        continue;
+                    };
+                    details["tabId"] = tab_id.into();
+                    let args = json!([details, [listener.get()]]);
+                    if let Some(frame) = super::event_frame(
+                        sender.kind(),
+                        super::direct_sequence(),
+                        observation.event,
+                        &args,
+                    ) {
+                        out.deliver(key.clone(), frame);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn menu_clicked(
+        &mut self,
+        install: ExtensionInstallId,
+        tab: ItemId,
+        id: &str,
+        context: &zephium_webext_runtime::api::context_menus::MenuContext,
+        out: &mut Outbox,
+    ) -> Result<(), ApiError> {
+        let permissions = self
+            .permissions
+            .get_mut(&install)
+            .ok_or_else(ApiError::context_invalidated)?;
+        let (data, tab) = self.browser.menu_clicked(install, tab, id, context)?;
+        permissions.grant_active_tab(tab.tab.id(), tab.document, &tab.url()?);
+        let args = json!([data, tabs::project(&tab, permissions)]);
+        self.emit(
+            install,
+            "contextMenus.onClicked",
+            &args,
+            StartReason::Event,
+            out,
+        );
+        self.op(super::NativeOp::ScriptsChanged);
+        Ok(())
+    }
+
     pub(crate) fn browser(&self) -> std::rc::Rc<Shared> {
         self.browser.clone()
     }

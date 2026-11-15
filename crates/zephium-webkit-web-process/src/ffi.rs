@@ -4,6 +4,8 @@
 //! or unref. JSC contexts/values with full transfer are released in scope order.
 //! Every C entry aborts on panic, including destroy and completion callbacks.
 
+#[cfg(feature = "native-tests")]
+mod diagnostics;
 mod raw;
 mod scripts;
 
@@ -43,6 +45,7 @@ struct Runtime {
     event_inflight_count: usize,
     injections: BTreeMap<u64, scripts::PendingInjection>,
     next_injection: u64,
+    idle_injections: usize,
     script_tables: BTreeMap<u64, (Weak<protocol::ScriptTable>, usize)>,
     policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
@@ -200,6 +203,14 @@ fn bounded_text(pointer: *const c_char, cap: usize) -> Option<String> {
     None
 }
 
+fn is_data_uri(pointer: *const c_char) -> bool {
+    !pointer.is_null()
+        && b"data:".iter().enumerate().all(|(index, expected)| {
+            // Stop at the first mismatch, including a terminating NUL.
+            unsafe { (*pointer.cast::<u8>().add(index)).eq_ignore_ascii_case(expected) }
+        })
+}
+
 /// WebKit owns both arguments for the duration of initialization.
 #[no_mangle]
 pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
@@ -252,6 +263,7 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 event_inflight_count: 0,
                 injections: BTreeMap::new(),
                 next_injection: 0,
+                idle_injections: 0,
                 script_tables: BTreeMap::new(),
                 policy_maps: BTreeMap::new(),
             });
@@ -1268,17 +1280,19 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
             let pointer = native.pointer;
             let frame_pointer = native.frames.get(&binding.frame)?.pointer;
             let now_ms = (raw::g_get_monotonic_time().max(0) as u64) / 1000;
-            let post_id = runtime
-                .state
-                .reserve_post(
-                    binding.page,
-                    binding.frame,
-                    binding.document_seq,
-                    &binding.world,
-                    length,
-                    now_ms,
-                )
-                .ok()?;
+            let reserved = runtime.state.reserve_post(
+                binding.page,
+                binding.frame,
+                binding.document_seq,
+                &binding.world,
+                length,
+                now_ms,
+            );
+            #[cfg(feature = "native-tests")]
+            if let Err(error) = &reserved {
+                diagnostics::post_refused(binding.page, binding.frame, &binding.world, error);
+            }
+            let post_id = reserved.ok()?;
             Some((post_id, generation, frame, pointer, frame_pointer))
         })
         .flatten();
@@ -1606,11 +1620,11 @@ unsafe extern "C" fn send_request(
             return 0;
         };
         let started = observe.then(std::time::Instant::now);
-        let Some(url) = bounded_text(
-            raw::webkit_uri_request_get_uri(request),
-            protocol::MAX_URI_BYTES,
-        ) else {
-            return 1;
+        let uri = raw::webkit_uri_request_get_uri(request);
+        let Some(url) = bounded_text(uri, protocol::MAX_URI_BYTES) else {
+            // Large inline data is decoded by WebKit, not a network request.
+            // Keep this exception off the normal bounded-URL path.
+            return c_int::from(!is_data_uri(uri));
         };
         let method = bounded_text(raw::webkit_uri_request_get_http_method(request), 32);
         let headers = raw::webkit_uri_request_get_http_headers(request);
@@ -2065,4 +2079,25 @@ unsafe extern "C" fn form_hook_destroyed(data: *mut c_void, _: *mut Object) {
     boundary(|| unsafe {
         drop(Box::from_raw(data.cast::<u64>()));
     });
+}
+
+#[cfg(test)]
+mod request_uri_tests {
+    use super::*;
+
+    #[test]
+    fn inline_data_does_not_enter_the_bounded_network_url_path() {
+        for value in ["", "d", "data", "datax:", "https://data:", "blob:data:"] {
+            assert!(!is_data_uri(CString::new(value).unwrap().as_ptr()));
+        }
+        assert!(!is_data_uri(ptr::null()));
+        for scheme in ["data:", "DATA:"] {
+            let value = CString::new(format!("{scheme}{}", "x".repeat(20_000))).unwrap();
+            assert!(is_data_uri(value.as_ptr()));
+            assert!(bounded_text(value.as_ptr(), protocol::MAX_URI_BYTES).is_none());
+        }
+        let network = CString::new(format!("https://localhost/{}", "x".repeat(20_000))).unwrap();
+        assert!(!is_data_uri(network.as_ptr()));
+        assert!(bounded_text(network.as_ptr(), protocol::MAX_URI_BYTES).is_none());
+    }
 }

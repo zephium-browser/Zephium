@@ -91,7 +91,27 @@ impl Fixture {
                 if path.contains("ubol-") {
                     collected.lock().unwrap().push(json!({"hit": path.clone()}));
                 }
-                let body = if let Some(query) = path.strip_prefix("/report?") {
+                if path.starts_with("/request-error") {
+                    continue;
+                }
+                if path == "/delayed.js" {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let body = "globalThis.fixtureParsed=true;";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    continue;
+                }
+                let body = if path == "/delayed-form" {
+                    let user_agent = text.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("user-agent")
+                            .then(|| value.trim())
+                    });
+                    collected
+                        .lock()
+                        .unwrap()
+                        .push(json!({"requestUserAgent":user_agent}));
+                    "<!doctype html><html><head><script src='/delayed.js'></script></head><body><form><input autocomplete='username'></form></body></html>".into()
+                } else if let Some(query) = path.strip_prefix("/report?") {
                     let decoded = url::form_urlencoded::parse(format!("q={query}").as_bytes())
                         .next()
                         .map(|(_, value)| value.into_owned())
@@ -100,6 +120,8 @@ impl Fixture {
                         collected.lock().unwrap().push(value);
                     }
                     String::new()
+                } else if path.starts_with("/password-form") {
+                    "<!doctype html><title>Password manager fixture</title><form action='/submitted' method='get'><label>Username<input name='username' autocomplete='username'></label><label>Password<input name='password' type='password' autocomplete='current-password'></label><button type='submit'>Sign in</button></form>".into()
                 } else if path.starts_with("/clicked") {
                     collected.lock().unwrap().push(json!({"where": "clicked"}));
                     "<!doctype html><title>clicked</title><p>clicked".to_owned()
@@ -615,4 +637,1341 @@ fn ubol() {
     host.close(tab);
     let mut drain = host.runtime.retire();
     assert!(drain.run(Duration::from_secs(10)));
+}
+
+fn password_package(id: &str, reference: &Value) -> PathBuf {
+    let output = std::process::Command::new("python3")
+        .args(["-I", "-c", r#"
+import hashlib, io, json, os, pathlib, sys, tomllib, zipfile
+pin = next(e for e in tomllib.load(open(sys.argv[1], 'rb'))['extension'] if e['id'] == sys.argv[2])
+reference = json.loads(sys.argv[3])['package']
+assert all(reference[k] == pin[k] for k in ['id','version','sha256']), 'Chromium reference pin is stale'
+assert pin['version'] and pin['sha256'], 'unresolved package pin: run fetch-pinned.sh --pin-missing --extract'
+root = pathlib.Path(os.environ['ZEPHIUM_WEBEXT_PINNED_DIR']) / (pin['id'] + '-' + pin['version'])
+data = root.with_name(root.name + '.crx').read_bytes()
+assert hashlib.sha256(data).hexdigest() == pin['sha256'], 'CRX digest mismatch'
+assert data[:4] == b'Cr24' and int.from_bytes(data[4:8], 'little') == 3, 'expected CRX3'
+archive = zipfile.ZipFile(io.BytesIO(data[12 + int.from_bytes(data[8:12], 'little'):]))
+for name in archive.namelist():
+    assert not name.startswith(('/', '\\')) and '..' not in name.replace('\\', '/').split('/'), 'unsafe package path'
+    if not name.endswith('/'):
+        file = root / name
+        assert not file.is_symlink() and root.resolve() in file.resolve().parents, 'unsafe extracted path'
+        assert file.read_bytes() == archive.read(name), 'extracted file differs from pin: ' + name
+assert json.loads((root / 'manifest.json').read_text())['version'] == pin['version']
+print(root)
+"#])
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/webext/pinned-crx.toml"))
+        .arg(id)
+        .arg(reference.to_string())
+        .output()
+        .expect("python3 pin verification");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+struct MappedPage(gtk::Window);
+
+impl MappedPage {
+    fn new(view: &webkit2gtk::WebView) -> Self {
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(480, 640);
+        window.add(view);
+        window.show_all();
+        window.present();
+        Self(window)
+    }
+}
+
+impl Drop for MappedPage {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.child() {
+            self.0.remove(&child);
+        }
+        self.0.close();
+    }
+}
+
+struct DiagnosticDump(PathBuf);
+
+impl Drop for DiagnosticDump {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            if let Ok(text) = std::fs::read_to_string(&self.0) {
+                let lines: Vec<_> = text.lines().collect();
+                eprintln!(
+                    "diagnostics: {} (last 128 records)\n{}",
+                    self.0.display(),
+                    lines[lines.len().saturating_sub(128)..].join("\n")
+                );
+            }
+        }
+    }
+}
+
+fn diagnostic_rows(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn password_reference(id: &str) -> Value {
+    [
+        include_str!("../../../eval/webext-conformance/reference/password-managers/bitwarden.json"),
+        include_str!(
+            "../../../eval/webext-conformance/reference/password-managers/onepassword.json"
+        ),
+        include_str!(
+            "../../../eval/webext-conformance/reference/password-managers/proton_pass.json"
+        ),
+    ]
+    .into_iter()
+    .map(|source| serde_json::from_str::<Value>(source).unwrap())
+    .find(|reference| reference["package"]["id"] == id)
+    .expect("pinned Chromium package reference")
+}
+
+fn reference_rejection(row: &Value, rows: &[Value], reference: &Value, used: &mut usize) -> bool {
+    // bitwarden.json cites instrumented lines 73/145/153 and passive line 32.
+    let Some(expected) = reference["backgroundUnhandled"]
+        .as_array()
+        .and_then(|items| items.first())
+    else {
+        return false;
+    };
+    let detail = &row["event"]["detail"];
+    let matches = row["context"] == "Background"
+        && detail["kind"] == "unhandled-rejection"
+        && detail["message"]
+            .as_str()
+            .and_then(|text| text.lines().next())
+            == expected["message"].as_str()
+        && *used < expected["maximum"].as_u64().unwrap() as usize
+        && rows
+            .iter()
+            .rev()
+            .find(|call| {
+                call["context"] == "Background"
+                    && call["event"]["sender"] == row["event"]["sender"]
+                    && call["sequence"].as_u64() < row["sequence"].as_u64()
+                    && call["event"]["detail"]["kind"] == "api-failure"
+                    && call["event"]["detail"]["message"] == expected["message"]
+            })
+            .is_some_and(|call| {
+                let failure = &call["event"]["detail"];
+                call["context"] == "Background"
+                    && call["event"]["sender"] == row["event"]["sender"]
+                    && call["sequence"].as_u64() < row["sequence"].as_u64()
+                    && failure["kind"] == "api-failure"
+                    && failure["namespace"] == "runtime"
+                    && failure["method"] == "sendMessage"
+                    && failure["command"] == expected["command"]
+                    && failure["message"] == expected["message"]
+            });
+    if matches {
+        *used += 1;
+    }
+    matches
+}
+
+fn console_message(message: &str) -> String {
+    message
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|word| {
+            if word.starts_with("https://") || word.starts_with("http://") {
+                "<network-url>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("[network-url]", "<network-url>")
+        .replace("TypeError: Load failed", "Load failed")
+}
+
+fn proxy_refusals(row: &Value, rows: &[Value], origin: &Value) -> usize {
+    let context = if row["context"] == "Background" {
+        "BackgroundOwner"
+    } else {
+        row["context"].as_str().unwrap_or_default()
+    };
+    rows.iter()
+        .filter(|failure| {
+            failure["context"] == context
+                && failure["sequence"].as_u64() < row["sequence"].as_u64()
+                && failure["event"]["kind"] == "resource-failed"
+                && failure["event"]["resource"] == *origin
+                && failure["event"]["domain"] == "g-io-error-quark"
+                && failure["event"]["message"]
+                    == "Could not connect to proxy server 127.0.0.1: Connection refused"
+        })
+        .count()
+}
+
+fn reference_offline(row: &Value, rows: &[Value], reference: &Value, used: &mut [usize]) -> bool {
+    let event = &row["event"];
+    let detail = if event["kind"] == "javascript" {
+        &event["detail"]
+    } else {
+        event
+    };
+    for (index, expected) in reference["offlineErrors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        if row["context"] != expected["context"]
+            || detail["kind"] != expected["kind"]
+            || used[index] >= expected["maximum"].as_u64().unwrap() as usize
+        {
+            continue;
+        }
+        // Each rule cites a real blocked request/console line in the reference.
+        // Local package failures, other origins, other errors and extra calls fail.
+        let matches = match detail["kind"].as_str() {
+            Some("resource-failed" | "load-failed") => {
+                detail["resource"] == expected["origin"]
+                    && detail["domain"] == "g-io-error-quark"
+                    && detail["message"]
+                        == "Could not connect to proxy server 127.0.0.1: Connection refused"
+            }
+            Some("fetch-failed") => {
+                detail["origin"] == expected["origin"]
+                    && detail["message"] == "Load failed"
+                    && proxy_refusals(row, rows, &expected["origin"]) > used[index]
+            }
+            Some("console-error") => {
+                console_message(detail["message"].as_str().unwrap_or_default())
+                    == expected["message"].as_str().unwrap()
+                    && rows.iter().any(|failure| {
+                        failure["context"] == row["context"]
+                            && event["sender"].is_string()
+                            && failure["event"]["sender"] == event["sender"]
+                            && proxy_refusals(failure, rows, &expected["origin"]) > 0
+                            && failure["sequence"].as_u64() < row["sequence"].as_u64()
+                            && failure["event"]["detail"]["kind"] == "fetch-failed"
+                            && failure["event"]["detail"]["origin"] == expected["origin"]
+                            && failure["event"]["detail"]["message"] == "Load failed"
+                    })
+            }
+            _ => false,
+        };
+        if matches {
+            used[index] += 1;
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn reference_offline_requires_the_recorded_origin_error_context_and_count() {
+    let reference = password_reference("nngceckbapebfimnlniiiahkandclblb");
+    let mut used = vec![0; reference["offlineErrors"].as_array().unwrap().len()];
+    let row = json!({"context":"BackgroundOwner","event":{"kind":"resource-failed",
+        "resource":"https://api.bitwarden.com","domain":"g-io-error-quark",
+        "message":"Could not connect to proxy server 127.0.0.1: Connection refused"}});
+    assert!(reference_offline(&row, &[], &reference, &mut used));
+    assert!(!reference_offline(&row, &[], &reference, &mut used));
+    for (key, value) in [
+        ("resource", "https://unexpected.test"),
+        ("resource", "chrome-extension://id/missing.js"),
+        ("message", "Forbidden"),
+        ("domain", "WebKitPolicyError"),
+    ] {
+        let mut changed = row.clone();
+        changed["event"][key] = json!(value);
+        assert!(!reference_offline(
+            &changed,
+            &[],
+            &reference,
+            &mut vec![0; used.len()]
+        ));
+    }
+    let fetch = json!({"sequence":2,"context":"Background","event":{"kind":"javascript","sender":"worker-1","detail":{"kind":"fetch-failed","origin":"https://api.bitwarden.com","message":"Load failed"}}});
+    assert!(!reference_offline(
+        &fetch,
+        &[],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    let mut proxy = row.clone();
+    proxy["sequence"] = json!(1);
+    assert!(reference_offline(
+        &fetch,
+        &[proxy.clone()],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    let mut console = json!({"sequence":3,"context":"Background","event":{"kind":"javascript","sender":"worker-2","detail":{"kind":"console-error","message":"Unable to fetch ServerConfig from <network-url> Load failed"}}});
+    assert!(!reference_offline(
+        &console,
+        &[proxy.clone(), fetch.clone()],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    console["event"]["sender"] = json!("worker-1");
+    assert!(reference_offline(
+        &console,
+        &[proxy, fetch],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+    assert_eq!(console_message("Unable to fetch ServerConfig from https://api.bitwarden.com/config TypeError: Load failed"), "Unable to fetch ServerConfig from <network-url> Load failed");
+    let mut changed = row;
+    changed["context"] = json!("ContentScript");
+    assert!(!reference_offline(
+        &changed,
+        &[],
+        &reference,
+        &mut vec![0; used.len()]
+    ));
+}
+
+#[test]
+fn reference_rejection_requires_the_same_command_context_and_single_error() {
+    let reference = password_reference("nngceckbapebfimnlniiiahkandclblb");
+    let message = reference["backgroundUnhandled"][0]["message"]
+        .as_str()
+        .unwrap();
+    let call = json!({"sequence":1,"context":"Background","event":{"sender":"worker","detail":{
+        "kind":"api-failure","namespace":"runtime","method":"sendMessage",
+        "command":"getUserPremiumStatus","message":message}}});
+    let rejection = json!({"sequence":2,"context":"Background","event":{"sender":"worker","detail":{
+        "kind":"unhandled-rejection","message":format!("{message}\nworker.js:1:1")}}});
+    let mut used = 0;
+    assert!(reference_rejection(
+        &rejection,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut used
+    ));
+    assert!(!reference_rejection(
+        &rejection,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut used
+    ));
+    for (field, value) in [
+        ("command", "syncStarted"),
+        ("namespace", "tabs"),
+        ("method", "connect"),
+    ] {
+        let mut other = call.clone();
+        other["event"]["detail"][field] = json!(value);
+        assert!(!reference_rejection(
+            &rejection,
+            &[other],
+            &reference,
+            &mut 0
+        ));
+    }
+    let mut other = rejection.clone();
+    other["context"] = json!("Popup");
+    assert!(!reference_rejection(
+        &other,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut 0
+    ));
+    other = rejection.clone();
+    other["event"]["sender"] = json!("another worker");
+    assert!(!reference_rejection(
+        &other,
+        std::slice::from_ref(&call),
+        &reference,
+        &mut 0
+    ));
+    let mut intervening = call.clone();
+    intervening["sequence"] = json!(2);
+    intervening["event"]["detail"]["command"] = json!("syncStarted");
+    other = rejection.clone();
+    other["sequence"] = json!(3);
+    assert!(!reference_rejection(
+        &other,
+        &[call, intervening],
+        &reference,
+        &mut 0
+    ));
+}
+
+fn password_manager(id: &str, name: &str, signal: &str) {
+    use zephium_webext_linux::diagnostics;
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("set evidence directory"),
+    );
+    let diagnostic =
+        DiagnosticDump(diagnostics::begin(&evidence, id).expect("fresh diagnostic file"));
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"popup-signal", "extensionName":name, "signal":signal}),
+    );
+    let reference = password_reference(id);
+    let directory = password_package(id, &reference);
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let web_context = context();
+    let mut proxy = webkit2gtk::NetworkProxySettings::new(
+        Some("http://127.0.0.1:9"),
+        &["127.0.0.1", "localhost"],
+    );
+    web_context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    let (mut host, _engine) = host(web_context, &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    let spec = spec(&directory, id, 1);
+    let options_declared = spec.manifest.options_page().is_some();
+    let fixture_url = url::Url::parse(&fixture.url("/password-form")).unwrap();
+    let origin = zephium_webext_runtime::pattern::DocumentOrigin::of_url(&fixture_url);
+    let registry = zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
+        &spec.manifest,
+        |_, _| Ok(()),
+    )
+    .expect("manifest script registry");
+    let expected_content: Vec<(String, usize)> = registry
+        .injection_plan(
+            &zephium_webext_runtime::pattern::FrameDocument {
+                url: &fixture_url,
+                origin: &origin,
+                creator_url: None,
+            },
+            true,
+            false,
+            true,
+        )
+        .into_iter()
+        .flat_map(|entry| {
+            (0..entry.script.js.len())
+                .map(|index| (entry.script.id.clone(), index))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    diagnostics::record(
+        id,
+        "ContentScript",
+        json!({"kind":"expected-content", "files":expected_content}),
+    );
+    let mut failures = Vec::new();
+    let observing = Instant::now();
+    match host.runtime.install_admitted(spec) {
+        Err(error) => failures.push(format!("install: {error}")),
+        Ok(()) => {
+            let tab = host.open("about:blank", true);
+            let fixture_view = host.shell.borrow().tabs[&tab].view.clone();
+            let fixture_window = MappedPage::new(&fixture_view);
+            fixture_window.0.resize(1000, 700);
+            fixture_view.load_uri(&fixture.url("/password-form"));
+            pump(&mut host, Duration::from_secs(5));
+            assert_eq!(
+                evaluate(&fixture_view, "return document.visibilityState;"),
+                "visible"
+            );
+            // Match the reference's settled installation page before clicking
+            // an action that can navigate that same page again.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let views: Vec<_> = host
+                    .shell
+                    .borrow()
+                    .tabs
+                    .values()
+                    .filter(|tab| {
+                        tab.url.as_ref().is_some_and(|url| {
+                            url.scheme() == "chrome-extension" && url.host_str() == Some(id)
+                        })
+                    })
+                    .map(|tab| tab.view.clone())
+                    .collect();
+                if views.iter().all(|view| {
+                    !view.is_loading()
+                        && evaluate(view, "return document.readyState === 'complete';") == "true"
+                }) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    failures.push("installation page did not finish loading before action".into());
+                    break;
+                }
+                pump(&mut host, Duration::from_millis(200));
+            }
+            host.shell.borrow_mut().active = Some(tab);
+            host.publish();
+            match host.runtime.invoke_action(install, tab) {
+                Ok(zephium_webext_linux::runtime::ActionActivation::Click) => {
+                    assert_eq!(reference["action"], "click");
+                    diagnostics::record(
+                        id,
+                        "host",
+                        json!({"kind":"action-invoked","activation":"click"}),
+                    );
+                    pump(&mut host, Duration::from_secs(15));
+                    let active = host.shell.borrow().active;
+                    let views: Vec<_> = host
+                        .shell
+                        .borrow()
+                        .tabs
+                        .iter()
+                        .filter(|(tab_id, tab)| {
+                            Some(**tab_id) == active
+                                && tab.url.as_ref().is_some_and(|url| {
+                                    url.scheme() == "chrome-extension" && url.host_str() == Some(id)
+                                })
+                        })
+                        .map(|(_, tab)| tab.view.clone())
+                        .collect();
+                    let mut interactive = false;
+                    for view in views {
+                        let _mapped = MappedPage::new(&view);
+                        pump(&mut host, Duration::from_secs(5));
+                        let state = evaluate(&view, "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),path:location.pathname,controls:[...document.querySelectorAll('button,[role=button],a[href]')].filter(e=>e.getClientRects().length && !e.disabled).slice(0,24).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,120))});");
+                        let ready = evaluate(&view, signal) == "true";
+                        interactive |= ready;
+                        diagnostics::record(
+                            id,
+                            "ExtensionTab",
+                            json!({"kind":"action-tab-state","state":state,"interactive":ready}),
+                        );
+                    }
+                    if !interactive {
+                        failures.push("action did not open its interactive extension tab".into());
+                    }
+                }
+                Ok(zephium_webext_linux::runtime::ActionActivation::Popup(path)) => {
+                    assert_eq!(reference["action"], "popup");
+                    diagnostics::record(
+                        id,
+                        "host",
+                        json!({"kind":"action-invoked","activation":"popup","path":path}),
+                    );
+                }
+                Err(error) => failures.push(format!("action: {error}")),
+            }
+            host.shell.borrow_mut().active = Some(tab);
+            host.publish();
+            match host.runtime.open_page(install, PageKind::Popup, None) {
+                Err(error) => failures.push(format!("popup: {error:?}")),
+                Ok(popup) => {
+                    let _mapped = MappedPage::new(popup.view());
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"view-mapped","mapped":popup.view().is_mapped()}),
+                    );
+                    let reference_empty = reference["forcedPopup"]["interactive"] == false;
+                    let deadline =
+                        Instant::now() + Duration::from_secs(if reference_empty { 5 } else { 45 });
+                    let mut ready = false;
+                    while Instant::now() < deadline {
+                        pump(&mut host, Duration::from_millis(200));
+                        let result = evaluate(popup.view(), signal);
+                        if result.starts_with("error:") {
+                            failures.push(format!("popup signal: {result}"));
+                            break;
+                        }
+                        if result == "true" {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"popup-result", "interactive":ready}),
+                    );
+                    let controls = evaluate(
+                        popup.view(),
+                        r#"return JSON.stringify([...document.querySelectorAll('button,[role="button"]')].filter(e=>e.getClientRects().length && !e.disabled).slice(0,24).map(e=>(e.getAttribute('aria-label')||e.textContent||'').trim().slice(0,120)));"#,
+                    );
+                    diagnostics::record(
+                        id,
+                        "Popup",
+                        json!({"kind":"visible-controls", "labels":controls}),
+                    );
+                    if !ready {
+                        let state = evaluate(popup.view(), "return JSON.stringify({ready:document.readyState,text:document.body?.innerText.slice(0,2048),children:document.body?.children.length,html:document.body?.innerHTML.slice(0,4096),visibility:document.visibilityState,path:location.pathname});");
+                        diagnostics::record(
+                            id,
+                            "Popup",
+                            json!({"kind":"popup-state","state":state}),
+                        );
+                        // onepassword.json: passive lines 349/505 prove welcome-tab
+                        // action and a complete, empty forced manifest popup.
+                        let state: Value = serde_json::from_str(&state).unwrap_or(Value::Null);
+                        let matches_reference = reference_empty
+                            && state["ready"] == "complete"
+                            && state["text"] == reference["forcedPopup"]["text"]
+                            && serde_json::from_str::<Value>(&controls).ok().as_ref()
+                                == Some(&reference["forcedPopup"]["controls"]);
+                        if !matches_reference {
+                            failures.push(
+                                "popup did not match its Chromium first-screen reference".into(),
+                            );
+                        }
+                    }
+                    pump(&mut host, Duration::from_secs(2));
+                }
+            }
+            if options_declared {
+                match host.runtime.open_page(install, PageKind::Options, None) {
+                    Err(error) => failures.push(format!("options: {error:?}")),
+                    Ok(options) => {
+                        let _mapped = MappedPage::new(options.view());
+                        let deadline = Instant::now() + Duration::from_secs(15);
+                        let mut ready = false;
+                        while Instant::now() < deadline {
+                            pump(&mut host, Duration::from_millis(200));
+                            if evaluate(options.view(), "return document.readyState === 'complete' && !!document.body && document.body.children.length > 0;") == "true" {
+                                ready = true;
+                                break;
+                            }
+                        }
+                        diagnostics::record(
+                            id,
+                            "Options",
+                            json!({"kind":"options-result", "loaded":ready}),
+                        );
+                        if !ready {
+                            failures.push("declared options page did not load".into());
+                        }
+                    }
+                }
+            } else {
+                diagnostics::record(id, "Options", json!({"kind":"options-not-declared"}));
+            }
+            pump(
+                &mut host,
+                Duration::from_secs(22).saturating_sub(observing.elapsed()),
+            );
+            host.close(tab);
+        }
+    }
+    let runtime_errors = host.runtime.errors(install);
+    let rows = diagnostic_rows(&diagnostic.0);
+    let api_rows = diagnostic_rows(&diagnostic.0.with_extension("api.jsonl"));
+    if !api_rows.iter().any(|row| {
+        row["context"] == "Background"
+            && row["event"]["detail"]["complete"] == true
+            && row["event"]["detail"]["durationMs"] == 20000
+    }) {
+        failures.push("first 20 seconds of background APIs were not fully captured".into());
+    }
+    if !rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started")
+    {
+        failures.push("background never reached started".into());
+    }
+    if !rows.iter().any(|row| {
+        row["event"]["kind"] == "content-evaluation"
+            && row["event"]["accepted"] == true
+            && row["event"]["success"] == true
+            && row["event"]["fileIndex"]
+                .as_u64()
+                .is_some_and(|index| index < u64::from(u16::MAX))
+    }) {
+        failures.push("no content-script file successfully evaluated on the localhost form".into());
+    }
+    for (script, index) in &expected_content {
+        if !rows.iter().any(|row| {
+            row["event"]["kind"] == "content-evaluation"
+                && row["event"]["accepted"] == true
+                && row["event"]["success"] == true
+                && row["event"]["script"] == *script
+                && row["event"]["fileIndex"].as_u64() == Some(*index as u64)
+        }) {
+            failures.push(format!(
+                "matching content script {script} file {index} did not evaluate"
+            ));
+        }
+    }
+    let mut reference_rejections = 0;
+    let mut offline_used = vec![0; reference["offlineErrors"].as_array().unwrap().len()];
+    let mut reference_console = Vec::new();
+    for row in &rows {
+        if reference_rejection(row, &rows, &reference, &mut reference_rejections) {
+            continue;
+        }
+        if reference_offline(row, &rows, &reference, &mut offline_used) {
+            if row["event"]["detail"]["kind"] == "console-error" {
+                reference_console.push((
+                    row["context"].as_str().unwrap().to_owned(),
+                    console_message(row["event"]["detail"]["message"].as_str().unwrap()),
+                ));
+            }
+            continue;
+        }
+        let event = &row["event"];
+        let kind = if event["kind"] == "javascript" {
+            event["detail"]["kind"].as_str()
+        } else {
+            event["kind"].as_str()
+        };
+        if matches!(
+            kind,
+            Some(
+                "dispatcher-refusal"
+                    | "delivery-failed"
+                    | "bridge-refusal"
+                    | "bridge-delivery-refused"
+                    | "unknown-method"
+                    | "invalid-diagnostic"
+                    | "uncaught"
+                    | "unhandled-rejection"
+                    | "console-error"
+                    | "api-refusal"
+                    | "csp"
+                    | "resource-error"
+                    | "resource-failed"
+                    | "resource-http-error"
+                    | "load-failed"
+                    | "fetch-failed"
+                    | "fetch-http-error"
+                    | "capture-truncated"
+                    | "context-truncated"
+                    | "record-too-large"
+            )
+        ) || (kind == Some("api-failure") && event["detail"]["method"] == "setIcon")
+            || (kind == Some("content-evaluation") && event["success"] == false)
+        {
+            failures.push(format!(
+                "diagnostic {} ({})",
+                kind.unwrap_or("unknown"),
+                row["context"]
+            ));
+        }
+    }
+    let mut remaining_reference_errors = reference_rejections;
+    for error in runtime_errors {
+        if error.kind == zephium_webext_linux::runtime::ExtensionErrorKind::Console {
+            if let Some(index) = reference_console.iter().position(|(context, message)| {
+                *context == format!("{:?}", error.context)
+                    && *message == console_message(&error.message)
+            }) {
+                reference_console.remove(index);
+                continue;
+            }
+        }
+        let matches = remaining_reference_errors > 0
+            && error.kind == zephium_webext_linux::runtime::ExtensionErrorKind::UnhandledRejection
+            && error.context == zephium_webext_runtime::context::ContextKind::Background
+            && reference["backgroundUnhandled"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|expected| {
+                        error.message.strip_prefix("Uncaught (in promise) Error: ")
+                            == expected["message"].as_str()
+                    })
+                });
+        if matches {
+            remaining_reference_errors -= 1;
+        } else {
+            failures.push(format!("runtime {:?} in {:?}", error.kind, error.context));
+        }
+    }
+    let api = std::fs::read_to_string(diagnostic.0.with_extension("api.jsonl")).unwrap();
+    if !api
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|row| row["event"]["detail"]["complete"] == true)
+    {
+        failures.push("first 20 seconds of background API trace incomplete".into());
+    }
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"acceptance", "failures":failures}),
+    );
+    let tabs = host.shell.borrow().order.clone();
+    for tab in tabs {
+        host.close(tab);
+    }
+    let mut drain = host.runtime.retire();
+    let drained = drain.run(Duration::from_secs(10));
+    assert!(drained, "runtime teardown did not drain");
+    assert!(
+        failures.is_empty(),
+        "{name}: {}\ndiagnostics: {}",
+        failures.join("; "),
+        diagnostic.0.display()
+    );
+}
+
+// Signals require visible, enabled signed-out controls, not a spinner/root or error link.
+const VISIBLE_CONTROLS: &str = r#"
+const visible = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && !e.disabled;
+const buttons = [...document.querySelectorAll('button,[role="button"],a[href]')].filter(visible);
+const labels = buttons.map(e => (e.getAttribute('aria-label') || e.textContent || '').trim());
+const text = document.body?.innerText || '';
+if (/something went wrong|browser (?:is )?not supported|webassembly.*(?:failed|unavailable)|unexpected error/i.test(text)) return false;
+"#;
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn bitwarden() {
+    password_manager("nngceckbapebfimnlniiiahkandclblb", "Bitwarden", &format!("{VISIBLE_CONTROLS} return (visible(document.querySelector('autofill-default-password-manager-prompt #default-password-manager-prompt_button_continue')) && visible(document.querySelector('autofill-default-password-manager-prompt #default-password-manager-prompt_button_skip-for-now'))) || (visible(document.querySelector('[data-testid=login-email-input]')) && visible(document.querySelector('[data-testid=login-continue-button]'))) || (/bitwarden/i.test(text) && labels.some(s => /^(get started|log in|unlock)$/i.test(s)));"));
+}
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn onepassword() {
+    password_manager("aeblfdkhhhdcdjpifhhbdiojplfjncoa", "1Password", &format!("{VISIBLE_CONTROLS} return (/1password/i.test(text) && labels.some(s => /^(sign in|sign in to 1password|add an account|create an account|unlock 1password|get started)$/i.test(s))) || (visible(document.querySelector('h1')) && /^Welcome to 1Password!?$/.test(document.querySelector('h1').textContent.trim()) && labels.includes('Continue'));"));
+}
+
+#[test]
+#[ignore = "pinned package, diagnostic module and private WebKitGTK session"]
+fn proton_pass() {
+    password_manager("ghmbeldphafepmbegfdlkpapadhbakde", "Proton Pass", &format!("{VISIBLE_CONTROLS} return visible(document.querySelector('.app-root .pass-lobby--heading')) && labels.includes('Sign in with Proton') && labels.includes('Create a Proton account');"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn diagnostic_capture() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("evidence directory"),
+    );
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Diagnostic fixture","version":"1.0",
+        "permissions":["bookmarks"], "host_permissions":["http://127.0.0.1/*"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "options_ui":{"page":"options.html"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
+    }).to_string()).unwrap();
+    let probe = "console.warn('diagnostic warning');void chrome.diagnosticMissing;void browser.runtime.diagnosticMissing;setTimeout(()=>{Promise.reject(new Error('diagnostic rejection'));},10);setTimeout(()=>{throw new Error('diagnostic async exception');},20);";
+    for file in ["worker.js", "page.js"] {
+        std::fs::write(
+            package.path().join(file),
+            format!("{probe}chrome.runtime.getPackageDirectoryEntry(()=>{{void chrome.runtime.lastError;}});"),
+        ).unwrap();
+    }
+    std::fs::write(
+        package.path().join("content.js"),
+        format!("{probe}\nthrow new Error('diagnostic content exception');"),
+    )
+    .unwrap();
+    for file in ["popup.html", "options.html"] {
+        std::fs::write(package.path().join(file), "<!doctype html><title>Diagnostic</title><script src='page.js'></script><script>void 0;</script><img src='missing.png'><button>Ready</button>").unwrap();
+    }
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    let tab = host.open(&fixture.url("/password-form"), true);
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    let options = host
+        .runtime
+        .open_page(install, PageKind::Options, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(5));
+    let rows = diagnostic_rows(&diagnostic.0);
+    drop(popup);
+    drop(options);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    for context in ["Background", "Popup", "Options", "ContentScript"] {
+        for kind in [
+            "context-ready",
+            "undefined-api",
+            "console-warn",
+            "unhandled-rejection",
+        ] {
+            assert!(
+                rows.iter()
+                    .any(|row| row["context"] == context && row["event"]["detail"]["kind"] == kind),
+                "missing {context} {kind}"
+            );
+        }
+    }
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-wake"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "api-refusal"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "csp"));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["detail"]["kind"] == "uncaught"
+            && row["event"]["detail"]["stack"]
+                .as_str()
+                .is_some_and(|stack| stack.contains("page.js"))));
+    assert!(rows.iter().any(
+        |row| row["event"]["kind"] == "content-evaluation" && row["event"]["success"] == false
+    ));
+    assert!(rows
+        .iter()
+        .any(|row| row["event"]["kind"] == "resource-failed"
+            || row["event"]["kind"] == "resource-http-error"
+            || row["event"]["detail"]["kind"] == "resource-error"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn runtime_compatibility() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(
+        std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").expect("evidence directory"),
+    );
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Runtime compatibility fixture","version":"1.0",
+        "permissions":["scripting","sidePanel","contextMenus","nativeMessaging"], "host_permissions":["http://127.0.0.1/*"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "content_security_policy":{"extension_pages":"script-src 'self'; object-src 'self'; connect-src 'none'"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
+    }).to_string()).unwrap();
+    std::fs::write(package.path().join("build.info"), "package-only").unwrap();
+    std::fs::write(package.path().join("worker.js"), r#"
+const packageReady = fetch(chrome.runtime.getURL('build.info')).then(r=>r.text());
+chrome.contextMenus.onClicked.addListener(()=>{});
+const configurationReady = Promise.all([chrome.contextMenus.removeAll(), chrome.sidePanel.setOptions({enabled:false})]);
+const nativeReady = chrome.runtime.sendNativeMessage('org.example.absent', {}).then(()=> 'unexpected success', e=>e.message);
+const portReady = new Promise(resolve=>{ const port=chrome.runtime.connectNative('org.example.absent'); port.onDisconnect.addListener(()=>resolve(chrome.runtime.lastError?.message)); });
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+  (async()=>{
+    const target={tabId:sender.tab.id,frameIds:[sender.frameId]};
+    const immediate=await chrome.scripting.executeScript({target,injectImmediately:true,func:()=>document.readyState});
+    const idle=await chrome.scripting.executeScript({target,func:()=>document.readyState});
+    const main=await chrome.scripting.executeScript({target,world:'MAIN',func:()=>({
+      userAgent:navigator.userAgent,chrome:typeof globalThis.chrome,browser:typeof globalThis.browser,
+      nativePost:typeof globalThis.__zephiumPost,nativeReceiver:typeof globalThis.__zephiumRegisterReceiver
+    })});
+    await configurationReady;
+    respond({main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
+      panel:await chrome.sidePanel.getOptions({}),native:await nativeReady,port:await portReady});
+  })().catch(e=>respond({error:String(e)}));
+  return true;
+});
+"#).unwrap();
+    std::fs::write(package.path().join("content.js"), r#"
+chrome.runtime.sendMessage({probe:true}, result=>{
+ document.documentElement.dataset.compatibility=JSON.stringify({...result,contentUA:navigator.userAgent});
+});
+"#).unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><button>Ready</button>",
+    )
+    .unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    let tab = host.open(&fixture.url("/delayed-form"), true);
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut result = Value::Null;
+    while Instant::now() < deadline {
+        pump(&mut host, Duration::from_millis(100));
+        if let Ok(value) = serde_json::from_str::<Value>(&evaluate(
+            &view,
+            "return document.documentElement.dataset.compatibility || 'null';",
+        )) {
+            if !value.is_null() {
+                result = value;
+                break;
+            }
+        }
+    }
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    let popup_ua = evaluate(popup.view(), "return navigator.userAgent;");
+    let main_ua = evaluate(&view, "return navigator.userAgent;");
+    let remote = evaluate(
+        popup.view(),
+        &format!(
+            "try{{await fetch('{}');return 'allowed'}}catch(e){{return 'blocked'}}",
+            fixture.url("/password-form")
+        ),
+    );
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"compatibility-result","result":result,"popupUA":popup_ua,"mainUA":main_ua,"remoteFetch":remote}),
+    );
+    drop(popup);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+    assert_eq!(result["package"], "package-only");
+    assert_eq!(result["panel"]["enabled"], false);
+    for key in ["native", "port"] {
+        assert_eq!(result[key], "Specified native messaging host not found.");
+    }
+    assert_eq!(result["immediate"], "loading");
+    assert!(
+        matches!(result["idle"].as_str(), Some("interactive" | "complete")),
+        "{result}"
+    );
+    for key in ["workerUA", "contentUA"] {
+        assert!(
+            result[key]
+                .as_str()
+                .is_some_and(|ua| ua.contains(" Chrome/") && ua.contains("AppleWebKit")),
+            "{result}"
+        );
+    }
+    assert!(popup_ua.contains(" Chrome/"));
+    assert!(!main_ua.contains("ZephiumWebExtensions/"));
+    assert_eq!(result["main"]["userAgent"], main_ua);
+    for key in ["chrome", "browser", "nativePost", "nativeReceiver"] {
+        assert_eq!(result["main"][key], "undefined", "{key}");
+    }
+    let requests = fixture.take();
+    assert!(requests
+        .iter()
+        .any(|row| row["requestUserAgent"] == main_ua));
+    for row in diagnostic_rows(&diagnostic.0) {
+        let detail = &row["event"]["detail"];
+        if detail["kind"] == "compatibility-identity" {
+            for key in ["appVersion", "vendor", "platform", "userAgentData"] {
+                assert_eq!(detail["before"][key], detail["after"][key], "{row}");
+            }
+        }
+    }
+    assert_eq!(remote, "blocked");
+    assert!(diagnostic_rows(&diagnostic.0)
+        .iter()
+        .any(|row| row["event"]["kind"] == "background-started"));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn platform_capabilities() {
+    use zephium_webext_linux::diagnostics;
+    use zephium_webext_runtime::api::context_menus::MenuContext;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").unwrap());
+    let _diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"), json!({
+        "manifest_version":3,"name":"Platform capabilities","version":"1.0",
+        "permissions":["tabs","webRequest","contextMenus","notifications"],"host_permissions":["<all_urls>"],
+        "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]},{"matches":["http://127.0.0.1/*"],"js":["main.js"],"world":"MAIN"}]
+    }).to_string()).unwrap();
+    std::fs::write(
+        package.path().join("main.js"),
+        "document.documentElement.dataset.mainIdle=typeof requestIdleCallback;",
+    )
+    .unwrap();
+    std::fs::write(package.path().join("empty.js"), r#"
+(async()=>{
+ let cancelled=false;
+ const handle=requestIdleCallback(()=>cancelled=true);
+ cancelIdleCallback(handle);
+ const idle=await new Promise(resolve=>requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining()})));
+ const timed=await new Promise(resolve=>{
+   requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining()}),{timeout:1});
+   const until=performance.now()+20;while(performance.now()<until){}
+ });
+ document.documentElement.dataset.isolatedIdle=JSON.stringify({idle,timed,cancelled});
+})().catch(error=>document.documentElement.dataset.isolatedIdle=JSON.stringify({error:String(error)}));
+"#).unwrap();
+    let icon =
+        gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 2, 2).unwrap();
+    icon.fill(0xff00ffff);
+    icon.savev(package.path().join("icon.png"), "png", &[])
+        .unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><title>Own package page</title><button>Ready</button>",
+    )
+    .unwrap();
+    std::fs::write(package.path().join("worker.js"), r#"
+const seen=[]; let clicks=0, matchingWindow=0, foreignWindow=0, iconResult=null;
+(async()=>{
+ await chrome.action.setIcon({path:'./icon.png'});
+ let missing=false, foreign=false;
+ try{await chrome.action.setIcon({path:'./missing.png'});}catch{missing=true;}
+ try{await chrome.action.setIcon({path:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/icon.png'});}catch{foreign=true;}
+ iconResult={loaded:true,missing,foreign};
+})().catch(error=>iconResult={error:error.message});
+chrome.windows.getAll().then(windows=>{
+ chrome.webRequest.onBeforeRequest.addListener(()=>matchingWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id});
+ chrome.webRequest.onBeforeRequest.addListener(()=>foreignWindow++,{urls:['http://127.0.0.1/*'],windowId:windows[0].id+1000});
+});
+for(const event of ['onBeforeRequest','onBeforeSendHeaders','onHeadersReceived','onCompleted','onErrorOccurred']) {
+ const extra=event==='onBeforeSendHeaders'?['requestHeaders']:event==='onHeadersReceived'?['responseHeaders']:[];
+ chrome.webRequest[event].addListener(details=>seen.push({event,id:details.requestId,type:details.type,headers:details.responseHeaders}),{urls:['http://127.0.0.1/*']},extra);
+}
+chrome.contextMenus.create({id:'fill',title:'Fill',contexts:['editable']});
+chrome.contextMenus.onClicked.addListener(info=>{if(info.menuItemId==='fill')clicks++;});
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.report)respond({seen,clicks,matchingWindow,foreignWindow,iconResult}); });
+"#).unwrap();
+    let plain = webkit2gtk::WebView::with_context(&context());
+    plain.load_uri(&fixture.url("/password-form"));
+    pump_for(Duration::from_secs(1));
+    let default_idle = evaluate(&plain, "return typeof requestIdleCallback;");
+    assert_eq!(
+        default_idle, "undefined",
+        "update this probe when WebKit enables idle callbacks by default"
+    );
+    drop(plain);
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let _initial_tab = host.open("about:blank", true);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    let tab = host.open(&fixture.url("/password-form"), true);
+    pump(&mut host, Duration::from_secs(2));
+    let tab_view = host.shell.borrow().tabs[&tab].view.clone();
+    assert_eq!(
+        evaluate(&tab_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    assert_eq!(
+        evaluate(&tab_view, "return typeof cancelIdleCallback;"),
+        "undefined"
+    );
+    assert_eq!(
+        evaluate(
+            &tab_view,
+            "return document.documentElement.dataset.mainIdle;"
+        ),
+        default_idle
+    );
+    let isolated: Value = serde_json::from_str(&evaluate(
+        &tab_view,
+        "return document.documentElement.dataset.isolatedIdle;",
+    ))
+    .unwrap();
+    assert_eq!(isolated["cancelled"], false, "{isolated}");
+    assert_eq!(isolated["idle"]["didTimeout"], false, "{isolated}");
+    assert!(
+        isolated["idle"]["remaining"]
+            .as_f64()
+            .is_some_and(|v| (0.0..=50.0).contains(&v)),
+        "{isolated}"
+    );
+    assert_eq!(
+        isolated["timed"],
+        json!({"didTimeout":true,"remaining":0}),
+        "{isolated}"
+    );
+    drop(tab_view);
+    let menu_context = MenuContext {
+        menu_generation: host.runtime.context_menu_generation(),
+        document_id: host.runtime.context_menu_document(tab),
+        page_url: fixture.url("/password-form"),
+        editable: true,
+        ..Default::default()
+    };
+    assert_eq!(host.runtime.context_menu_items(tab, &menu_context).len(), 1);
+    host.runtime
+        .context_menu_clicked(install, tab, "fill", &menu_context)
+        .unwrap();
+    let mut stale = menu_context.clone();
+    stale.document_id = Some("stale-document".into());
+    assert!(host
+        .runtime
+        .context_menu_clicked(install, tab, "fill", &stale)
+        .is_err());
+    let failed_tab = host.open(&fixture.url("/request-error"), false);
+    pump(&mut host, Duration::from_secs(2));
+    host.close(failed_tab);
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            r#"globalThis.result=null;(async()=>{
+ const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
+ const created=await chrome.tabs.create({url:'popup.html#created'});
+ await chrome.tabs.update(created.id,{url:'popup.html#updated'});
+ const window=await chrome.windows.create({url:'popup.html#window',type:'popup'});
+ let cancelledIdle=false;
+ const cancelled=requestIdleCallback(()=>cancelledIdle=true);
+ cancelIdleCallback(cancelled);
+ const idle=await new Promise(resolve=>requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining(),cancelled:cancelledIdle}),{timeout:1000}));
+ const image=new Image();
+ const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
+ image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
+ let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
+ globalThis.result={created,window,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+})().catch(e=>globalThis.result={error:e.message});return 'started';"#
+        ),
+        "started"
+    );
+    pump(&mut host, Duration::from_secs(4));
+    let result: Value = serde_json::from_str(&evaluate(
+        popup.view(),
+        "return JSON.stringify(globalThis.result);",
+    ))
+    .unwrap();
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"platform-capabilities","result":result}),
+    );
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["nativeIdle"], true);
+    assert_eq!(result["foreign"], true);
+    assert_eq!(result["inlineImage"], true);
+    assert_eq!(result["idle"]["cancelled"], false);
+    assert!(result["idle"]["didTimeout"].is_boolean());
+    assert!(result["idle"]["remaining"]
+        .as_f64()
+        .is_some_and(|value| (0.0..=50.0).contains(&value)));
+    assert_eq!(result["window"]["type"], "normal");
+    assert_eq!(result["clear"], false);
+    assert_eq!(result["all"], json!({}));
+    assert_eq!(result["report"]["clicks"], 1);
+    assert_eq!(
+        result["report"]["iconResult"],
+        json!({"loaded":true,"missing":true,"foreign":true})
+    );
+    assert!(result["report"]["matchingWindow"].as_u64().unwrap() >= 2);
+    assert_eq!(result["report"]["foreignWindow"], 0);
+    for event in [
+        "onBeforeRequest",
+        "onBeforeSendHeaders",
+        "onHeadersReceived",
+        "onCompleted",
+        "onErrorOccurred",
+    ] {
+        assert!(
+            result["report"]["seen"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["event"] == event),
+            "missing {event}: {result}"
+        );
+    }
+    // An extension document in an ordinary tab keeps that view's defaults,
+    // including after it navigates back to a web page.
+    let package_tab = host.open(&format!("chrome-extension://{id}/popup.html"), true);
+    pump(&mut host, Duration::from_secs(1));
+    let package_view = host.shell.borrow().tabs[&package_tab].view.clone();
+    assert_eq!(
+        evaluate(&package_view, "return location.protocol;"),
+        "chrome-extension:"
+    );
+    assert_eq!(
+        evaluate(&package_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    package_view.load_uri(&fixture.url("/password-form"));
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(&package_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    drop(package_view);
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"idle-worlds","default":default_idle,"isolated":isolated,"ownedNative":result["nativeIdle"]}),
+    );
+    let tabs: Vec<_> = host.shell.borrow().tabs.keys().copied().collect();
+    for tab in tabs {
+        host.close(tab);
+    }
+    drop(popup);
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
+}
+
+#[test]
+#[ignore = "diagnostic module and private WebKitGTK session"]
+fn request_cost() {
+    use zephium_webext_linux::diagnostics;
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let evidence = PathBuf::from(std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").unwrap());
+    let diagnostic = DiagnosticDump(diagnostics::begin(&evidence, id).unwrap());
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    std::fs::write(package.path().join("manifest.json"),json!({"manifest_version":3,"name":"Zero request listeners","version":"1.0","content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]}],"host_permissions":["http://127.0.0.1/*"]}).to_string()).unwrap();
+    std::fs::write(package.path().join("empty.js"), "void 0;").unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    let tab = host.open(&fixture.url("/password-form"), true);
+    pump(&mut host, Duration::from_secs(1));
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    evaluate(&view,"globalThis.costDone=false;(async()=>{for(let i=0;i<256;i++)await fetch('/password-form?cost='+i,{cache:'no-store'});globalThis.costDone=true;})();return 'started';");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline
+        && evaluate(&view, "return globalThis.costDone===true;") != "true"
+    {
+        pump(&mut host, Duration::from_millis(100));
+    }
+    assert_eq!(
+        evaluate(&view, "return globalThis.costDone===true;"),
+        "true"
+    );
+    pump(&mut host, Duration::from_secs(1));
+    let rows = diagnostic_rows(&diagnostic.0);
+    let mut values: Vec<u64> = rows
+        .iter()
+        .filter(|row| row["event"]["kind"] == "request-cost" && row["event"]["listeners"] == false)
+        .filter_map(|row| row["event"]["nanoseconds"].as_u64())
+        .filter(|value| *value > 0)
+        .collect();
+    values.sort_unstable();
+    assert!(values.len() >= 256, "{} samples", values.len());
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"request-cost-summary","samples":values.len(),"p50_ns":values[values.len()/2],"p99_ns":values[(values.len()-1)*99/100],"mean_ns":values.iter().sum::<u64>()/values.len() as u64}),
+    );
+    host.close(tab);
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
 }

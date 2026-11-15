@@ -104,7 +104,7 @@ test('mixed synchronous return and callback methods retain their modes and requi
   assert.equal(spec.signature, 'contextMenus.CreateProperties createProperties, optional function callback');
   const { chrome } = extensionContext('background', { permissions: ['contextMenus'] });
   assert.equal(typeof chrome.contextMenus.onClicked.addListener, 'function');
-  assert.equal(chrome.contextMenus.create, undefined);
+  assert.equal(typeof chrome.contextMenus.create, 'function');
 });
 
 

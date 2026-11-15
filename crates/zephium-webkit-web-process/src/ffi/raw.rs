@@ -148,6 +148,10 @@ unsafe extern "C" {
         uri: *const c_char,
         line: c_uint,
     ) -> *mut Object;
+    #[cfg(feature = "native-tests")]
+    pub fn jsc_exception_get_message(exception: *mut Object) -> *const c_char;
+    #[cfg(feature = "native-tests")]
+    pub fn jsc_exception_get_backtrace_string(exception: *mut Object) -> *const c_char;
     pub fn jsc_context_get_exception(context: *mut Object) -> *mut Object;
     pub fn jsc_context_clear_exception(context: *mut Object);
     pub fn jsc_weak_value_new(value: *mut Object) -> *mut Object;

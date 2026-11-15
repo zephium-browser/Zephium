@@ -142,6 +142,8 @@ impl Bootstrap<'_> {
             "incognito": self.incognito,
             "unpacked": self.unpacked,
             "permissions": self.permissions,
+            // Compatibility target matches the pinned Chromium API schema, not the engine.
+            "userAgentSuffix": " Chrome/157.0.0.0 ZephiumWebExtensions/1",
         });
         if let (Some(worker), Some(object)) = (worker, value.as_object_mut()) {
             object.insert("worker".into(), worker);
@@ -153,8 +155,12 @@ impl Bootstrap<'_> {
 /// `(BUNDLE)('page', surface, bootstrap)` for an extension page's default
 /// world, injected at document start before any page script.
 pub(crate) fn page_script(bootstrap: &Value) -> String {
+    #[cfg(feature = "native-tests")]
+    let bundle = crate::diagnostics::bundle(BUNDLE, false);
+    #[cfg(not(feature = "native-tests"))]
+    let bundle = BUNDLE;
     format!(
-        "(function(){{'use strict';try{{({BUNDLE})('page',{},{});}}catch(e){{}}}})();",
+        "(function(){{'use strict';try{{({bundle})('page',{},{});}}catch(e){{}}}})();",
         surface(),
         bootstrap
     )
@@ -214,7 +220,11 @@ pub(crate) fn launch(
         "storage": {"quota": quota, "usage": 0, "persisted": true},
     });
     let boot = bootstrap.to_value(Some(worker));
-    let worker_js = format!("{WORKER_HOOKS}({WORKER_BUNDLE},{worker_surface},{boot});");
+    #[cfg(feature = "native-tests")]
+    let worker_bundle = crate::diagnostics::bundle(WORKER_BUNDLE, true);
+    #[cfg(not(feature = "native-tests"))]
+    let worker_bundle = WORKER_BUNDLE;
+    let worker_js = format!("{WORKER_HOOKS}({worker_bundle},{worker_surface},{boot});");
     let owner = json!({
         "workerURL": format!("{scope}?{WORKER_QUERY}"),
         "type": kind,

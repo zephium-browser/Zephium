@@ -344,6 +344,11 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
                 return Err(error);
             }
         };
+        // Ordinary tab views can later navigate to the web, including tabs
+        // currently displaying an extension document. Keep their defaults.
+        if owned {
+            crate::settings::configure_owned(view);
+        }
         let page = Rc::new(Cell::new(view.page_id()));
         let handlers = connect(&self.shared, id, view, page);
         self.shared.hosts.borrow_mut().insert(
@@ -947,8 +952,8 @@ impl<R: Runtime + 'static> Shared<R> {
                 };
                 core.attach_settled(id, generation, outcome);
             }
-            Outgoing::Deliver { context } => {
-                core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied));
+            Outgoing::Deliver { context, frame } => {
+                core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied), frame);
             }
             Outgoing::Policy { policy_generation } => {
                 core.policy_settled(policy_generation, reply == Ok(DeliveryStatus::Delivered))

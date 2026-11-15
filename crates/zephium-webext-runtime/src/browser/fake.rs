@@ -25,7 +25,12 @@ pub struct FakeBrowser {
     pub reply: Result<Value, ApiError>,
     pub gesture: bool,
     pub resources: BTreeSet<String>,
+    pub menus: Option<
+        BTreeMap<zephium_core::ids::ExtensionInstallId, crate::api::context_menus::MenuStore>,
+    >,
     pub time_ms: u64,
+    pub panels:
+        BTreeMap<zephium_core::ids::ExtensionInstallId, crate::api::side_panel::OptionsStore>,
     pub frames: Vec<crate::api::web_navigation::BrowserFrame>,
     pub action: crate::api::action::ActionStore,
     pub languages: BTreeMap<i32, String>,
@@ -58,7 +63,9 @@ impl FakeBrowser {
             reply: Ok(Value::Null),
             gesture: false,
             resources: BTreeSet::new(),
+            menus: None,
             time_ms: 1,
+            panels: BTreeMap::new(),
             frames: Vec::new(),
             action: Default::default(),
             languages: BTreeMap::new(),
@@ -1278,6 +1285,28 @@ impl FakeBrowser {
 }
 
 impl BrowserPort for FakeBrowser {
+    fn context_menu(
+        &mut self,
+        sender: &Sender,
+        request: crate::api::context_menus::Request,
+    ) -> Result<Value, ApiError> {
+        match &mut self.menus {
+            Some(menus) => menus.entry(sender.install()).or_default().apply(request),
+            None => crate::api::context_menus::unavailable(request),
+        }
+    }
+
+    fn side_panel(
+        &mut self,
+        sender: &Sender,
+        request: crate::api::side_panel::Request,
+    ) -> Result<Value, ApiError> {
+        self.panels
+            .entry(sender.install())
+            .or_insert_with(|| crate::api::side_panel::OptionsStore::new(&self.info.manifest))
+            .configure(request)
+    }
+
     fn set_dnr_badge(
         &mut self,
         _: zephium_core::ids::ExtensionInstallId,

@@ -21,3 +21,28 @@ version = "2026.1110.1816"
 sha256 = "f830f9b2ac6c40dce7f193717fd286a4c966e8999018d5a3e75998d81751bb8a"
 license = "GPL-3.0"
 source = "https://github.com/uBlockOrigin/uBOL-home"
+
+# Password-manager packages verified by fetch-pinned.sh and the native harness.
+[[extension]]
+id = "nngceckbapebfimnlniiiahkandclblb"
+name = "Bitwarden"
+version = "2026.10.2"
+sha256 = "1c995179f75863104c8a6e389e1050568a82c0d2c07d6acf6b62703d249430c9"
+license = "LicenseRef-Bitwarden"
+source = "https://github.com/bitwarden/clients"
+
+[[extension]]
+id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
+name = "1Password"
+version = "8.12.44.33"
+sha256 = "1cdc5bfbe2d13f38bbceeeb6fb41ff08477939c42567bf7cbcd0016ac00b09cb"
+license = "LicenseRef-Proprietary"
+source = "https://1password.com/downloads/browser-extension/"
+
+[[extension]]
+id = "ghmbeldphafepmbegfdlkpapadhbakde"
+name = "Proton Pass"
+version = "1.43.0"
+sha256 = "9f52c73fb98f9a53ab62d273b659e28e42a488ffaeae18436776080c6e485b9a"
+license = "GPL-3.0"
+source = "https://github.com/ProtonMail/WebClients"

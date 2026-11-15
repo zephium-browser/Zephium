@@ -5,6 +5,7 @@ use crate::dispatch::{ApiTable, RegistrationError};
 pub mod action;
 pub mod bookmarks;
 pub mod commands;
+pub mod context_menus;
 pub mod declarative_net_request;
 pub mod dom;
 pub mod extension;
@@ -19,9 +20,11 @@ pub mod runtime;
 pub mod scripting;
 pub mod search;
 pub mod sessions;
+pub mod side_panel;
 pub mod tabs;
 pub mod top_sites;
 pub mod web_navigation;
+pub mod web_request;
 pub mod windows;
 
 /// Registers every implemented namespace using generated schemas and feature metadata.
@@ -48,6 +51,7 @@ where
     runtime::register(table)?;
     action::register(table)?;
     commands::register(table)?;
+    context_menus::register(table)?;
     declarative_net_request::register(table)?;
     permissions::register(table)?;
     extension::register(table)?;
@@ -61,6 +65,7 @@ where
     history::register(table)?;
     bookmarks::register(table)?;
     sessions::register(table)?;
+    side_panel::register(table)?;
     top_sites::register(table)?;
     search::register(table)?;
     Ok(())

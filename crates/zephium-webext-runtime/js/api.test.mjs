@@ -388,3 +388,47 @@ test('a context without a bridge gets the API but every call reports invalidatio
   await assert.rejects(context.chrome.tabs.query({}), (error) => error.message === 'Extension context invalidated.');
   assert.equal(run('typeof chrome'), 'object');
 });
+
+
+test('menu creation returns an id while native errors settle only through lastError', async () => {
+  const {chrome, host} = extensionContext('background', {permissions:['contextMenus']});
+  host.handlers['contextMenus.create'] = () => { throw 'This function is not supported.'; };
+  let seen;
+  const id = chrome.contextMenus.create({id:'item', title:'Item'}, () => { seen = chrome.runtime.lastError.message; });
+  assert.equal(id, 'item');
+  assert.equal(seen, undefined);
+  await flush();
+  assert.equal(seen, 'This function is not supported.');
+  await flush();
+  assert.equal(chrome.runtime.lastError, undefined);
+  assert.throws(() => chrome.contextMenus.create('invalid'), /invocation|signature|parameter/i);
+});
+
+test('adapter compatibility identity is confined to extension realms', () => {
+  for (const kind of ['background', 'popup', 'options', 'extensionTab', 'offscreen', 'extensionFrame', 'contentScript', 'userScript', 'externalPage']) {
+    const {run} = extensionContext(kind, {userAgentSuffix:' Chrome/157.0.0.0 ZephiumWebExtensions/1'}, {globals:{navigator:{userAgent:'AppleWebKit/605 Safari/605',appVersion:'original-version',vendor:'original-vendor',platform:'original-platform',userAgentData:undefined}, identitySentinel:42}});
+    const ua = run('navigator.userAgent');
+    assert(ua.includes('AppleWebKit/605'));
+    assert.equal(run('navigator.appVersion'), 'original-version');
+    assert.equal(run('navigator.vendor'), 'original-vendor');
+    assert.equal(run('navigator.platform'), 'original-platform');
+    assert.equal(run('navigator.userAgentData'), undefined);
+    assert.equal(run('identitySentinel'), 42);
+    assert.equal(ua.includes(' Chrome/'), kind !== 'externalPage');
+  }
+  const ordinary = extensionContext('popup', {}, {globals:{navigator:{userAgent:'original'}}});
+  assert.equal(ordinary.run('navigator.userAgent'), 'original');
+});
+
+test('menu inline callbacks are refused instead of disappearing during serialization', async () => {
+  const {chrome, host} = extensionContext('background', {permissions:['contextMenus']});
+  let calls = 0;
+  host.handlers['contextMenus.create'] = () => { calls++; };
+  host.handlers['contextMenus.update'] = () => { calls++; };
+  let error;
+  chrome.contextMenus.create({id:'inline', title:'Item', onclick() {}}, () => { error = chrome.runtime.lastError.message; });
+  await flush();
+  assert.equal(error, 'This function is not supported.');
+  await assert.rejects(chrome.contextMenus.update('inline', {onclick() {}}), /not supported/);
+  assert.equal(calls, 0);
+});

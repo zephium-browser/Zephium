@@ -281,6 +281,15 @@
 
     const handlers = { __proto__: null };
     const dead = { __proto__: null, send: () => false, listen() {} };
+    // Native adapters may identify their Chrome API compatibility in extension
+    // realms. Keep the engine token and leave network headers to the web engine.
+    const suffix = own(bootstrap, 'userAgentSuffix');
+    const navigator = global.navigator;
+    if (kind !== 'externalPage' && typeof suffix === 'string' && suffix.length <= 128 &&
+        navigator && typeof navigator.userAgent === 'string') {
+      const userAgent = navigator.userAgent + suffix;
+      I.defineProperty(navigator, 'userAgent', { value: userAgent, configurable: true, enumerable: true });
+    }
     const client = T.createClient(link || dead, {
       maxMessageBytes: T.messageLimit(kind),
       idBase: own(options, 'idBase'),
@@ -526,8 +535,25 @@
       });
     }
 
+    let nextMenuId = 0;
     function makeFunction(fullName, spec) {
       const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
+      if (fullName === 'contextMenus.create') {
+        const params = normalizeParams(own(spec, 'parameters'));
+        I.ArrayPush(params, CALLBACK);
+        return function create(...args) {
+          ensureValid();
+          const values = resolveArguments(fullName, spec.signature, params, args);
+          const properties = values[0];
+          const callback = values[values.length - 1];
+          const id = own(properties, 'id') === undefined ? ++nextMenuId : properties.id;
+          const promise = own(properties, 'onclick') === undefined
+            ? client.call(fullName, I.JSONStringify([properties]), false)
+            : I.PromiseReject(new I.Error('This function is not supported.'));
+          settle(promise, callback, spec);
+          return id;
+        };
+      }
       if (returns === 'sync' && own(spec, 'callback') === true) return undefined;
       const local = LOCAL[fullName];
       if (returns === 'sync' && local === undefined) return undefined;
@@ -561,7 +587,9 @@
           const callback = takesCallback ? values[values.length - 1] : null;
           const callValues = takesCallback ? I.ArraySlice(values, 0, values.length - 1) : values;
           let promise;
-          if (local !== undefined) {
+          if (fullName === 'contextMenus.update' && own(callValues[1], 'onclick') !== undefined) {
+            promise = I.PromiseReject(new I.Error('This function is not supported.'));
+          } else if (local !== undefined) {
             promise = local(callValues, fullName, signature);
           } else {
             let text;

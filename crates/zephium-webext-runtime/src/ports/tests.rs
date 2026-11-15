@@ -430,7 +430,11 @@ fn one_shot_async_promise_first_response_wins_and_settlement_receipt_is_scoped()
             &clock,
         )
         .expect("send");
-    assert_eq!(deliveries.len(), 2);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(
+        deliveries[0].listeners,
+        vec![listeners[0].listener, listeners[1].listener]
+    );
     assert!(service
         .observe(
             &receiver,
@@ -773,4 +777,61 @@ proptest! {
         prop_assert!(service.acknowledge(&source, id, &mut limiter));
         prop_assert_eq!(limiter.install_bytes(install()), 0);
     }
+}
+
+#[test]
+fn one_shot_groups_large_listener_sets_without_changing_callback_authority() {
+    let source = content_sender("https://example.com/");
+    let receiver = background_sender();
+    let listeners: Vec<_> = (1..=300).map(|id| listener(&receiver, id)).collect();
+    let mut service = MessageService::new();
+    let mut limiter = Limiter::new();
+    let clock = ManualClock::default();
+    let (id, deliveries) = service
+        .send(
+            &source,
+            &MessageRoute::Runtime,
+            &listeners,
+            br#"{"probe":true}"#,
+            &mut limiter,
+            &clock,
+        )
+        .unwrap();
+    assert_eq!(deliveries.len(), 1);
+    let args = deliveries[0].arguments(json!({})).unwrap();
+    assert_eq!(args[3], json!((1..=300).collect::<Vec<_>>()));
+    assert!(service
+        .observe(
+            &receiver,
+            id,
+            listener(&receiver, 301).listener,
+            ListenerOutcome::Response(b"forged".to_vec()),
+            &mut limiter,
+            &clock
+        )
+        .is_err());
+    for entry in &listeners[..299] {
+        assert!(service
+            .observe(
+                &receiver,
+                id,
+                entry.listener,
+                ListenerOutcome::NoResponse,
+                &mut limiter,
+                &clock
+            )
+            .unwrap()
+            .is_none());
+    }
+    assert!(service
+        .observe(
+            &receiver,
+            id,
+            listeners[299].listener,
+            ListenerOutcome::Response(b"last callback".to_vec()),
+            &mut limiter,
+            &clock
+        )
+        .unwrap()
+        .is_some());
 }

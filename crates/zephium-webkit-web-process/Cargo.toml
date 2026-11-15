@@ -10,13 +10,14 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-native-tests = []
+native-tests = ["dep:serde_json"]
 
 [dependencies]
 zephium-webkit-web-process-protocol = { path = "../zephium-webkit-web-process-protocol", version = "=0.1.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+serde_json = { workspace = true, optional = true }
 
 [build-dependencies]
 pkg-config = "0.3"

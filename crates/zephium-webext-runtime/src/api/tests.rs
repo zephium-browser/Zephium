@@ -182,6 +182,16 @@ fn methods() -> Vec<String> {
             methods.push(format!("{event}.{operation}"));
         }
     }
+    methods.extend(
+        super::side_panel::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
+    methods.extend(
+        super::context_menus::METHODS
+            .iter()
+            .map(|name| (*name).to_owned()),
+    );
     methods.extend(super::tabs::METHODS.iter().map(|name| (*name).to_owned()));
     methods.extend(
         super::windows::METHODS

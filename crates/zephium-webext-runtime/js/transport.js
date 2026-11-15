@@ -403,6 +403,8 @@
     let waitingTail = 0;
     let nextId = idBase;
     let inFlightBytes = 0;
+    let internalPending = 0;
+    const internalLimit = LIMITS.outstandingCalls / 2;
     let invalidated = null;
     let dropped = 0;
     const scheduler = createScheduler((bytes) => link.send(bytes), {
@@ -426,12 +428,13 @@
       if (entry === undefined) return;
       I.MapDelete(pending, id);
       inFlightBytes -= entry.bytes;
+      if (entry.internal) internalPending--;
       if (ok) entry.resolve(value);
       else entry.reject(value);
       drainWaiting();
     };
 
-    const dispatchCall = (name, argsText, resolve, reject) => {
+    const dispatchCall = (name, argsText, resolve, reject, internal = false) => {
       const id = allocate();
       if (id === 0) return reject(ERRORS.tooManyPending);
       const bytes = encode(
@@ -441,8 +444,9 @@
       );
       if (typeof bytes === 'string') return reject(bytes === 'TooLarge' ? ERRORS.tooLarge : ERRORS.malformedReply);
       const size = I.TypedArrayLength(bytes);
-      I.MapSet(pending, id, { __proto__: null, resolve, reject, bytes: size });
+      I.MapSet(pending, id, { __proto__: null, resolve, reject, bytes: size, internal });
       inFlightBytes += size;
+      if (internal) internalPending++;
       const queued = scheduler.push(bytes, (sent) => {
         if (!sent) settle(id, false, invalidated || ERRORS.invalidated);
       });
@@ -453,11 +457,11 @@
       I.MapSize(pending) < LIMITS.outstandingCalls && inFlightBytes + bytes <= LIMITS.inFlightBytes;
 
     function drainWaiting() {
-      while (waitingHead < waitingTail && hasRoom(0)) {
+      while (waitingHead < waitingTail && internalPending < internalLimit && hasRoom(0)) {
         const entry = I.MapGet(waiting, waitingHead);
         I.MapDelete(waiting, waitingHead);
         waitingHead++;
-        dispatchCall(entry.name, entry.argsText, entry.resolve, entry.reject);
+        dispatchCall(entry.name, entry.argsText, entry.resolve, entry.reject, true);
       }
     }
 
@@ -516,13 +520,14 @@
         return new I.Promise((resolve, reject) => {
           if (invalidated !== null) return reject(invalidated);
           const bytes = argsText.length;
-          if (!hasRoom(bytes) || waitingTail > waitingHead) {
+          // Internal bookkeeping must not occupy every application call slot.
+          if (!hasRoom(bytes) || (internal && (internalPending >= internalLimit || waitingTail > waitingHead))) {
             if (!internal) return reject(ERRORS.tooManyPending);
             if (I.MapSize(waiting) >= 4096) return reject(ERRORS.tooManyPending);
             I.MapSet(waiting, waitingTail++, { __proto__: null, name, argsText, resolve, reject });
             return undefined;
           }
-          return dispatchCall(name, argsText, resolve, reject);
+          return dispatchCall(name, argsText, resolve, reject, internal);
         });
       },
       ack(seq) {

@@ -12,6 +12,7 @@ mod content;
 mod errors;
 pub(crate) mod host;
 mod icons;
+mod requests;
 mod storage;
 
 use std::cell::{Cell, RefCell};
@@ -245,6 +246,8 @@ struct Inner {
     tabs: RefCell<HashMap<BridgeViewId, TabEntry>>,
     content: RefCell<TabContent>,
     script_generation: Cell<u64>,
+    observing_requests: Cell<bool>,
+    next_request: Cell<u64>,
 }
 
 /// What every ordinary tab gets, rebuilt when installs or registrations change.
@@ -261,6 +264,7 @@ struct TabEntry {
     styles: Vec<webkit2gtk::UserStyleSheet>,
     loads: Option<glib::SignalHandlerId>,
     uris: Option<glib::SignalHandlerId>,
+    requests: Option<glib::SignalHandlerId>,
 }
 
 /// One profile's extension runtime. GTK thread only; clones share it.
@@ -413,6 +417,8 @@ impl ProfileRuntime {
             tabs: RefCell::new(HashMap::new()),
             content: RefCell::new(TabContent::default()),
             script_generation: Cell::new(0),
+            observing_requests: Cell::new(false),
+            next_request: Cell::new(0),
         });
         let weak = Rc::downgrade(&inner);
         *requests.framed.borrow_mut() = Some(Box::new(move |view| {
@@ -675,6 +681,46 @@ impl ProfileRuntime {
             .inner
             .bridge
             .with_runtime(|host, out| host.invoke_action(install, tab, out))
+            .map_err(|_| "The extension runtime is busy.".to_owned())
+            .and_then(|result| result.map_err(|error| error.message().to_owned()));
+        self.inner.run();
+        result
+    }
+
+    /// The Chrome tab id the runtime gave a shell tab.
+    pub fn context_menu_generation(&self) -> u64 {
+        self.inner.browser.menu_generation()
+    }
+
+    /// Current document identity for native menu activation.
+    pub fn context_menu_document(&self, tab: ItemId) -> Option<String> {
+        self.inner.browser.menu_document(tab)
+    }
+
+    /// Menu items selected using native hit-test facts for this document.
+    pub fn context_menu_items(
+        &self,
+        tab: ItemId,
+        context: &zephium_webext_runtime::api::context_menus::MenuContext,
+    ) -> Vec<(
+        ExtensionInstallId,
+        zephium_webext_runtime::api::context_menus::MenuItem,
+    )> {
+        self.inner.browser.menu_items(tab, context)
+    }
+
+    /// Deliver a native menu activation after rechecking the current document.
+    pub fn context_menu_clicked(
+        &self,
+        install: ExtensionInstallId,
+        tab: ItemId,
+        id: &str,
+        context: &zephium_webext_runtime::api::context_menus::MenuContext,
+    ) -> Result<(), String> {
+        let result = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.menu_clicked(install, tab, id, context, out))
             .map_err(|_| "The extension runtime is busy.".to_owned())
             .and_then(|result| result.map_err(|error| error.message().to_owned()));
         self.inner.run();
@@ -1017,6 +1063,7 @@ impl Inner {
             }
         }
         self.running.set(false);
+        self.update_request_observation();
         self.arm();
     }
 
@@ -1173,6 +1220,14 @@ impl Inner {
             .own_plan(install)
             .ok_or_else(|| "The extension is not running.".to_owned())?;
         let view = create_view(&self.context, false, None);
+        #[cfg(feature = "native-tests")]
+        if let Some(record) = self.records.borrow().get(&install) {
+            crate::diagnostics::observe_view(
+                &view,
+                record.extension_id.as_str(),
+                "BackgroundOwner",
+            );
+        }
         self.allow_cors(install, &view);
         self.views.owned.borrow_mut().insert(
             (install, ViewKindKey::Background),
@@ -1532,6 +1587,8 @@ impl Inner {
             .ok_or(ViewError::UnknownInstall)?;
         let plan = self.own_plan(install).ok_or(ViewError::UnknownInstall)?;
         let view = create_view(&self.context, false, Some(&script));
+        #[cfg(feature = "native-tests")]
+        crate::diagnostics::observe_view(&view, extension.as_str(), &format!("{context:?}"));
         self.allow_cors(install, &view);
         let serial = self.next_page.get();
         self.next_page.set(serial + 1);
@@ -1844,6 +1901,10 @@ impl Inner {
                 styles: Vec::new(),
                 loads: Some(loads),
                 uris: Some(uris),
+                requests: self
+                    .observing_requests
+                    .get()
+                    .then(|| requests::attach(self, tab, view)),
             },
         );
         self.browser.tab_view(id, Some(tab));
@@ -1865,6 +1926,9 @@ impl Inner {
             }
             if let (Some(webview), Some(uris)) = (entry.view.upgrade(), entry.uris.take()) {
                 webview.disconnect(uris);
+            }
+            if let (Some(webview), Some(requests)) = (entry.view.upgrade(), entry.requests.take()) {
+                webview.disconnect(requests);
             }
             if let Some(manager) = entry
                 .view

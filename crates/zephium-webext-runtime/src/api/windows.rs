@@ -105,6 +105,53 @@ enum Prepared {
     Request(Request),
 }
 
+/// Explicit adapter fallback when separate native windows are unavailable.
+/// Returns the existing window's identity; callers must report its actual type and bounds.
+pub fn tab_fallback(
+    snapshot: &BrowserSnapshot,
+    sender: &crate::context::Sender,
+    properties: &Properties,
+) -> Result<
+    (
+        i32,
+        Vec<zephium_core::extensions::ExtensionBrowserRequestAction>,
+    ),
+    ApiError,
+> {
+    use zephium_core::extensions::ExtensionBrowserRequestAction;
+    if properties.tab_id.is_some() || properties.set_self_as_opener == Some(true) {
+        return Err(browser::unsupported());
+    }
+    let urls = match &properties.url {
+        Some(Value::String(url)) => vec![url.as_str()],
+        Some(Value::Array(urls)) => urls
+            .iter()
+            .map(|url| url.as_str().ok_or_else(ApiError::malformed_arguments))
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(browser::unsupported()),
+    };
+    if urls.is_empty() || urls.len() > zephium_core::extensions::MAX_EXTENSION_BROWSER_TABS {
+        return Err(browser::unsupported());
+    }
+    let window = snapshot.window(tabs::current_window(snapshot, sender, None)?)?;
+    let actions = urls
+        .into_iter()
+        .map(|url| {
+            let url = tabs::navigation_url(sender, url)?;
+            let parsed = url::Url::parse(&url).map_err(|_| ApiError::malformed_arguments())?;
+            if sender.scheme().extension_of(&parsed).as_ref() != Some(sender.extension_id()) {
+                return Err(browser::unsupported());
+            }
+            Ok(ExtensionBrowserRequestAction::CreateTab {
+                window: Some(window.native_id),
+                url: Some(url.into()),
+                active: properties.focused.unwrap_or(true),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok((window.id, actions))
+}
+
 fn prepare(snapshot: &BrowserSnapshot, call: &Invocation<'_>) -> Result<Prepared, ApiError> {
     let args = call.args();
     let sender = call.sender();
@@ -329,6 +376,46 @@ mod tests {
     use crate::context::tests::{background_sender, profile};
     use crate::permissions::{PermissionDeclaration, PermissionRequest, SiteAccess};
     use zephium_webext::manifest::Manifest;
+
+    #[test]
+    fn tab_fallback_returns_existing_window_and_refuses_foreign_or_nonpackage_urls() {
+        let sender = background_sender();
+        let mut host = FakeBrowser::new(profile());
+        let id = host.add_window(false);
+        let properties = Properties {
+            url: Some(json!("popup.html")),
+            kind: Some("popup".into()),
+            ..Default::default()
+        };
+        let (window, actions) = tab_fallback(&host.snapshot, &sender, &properties).unwrap();
+        assert_eq!(window, id);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(host.snapshot.windows[0].kind, "normal");
+        for url in [
+            "https://example.com/",
+            "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html",
+            "javascript:alert(1)",
+        ] {
+            assert!(tab_fallback(
+                &host.snapshot,
+                &sender,
+                &Properties {
+                    url: Some(json!(url)),
+                    ..properties.clone()
+                }
+            )
+            .is_err());
+        }
+        assert!(tab_fallback(
+            &host.snapshot,
+            &sender,
+            &Properties {
+                tab_id: Some(1),
+                ..properties
+            }
+        )
+        .is_err());
+    }
 
     fn permissions(tabs: bool) -> InstallPermissions {
         let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(

@@ -674,15 +674,25 @@ fn deliveries_target_the_bound_frame_and_are_bounded() {
     }
     assert_eq!(
         accepted,
-        super::core::MAX_INFLIGHT_PER_CONTEXT + MAX_QUEUED_FRAMES_PER_CONTEXT
+        MAX_QUEUED_FRAMES_PER_CONTEXT + super::core::MAX_INFLIGHT_PER_CONTEXT
     );
     assert_eq!(
         h.core.deliver(&key, vec![1]),
         Err(DeliverError::Backpressure)
     );
     h.core.take_effects();
+    let frame = effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            Effect::Send {
+                outgoing: Outgoing::Deliver { frame, .. },
+                ..
+            } => Some(frame),
+            _ => None,
+        })
+        .unwrap();
     h.core
-        .delivery_settled(id, &key, DeliveryStatus::NoReceiver);
+        .delivery_settled(id, &key, DeliveryStatus::NoReceiver, frame);
     let effects = h.core.take_effects();
     assert!(effects.iter().any(|effect| matches!(
         effect,
@@ -1227,4 +1237,89 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
     let results = h.core.take_effects();
     assert!(results.iter().any(|effect| matches!(effect, Effect::Injection { result, .. } if result.request_id == id_request && result.status == zephium_webkit_web_process_protocol::protocol::InjectionStatus::TimedOut)));
     assert!(h.core.inject(id, install(), request, 1011).is_ok());
+}
+
+#[test]
+fn rate_limited_delivery_retries_without_replaying_accepted_frames() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    let sender = senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+        .pop()
+        .unwrap();
+    let key = sender.context_key();
+    h.core.deliver(&key, b"reply".to_vec()).unwrap();
+    let take = |core: &mut Core| {
+        core.take_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Send {
+                    outgoing: Outgoing::Deliver { frame, .. },
+                    bytes,
+                    ..
+                } => Some((frame, bytes)),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let (frame, original) = take(&mut h.core);
+    h.core
+        .delivery_settled(id, &key, DeliveryStatus::RateLimited, frame);
+    assert!(h.core.has_buffered());
+    assert!(h.core.take_effects().is_empty());
+    h.core.tick(250);
+    let (frame, retried) = take(&mut h.core);
+    assert_eq!(retried, original);
+    h.core
+        .delivery_settled(id, &key, DeliveryStatus::Delivered, frame);
+    h.core.tick(500);
+    assert!(!h.core.has_buffered());
+    assert!(h.core.take_effects().is_empty());
+
+    h.core.deliver(&key, b"retired".to_vec()).unwrap();
+    let (frame, _) = take(&mut h.core);
+    h.core.detach(id);
+    h.core.take_effects();
+    h.core
+        .delivery_settled(id, &key, DeliveryStatus::RateLimited, frame);
+    h.core.tick(750);
+    assert!(!h.core.has_buffered());
+    assert!(h.core.take_effects().is_empty());
+}
+
+#[test]
+fn persistently_rate_limited_delivery_has_a_finite_retry_budget() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    let sender = senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+        .pop()
+        .unwrap();
+    let key = sender.context_key();
+    h.core.deliver(&key, b"reply".to_vec()).unwrap();
+    for attempt in 0..=8 {
+        let frame = h
+            .core
+            .take_effects()
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Send {
+                    outgoing: Outgoing::Deliver { frame, .. },
+                    ..
+                } => Some(frame),
+                _ => None,
+            })
+            .unwrap();
+        h.core
+            .delivery_settled(id, &key, DeliveryStatus::RateLimited, frame);
+        h.core.tick((attempt + 1) * 250);
+    }
+    assert!(!h.core.has_buffered());
+    assert!(h.core.take_effects().iter().any(|effect| matches!(
+        effect,
+        Effect::Undeliverable {
+            error: DeliverError::RateLimited,
+            ..
+        }
+    )));
 }

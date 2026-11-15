@@ -1,0 +1,1 @@
+{"id":"runtime-self-message","title":"Worker startup missing receiver and sender-context exclusion","apis":["runtime.sendMessage","runtime.onMessage","runtime.lastError"],"permissions":[]}

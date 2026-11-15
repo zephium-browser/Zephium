@@ -24,6 +24,41 @@ fn popup_sender() -> Sender {
 }
 
 #[test]
+fn request_interest_tracks_live_callbacks_and_durable_worker_lifetimes() {
+    let sender = background_sender();
+    let mut registry = EventRegistry::new();
+    let filter = json!({"urls":["<all_urls>"]});
+    assert!(!registry.has_web_request_listeners());
+    registry.begin_registration(&sender).unwrap();
+    registry
+        .add(&sender, id(1), "webRequest.onBeforeRequest", Some(&filter))
+        .unwrap();
+    assert!(registry.has_web_request_listeners());
+    registry.finish_registration(&sender).unwrap();
+    let snapshot = registry.snapshot(sender.install());
+    registry.cancel_context(&sender.context_key());
+    assert!(registry.has_web_request_listeners());
+    registry.erase(sender.install());
+    assert!(!registry.has_web_request_listeners());
+    registry.restore(sender.install(), snapshot).unwrap();
+    assert!(registry.has_web_request_listeners());
+    registry.begin_registration(&sender).unwrap();
+    registry.finish_registration(&sender).unwrap();
+    assert!(!registry.has_web_request_listeners());
+    registry
+        .add(&sender, id(2), "webRequest.onCompleted", Some(&filter))
+        .unwrap();
+    assert!(registry.has_web_request_listeners());
+    registry.remove(&sender, "webRequest.onCompleted", id(2));
+    assert!(!registry.has_web_request_listeners());
+    registry
+        .add(&sender, id(3), "webRequest.onErrorOccurred", Some(&filter))
+        .unwrap();
+    registry.cancel_context(&sender.context_key());
+    assert!(!registry.has_web_request_listeners());
+}
+
+#[test]
 fn callback_identity_is_scoped_to_event_and_context() {
     let sender = background_sender();
     let popup = popup_sender();

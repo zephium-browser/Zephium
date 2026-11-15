@@ -56,6 +56,8 @@ fn evaluate(context: &Owned, source: &str, url: &str) -> (Option<Owned>, bool) {
             1,
         ));
         let success = raw::jsc_context_get_exception(context.0).is_null();
+        #[cfg(feature = "native-tests")]
+        super::diagnostics::evaluation(context, &url, success);
         raw::jsc_context_clear_exception(context.0);
         (value, success)
     }
@@ -451,6 +453,8 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                     .is_ok()
             })
             .unwrap_or(false);
+            #[cfg(feature = "native-tests")]
+            super::diagnostics::scope(page, frame, sequence, &entry.world, "manifest");
             let success = charged && evaluate(&context, &file.source, &file.url).1;
             with_runtime(|runtime| {
                 runtime.state.queue_frame_event(
@@ -861,6 +865,97 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
     flush_frame_events(page) && success
 }
 
+struct IdleInjection {
+    reserved: bool,
+    page: u64,
+    request: InjectRequest,
+    deadline: std::time::Instant,
+}
+
+unsafe extern "C" fn idle_injection_destroyed(data: *mut c_void) {
+    boundary(|| unsafe {
+        let waiting = Box::from_raw(data.cast::<IdleInjection>());
+        if waiting.reserved {
+            with_runtime(|runtime| {
+                runtime.idle_injections = runtime.idle_injections.saturating_sub(1)
+            });
+        }
+    });
+}
+
+unsafe extern "C" fn idle_injection(data: *mut c_void) -> c_int {
+    boundary(|| unsafe {
+        let waiting = &mut *data.cast::<IdleInjection>();
+        let InjectionTarget::Frame {
+            frame_id,
+            document_seq,
+        } = waiting.request.target
+        else {
+            return 0;
+        };
+        let state = with_runtime(|runtime| {
+            if !runtime.state.validate_message(
+                waiting.page,
+                &waiting.request.token,
+                waiting.request.generation,
+            ) || runtime
+                .state
+                .frame(waiting.page, frame_id)
+                .is_none_or(|frame| frame.document_seq != document_seq)
+            {
+                return None;
+            }
+            runtime
+                .pages
+                .get(&waiting.page)?
+                .frames
+                .get(&frame_id)
+                .map(|frame| frame.phases[2])
+        })
+        .flatten();
+        let now = std::time::Instant::now();
+        if state == Some(false) && now < waiting.deadline {
+            return 1;
+        }
+        if state == Some(true) && now < waiting.deadline {
+            let mut request = waiting.request.clone();
+            request.kind = if request.kind == InjectionKind::FunctionAtIdle {
+                InjectionKind::Function
+            } else {
+                InjectionKind::Script
+            };
+            request.timeout_ms =
+                u32::try_from(waiting.deadline.saturating_duration_since(now).as_millis())
+                    .unwrap_or(1)
+                    .max(1);
+            waiting.reserved = false;
+            with_runtime(|runtime| {
+                runtime.idle_injections = runtime.idle_injections.saturating_sub(1)
+            });
+            inject(waiting.page, request);
+        } else {
+            publish_result(
+                PendingInjection {
+                    page: waiting.page,
+                    generation: waiting.request.generation,
+                    request_id: waiting.request.request_id,
+                    frame_id,
+                    document_seq,
+                    world: waiting.request.world.clone(),
+                    timeout_source: 0,
+                },
+                if state.is_none() {
+                    InjectionStatus::StaleTarget
+                } else {
+                    InjectionStatus::TimedOut
+                },
+                "null".into(),
+            );
+        }
+        0
+    })
+}
+
 pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
     if !with_runtime(|runtime| {
         runtime
@@ -939,23 +1034,57 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
             if !grant {
                 return Err(InjectionStatus::Denied);
             }
-            if runtime.injections.len() >= MAX_PENDING_INJECTIONS {
+            if runtime.injections.len() + runtime.idle_injections >= MAX_PENDING_INJECTIONS {
                 return Err(InjectionStatus::Denied);
             }
-            runtime
-                .state
-                .charge_script_bytes(
-                    page,
-                    frame_id,
-                    sequence,
-                    request.source.len().saturating_add(request.args_json.len()),
-                )
-                .map_err(|_| InjectionStatus::Oversized)?;
+            if !matches!(
+                request.kind,
+                InjectionKind::ScriptAtIdle | InjectionKind::FunctionAtIdle
+            ) {
+                runtime
+                    .state
+                    .charge_script_bytes(
+                        page,
+                        frame_id,
+                        sequence,
+                        request.source.len().saturating_add(request.args_json.len()),
+                    )
+                    .map_err(|_| InjectionStatus::Oversized)?;
+            }
             Ok(())
         })
         .unwrap_or(Err(InjectionStatus::StaleTarget));
         if let Err(status) = admission {
             publish_result(pending, status, "null".into());
+            continue;
+        }
+        if matches!(
+            request.kind,
+            InjectionKind::ScriptAtIdle | InjectionKind::FunctionAtIdle
+        ) {
+            let mut request = request.clone();
+            request.target = InjectionTarget::Frame {
+                frame_id,
+                document_seq: sequence,
+            };
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(u64::from(request.timeout_ms));
+            with_runtime(|runtime| runtime.idle_injections += 1);
+            unsafe {
+                raw::g_timeout_add_full(
+                    0,
+                    10,
+                    Some(idle_injection),
+                    Box::into_raw(Box::new(IdleInjection {
+                        reserved: true,
+                        page,
+                        request,
+                        deadline,
+                    }))
+                    .cast(),
+                    Some(idle_injection_destroyed),
+                );
+            }
             continue;
         }
         if matches!(
@@ -1039,6 +1168,10 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
                     pending.timeout_source = timeout_source;
                 }
             });
+            #[cfg(feature = "native-tests")]
+            super::diagnostics::scope(page, frame_id, sequence, &request.world, "executeScript");
+            #[cfg(feature = "native-tests")]
+            super::diagnostics::request(request.request_id);
             let value = if request.kind == InjectionKind::Function {
                 let Ok(args_json) = CString::new(request.args_json.as_str()) else {
                     finish(id, InjectionStatus::InvalidArguments, "null".into());
