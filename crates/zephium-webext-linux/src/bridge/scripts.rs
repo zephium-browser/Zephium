@@ -104,7 +104,6 @@ impl SealedScripts {
     /// Validates and seals a host-built table before publication.
     pub fn new(table: ScriptTable) -> Result<Self, ScriptTableError> {
         let bytes = table.encode().map_err(ScriptTableError::Wire)?;
-        let table = ScriptTable::decode(&bytes).map_err(ScriptTableError::Wire)?;
         if bytes.is_empty() || bytes.len() > MAX_SCRIPT_TABLE_BYTES {
             return Err(ScriptTableError::InvalidSize);
         }
