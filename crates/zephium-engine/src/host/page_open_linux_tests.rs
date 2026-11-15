@@ -1672,3 +1672,67 @@ fn native_display_capture_fails_cleanly_without_portal() {
         webkit2gtk::MediaCaptureState::None
     );
 }
+
+fn visible_dialog() -> gtk::Dialog {
+    let mut panel = None;
+    until(|| {
+        panel = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Dialog>().ok())
+            .find(|dialog| dialog.is_visible());
+        panel.is_some()
+    });
+    panel.unwrap()
+}
+
+#[test]
+#[ignore = "isolated GTK; localhost prompt input and cancellation"]
+fn native_prompt_returns_chosen_text_and_null_on_cancel() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.title=String(prompt('fixture','initial'))");
+    let panel = visible_dialog();
+    let entry = panel
+        .content_area()
+        .children()
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Entry>().ok())
+        .unwrap();
+    assert_eq!(entry.text(), "initial");
+    entry.set_text("chosen <literal>");
+    panel.response(gtk::ResponseType::Ok);
+    until(|| page.title().as_deref() == Some("chosen <literal>"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    script(
+        &page,
+        "document.title=String(prompt('fixture','not-returned'))",
+    );
+    visible_dialog().response(gtk::ResponseType::Cancel);
+    until(|| page.title().as_deref() == Some("null"));
+}
+
+#[test]
+#[ignore = "isolated GTK; trusted activation and beforeunload cancel/leave"]
+fn native_beforeunload_can_keep_or_leave_the_document() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#script').onclick=()=>{window.onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture';return 'fixture'};document.title='armed'};document.title='activation-ready'");
+    until(|| page.title().as_deref() == Some("activation-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("armed"));
+    page.load_uri(&format!("{}/leave", fixture.origin));
+    visible_dialog().response(gtk::ResponseType::Cancel);
+    script(
+        &page,
+        "document.title=window.onbeforeunload && location.pathname==='/page'?'kept':'lost-document'",
+    );
+    until(|| page.title().as_deref() == Some("kept"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    page.load_uri(&format!("{}/leave", fixture.origin));
+    visible_dialog().response(gtk::ResponseType::Ok);
+    until(|| !page.is_loading() && page.title().as_deref() == Some("child"));
+}
