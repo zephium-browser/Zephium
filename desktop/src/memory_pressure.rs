@@ -1,7 +1,7 @@
 //! OS and process-family residency input. Windows may raise Warning from the
 //! browser process tree's private bytes so grace/watermarks tighten before the
-//! machine runs out of free physical RAM. Critical stays OS-only: a fat
-//! session must not drive urgent discard the way a true low-memory signal does.
+//! machine runs out of free physical RAM. Soft sits high because PrivateUsage
+//! overstates reclaimable working set on WebView2. Critical stays OS-only.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
@@ -125,23 +125,21 @@ fn windows_tier(low: bool, high: bool) -> zephium_core::ports::engine::MemoryPre
     }
 }
 
-/// Enter Warning at soft; leave only below soft−gap. Never emits Critical:
+/// Enter Warning at `soft`; leave only below soft−1 GiB. Never emits Critical:
 /// that tier is reserved for OS low-memory notifications.
 #[cfg(any(test, target_os = "windows"))]
 fn self_budget_tier(
     private_bytes: u64,
     previous: zephium_core::ports::engine::MemoryPressure,
+    soft: u64,
 ) -> zephium_core::ports::engine::MemoryPressure {
     use zephium_core::ports::engine::MemoryPressure;
-    const SOFT: u64 = 2 << 30;
-    const EXIT: u64 = SOFT - (512 << 20);
+    let exit = soft.saturating_sub(1 << 30);
     match previous {
-        MemoryPressure::Warning | MemoryPressure::Critical
-            if private_bytes >= EXIT =>
-        {
+        MemoryPressure::Warning | MemoryPressure::Critical if private_bytes >= exit => {
             MemoryPressure::Warning
         }
-        _ if private_bytes >= SOFT => MemoryPressure::Warning,
+        _ if private_bytes >= soft => MemoryPressure::Warning,
         _ => MemoryPressure::Normal,
     }
 }
@@ -190,32 +188,33 @@ mod tests {
 
     #[test]
     fn self_budget_raises_warning_with_hysteresis_never_critical() {
+        const SOFT: u64 = 8 << 30;
         assert_eq!(
-            self_budget_tier(0, MemoryPressure::Normal),
+            self_budget_tier(0, MemoryPressure::Normal, SOFT),
             MemoryPressure::Normal
         );
         assert_eq!(
-            self_budget_tier((2 << 30) - 1, MemoryPressure::Normal),
+            self_budget_tier(SOFT - 1, MemoryPressure::Normal, SOFT),
             MemoryPressure::Normal
         );
         assert_eq!(
-            self_budget_tier(2 << 30, MemoryPressure::Normal),
+            self_budget_tier(SOFT, MemoryPressure::Normal, SOFT),
             MemoryPressure::Warning
         );
         assert_eq!(
-            self_budget_tier(4 << 30, MemoryPressure::Normal),
+            self_budget_tier(SOFT + (2 << 30), MemoryPressure::Normal, SOFT),
             MemoryPressure::Warning
         );
         assert_eq!(
-            self_budget_tier((2 << 30) - (256 << 20), MemoryPressure::Warning),
+            self_budget_tier(SOFT - (512 << 20), MemoryPressure::Warning, SOFT),
             MemoryPressure::Warning
         );
         assert_eq!(
-            self_budget_tier((2 << 30) - (512 << 20) - 1, MemoryPressure::Warning),
+            self_budget_tier(SOFT - (1 << 30) - 1, MemoryPressure::Warning, SOFT),
             MemoryPressure::Normal
         );
         assert_ne!(
-            self_budget_tier(8 << 30, MemoryPressure::Normal),
+            self_budget_tier(SOFT * 2, MemoryPressure::Normal, SOFT),
             MemoryPressure::Critical
         );
         assert_eq!(
@@ -255,6 +254,9 @@ mod native {
     const SELF_SAMPLE_NORMAL_MS: u32 = 30_000;
     /// Faster sample once Warning (self or OS) is elevated.
     const SELF_SAMPLE_ELEVATED_MS: u32 = 5_000;
+    /// Family PrivateUsage soft floor. Private overstates WS on WebView2; 8 GiB
+    /// sits above a typical 50-tab private floor (~4–7 GiB) so Warning is not sticky.
+    const SELF_SOFT_PRIVATE: u64 = 8 << 30;
 
     fn signaled(event: &Event) -> Option<bool> {
         let mut state = windows::core::BOOL::default();
@@ -290,10 +292,10 @@ mod native {
         }
     }
 
-    /// Root plus descendants. Parent edges where the parent started after the
-    /// child are dropped (PID reuse), matching the blocker-bench soak tree.
-    /// `None` if the root or any retained member cannot be queried — callers
-    /// must keep the previous self tier instead of treating that as zero.
+    /// Root plus descendants. Toolhelp builds the parent map cheaply; only the
+    /// family is OpenProcess'd. Parent edges where the parent started after the
+    /// child are dropped (PID reuse). `None` if the root cannot be queried —
+    /// callers must keep the previous self tier instead of treating that as zero.
     fn family_private_bytes(root: u32) -> Option<u64> {
         // SAFETY: snapshot handle is owned and closed below.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
@@ -301,52 +303,44 @@ mod native {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        let mut rows: Vec<(u32, u32)> = Vec::new();
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         // SAFETY: Toolhelp enumeration against the live snapshot.
         let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
         while more {
-            rows.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            children
+                .entry(entry.th32ParentProcessID)
+                .or_default()
+                .push(entry.th32ProcessID);
             more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
         }
         let _ = unsafe { CloseHandle(snapshot) };
 
+        let (root_private, root_start) = process_private_and_start(root)?;
+        let mut total = root_private;
         let mut starts = HashMap::new();
-        let mut private = HashMap::new();
-        for &(pid, _) in &rows {
-            let Some((bytes, start)) = process_private_and_start(pid) else {
+        starts.insert(root, root_start);
+        let mut stack = vec![root];
+        let mut seen = HashSet::new();
+        seen.insert(root);
+        while let Some(parent) = stack.pop() {
+            let Some(kids) = children.get(&parent) else {
                 continue;
             };
-            starts.insert(pid, start);
-            private.insert(pid, bytes);
-        }
-        if !starts.contains_key(&root) {
-            return None;
-        }
-        let mut parents: HashMap<u32, u32> = HashMap::new();
-        for &(pid, ppid) in &rows {
-            let Some(&child_start) = starts.get(&pid) else {
-                continue;
-            };
-            if starts.get(&ppid).is_some_and(|parent| *parent > child_start) {
-                continue;
-            }
-            parents.insert(pid, ppid);
-        }
-
-        let mut ids = HashSet::new();
-        ids.insert(root);
-        let mut grew = true;
-        while grew {
-            grew = false;
-            for (&pid, &ppid) in &parents {
-                if ids.contains(&ppid) && ids.insert(pid) {
-                    grew = true;
+            let parent_start = starts[&parent];
+            for &pid in kids {
+                if !seen.insert(pid) {
+                    continue;
                 }
+                let Some((bytes, start)) = process_private_and_start(pid) else {
+                    continue;
+                };
+                if parent_start > start {
+                    continue;
+                }
+                starts.insert(pid, start);
+                total = total.saturating_add(bytes);
+                stack.push(pid);
             }
-        }
-        let mut total = 0_u64;
-        for pid in ids {
-            total = total.saturating_add(*private.get(&pid)?);
         }
         Some(total)
     }
@@ -395,7 +389,9 @@ mod native {
                         return;
                     };
                     let mut self_tier = family_private_bytes(root)
-                        .map(|bytes| super::self_budget_tier(bytes, MemoryPressure::Normal))
+                        .map(|bytes| {
+                            super::self_budget_tier(bytes, MemoryPressure::Normal, SELF_SOFT_PRIVATE)
+                        })
                         .unwrap_or(MemoryPressure::Normal);
                     let mut effective = os_tier.max(self_tier);
                     // Launching under pressure is not a normal machine.
@@ -441,7 +437,8 @@ mod native {
                         // A failed family sample keeps the prior self tier so
                         // a denied OpenProcess cannot clear Warning to Normal.
                         if let Some(bytes) = family_private_bytes(root) {
-                            self_tier = super::self_budget_tier(bytes, self_tier);
+                            self_tier =
+                                super::self_budget_tier(bytes, self_tier, SELF_SOFT_PRIVATE);
                         }
                         let next = os_tier.max(self_tier);
                         if next != effective {
