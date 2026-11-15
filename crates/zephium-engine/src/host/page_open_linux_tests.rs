@@ -2412,6 +2412,7 @@ fn native_download_edges_settle_through_shared_coordinator() {
             terminal.state, terminal.received, terminal.total, terminal.error
         );
         assert_eq!(terminal.state, expected);
+        assert!(!terminal.source_is_context);
         assert!(received.get() > 0);
         if kind == "progress" || kind == "encoded" {
             assert_eq!(

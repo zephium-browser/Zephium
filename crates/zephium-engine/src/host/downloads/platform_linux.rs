@@ -331,7 +331,9 @@ impl Downloads {
                         .map_or(0, |t| t.as_secs() as i64),
                     filename: "download".into(),
                     source: origin.as_str().into(),
-                    source_is_context: true,
+                    source_is_context: parsed
+                        .as_ref()
+                        .is_some_and(|url| matches!(url.scheme(), "blob" | "data")),
                     state: DownloadState::Pending,
                     received: 0,
                     total: None,
