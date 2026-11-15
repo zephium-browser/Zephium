@@ -7,7 +7,7 @@ pub use crate::scripts::*;
 use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
 use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";
@@ -264,6 +264,10 @@ pub struct FormEvent {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Event {
+    ScriptsReleased {
+        generation: u64,
+        table_generation: u64,
+    },
     Attached {
         generation: u64,
     },
@@ -795,9 +799,17 @@ pub fn encode_event(event: &Event) -> Result<Vec<u8>, WireError> {
         Event::Requests { .. } => 19,
         Event::Form(_) => 20,
         Event::Injection(_) => 21,
+        Event::ScriptsReleased { .. } => 22,
     });
     match event {
         Event::Attached { generation } => w.u64(*generation),
+        Event::ScriptsReleased {
+            generation,
+            table_generation,
+        } => {
+            w.u64(*generation);
+            w.u64(*table_generation);
+        }
         Event::Frames { generation, events } => {
             w.u64(*generation);
             w.count(events.len(), MAX_BATCH_EVENTS)?;
@@ -1063,6 +1075,10 @@ pub fn decode_event(bytes: &[u8]) -> Result<Event, WireError> {
             })
         }
         21 => Event::Injection(r.injection_result(generation)?),
+        22 => Event::ScriptsReleased {
+            generation,
+            table_generation: r.u64()?,
+        },
         _ => return Err(WireError::Invalid),
     };
     r.end()?;

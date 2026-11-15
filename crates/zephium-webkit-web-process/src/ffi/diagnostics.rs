@@ -53,10 +53,14 @@ pub(super) unsafe extern "C" fn console_message(
         });
         let text = row.to_string();
         if text.len() <= 16 * 1024 {
-            let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(format!("ZPD {text}\n").as_bytes());
         } else {
             let row = serde_json::json!({"extension":extension,"context":"NativeConsole","event":{"kind":"native-record-too-large"}});
-            let _ = writeln!(std::io::stderr().lock(), "ZPD {row}");
+            let _ = std::io::stderr()
+                .lock()
+                .write_all(format!("ZPD {row}\n").as_bytes());
         }
     });
 }
@@ -92,7 +96,9 @@ pub(super) fn background_process(page: u64, uri: &str) {
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
     let row = serde_json::json!({"extension":extension,"context":"Background","process":std::process::id(),"sequence":sequence,"event":{"kind":"native-background-process","page":page,"startTicks":started,"pidNamespace":namespace}});
-    let _ = writeln!(std::io::stderr().lock(), "ZPD {row}");
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("ZPD {row}\n").as_bytes());
 }
 
 pub(super) fn request(id: u64) {
@@ -128,7 +134,12 @@ fn redact(text: &str) -> String {
         .join(" ")
 }
 
-pub(super) fn evaluation(context: &Owned, source: &CStr, success: bool) {
+pub(super) fn evaluation(
+    context: &Owned,
+    source: &CStr,
+    success: bool,
+    timing: Option<(u128, usize)>,
+) {
     if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_none() {
         return;
     }
@@ -160,6 +171,10 @@ pub(super) fn evaluation(context: &Owned, source: &CStr, success: bool) {
     } else {
         serde_json::json!({"kind":"native-evaluation", "source":redact(&source), "success":success, "message":message, "stack":stack})
     };
+    if let Some((nanos, bytes)) = timing {
+        event["evaluationNanos"] = serde_json::json!(nanos);
+        event["sourceBytes"] = serde_json::json!(bytes);
+    }
     if let Some(scope) = SCOPE.with_borrow_mut(Option::take) {
         event["scope"] = scope;
     }
@@ -169,7 +184,9 @@ pub(super) fn evaluation(context: &Owned, source: &CStr, success: bool) {
     if text.len() > 16 * 1024 {
         text = serde_json::json!({"extension":extension, "context":"ContentScript", "event":{"kind":"native-record-too-large"}}).to_string();
     }
-    let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("ZPD {text}\n").as_bytes());
 }
 
 pub(super) fn evaluation_begin(source: &CStr) {
@@ -194,7 +211,9 @@ pub(super) fn evaluation_begin(source: &CStr) {
     let row = serde_json::json!({"extension":extension,"context":"ContentScript","process":std::process::id(),"sequence":sequence,"event":{"kind":"native-evaluation-begin","source":redact(&source),"scope":scope}});
     let text = row.to_string();
     if text.len() <= 16 * 1024 {
-        let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
+        let _ = std::io::stderr()
+            .lock()
+            .write_all(format!("ZPD {text}\n").as_bytes());
     }
 }
 
@@ -215,7 +234,9 @@ pub(super) fn post_refused(page: u64, frame: u64, world: &str, error: &crate::st
         serde_json::json!({"kind":"native-post-refused","page":page,"frame":frame,"world":world,"reason":format!("{error:?}")})
     };
     let row = serde_json::json!({"extension":extension,"context":"transport","process":std::process::id(),"sequence":sequence,"event":event});
-    let _ = writeln!(std::io::stderr().lock(), "ZPD {row}");
+    let _ = std::io::stderr()
+        .lock()
+        .write_all(format!("ZPD {row}\n").as_bytes());
 }
 
 #[cfg(test)]

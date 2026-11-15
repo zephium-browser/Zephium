@@ -10,7 +10,7 @@ use zephium_webext_runtime::permissions::SiteAccess;
 use zephium_webext_runtime::scripting_registry::{ExecutionWorld, InjectionTime};
 use zephium_webkit_web_process_protocol::protocol::{
     MatchRule, RunAt, ScriptEntry, ScriptFile, ScriptTable, MAX_BOOTSTRAP_BYTES,
-    MAX_SCRIPT_SOURCE_BYTES,
+    MAX_INLINE_SCRIPT_SOURCE_BYTES, MAX_SCRIPT_SOURCE_BYTES,
 };
 
 use super::host::glue::ContentInstall;
@@ -41,16 +41,55 @@ fn hex(install: ExtensionInstallId) -> String {
         .collect()
 }
 
-fn read(root: &std::path::Path, extension: &str, path: &str) -> Result<ScriptFile, String> {
+pub(super) fn validate_file(
+    root: &std::path::Path,
+    path: &str,
+    kind: zephium_webext_runtime::scripting_registry::ResourceKind,
+) -> Result<(), zephium_webext_runtime::ApiError> {
+    use zephium_webext_runtime::{scripting_registry::ResourceKind, ApiError};
+    let path = zephium_webext::manifest::normalize_resource(path)
+        .filter(|path| !path.starts_with('_'))
+        .ok_or_else(|| ApiError::other("Invalid script path."))?;
+    let limit = if kind == ResourceKind::JavaScript {
+        MAX_SCRIPT_SOURCE_BYTES
+    } else {
+        MAX_INLINE_SCRIPT_SOURCE_BYTES
+    };
+    let metadata = std::fs::symlink_metadata(root.join(&path))
+        .map_err(|_| ApiError::other(format!("Could not load file: '{path}'.")))?;
+    if !metadata.is_file() {
+        return Err(ApiError::other(format!("Could not load file: '{path}'.")));
+    }
+    if metadata.len() > limit as u64 {
+        return Err(ApiError::other(format!(
+            "Script '{path}' exceeds the {limit}-byte source limit."
+        )));
+    }
+    Ok(())
+}
+
+fn read(
+    root: &std::path::Path,
+    extension: &str,
+    path: &str,
+    limit: usize,
+) -> Result<ScriptFile, String> {
     let normalized = zephium_webext::manifest::normalize_resource(path)
         .filter(|path| !path.starts_with('_'))
         .ok_or_else(|| format!("invalid content script path {path}"))?;
     let full = root.join(&normalized);
     let metadata = std::fs::symlink_metadata(&full).map_err(|_| format!("missing {path}"))?;
-    if !metadata.is_file() || metadata.len() > MAX_SCRIPT_SOURCE_BYTES as u64 {
-        return Err(format!("{path} is not a file of at most 2 MiB"));
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return Err(format!("{path} is not a file of at most {limit} bytes"));
     }
-    let bytes = std::fs::read(&full).map_err(|_| format!("unreadable {path}"))?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&full)
+        .and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes))
+        .map_err(|_| format!("unreadable {path}"))?;
+    if bytes.len() > limit {
+        return Err(format!("{path} exceeds the {limit}-byte source limit"));
+    }
     let source = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
     let source = source.trim_start_matches('\u{feff}').to_owned();
     Ok(ScriptFile {
@@ -134,6 +173,7 @@ fn webkit_patterns(patterns: &[String]) -> Option<Vec<String>> {
 pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
     let mut entries = Vec::new();
     let mut catalogs = std::collections::BTreeMap::new();
+    let mut bootstraps = std::collections::BTreeMap::new();
     let mut grants = Vec::new();
     let mut styles = Vec::new();
     let mut problems = Vec::new();
@@ -165,7 +205,14 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                 let files: Result<Vec<ScriptFile>, String> = script
                     .js
                     .iter()
-                    .map(|path| read(&install.root, &install.extension_id, path))
+                    .map(|path| {
+                        read(
+                            &install.root,
+                            &install.extension_id,
+                            path,
+                            MAX_SCRIPT_SOURCE_BYTES,
+                        )
+                    })
                     .collect();
                 let files = match files {
                     Ok(files) => files,
@@ -200,10 +247,17 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
             if !script.css.is_empty() && sites.as_ref().is_none_or(|sites| !sites.is_empty()) {
                 let mut source = String::new();
                 for path in &script.css {
-                    match read(&install.root, &install.extension_id, path) {
+                    match read(
+                        &install.root,
+                        &install.extension_id,
+                        path,
+                        MAX_INLINE_SCRIPT_SOURCE_BYTES,
+                    ) {
                         Ok(file) => {
                             match install.messages.localize_css(&file.source) {
-                                Ok(localized) if localized.len() <= MAX_SCRIPT_SOURCE_BYTES => {
+                                Ok(localized)
+                                    if localized.len() <= MAX_INLINE_SCRIPT_SOURCE_BYTES =>
+                                {
                                     source.push_str(&localized)
                                 }
                                 _ => {
@@ -245,7 +299,14 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
         if grant_rules.is_empty() {
             continue;
         }
-        if own.iter().any(|entry| !entry.bootstrap.is_empty()) {
+        bootstraps.insert(
+            isolated,
+            zephium_webkit_web_process_protocol::protocol::ScriptBootstrap {
+                install_id: hex(install.install),
+                source: content_bootstrap,
+            },
+        );
+        {
             if let Some(catalog) = catalog {
                 catalogs.insert(hex(install.install), catalog);
             }
@@ -262,6 +323,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
         table: ScriptTable {
             generation,
             catalogs,
+            bootstraps,
             entries,
         },
         grants,
@@ -298,6 +360,23 @@ mod tests {
         assert_eq!(
             zephium_webext_runtime::i18n::MAX_LOCALE_MESSAGES,
             zephium_webkit_web_process_protocol::scripts::MAX_CATALOG_MESSAGES
+        );
+    }
+    #[test]
+    fn package_file_budget_preflight_rejects_oversize_and_keeps_css_bound() {
+        use zephium_webext_runtime::scripting_registry::ResourceKind;
+        let root = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(root.path().join("content.js")).unwrap();
+        file.set_len(super::MAX_SCRIPT_SOURCE_BYTES as u64).unwrap();
+        assert!(super::validate_file(root.path(), "content.js", ResourceKind::JavaScript).is_ok());
+        assert!(super::validate_file(root.path(), "content.js", ResourceKind::Css).is_err());
+        file.set_len(super::MAX_SCRIPT_SOURCE_BYTES as u64 + 1)
+            .unwrap();
+        let error =
+            super::validate_file(root.path(), "content.js", ResourceKind::JavaScript).unwrap_err();
+        assert!(error.message().contains("16777216-byte source limit"));
+        assert!(
+            super::validate_file(root.path(), "../content.js", ResourceKind::JavaScript).is_err()
         );
     }
 }

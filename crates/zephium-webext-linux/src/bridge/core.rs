@@ -97,6 +97,7 @@ pub(crate) enum Outgoing {
         policy_generation: u64,
     },
     Scripts {
+        generation: u64,
         table_generation: u64,
     },
     Inject {
@@ -884,7 +885,7 @@ impl Core {
                 for event in &events {
                     match event {
                         zephium_webkit_web_process_protocol::protocol::FrameEvent::Evaluated(evaluation) => {
-                            let accepted = self.record_evaluation(id, evaluation);
+                            let accepted = self.record_evaluation(id, evaluation, now_ms);
                             self.stats.frame_records_refused += u64::from(!accepted);
                             #[cfg(feature = "native-tests")]
                             if let Some(extension) = u128::from_str_radix(&evaluation.install_id, 16).ok()
@@ -908,6 +909,24 @@ impl Core {
                     }
                 }
                 self.reassess(id, now_ms);
+            }
+            Event::ScriptsReleased {
+                generation,
+                table_generation,
+            } if Some(generation) == current => {
+                if table_generation < self.current_scripts
+                    && view.sent_tables.contains(&table_generation)
+                {
+                    if let Some(leases) = self.table_leases.get_mut(&(id, generation)) {
+                        leases.remove(&table_generation);
+                    }
+                    if let Some(view) = self.views.get_mut(&id) {
+                        view.sent_tables.remove(&table_generation);
+                    }
+                    self.collect_scripts();
+                } else {
+                    self.stats.stale_events += 1;
+                }
             }
             Event::Requests {
                 generation,
@@ -1306,6 +1325,7 @@ impl Core {
         &mut self,
         id: u64,
         evaluation: &zephium_webkit_web_process_protocol::protocol::Evaluation,
+        now_ms: u64,
     ) -> bool {
         if !evaluation.success {
             return true;
@@ -1359,7 +1379,29 @@ impl Core {
         if install_hex(grant.install) != evaluation.install_id {
             return false;
         }
-        let valid = if evaluation.table_generation == 0 {
+        let programmatic = evaluation.script_id.is_empty()
+            && evaluation.file_index == u16::MAX
+            && view.sent_tables.contains(&evaluation.table_generation)
+            && self
+                .scripts
+                .get(&evaluation.table_generation)
+                .and_then(|table| table.table.bootstraps.get(&evaluation.world))
+                .is_some_and(|bootstrap| bootstrap.install_id == evaluation.install_id)
+            && evaluation
+                .request_id
+                .and_then(|id| self.injections.get(&id))
+                .is_some_and(|pending| {
+                    pending.view == id
+                        && pending.deadline > now_ms
+                        && Some(pending.generation) == view.generation()
+                        && install_hex(pending.install) == evaluation.install_id
+                        && pending.world == evaluation.world
+                        && pending.targets.get(&evaluation.frame_id)
+                            == Some(&evaluation.document_seq)
+                });
+        let valid = if evaluation.request_id.is_some() {
+            programmatic
+        } else if evaluation.table_generation == 0 {
             evaluation.script_id.is_empty()
                 && evaluation.file_index == u16::MAX
                 && !grant.bootstrap.is_empty()
@@ -1396,7 +1438,57 @@ impl Core {
             .is_ok()
     }
 
+    fn collect_scripts(&mut self) {
+        let live: HashSet<u64> = self
+            .table_leases
+            .values()
+            .flat_map(|tables| tables.iter().copied())
+            .collect();
+        self.scripts.retain(|generation, table| {
+            *generation == self.current_scripts
+                || live.contains(generation)
+                || Rc::strong_count(table) > 1
+        });
+    }
+
+    pub fn check_script_capacity(&self, length: usize) -> Result<(), ScriptTableError> {
+        let retained: Vec<_> = self
+            .scripts
+            .iter()
+            .filter(|(generation, table)| {
+                self.table_leases
+                    .values()
+                    .any(|tables| tables.contains(generation))
+                    || Rc::strong_count(table) > 1
+            })
+            .map(|(_, table)| table)
+            .collect();
+        if retained.len() >= 16
+            || retained
+                .iter()
+                .map(|table| table.len() as usize)
+                .sum::<usize>()
+                .saturating_add(length)
+                .saturating_add(self.sources.bytes())
+                > 64 * 1024 * 1024
+        {
+            return Err(ScriptTableError::Generation);
+        }
+        Ok(())
+    }
+
     pub fn publish_scripts(&mut self, table: Rc<SealedScripts>) -> Result<u64, ScriptTableError> {
+        for (world, bootstrap) in &table.table.bootstraps {
+            let install = u128::from_str_radix(&bootstrap.install_id, 16)
+                .ok()
+                .map(ExtensionInstallId::from)
+                .ok_or(ScriptTableError::InvalidOwner)?;
+            if !self.extensions.contains_key(&install)
+                || *world != super::world_name(install, &InjectedWorld::Isolated)
+            {
+                return Err(ScriptTableError::InvalidOwner);
+            }
+        }
         for entry in &table.table.entries {
             let install = u128::from_str_radix(&entry.install_id, 16)
                 .ok()
@@ -1416,6 +1508,7 @@ impl Core {
         if generation <= self.current_scripts {
             return Err(ScriptTableError::Generation);
         }
+        self.check_script_capacity(table.len() as usize)?;
         let live: HashSet<u64> = self
             .table_leases
             .values()
@@ -1423,18 +1516,6 @@ impl Core {
             .collect();
         self.scripts
             .retain(|generation, table| live.contains(generation) || Rc::strong_count(table) > 1);
-        if self.scripts.len() >= 16
-            || self
-                .scripts
-                .values()
-                .map(|table| u64::from(table.len()))
-                .sum::<u64>()
-                + u64::from(table.len())
-                + self.sources.bytes() as u64
-                > 64 * 1024 * 1024
-        {
-            return Err(ScriptTableError::Generation);
-        }
         self.scripts.insert(generation, table);
         self.current_scripts = generation;
         for id in self.views() {
@@ -1451,6 +1532,9 @@ impl Core {
         else {
             return;
         };
+        if view.sent_tables.contains(&self.current_scripts) {
+            return;
+        }
         let Some(generation) = view.generation() else {
             return;
         };
@@ -1479,6 +1563,7 @@ impl Core {
                 name: zephium_webkit_web_process_protocol::protocol::SCRIPTS_MESSAGE,
                 bytes,
                 outgoing: Outgoing::Scripts {
+                    generation,
                     table_generation: table.table.generation,
                 },
                 policy: None,
@@ -1488,15 +1573,29 @@ impl Core {
         }
     }
 
-    pub fn scripts_settled(&mut self, id: u64, table_generation: u64, accepted: bool) {
-        if !accepted
-            && self
+    pub fn scripts_settled(
+        &mut self,
+        id: u64,
+        generation: u64,
+        table_generation: u64,
+        accepted: Option<bool>,
+    ) {
+        if accepted == Some(false) {
+            if let Some(leases) = self.table_leases.get_mut(&(id, generation)) {
+                leases.remove(&table_generation);
+            }
+            if let Some(view) = self
                 .views
-                .get(&id)
-                .is_some_and(|view| view.sent_tables.contains(&table_generation))
-        {
+                .get_mut(&id)
+                .filter(|view| view.generation() == Some(generation))
+            {
+                view.sent_tables.remove(&table_generation);
+            }
+        }
+        if accepted != Some(true) {
             self.stats.scripts_refused += 1;
         }
+        self.collect_scripts();
     }
 
     fn close_context(&mut self, key: &ContextKey, reason: CloseReason) {
@@ -1872,7 +1971,20 @@ impl Core {
         {
             return Err(InjectionError::Invalid);
         }
-        request.validate().map_err(|_| InjectionError::Invalid)?;
+        let packaged = matches!(
+            request.kind,
+            zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+        );
+        let mut validation = request.clone();
+        if packaged && request.source.len() > 64 * 1024 {
+            validation.source_fd = Some(zephium_webkit_web_process_protocol::protocol::SourceFd {
+                index: 0,
+                length: u32::try_from(request.source.len()).map_err(|_| InjectionError::Invalid)?,
+            });
+            validation.source = "".into();
+        }
+        validation.validate().map_err(|_| InjectionError::Invalid)?;
         let source = if request.source.len() > 64 * 1024
             && matches!(
                 request.kind,

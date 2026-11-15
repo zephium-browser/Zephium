@@ -22,12 +22,13 @@ fn catalog_name(name: &str) -> bool {
 }
 
 pub const MAX_SCRIPT_FILES: usize = 256;
-pub const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_FRAME_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_SCRIPT_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_INLINE_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_FRAME_SCRIPT_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_ARGS_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_RESULT_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_INJECT_REQUEST_BYTES: usize =
-    MAX_SCRIPT_SOURCE_BYTES + MAX_ARGS_JSON_BYTES + 16 * 1024;
+    MAX_INLINE_SCRIPT_SOURCE_BYTES + MAX_ARGS_JSON_BYTES + 16 * 1024;
 pub const MAX_INJECT_TIMEOUT_MS: u32 = 30_000;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -69,12 +70,19 @@ pub struct ScriptEntry<S = String> {
     pub bootstrap: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScriptBootstrap<S = String> {
+    pub install_id: String,
+    pub source: S,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScriptTable<S = String> {
     pub generation: u64,
     /// JSON catalogs passed as data to content bootstraps, shared per install.
     /// They count against the existing table and per-document byte budgets.
     pub catalogs: BTreeMap<String, Arc<str>>,
+    pub bootstraps: BTreeMap<String, ScriptBootstrap<S>>,
     pub entries: Vec<ScriptEntry<S>>,
 }
 
@@ -89,6 +97,7 @@ pub struct ScriptUpdate {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Evaluation {
+    pub request_id: Option<u64>,
     pub install_id: String,
     pub script_id: String,
     pub world: String,
@@ -294,7 +303,7 @@ fn json(value: &str, max: usize, array: bool) -> Result<(), WireError> {
 
 impl InjectRequest {
     pub fn validate(&self) -> Result<(), WireError> {
-        if self.source.len() > MAX_SCRIPT_SOURCE_BYTES
+        if self.source.len() > MAX_INLINE_SCRIPT_SOURCE_BYTES
             || self
                 .source_fd
                 .as_ref()
@@ -338,13 +347,42 @@ impl<S: AsRef<str>> ScriptTable<S> {
             return Err(WireError::Oversized);
         }
         let mut bytes = 0usize;
+        if self.bootstraps.len() > MAX_SCRIPT_ENTRIES {
+            return Err(WireError::Oversized);
+        }
+        for (world, bootstrap) in &self.bootstraps {
+            if !valid_world_name(world)
+                || world.is_empty()
+                || !valid_install_id(&bootstrap.install_id)
+                || bootstrap.source.as_ref().is_empty()
+                || bootstrap.source.as_ref().contains('\0')
+            {
+                return Err(WireError::Invalid);
+            }
+            if bootstrap.source.as_ref().len() > MAX_BOOTSTRAP_BYTES {
+                return Err(WireError::Oversized);
+            }
+            worlds.insert(
+                world,
+                (bootstrap.install_id.as_str(), bootstrap.source.as_ref()),
+            );
+            bytes = bytes.saturating_add(bootstrap.source.as_ref().len());
+            if bytes > MAX_SCRIPT_TABLE_BYTES {
+                return Err(WireError::Oversized);
+            }
+        }
+
         for (install, catalog) in &self.catalogs {
             if !valid_install_id(install)
-                || !self.entries.iter().any(|entry| {
-                    entry.install_id == *install
-                        && !entry.world.is_empty()
-                        && !entry.bootstrap.is_empty()
-                })
+                || !(self
+                    .bootstraps
+                    .values()
+                    .any(|bootstrap| bootstrap.install_id == *install)
+                    || self.entries.iter().any(|entry| {
+                        entry.install_id == *install
+                            && !entry.world.is_empty()
+                            && !entry.bootstrap.is_empty()
+                    }))
             {
                 return Err(WireError::Invalid);
             }
@@ -400,7 +438,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
                 return Err(WireError::Invalid);
             }
             if !entry.world.is_empty() {
-                let owner = (&entry.install_id, &entry.bootstrap);
+                let owner = (entry.install_id.as_str(), entry.bootstrap.as_str());
                 if worlds
                     .insert(&entry.world, owner)
                     .is_some_and(|previous| previous != owner)
@@ -436,6 +474,12 @@ impl<S: AsRef<str>> ScriptTable<S> {
         self.validate()?;
         let mut w = Writer::new(48);
         w.u64(self.generation);
+        w.count(self.bootstraps.len(), MAX_SCRIPT_ENTRIES)?;
+        for (world, bootstrap) in &self.bootstraps {
+            w.string(world, MAX_WORLD_BYTES)?;
+            w.string(&bootstrap.install_id, MAX_INSTALL_ID_BYTES)?;
+            w.string(bootstrap.source.as_ref(), MAX_BOOTSTRAP_BYTES)?;
+        }
         w.count(self.catalogs.len(), MAX_SCRIPT_ENTRIES)?;
         for (install, catalog) in &self.catalogs {
             w.string(install, MAX_INSTALL_ID_BYTES)?;
@@ -465,6 +509,18 @@ impl<S: AsRef<str>> ScriptTable<S> {
         let mut r = Reader::new(bytes, MAX_SCRIPT_TABLE_BYTES)?;
         r.header(48)?;
         let generation = r.u64()?;
+        let n = r.count(MAX_SCRIPT_ENTRIES)?;
+        let mut bootstraps = BTreeMap::new();
+        for _ in 0..n {
+            let world = r.string(MAX_WORLD_BYTES)?;
+            let bootstrap = ScriptBootstrap {
+                install_id: r.string(MAX_INSTALL_ID_BYTES)?,
+                source: source(r.borrowed_string(MAX_BOOTSTRAP_BYTES)?),
+            };
+            if bootstraps.insert(world, bootstrap).is_some() {
+                return Err(WireError::Invalid);
+            }
+        }
         let count = r.count(MAX_SCRIPT_ENTRIES)?;
         let mut catalogs = BTreeMap::new();
         for _ in 0..count {
@@ -492,6 +548,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
         let table = Self {
             generation,
             catalogs,
+            bootstraps,
             entries,
         };
         table.validate()?;
@@ -530,6 +587,10 @@ impl Writer {
     }
 
     pub(crate) fn evaluation(&mut self, value: &Evaluation) -> Result<(), WireError> {
+        self.boolean(value.request_id.is_some());
+        if let Some(id) = value.request_id {
+            self.u64(id);
+        }
         self.string(&value.install_id, MAX_INSTALL_ID_BYTES)?;
         self.string(&value.script_id, MAX_SCRIPT_ID_BYTES)?;
         self.string(&value.world, MAX_WORLD_BYTES)?;
@@ -560,7 +621,7 @@ impl Writer {
         }
         self.string(&value.world, MAX_WORLD_BYTES)?;
         self.u8(value.kind as u8);
-        self.string(&value.source, MAX_SCRIPT_SOURCE_BYTES)?;
+        self.string(&value.source, MAX_INLINE_SCRIPT_SOURCE_BYTES)?;
         self.boolean(value.source_fd.is_some());
         if let Some(fd) = &value.source_fd {
             self.u32(fd.index);
@@ -603,6 +664,11 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn evaluation(&mut self) -> Result<Evaluation, WireError> {
         Ok(Evaluation {
+            request_id: if self.boolean()? {
+                Some(self.u64()?)
+            } else {
+                None
+            },
             install_id: self.string(MAX_INSTALL_ID_BYTES)?,
             script_id: self.string(MAX_SCRIPT_ID_BYTES)?,
             world: self.string(MAX_WORLD_BYTES)?,
@@ -635,7 +701,7 @@ impl<'a> Reader<'a> {
             target,
             world: self.string(MAX_WORLD_BYTES)?,
             kind: InjectionKind::decode(self.u8()?)?,
-            source: self.string(MAX_SCRIPT_SOURCE_BYTES)?.into(),
+            source: self.string(MAX_INLINE_SCRIPT_SOURCE_BYTES)?.into(),
             source_fd: if self.boolean()? {
                 Some(SourceFd {
                     index: self.u32()?,
@@ -680,6 +746,7 @@ mod tests {
 
     fn table() -> ScriptTable {
         ScriptTable {
+            bootstraps: Default::default(),
             catalogs: Default::default(),
             generation: 9,
             entries: vec![ScriptEntry {
@@ -854,6 +921,36 @@ mod tests {
     }
 
     #[test]
+    fn programmatic_bootstraps_are_borrowed_and_match_static_world_ownership() {
+        let mut value = table();
+        let entry = &value.entries[0];
+        value.bootstraps.insert(
+            entry.world.clone(),
+            ScriptBootstrap {
+                install_id: entry.install_id.clone(),
+                source: entry.bootstrap.clone(),
+            },
+        );
+        let encoded = value.encode().unwrap();
+        let borrowed = ScriptTable::decode_borrowed(&encoded).unwrap();
+        let source = borrowed.bootstraps.values().next().unwrap().source;
+        assert!((encoded.as_ptr_range()).contains(&source.as_ptr()));
+        value
+            .bootstraps
+            .values_mut()
+            .next()
+            .unwrap()
+            .source
+            .push('x');
+        assert_eq!(value.validate(), Err(WireError::Invalid));
+        let event = Event::ScriptsReleased {
+            generation: 2,
+            table_generation: 7,
+        };
+        assert_eq!(decode_event(&encode_event(&event).unwrap()), Ok(event));
+    }
+
+    #[test]
     fn table_refuses_unbounded_sources_duplicates_and_ambiguous_world_bootstraps() {
         let mut oversized = table();
         oversized.entries[0].files[0].source = "x".repeat(MAX_SCRIPT_SOURCE_BYTES + 1);
@@ -950,7 +1047,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     #[test]
@@ -985,6 +1082,7 @@ mod tests {
             generation: 7,
             events: vec![
                 FrameEvent::Evaluated(Evaluation {
+                    request_id: None,
                     install_id: "a".repeat(32),
                     script_id: "_manifest_0".into(),
                     world: "zephium-webext-isolated".into(),

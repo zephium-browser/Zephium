@@ -701,21 +701,13 @@ impl ScriptingHost for State {
         &self,
         sender: &Sender,
         path: &str,
-        _: ResourceKind,
+        kind: ResourceKind,
     ) -> Result<(), ApiError> {
         let install = self
             .installs
             .get(&sender.install())
             .ok_or_else(ApiError::context_invalidated)?;
-        let normalized = zephium_webext::manifest::normalize_resource(path)
-            .filter(|path| !path.starts_with('_'))
-            .ok_or_else(|| ApiError::other(format!("Could not load file: '{path}'.")))?;
-        let file = install.root.join(&normalized);
-        if std::fs::symlink_metadata(file).is_ok_and(|meta| meta.is_file()) {
-            Ok(())
-        } else {
-            Err(ApiError::other(format!("Could not load file: '{path}'.")))
-        }
+        super::content::validate_file(&install.root, path, kind)
     }
 
     fn commit_script_registry(
@@ -1138,7 +1130,7 @@ fn event_frame(kind: ContextKind, seq: u64, name: &str, args: &Value) -> Option<
 }
 
 /// The manifest as extensions see it, with Chrome's localized string fields.
-fn localized_manifest(manifest: &Manifest) -> Value {
+pub(super) fn localized_manifest(manifest: &Manifest) -> Value {
     let mut raw = manifest.raw().clone();
     let localize = |value: &mut Value| {
         if let Some(text) = value.as_str() {
@@ -1483,7 +1475,7 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
 
 /// Builds one message's text for the binding's synchronous lookup: named
 /// placeholders applied, positional ones left for call time.
-fn binding_catalog(messages: &Messages) -> Value {
+pub(super) fn binding_catalog(messages: &Messages) -> Value {
     let Value::Object(catalog) = messages.catalog() else {
         return json!({});
     };

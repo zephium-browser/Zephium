@@ -449,6 +449,14 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         self.shared.core.borrow().policy_status(generation)
     }
 
+    pub(crate) fn check_script_capacity(
+        &self,
+        table: &ScriptTable,
+    ) -> Result<(), ScriptTableError> {
+        let bytes = table.encode().map_err(ScriptTableError::Wire)?;
+        self.shared.core.borrow().check_script_capacity(bytes.len())
+    }
+
     /// Publishes this profile's immutable script snapshot to future documents.
     pub fn publish_scripts(&self, table: ScriptTable) -> Result<u64, ScriptTableError> {
         let table = Rc::new(SealedScripts::new(table)?);
@@ -918,7 +926,7 @@ impl<R: Runtime + 'static> Shared<R> {
         let delivery = matches!(outgoing, Outgoing::Deliver { .. });
         let cancelled = cancellable.clone();
         view.send_message_to_page(&message, Some(&cancellable), move |reply| {
-            let _leases = leases;
+            drop(leases);
             pending.set(pending.get().saturating_sub(1));
             if cancelled.is_cancelled() {
                 return;
@@ -971,9 +979,15 @@ impl<R: Runtime + 'static> Shared<R> {
             Outgoing::Policy { policy_generation } => {
                 core.policy_settled(policy_generation, reply == Ok(DeliveryStatus::Delivered))
             }
-            Outgoing::Scripts { table_generation } => {
-                core.scripts_settled(id, table_generation, reply == Ok(DeliveryStatus::Delivered))
-            }
+            Outgoing::Scripts {
+                generation,
+                table_generation,
+            } => core.scripts_settled(
+                id,
+                generation,
+                table_generation,
+                reply.map(|status| status == DeliveryStatus::Delivered).ok(),
+            ),
             Outgoing::Inject { request_id } => {
                 core.injection_transport_settled(request_id, reply == Ok(DeliveryStatus::Delivered))
             }

@@ -572,7 +572,6 @@ impl ProfileRuntime {
         previous_version: &str,
     ) -> Result<(), InstallError> {
         self.inner.check_script_writes(spec.install)?;
-        let _ = self.inner.deactivate(spec.install, false);
         self.inner.activate(
             spec,
             &Activation::Updated {
@@ -1663,19 +1662,10 @@ impl Inner {
             return Err(InstallError::Retired);
         }
         self.check_script_writes(spec.install)?;
-        let manifest_scripts =
+        let mut manifest_scripts =
             zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
                 &spec.manifest,
-                |path, _| {
-                    zephium_webext::manifest::normalize_resource(path)
-                        .filter(|path| spec.directory.join(path).is_file())
-                        .map(|_| ())
-                        .ok_or_else(|| {
-                            zephium_webext_runtime::ApiError::other(format!(
-                                "Could not load file: '{path}'."
-                            ))
-                        })
-                },
+                |path, kind| content::validate_file(&spec.directory, path, kind),
             )
             .map_err(|error| {
                 InstallError::Admission(format!("Invalid content scripts: {error}"))
@@ -1683,9 +1673,34 @@ impl Inner {
 
         let background =
             check_background(&spec.manifest, &spec.directory).map_err(InstallError::Refused)?;
-        if self.records.borrow().contains_key(&spec.install) {
-            let _ = self.deactivate(spec.install, false);
+        let state_directory = self
+            .config
+            .state_directory
+            .as_ref()
+            .map(|directory| directory.join(hex(spec.install)));
+        if !matches!(activation, Activation::Installed) {
+            if let Some(directory) = &state_directory {
+                let bytes =
+                    storage::read_scripts(&directory.join("scripts.json")).map_err(|error| {
+                        InstallError::Admission(format!(
+                            "Could not restore registered scripts: {error}"
+                        ))
+                    })?;
+                if let Some(bytes) = bytes {
+                    let scripts = serde_json::from_slice(&bytes).map_err(|error| {
+                        InstallError::Admission(format!("Invalid registered scripts: {error}"))
+                    })?;
+                    manifest_scripts
+                        .restore(scripts, |path, kind| {
+                            content::validate_file(&spec.directory, path, kind)
+                        })
+                        .map_err(|error| {
+                            InstallError::Admission(format!("Registered scripts refused: {error}"))
+                        })?;
+                }
+            }
         }
+
         let catalogs = read_locales(&spec.directory, &spec.manifest, &self.config.locale)
             .map_err(InstallError::Locales)?;
         let messages = Arc::new(
@@ -1697,6 +1712,53 @@ impl Inner {
             )
             .map_err(|error| InstallError::Locales(error.message().to_owned()))?,
         );
+        let mut candidates = self
+            .bridge
+            .with_runtime(|host, _| host.content_installs())
+            .map_err(|_| InstallError::Admission("Runtime is busy.".into()))?;
+        candidates.retain(|candidate| candidate.install != spec.install);
+        let grants = spec.permissions.snapshot();
+        candidates.push(host::glue::ContentInstall {
+            install: spec.install,
+            extension_id: spec.extension_id.as_str().to_owned(),
+            root: spec.directory.clone(),
+            messages: messages.clone(),
+            scripts: manifest_scripts
+                .declarations()
+                .map(|declaration| (declaration.script.clone(), declaration.matcher.clone()))
+                .collect(),
+            site_access: spec.permissions.site_access().clone(),
+            origins: grants.origins,
+            file_access: spec.permissions.file_access(),
+            bootstrap: crate::background::Bootstrap {
+                extension_id: &spec.extension_id,
+                kind: ContextKind::ContentScript,
+                manifest: &host::localized_manifest(&spec.manifest),
+                messages: &host::binding_catalog(&messages),
+                ui_language: &self.config.locale.ui_language,
+                incognito: self.config.incognito,
+                unpacked: spec.unpacked,
+                permissions: &grants.permissions,
+            }
+            .to_value(None),
+        });
+        let candidate = content::build(&candidates, self.script_generation.get() + 1);
+        if let Some((_, problem)) = candidate.problems.first() {
+            return Err(InstallError::Admission(format!(
+                "Content scripts refused: {problem}"
+            )));
+        }
+        if candidate.grants.len() > zephium_webkit_web_process_protocol::protocol::MAX_WORLDS {
+            return Err(InstallError::Admission(
+                "Content scripts exceed the 16-extension world limit.".into(),
+            ));
+        }
+        self.bridge.check_script_capacity(&candidate.table).map_err(|error| InstallError::Admission(format!("Content scripts exceed the bounded source publication capacity (32 MiB table, 64 MiB live profile sources, 16 retained generations): {error:?}")))?;
+        drop(candidate);
+        drop(candidates);
+        if self.records.borrow().contains_key(&spec.install) {
+            let _ = self.deactivate(spec.install, false);
+        }
         self.scheme
             .add_install(
                 spec.install,
@@ -1718,11 +1780,6 @@ impl Inner {
             self.scheme.remove_install(spec.install);
             return Err(InstallError::Admission(format!("{error:?}")));
         }
-        let state_directory = self
-            .config
-            .state_directory
-            .as_ref()
-            .map(|directory| directory.join(hex(spec.install)));
         let snapshot = |name: &str| {
             state_directory
                 .as_ref()
@@ -1748,9 +1805,7 @@ impl Inner {
             listeners: snapshot("listeners.json"),
             alarms: snapshot("alarms.json"),
             imports: snapshot("imports.json"),
-            scripts: state_directory.as_ref().map_or(Ok(None), |directory| {
-                storage::read_scripts(&directory.join("scripts.json"))
-            }),
+            scripts: Ok(None),
             manifest: spec.manifest,
             root: spec.directory,
             background,
@@ -2006,6 +2061,7 @@ impl Inner {
         });
         if let Err(error) = self.bridge.publish_scripts(built.table) {
             eprintln!("extensions: content-script table refused: {error:?}");
+            return;
         }
         let installs: Vec<ExtensionInstallId> = self.records.borrow().keys().copied().collect();
         let scripts: Vec<PageScript> = installs

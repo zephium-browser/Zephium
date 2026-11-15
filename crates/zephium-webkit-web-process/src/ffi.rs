@@ -68,6 +68,7 @@ struct NativePage {
     batch_inflight: bool,
     form_connected: bool,
     scripts: Option<Rc<PublishedScripts>>,
+    retired_scripts: Vec<(u64, RcWeak<PublishedScripts>)>,
 }
 
 struct NativeFrame {
@@ -98,6 +99,7 @@ struct Completion {
     post_id: Option<u64>,
     event_bytes: usize,
     batch: bool,
+    released_table: Option<u64>,
 }
 
 struct PanicGuard;
@@ -323,6 +325,7 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
                     batch_inflight: false,
                     form_connected: false,
                     scripts: None,
+                    retired_scripts: Vec::new(),
                 },
             );
             true
@@ -499,6 +502,7 @@ fn flush_frame_events(id: u64) -> bool {
                 post_id: None,
                 event_bytes,
                 batch: false,
+                released_table: None,
             },
         );
     }
@@ -537,12 +541,21 @@ fn send_event_immediately(id: u64, event: Event) -> bool {
             post_id: None,
             event_bytes,
             batch: false,
+            released_table: None,
         },
     );
     true
 }
 
-fn send_bytes(page: &Owned, bytes: Vec<u8>, completion: Completion) {
+fn send_bytes(page: &Owned, bytes: Vec<u8>, mut completion: Completion) {
+    if bytes.get(4) == Some(&22) {
+        if let Ok(Event::ScriptsReleased {
+            table_generation, ..
+        }) = protocol::decode_event(&bytes)
+        {
+            completion.released_table = Some(table_generation);
+        }
+    }
     unsafe {
         let owned = Box::new(bytes);
         let parameters = raw::g_variant_new_from_data(
@@ -575,6 +588,7 @@ unsafe extern "C" fn message_finished(page: *mut Object, result: *mut Object, da
         let completion = Box::from_raw(data.cast::<Completion>());
         let mut error = ptr::null_mut();
         let reply = raw::webkit_web_page_send_message_to_view_finish(page, result, &mut error);
+        let delivered = !reply.is_null() && error.is_null();
         if !reply.is_null() {
             raw::g_object_unref(reply);
         }
@@ -598,6 +612,12 @@ unsafe extern "C" fn message_finished(page: *mut Object, result: *mut Object, da
             {
                 if let Some(page) = runtime.pages.get_mut(&completion.page) {
                     page.batch_inflight = false;
+                    if delivered {
+                        if let Some(table) = completion.released_table {
+                            page.retired_scripts
+                                .retain(|(generation, _)| *generation != table);
+                        }
+                    }
                 }
             }
         });
@@ -639,6 +659,27 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                             native.events.push_back(bytes);
                         }
                     }
+                }
+                if native.events.is_empty() && !native.retired_scripts.is_empty() {
+                    native.retired_scripts.retain(|(table_generation, table)| {
+                        if table.strong_count() != 0 {
+                            return true;
+                        }
+                        let Ok(bytes) = protocol::encode_event(&Event::ScriptsReleased {
+                            generation,
+                            table_generation: *table_generation,
+                        }) else {
+                            return true;
+                        };
+                        if native.event_bytes.saturating_add(bytes.len()) > MAX_PENDING_EVENT_BYTES
+                            || native.events.len() >= MAX_PENDING_EVENTS
+                        {
+                            return true;
+                        }
+                        native.event_bytes += bytes.len();
+                        native.events.push_back(bytes);
+                        true
+                    });
                 }
                 if native.events.is_empty()
                     && (!native.requests.is_empty() || native.requests_dropped != 0)
@@ -703,6 +744,7 @@ unsafe extern "C" fn flush_events(_: *mut c_void) -> c_int {
                         post_id: None,
                         event_bytes,
                         batch: true,
+                        released_table: None,
                     },
                 );
             }
@@ -799,6 +841,7 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 }
                 let native = runtime.pages.get_mut(&id)?;
                 native.scripts = None;
+                native.retired_scripts.clear();
                 native.policy = None;
                 native.frame_allow.clear();
                 native.pending_allow = None;
@@ -874,7 +917,13 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
                 let Some(page) = runtime.pages.get_mut(&id) else {
                     return false;
                 };
-                page.scripts = Some(table);
+                if page.retired_scripts.len() >= 16 {
+                    return false;
+                }
+                if let Some(previous) = page.scripts.replace(table) {
+                    page.retired_scripts
+                        .push((previous.table().generation, Rc::downgrade(&previous)));
+                }
                 true
             })
             .unwrap_or(false)
@@ -955,6 +1004,7 @@ fn attach_page(id: u64, pointer: *mut Object, attach: Attach) -> bool {
             return Some(BTreeMap::new());
         }
         native.scripts = None;
+        native.retired_scripts.clear();
         native.policy = None;
         native.frame_allow.clear();
         native.pending_allow = None;
@@ -1370,6 +1420,7 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
                 post_id: Some(post_id),
                 event_bytes: 0,
                 batch: false,
+                released_table: None,
             },
         );
         1
@@ -2220,6 +2271,7 @@ fn deactivate_page(id: u64) {
         runtime.state.remove_page(id);
         let native = runtime.pages.get_mut(&id)?;
         native.scripts = None;
+        native.retired_scripts.clear();
         native.policy = None;
         native.frame_allow.clear();
         native.pending_allow = None;

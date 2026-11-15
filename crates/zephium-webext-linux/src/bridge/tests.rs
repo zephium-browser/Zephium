@@ -200,6 +200,7 @@ impl Harness {
             .filter_map(|event| match event {
                 FrameEvent::Created(info) | FrameEvent::Committed(info) => {
                     Some(FrameEvent::Evaluated(Evaluation {
+                        request_id: None,
                         install_id: format!("{:032x}", 10),
                         script_id: String::new(),
                         world: world(),
@@ -981,6 +982,7 @@ fn bootstrap_posts_wait_for_verified_success_and_forged_evaluations_grant_nothin
     assert!(senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).is_empty());
     assert_eq!(h.core.stats().buffered, 1);
     let evaluation = Evaluation {
+        request_id: None,
         install_id: format!("{:032x}", 10),
         script_id: String::new(),
         world: world(),
@@ -992,24 +994,29 @@ fn bootstrap_posts_wait_for_verified_success_and_forged_evaluations_grant_nothin
     };
     for forged in [
         Evaluation {
+            request_id: None,
             install_id: format!("{:032x}", 11),
             ..evaluation.clone()
         },
         Evaluation {
+            request_id: None,
             table_generation: 7,
             script_id: "unknown".into(),
             file_index: 0,
             ..evaluation.clone()
         },
         Evaluation {
+            request_id: None,
             document_seq: 2,
             ..evaluation.clone()
         },
         Evaluation {
+            request_id: None,
             world: world_name(other_install(), &InjectedWorld::Isolated),
             ..evaluation.clone()
         },
         Evaluation {
+            request_id: None,
             success: false,
             ..evaluation.clone()
         },
@@ -1043,6 +1050,24 @@ fn immediate_structural_widening_keeps_the_live_context_and_generation() {
         .pop()
         .expect("sender");
     h.core
+        .publish_scripts(std::rc::Rc::new(
+            super::scripts::SealedScripts::new(script_table(7)).unwrap(),
+        ))
+        .unwrap();
+    let sent = h.core.take_effects();
+    assert_eq!(
+        sent.iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::Send {
+                    outgoing: Outgoing::Scripts { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    h.core
         .update_plan(id, &tab_plan(&[SITE, "https://b.test"]), true)
         .expect("widen");
     let effects = h.core.take_effects();
@@ -1050,6 +1075,13 @@ fn immediate_structural_widening_keeps_the_live_context_and_generation() {
     assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next }, .. } if *next == generation)));
     h.core
         .attach_settled(id, generation, AttachOutcome::Accepted);
+    assert!(!h.core.take_effects().iter().any(|effect| matches!(
+        effect,
+        Effect::Send {
+            outgoing: Outgoing::Scripts { .. },
+            ..
+        }
+    )));
     assert_eq!(h.core.context_view(&sender.context_key()), Some(id));
     assert_eq!(
         senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).len(),
@@ -1150,6 +1182,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
     };
     ScriptTable {
         generation,
+        bootstraps: Default::default(),
         catalogs: Default::default(),
         entries: vec![ScriptEntry {
             install_id: format!("{:032x}", 10),
@@ -1182,7 +1215,7 @@ fn document_snapshot_claims_are_checked_against_sent_history_without_ack_races()
     h.core.take_effects();
     // A document pinned 7 before publication 8, and its Created arrives after
     // the newer ACK. Its exact sent snapshot remains admissible.
-    h.core.scripts_settled(id, 8, true);
+    h.core.scripts_settled(id, generation, 8, Some(true));
     let mut facts = info(1, 1, "https://a.test/", true);
     facts.table_generation = 7;
     h.event(
@@ -1193,6 +1226,7 @@ fn document_snapshot_claims_are_checked_against_sent_history_without_ack_races()
         },
     );
     let evaluation = Evaluation {
+        request_id: None,
         install_id: format!("{:032x}", 10),
         script_id: "manifest-0".into(),
         world: world(),
@@ -1433,4 +1467,197 @@ fn large_injections_send_only_metadata_and_reuse_one_sealed_file() {
         retired.upgrade().is_none(),
         "native detach acknowledgment releases retired mappings"
     );
+}
+
+#[test]
+fn programmatic_bootstrap_receipts_require_the_exact_live_request_on_old_documents() {
+    use zephium_webkit_web_process_protocol::protocol::{
+        InjectRequest, InjectionKind, InjectionTarget, ScriptBootstrap,
+    };
+    for expired in [false, true] {
+        let mut h = Harness::new();
+        let mut plan = tab_plan(&[SITE]);
+        plan.worlds[0].bootstrap = "".into();
+        let (id, generation) = h.tab(5, &plan);
+        h.event(
+            id,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Created(info(1, 1, "https://a.test/", true))],
+            },
+        );
+        let mut table = script_table(7);
+        table.entries.clear();
+        table.bootstraps.insert(
+            world(),
+            ScriptBootstrap {
+                install_id: format!("{:032x}", 10),
+                source: "void 0;".into(),
+            },
+        );
+        h.core
+            .publish_scripts(std::rc::Rc::new(
+                super::scripts::SealedScripts::new(table).unwrap(),
+            ))
+            .unwrap();
+        h.core.take_effects();
+        assert!(
+            senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).is_empty()
+        );
+        let request = h
+            .core
+            .inject(
+                id,
+                install(),
+                InjectRequest {
+                    install_id: String::new(),
+                    token: String::new(),
+                    generation: 0,
+                    request_id: 0,
+                    target: InjectionTarget::Frame {
+                        frame_id: 1,
+                        document_seq: 1,
+                    },
+                    world: world(),
+                    kind: InjectionKind::Script,
+                    source: "void 0;".into(),
+                    source_fd: None,
+                    source_url: format!("chrome-extension://{EXTENSION}/programmatic.js"),
+                    args_json: "[]".into(),
+                    timeout_ms: 1000,
+                },
+                h.now,
+            )
+            .unwrap();
+        h.core.take_effects();
+        let receipt = Evaluation {
+            request_id: Some(request),
+            install_id: format!("{:032x}", 10),
+            script_id: String::new(),
+            world: world(),
+            frame_id: 1,
+            document_seq: 1,
+            table_generation: 7,
+            file_index: u16::MAX,
+            success: true,
+        };
+        if expired {
+            h.now += 2000;
+            assert!(senders(&h.event(
+                id,
+                Event::Frames {
+                    generation,
+                    events: vec![FrameEvent::Evaluated(receipt)]
+                }
+            ))
+            .is_empty());
+            assert!(
+                senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+                    .is_empty()
+            );
+            continue;
+        }
+        for forged in [
+            Evaluation {
+                request_id: Some(request + 1),
+                ..receipt.clone()
+            },
+            Evaluation {
+                document_seq: 2,
+                ..receipt.clone()
+            },
+            Evaluation {
+                table_generation: 8,
+                ..receipt.clone()
+            },
+        ] {
+            assert!(senders(&h.event(
+                id,
+                Event::Frames {
+                    generation,
+                    events: vec![FrameEvent::Evaluated(forged)]
+                }
+            ))
+            .is_empty());
+        }
+        assert_eq!(
+            senders(&h.event(
+                id,
+                Event::Frames {
+                    generation,
+                    events: vec![FrameEvent::Evaluated(receipt.clone())]
+                }
+            ))
+            .len(),
+            1
+        );
+        h.event(
+            id,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Created(info(1, 2, "https://a.test/next", true))],
+            },
+        );
+        h.event(
+            id,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Evaluated(Evaluation {
+                    document_seq: 2,
+                    ..receipt
+                })],
+            },
+        );
+        assert!(
+            senders(&h.post(id, post(generation, 1, 2, &world(), "https://a.test/next")))
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn retired_script_tables_wait_for_every_native_release_and_transport_lease() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let (first, first_generation) = h.tab(5, &tab_plan(&[SITE]));
+    let (second, second_generation) = h.tab(6, &tab_plan(&[SITE]));
+    let table = Rc::new(SealedScripts::new(script_table(7)).unwrap());
+    let retired = Rc::downgrade(&table);
+    h.core.publish_scripts(table.clone()).unwrap();
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(8)).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    h.event(
+        first,
+        Event::ScriptsReleased {
+            generation: first_generation + 99,
+            table_generation: 7,
+        },
+    );
+    assert_eq!(retired.strong_count(), 2);
+    h.event(
+        first,
+        Event::ScriptsReleased {
+            generation: first_generation,
+            table_generation: 7,
+        },
+    );
+    assert!(retired.upgrade().is_some());
+    h.event(
+        second,
+        Event::ScriptsReleased {
+            generation: second_generation,
+            table_generation: 7,
+        },
+    );
+    assert!(
+        retired.strong_count() == 2,
+        "in-flight transport still retains the table"
+    );
+    drop(table);
+    h.core
+        .scripts_settled(second, second_generation, 8, Some(true));
+    assert!(retired.upgrade().is_none());
 }

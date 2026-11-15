@@ -49,6 +49,8 @@ fn evaluate(context: &Owned, source: &str, url: &str) -> (Option<Owned>, bool) {
     };
     #[cfg(feature = "native-tests")]
     super::diagnostics::evaluation_begin(&url);
+    #[cfg(feature = "native-tests")]
+    let started = std::time::Instant::now();
     unsafe {
         let value = Owned::full(raw::jsc_context_evaluate_with_source_uri(
             context.0,
@@ -59,7 +61,12 @@ fn evaluate(context: &Owned, source: &str, url: &str) -> (Option<Owned>, bool) {
         ));
         let success = raw::jsc_context_get_exception(context.0).is_null();
         #[cfg(feature = "native-tests")]
-        super::diagnostics::evaluation(context, &url, success);
+        super::diagnostics::evaluation(
+            context,
+            &url,
+            success,
+            Some((started.elapsed().as_nanos(), source.len())),
+        );
         raw::jsc_context_clear_exception(context.0);
         (value, success)
     }
@@ -115,7 +122,12 @@ fn evaluate_content_bootstrap(context: &Owned, source: &str, catalog: Option<&st
         )));
         let success = raw::jsc_context_get_exception(context.0).is_null();
         #[cfg(feature = "native-tests")]
-        super::diagnostics::evaluation(context, c"zephium://native/content-bootstrap", success);
+        super::diagnostics::evaluation(
+            context,
+            c"zephium://native/content-bootstrap",
+            success,
+            None,
+        );
         raw::jsc_context_clear_exception(context.0);
         success
     }
@@ -299,6 +311,7 @@ pub(super) fn install_bridge(binding: Binding, install_id: &str, bootstrap: &str
             runtime.state.queue_frame_event(
                 page,
                 FrameEvent::Evaluated(Evaluation {
+                    request_id: None,
                     install_id: install_id.to_owned(),
                     script_id: String::new(),
                     world: world.to_owned(),
@@ -485,6 +498,7 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                     runtime.state.queue_frame_event(
                         page,
                         FrameEvent::Evaluated(Evaluation {
+                            request_id: None,
                             install_id: entry.install_id.clone(),
                             script_id: entry.script_id.clone(),
                             world: entry.world.clone(),
@@ -522,6 +536,7 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                 runtime.state.queue_frame_event(
                     page,
                     FrameEvent::Evaluated(Evaluation {
+                        request_id: None,
                         install_id: entry.install_id.clone(),
                         script_id: entry.script_id.clone(),
                         world: entry.world.clone(),
@@ -909,13 +924,29 @@ const AWAIT_RESULT: &str = r#"((value, done) => {
     }, () => fail(1));
 })"#;
 
+fn injection_document_live(
+    runtime: &Runtime,
+    page: u64,
+    frame: u64,
+    sequence: u64,
+    request: &InjectRequest,
+) -> bool {
+    runtime
+        .state
+        .validate_message(page, &request.token, request.generation)
+        && runtime
+            .state
+            .frame(page, frame)
+            .is_some_and(|info| info.document_seq == sequence)
+}
+
 fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &InjectRequest) -> bool {
     if request.world.is_empty() {
         return true;
     }
     let bootstrap = with_runtime(|runtime| {
         let info = runtime.state.frame(page, frame)?;
-        if info.document_seq != sequence {
+        if !injection_document_live(runtime, page, frame, sequence, request) {
             return None;
         }
         let grant = runtime
@@ -929,27 +960,42 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
                     && world.matches.iter().any(|rule| rule.matches(info))
             })?;
         let fallback = if grant.bootstrap.is_empty() {
-            runtime
+            let current = runtime
                 .pages
                 .get(&page)?
-                .frames
-                .get(&frame)?
                 .scripts
                 .as_ref()
-                .and_then(|table| {
+                .filter(|table| {
                     table
                         .table()
-                        .entries
-                        .iter()
-                        .enumerate()
-                        .find(|(_, entry)| {
-                            entry.install_id == request.install_id
-                                && entry.world == request.world
-                                && entry.rule.matches(info)
-                                && !entry.bootstrap.is_empty()
-                        })
-                        .map(|(index, _)| (table.clone(), index))
+                        .bootstraps
+                        .get(&request.world)
+                        .is_some_and(|bootstrap| bootstrap.install_id == request.install_id)
                 })
+                .map(|table| (table.clone(), usize::MAX));
+            current.or_else(|| {
+                runtime
+                    .pages
+                    .get(&page)?
+                    .frames
+                    .get(&frame)?
+                    .scripts
+                    .as_ref()
+                    .and_then(|table| {
+                        table
+                            .table()
+                            .entries
+                            .iter()
+                            .enumerate()
+                            .find(|(_, entry)| {
+                                entry.install_id == request.install_id
+                                    && entry.world == request.world
+                                    && entry.rule.matches(info)
+                                    && !entry.bootstrap.is_empty()
+                            })
+                            .map(|(index, _)| (table.clone(), index))
+                    })
+            })
         } else {
             None
         };
@@ -973,11 +1019,19 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
         return false;
     }
     let Some((table, index)) = fallback else {
-        return true;
+        return !bootstrap.is_empty();
     };
     let table_generation = table.table().generation;
-    let entry = &table.table().entries[index];
+    let (source, script_id) = if index == usize::MAX {
+        (table.table().bootstraps[&request.world].source, "")
+    } else {
+        let entry = &table.table().entries[index];
+        (entry.bootstrap.as_str(), entry.script_id.as_str())
+    };
     if let Some(outcome) = with_runtime(|runtime| {
+        if !injection_document_live(runtime, page, frame, sequence, request) {
+            return None;
+        }
         runtime
             .pages
             .get(&page)?
@@ -989,15 +1043,25 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
     })
     .flatten()
     {
-        return outcome;
+        return publish_bootstrap_ready(
+            page,
+            frame,
+            sequence,
+            request,
+            table_generation,
+            script_id,
+            outcome,
+        );
     }
     let Some(context) = context(page, frame, &request.world) else {
         return false;
     };
-    let catalog = content_catalog(page, frame, &entry.install_id);
-    let bootstrap_bytes =
-        entry.bootstrap.len() + catalog.as_ref().map_or(0, |catalog| catalog.len());
+    let catalog = table.table().catalogs.get(&request.install_id).cloned();
+    let bootstrap_bytes = source.len() + catalog.as_ref().map_or(0, |catalog| catalog.len());
     let charged = with_runtime(|runtime| {
+        if !injection_document_live(runtime, page, frame, sequence, request) {
+            return false;
+        }
         let charged = runtime
             .state
             .charge_script_bytes(page, frame, sequence, bootstrap_bytes)
@@ -1012,9 +1076,11 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
         charged
     })
     .unwrap_or(false);
-    let success =
-        charged && evaluate_content_bootstrap(&context, &entry.bootstrap, catalog.as_deref());
+    let success = charged && evaluate_content_bootstrap(&context, source, catalog.as_deref());
     with_runtime(|runtime| {
+        if !injection_document_live(runtime, page, frame, sequence, request) {
+            return;
+        }
         if let Some(frame) = runtime
             .pages
             .get_mut(&page)
@@ -1022,21 +1088,70 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
         {
             frame.bootstrapped.insert(request.world.clone(), success);
         }
-        runtime.state.queue_frame_event(
-            page,
-            FrameEvent::Evaluated(Evaluation {
-                install_id: entry.install_id.clone(),
-                script_id: entry.script_id.clone(),
-                world: entry.world.clone(),
-                frame_id: frame,
-                document_seq: sequence,
-                table_generation,
-                file_index: u16::MAX,
-                success,
-            }),
-        );
     });
-    flush_frame_events(page) && success
+    publish_bootstrap_ready(
+        page,
+        frame,
+        sequence,
+        request,
+        table_generation,
+        script_id,
+        success,
+    )
+}
+
+fn publish_bootstrap_ready(
+    page: u64,
+    frame: u64,
+    sequence: u64,
+    request: &InjectRequest,
+    table_generation: u64,
+    script_id: &str,
+    success: bool,
+) -> bool {
+    let current = || {
+        with_runtime(|runtime| injection_document_live(runtime, page, frame, sequence, request))
+            .unwrap_or(false)
+    };
+    let published = current()
+        && flush_frame_events(page)
+        && current()
+        && send_event_immediately(
+            page,
+            Event::Frames {
+                generation: request.generation,
+                events: vec![FrameEvent::Evaluated(Evaluation {
+                    request_id: if script_id.is_empty() {
+                        Some(request.request_id)
+                    } else {
+                        None
+                    },
+                    install_id: request.install_id.clone(),
+                    script_id: script_id.to_owned(),
+                    world: request.world.clone(),
+                    frame_id: frame,
+                    document_seq: sequence,
+                    table_generation,
+                    file_index: u16::MAX,
+                    success,
+                })],
+            },
+        );
+    if !published {
+        with_runtime(|runtime| {
+            if !injection_document_live(runtime, page, frame, sequence, request) {
+                return;
+            }
+            if let Some(frame) = runtime
+                .pages
+                .get_mut(&page)
+                .and_then(|page| page.frames.get_mut(&frame))
+            {
+                frame.bootstrapped.insert(request.world.clone(), false);
+            }
+        });
+    }
+    published && success && current()
 }
 
 struct IdleInjection {

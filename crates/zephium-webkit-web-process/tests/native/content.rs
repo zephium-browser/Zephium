@@ -172,7 +172,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut table=ScriptTable {catalogs: Default::default(),
+    let mut table=ScriptTable {bootstraps: Default::default(), catalogs: Default::default(),
         generation:1,entries:vec![
         entry("first",RunAt::DocumentStart,WORLD,"\"use strict\"; let sharedLexical=40; const sharedConstant=2; order.push('start'); globalThis.strictThis=(function(){return this;})()===undefined; globalThis.bootBefore=bootCount===1;"),
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
@@ -352,6 +352,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         "(function(messages){globalThis.catalogText=messages.probe.message;})".into();
     let mut catalog_table = ScriptTable {
         generation: 3,
+        bootstraps: Default::default(),
         catalogs: Default::default(),
         entries: vec![catalog_entry],
     };
@@ -589,6 +590,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     }],..Attach::default()};
     assert!(send(&page, &UiMessage::Attach(attachment.clone()), None));
     let table = ScriptTable {
+        bootstraps: Default::default(),
         catalogs: Default::default(),
         generation: 1,
         entries: vec![
