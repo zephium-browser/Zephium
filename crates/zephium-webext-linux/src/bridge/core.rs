@@ -873,7 +873,7 @@ impl Core {
             } if Some(generation) == current => {
                 if view
                     .attached_plan()
-                    .is_some_and(|plan| plan.observe_requests)
+                    .is_some_and(|plan| plan.observe_requests || plan.apply_policy)
                 {
                     self.effects.push(Effect::Requests {
                         view: id,

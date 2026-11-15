@@ -114,6 +114,23 @@
         "lastError": null,
         "message": "Failed to fetch"
       }
+    },
+    {
+      "label": "unblocked after removing all rules:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unblocked after removing all rules:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "status": 200,
+          "text": "fixture resource"
+        }
+      }
     }
   ],
   "schemaVersion": 1,

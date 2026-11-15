@@ -155,6 +155,72 @@ fn hit(fixture: &Fixture, suffix: &str) -> bool {
 
 #[test]
 #[ignore = "sandboxed WebKitGTK DNR; use timeout -k 10 420 scripts/ci/linux-test.sh"]
+fn native_empty_policy_skips_metadata_and_keeps_enforcement() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    let events = observe(&page);
+    load(&page, &format!("{}/frame?inert", fixture.origin));
+    assert!(send(
+        &page,
+        &UiMessage::Attach(Attach {
+            token: TOKEN.into(),
+            generation: 1,
+            tab_id: 44,
+            observe_requests: false,
+            ..Attach::default()
+        }),
+        None
+    ));
+    publish(&page, 1, &[]);
+    assert!(fetch(&page, "/dnr-empty-control")["body"].is_string());
+    let oversized = format!("/dnr-empty-oversized?{}", "x".repeat(8192));
+    let _ = fetch(&page, &oversized);
+    assert!(hit(&fixture, "/dnr-empty-oversized"));
+    let data = format!("data:text/plain,{}", "x".repeat(9000));
+    assert_eq!(fetch(&page, &data)["body"].as_str().unwrap().len(), 9000);
+    pump_for(Duration::from_millis(350));
+    assert!(!events
+        .borrow()
+        .iter()
+        .any(|event| matches!(event, Event::Requests { .. })));
+    let blocking = extension(
+        EXTENSION,
+        1,
+        vec![rules(
+            "_dynamic",
+            RulesetKind::Dynamic,
+            json!([{"id":1,"action":{"type":"block"},"condition":{"urlFilter":"/dnr-empty-control"}}]),
+        )],
+    );
+    publish(&page, 2, &[blocking]);
+    let oversized = format!("/dnr-policy-oversized?{}", "x".repeat(8192));
+    assert!(fetch(&page, &oversized)["error"].is_string());
+    assert!(!hit(&fixture, "/dnr-policy-oversized"));
+    assert!(fetch(&page, "/dnr-empty-control?blocked")["error"].is_string());
+    assert!(!hit(&fixture, "blocked"));
+    pump_until(|| {
+        events.borrow().iter().any(|event| matches!(event, Event::Requests { observations, .. } if observations.iter().any(|row| row.matched)))
+    });
+    publish(&page, 3, &[]);
+    assert!(fetch(&page, "/dnr-empty-control?removed")["body"].is_string());
+    filter::install(
+        &page,
+        r#"[{"trigger":{"url-filter":"/dnr-empty-builtin"},"action":{"type":"block"}}]"#,
+    );
+    assert!(fetch(&page, "/dnr-empty-builtin")["error"].is_string());
+    assert!(!hit(&fixture, "/dnr-empty-builtin"));
+    support::assert_sandbox(&module);
+    load(&page, "about:blank");
+    page.stop_loading();
+    drop(page);
+    drop(context);
+}
+
+#[test]
+#[ignore = "sandboxed WebKitGTK DNR; use timeout -k 10 420 scripts/ci/linux-test.sh"]
 fn native_dnr_enforcement_and_resource_coverage() {
     let _session = support::init();
     let module = ModuleDirectory::new();

@@ -202,6 +202,12 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
+        &[Permission("scripting")],
+        "Can't insert or remove CSS programmatically",
+        LIN,
+    ),
+    (&[Key("incognito")], "Can't run in private windows", LIN),
+    (
         &[Permission("cookies")],
         "Can't read or change cookies",
         LIN,
@@ -413,6 +419,7 @@ mod tests {
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Opens separate extension windows as browser tabs",
                 "Can't show notifications",
+                "Can't insert or remove CSS programmatically",
             ]
         );
         assert_eq!(
@@ -422,7 +429,10 @@ mod tests {
         let reader = json!({"manifest_version": 3, "permissions": ["storage", "alarms", "scripting", "fontSettings"]});
         assert_eq!(
             assess(reader, Platform::Linux),
-            ["Can't change font settings"]
+            [
+                "Can't change font settings",
+                "Can't insert or remove CSS programmatically"
+            ]
         );
     }
 

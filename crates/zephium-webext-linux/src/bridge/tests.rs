@@ -94,6 +94,42 @@ struct Harness {
     now: u64,
 }
 
+#[test]
+fn policy_feedback_does_not_require_all_request_observation() {
+    for (apply_policy, observe_requests, delivered) in [
+        (false, false, false),
+        (true, false, true),
+        (false, true, true),
+    ] {
+        let mut h = Harness::new();
+        let mut plan = tab_plan(&[SITE]);
+        plan.apply_policy = apply_policy;
+        plan.observe_requests = observe_requests;
+        let (id, generation) = h.tab(2, &plan);
+        let event = |generation| Event::Requests {
+            generation,
+            observations: vec![],
+            dropped_observations: 0,
+            dropped_matches: 1,
+        };
+        let effects = h.event(id, event(generation));
+        assert_eq!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                Effect::Requests {
+                    dropped_matches: 1,
+                    ..
+                }
+            )),
+            delivered
+        );
+        assert!(!h
+            .event(id, event(generation + 1))
+            .iter()
+            .any(|effect| matches!(effect, Effect::Requests { .. })));
+    }
+}
+
 impl Harness {
     fn new() -> Self {
         let mut core = Core::new(

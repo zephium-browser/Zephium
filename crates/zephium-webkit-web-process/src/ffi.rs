@@ -1466,6 +1466,14 @@ enum PolicyData {
     Exact(PolicySnapshot),
     Dnr(DnrPolicySnapshot<'static>),
 }
+impl PolicyData {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Exact(policy) => policy.is_empty(),
+            Self::Dnr(policy) => !policy.has_rules(),
+        }
+    }
+}
 struct PublishedPolicy {
     // The dependent descriptors must be dropped before the mapping.
     data: PolicyData,
@@ -1620,6 +1628,23 @@ unsafe extern "C" fn send_request(
             return 0;
         };
         let started = observe.then(std::time::Instant::now);
+        let empty_policy = with_runtime(|runtime| {
+            runtime
+                .pages
+                .get(&page_id)
+                .and_then(|page| page.policy.as_ref())
+                .is_some_and(|policy| policy.data.is_empty())
+        })
+        .unwrap_or(false);
+        if empty_policy && !observe {
+            // No request data enters policy processing. Scheme authorization and
+            // WebKit's built-in content filters remain independent of this hook.
+            return 0;
+        }
+        // Native fixtures collect metadata after timing the production empty path.
+        let empty_time = (cfg!(feature = "native-tests") && empty_policy)
+            .then(|| started.map(|start| start.elapsed()))
+            .flatten();
         let uri = raw::webkit_uri_request_get_uri(request);
         let Some(url) = bounded_text(uri, protocol::MAX_URI_BYTES) else {
             // Large inline data is decoded by WebKit, not a network request.
@@ -1815,7 +1840,10 @@ unsafe extern "C" fn send_request(
             Decision::Allow => false,
         };
         let evaluation_time_ns = started.map_or(0, |start| {
-            start.elapsed().as_nanos().min(u64::MAX as u128) as u64
+            empty_time
+                .unwrap_or_else(|| start.elapsed())
+                .as_nanos()
+                .min(u64::MAX as u128) as u64
         });
         if observe || rule_id.is_some() {
             let observation = RequestEvent {

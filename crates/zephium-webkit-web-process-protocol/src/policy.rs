@@ -150,6 +150,10 @@ impl std::fmt::Display for PolicyError {
 impl std::error::Error for PolicyError {}
 
 impl PolicySnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+
     pub fn new(rules: Vec<Rule>) -> Result<Self, PolicyError> {
         if rules.len() > MAX_RULES {
             return Err(PolicyError);
@@ -400,6 +404,7 @@ mod tests {
     }
     #[test]
     fn decisions_roundtrip_and_do_not_match_other_urls() {
+        assert!(PolicySnapshot::default().is_empty());
         for decision in [
             Decision::Allow,
             Decision::Cancel,
@@ -413,6 +418,7 @@ mod tests {
         ] {
             let policy = PolicySnapshot::new(vec![rule(decision.clone())]).unwrap();
             let decoded = PolicySnapshot::decode(&policy.encode().unwrap()).unwrap();
+            assert!(!decoded.is_empty());
             assert_eq!(decoded, policy);
             assert_eq!(decoded.decide(&request()), decision);
             let mut other = request();

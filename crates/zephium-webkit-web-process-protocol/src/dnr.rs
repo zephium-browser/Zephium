@@ -80,6 +80,7 @@ struct Extension<'a> {
 
 pub struct DnrPolicySnapshot<'a> {
     extensions: Vec<Extension<'a>>,
+    has_rules: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,7 +219,17 @@ impl<'a> DnrPolicySnapshot<'a> {
         if !reader.0.is_empty() {
             return Err(DnrPolicyError);
         }
-        Ok(Self { extensions })
+        let has_rules = extensions
+            .iter()
+            .any(|extension| extension.rulesets.iter().any(|set| set.rule_count() != 0));
+        Ok(Self {
+            extensions,
+            has_rules,
+        })
+    }
+
+    pub fn has_rules(&self) -> bool {
+        self.has_rules
     }
 
     pub fn evaluate(&self, info: &RequestInfo, inherited: &[DnrFrameAllow]) -> DnrPolicyMatch {
@@ -537,6 +548,24 @@ mod tests {
         DnrPolicySnapshot::load(&bytes)
             .unwrap()
             .evaluate(info, inherited)
+    }
+
+    #[test]
+    fn rule_presence_distinguishes_permissions_empty_sets_and_allow_rules() {
+        for extensions in [vec![], vec![policy(OWNER, 1, vec![])]] {
+            let bytes = DnrPolicySnapshot::encode(&extensions).unwrap();
+            let snapshot = DnrPolicySnapshot::load(&bytes).unwrap();
+            assert!(!snapshot.has_rules());
+            assert_eq!(snapshot.evaluate(&request(), &[]).decision, Decision::Allow);
+        }
+        for action in [Action::Allow, Action::Block] {
+            let extensions = vec![
+                policy(OWNER, 1, vec![]),
+                policy(OTHER, 2, vec![rule(1, 1, action)]),
+            ];
+            let bytes = DnrPolicySnapshot::encode(&extensions).unwrap();
+            assert!(DnrPolicySnapshot::load(&bytes).unwrap().has_rules());
+        }
     }
 
     #[test]

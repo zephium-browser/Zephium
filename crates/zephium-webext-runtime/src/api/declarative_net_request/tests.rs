@@ -140,6 +140,53 @@ fn call(
 }
 
 #[test]
+fn failed_last_rule_removal_preserves_policy_until_publication_succeeds() {
+    let sender = background_sender();
+    let permissions = permissions(&["declarativeNetRequest"], &[]);
+    let mut host = Host::new();
+    let mut dispatcher = dispatcher();
+    let method = "declarativeNetRequest.updateDynamicRules";
+    call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        &permissions,
+        method,
+        json!([{"addRules":[rule(1)]}]),
+    )
+    .unwrap();
+    host.fail_publication = true;
+    assert!(call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        &permissions,
+        method,
+        json!([{"removeRuleIds":[1]}])
+    )
+    .is_err());
+    assert_eq!(
+        host.state.rules(dnr::RulesetKind::Dynamic).unwrap().len(),
+        1
+    );
+    host.fail_publication = false;
+    call(
+        &mut dispatcher,
+        &mut host,
+        &sender,
+        &permissions,
+        method,
+        json!([{"removeRuleIds":[1]}]),
+    )
+    .unwrap();
+    assert!(host
+        .state
+        .rules(dnr::RulesetKind::Dynamic)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn atomic_duplicate_rejection_removal_replacement_and_publication_failure() {
     let sender = background_sender();
     let permissions = permissions(&["declarativeNetRequest"], &[]);

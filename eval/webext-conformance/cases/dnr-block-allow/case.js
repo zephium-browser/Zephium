@@ -40,4 +40,5 @@ export async function run(h) {
   await chrome.declarativeNetRequest.updateDynamicRules({
     removeRuleIds: [11],
   });
+  await h.call("unblocked after removing all rules", fetchResource);
 }

@@ -58,6 +58,17 @@ const MAX_LOCALE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const DRAIN_QUIET: Duration = Duration::from_millis(100);
 const MAX_TIMER: Duration = Duration::from_secs(24 * 60 * 60);
 
+fn measure_requests() -> bool {
+    #[cfg(feature = "native-tests")]
+    {
+        std::env::var_os("ZEPHIUM_WEBEXT_MEASURE_REQUESTS").is_some()
+    }
+    #[cfg(not(feature = "native-tests"))]
+    {
+        false
+    }
+}
+
 /// How one profile's runtime is set up.
 #[derive(Clone, Debug)]
 pub struct ProfileRuntimeConfig {
@@ -1759,6 +1770,8 @@ impl Inner {
                 })
                 .collect(),
             extension_bootstrap: Arc::from(""),
+            apply_policy: true,
+            observe_requests: measure_requests(),
             ..AttachPlan::default()
         };
         *self.content.borrow_mut() = TabContent {
@@ -1851,7 +1864,7 @@ impl Inner {
     ) -> Result<BridgeViewId, RegisterError> {
         let mut plan = self.content.borrow().plan.clone();
         plan.apply_policy = true;
-        plan.observe_requests = true;
+        plan.observe_requests = measure_requests();
         let id = self.bridge.attach_tab_with_id(tab, tab_id, view, &plan)?;
         self.network_tabs.borrow_mut().insert(id, tab);
         let _ = self
