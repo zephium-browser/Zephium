@@ -116,7 +116,11 @@ it("takes each feature's pages out of navigation and search while its switch is 
 it("offers SmartScreen search results only on Windows", async () => {
   for (const windows of [false, true]) {
     vi.resetModules();
-    vi.doMock("$shared/platform", () => ({ IS_WINDOWS: windows, IS_MAC: !windows }));
+    vi.doMock("$shared/platform", () => ({
+      IS_WINDOWS: windows,
+      IS_MAC: !windows,
+      SUPPORTS_BLOCKER_STATISTICS: true,
+    }));
     const model = await import("../lib/settings-model");
     expect(
       model.searchSettings("SmartScreen").some((field) => field.target === "privacy.smartscreen"),

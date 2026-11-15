@@ -230,6 +230,7 @@ export const fields = {
     initial: true,
   },
   "ntp.trackers": {
+    requiresBlockerStatistics: true,
     section: "newtab",
     label: m.ntp_trackers_blocked,
     description: m.ntp_figures,
