@@ -1199,6 +1199,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
             install_id: format!("{:032x}", 10),
             script_id: "manifest-0".into(),
             world: world(),
+            admission_world: world(),
             run_at: RunAt::DocumentStart,
             rule: MatchRule::for_origin(SITE).expect("rule"),
             files: vec![ScriptFile {

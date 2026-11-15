@@ -156,7 +156,7 @@ fn entry_admitted(document: &Document, entry: &protocol::ScriptEntry<&str>) -> b
                 .is_some_and(|attach| {
                     attach.worlds.iter().any(|world| {
                         world.install_id == entry.install_id
-                            && (entry.world.is_empty() || world.name == entry.world)
+                            && world.name == entry.admission_world
                             && world.matches.iter().any(|rule| rule.matches(info))
                     })
                 })
@@ -409,7 +409,7 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                     && entry.rule.matches(&info)
                     && attach.worlds.iter().any(|world| {
                         world.install_id == entry.install_id
-                            && (entry.world.is_empty() || world.name == entry.world)
+                            && world.name == entry.admission_world
                             && world.matches.iter().any(|rule| rule.matches(&info))
                     })
             })

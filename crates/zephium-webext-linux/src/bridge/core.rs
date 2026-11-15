@@ -1363,15 +1363,7 @@ impl Core {
             return false;
         };
         if evaluation.world.is_empty() {
-            let allowed = |plan: &ResolvedPlan| {
-                plan.worlds.iter().any(|(name, grant)| {
-                    install_hex(grant.install) == evaluation.install_id
-                        && plan.admits_world(name, &frame.document.facts).is_some()
-                })
-            };
-            return allowed(&view.plan)
-                && allowed(attached)
-                && frame.document.facts.table_generation == evaluation.table_generation
+            return frame.document.facts.table_generation == evaluation.table_generation
                 && self
                     .scripts
                     .get(&evaluation.table_generation)
@@ -1380,6 +1372,12 @@ impl Core {
                             entry.install_id == evaluation.install_id
                                 && entry.script_id == evaluation.script_id
                                 && entry.world.is_empty()
+                                && [&view.plan, attached].iter().all(|plan| {
+                                    plan.admits_world(&entry.admission_world, &frame.document.facts)
+                                        .is_some_and(|grant| {
+                                            install_hex(grant.install) == entry.install_id
+                                        })
+                                })
                                 && entry.rule.matches(&frame.document.facts)
                                 && usize::from(evaluation.file_index) < entry.files.len()
                         })

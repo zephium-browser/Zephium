@@ -272,6 +272,7 @@ fn native_bridge() {
     let table = ScriptTable { bootstraps: Default::default(), catalogs: Default::default(),
         generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
+        admission_world: world_name(install(), &InjectedWorld::Isolated),
         run_at: RunAt::DocumentStart, rule: MatchRule { matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
             &["<all_urls>"], &[], &[], &[], Default::default()).expect("matcher"), all_frames: true, file_access: false },
         files: vec![ScriptFile { source: "globalThis.__nativeBridgeScriptCount = (globalThis.__nativeBridgeScriptCount || 0) + 1; globalThis.__bridgeSend({phase:'native-script', href:location.href, value:73});".into(), url: format!("chrome-extension://{EXTENSION}/native-content.js") }],

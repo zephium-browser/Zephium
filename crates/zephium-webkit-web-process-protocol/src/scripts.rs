@@ -63,6 +63,8 @@ pub struct ScriptEntry<S = String> {
     pub script_id: String,
     /// An empty name selects MAIN, which receives no binding bootstrap.
     pub world: String,
+    /// Exact grant required even when execution selects MAIN.
+    pub admission_world: String,
     pub run_at: RunAt,
     pub rule: MatchRule,
     pub files: Vec<ScriptFile<S>>,
@@ -430,6 +432,9 @@ impl<S: AsRef<str>> ScriptTable<S> {
                 || entry.script_id.len() > MAX_SCRIPT_ID_BYTES
                 || entry.script_id.chars().any(char::is_control)
                 || (!entry.world.is_empty() && !valid_world_name(&entry.world))
+                || entry.admission_world.is_empty()
+                || !valid_world_name(&entry.admission_world)
+                || (!entry.world.is_empty() && entry.world != entry.admission_world)
                 || (entry.world.is_empty() && !entry.bootstrap.is_empty())
                 || (entry.files.is_empty() && entry.css.is_empty())
                 || entry.bootstrap.contains('\0')
@@ -490,6 +495,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
             w.string(&entry.install_id, MAX_INSTALL_ID_BYTES)?;
             w.string(&entry.script_id, MAX_SCRIPT_ID_BYTES)?;
             w.string(&entry.world, MAX_WORLD_BYTES)?;
+            w.string(&entry.admission_world, MAX_WORLD_BYTES)?;
             w.u8(entry.run_at as u8);
             w.rule(&entry.rule)?;
             w.files(&entry.files)?;
@@ -537,6 +543,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
                 install_id: r.string(MAX_INSTALL_ID_BYTES)?,
                 script_id: r.string(MAX_SCRIPT_ID_BYTES)?,
                 world: r.string(MAX_WORLD_BYTES)?,
+                admission_world: r.string(MAX_WORLD_BYTES)?,
                 run_at: RunAt::decode(r.u8()?)?,
                 rule: r.rule()?,
                 files: r.files(&source)?,
@@ -753,6 +760,7 @@ mod tests {
                 install_id: "a".repeat(32),
                 script_id: "_manifest_0".into(),
                 world: "zephium-webext-isolated".into(),
+                admission_world: "zephium-webext-isolated".into(),
                 run_at: RunAt::DocumentStart,
                 rule: MatchRule {
                     matcher: ContentScriptMatcher::new(
@@ -921,6 +929,29 @@ mod tests {
     }
 
     #[test]
+    fn user_union_and_exact_main_admission_survive_the_wire() {
+        let mut value = table();
+        let entry = &mut value.entries[0];
+        entry.world.clear();
+        entry.bootstrap.clear();
+        entry.admission_world = "zephium-webext-dedicated-user-world".into();
+        entry.rule.matcher = ContentScriptMatcher::user_script(
+            &["https://a.test/*"],
+            &["https://b.test/private/*"],
+            &["https://b.test/*"],
+            &[],
+        )
+        .unwrap();
+        let bytes = value.encode().unwrap();
+        assert_eq!(ScriptTable::decode(&bytes).unwrap(), value);
+        let mut old = bytes;
+        old[3] = b'3';
+        assert_eq!(ScriptTable::decode(&old), Err(WireError::Version));
+        value.entries[0].admission_world.clear();
+        assert_eq!(value.encode(), Err(WireError::Invalid));
+    }
+
+    #[test]
     fn programmatic_bootstraps_are_borrowed_and_match_static_world_ownership() {
         let mut value = table();
         let entry = &value.entries[0];
@@ -1047,7 +1078,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 
     #[test]

@@ -42,6 +42,7 @@ fn entry(id: &str, run_at: RunAt, world: &str, source: &str) -> ScriptEntry {
         install_id: INSTALL.into(),
         script_id: id.into(),
         world: world.into(),
+        admission_world: if world.is_empty() { WORLD } else { world }.into(),
         run_at,
         rule: rule(true),
         files: vec![file(id, source)],
@@ -185,6 +186,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         source: "let idleShared=41;globalThis.idleTaskRan=false;setTimeout(()=>{idleTaskRan=true},0);".into(),
         url: format!("chrome-extension://{ID}/idle-first.js"),
     });
+    let mut denied_main = entry(
+        "wrong-main-grant",
+        RunAt::DocumentStart,
+        "",
+        "globalThis.wrongMainGrantRan=true;",
+    );
+    denied_main.admission_world = "zephium-webext-ungranted-user-world".into();
+    table.entries.push(denied_main);
     for script in &mut table.entries {
         if !script.world.is_empty() {
             script.bootstrap = bootstrap.into();
@@ -200,6 +209,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
             .count()
             >= 6
     });
+    assert_eq!(
+        evaluate(
+            &page,
+            "return globalThis.wrongMainGrantRan === undefined;",
+            None
+        ),
+        "true"
+    );
     assert_eq!(
         evaluate(
             &page,

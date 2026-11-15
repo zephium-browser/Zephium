@@ -234,6 +234,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                         content_bootstrap.clone()
                     },
                     world,
+                    admission_world: isolated.clone(),
                     run_at: match script.run_at {
                         InjectionTime::DocumentStart => RunAt::DocumentStart,
                         InjectionTime::DocumentEnd => RunAt::DocumentEnd,
