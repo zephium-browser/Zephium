@@ -16,6 +16,7 @@ mod errors;
 mod handler_cache;
 pub(crate) mod host;
 mod icons;
+mod language;
 mod native_privacy;
 mod notifications;
 mod requests;
@@ -2006,6 +2007,11 @@ impl Inner {
 impl Inner {
     fn outgoing(self: &Rc<Self>, item: browser::Outgoing) {
         match item {
+            browser::Outgoing::Language {
+                pending,
+                tab,
+                document,
+            } => language::submit(self, pending, tab, document),
             browser::Outgoing::Engine(call) => {
                 if let Some(engine) = self.engine.upgrade() {
                     engine.browser_call(call);

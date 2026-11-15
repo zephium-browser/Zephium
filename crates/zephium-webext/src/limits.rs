@@ -216,7 +216,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("tabs")],
-        "Can't detect the language of a tab",
+        "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable",
         LIN,
     ),
     (
@@ -431,7 +431,7 @@ mod tests {
         let raw = json!({"manifest_version":3,"permissions":["tabs"]});
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
-            ["Can read browser windows but can't create, resize, focus or close them through the extension API", "Can't detect the language of a tab"]
+            ["Can read browser windows but can't create, resize, focus or close them through the extension API", "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable"]
         );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
@@ -557,7 +557,7 @@ mod tests {
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Can read browser windows but can't create, resize, focus or close them through the extension API",
-                "Can't detect the language of a tab",
+                "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable",
                 "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",

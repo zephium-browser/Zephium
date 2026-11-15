@@ -82,6 +82,55 @@ fn a_stale_surface_cannot_roll_the_browser_back() {
 }
 
 #[test]
+fn language_results_cannot_cross_same_url_reload_or_tab_removal() {
+    let shared = shared();
+    shared.publish_surface(surface(1, vec![tab(10, "https://a.test/", false)], 10));
+    let id = shared.tab_id(ItemId::from(10)).unwrap();
+    let mut state = shared.state.borrow_mut();
+    let document = DocumentGeneration::new(41).unwrap();
+    state.frames.entry(ItemId::from(10)).or_default().insert(
+        FrameId::MAIN,
+        Frame {
+            document,
+            url: Url::parse("https://a.test/").unwrap(),
+            parent: None,
+            opaque: false,
+            creator: None,
+        },
+    );
+    let document_id = state
+        .snapshot()
+        .unwrap()
+        .tab(id)
+        .unwrap()
+        .document_id
+        .clone();
+    assert_eq!(
+        state
+            .language_reply(id, document, &document_id, Ok("fr".into()))
+            .unwrap(),
+        json!("fr")
+    );
+    state
+        .frames
+        .get_mut(&ItemId::from(10))
+        .unwrap()
+        .get_mut(&FrameId::MAIN)
+        .unwrap()
+        .document = DocumentGeneration::new(42).unwrap();
+    assert!(state
+        .language_reply(id, document, &document_id, Ok("fr".into()))
+        .is_err());
+    drop(state);
+    shared.publish_surface(surface(2, vec![tab(11, "https://a.test/", false)], 11));
+    assert!(shared
+        .state
+        .borrow()
+        .language_reply(id, document, &document_id, Ok("fr".into()))
+        .is_err());
+}
+
+#[test]
 fn data_replies_refuse_unavailable_profiles_and_unknown_methods() {
     assert!(data_reply("history.search", &[], &ExtensionDataReply::Unavailable).is_err());
     assert!(data_reply("history.search", &[], &ExtensionDataReply::Busy).is_err());

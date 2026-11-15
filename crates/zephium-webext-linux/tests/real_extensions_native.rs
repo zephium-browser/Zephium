@@ -1948,8 +1948,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  try{await chrome.management.getAll()}catch(error){managementError=error.message}
  let restoreError='unexpected success';
  try{await chrome.sessions.restore()}catch(error){restoreError=error.message}
- let languageError='unexpected success';
- try{await chrome.tabs.detectLanguage(created.id)}catch(error){languageError=error.message}
+ const languageTab=(await chrome.tabs.query({})).find(tab=>tab.url?.startsWith('http://127.0.0.1:'));
+ const declaredLanguage=await chrome.tabs.detectLanguage(languageTab.id);
  const windowsUnchanged=(await chrome.tabs.query({})).length===tabCount;
  let cancelledIdle=false;
  const cancelled=requestIdleCallback(()=>cancelledIdle=true);
@@ -1959,7 +1959,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,declaredLanguage,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1979,7 +1979,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert_eq!(result["nativeIdle"], true);
     assert_eq!(result["foreign"], true);
     assert_eq!(result["restoreError"], "This function is not supported.");
-    assert_eq!(result["languageError"], "This function is not supported.");
+    assert_eq!(result["declaredLanguage"], "und");
     assert_eq!(result["managementError"], "This function is not supported.");
     for name in [
         "passwordSavingEnabled",

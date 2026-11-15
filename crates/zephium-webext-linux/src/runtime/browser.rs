@@ -115,11 +115,18 @@ pub enum BrowserSettlement {
     Data(ExtensionDataReply),
     /// The person answered a prompt.
     Prompt(bool),
+    /// A bounded declared-language observation, fenced to the requested document.
+    Language(Result<String, ApiError>),
 }
 
 /// Work the runtime's GTK side performs after a dispatch.
 pub(crate) enum Outgoing {
     Engine(BrowserCall),
+    Language {
+        pending: u64,
+        tab: ItemId,
+        document: DocumentGeneration,
+    },
     Inject {
         pending: u64,
         frame: usize,
@@ -223,6 +230,11 @@ struct FrameJob {
 }
 
 enum Shape {
+    Language {
+        tab_id: i32,
+        document: DocumentGeneration,
+        document_id: String,
+    },
     Mutations {
         remaining: VecDeque<CoreAction>,
         reply: Reply,
@@ -832,6 +844,14 @@ impl Shared {
                     }
                 }
             }
+            (
+                Shape::Language {
+                    tab_id,
+                    document,
+                    document_id,
+                },
+                BrowserSettlement::Language(result),
+            ) => state.language_reply(*tab_id, *document, document_id, result),
             (Shape::Data { method, args }, BrowserSettlement::Data(reply)) => {
                 data_reply(method, args, &reply)
             }
@@ -1085,6 +1105,21 @@ fn diff(previous: &BrowserSnapshot, current: &BrowserSnapshot) -> Vec<TabEvent> 
 }
 
 impl BrowserState {
+    fn language_reply(
+        &self,
+        tab_id: i32,
+        document: DocumentGeneration,
+        document_id: &str,
+        result: Result<String, ApiError>,
+    ) -> Result<Value, ApiError> {
+        let snapshot = self.snapshot()?;
+        let tab = snapshot.tab(tab_id)?;
+        if tab.document != document || tab.document_id != document_id {
+            return Err(ApiError::context_invalidated());
+        }
+        result.map(Value::String)
+    }
+
     fn snapshot(&self) -> Result<BrowserSnapshot, ApiError> {
         let Some(surface) = self.surface.as_ref() else {
             // Before the shell publishes its first surface there are no tabs.
@@ -1256,6 +1291,11 @@ impl BrowserState {
         let id = self.next;
         let first = first.map(|first| match first {
             Outgoing::Engine(call) => Outgoing::Engine(with_request(call, id)),
+            Outgoing::Language { tab, document, .. } => Outgoing::Language {
+                pending: id,
+                tab,
+                document,
+            },
             Outgoing::Inject {
                 frame,
                 tab,
@@ -1443,7 +1483,28 @@ impl BrowserState {
                 None => self.refuse(invocation),
             },
             Request::Capture { .. } => self.refuse(invocation),
-            Request::DetectLanguage { .. } => self.refuse(invocation),
+            Request::DetectLanguage {
+                tab_id,
+                document,
+                document_id,
+            } => {
+                let Some(tab) = self.tabs.key(tab_id) else {
+                    return invocation.reply(Err(ApiError::context_invalidated()));
+                };
+                self.pend(
+                    invocation,
+                    Shape::Language {
+                        tab_id,
+                        document,
+                        document_id,
+                    },
+                    Some(Outgoing::Language {
+                        pending: 0,
+                        tab,
+                        document,
+                    }),
+                )
+            }
             Request::Discard { .. } => self.refuse(invocation),
         }
     }
