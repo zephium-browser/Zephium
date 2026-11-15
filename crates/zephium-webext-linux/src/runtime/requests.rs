@@ -28,8 +28,18 @@ impl Inner {
     }
 }
 
+fn interested(inner: &Weak<Inner>) -> Option<Rc<Inner>> {
+    inner.upgrade().filter(|inner| {
+        !inner.retired.get()
+            && inner
+                .bridge
+                .with_runtime(|host, _| host.request_interest())
+                .unwrap_or(false)
+    })
+}
+
 fn deliver(inner: &Weak<Inner>, tab: ItemId, observation: &Observation) {
-    if let Some(inner) = inner.upgrade().filter(|inner| !inner.retired.get()) {
+    if let Some(inner) = interested(inner) {
         let _ = inner
             .bridge
             .with_runtime(|host, out| host.request_observed(tab, observation, out));
@@ -57,7 +67,7 @@ pub(super) fn attach(
 ) -> glib::SignalHandlerId {
     let weak = Rc::downgrade(inner);
     view.connect_resource_load_started(move |view, resource, request| {
-        let Some(inner) = weak.upgrade() else {
+        let Some(inner) = interested(&weak) else {
             return;
         };
         // WebKit exposes no resource-to-frame join; only the main resource has a proven frame.
@@ -92,6 +102,9 @@ pub(super) fn attach(
             headers: Vec::new(),
         };
         deliver(&weak, tab, &observation);
+        if interested(&weak).is_none() {
+            return;
+        }
         observation.event = "webRequest.onBeforeSendHeaders";
         observation.headers = headers(request.http_headers());
         deliver(&weak, tab, &observation);
@@ -100,6 +113,9 @@ pub(super) fn attach(
         let done = Rc::new(Cell::new(false));
         let (state_response, weak_response) = (state.clone(), weak.clone());
         resource.connect_response_notify(move |resource| {
+            if interested(&weak_response).is_none() {
+                return;
+            }
             let Some(response) = resource.response() else {
                 return;
             };
@@ -115,7 +131,7 @@ pub(super) fn attach(
         });
         let (state_failed, weak_failed, failed) = (state.clone(), weak.clone(), done.clone());
         resource.connect_failed(move |_, _| {
-            if failed.replace(true) {
+            if failed.replace(true) || interested(&weak_failed).is_none() {
                 return;
             }
             let mut observation = state_failed.borrow_mut();
@@ -127,7 +143,7 @@ pub(super) fn attach(
         });
         let weak_finished = weak.clone();
         resource.connect_finished(move |_| {
-            if done.replace(true) {
+            if done.replace(true) || interested(&weak_finished).is_none() {
                 return;
             }
             let mut observation = state.borrow_mut();

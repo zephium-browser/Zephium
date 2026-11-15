@@ -66,7 +66,8 @@ fn bootstrap(data: &serde_json::Value) -> Result<String, String> {
     #[cfg(not(feature = "native-tests"))]
     let bundle = zephium_webext_runtime::js::NATIVE_CONTENT_BUNDLE;
     let source = format!(
-        "(function(){{'use strict';({})('native-content',{},{});}})();",
+        "(function(){{'use strict';{};({})('native-content',{},{});}})();",
+        include_str!("idle_callback.js"),
         bundle,
         zephium_webext_runtime::js::context_surface(
             &zephium_webext::manifest::Manifest::from_value(data["manifest"].clone()),

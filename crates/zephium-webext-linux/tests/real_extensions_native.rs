@@ -1696,9 +1696,26 @@ fn platform_capabilities() {
         "manifest_version":3,"name":"Platform capabilities","version":"1.0",
         "permissions":["tabs","webRequest","contextMenus","notifications"],"host_permissions":["<all_urls>"],
         "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
-        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]}]
+        "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]},{"matches":["http://127.0.0.1/*"],"js":["main.js"],"world":"MAIN"}]
     }).to_string()).unwrap();
-    std::fs::write(package.path().join("empty.js"), "void 0;").unwrap();
+    std::fs::write(
+        package.path().join("main.js"),
+        "document.documentElement.dataset.mainIdle=typeof requestIdleCallback;",
+    )
+    .unwrap();
+    std::fs::write(package.path().join("empty.js"), r#"
+(async()=>{
+ let cancelled=false;
+ const handle=requestIdleCallback(()=>cancelled=true);
+ cancelIdleCallback(handle);
+ const idle=await new Promise(resolve=>requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining()})));
+ const timed=await new Promise(resolve=>{
+   requestIdleCallback(deadline=>resolve({didTimeout:deadline.didTimeout,remaining:deadline.timeRemaining()}),{timeout:1});
+   const until=performance.now()+20;while(performance.now()<until){}
+ });
+ document.documentElement.dataset.isolatedIdle=JSON.stringify({idle,timed,cancelled});
+})().catch(error=>document.documentElement.dataset.isolatedIdle=JSON.stringify({error:String(error)}));
+"#).unwrap();
     let icon =
         gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 2, 2).unwrap();
     icon.fill(0xff00ffff);
@@ -1730,6 +1747,15 @@ chrome.contextMenus.create({id:'fill',title:'Fill',contexts:['editable']});
 chrome.contextMenus.onClicked.addListener(info=>{if(info.menuItemId==='fill')clicks++;});
 chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.report)respond({seen,clicks,matchingWindow,foreignWindow,iconResult}); });
 "#).unwrap();
+    let plain = webkit2gtk::WebView::with_context(&context());
+    plain.load_uri(&fixture.url("/password-form"));
+    pump_for(Duration::from_secs(1));
+    let default_idle = evaluate(&plain, "return typeof requestIdleCallback;");
+    assert_eq!(
+        default_idle, "undefined",
+        "update this probe when WebKit enables idle callbacks by default"
+    );
+    drop(plain);
     let (mut host, _engine) = host(context(), &module, state.path(), id);
     let _initial_tab = host.open("about:blank", true);
     let install = ExtensionInstallId::from(INSTALL);
@@ -1739,6 +1765,41 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     pump(&mut host, Duration::from_secs(2));
     let tab = host.open(&fixture.url("/password-form"), true);
     pump(&mut host, Duration::from_secs(2));
+    let tab_view = host.shell.borrow().tabs[&tab].view.clone();
+    assert_eq!(
+        evaluate(&tab_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    assert_eq!(
+        evaluate(&tab_view, "return typeof cancelIdleCallback;"),
+        "undefined"
+    );
+    assert_eq!(
+        evaluate(
+            &tab_view,
+            "return document.documentElement.dataset.mainIdle;"
+        ),
+        default_idle
+    );
+    let isolated: Value = serde_json::from_str(&evaluate(
+        &tab_view,
+        "return document.documentElement.dataset.isolatedIdle;",
+    ))
+    .unwrap();
+    assert_eq!(isolated["cancelled"], false, "{isolated}");
+    assert_eq!(isolated["idle"]["didTimeout"], false, "{isolated}");
+    assert!(
+        isolated["idle"]["remaining"]
+            .as_f64()
+            .is_some_and(|v| (0.0..=50.0).contains(&v)),
+        "{isolated}"
+    );
+    assert_eq!(
+        isolated["timed"],
+        json!({"didTimeout":true,"remaining":0}),
+        "{isolated}"
+    );
+    drop(tab_view);
     let menu_context = MenuContext {
         menu_generation: host.runtime.context_menu_generation(),
         document_id: host.runtime.context_menu_document(tab),
@@ -1768,6 +1829,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         evaluate(
             popup.view(),
             r#"globalThis.result=null;(async()=>{
+ const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
  const created=await chrome.tabs.create({url:'popup.html#created'});
  await chrome.tabs.update(created.id,{url:'popup.html#updated'});
  const window=await chrome.windows.create({url:'popup.html#window',type:'popup'});
@@ -1779,7 +1841,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,window,foreign,idle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={created,window,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1796,6 +1858,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         json!({"kind":"platform-capabilities","result":result}),
     );
     assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["nativeIdle"], true);
     assert_eq!(result["foreign"], true);
     assert_eq!(result["inlineImage"], true);
     assert_eq!(result["idle"]["cancelled"], false);
@@ -1829,6 +1892,31 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             "missing {event}: {result}"
         );
     }
+    // An extension document in an ordinary tab keeps that view's defaults,
+    // including after it navigates back to a web page.
+    let package_tab = host.open(&format!("chrome-extension://{id}/popup.html"), true);
+    pump(&mut host, Duration::from_secs(1));
+    let package_view = host.shell.borrow().tabs[&package_tab].view.clone();
+    assert_eq!(
+        evaluate(&package_view, "return location.protocol;"),
+        "chrome-extension:"
+    );
+    assert_eq!(
+        evaluate(&package_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    package_view.load_uri(&fixture.url("/password-form"));
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(&package_view, "return typeof requestIdleCallback;"),
+        default_idle
+    );
+    drop(package_view);
+    diagnostics::record(
+        id,
+        "host",
+        json!({"kind":"idle-worlds","default":default_idle,"isolated":isolated,"ownedNative":result["nativeIdle"]}),
+    );
     let tabs: Vec<_> = host.shell.borrow().tabs.keys().copied().collect();
     for tab in tabs {
         host.close(tab);

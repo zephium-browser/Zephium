@@ -692,4 +692,35 @@ fn corpus_smoke(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events, 
     assert!(hit(fixture, "http://amazon.com/dnr-actual?keep=yes"));
     assert!(!hit(fixture, "asc_campaign=tracking"));
     println!("DNR ubOL block_samples=2 redirect_samples=1 proxy=localhost scripts_executed=false");
+    publish(page, 13, &[]);
+    // Match request_cost's fetch-only workload independently of the runtime host.
+    for origin in [&fixture.origin, "http://dnr-fixture.test"] {
+        for parallel in [false, true] {
+            load(page, &format!("{origin}/frame?cost"));
+            pump_for(Duration::from_millis(350));
+            events.borrow_mut().clear();
+            let script = format!(
+                "const run=i=>fetch('/dnr-resource?cost='+i,{{cache:'no-store'}}); if ({parallel}) {{await Promise.all(Array.from({{length:256}},(_,i)=>run(i)));}} else {{for(let i=0;i<256;i++)await run(i);}} return 'done';"
+            );
+            assert_eq!(evaluate(page, &script, None), "done");
+            pump_for(Duration::from_millis(350));
+            let mut timing: Vec<_> = events
+                .borrow()
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Requests { observations, .. } => Some(observations),
+                    _ => None,
+                })
+                .flatten()
+                .filter(|row| row.url.contains("?cost="))
+                .map(|row| row.evaluation_time_ns)
+                .collect();
+            timing.sort_unstable();
+            assert_eq!(timing.len(), 256);
+            println!(
+                "DNR fetch_cost {}",
+                json!({"localhost":origin == fixture.origin,"parallel":parallel,"samples":timing.len(),"p50_ns":timing[timing.len()/2],"p99_ns":timing[(timing.len()-1)*99/100]})
+            );
+        }
+    }
 }

@@ -1,4 +1,4 @@
-//! Native WebKit features needed by extension documents and content scripts.
+//! Native WebKit features for runtime-owned extension views.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
 
@@ -20,7 +20,7 @@ unsafe extern "C" {
     );
 }
 
-pub(crate) fn configure(view: &webkit2gtk::WebView) {
+pub(crate) fn configure_owned(view: &webkit2gtk::WebView) {
     let Some(settings) = view.settings() else {
         return;
     };

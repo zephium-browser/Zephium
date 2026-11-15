@@ -1621,13 +1621,10 @@ unsafe extern "C" fn send_request(
         };
         let started = observe.then(std::time::Instant::now);
         let uri = raw::webkit_uri_request_get_uri(request);
-        // Inline data is decoded by WebKit, not a network request. Its payload
-        // must never be copied into the bounded network policy/telemetry URL.
-        if is_data_uri(uri) {
-            return 0;
-        }
         let Some(url) = bounded_text(uri, protocol::MAX_URI_BYTES) else {
-            return 1;
+            // Large inline data is decoded by WebKit, not a network request.
+            // Keep this exception off the normal bounded-URL path.
+            return c_int::from(!is_data_uri(uri));
         };
         let method = bounded_text(raw::webkit_uri_request_get_http_method(request), 32);
         let headers = raw::webkit_uri_request_get_http_headers(request);
