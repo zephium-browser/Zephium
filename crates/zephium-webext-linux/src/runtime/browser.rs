@@ -312,6 +312,7 @@ pub(crate) struct BrowserState {
 pub(crate) struct Shared {
     state: RefCell<BrowserState>,
     kick: RefCell<Option<Rc<dyn Fn()>>>,
+    pub(crate) css: super::css::Sheets,
 }
 
 /// The [`BrowserPort`] the runtime host dispatches to.
@@ -476,6 +477,7 @@ impl Shared {
     /// The install stopped: its pending requests are dropped unanswered (its
     /// contexts are gone) and its toolbar state forgotten.
     pub(crate) fn forget(&self, install: ExtensionInstallId) -> Vec<Responder> {
+        self.css.remove_install(install);
         let mut state = self.state.borrow_mut();
         state.installs.remove(&install);
         state.commands.remove(install);
@@ -1734,6 +1736,41 @@ fn with_request(call: BrowserCall, id: u64) -> BrowserCall {
 impl Browser {
     fn dispatch(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
         let mut state = self.shared.state.borrow_mut();
+        if let BrowserRequest::Scripting(request @ scripting::Request::Css { .. }) = &request {
+            let result = (|| {
+                let scripting::Request::Css { source, .. } = request else {
+                    unreachable!()
+                };
+                let install = invocation.sender().install();
+                let facts = state
+                    .installs
+                    .get(&install)
+                    .ok_or_else(ApiError::context_invalidated)?;
+                let tab = state
+                    .tabs
+                    .key(request.target().tab_id)
+                    .ok_or_else(ApiError::context_invalidated)?;
+                let text = match source {
+                    scripting::CssSource::Code(text) => text.clone(),
+                    scripting::CssSource::Files(files) => {
+                        let mut text = String::new();
+                        for file in files {
+                            let (source, _) = read_package_file(facts, file)?;
+                            if text.len() + source.len() + 1 > scripting::MAX_SOURCE_BYTES {
+                                return Err(ApiError::message_too_large());
+                            }
+                            text.push_str(&source);
+                            text.push('\n');
+                        }
+                        text
+                    }
+                };
+                super::css::check_all_frame_grants(request, invocation.permissions())?;
+                self.shared.css.apply(tab, install, request, &text)?;
+                Ok(Value::Null)
+            })();
+            return invocation.reply(result);
+        }
         match request {
             BrowserRequest::Core(action) => {
                 state.mutate(invocation, VecDeque::from([action]), Reply::Null)

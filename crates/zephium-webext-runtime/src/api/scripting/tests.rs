@@ -212,14 +212,34 @@ fn css_identity_retains_source_origin_and_removal() {
             source,
             origin,
             remove,
+            all_frames,
         }) = host.requests.last().unwrap()
         else {
             panic!("css");
         };
+        assert!(!all_frames);
         assert_eq!(target.frames[0].frame, FrameId::new(3));
         assert_eq!(source, &CssSource::Code("body { color: red }".into()));
         assert_eq!(*origin, StyleOrigin::User);
         assert_eq!(*remove, method == "scripting.removeCSS");
+    }
+}
+
+#[test]
+fn css_preserves_all_frames_selection_separately_from_exact_ids() {
+    let mut host = fixture();
+    let granted = permissions(&["scripting"], &["<all_urls>"]);
+    for all_frames in [false, true] {
+        call(
+            &mut host,
+            &granted,
+            "scripting.insertCSS",
+            json!([{"target":{"tabId":1,"allFrames":all_frames},"css":"body {}"}]),
+        )
+        .unwrap();
+        assert!(
+            matches!(host.requests.last(), Some(BrowserRequest::Scripting(Request::Css { all_frames: selected, .. })) if *selected == all_frames)
+        );
     }
 }
 
@@ -307,6 +327,7 @@ fn injection_results_preserve_chrome_single_and_multiple_frame_failure_shapes() 
     };
     assert_eq!(reply(&script, failed()).unwrap(), json!([]));
     let css = Request::Css {
+        all_frames: true,
         target,
         source: CssSource::Code("body {}".into()),
         origin: StyleOrigin::Author,

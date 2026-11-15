@@ -10,6 +10,7 @@
 mod browser;
 mod commands;
 mod content;
+mod css;
 mod errors;
 pub(crate) mod host;
 mod icons;
@@ -1915,6 +1916,7 @@ impl Inner {
             match event {
                 webkit2gtk::LoadEvent::Started => view.set_cors_allowlist(&[]),
                 webkit2gtk::LoadEvent::Committed => {
+                    inner.browser.css.clear(tab);
                     let install = view.uri().and_then(|uri| inner.install_of_uri(&uri));
                     match install {
                         Some(install) => inner.allow_cors(install, view),
@@ -1955,6 +1957,7 @@ impl Inner {
                     .then(|| requests::attach(self, tab, view)),
             },
         );
+        self.browser.css.attach(tab, view);
         self.browser.tab_view(id, Some(tab));
         self.apply_tab_content(id);
         Ok(id)
@@ -1962,6 +1965,7 @@ impl Inner {
 
     fn detach_ordinary_tab(&self, view: BridgeViewId) {
         if let Some(tab) = self.network_tabs.borrow_mut().remove(&view) {
+            self.browser.css.detach(tab);
             let _ = self
                 .bridge
                 .with_runtime(|host, _| host.network_tab_closed(tab));

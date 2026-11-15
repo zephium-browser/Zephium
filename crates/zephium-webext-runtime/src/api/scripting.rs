@@ -80,6 +80,8 @@ pub enum Request {
     },
     /// Insert or remove CSS using an install-scoped source/origin identity.
     Css {
+        /// Whether the caller selected all frames rather than exact frame identities.
+        all_frames: bool,
         /// Exact admitted destinations.
         target: InjectionTarget,
         /// Exact stylesheet identity.
@@ -403,6 +405,7 @@ fn prepare(host: &impl BrowserPort, call: &Invocation<'_>) -> Result<Request, Ap
             CssSource::Code(source.into())
         };
         Ok(Request::Css {
+            all_frames: details["target"]["allFrames"].as_bool().unwrap_or(false),
             target,
             source,
             origin: if details["origin"] == "USER" {

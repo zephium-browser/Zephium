@@ -103,6 +103,11 @@ for (const id of cases) {
         } else if (url.pathname === "/resource.txt") {
           response.setHeader("Content-Type", "text/plain");
           response.end("fixture resource");
+        } else if (url.pathname === "/web-frames.html") {
+          response.setHeader("Content-Type", "text/html");
+          response.end(
+            `<!doctype html>${page}<iframe src="${origins.a}/frame.html?kind=same"></iframe><iframe src="${origins.b}/frame.html?kind=cross"></iframe>`,
+          );
         } else if (url.pathname === "/frames.html") {
           response.setHeader("Content-Type", "text/html");
           response.end(

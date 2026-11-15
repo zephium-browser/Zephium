@@ -23,8 +23,10 @@
             "documentId": "<document:1>",
             "frameId": 0,
             "result": {
+              "adopted": 0,
               "color": "rgb(12, 34, 56)",
-              "marker": "manifest"
+              "marker": "manifest",
+              "sheets": 0
             }
           }
         ]
@@ -62,8 +64,10 @@
             "documentId": "<document:1>",
             "frameId": 0,
             "result": {
+              "adopted": 0,
               "color": "rgb(21, 43, 65)",
-              "marker": "programmatic"
+              "marker": "programmatic",
+              "sheets": 0
             }
           }
         ]
@@ -101,9 +105,256 @@
             "documentId": "<document:1>",
             "frameId": 0,
             "result": {
+              "adopted": 0,
               "color": "rgb(12, 34, 56)",
-              "marker": "manifest"
+              "marker": "manifest",
+              "sheets": 0
             }
+          }
+        ]
+      }
+    },
+    {
+      "label": "page important rule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "page important rule:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "AUTHOR important insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "AUTHOR important insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "AUTHOR important computed style:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "AUTHOR important computed style:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "adopted": 0,
+              "color": "rgb(1, 2, 3)",
+              "marker": "manifest",
+              "sheets": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "USER insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "USER insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "USER computed style:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "USER computed style:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "adopted": 0,
+              "color": "rgb(9, 8, 7)",
+              "marker": "manifest",
+              "sheets": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "navigation:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "navigation:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "new document has no programmatic CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "new document has no programmatic CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:2>",
+            "frameId": 0,
+            "result": {
+              "adopted": 0,
+              "color": "rgb(12, 34, 56)",
+              "marker": "manifest",
+              "sheets": 0
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "all-frame insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "all-frame insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "all-frame computed style:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "all-frame computed style:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "adopted": 0,
+            "marker": "yes",
+            "sheets": 0,
+            "top": false,
+            "url": "<origin:a>/frame.html?kind=same"
+          },
+          {
+            "adopted": 0,
+            "marker": "yes",
+            "sheets": 0,
+            "top": true,
+            "url": "<origin:a>/web-frames.html"
+          },
+          {
+            "adopted": 0,
+            "marker": "yes",
+            "sheets": 0,
+            "top": false,
+            "url": "<origin:b>/frame.html?kind=cross"
+          }
+        ]
+      }
+    },
+    {
+      "label": "all-frame removal:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "all-frame removal:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "all-frame removal computed style:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "all-frame removal computed style:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "adopted": 0,
+            "marker": "",
+            "sheets": 0,
+            "top": false,
+            "url": "<origin:a>/frame.html?kind=same"
+          },
+          {
+            "adopted": 0,
+            "marker": "",
+            "sheets": 0,
+            "top": true,
+            "url": "<origin:a>/web-frames.html"
+          },
+          {
+            "adopted": 0,
+            "marker": "",
+            "sheets": 0,
+            "top": false,
+            "url": "<origin:b>/frame.html?kind=cross"
           }
         ]
       }

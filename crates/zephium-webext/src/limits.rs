@@ -203,7 +203,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("scripting")],
-        "Can't insert or remove CSS programmatically",
+        "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
         LIN,
     ),
     (&[Key("incognito")], "Can't run in private windows", LIN),
@@ -414,7 +414,7 @@ mod tests {
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Opens separate extension windows as browser tabs",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
-                "Can't insert or remove CSS programmatically",
+                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
             ]
         );
         assert_eq!(
@@ -426,7 +426,7 @@ mod tests {
             assess(reader, Platform::Linux),
             [
                 "Can't change font settings",
-                "Can't insert or remove CSS programmatically"
+                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)"
             ]
         );
     }

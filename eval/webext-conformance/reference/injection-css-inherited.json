@@ -1,0 +1,64 @@
+{
+  "caseId": "injection-css-inherited",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "inherited-origin insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "inherited-origin insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "inherited-origin computed style:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "inherited-origin computed style:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "marker": "yes",
+            "url": "about:blank"
+          },
+          {
+            "marker": "yes",
+            "url": "about:srcdoc"
+          },
+          {
+            "marker": "yes",
+            "url": "<origin:a>/frame.html?kind=same"
+          },
+          {
+            "marker": "yes",
+            "url": "<origin:a>/frames.html"
+          },
+          {
+            "marker": "yes",
+            "url": "<origin:b>/frame.html?kind=cross"
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}
