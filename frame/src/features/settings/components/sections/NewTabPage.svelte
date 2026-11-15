@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SUPPORTS_BLOCKER_STATISTICS } from "$shared/platform";
   import { onDestroy } from "svelte";
   import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
@@ -184,15 +185,17 @@
 </SettingsGroup>
 
 <SettingsGroup title={m.ntp_figures()}>
-  <SettingsRow settingId="ntp.trackers" title={m.ntp_trackers_blocked()}>
-    <Switch
-      label={m.ntp_trackers_blocked()}
-      labelHidden
-      checked={preferences.value("ui.newtab-trackers") !== "false"}
-      disabled={busy}
-      onchange={(v) => set("ui.newtab-trackers", String(v))}
-    />
-  </SettingsRow>
+  {#if SUPPORTS_BLOCKER_STATISTICS}
+    <SettingsRow settingId="ntp.trackers" title={m.ntp_trackers_blocked()}>
+      <Switch
+        label={m.ntp_trackers_blocked()}
+        labelHidden
+        checked={preferences.value("ui.newtab-trackers") !== "false"}
+        disabled={busy}
+        onchange={(v) => set("ui.newtab-trackers", String(v))}
+      />
+    </SettingsRow>
+  {/if}
   {#if preferences.enabled("time")}
     <SettingsRow settingId="ntp.focus" title={m.ntp_focused()}>
       <Switch

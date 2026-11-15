@@ -251,12 +251,34 @@ fn native_filter_blocks_requests_and_pause_and_retirement_are_scoped() {
         &Default::default(),
     )
     .unwrap();
+    let observed_blocked = Rc::new(std::cell::Cell::new(0));
+    let observed = observed_blocked.clone();
+    view.webview()
+        .connect_resource_load_started(move |_, resource, request| {
+            use webkit2gtk::URIRequestExt;
+            if request
+                .uri()
+                .is_some_and(|uri| uri.ends_with("/blocked.js"))
+            {
+                observed.set(observed.get() + 1);
+            }
+            use webkit2gtk::WebResourceExt;
+            resource.connect_failed(|_, error| {
+                eprintln!("resource failure: {error:?}");
+            });
+        });
     fixture.load(&view, 1, "blocked:allowed");
+    assert_eq!(
+        observed_blocked.get(),
+        0,
+        "content-filter hits have no resource object"
+    );
     assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 0);
     fixture.load(&other, 2, "allowed:allowed");
     assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 1);
     pause.set(true);
     fixture.load(&view, 3, "allowed:allowed");
+    assert_eq!(observed_blocked.get(), 1);
     assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 2);
     pause.set(false);
     fixture.load(&view, 4, "blocked:allowed");
