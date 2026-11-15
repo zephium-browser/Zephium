@@ -99,6 +99,35 @@ impl Fixture {
                     let _ = stream.write_all(response.as_bytes());
                     continue;
                 }
+                if let Some(kind) = line
+                    .split(" /download-")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                {
+                    if kind == "encoded" {
+                        let compressed: &[u8] = &[
+                            31, 139, 8, 0, 0, 0, 0, 0, 0, 255, 237, 193, 1, 13, 0, 0, 0, 194, 160,
+                            218, 143, 111, 15, 7, 20, 0, 0, 0, 240, 110, 193, 119, 16, 62, 0, 16,
+                            0, 0,
+                        ];
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Disposition: attachment; filename=\"encoded.txt\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",compressed.len());
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(compressed);
+                        continue;
+                    }
+                    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"{kind}.txt\"\r\nContent-Length: 262144\r\nConnection: close\r\n\r\n");
+                    let _ = stream.write_all(header.as_bytes());
+                    for index in 0..64 {
+                        if stream.write_all(&[b'x'; 4096]).is_err() {
+                            break;
+                        }
+                        if kind == "failure" && index == 2 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    continue;
+                }
                 let page = line.contains(" /page ");
                 let body = if page {
                     "<!doctype html><title>ready</title><style>a,button{position:absolute;left:0;width:200px;height:40px}#blank{top:0}#link{top:60px}#script{top:120px}#post{top:180px}</style><a id=blank href='/blank' target=_blank>blank</a><a id=link href='/link'>link</a><button id=script onclick=\"window.open('/script')\">script</button><form action='/post' method=post target=_blank><input name=proof value=preserved><button id=post>post</button></form>"
@@ -2150,4 +2179,155 @@ time.sleep(.2);assert l.xdo_mouse_up(x,0,1)==0
         }
     }
     source.close();
+}
+
+fn download_call(
+    host: &NativeHarness,
+    call: zephium_core::downloads::DownloadCall,
+) -> zephium_core::downloads::DownloadResponse {
+    let (send, recv) = mpsc::channel();
+    assert!(host.engine.download_call(
+        Partition::Ephemeral(host.profile),
+        call,
+        zephium_core::downloads::DownloadCompletion::new(Box::new(move |reply| {
+            let _ = send.send(reply);
+        }))
+    ));
+    let mut response = None;
+    until(|| {
+        response = recv.try_recv().ok();
+        response.is_some()
+    });
+    response.unwrap()
+}
+fn download_entries(host: &NativeHarness) -> Vec<zephium_core::downloads::DownloadView> {
+    match download_call(host, zephium_core::downloads::DownloadCall::Updates) {
+        zephium_core::downloads::DownloadResponse::Updates { entries, .. } => entries,
+        reply => panic!("unexpected download reply: {reply:?}"),
+    }
+}
+fn consent_download(host: &NativeHarness, id: ItemId) {
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::DownloadPermissionRequested { id: owner, prompt } = event {
+                assert_eq!(id, owner);
+                request = Some(prompt.request);
+            }
+        }
+        request.is_some()
+    });
+    assert_eq!(
+        host.engine
+            .answer_download_permission(id, request.unwrap(), true),
+        NativeDispatch::Scheduled
+    );
+}
+
+#[test]
+#[ignore = "isolated GTK; network progress, truncation, cancel, data URL and destination picker"]
+fn native_download_edges_settle_through_shared_coordinator() {
+    use webkit2gtk::DownloadExt;
+    use zephium_core::downloads::{DownloadCall, DownloadState};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let output = tempfile::tempdir().unwrap();
+    let directory = output.path().to_owned();
+    let profile = host.profile;
+    super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_directory(profile, directory)
+    });
+    for kind in ["progress", "encoded", "failure", "cancel"] {
+        let received = Rc::new(std::cell::Cell::new(0_u64));
+        let seen = received.clone();
+        let native = page
+            .download_uri(&format!("{}/download-{kind}", fixture.origin))
+            .unwrap();
+        native.connect_received_data(move |_, bytes| seen.set(seen.get() + bytes));
+        consent_download(&host, id);
+        let mut active = None;
+        until(|| {
+            active = download_entries(&host).into_iter().find(|entry| {
+                entry.filename == format!("{kind}.txt")
+                    && entry.received.parse::<u64>().unwrap() > 0
+            });
+            active.is_some()
+        });
+        if kind == "cancel" {
+            download_call(
+                &host,
+                DownloadCall::Cancel {
+                    id: active.unwrap().id,
+                },
+            );
+        }
+        let expected = match kind {
+            "progress" | "encoded" => DownloadState::Completed,
+            "failure" => DownloadState::Failed,
+            _ => DownloadState::Cancelled,
+        };
+        let mut terminal = None;
+        until(|| {
+            terminal = download_entries(&host)
+                .into_iter()
+                .find(|entry| entry.filename == format!("{kind}.txt") && entry.state.terminal());
+            terminal.is_some()
+        });
+        let terminal = terminal.unwrap();
+        eprintln!(
+            "network {kind} terminal: state={:?}, received={}, total={:?}, error={:?}",
+            terminal.state, terminal.received, terminal.total, terminal.error
+        );
+        assert_eq!(terminal.state, expected);
+        assert!(received.get() > 0);
+        if kind == "progress" || kind == "encoded" {
+            assert_eq!(
+                std::fs::read(output.path().join(format!("{kind}.txt"))).unwrap(),
+                vec![b'x'; if kind == "encoded" { 4096 } else { 262144 }]
+            );
+        } else {
+            assert!(!output.path().join(format!("{kind}.txt")).exists());
+        }
+        eprintln!(
+            "network {kind}: native bytes {}, shared state {expected:?}",
+            received.get()
+        );
+    }
+    // Use the real native save panel for a generated data URL.
+    super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_ask_destination(profile)
+    });
+    script(&page,"document.querySelector('#script').onclick=()=>{let a=document.createElement('a');a.href='data:text/plain,chosen%20data';a.download='data.txt';document.body.append(a);a.click()};document.title='data-ready'");
+    until(|| page.title().as_deref() == Some("data-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    consent_download(&host, id);
+    let panel = Rc::new(RefCell::new(None));
+    until(|| {
+        let slot = panel.clone();
+        super::super::try_with(move |host| {
+            *slot.borrow_mut() = host.downloads.as_ref().unwrap().test_save_panel()
+        });
+        panel.borrow().is_some()
+    });
+    let panel = panel.take().unwrap();
+    assert_eq!(panel.action(), gtk::FileChooserAction::Save);
+    assert!(panel.set_current_folder(output.path()));
+    panel.set_current_name("chosen-data.txt");
+    until(|| panel.filename() == Some(output.path().join("chosen-data.txt")));
+    panel.emit_by_name::<()>("response", &[&-3_i32]);
+    until(|| output.path().join("chosen-data.txt").exists());
+    assert_eq!(
+        std::fs::read(output.path().join("chosen-data.txt")).unwrap(),
+        b"chosen data"
+    );
 }
