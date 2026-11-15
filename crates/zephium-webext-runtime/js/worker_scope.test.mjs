@@ -624,7 +624,13 @@ test('registration follows host lifecycle without inventing another worker', asy
   assert.equal(registration.active, self.serviceWorker);
   assert.equal(registration.installing, null);
   assert.equal(registration.waiting, null);
-  await assert.rejects(registration.update(), { name: 'NotSupportedError' });
+  let settled = false;
+  const update = registration.update();
+  update.then(() => { settled = true; }, () => { settled = true; });
+  assert.notEqual(update, registration.update());
+  assert.throws(() => registration.update.call({}), /Illegal invocation/);
+  await flush();
+  assert.equal(settled, false);
   const restarted = workerRealm({ install: false });
   assert.equal(restarted.self.registration.active, restarted.self.serviceWorker);
   assert.equal(restarted.self.registration.installing, null);

@@ -305,10 +305,11 @@
       update() {
         check(this);
         const installing = state() === 'parsed' || state() === 'installing';
+        // Chromium's extension embedder blocks the update job without settling it.
+        if (!installing) return new I.Promise(() => {});
         return I.PromiseReject(new I.DOMException(
-          installing ? "Failed to update a ServiceWorker for scope ('" + scope + "'): The service worker is still installing."
-            : 'Extension workers are updated by the browser extension installer.',
-          installing ? 'InvalidStateError' : 'NotSupportedError'));
+          "Failed to update a ServiceWorker for scope ('" + scope + "'): The service worker is still installing.",
+          'InvalidStateError'));
       }
       unregister() {
         check(this);
