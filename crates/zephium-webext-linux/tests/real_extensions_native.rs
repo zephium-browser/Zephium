@@ -1734,7 +1734,7 @@ fn platform_capabilities() {
     let package = tempfile::tempdir().unwrap();
     std::fs::write(package.path().join("manifest.json"), json!({
         "manifest_version":3,"name":"Platform capabilities","version":"1.0",
-        "permissions":["tabs","webRequest","contextMenus","notifications","sessions","declarativeContent","management","cookies","downloads"],"host_permissions":["<all_urls>"],
+        "permissions":["tabs","webRequest","contextMenus","notifications","sessions","declarativeContent","management","cookies","downloads","privacy"],"host_permissions":["<all_urls>"],
         "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]},{"matches":["http://127.0.0.1/*"],"js":["main.js"],"world":"MAIN"}]
     }).to_string()).unwrap();
@@ -1870,6 +1870,15 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             popup.view(),
             r#"globalThis.result=null;(async()=>{
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
+ const privacy={};
+ for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled']){
+   privacy[name]=await chrome.privacy.services[name].get({});
+ }
+ const privacyErrors=[];
+ for(const run of [()=>chrome.privacy.services.passwordSavingEnabled.set({value:true}),()=>chrome.privacy.services.passwordSavingEnabled.clear({}),()=>chrome.privacy.services.passwordSavingEnabled.get({incognito:true})]){
+   try{await run();privacyErrors.push('unexpected success')}catch(error){privacyErrors.push(error.message)}
+ }
+
  const captureErrors=[];
  const captureWindow=await chrome.windows.getCurrent();
  for(const format of ['png','jpeg']){
@@ -1904,7 +1913,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1926,6 +1935,26 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert_eq!(result["restoreError"], "This function is not supported.");
     assert_eq!(result["languageError"], "This function is not supported.");
     assert_eq!(result["managementError"], "This function is not supported.");
+    for name in [
+        "passwordSavingEnabled",
+        "autofillEnabled",
+        "autofillAddressEnabled",
+        "autofillCreditCardEnabled",
+    ] {
+        assert_eq!(
+            result["privacy"][name],
+            json!({"value":false,"levelOfControl":"not_controllable"})
+        );
+    }
+    assert_eq!(
+        result["privacyErrors"],
+        json!([
+            "This function is not supported.",
+            "This function is not supported.",
+            "This function is not supported."
+        ])
+    );
+
     assert_eq!(
         result["captureErrors"],
         json!(vec!["This function is not supported."; 2])

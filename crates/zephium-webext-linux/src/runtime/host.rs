@@ -1409,6 +1409,7 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::context_menus::register(&mut table)?;
     api::side_panel::register(&mut table)?;
     api::permissions::register(&mut table)?;
+    api::privacy::register(&mut table)?;
     api::extension::register(&mut table)?;
     api::management::register(&mut table)?;
     api::idle::register(&mut table)?;

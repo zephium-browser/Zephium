@@ -177,7 +177,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("privacy")],
-        "Can't change privacy settings",
+        "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
         LIN,
     ),
     (
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
             [
-                "Can't change privacy settings",
+                "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",

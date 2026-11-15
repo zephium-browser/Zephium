@@ -266,6 +266,7 @@ fn methods() -> Vec<String> {
             .iter()
             .map(|name| (*name).to_owned()),
     );
+    methods.extend(super::privacy::methods().map(str::to_owned));
     methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
     methods.push("webRequest.handlerBehaviorChanged".into());
     methods.extend(super::unavailable::methods().map(str::to_owned));

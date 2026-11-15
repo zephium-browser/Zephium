@@ -1746,6 +1746,9 @@ impl Browser {
                 )
             }
             BrowserRequest::Permissions(_) => state.refuse(invocation),
+            BrowserRequest::Service(ServiceRequest::FormPrivacy(_)) => invocation.reply(Ok(
+                json!({"value":false,"levelOfControl":"not_controllable"}),
+            )),
             BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => {
                 invocation.reply(Ok(json!("active")))
             }

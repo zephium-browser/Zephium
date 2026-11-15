@@ -16,6 +16,7 @@ pub mod idle;
 pub mod management;
 pub mod notifications;
 pub mod permissions;
+pub mod privacy;
 pub mod runtime;
 pub mod scripting;
 pub mod search;
@@ -55,6 +56,7 @@ where
     context_menus::register(table)?;
     declarative_net_request::register(table)?;
     permissions::register(table)?;
+    privacy::register(table)?;
     extension::register(table)?;
     management::register(table)?;
     idle::register(table)?;
