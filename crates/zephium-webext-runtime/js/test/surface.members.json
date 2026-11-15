@@ -263,5 +263,14 @@
     "functions": [
       "chooseDesktopMedia"
     ]
+  },
+  "declarativeContent": {
+    "constructors": [
+      "PageStateMatcher",
+      "ShowAction",
+      "ShowPageAction",
+      "SetIcon",
+      "RequestContentScript"
+    ]
   }
 }

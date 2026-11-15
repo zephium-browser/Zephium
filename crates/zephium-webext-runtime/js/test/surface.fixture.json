@@ -180,6 +180,25 @@
         "contextMenus"
       ]
     },
+    "declarativeContent": {
+      "constructors": {
+        "PageStateMatcher": "declarativeContent.PageStateMatcher",
+        "RequestContentScript": "declarativeContent.RequestContentScript",
+        "SetIcon": "declarativeContent.SetIcon",
+        "ShowAction": "declarativeContent.ShowAction",
+        "ShowPageAction": "declarativeContent.ShowAction"
+      },
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "permissions": [
+        "declarativeContent"
+      ]
+    },
     "declarativeNetRequest": {
       "contexts": [
         "background",

@@ -10,7 +10,7 @@ test('the small fixture is an exact member selection from generated metadata', (
   const namespaces = {};
   for (const [namespace, selected] of Object.entries(members)) {
     const node = { ...generatedSurface.namespaces[namespace] };
-    for (const field of ['functions', 'events', 'properties']) {
+    for (const field of ['functions', 'events', 'properties', 'constructors']) {
       const trimmed = {};
       for (const name of selected[field] || []) {
         assert.ok(Object.hasOwn(node[field], name), `${namespace}.${name}`);
@@ -32,7 +32,7 @@ test('generated surface has the binding format and excludes host-only metadata',
   assert.equal(namespaces.zephium, undefined);
   assert.equal(namespaces.runtime.functions.markListenerRegistrationComplete, undefined);
   for (const namespace of Object.values(namespaces)) {
-    for (const key of Object.keys(namespace)) assert.ok(['contexts', 'permissions', 'manifest', 'functions', 'events', 'properties'].includes(key), key);
+    for (const key of Object.keys(namespace)) assert.ok(['contexts', 'permissions', 'manifest', 'functions', 'events', 'properties', 'constructors'].includes(key), key);
     for (const fn of Object.values(namespace.functions || {})) {
       for (const key of Object.keys(fn)) assert.ok(['contexts', 'permissions', 'requiredPermissions', 'unpackedOnly', 'manifest', 'parameters', 'returns', 'callback', 'callbackRequired', 'promise', 'result', 'optionalResult', 'signature', 'setting'].includes(key), key);
       assert.equal(Boolean(fn.parameters?.some((parameter) => parameter.name === 'callback')), false);
@@ -119,4 +119,15 @@ test('manifest-gated APIs require admitted features independently of API permiss
     const content = extensionContext('contentScript', { manifest: { manifest_version: 3, [feature]: {} } });
     assert.equal(content.chrome[feature], undefined);
   }
+});
+
+
+test('declarative constructors retain the pinned export map and legacy alias', () => {
+  assert.deepEqual(generatedSurface.namespaces.declarativeContent.constructors, {
+    PageStateMatcher: 'declarativeContent.PageStateMatcher',
+    RequestContentScript: 'declarativeContent.RequestContentScript',
+    SetIcon: 'declarativeContent.SetIcon',
+    ShowAction: 'declarativeContent.ShowAction',
+    ShowPageAction: 'declarativeContent.ShowAction',
+  });
 });

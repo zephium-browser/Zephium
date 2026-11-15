@@ -37,6 +37,123 @@ pub(crate) struct ContentInstall {
 }
 
 impl RuntimeHost {
+    pub(crate) fn accept_permission_grant(
+        &mut self,
+        install: ExtensionInstallId,
+        request: zephium_webext_runtime::permissions::PermissionRequest,
+        responder: Responder,
+        manifest: Option<zephium_webext::manifest::Manifest>,
+        out: &mut Outbox,
+    ) {
+        let candidate = self
+            .permissions
+            .get(&install)
+            .cloned()
+            .and_then(|permissions| {
+                self.router
+                    .contexts
+                    .contains_key(responder.context())
+                    .then_some(permissions)
+            });
+        let (Some(mut permissions), Some(manifest)) = (candidate, manifest) else {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        };
+        let effect = match permissions.grant(&request) {
+            Ok(effect) => effect,
+            Err(error) => {
+                self.settle(responder, Err(error), out);
+                return;
+            }
+        };
+        let completion = super::PermissionCompletion::Grant {
+            install,
+            epoch: self.state.installs[&install].network_epoch,
+            request: zephium_webext_runtime::permissions::PermissionRequest {
+                permissions: effect.added_permissions,
+                origins: effect.added_origins,
+            },
+            responder,
+        };
+        if let Err((error, completion)) =
+            self.update_network_permissions(install, permissions, manifest, completion)
+        {
+            self.complete_permissions(*completion, Err(error), out);
+        }
+    }
+
+    pub(crate) fn complete_permissions(
+        &mut self,
+        completion: super::PermissionCompletion,
+        result: Result<(), String>,
+        out: &mut Outbox,
+    ) {
+        match completion {
+            super::PermissionCompletion::Host(update) => update.settle(result),
+            super::PermissionCompletion::Grant {
+                install,
+                epoch,
+                request,
+                responder,
+            } => {
+                let result = if self.shutting_down
+                    || self
+                        .state
+                        .installs
+                        .get(&install)
+                        .is_none_or(|state| state.network_epoch != epoch)
+                {
+                    Err(ApiError::context_invalidated().message().into())
+                } else {
+                    result
+                };
+                if result.is_ok()
+                    && (!request.permissions.is_empty() || !request.origins.is_empty())
+                {
+                    self.emit(
+                        install,
+                        "permissions.onAdded",
+                        &json!([permissions_api::to_value(&request)]),
+                        StartReason::Event,
+                        out,
+                    );
+                }
+                self.settle(
+                    responder,
+                    result.map(|()| Value::Bool(true)).map_err(ApiError::other),
+                    out,
+                );
+            }
+        }
+    }
+
+    pub(crate) fn publish_permission_bindings(
+        &mut self,
+        install: ExtensionInstallId,
+        out: &mut Outbox,
+    ) {
+        let Some(permissions) = self.permissions.get(&install) else {
+            return;
+        };
+        let granted = permissions.snapshot().permissions;
+        for sender in self
+            .router
+            .contexts
+            .values()
+            .filter(|sender| sender.install() == install)
+        {
+            if let Some(sequence) =
+                zephium_webext_runtime::envelope::EventSeq::new(super::direct_sequence())
+            {
+                if let Ok(frame) = zephium_webext_runtime::protocol::permissions_changed(
+                    sender, sequence, &granted,
+                ) {
+                    out.deliver(sender.context_key(), frame);
+                }
+            }
+        }
+    }
+
     pub(crate) fn notification_allowed(&self, install: ExtensionInstallId) -> bool {
         self.permissions
             .get(&install)
@@ -343,25 +460,11 @@ impl RuntimeHost {
                 install,
                 request,
             } => {
-                let granted = self
-                    .permissions
-                    .get_mut(&install)
-                    .ok_or_else(ApiError::context_invalidated)
-                    .and_then(|permissions| permissions.grant(&request));
-                match granted {
-                    Ok(_) => {
-                        self.settle(responder, Ok(Value::Bool(true)), out);
-                        self.emit(
-                            install,
-                            "permissions.onAdded",
-                            &json!([permissions_api::to_value(&request)]),
-                            StartReason::Event,
-                            out,
-                        );
-                        self.op(super::NativeOp::ScriptsChanged);
-                    }
-                    Err(error) => self.settle(responder, Err(error), out),
-                }
+                self.op(super::NativeOp::GrantPermissions {
+                    install,
+                    request,
+                    responder,
+                });
             }
         }
         self.process_work(out);

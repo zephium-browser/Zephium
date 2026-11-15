@@ -144,6 +144,7 @@ impl Bootstrap<'_> {
             "permissions": self.permissions,
             "userScriptsEnabled": false,
             "unavailableSyncApis": true,
+            "offscreenReadyHandshake": true,
             // Compatibility target matches the pinned Chromium API schema, not the engine.
             "userAgentSuffix": " Chrome/157.0.0.0 ZephiumWebExtensions/1",
         });

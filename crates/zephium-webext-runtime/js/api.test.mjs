@@ -5,6 +5,59 @@ import { EXTENSION_ID, createRealm, extensionContext, flush, plain, surface } fr
 
 const keys = (object) => Object.keys(object).sort();
 
+test('offscreen readiness follows synchronous load-listener registration', async () => {
+  let loaded;
+  class Document { get readyState() { return 'loading'; } }
+  class EventTarget { addEventListener(type, listener) { assert.equal(type, 'load'); loaded = listener; } }
+  const {chrome, host} = extensionContext('offscreen', {offscreenReadyHandshake: true}, {
+    globals: {Document, document: new Document(), EventTarget},
+  });
+  host.handlers['zephium.offscreenReady'] = () => null;
+  assert.deepEqual(host.calls, []);
+  loaded();
+  chrome.runtime.onMessage.addListener(() => {});
+  assert.deepEqual(host.calls.map(call => call.name), ['zephium.addListener']);
+  loaded();
+  await flush();
+  assert.deepEqual(host.calls.map(call => call.name), ['zephium.addListener', 'zephium.offscreenReady']);
+  assert.deepEqual(host.calls.at(-1).args, []);
+});
+
+test('offscreen readiness cannot overtake registrations waiting on internal backpressure', async () => {
+  let loaded;
+  class Document { get readyState() { return 'loading'; } }
+  class EventTarget { addEventListener(_type, listener) { loaded = listener; } }
+  const {host, context} = extensionContext('offscreen', {offscreenReadyHandshake: true}, {
+    globals: {Document, document: new Document(), EventTarget},
+  });
+  host.handlers['zephium.addListener'] = () => host.LATER;
+  host.handlers['zephium.offscreenReady'] = () => null;
+  const pending = Array.from({length: 129}, () => context.client.call('zephium.addListener', '[]', true));
+  loaded();
+  await flush();
+  assert.equal(host.calls.length, 128);
+  host.reply(host.calls[0].id, null);
+  await flush();
+  assert.equal(host.calls.at(-1).name, 'zephium.addListener');
+  for (const call of host.calls.slice(1)) host.reply(call.id, null);
+  await Promise.all(pending);
+  await flush();
+  assert.equal(host.calls.at(-1).name, 'zephium.offscreenReady');
+});
+
+test('empty loaded offscreen documents signal once, but retired or other contexts do not', async () => {
+  class Document { get readyState() { return 'complete'; } }
+  const globals = {Document, document: new Document()};
+  const live = extensionContext('offscreen', {offscreenReadyHandshake: true}, {globals});
+  const retired = extensionContext('offscreen', {offscreenReadyHandshake: true}, {globals});
+  retired.context.invalidate();
+  const other = extensionContext('popup', {offscreenReadyHandshake: true}, {globals});
+  const disabled = extensionContext('offscreen', {}, {globals});
+  await flush();
+  assert.deepEqual(live.host.calls.map(call => call.name), ['zephium.offscreenReady']);
+  for (const fixture of [retired, other, disabled]) assert.deepEqual(fixture.host.calls, []);
+});
+
 test('browser is chrome, both globals, with only the namespaces the context may use', () => {
   const background = extensionContext('background');
   assert.equal(background.run('globalThis.browser === globalThis.chrome'), true);
@@ -480,4 +533,25 @@ test('unavailable synchronous host APIs validate then refuse without fake cancel
   assert.throws(()=>chrome.desktopCapture.chooseDesktopMedia(7), /signature|parameter|invocation/);
   assert.equal(called,false);
   assert.equal(host.calls.length,0);
+});
+
+
+test('unavailable declarative constructors are defined, gated and never inspect arguments', () => {
+  const names = ['PageStateMatcher', 'ShowAction', 'ShowPageAction', 'SetIcon', 'RequestContentScript'];
+  const context = extensionContext('background', {permissions:['declarativeContent'], unavailableSyncApis:true});
+  const hostile = new Proxy({}, {ownKeys(){throw Error('argument inspected')}});
+  for (const name of names) {
+    const constructor = context.chrome.declarativeContent[name];
+    assert.equal(typeof constructor, 'function');
+    assert.throws(() => new constructor(hostile), {message:'This function is not supported.'});
+    assert.throws(() => constructor(hostile), {message:'This function is not supported.'});
+  }
+  assert.equal(context.host.calls.length, 0);
+  const held = context.chrome.declarativeContent.PageStateMatcher;
+  context.host.event('zephium.onInvalidated', []);
+  assert.throws(() => new held(), {message:'Extension context invalidated.'});
+  for (const kind of ['contentScript', 'offscreen', 'externalPage']) {
+    assert.equal(extensionContext(kind, {permissions:['declarativeContent'], unavailableSyncApis:true}).chrome.declarativeContent, undefined);
+  }
+  assert.equal(extensionContext('background', {permissions:[], unavailableSyncApis:true}).chrome.declarativeContent, undefined);
 });

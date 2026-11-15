@@ -4,8 +4,7 @@ use super::{array, catalog, flag};
 use crate::context::{ContextKind, ContextMask};
 use crate::permissions::Gate;
 
-/// Chromium feature metadata projected onto the runtime's context kinds.
-/// Zephium's security ceiling is applied separately at registration.
+/// Chromium feature metadata projected within the runtime's caller ceiling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Access {
     /// Required API permission.
@@ -22,7 +21,12 @@ pub fn access(name: &str) -> Option<Access> {
     if name.starts_with("declarativeNetRequest.") {
         project_dnr(&method.feature_rules)
     } else {
-        project(&method.feature_rules, &catalog.namespace_rules, 0)
+        project(
+            &method.feature_rules,
+            &catalog.namespace_rules,
+            0,
+            crate::dispatch::permitted_contexts(name),
+        )
     }
 }
 
@@ -104,6 +108,7 @@ fn project(
     rules: &'static [Value],
     namespaces: &'static std::collections::HashMap<String, Vec<Value>>,
     depth: usize,
+    ceiling: ContextMask,
 ) -> Option<Access> {
     if depth >= 16 || rules.is_empty() {
         return None;
@@ -170,6 +175,7 @@ fn project(
                 });
             }
         }
+        mask = mask.intersection(ceiling);
         if mask.is_empty() {
             continue;
         }
@@ -183,7 +189,7 @@ fn project(
                 } else if let Some(feature) = dependency.strip_prefix("manifest:") {
                     Gate::RequiresManifest(dependency_name(rules, "manifest:", feature)?)
                 } else if let Some(api) = dependency.strip_prefix("api:") {
-                    let inherited = project(namespaces.get(api)?, namespaces, depth + 1)?;
+                    let inherited = project(namespaces.get(api)?, namespaces, depth + 1, ceiling)?;
                     mask = mask.intersection(inherited.contexts);
                     inherited.gate
                 } else {
@@ -241,6 +247,32 @@ mod tests {
     use std::{collections::HashMap, sync::OnceLock};
 
     #[test]
+    fn management_prunes_web_store_alternatives_before_merging_permissions() {
+        for name in [
+            "management.get",
+            "management.getAll",
+            "management.setEnabled",
+            "management.uninstall",
+            "management.onInstalled.addListener",
+        ] {
+            let access = access(name).unwrap();
+            assert_eq!(access.gate, Gate::Requires("management"), "{name}");
+            assert_eq!(
+                access.contexts,
+                ContextMask::PRIVILEGED_PAGES.without(ContextKind::Offscreen),
+                "{name}"
+            );
+        }
+        for name in [
+            "management.getSelf",
+            "management.uninstallSelf",
+            "management.getPermissionWarningsByManifest",
+        ] {
+            assert_eq!(access(name).unwrap().gate, Gate::Open, "{name}");
+        }
+    }
+
+    #[test]
     fn inheritance_preserves_permissions_and_replaces_contexts() {
         static RULES: OnceLock<Vec<Value>> = OnceLock::new();
         static NAMESPACES: OnceLock<HashMap<String, Vec<Value>>> = OnceLock::new();
@@ -252,7 +284,12 @@ mod tests {
             ]}),
         ]);
         assert_eq!(
-            project(rules, NAMESPACES.get_or_init(HashMap::new), 0),
+            project(
+                rules,
+                NAMESPACES.get_or_init(HashMap::new),
+                0,
+                ContextMask::ALL
+            ),
             Some(Access {
                 gate: Gate::Requires("storage"),
                 contexts: ContextMask::of(ContextKind::ContentScript),
@@ -337,7 +374,12 @@ mod tests {
         ]);
         for rules in cases {
             assert_eq!(
-                project(rules, NAMESPACES.get_or_init(HashMap::new), 0),
+                project(
+                    rules,
+                    NAMESPACES.get_or_init(HashMap::new),
+                    0,
+                    ContextMask::ALL
+                ),
                 None,
                 "{rules:?}"
             );

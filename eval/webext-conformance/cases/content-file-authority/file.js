@@ -1,0 +1,1 @@
+globalThis.fileMatched = true;

@@ -94,6 +94,10 @@ pub(crate) struct Install {
 
 pub(crate) enum Job {
     Install(Install),
+    InstallPermissions {
+        install: Install,
+        ticket: u64,
+    },
     Call {
         install: ExtensionInstallId,
         epoch: u64,
@@ -256,21 +260,18 @@ fn run(
             Job::Install(install) => {
                 let id = install.install;
                 let epoch = install.epoch;
-                let result = prepare_install(install).and_then(|mut prepared| {
-                    let state = prepared.state.clone();
-                    let (indexes, status) = compile_state(&mut prepared, &state)?;
-                    prepared.policy.rulesets = indexes;
-                    Ok(Staged {
-                        persist: true,
-                        state,
-                        value: Value::Null,
-                        status,
-                        extension: Some(prepared.policy.clone()),
-                        new_install: Some(prepared),
-                        removed: false,
-                    })
-                });
+                let result = stage_install(install);
                 (id, epoch, None, result)
+            }
+            Job::InstallPermissions { install, ticket } => {
+                let id = install.install;
+                let epoch = install.epoch;
+                let result = if installs.contains_key(&id) {
+                    Err(ApiError::context_invalidated())
+                } else {
+                    stage_install(install)
+                };
+                (id, epoch, Some(ticket), result)
             }
             Job::Call {
                 install,
@@ -636,6 +637,30 @@ fn snapshot(
     extensions.sort_by_key(|extension| extension.install_order);
     let bytes = DnrPolicySnapshot::encode(&extensions).map_err(|_| failed())?;
     SealedPolicy::new(&bytes).map_err(|_| failed())
+}
+
+fn stage_install(install: Install) -> Result<Staged, ApiError> {
+    let can_filter = install.permissions.has_api("declarativeNetRequest")
+        || install
+            .permissions
+            .has_api("declarativeNetRequestWithHostAccess");
+    let mut prepared = prepare_install(install)?;
+    let state = prepared.state.clone();
+    let (indexes, mut status) = compile_state(&mut prepared, &state)?;
+    if can_filter {
+        prepared.policy.rulesets = indexes;
+    } else {
+        status.active_rule_count = 0;
+    }
+    Ok(Staged {
+        persist: true,
+        state,
+        value: Value::Null,
+        status,
+        extension: Some(prepared.policy.clone()),
+        new_install: Some(prepared),
+        removed: false,
+    })
 }
 
 fn prepare_install(install: Install) -> Result<Prepared, ApiError> {
@@ -1053,6 +1078,61 @@ mod tests {
         assert_eq!(prepared.state.dynamic_rules, previous.dynamic_rules);
         assert_eq!(prepared.state.static_rulesets[0].id, "main");
         assert!(prepared.state.static_rulesets[0].enabled);
+    }
+
+    #[test]
+    fn lazy_permission_install_does_not_activate_rules_without_dnr_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("rules.json"),
+            br#"[{"id":1,"action":{"type":"block"},"condition":{"urlFilter":"ads"}}]"#,
+        )
+        .unwrap();
+        let mut install = installation(root.path(), directory.path());
+        let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(
+            json!({"permissions":["offscreen"]}),
+        ));
+        install.permissions = InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::OnAllSites,
+            false,
+        );
+        let staged = stage_install(install).unwrap();
+        assert_eq!(staged.state.static_rulesets[0].rules.len(), 1);
+        assert!(staged.extension.unwrap().rulesets.is_empty());
+        assert_eq!(staged.status.active_rule_count, 0);
+    }
+
+    #[test]
+    fn lazy_permission_install_keeps_its_ticket_and_commits_before_later_updates() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("rules.json"), b"[]").unwrap();
+        let install = installation(root.path(), directory.path());
+        let permissions = install.permissions.clone();
+        let id = install.install;
+        let epoch = install.epoch;
+        let executor = NetworkExecutor::start().unwrap();
+        assert!(executor.submit(Job::InstallPermissions { install, ticket: 7 }));
+        let prepared = completion(&executor);
+        assert_eq!(prepared.ticket, Some(7));
+        assert!(prepared.prepared && prepared.result.is_ok());
+        assert!(!directory.path().join("dnr.json").exists());
+        assert!(executor.finish(prepared.revision, true));
+        assert!(completion(&executor).result.is_ok());
+        assert!(executor.submit(Job::Permissions {
+            install: id,
+            epoch,
+            ticket: 8,
+            permissions
+        }));
+        let prepared = completion(&executor);
+        assert_eq!(prepared.ticket, Some(8));
+        assert!(prepared.prepared && prepared.result.is_ok());
+        assert!(executor.finish(prepared.revision, true));
+        assert!(completion(&executor).result.is_ok());
     }
 
     #[test]

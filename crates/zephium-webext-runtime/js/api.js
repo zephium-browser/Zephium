@@ -731,6 +731,15 @@
           for (let i = 0; i < propertyNames.length; i++) {
             define(target, propertyNames[i], deepFreeze(I.JSONParse(I.JSONStringify(properties[propertyNames[i]]))));
           }
+          if (own(bootstrap, 'unavailableSyncApis') === true) {
+            const constructors = I.keys(own(node, 'constructors') || {});
+            for (let i = 0; i < constructors.length; i++) {
+              define(target, constructors[i], function () {
+                ensureValid();
+                throw new I.Error('This function is not supported.');
+              });
+            }
+          }
           if (key === 'runtime') runtimeExtras(target);
           if (key === 'extension') extensionExtras(target);
           I.MapSet(objects, key, target);
@@ -790,6 +799,17 @@
     if (own(options, 'defineGlobals') !== false) {
       define(global, 'chrome', chrome);
       define(global, 'browser', chrome);
+    }
+    if (kind === 'offscreen' && own(bootstrap, 'offscreenReadyHandshake') === true) {
+      let sent = false;
+      const ready = () => {
+        if (sent || invalid) return;
+        sent = true;
+        I.PromiseThen(client.call('zephium.offscreenReady', '[]', true), undefined, () => undefined);
+      };
+      const afterLoad = () => I.setTimeout(ready, 0);
+      if (I.DocumentReadyState?.(global.document) === 'complete') afterLoad();
+      else I.addEventListener(global, 'load', afterLoad, {once: true});
     }
 
     return {

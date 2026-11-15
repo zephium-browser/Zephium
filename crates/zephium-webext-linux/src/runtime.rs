@@ -12,6 +12,7 @@ mod commands;
 mod content;
 mod css;
 mod errors;
+mod handler_cache;
 pub(crate) mod host;
 mod icons;
 mod notifications;
@@ -210,10 +211,12 @@ enum NativeEvent {
     },
     OffscreenLoaded {
         install: ExtensionInstallId,
+        generation: u64,
         loaded: bool,
     },
     OffscreenGone {
         install: ExtensionInstallId,
+        generation: u64,
     },
 }
 
@@ -263,6 +266,7 @@ struct Inner {
     observing_requests: Cell<bool>,
     next_request: Cell<u64>,
     notifications: Rc<notifications::Backend>,
+    handler_cache: handler_cache::Backend,
 }
 
 /// What every ordinary tab gets, rebuilt when installs or registrations change.
@@ -436,6 +440,7 @@ impl ProfileRuntime {
             observing_requests: Cell::new(false),
             next_request: Cell::new(0),
             notifications: Rc::default(),
+            handler_cache: handler_cache::Backend::default(),
         });
         let weak = Rc::downgrade(&inner);
         *requests.framed.borrow_mut() = Some(Box::new(move |view| {
@@ -530,13 +535,26 @@ impl ProfileRuntime {
         install: ExtensionInstallId,
         permissions: InstallPermissions,
     ) -> Result<PermissionUpdate, String> {
+        let manifest = self
+            .inner
+            .records
+            .borrow()
+            .get(&install)
+            .map(|record| record.manifest.clone())
+            .ok_or("The extension is not installed.")?;
         let update = PermissionUpdate {
             completion: Rc::new(RefCell::new(None)),
         };
         self.inner
             .bridge
             .with_runtime(|host, _| {
-                host.update_network_permissions(install, permissions, update.clone())
+                host.update_network_permissions(
+                    install,
+                    permissions,
+                    manifest,
+                    host::PermissionCompletion::Host(update.clone()),
+                )
+                .map_err(|(error, _)| error)
             })
             .map_err(|_| "Runtime is busy.".to_owned())??;
         Ok(update)
@@ -832,6 +850,19 @@ impl ProfileRuntime {
             .with_runtime(|host, _| host.status(install))
             .ok()
             .flatten()
+    }
+
+    /// Observes the native offscreen setting without reading clipboard contents.
+    #[cfg(feature = "native-tests")]
+    pub fn offscreen_clipboard_enabled(&self, install: ExtensionInstallId) -> Option<bool> {
+        use webkit2gtk::SettingsExt;
+        self.inner
+            .views
+            .owned
+            .borrow()
+            .get(&(install, ViewKindKey::Offscreen))
+            .and_then(|owned| owned.view.settings())
+            .map(|settings| settings.is_javascript_can_access_clipboard())
     }
 
     /// An install's recent errors, oldest first.
@@ -1132,10 +1163,23 @@ impl Inner {
                 "The background page failed to load.",
                 out,
             ),
-            NativeEvent::OffscreenLoaded { install, loaded } => {
-                host.offscreen_loaded(install, loaded, out);
+            NativeEvent::OffscreenLoaded {
+                install,
+                generation,
+                loaded,
+            } => {
+                if host.offscreen_current(install, generation) {
+                    host.offscreen_loaded(install, loaded, out);
+                }
             }
-            NativeEvent::OffscreenGone { install } => host.offscreen_gone(install, out),
+            NativeEvent::OffscreenGone {
+                install,
+                generation,
+            } => {
+                if host.offscreen_current(install, generation) {
+                    host.offscreen_gone(install, out);
+                }
+            }
         });
     }
 
@@ -1179,6 +1223,9 @@ impl Inner {
 
     fn execute(self: &Rc<Self>, op: NativeOp) {
         match op {
+            NativeOp::HandlerCache { sender, responder } => {
+                handler_cache::submit(self, sender, responder)
+            }
             NativeOp::Notifications {
                 sender,
                 root,
@@ -1218,22 +1265,112 @@ impl Inner {
             }
             NativeOp::CreateOffscreen {
                 install,
+                generation,
                 url,
                 clipboard,
             } => {
-                if let Err(()) = self.create_offscreen(install, &url, clipboard) {
-                    let _ = self
-                        .bridge
-                        .with_runtime(|host, out| host.offscreen_loaded(install, false, out));
+                if let Err(()) = self.create_offscreen(install, generation, &url, clipboard) {
+                    let _ = self.bridge.with_runtime(|host, out| {
+                        if host.offscreen_current(install, generation) {
+                            host.offscreen_loaded(install, false, out);
+                        }
+                    });
                 }
             }
-            NativeOp::OffscreenReady { install } => {
-                let _ = self
-                    .bridge
-                    .with_runtime(|host, out| host.offscreen_loaded(install, true, out));
+            NativeOp::OffscreenReady {
+                install,
+                generation,
+                document,
+            } => {
+                let weak = Rc::downgrade(self);
+                glib::idle_add_local_once(move || {
+                    let Some(inner) = weak.upgrade().filter(|inner| !inner.retired.get()) else {
+                        return;
+                    };
+                    let _ = inner.bridge.with_runtime(|host, out| {
+                        if host.offscreen_current(install, generation)
+                            && host.offscreen_document_live(install, document)
+                        {
+                            host.offscreen_loaded(install, true, out);
+                        }
+                    });
+                    inner.run();
+                });
             }
             NativeOp::CloseOffscreen { install } => {
                 self.drop_owned(install, ViewKindKey::Offscreen, None);
+            }
+            NativeOp::RevokeOffscreenClipboard { install } => {
+                use webkit2gtk::SettingsExt;
+                if self
+                    .bridge
+                    .with_runtime(|host, _| host.clipboard_authorized(install))
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                if let Some(settings) = self
+                    .views
+                    .owned
+                    .borrow()
+                    .get(&(install, ViewKindKey::Offscreen))
+                    .and_then(|owned| owned.view.settings())
+                {
+                    settings.set_javascript_can_access_clipboard(false);
+                }
+            }
+            NativeOp::GrantPermissions {
+                install,
+                request,
+                responder,
+            } => {
+                let manifest = self
+                    .records
+                    .borrow()
+                    .get(&install)
+                    .map(|record| record.manifest.clone());
+                let _ = self.bridge.with_runtime(|host, out| {
+                    host.accept_permission_grant(install, request, responder, manifest, out);
+                });
+            }
+            NativeOp::PermissionsSettled { completion, result } => {
+                let _ = self.bridge.with_runtime(|host, out| {
+                    host.complete_permissions(completion, result, out);
+                });
+            }
+            NativeOp::RefreshPermissions { install } => {
+                self.refresh_content();
+                let mut views: Vec<_> = self
+                    .views
+                    .owned
+                    .borrow()
+                    .values()
+                    .filter(|owned| owned.install == install)
+                    .map(|owned| owned.view.clone())
+                    .collect();
+                views.extend(
+                    self.views
+                        .pages
+                        .borrow()
+                        .iter()
+                        .filter(|page| page.install == install)
+                        .filter_map(|page| page.view.upgrade()),
+                );
+                views.extend(
+                    self.tabs
+                        .borrow()
+                        .values()
+                        .filter_map(|tab| tab.view.upgrade())
+                        .filter(|view| {
+                            view.uri().and_then(|uri| self.install_of_uri(&uri)) == Some(install)
+                        }),
+                );
+                for view in views {
+                    self.allow_cors(install, &view);
+                }
+                let _ = self.bridge.with_runtime(|host, out| {
+                    host.publish_permission_bindings(install, out);
+                });
             }
             NativeOp::Notify(notice) => {
                 if let Some(engine) = self.engine.upgrade() {
@@ -1344,9 +1481,22 @@ impl Inner {
     fn create_offscreen(
         self: &Rc<Self>,
         install: ExtensionInstallId,
+        generation: u64,
         url: &str,
         clipboard: bool,
     ) -> Result<(), ()> {
+        if !self
+            .bridge
+            .with_runtime(|host, _| host.offscreen_current(install, generation))
+            .unwrap_or(false)
+        {
+            return Err(());
+        }
+        let clipboard = clipboard
+            && self
+                .bridge
+                .with_runtime(|host, _| host.clipboard_authorized(install))
+                .unwrap_or(false);
         self.drop_owned(install, ViewKindKey::Offscreen, None);
         let script = self
             .page_script(install, ContextKind::Offscreen)
@@ -1358,7 +1508,7 @@ impl Inner {
             (install, ViewKindKey::Offscreen),
             Owned {
                 install,
-                generation: 0,
+                generation,
                 view: view.clone(),
                 bridge: None,
                 handlers: Vec::new(),
@@ -1371,12 +1521,21 @@ impl Inner {
             self.drop_owned(install, ViewKindKey::Offscreen, None);
             return Err(());
         };
+        if !self
+            .bridge
+            .with_runtime(|host, _| host.offscreen_attached(install, generation, id))
+            .unwrap_or(false)
+        {
+            self.drop_owned(install, ViewKindKey::Offscreen, Some(generation));
+            return Err(());
+        }
         let weak = Rc::downgrade(self);
         let failed = view.connect_load_failed(move |_, _, _, _| {
             Inner::push_event(
                 &weak,
                 NativeEvent::OffscreenLoaded {
                     install,
+                    generation,
                     loaded: false,
                 },
             );
@@ -1386,9 +1545,15 @@ impl Inner {
         let gone = view.connect_web_process_terminated(move |_, reason| {
             if reason != WebProcessTerminationReason::TerminatedByApi {
                 if let Some(inner) = weak.upgrade() {
-                    inner.drop_dead(install, ViewKindKey::Offscreen, None);
+                    inner.drop_dead(install, ViewKindKey::Offscreen, Some(generation));
                 }
-                Inner::push_event(&weak, NativeEvent::OffscreenGone { install });
+                Inner::push_event(
+                    &weak,
+                    NativeEvent::OffscreenGone {
+                        install,
+                        generation,
+                    },
+                );
             }
         });
         if let Some(owned) = self
@@ -1713,6 +1878,7 @@ impl Inner {
 
     fn retire(self: &Rc<Self>) -> RuntimeDrain {
         self.notifications.retire();
+        self.handler_cache.retire();
         if !self.retired.get() {
             let _ = self.bridge.with_runtime(|host, out| host.shutdown(out));
             self.run();

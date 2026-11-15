@@ -377,6 +377,8 @@ pub enum BrowserRequest {
 /// Small native desktop services with no Shell mutation counterpart.
 #[derive(Clone, Debug)]
 pub enum ServiceRequest {
+    /// Invalidate native memory caches after webRequest handler changes.
+    HandlerBehaviorChanged,
     /// Query active/idle/locked using the supplied threshold in seconds.
     QueryIdle(u32),
     /// Change the install's idle observation interval in seconds.

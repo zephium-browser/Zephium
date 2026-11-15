@@ -3,6 +3,20 @@ use crate::permissions::InstallPermissions;
 use serde_json::Value;
 use url::Url;
 
+/// Invalidation must reach the native profile cache, never a successful no-op.
+pub fn register<S: crate::browser::BrowserPort + 'static>(
+    table: &mut crate::dispatch::ApiTable<S>,
+) -> Result<(), crate::dispatch::RegistrationError> {
+    table.register_generated("webRequest.handlerBehaviorChanged", |host: &mut S, call| {
+        host.request(
+            crate::browser::BrowserRequest::Service(
+                crate::browser::ServiceRequest::HandlerBehaviorChanged,
+            ),
+            call,
+        )
+    })
+}
+
 /// Lifecycle events the UI-process observer can establish from native resource signals.
 pub const OBSERVED_EVENTS: &[&str] = &[
     "webRequest.onBeforeRequest",
@@ -115,6 +129,76 @@ mod tests {
     use crate::permissions::{PermissionDeclaration, PermissionRequest, SiteAccess};
     use serde_json::json;
     use zephium_webext::manifest::Manifest;
+    #[test]
+    fn cache_invalidation_requires_permission_validation_and_native_settlement() {
+        use crate::browser::{fake::FakeBrowser, BrowserRequest, ServiceRequest};
+        use crate::context::tests::{background_sender, profile};
+        use crate::dispatch::{ApiTable, Dispatcher};
+        let mut host = FakeBrowser::new(profile());
+        let mut table = ApiTable::new();
+        register(&mut table).unwrap();
+        let mut dispatcher = Dispatcher::new(table);
+        let permissions = |granted| {
+            let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(
+                json!({"permissions": if granted {vec!["webRequest"]} else {vec![]}}),
+            ));
+            InstallPermissions::new(
+                declaration,
+                &PermissionRequest::default(),
+                SiteAccess::OnAllSites,
+                false,
+            )
+        };
+        let sender = background_sender();
+        assert!(host
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(false),
+                "webRequest.handlerBehaviorChanged",
+                json!([])
+            )
+            .is_err());
+        assert!(host
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(true),
+                "webRequest.handlerBehaviorChanged",
+                json!([42])
+            )
+            .is_err());
+        assert!(host.requests.is_empty());
+        host.reply = Err(crate::ApiError::other("native failure"));
+        assert!(host
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(true),
+                "webRequest.handlerBehaviorChanged",
+                json!([])
+            )
+            .is_err());
+        assert!(matches!(
+            host.requests.last(),
+            Some(BrowserRequest::Service(
+                ServiceRequest::HandlerBehaviorChanged
+            ))
+        ));
+        host.reply = Ok(Value::Null);
+        assert_eq!(
+            host.call(
+                &mut dispatcher,
+                &sender,
+                &permissions(true),
+                "webRequest.handlerBehaviorChanged",
+                json!([])
+            )
+            .unwrap(),
+            Value::Null
+        );
+    }
+
     #[test]
     fn request_and_response_header_visibility_follow_chrome() {
         for name in [

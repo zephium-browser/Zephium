@@ -1479,7 +1479,7 @@ impl BrowserState {
                     })),
                 )
             }
-            Request::DetectLanguage { .. } => invocation.reply(Ok(json!("und"))),
+            Request::DetectLanguage { .. } => self.refuse(invocation),
             Request::Discard { .. } => self.refuse(invocation),
         }
     }
@@ -1752,6 +1752,9 @@ impl Browser {
             BrowserRequest::Action(request) => state.action_request(request, invocation),
             BrowserRequest::Scripting(request) => state.scripting_request(request, invocation),
             BrowserRequest::Data(call) => {
+                if matches!(call, ExtensionDataCall::Restore { .. }) {
+                    return invocation.reply(Err(unsupported()));
+                }
                 let method = invocation.name();
                 let args = invocation.args().to_vec();
                 state.pend(

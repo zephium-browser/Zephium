@@ -741,9 +741,8 @@ impl MatchPattern {
         let raw_path = &remainder[path_start..];
 
         let (host, port) = if scheme == PatternScheme::File {
-            if !authority.is_empty() {
-                return Err(MatchPatternError::InvalidHost);
-            }
+            // Chromium URLPattern ignores a file pattern's authority. This is
+            // content selection only; host grants and file access are separate.
             (None, PortPattern::Any)
         } else {
             let (raw_host, raw_port) = split_host_and_port(authority)?;
@@ -1478,6 +1477,19 @@ mod tests {
     }
 
     #[test]
+    fn file_authorities_are_ignored_only_for_content_selection() {
+        for source in ["file://*/tmp/*", "file://localhost/tmp/*", "file:///tmp/*"] {
+            let parsed = pattern(source);
+            assert_eq!(parsed.as_str(), "file:///tmp/*");
+            assert!(parsed.matches_url(&url("file:///tmp/a")));
+            assert!(!parsed.matches_url(&url("file:///other/a")));
+            assert!(!parsed.matches_url(&url("https://localhost/tmp/a")));
+        }
+        assert!(crate::HostPattern::parse("file://*/tmp/*").is_err());
+        assert!(crate::HostPattern::parse("file://localhost/tmp/*").is_err());
+    }
+
+    #[test]
     fn invalid_patterns_are_rejected() {
         let cases = [
             "",
@@ -1491,7 +1503,6 @@ mod tests {
             "https://example.com:notaport/*",
             "https://example.com:65536/*",
             "https://user@example.com/*",
-            "file://localhost/foo",
             "https://example.com/\n",
             "https://*.127.0.0.1/*",
         ];

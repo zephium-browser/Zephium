@@ -1,0 +1,1 @@
+{"id":"management-surface","title":"Permissioned management capabilities survive Web Store alternatives","apis":["management.get","management.getAll","management.setEnabled","management.uninstall","management.onInstalled"],"permissions":["management"]}

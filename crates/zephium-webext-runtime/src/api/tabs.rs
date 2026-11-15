@@ -514,9 +514,6 @@ fn prepare(snapshot: &BrowserSnapshot, call: &Invocation<'_>) -> Result<Prepared
         }
         "tabs.detectLanguage" => {
             let tab = target_tab(snapshot, sender, args.first().and_then(as_integer))?;
-            if !readable_for(tab, sender, permissions) {
-                return Err(ApiError::cannot_access_page());
-            }
             if tab.tab.discarded() {
                 return Err(ApiError::other("Cannot determine language: tab not loaded"));
             }
@@ -1510,6 +1507,33 @@ mod tests {
                 &granted,
                 "tabs.detectLanguage",
                 json!([2])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn language_detection_does_not_require_tab_or_host_access() {
+        let (mut browser, mut dispatcher, sender) = browser();
+        browser.languages.insert(1, "pl".into());
+        assert_eq!(
+            browser
+                .call(
+                    &mut dispatcher,
+                    &sender,
+                    &permissions(&[], &[]),
+                    "tabs.detectLanguage",
+                    json!([1])
+                )
+                .unwrap(),
+            json!("pl")
+        );
+        assert!(browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(&[], &[]),
+                "tabs.detectLanguage",
+                json!([999])
             )
             .is_err());
     }

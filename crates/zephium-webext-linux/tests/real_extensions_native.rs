@@ -1734,7 +1734,7 @@ fn platform_capabilities() {
     let package = tempfile::tempdir().unwrap();
     std::fs::write(package.path().join("manifest.json"), json!({
         "manifest_version":3,"name":"Platform capabilities","version":"1.0",
-        "permissions":["tabs","webRequest","contextMenus","notifications"],"host_permissions":["<all_urls>"],
+        "permissions":["tabs","webRequest","contextMenus","notifications","sessions","declarativeContent","management","cookies","downloads"],"host_permissions":["<all_urls>"],
         "background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"},
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["empty.js"]},{"matches":["http://127.0.0.1/*"],"js":["main.js"],"world":"MAIN"}]
     }).to_string()).unwrap();
@@ -1878,6 +1878,18 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  for(const run of [()=>chrome.windows.create({url:'popup.html#window',type:'popup'}),()=>chrome.windows.update(current.id,{width:333}),()=>chrome.windows.remove(current.id)]){
    try{await run();windowErrors.push('unexpected success')}catch(error){windowErrors.push(error.message)}
  }
+ const constructorErrors=[];
+ for(const name of ['PageStateMatcher','ShowAction','ShowPageAction','SetIcon','RequestContentScript']){
+   try{new chrome.declarativeContent[name]({css:['body']});constructorErrors.push('unexpected success')}catch(error){constructorErrors.push(error.message)}
+ }
+ const unavailableErrors=[];
+ for(const run of [()=>chrome.cookies.getAll({}),()=>chrome.downloads.search({})]){try{await run();unavailableErrors.push('unexpected success')}catch(error){unavailableErrors.push(error.message)}}
+ let managementError='unexpected success';
+ try{await chrome.management.getAll()}catch(error){managementError=error.message}
+ let restoreError='unexpected success';
+ try{await chrome.sessions.restore()}catch(error){restoreError=error.message}
+ let languageError='unexpected success';
+ try{await chrome.tabs.detectLanguage(created.id)}catch(error){languageError=error.message}
  const windowsUnchanged=(await chrome.tabs.query({})).length===tabCount;
  let cancelledIdle=false;
  const cancelled=requestIdleCallback(()=>cancelledIdle=true);
@@ -1887,7 +1899,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,windowErrors,windowsUnchanged,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={created,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1906,6 +1918,17 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert!(result.get("error").is_none(), "{result}");
     assert_eq!(result["nativeIdle"], true);
     assert_eq!(result["foreign"], true);
+    assert_eq!(result["restoreError"], "This function is not supported.");
+    assert_eq!(result["languageError"], "This function is not supported.");
+    assert_eq!(result["managementError"], "This function is not supported.");
+    assert_eq!(
+        result["unavailableErrors"],
+        json!(vec!["This function is not supported."; 2])
+    );
+    assert_eq!(
+        result["constructorErrors"],
+        json!(vec!["This function is not supported."; 5])
+    );
     assert_eq!(result["inlineImage"], true);
     assert_eq!(result["idle"]["cancelled"], false);
     assert!(result["idle"]["didTimeout"].is_boolean());
@@ -2395,5 +2418,266 @@ for(const event of ['onClicked','onClosed','onButtonClicked'])chrome.notificatio
     let _stop = host.runtime.install_disabled(install);
     pump(&mut host, Duration::from_secs(1));
     assert!(replacement.ids().is_empty());
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
+}
+
+#[test]
+#[ignore = "native cache invalidation in a disposable profile"]
+fn handler_cache_clears_memory_and_preserves_website_storage() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    std::fs::write(
+        package.path().join("manifest.json"),
+        json!({
+            "manifest_version":3,"name":"Cache invalidation","version":"1.0",
+            "permissions":["webRequest"],"action":{"default_popup":"popup.html"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><title>Cache control</title>",
+    )
+    .unwrap();
+    let web_context = context();
+    let manager = web_context.website_data_manager().unwrap();
+    let (mut host, _engine) = host(web_context, &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    let tab = host.open(&fixture.url("/breadth"), true);
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    let mapped = MappedPage::new(&view);
+    pump(&mut host, Duration::from_secs(2));
+    assert_eq!(evaluate(&view, "localStorage.setItem('cache-fixture','kept');document.cookie='cache_fixture=kept;path=/';const image=new Image();document.body.append(image);return await new Promise(resolve=>{image.onload=()=>resolve('loaded');image.onerror=()=>resolve('failed');image.src='/cache-image.svg';});"), "loaded");
+    let memory_sites = || {
+        let result = Rc::new(RefCell::new(None));
+        let observed = result.clone();
+        manager.fetch(
+            webkit2gtk::WebsiteDataTypes::MEMORY_CACHE,
+            None::<&gtk::gio::Cancellable>,
+            move |value| {
+                *observed.borrow_mut() = Some(
+                    value
+                        .unwrap()
+                        .iter()
+                        .filter_map(|data| data.name().map(|name| name.to_string()))
+                        .collect::<Vec<_>>(),
+                );
+            },
+        );
+        pump_until(|| result.borrow().is_some());
+        let value = result.borrow_mut().take().unwrap();
+        value
+    };
+    let before = memory_sites();
+    assert!(
+        before.iter().any(|site| site == "127.0.0.1"),
+        "warm cache: {before:?}"
+    );
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    let popup_mapped = MappedPage::new(popup.view());
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(evaluate(popup.view(), "return Promise.all(Array.from({length:4},()=>chrome.webRequest.handlerBehaviorChanged())).then(()=> 'cleared',e=>e.message);"), "cleared");
+    let after = memory_sites();
+    assert!(
+        !after.iter().any(|site| site == "127.0.0.1"),
+        "cleared memory cache: {after:?}"
+    );
+    let kept = evaluate(&view, "return localStorage.getItem('cache-fixture')+':'+document.cookie.includes('cache_fixture=kept');");
+    assert_eq!(kept, "kept:true");
+    println!("WEBEXT handler_cache before={before:?} after={after:?} storage_preserved=true");
+    drop(popup_mapped);
+    drop(mapped);
+    drop(view);
+    drop(popup);
+    host.close(tab);
+    let mut drain = host.runtime.retire();
+    assert!(drain.run(Duration::from_secs(10)));
+}
+
+#[test]
+#[ignore = "private offscreen settings check; never accesses clipboard contents"]
+fn offscreen_clipboard_requires_both_grants_and_revokes_live_access() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    std::fs::write(
+        package.path().join("manifest.json"),
+        json!({
+            "manifest_version":3,"name":"Clipboard capability fixture","version":"1",
+            "permissions":["offscreen"],"optional_permissions":["clipboardRead","clipboardWrite","cookies"],
+            "background":{"service_worker":"worker.js"},
+            "action":{"default_popup":"popup.html"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(package.path().join("worker.js"), "chrome.runtime.onMessage.addListener((message,sender,reply)=>{if(message==='idle-wake')reply('awake');});").unwrap();
+    for name in ["popup.html", "off.html"] {
+        std::fs::write(
+            package.path().join(name),
+            "<!doctype html><title>Capability fixture</title>",
+        )
+        .unwrap();
+    }
+    let specification = spec(package.path(), id, 1);
+    let (declaration, _) = PermissionDeclaration::from_manifest(&specification.manifest);
+    let permissions = |names: &[&str]| {
+        let mut names = names.to_vec();
+        if names.len() == 2 {
+            names.push("cookies");
+        }
+        InstallPermissions::new(
+            declaration.clone(),
+            &PermissionRequest::parse(&names, &[]).unwrap(),
+            SiteAccess::OnAllSites,
+            false,
+        )
+    };
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime.install_admitted(specification).unwrap();
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    let mapped = MappedPage::new(popup.view());
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "await chrome.permissions.getAll();return typeof chrome.cookies;"
+        ),
+        "undefined"
+    );
+    for names in [
+        vec![],
+        vec!["clipboardRead"],
+        vec!["clipboardWrite"],
+        vec!["clipboardRead", "clipboardWrite"],
+    ] {
+        let update = host
+            .runtime
+            .permissions_changed(install, permissions(&names))
+            .unwrap();
+        assert!(update.poll().is_none());
+        assert!(host
+            .runtime
+            .permissions_changed(install, permissions(&names))
+            .is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while update.poll().is_none() && Instant::now() < deadline {
+            pump(&mut host, Duration::from_millis(10));
+        }
+        assert_eq!(update.poll(), Some(Ok(())));
+        assert_eq!(
+            evaluate(popup.view(), "return typeof chrome.cookies;"),
+            if names.len() == 2 {
+                "object"
+            } else {
+                "undefined"
+            }
+        );
+        assert_eq!(evaluate(popup.view(), "await chrome.offscreen.createDocument({url:'off.html',reasons:['CLIPBOARD'],justification:'Inspect native permission settings only'});return 'created';"), "created");
+        assert_eq!(
+            host.runtime.offscreen_clipboard_enabled(install),
+            Some(names.len() == 2)
+        );
+        if names.len() == 2 {
+            let update = host
+                .runtime
+                .permissions_changed(install, permissions(&["clipboardWrite"]))
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while update.poll().is_none() && Instant::now() < deadline {
+                pump(&mut host, Duration::from_millis(10));
+            }
+            assert_eq!(update.poll(), Some(Ok(())));
+            assert_eq!(
+                evaluate(popup.view(), "return typeof chrome.cookies;"),
+                "undefined"
+            );
+            assert_eq!(
+                host.runtime.offscreen_clipboard_enabled(install),
+                Some(false)
+            );
+            assert_eq!(
+                evaluate(popup.view(), "return await chrome.offscreen.hasDocument();"),
+                "true"
+            );
+        }
+        assert_eq!(
+            evaluate(
+                popup.view(),
+                "await chrome.offscreen.closeDocument();return 'closed';"
+            ),
+            "closed"
+        );
+    }
+    host.shell.borrow_mut().permission_prompt_allowed = true;
+    assert_eq!(evaluate(popup.view(), "globalThis.grantResult=null;chrome.permissions.request({permissions:['clipboardRead','cookies']}).then(value=>globalThis.grantResult={value,cookies:typeof chrome.cookies},error=>globalThis.grantResult={error:error.message});return 'started';"), "started");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let result = loop {
+        pump(&mut host, Duration::from_millis(10));
+        let result = evaluate(
+            popup.view(),
+            "return JSON.stringify(globalThis.grantResult);",
+        );
+        if result != "null" || Instant::now() >= deadline {
+            break result;
+        }
+    };
+    assert_eq!(
+        serde_json::from_str::<Value>(&result).unwrap(),
+        json!({"value":true,"cookies":"object"})
+    );
+    assert_eq!(evaluate(popup.view(), "await chrome.offscreen.createDocument({url:'off.html',reasons:['CLIPBOARD'],justification:'Inspect settled native grants only'});return 'created';"), "created");
+    assert_eq!(
+        host.runtime.offscreen_clipboard_enabled(install),
+        Some(true)
+    );
+    pump(&mut host, Duration::from_secs(40));
+    let parked = host.runtime.background(install).unwrap();
+    assert_eq!(
+        parked.state,
+        zephium_webext_runtime::lifecycle::BackgroundState::Stopped
+    );
+    assert_eq!(
+        evaluate(popup.view(), "return await chrome.offscreen.hasDocument();"),
+        "true"
+    );
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "return await chrome.runtime.sendMessage('idle-wake');"
+        ),
+        "awake"
+    );
+    assert!(host.runtime.background(install).unwrap().generation > parked.generation);
+    assert_eq!(
+        evaluate(popup.view(), "return await chrome.offscreen.hasDocument();"),
+        "true"
+    );
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "await chrome.offscreen.closeDocument();return 'closed';"
+        ),
+        "closed"
+    );
+    drop(mapped);
+    drop(popup);
     assert!(host.runtime.retire().run(Duration::from_secs(10)));
 }

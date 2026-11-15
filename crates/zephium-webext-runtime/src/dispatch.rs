@@ -1046,7 +1046,7 @@ mod tests {
                 call.reply(Ok(Value::Null))
             })
             .unwrap();
-        assert!(crate::schema::access("runtime.connectNative")
+        assert!(!crate::schema::access("runtime.connectNative")
             .unwrap()
             .contexts
             .contains(ContextKind::ExtensionFrame));

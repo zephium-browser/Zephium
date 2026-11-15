@@ -63,6 +63,7 @@ where
     notifications::register(table)?;
     scripting::register(table)?;
     web_navigation::register(table)?;
+    web_request::register(table)?;
     history::register(table)?;
     bookmarks::register(table)?;
     sessions::register(table)?;

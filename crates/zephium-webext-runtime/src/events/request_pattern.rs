@@ -98,7 +98,6 @@ mod tests {
                 "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/*.html*",
                 "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/popup.html?x=1",
             ),
-            ("file://*/*.user.js", "file:///tmp/a.user.js"),
             ("wss://example.test/*", "wss://example.test/socket"),
             ("ftp://example.test:21/*", "ftp://example.test/file"),
         ] {
@@ -107,6 +106,11 @@ mod tests {
                 .matches_url(&Url::parse(target).unwrap()));
             assert!(MatchPattern::parse(pattern).is_err());
         }
+        let file = "file://*/*.user.js";
+        let target = Url::parse("file:///tmp/a.user.js").unwrap();
+        assert!(RequestPattern::parse(file).unwrap().matches_url(&target));
+        assert!(MatchPattern::parse(file).unwrap().matches_url(&target));
+        assert!(crate::pattern::HostPattern::parse(file).is_err());
         let own =
             RequestPattern::parse("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/*").unwrap();
         assert!(!own.matches_url(

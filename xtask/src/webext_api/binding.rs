@@ -52,6 +52,15 @@ fn contexts(value: &Value) -> Option<BTreeSet<String>> {
 
 // Keep feature inheritance and fail-closed alternatives aligned with schema/access.rs.
 fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -> Option<Access> {
+    access_with_policy(rules, namespaces, depth, None)
+}
+
+fn access_with_policy(
+    rules: &[Value],
+    namespaces: &BTreeMap<String, Value>,
+    depth: usize,
+    policy: Option<&str>,
+) -> Option<Access> {
     if depth >= 16 || rules.is_empty() {
         return None;
     }
@@ -101,6 +110,9 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
             manifest: None,
             dnr: None,
         };
+        if let Some(name) = policy {
+            apply_policy(name, &mut current);
+        }
         if current.contexts.is_empty() {
             continue;
         }
@@ -113,8 +125,12 @@ fn access(rules: &[Value], namespaces: &BTreeMap<String, Value>, depth: usize) -
                     } else if let Some(feature) = dependency.strip_prefix("manifest:") {
                         (None, Some(feature.to_owned()))
                     } else if let Some(api) = dependency.strip_prefix("api:") {
-                        let inherited =
-                            access(namespaces.get(api)?.as_array()?, namespaces, depth + 1)?;
+                        let inherited = access_with_policy(
+                            namespaces.get(api)?.as_array()?,
+                            namespaces,
+                            depth + 1,
+                            policy,
+                        )?;
                         current
                             .contexts
                             .retain(|kind| inherited.contexts.contains(kind));
@@ -648,13 +664,14 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
                     let details = json!({"type":"object","properties":{"scope":{"$ref":"types.ChromeSettingScope","optional":true},"value":value}});
                     spec["setting"] = setting_schema(namespace, &details, &types, 0)?;
                 }
-                let mut access = access(
+                let mut access = access_with_policy(
                     member["feature_rules"]
                         .as_array()
                         .map(Vec::as_slice)
                         .unwrap_or_default(),
                     &rules,
                     0,
+                    Some(&full),
                 )
                 .unwrap_or(Access {
                     contexts: BTreeSet::new(),
@@ -677,6 +694,24 @@ pub(super) fn surface(catalog: &Catalog) -> Result<Value, String> {
             ensure_namespace(&mut namespaces, namespace)["properties"] = enums;
         }
         constants(namespace, &schema["properties"], &types, &mut namespaces, 0);
+        if namespace == "declarativeContent" {
+            // Pinned declarative_content_hooks_delegate.cc::InitializeTemplate exports.
+            let mut constructors = Map::new();
+            for (name, target) in [
+                ("PageStateMatcher", "PageStateMatcher"),
+                ("ShowAction", "ShowAction"),
+                ("ShowPageAction", "ShowAction"),
+                ("SetIcon", "SetIcon"),
+                ("RequestContentScript", "RequestContentScript"),
+            ] {
+                let target = format!("{namespace}.{target}");
+                if !types.contains_key(&target) {
+                    return Err(format!("missing custom constructor schema: {target}"));
+                }
+                constructors.insert(name.into(), target.into());
+            }
+            ensure_namespace(&mut namespaces, namespace)["constructors"] = constructors.into();
+        }
     }
     // Lift common access metadata to the owning namespace and union child contexts.
     let names: Vec<_> = namespaces.keys().cloned().collect();
@@ -797,7 +832,7 @@ pub(super) fn fixture(surface: &Value, members: &str) -> Result<String, String> 
             .as_object()
             .ok_or_else(|| format!("fixture namespace missing: {name}"))?
             .clone();
-        for field in ["functions", "events", "properties"] {
+        for field in ["functions", "events", "properties", "constructors"] {
             let mut trimmed = Map::new();
             for member in selected[field].as_array().into_iter().flatten() {
                 let member = member.as_str().ok_or("fixture member must be a string")?;
@@ -956,5 +991,21 @@ mod tests {
         assert!(access(json!([{"name":"sample","rules":{"contexts":["privileged_extension"],"dependencies":["unsupported:action"]}}]).as_array().unwrap(), &namespaces, 0).is_none());
         let alternatives = json!([{"name":"sample","rules":[{"contexts":["privileged_extension"],"dependencies":["permission:one"]},{"contexts":["content_script"],"dependencies":["permission:two"]}]}]);
         assert!(access(alternatives.as_array().unwrap(), &namespaces, 0).is_none());
+        let alternatives = json!([{"name":"management","rules":[{"contexts":["privileged_extension"],"dependencies":["permission:management"]},{"contexts":["web_page"],"dependencies":[]}]}]);
+        let projected = access_with_policy(
+            alternatives.as_array().unwrap(),
+            &namespaces,
+            0,
+            Some("management.getAll"),
+        )
+        .unwrap();
+        assert_eq!(projected.permission.as_deref(), Some("management"));
+        assert_eq!(
+            projected.contexts,
+            ["background", "popup", "options", "extensionTab"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
     }
 }

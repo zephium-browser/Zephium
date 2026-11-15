@@ -40,6 +40,12 @@ impl HostPattern {
         if source.contains('#') {
             return Err(MatchPatternError::FragmentNotAllowed);
         }
+        if source
+            .strip_prefix("file://")
+            .is_some_and(|rest| !rest.starts_with('/'))
+        {
+            return Err(MatchPatternError::InvalidHost);
+        }
         let parsed = MatchPattern::parse(source)?;
         Ok(Self {
             pattern: canonical(&parsed, PathMode::AllPaths)?,
@@ -771,6 +777,20 @@ mod tests {
         assert!(!check("https://www.example.com/sport/1"));
         assert!(!check("https://www.example.com/news/1?draft=1"));
         assert!(!check("https://www.other.com/news/1"));
+    }
+
+    #[test]
+    fn file_content_selection_still_requires_file_access() {
+        let matcher = script(&["file://*/*"], MatchOptions::default());
+        let target = url("file:///tmp/fixture.html");
+        let origin = DocumentOrigin::of_url(&target);
+        let document = FrameDocument {
+            url: &target,
+            origin: &origin,
+            creator_url: None,
+        };
+        assert!(!matcher.matches(&document, false));
+        assert!(matcher.matches(&document, true));
     }
 
     #[test]
