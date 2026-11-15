@@ -2349,11 +2349,11 @@ pub fn page_mute_supported() -> bool {
     {
         platform::macos::audio::mute_supported()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         true
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
@@ -3392,11 +3392,11 @@ impl Engine for WebviewEngine {
         if !page_mute_supported() {
             return NativeDispatch::Unsupported;
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |h| h.set_muted(id, muted))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (id, muted);
             NativeDispatch::Unsupported

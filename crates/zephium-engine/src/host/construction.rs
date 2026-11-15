@@ -2800,7 +2800,7 @@ impl EngineHost {
             })
         };
         // Whether the page makes sound, from the engine's own notification.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let audio_observer = {
             let audio_id = id.clone();
             let audio_permit = event_permit.clone();
@@ -2820,7 +2820,7 @@ impl EngineHost {
             {
                 crate::platform::macos::audio::AudioObserver::install(&view, changed)
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 crate::platform::imp::install_audio_observer(&view, changed)
             }
@@ -2932,7 +2932,7 @@ impl EngineHost {
             _capture_observer: capture_observer,
             #[cfg(target_os = "macos")]
             _audio_observer: audio_observer,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             audio_observer,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             _fullscreen_observer: fullscreen_observer,

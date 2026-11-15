@@ -1,6 +1,8 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
 //! composition root; the stage positions them and draws the drop indicator.
 
+mod audio;
+pub(crate) use audio::{install_audio_observer, AudioObserver};
 mod content_filter;
 mod find;
 mod fullscreen;

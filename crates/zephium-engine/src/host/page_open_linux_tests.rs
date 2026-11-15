@@ -925,3 +925,44 @@ fn native_history_lists_and_revalidates_jump_targets() {
             && !page.is_loading()
     });
 }
+
+#[test]
+#[ignore = "requires isolated GTK display; localhost muted audio only"]
+fn native_audio_mute_preserves_person_and_focus_intent() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    assert!(crate::page_mute_supported());
+    assert_eq!(host.engine.set_muted(id, true), NativeDispatch::Scheduled);
+    until(|| page.is_muted());
+    host.engine.set_media_suspended(id, true);
+    assert_eq!(host.engine.set_muted(id, false), NativeDispatch::Scheduled);
+    // A host barrier proves both queued mute intents settled.
+    let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = settled.clone();
+    assert!(host
+        .engine
+        .run(move || done.store(true, std::sync::atomic::Ordering::Release)));
+    until(|| settled.load(std::sync::atomic::Ordering::Acquire));
+    assert!(page.is_muted());
+    host.engine.set_media_suspended(id, false);
+    until(|| !page.is_muted());
+    assert_eq!(host.engine.set_muted(id, true), NativeDispatch::Scheduled);
+    until(|| page.is_muted());
+    script(&page, "document.querySelector('#script').onclick=()=>{window.audio=new AudioContext();window.tone=audio.createOscillator();tone.connect(audio.destination);tone.start();document.title='audio-started'};document.title='audio-ready'");
+    until(|| page.title().as_deref() == Some("audio-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| {
+        host.drain().iter().any(|event| matches!(event, EngineEvent::AudioChanged { id: owner, audible: true } if *owner == id))
+    });
+    script(&page, "tone.stop();audio.close()");
+    until(|| {
+        host.drain().iter().any(|event| matches!(event, EngineEvent::AudioChanged { id: owner, audible: false } if *owner == id))
+    });
+    page.load_uri(&format!("{}/second", fixture.origin));
+    until(|| {
+        host.drain();
+        !page.is_loading()
+    });
+    assert!(page.is_muted());
+}
