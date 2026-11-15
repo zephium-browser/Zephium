@@ -38,8 +38,11 @@
           : m.page_permission_title_microphone({ site }),
   );
   let icon = $derived(location ? Location01Icon : camera ? Camera01Icon : Mic01Icon);
-  // macOS gives no position to a browser the person turned it off for.
-  let systemOff = $derived(location && prompt.blocked_by_system);
+  let systemOff = $derived(prompt.blocked_by_system);
+  let deviceUnavailable = $derived(!location && systemOff);
+  let systemMessage = $derived(
+    location ? m.page_permission_location_off() : m.page_permission_devices_unavailable(),
+  );
   let described = $derived(
     [systemOff && "page-permission-system", !prompt.rememberable && "page-permission-private"]
       .filter(Boolean)
@@ -64,7 +67,8 @@
   );
 
   function respond(decision: PagePermissionPromptDecisionInput) {
-    if (busy) return;
+    if (busy || (deviceUnavailable && (decision === "always_allow" || decision === "allow_once")))
+      return;
     if (decision !== "dismiss" && performance.now() - shownAt < SETTLE_MS) return;
     permissions.respond(prompt, decision);
   }
@@ -114,7 +118,7 @@
         variant="secondary"
         {size}
         class="w-full"
-        disabled={busy}
+        disabled={busy || deviceUnavailable}
         aria-busy={busy || undefined}
         onclick={() => respond("always_allow")}
       >
@@ -124,7 +128,7 @@
         variant="secondary"
         {size}
         class="w-full"
-        disabled={busy}
+        disabled={busy || deviceUnavailable}
         aria-busy={busy || undefined}
         onclick={() => respond("allow_once")}
       >
@@ -157,7 +161,7 @@
       <Button
         variant="primary"
         {size}
-        disabled={busy}
+        disabled={busy || deviceUnavailable}
         aria-busy={busy || undefined}
         onclick={() => respond("allow_once")}
       >
@@ -183,7 +187,7 @@
       <p id="page-permission-title" class="title">{title}</p>
     </div>
     {#if systemOff}
-      <p id="page-permission-system" class="detail">{m.page_permission_location_off()}</p>
+      <p id="page-permission-system" class="detail">{systemMessage}</p>
     {/if}
     {#if !prompt.rememberable}
       <p id="page-permission-private" class="detail">{m.page_permission_private()}</p>
@@ -219,7 +223,7 @@
 
       {#if systemOff}
         <p id="page-permission-system" class="mt-3 text-[11.5px] leading-4 text-muted">
-          {m.page_permission_location_off()}
+          {systemMessage}
         </p>
       {/if}
 

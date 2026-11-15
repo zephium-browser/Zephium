@@ -764,6 +764,19 @@ impl EngineHost {
         {
             return false;
         }
+        #[cfg(target_os = "linux")]
+        if self.page_permissions.has_pending_for(id)
+            || self
+                .page_permissions
+                .pending_presence()
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self
+                .downloads
+                .as_ref()
+                .is_some_and(|downloads| downloads.has_pending_decision(profile))
+        {
+            return false;
+        }
         #[cfg(target_os = "windows")]
         if !self.hidden.contains(&id) {
             return false;

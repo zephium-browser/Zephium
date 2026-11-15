@@ -376,3 +376,20 @@ Linux script dialogs similarly require explicit host ownership. The ordinary-tab
 host retains the native completion, bounds message/default text before copying,
 uses a transient GTK dialog, and cancels on navigation, hiding or retirement.
 Privileged and agent views keep the default close-without-prompt behavior.
+
+- Linux ordinary views may install a native download broker before navigation.
+  A single context dispatcher routes by the actual native originating view;
+  absent ownership cancels. Explicit deny policy remains dominant. Brokered
+  blob/data navigation actions become downloads, never top-level documents.
+  Destination consent, publication protection and lifecycle belong to the host.
+
+Linux ordinary views may install a native permission-request owner before loading.
+Unhandled requests remain denied; the host retains bounded native completions
+and owns foreground, navigation, shared consent and capture revocation checks.
+No native origin is invented by Wry; the host relies on qualified WebKitGTK
+Permissions Policy before applying its top-level-origin attribution.
+
+GTK TLS load failures retain native certificate-error categories for the shared
+error page. They never grant host-wide certificate exceptions; the Linux shell
+keeps continuation unavailable because the native API cannot scope by port or
+revoke an allowance.

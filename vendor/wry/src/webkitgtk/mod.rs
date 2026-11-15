@@ -981,8 +981,20 @@ impl InnerWebView {
       let tls_failure = Rc::new(Cell::new(None));
       let tls_sequence = sequence.clone();
       let tls_failed = tls_failure.clone();
-      webview.connect_load_failed_with_tls_errors(move |_, _, _, _| {
-        tls_failed.set(tls_sequence.get().active.map(|active| active.id));
+      webview.connect_load_failed_with_tls_errors(move |_, _, _, flags| {
+        use gtk::gio::TlsCertificateFlags as Flags;
+        let problem = if flags.contains(Flags::REVOKED) {
+          crate::CertificateProblem::Revoked
+        } else if flags.contains(Flags::EXPIRED) {
+          crate::CertificateProblem::Expired
+        } else if flags.contains(Flags::BAD_IDENTITY) {
+          crate::CertificateProblem::NameMismatch
+        } else if flags.contains(Flags::UNKNOWN_CA) {
+          crate::CertificateProblem::Untrusted
+        } else {
+          crate::CertificateProblem::Other
+        };
+        tls_failed.set(tls_sequence.get().active.map(|active| (active.id, problem)));
         false
       });
       let failure_handler = attributes.navigation_failure_handler.take();
@@ -993,11 +1005,12 @@ impl InnerWebView {
         let id = current.failed();
         sequence.set(current);
         let url = bounded_utf8_bytes(failing_uri.as_bytes(), PAGE_URL_LIMIT);
-        let reason = if tls_failure.take().is_some_and(|tls| Some(tls) == id) {
-          Some(crate::NavigationFailure::Insecure)
-        } else {
-          navigation_failure(error)
-        };
+        let reason =
+          if let Some((_, problem)) = tls_failure.take().filter(|(tls, _)| Some(*tls) == id) {
+            Some(crate::NavigationFailure::Certificate(problem))
+          } else {
+            navigation_failure(error)
+          };
         if let (Some(id), Some(url)) = (id, url) {
           if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
             handler(
@@ -1005,6 +1018,8 @@ impl InnerWebView {
               reason,
               if committed {
                 crate::FailedDocument::Replaced { url: url.clone() }
+              } else if matches!(reason, crate::NavigationFailure::Certificate(_)) {
+                crate::FailedDocument::Refused { url: url.clone() }
               } else {
                 crate::FailedDocument::Kept
               },
@@ -1136,11 +1151,29 @@ impl InnerWebView {
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
       #[cfg(target_os = "linux")]
       let action_handler = attributes.linux_navigation_action_handler.take();
+      #[cfg(target_os = "linux")]
+      let native_downloads = attributes.linux_download_handler.is_some()
+        && attributes.download_policy == crate::DownloadPolicy::UseHandlers;
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
         let handler = match policy_type {
           PolicyDecisionType::NavigationAction => &navigation_handler,
           _ => return false,
         };
+
+        #[cfg(target_os = "linux")]
+        if native_downloads
+          && policy_decision
+            .dynamic_cast_ref::<NavigationPolicyDecision>()
+            .and_then(NavigationPolicyDecisionExt::navigation_action)
+            .and_then(|action| action.request())
+            .and_then(|request| bounded_request_uri(&request))
+            .is_some_and(|uri| uri.starts_with("blob:") || uri.starts_with("data:"))
+        {
+          unsafe {
+            webkit2gtk::ffi::webkit_policy_decision_download(policy_decision.as_ptr());
+          }
+          return true;
+        }
 
         // Missing action/request/URI state during navigation or teardown must
         // not fall back to WebKit's default allow path.
@@ -1177,7 +1210,16 @@ impl InnerWebView {
     // brokers and allows it. `Default` is also fail-closed in this fork: it
     // must never delegate to an unlabelled native WebKit prompt.
     let permission_handler = attributes.permission_handler.take();
+    #[cfg(target_os = "linux")]
+    let native_permission_handler = attributes.linux_permission_handler.take();
     webview.connect_permission_request(move |_webview, request| {
+      #[cfg(target_os = "linux")]
+      if native_permission_handler
+        .as_ref()
+        .is_some_and(|handler| handler(_webview, request))
+      {
+        return true;
+      }
       let response_for = |kind| {
         permission_handler
           .as_ref()
@@ -1308,6 +1350,38 @@ impl InnerWebView {
     });
     webview.connect_print(|_, _| true);
 
+    #[cfg(target_os = "linux")]
+    if let Some(handler) = attributes
+      .linux_download_handler
+      .take()
+      .filter(|_| attributes.download_policy == crate::DownloadPolicy::UseHandlers)
+    {
+      use webkit2gtk::DownloadExt;
+      const KEY: &str = "wry-linux-download-owner";
+      const INSTALLED: &str = "wry-linux-download-dispatch";
+      unsafe {
+        webview.set_data(KEY, handler);
+      }
+      let context = web_context.context();
+      if unsafe { context.data::<bool>(INSTALLED).is_none() } {
+        context.connect_download_started(|_, download| {
+          let owner = download.web_view().and_then(|view| unsafe {
+            view
+              .data::<crate::LinuxDownloadHandler>(KEY)
+              .map(|handler| handler.as_ref().clone())
+          });
+          if let Some(owner) = owner {
+            owner(download);
+          } else {
+            download.cancel();
+          }
+        });
+        unsafe {
+          context.set_data(INSTALLED, true);
+        }
+      }
+      return;
+    }
     // Download handler
     web_context.register_download_handler(
       attributes.download_policy,

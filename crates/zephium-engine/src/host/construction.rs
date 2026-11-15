@@ -772,9 +772,9 @@ impl EngineHost {
         let on_load = self.sink.clone();
         let load_permit = event_permit.clone();
         let load_navigation = navigation.clone();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let page_permission_pending = self.page_permissions.pending_presence();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let load_page_permission_pending = page_permission_pending.clone();
         let presentation_permit = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "macos")]
@@ -809,6 +809,8 @@ impl EngineHost {
         );
         #[cfg(target_os = "linux")]
         let load_script_dialogs = Rc::downgrade(&script_dialogs);
+        #[cfg(target_os = "linux")]
+        let permission_requests = Rc::new(super::page_permissions::LinuxRequests::default());
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
@@ -1343,6 +1345,70 @@ impl EngineHost {
 
         #[cfg(target_os = "linux")]
         {
+            if let Some(downloads) = &self.downloads {
+                let manager = Rc::downgrade(downloads);
+                let permit = event_permit.clone();
+                let intent = download_surface_intent.clone();
+                let tracker = navigation.clone();
+                let item = id.clone();
+                let sink = self.sink.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_linux_download_handler(move |native| {
+                        use webkit2gtk::DownloadExt;
+                        let Some(manager) = manager.upgrade() else {
+                            native.cancel();
+                            return;
+                        };
+                        let ask = super::downloads::SiteAsk {
+                            item: item.clone(),
+                            permit: permit.clone(),
+                            sink: sink.clone(),
+                            site: tracker
+                                .committed_snapshot()
+                                .and_then(|(_, url)| url::Url::parse(&url).ok())
+                                .and_then(|url| {
+                                    zephium_core::permissions::PageOrigin::from_url(&url).ok()
+                                }),
+                            opened_by_click: false,
+                        };
+                        if manager
+                            .admit(
+                                partition,
+                                permit.clone(),
+                                intent.clone(),
+                                tracker.clone(),
+                                native,
+                                Some(ask),
+                            )
+                            .is_none()
+                        {
+                            native.cancel();
+                        }
+                    });
+            }
+            let requests = Rc::downgrade(&permission_requests);
+            let permission_item = id.clone();
+            let permission_permit = event_permit.clone();
+            let permission_navigation = navigation.clone();
+            let presence = page_permission_pending.clone();
+            let permission_presentation = presentation_permit.clone();
+            builder = builder.with_linux_permission_handler(move |page, native| {
+                requests.upgrade().is_some_and(|requests| {
+                    requests.admit(
+                        page,
+                        native,
+                        (
+                            partition.profile(),
+                            permission_item.clone(),
+                            permission_permit.clone(),
+                            permission_navigation.clone(),
+                            presence.clone(),
+                            permission_presentation.clone(),
+                        ),
+                    )
+                })
+            });
             let dialogs = Rc::downgrade(&script_dialogs);
             builder = builder.with_linux_script_dialog_handler(move |view, dialog| {
                 dialogs
@@ -1961,6 +2027,11 @@ impl EngineHost {
                         NavigationFailureReason::Blocked(_) => NavigationFailureReason::Other,
                         reason => reason,
                     };
+                    #[cfg(target_os = "linux")]
+                    let refused_url = match &document {
+                        wry::FailedDocument::Refused { url } => Some(url.clone()),
+                        _ => None,
+                    };
                     let replaced = match document {
                         wry::FailedDocument::Replaced { url } => Some(url),
                         wry::FailedDocument::Kept | wry::FailedDocument::Refused { .. } => None,
@@ -1968,7 +2039,7 @@ impl EngineHost {
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();
                     #[cfg(target_os = "linux")]
-                    let url = replaced;
+                    let url = refused_url.or(replaced);
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let url = matches!(reason, NavigationFailureReason::Certificate(_))
                         .then(|| failure_certificates.upgrade()?.refused_url())
@@ -2022,7 +2093,7 @@ impl EngineHost {
                     }
                     #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
                     super::page_reader::begin_load(&load_reader);
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     super::page_permissions::queue_navigation_revocation(
                         id,
                         &load_permit,
@@ -2554,6 +2625,7 @@ impl EngineHost {
                 event_permit.clone(),
                 navigation.clone(),
                 presentation_permit.clone(),
+                self.downloads.is_some(),
             );
             self.webext_linux.attach_tab(partition, id.get(), &view);
             self.webext_linux
@@ -2713,6 +2785,25 @@ impl EngineHost {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        let capture_observer = {
+            let id = id.clone();
+            let permit = event_permit.clone();
+            let navigation = navigation.clone();
+            let sink = self.sink.clone();
+            super::page_permissions::CaptureObserver::install(&view, move |state| {
+                if let Some(epoch) = navigation.resident_media_epoch() {
+                    permit.emit(
+                        &sink,
+                        EngineEvent::MediaCaptureChanged {
+                            id: id.get(),
+                            navigation: epoch.presentation_id(),
+                            state,
+                        },
+                    );
+                }
+            })
+        };
         let observation_id = id.clone();
         #[cfg(target_os = "macos")]
         let capture_observer = {
@@ -2930,7 +3021,7 @@ impl EngineHost {
             media_watch: Cell::new((0, false)),
             #[cfg(target_os = "windows")]
             _favicon_observer: favicon_observer,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             _capture_observer: capture_observer,
             #[cfg(target_os = "macos")]
             _audio_observer: audio_observer,
@@ -2968,6 +3059,8 @@ impl EngineHost {
             http_auth,
             #[cfg(target_os = "linux")]
             script_dialogs,
+            #[cfg(target_os = "linux")]
+            permission_requests,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificates,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

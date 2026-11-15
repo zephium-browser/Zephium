@@ -24,6 +24,7 @@ const PAGE_PERMISSION_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::
 const MAX_DOCUMENT_DECISIONS: usize = 32;
 const PAGE_PERMISSION_PROMPTS_ENABLED: bool = cfg!(any(
     test,
+    target_os = "linux",
     all(
         target_os = "macos",
         feature = "macos-page-permission-prompts"

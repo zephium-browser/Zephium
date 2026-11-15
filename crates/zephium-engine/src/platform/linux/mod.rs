@@ -63,8 +63,8 @@ use gtk::prelude::WidgetExt as _;
 #[cfg(any(test, feature = "native-isolation-probes"))]
 use webkit2gtk::UserContentManager;
 use webkit2gtk::{
-    DownloadExt, UserContentInjectedFrames, UserContentManagerExt, UserScript,
-    UserScriptInjectionTime, WebContextExt, WebViewExt, WebsiteDataManagerExt,
+    UserContentInjectedFrames, UserContentManagerExt, UserScript, UserScriptInjectionTime,
+    WebContextExt, WebViewExt, WebsiteDataManagerExt,
 };
 use wry::WebViewExtUnix;
 use zephium_core::ports::engine::{Partition, ScriptPrincipal};
@@ -449,20 +449,6 @@ pub fn configure(
         .website_data_manager()
         .ok_or("missing attested data manager")?;
     network::configure(&manager)?;
-
-    // `download-started` belongs to WebContext, not WebView. Persistent tabs
-    // share a context, so registering Wry's per-builder callback on every tab
-    // would retain one more closure for the lifetime of the profile. Mark the
-    // GLib object and install one fail-closed handler before the first load.
-    const DOWNLOAD_DENY_MARKER: &str = "zephium-download-deny-installed";
-    // SAFETY: this private key is written and read only as `bool` here, and
-    // the marker lives exactly as long as the context GLib object.
-    let installed = unsafe { context.data::<bool>(DOWNLOAD_DENY_MARKER).is_some() };
-    if !installed {
-        context.connect_download_started(|_, download| download.cancel());
-        // SAFETY: see the typed private-key invariant above.
-        unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
-    }
 
     Ok(())
 }

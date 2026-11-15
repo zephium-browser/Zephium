@@ -135,3 +135,15 @@ test("the card leaves keys and focus with whatever else has them", async () => {
   expect(native.respond).not.toHaveBeenCalled();
   field.remove();
 });
+
+test("unavailable devices explain the state and cannot be allowed", async () => {
+  const shown = { ...prompt(true), blocked_by_system: true };
+  const screen = await render(PagePermissionPrompt, { prompt: shown });
+  await expect
+    .element(screen.getByText("Camera or microphone access is unavailable on this system."))
+    .toBeVisible();
+  await expect
+    .element(screen.getByRole("button", { name: "Allow while visiting the site" }))
+    .toBeDisabled();
+  await expect.element(screen.getByRole("button", { name: "Allow this time" })).toBeDisabled();
+});

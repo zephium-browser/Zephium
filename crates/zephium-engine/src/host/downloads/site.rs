@@ -31,7 +31,7 @@ pub(in crate::host) struct SiteAsk {
 
 /// A transfer that may not choose its destination until the person answers.
 pub(super) struct SiteHold {
-    ask: SiteAsk,
+    ask: Box<SiteAsk>,
     site: PageOrigin,
     allowed: bool,
     clicked: bool,
@@ -89,7 +89,7 @@ impl Downloads {
             DownloadGate::Open => SiteAdmission::Open,
             DownloadGate::Refuse => SiteAdmission::Refuse,
             DownloadGate::Ask => SiteAdmission::Hold(SiteHold {
-                ask,
+                ask: Box::new(ask),
                 site,
                 allowed: remembered == Some(true),
                 clicked,

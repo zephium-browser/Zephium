@@ -82,6 +82,23 @@ impl Fixture {
                     let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"fixture\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     continue;
                 }
+                if line.contains(" /digest ") && !valid_digest_fixture(&request) {
+                    let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"fixture\", nonce=\"local-nonce\", algorithm=MD5, qop=\"auth\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                if let Some(capability) = line
+                    .split(" /permission-child?")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                {
+                    let body = format!(
+                        "<!doctype html><body><script>{}</script>",
+                        permission_fixture_script(capability)
+                    );
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
                 let page = line.contains(" /page ");
                 let body = if page {
                     "<!doctype html><title>ready</title><style>a,button{position:absolute;left:0;width:200px;height:40px}#blank{top:0}#link{top:60px}#script{top:120px}#post{top:180px}</style><a id=blank href='/blank' target=_blank>blank</a><a id=link href='/link'>link</a><button id=script onclick=\"window.open('/script')\">script</button><form action='/post' method=post target=_blank><input name=proof value=preserved><button id=post>post</button></form>"
@@ -1183,4 +1200,803 @@ fn native_site_data_clearing_preserves_other_profiles() {
     until(|| page.title().as_deref() == Some("cleared"));
     script(&second, "document.title=(localStorage.getItem('proof')==='second' && document.cookie.includes('proof=second'))?'isolated':'lost'");
     until(|| second.title().as_deref() == Some("isolated"));
+}
+
+struct DownloadFixtureStore;
+impl zephium_core::ports::store::Store for DownloadFixtureStore {
+    fn save_session(&self, _: zephium_core::session::SessionState) {}
+    fn flush(&self) -> bool {
+        true
+    }
+    fn load_session(&self) -> zephium_core::ports::store::SessionLoad {
+        zephium_core::ports::store::SessionLoad::Absent
+    }
+    fn record_visit(&self, _: ProfileId, _: String, _: String) {}
+    fn app_setting(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn set_app_setting(&self, _: String, _: String) -> bool {
+        false
+    }
+    fn search_history(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        vec![]
+    }
+    fn history_page(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: Option<i64>,
+        _: Option<i64>,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryVisit> {
+        vec![]
+    }
+    fn forget_history_urls(&self, _: ProfileId, _: &[String]) -> u32 {
+        0
+    }
+    fn clear_history(&self, _: ProfileId, _: Option<i64>) -> u32 {
+        0
+    }
+    fn amend_visit_title(&self, _: ProfileId, _: String, _: String) -> bool {
+        false
+    }
+    fn favicon_age(&self, _: ProfileId, _: &str) -> Option<i64> {
+        None
+    }
+    fn save_favicon(&self, _: ProfileId, _: String, _: Option<String>, _: Vec<u8>) {}
+    fn favicon_bytes(&self, _: ProfileId, _: &str) -> Option<(Option<String>, Vec<u8>)> {
+        None
+    }
+    fn download_recovery_profiles(
+        &self,
+        done: Box<dyn FnOnce(zephium_core::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        done(zephium_core::downloads::DownloadStoreReply::Profiles(
+            vec![],
+        ));
+        true
+    }
+    fn download_call(
+        &self,
+        _: ProfileId,
+        _: zephium_core::downloads::DownloadStoreCall,
+        _: Box<dyn FnOnce(zephium_core::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        panic!("private download history must not reach the durable store")
+    }
+}
+
+#[test]
+#[ignore = "requires isolated GTK/WebKitGTK host"]
+fn native_download_uses_shared_confirmation_and_secure_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    use zephium_core::downloads::{DownloadCall, DownloadCompletion, DownloadResponse};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let output = tempfile::tempdir().unwrap();
+    let directory = output.path().to_owned();
+    let profile = host.profile;
+    assert!(super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_directory(profile, directory);
+    }));
+    script(&page, "document.querySelector('#script').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['download fixture'],{type:'text/plain'}));a.download='fixture.txt';document.body.append(a);a.click()};document.title='download-ready'");
+    until(|| page.title().as_deref() == Some("download-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    let mut asked = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::DownloadPermissionRequested { id: owner, prompt } = event {
+                assert_eq!(owner, id);
+                asked = Some(prompt.request);
+            }
+        }
+        asked.is_some()
+    });
+    assert_eq!(
+        host.engine
+            .answer_download_permission(id, asked.unwrap(), true),
+        NativeDispatch::Scheduled
+    );
+    until(|| output.path().join("fixture.txt").exists());
+    let path = output.path().join("fixture.txt");
+    assert_eq!(std::fs::read(&path).unwrap(), b"download fixture");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    let file = std::fs::File::open(&path).unwrap();
+    use std::os::fd::AsRawFd;
+    assert_eq!(
+        unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                c"user.xdg.origin.url".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        },
+        -1
+    );
+    let (send, response) = mpsc::channel();
+    assert!(host.engine.download_call(
+        Partition::Ephemeral(host.profile),
+        DownloadCall::Updates,
+        DownloadCompletion::new(Box::new(move |result| {
+            send.send(result).unwrap();
+        }))
+    ));
+    let mut result = None;
+    until(|| {
+        result = response.try_recv().ok();
+        result.is_some()
+    });
+    assert!(matches!(result, Some(DownloadResponse::Updates { entries, .. }) if entries.len()==1));
+}
+
+struct RawNativeHarness {
+    _data: tempfile::TempDir,
+    page: webkit2gtk::WebView,
+    window: gtk::Window,
+}
+impl RawNativeHarness {
+    fn new() -> Self {
+        Self::create(true)
+    }
+    fn create(private: bool) -> Self {
+        crate::enforce_runtime_security_floor().unwrap();
+        gtk::init().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let manager = if private {
+            webkit2gtk::WebsiteDataManager::new_ephemeral()
+        } else {
+            webkit2gtk::WebsiteDataManager::builder()
+                .base_data_directory(data.path().to_str().unwrap())
+                .base_cache_directory(data.path().to_str().unwrap())
+                .build()
+        };
+        let context = webkit2gtk::WebContext::builder()
+            .website_data_manager(&manager)
+            .process_swap_on_cross_site_navigation_enabled(true)
+            .build();
+        context.set_sandbox_enabled(true);
+        assert!(context.is_sandbox_enabled());
+        let page = webkit2gtk::WebView::with_context(&context);
+        let settings = webkit2gtk::WebViewExt::settings(&page).unwrap();
+        settings.set_enable_media_stream(true);
+        settings.set_enable_mock_capture_devices(true);
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(800, 600);
+        window.add(&page);
+        window.show_all();
+        window.present();
+        window.window().unwrap().focus(0);
+        until(|| window.is_active());
+        Self {
+            page,
+            window,
+            _data: data,
+        }
+    }
+}
+impl Drop for RawNativeHarness {
+    fn drop(&mut self) {
+        self.page.stop_loading();
+        self.window.close();
+    }
+}
+
+#[test]
+#[ignore = "isolated GTK; verifies missing directory-request metadata without disclosing files"]
+fn native_file_and_directory_requests_have_indistinguishable_public_metadata() {
+    use webkit2gtk::FileChooserRequestExt;
+    let host = RawNativeHarness::new();
+    let fixture = Fixture::new();
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let observed = requests.clone();
+    host.page.connect_run_file_chooser(move |_, request| {
+        observed.borrow_mut().push((
+            request.selects_multiple(),
+            request.mime_types(),
+            request.selected_files(),
+        ));
+        request.cancel();
+        true
+    });
+    host.page.load_uri(&format!("{}/page", fixture.origin));
+    until(|| host.page.title().as_deref() == Some("ready"));
+    script(&host.page, "document.body.innerHTML='<input type=file accept=\"text/plain\" style=\"position:absolute;top:0;left:0;width:200px;height:40px\"><input type=file webkitdirectory accept=\"text/plain\" style=\"position:absolute;top:60px;left:0;width:200px;height:40px\">';document.title='inputs-ready'");
+    until(|| host.page.title().as_deref() == Some("inputs-ready"));
+    click(&host.page, 20, 1, gtk::gdk::ModifierType::empty());
+    until(|| requests.borrow().len() == 1);
+    click(&host.page, 80, 1, gtk::gdk::ModifierType::empty());
+    until(|| requests.borrow().len() == 2);
+    assert_eq!(requests.borrow()[0], requests.borrow()[1]);
+}
+
+#[test]
+#[ignore = "isolated GTK; real WebKit Permissions Policy, mock capture, no device grants"]
+fn native_permission_policy_requires_explicit_cross_origin_delegation() {
+    use webkit2gtk::{PermissionRequestExt, UserMediaPermissionRequestExt};
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let mut failures = Vec::new();
+    for capability in ["camera", "microphone", "geolocation", "notifications"] {
+        for frame in [
+            "cross-deny",
+            "cross-allow",
+            "same",
+            "srcdoc",
+            "blank",
+            "top",
+        ] {
+            let host = RawNativeHarness::create(capability != "notifications");
+            let count = Rc::new(std::cell::Cell::new(0));
+            let seen = count.clone();
+            host.page.connect_permission_request(move |_, request| {
+                let relevant = match capability {
+                    "camera" => request
+                        .downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
+                        .is_some_and(|r| r.is_for_video_device()),
+                    "microphone" => request
+                        .downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
+                        .is_some_and(|r| r.is_for_audio_device()),
+                    "geolocation" => request.is::<webkit2gtk::GeolocationPermissionRequest>(),
+                    "notifications" => request.is::<webkit2gtk::NotificationPermissionRequest>(),
+                    _ => false,
+                };
+                if relevant {
+                    seen.set(seen.get() + 1);
+                }
+                request.deny();
+                true
+            });
+            host.page.load_uri(&format!("{}/page", first.origin));
+            until(|| host.page.title().as_deref() == Some("ready"));
+            let child = permission_fixture_script(capability);
+            let source = match frame {
+                "cross-deny" | "cross-allow" | "same" => {
+                    let origin = if frame=="same" { &first.origin } else { &second.origin };
+                    let allow = if frame=="cross-allow" { "camera; microphone; geolocation" } else { "" };
+                    format!("const f=document.createElement('iframe');f.allow={};f.src={};document.body.append(f);", serde_json::to_string(allow).unwrap(), serde_json::to_string(&format!("{origin}/permission-child?{capability}")).unwrap())
+                },
+                "srcdoc" => format!("const f=document.createElement('iframe');f.srcdoc={};document.body.append(f);", serde_json::to_string(&format!("<body><script>{child}</script>")).unwrap()),
+                "top" => child.clone(),
+                "blank" => format!("const f=document.createElement('iframe');document.body.append(f);f.contentDocument.write({});f.contentDocument.close();", serde_json::to_string(&format!("<body><script>{child}</script>")).unwrap()),
+                _ => unreachable!(),
+            };
+            let expected_origin = serde_json::to_string(if frame.starts_with("cross-") {
+                &second.origin
+            } else {
+                &first.origin
+            })
+            .unwrap();
+            let finished = Rc::new(std::cell::Cell::new(false));
+            let done = finished.clone();
+            host.page.evaluate_javascript(&format!("window.addEventListener('message',e=>{{if(e.data==='permission-failed'||e.data==='notification-ready')document.title=e.origin==={expected_origin}?e.data:'wrong-origin'}});{source};document.querySelector('iframe')?.setAttribute('style','position:fixed;left:0;top:0;width:300px;height:100px;z-index:999999')"), None,None,None::<&gtk::gio::Cancellable>,move |result| { result.unwrap(); done.set(true); });
+            if capability == "notifications" {
+                until(|| {
+                    finished.get()
+                        && matches!(
+                            host.page.title().as_deref(),
+                            Some("notification-ready" | "wrong-origin")
+                        )
+                });
+                assert_ne!(
+                    host.page.title().as_deref(),
+                    Some("wrong-origin"),
+                    "{capability}/{frame}"
+                );
+                click(&host.page, 20, 1, gtk::gdk::ModifierType::empty());
+            }
+            until(|| {
+                finished.get()
+                    && matches!(
+                        host.page.title().as_deref(),
+                        Some("permission-failed" | "wrong-origin")
+                    )
+            });
+            assert_ne!(
+                host.page.title().as_deref(),
+                Some("wrong-origin"),
+                "{capability}/{frame}"
+            );
+            let actual = count.get();
+            let expected = if frame == "cross-deny"
+                || (capability == "notifications" && frame == "cross-allow")
+            {
+                0
+            } else {
+                1
+            };
+            eprintln!(
+                "policy {capability} {frame}: signals={actual}, page=refused, expected={expected}"
+            );
+            if actual != expected {
+                failures.push(format!(
+                    "{capability}/{frame}: {actual}, expected {expected}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "native policy qualification failed: {failures:?}"
+    );
+}
+
+fn permission_fixture_script(capability: &str) -> String {
+    let operation = match capability {
+        "camera" => "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());parent.postMessage('unexpected-grant','*')},fail)",
+        "microphone" => "navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{s.getTracks().forEach(t=>t.stop());parent.postMessage('unexpected-grant','*')},fail)",
+        "geolocation" => "navigator.geolocation.getCurrentPosition(()=>parent.postMessage('unexpected-grant','*'),fail,{timeout:3000})",
+        "notifications" => "const b=document.createElement('button');b.style='position:fixed;top:0;left:0;width:200px;height:40px';b.textContent='Request';b.onclick=()=>Notification.requestPermission().then(fail,fail);document.body.append(b);parent.postMessage('notification-ready','*')",
+        _ => "fail()",
+    };
+    format!("const fail=()=>parent.postMessage('permission-failed','*');try{{{operation}}}catch(e){{fail()}}")
+}
+
+#[test]
+#[ignore = "isolated GTK; shared consent, mock camera, capture observation and native stop"]
+fn native_permissions_use_shared_consent_and_revoke_capture() {
+    use zephium_core::permissions::{
+        PagePermissionKind, PagePermissionRequestKind, PagePermissionRequestSettlement,
+    };
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let settings = webkit2gtk::WebViewExt::settings(&page).unwrap();
+    settings.set_enable_media_stream(true);
+    settings.set_enable_mock_capture_devices(true);
+    script(&page, "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{window.stream=s;s.getTracks()[0].onended=()=>document.title='stopped';document.title='capturing'},e=>document.title='denied')");
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::PermissionRequested {
+                id: owner,
+                request: r,
+                ..
+            } = event
+            {
+                assert_eq!(owner, id);
+                request = Some(r);
+            }
+        }
+        request.is_some()
+    });
+    let request = request.unwrap();
+    assert_eq!(request.origin.as_str(), fixture.origin);
+    assert_eq!(
+        request.kind,
+        PagePermissionRequestKind::Single(PagePermissionKind::Camera)
+    );
+    assert_eq!(
+        host.engine.settle_page_permission_request(
+            host.profile,
+            id,
+            request.id,
+            PagePermissionRequestSettlement::Allow
+        ),
+        NativeDispatch::Scheduled
+    );
+    let mut capture = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::MediaCaptureChanged {
+                id: owner,
+                navigation,
+                state,
+            } = event
+            {
+                if owner == id && state.is_capturing() {
+                    capture = Some(navigation);
+                }
+            }
+        }
+        capture.is_some() && page.title().as_deref() == Some("capturing")
+    });
+    assert_eq!(
+        host.engine.stop_media_capture(id, capture.unwrap()),
+        NativeDispatch::Scheduled
+    );
+    until(|| {
+        page.title().as_deref() == Some("stopped")
+            && page.camera_capture_state() == webkit2gtk::MediaCaptureState::None
+    });
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
+    page.load_uri(&format!("{}/again", fixture.origin));
+    until(|| {
+        host.drain();
+        !page.is_loading() && page.is_mapped()
+    });
+    script(&page, "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected-cached-grant'},()=>document.title='denied')");
+    let mut second = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::PermissionRequested { request, .. } = event {
+                second = Some(request.id);
+            }
+        }
+        second.is_some() || page.title().as_deref() == Some("unexpected-cached-grant")
+    });
+    assert!(
+        second.is_some(),
+        "native permission cache bypassed the next document's broker"
+    );
+    page.load_uri(&format!("{}/next", fixture.origin));
+    until(|| {
+        host.drain();
+        !page.is_loading()
+    });
+    assert_eq!(
+        host.engine.settle_page_permission_request(
+            host.profile,
+            id,
+            second.unwrap(),
+            PagePermissionRequestSettlement::Allow
+        ),
+        NativeDispatch::Scheduled
+    );
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
+}
+
+#[test]
+#[ignore = "isolated GTK; display-capture activation policy with denied mock requests"]
+fn native_display_capture_requires_activation_before_permission() {
+    use webkit2gtk::PermissionRequestExt;
+    let host = RawNativeHarness::new();
+    let fixture = Fixture::new();
+    let requests = Rc::new(std::cell::Cell::new(0));
+    let observed = requests.clone();
+    host.page.connect_permission_request(move |_, request| {
+        observed.set(observed.get() + 1);
+        request.deny();
+        true
+    });
+    host.page.load_uri(&format!("{}/page", fixture.origin));
+    until(|| host.page.title().as_deref() == Some("ready"));
+    script(&host.page,"navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title=e.name)");
+    until(|| host.page.title().as_deref() != Some("ready"));
+    assert_eq!(host.page.title().as_deref(), Some("InvalidStateError"));
+    assert_eq!(requests.get(), 0);
+    script(&host.page,"document.querySelector('#script').onclick=()=>navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title='display-failed');document.title='display-ready'");
+    until(|| host.page.title().as_deref() == Some("display-ready"));
+    click(&host.page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| host.page.title().as_deref() == Some("display-failed"));
+    assert_eq!(requests.get(), 1, "no positive native activation control");
+}
+
+#[test]
+#[ignore = "isolated GTK and private D-Bus without a desktop portal; no real capture"]
+fn native_display_capture_fails_cleanly_without_portal() {
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#script').onclick=()=>navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title='display-failed');document.title='display-ready'");
+    until(|| page.title().as_deref() == Some("display-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("display-failed"));
+    assert!(!host
+        .drain()
+        .iter()
+        .any(|event| matches!(event, EngineEvent::PermissionRequested { .. })));
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
+}
+
+fn visible_dialog() -> gtk::Dialog {
+    let mut panel = None;
+    until(|| {
+        panel = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Dialog>().ok())
+            .find(|dialog| dialog.is_visible());
+        panel.is_some()
+    });
+    panel.unwrap()
+}
+
+#[test]
+#[ignore = "isolated GTK; localhost prompt input and cancellation"]
+fn native_prompt_returns_chosen_text_and_null_on_cancel() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.title=String(prompt('fixture','initial'))");
+    let panel = visible_dialog();
+    let entry = panel
+        .content_area()
+        .children()
+        .into_iter()
+        .find_map(|widget| widget.downcast::<gtk::Entry>().ok())
+        .unwrap();
+    assert_eq!(entry.text(), "initial");
+    entry.set_text("chosen <literal>");
+    panel.response(gtk::ResponseType::Ok);
+    until(|| page.title().as_deref() == Some("chosen <literal>"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    script(
+        &page,
+        "document.title=String(prompt('fixture','not-returned'))",
+    );
+    visible_dialog().response(gtk::ResponseType::Cancel);
+    until(|| page.title().as_deref() == Some("null"));
+}
+
+#[test]
+#[ignore = "isolated GTK; trusted activation and beforeunload cancel/leave"]
+fn native_beforeunload_can_keep_or_leave_the_document() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#script').onclick=()=>{window.onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture';return 'fixture'};document.title='armed'};document.title='activation-ready'");
+    until(|| page.title().as_deref() == Some("activation-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("armed"));
+    page.load_uri(&format!("{}/leave", fixture.origin));
+    visible_dialog().response(gtk::ResponseType::Cancel);
+    script(
+        &page,
+        "document.title=window.onbeforeunload && location.pathname==='/page'?'kept':'lost-document'",
+    );
+    until(|| page.title().as_deref() == Some("kept"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    page.load_uri(&format!("{}/leave", fixture.origin));
+    visible_dialog().response(gtk::ResponseType::Ok);
+    until(|| !page.is_loading() && page.title().as_deref() == Some("child"));
+}
+
+fn valid_digest_fixture(request: &str) -> bool {
+    let Some(header) = request
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.trim().strip_prefix("Digest "))
+    else {
+        return false;
+    };
+    let fields: std::collections::HashMap<_, _> = header
+        .split(',')
+        .filter_map(|field| field.trim().split_once('='))
+        .map(|(name, value)| (name, value.trim_matches('"')))
+        .collect();
+    if fields.get("username") != Some(&"fixture")
+        || fields.get("realm") != Some(&"fixture")
+        || fields.get("nonce") != Some(&"local-nonce")
+        || fields.get("uri") != Some(&"/digest")
+        || fields.get("qop") != Some(&"auth")
+    {
+        return false;
+    }
+    let (Some(cnonce), Some(nc), Some(response)) = (
+        fields.get("cnonce"),
+        fields.get("nc"),
+        fields.get("response"),
+    ) else {
+        return false;
+    };
+    let hash = |text: &str| {
+        let mut checksum = gtk::glib::Checksum::new(gtk::glib::ChecksumType::Md5).unwrap();
+        checksum.update(text.as_bytes());
+        checksum.string().unwrap()
+    };
+    let expected = hash(&format!(
+        "{}:local-nonce:{nc}:{cnonce}:auth:{}",
+        hash("fixture:fixture:fixture"),
+        hash("GET:/digest")
+    ));
+    *response == expected
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; loopback fixture credentials only"]
+fn native_digest_auth_uses_shared_prompt_and_verified_response() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&format!("{}/digest", fixture.origin));
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::HttpAuthRequested { id: owner, prompt } = event {
+                assert_eq!(owner, id);
+                assert!(prompt.insecure);
+                assert!(!prompt.proxy);
+                request = Some(prompt.request);
+            }
+        }
+        request.is_some()
+    });
+    assert_eq!(
+        host.engine.answer_http_auth(
+            id,
+            request.unwrap(),
+            zephium_core::http_auth::HttpCredentials::new("fixture".into(), "fixture".into())
+        ),
+        NativeDispatch::Scheduled
+    );
+    until(|| {
+        host.drain();
+        page.title().as_deref() == Some("child") && !page.is_loading()
+    });
+    assert!(has_view(id));
+}
+
+struct TlsFixture {
+    origin: String,
+    child: std::process::Child,
+    _files: tempfile::TempDir,
+}
+impl TlsFixture {
+    fn new() -> Self {
+        use std::process::{Command, Stdio};
+        let files = tempfile::tempdir().unwrap();
+        let key = files.path().join("fixture.key");
+        let cert = files.path().join("fixture.pem");
+        let generated = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let child = Command::new("openssl")
+            .args(["s_server", "-quiet", "-www", "-accept"])
+            .arg(address.to_string())
+            .arg("-key")
+            .arg(key)
+            .arg("-cert")
+            .arg(cert)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let fixture = Self {
+            origin: format!("https://{address}"),
+            child,
+            _files: files,
+        };
+        until(|| std::net::TcpStream::connect(address).is_ok());
+        fixture
+    }
+}
+impl Drop for TlsFixture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+#[ignore = "isolated GTK; disposable self-signed loopback TLS fixture"]
+fn native_certificate_failure_is_classified_without_a_host_wide_exception() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let tls = TlsFixture::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&tls.origin);
+    let mut failure = false;
+    until(|| {
+        for event in host.drain() {
+            match event {
+                EngineEvent::NavigationFailureReported {
+                    id: owner,
+                    reason,
+                    url,
+                    replaced_page,
+                } if owner == id => {
+                    assert!(matches!(reason, NavigationFailureReason::Certificate(_)));
+                    assert_eq!(url.as_deref(), Some(format!("{}/", tls.origin).as_str()));
+                    assert!(!replaced_page);
+                    failure = true;
+                }
+                EngineEvent::ViewCreationFailed { .. } => {
+                    panic!("certificate refusal closed the tab")
+                }
+                _ => {}
+            }
+        }
+        failure
+    });
+    assert!(has_view(id));
+    assert_eq!(
+        host.engine
+            .allow_certificate_exception(id, tls.origin.clone()),
+        NativeDispatch::Unsupported
+    );
+    assert_eq!(page.title().as_deref(), Some("ready"));
+}
+
+#[test]
+#[ignore = "isolated GTK; native timed-cookie limitation and non-destructive refusal"]
+fn native_timed_cookie_clear_is_unsupported_and_preserves_records() {
+    use webkit2gtk::WebsiteDataManagerExtManual;
+    use zephium_core::browsing_data::{
+        EngineDataCall, EngineDataFailure, EngineDataKinds, EngineDataReply,
+    };
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let partition = Partition::Persistent(host.profile);
+    let (_, page) = host.show_partition(partition, &format!("{}/page", fixture.origin));
+    script(
+        &page,
+        "document.cookie='timed=retained; SameSite=Lax';document.title='cookie-set'",
+    );
+    until(|| page.title().as_deref() == Some("cookie-set"));
+    let manager = page.website_data_manager().unwrap();
+    let (send, response) = mpsc::channel();
+    manager.clear(
+        webkit2gtk::WebsiteDataTypes::COOKIES,
+        gtk::glib::TimeSpan::from_seconds(3600),
+        None::<&gtk::gio::Cancellable>,
+        move |result| {
+            send.send(result).unwrap();
+        },
+    );
+    let mut result = None;
+    until(|| {
+        result = response.try_recv().ok();
+        result.is_some()
+    });
+    assert!(result.unwrap().is_ok());
+    script(&page, "document.title=document.cookie.includes('timed=retained')?'native-kept-cookie':'unexpectedly-removed'");
+    until(|| page.title().as_deref() == Some("native-kept-cookie"));
+    assert_eq!(
+        data_call(
+            &host,
+            partition,
+            EngineDataCall::Clear {
+                kinds: EngineDataKinds {
+                    site_data: true,
+                    ..Default::default()
+                },
+                since: Some(1),
+            }
+        ),
+        EngineDataReply::Failed(EngineDataFailure::Unsupported)
+    );
+    script(&page, "document.title=document.cookie.includes('timed=retained')?'broker-kept-cookie':'unexpectedly-removed'");
+    until(|| page.title().as_deref() == Some("broker-kept-cookie"));
 }

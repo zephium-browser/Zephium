@@ -7,6 +7,11 @@ use std::fs::{self, File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+#[path = "download_files_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(super) use linux::must_reveal;
 
 use zephium_core::downloads::{
     collision_filename as collision_name, valid_filename, DownloadError, FileIdentity,
@@ -21,6 +26,8 @@ pub(super) struct Destination {
     staging: File,
     parent_path: PathBuf,
     stage_name: CString,
+    #[cfg(target_os = "linux")]
+    provenance: Option<(String, String)>,
 }
 
 impl Destination {
@@ -76,9 +83,16 @@ impl Destination {
             staging,
             parent_path,
             stage_name,
+            #[cfg(target_os = "linux")]
+            provenance: None,
         };
         value.verify_namespace()?;
         Ok(value)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn set_provenance(&mut self, value: Option<(String, String)>) {
+        self.provenance = value;
     }
 
     pub(super) fn payload(&self) -> PathBuf {
@@ -128,7 +142,16 @@ impl Destination {
         if expected_bytes.is_some_and(|bytes| metadata.len() != bytes) {
             return Err(DownloadError::Integrity);
         }
+        #[cfg(target_os = "macos")]
         quarantine(&self.payload(), source)?;
+        #[cfg(target_os = "linux")]
+        {
+            let _ = source;
+            linux::protect(&file, self.provenance.as_ref().map_or("", |p| p.0.as_str()))?;
+            if let Some((_, referrer)) = &self.provenance {
+                linux::referrer(&file, referrer);
+            }
+        }
         self.verify_namespace()?;
         let after = fs::symlink_metadata(self.payload()).map_err(map_io)?;
         if after.dev() != metadata.dev() || after.ino() != metadata.ino() {
@@ -148,6 +171,7 @@ impl Destination {
                 CString::new(name.as_bytes()).map_err(|_| DownloadError::Destination)?;
             // Same-volume, descriptor-relative and exclusive. There is no
             // check-then-overwrite race, even for concurrent same-name downloads.
+            #[cfg(target_os = "macos")]
             let result = unsafe {
                 libc::renameatx_np(
                     self.staging.as_raw_fd(),
@@ -155,6 +179,16 @@ impl Destination {
                     self.parent.as_raw_fd(),
                     native_name.as_ptr(),
                     libc::RENAME_EXCL,
+                )
+            };
+            #[cfg(target_os = "linux")]
+            let result = unsafe {
+                libc::renameat2(
+                    self.staging.as_raw_fd(),
+                    c"payload".as_ptr(),
+                    self.parent.as_raw_fd(),
+                    native_name.as_ptr(),
+                    libc::RENAME_NOREPLACE,
                 )
             };
             if result == 0 {
@@ -320,6 +354,7 @@ fn map_io(error: std::io::Error) -> DownloadError {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
     // Read metadata on the held file, not on a path that may have changed.
     let size = unsafe {
@@ -339,10 +374,12 @@ pub(crate) fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn quarantine(path: &Path, source: &str) -> Result<(), DownloadError> {
     objc2::rc::autoreleasepool(|_| quarantine_in_pool(path, source))
 }
 
+#[cfg(target_os = "macos")]
 fn quarantine_in_pool(path: &Path, source: &str) -> Result<(), DownloadError> {
     use objc2::runtime::AnyObject;
     use objc2_foundation::{
@@ -384,6 +421,11 @@ fn quarantine_in_pool(path: &Path, source: &str) -> Result<(), DownloadError> {
             .map_err(|_| DownloadError::Protection)?;
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verify_quarantine(file: &File) -> Result<(), DownloadError> {
+    linux::verify(file)
 }
 
 #[cfg(test)]

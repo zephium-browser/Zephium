@@ -1337,3 +1337,50 @@ fn a_location_request_macos_refuses_tells_chrome_so() {
     assert_eq!(prompt.kinds, [PagePermissionKindView::Geolocation]);
     assert!(prompt.blocked_by_system);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn changing_capture_site_setting_stops_only_the_matching_live_document() {
+    use zephium_core::permissions::SitePermissionKind;
+    use zephium_core::ports::engine::{CaptureDeviceState, MediaCaptureState};
+    let (mut shell, engine, _screen, _queue, _profile, item) =
+        ready_shell(Arc::new(FakeStore::default()));
+    let navigation = document(&shell, item);
+    shell.handle(Command::Engine(EngineEvent::MediaCaptureChanged {
+        id: item,
+        navigation,
+        state: MediaCaptureState {
+            camera: CaptureDeviceState::Active,
+            microphone: CaptureDeviceState::None,
+        },
+    }));
+    for (origin, decision, expected) in [
+        (
+            "https://other.example",
+            Some(RememberedPagePermission::Deny),
+            0,
+        ),
+        (
+            "https://media.example",
+            Some(RememberedPagePermission::Allow),
+            0,
+        ),
+        ("https://media.example", None, 1),
+    ] {
+        shell.handle(Command::Operation {
+            operation_id: format!("capture-setting-{expected}-{origin}-{decision:?}"),
+            command: Box::new(Command::SetSitePermission {
+                origin: PageOrigin::parse_exact(origin).unwrap(),
+                kind: SitePermissionKind::Camera,
+                decision,
+                scheme: None,
+            }),
+        });
+        assert_eq!(engine.media_capture_stops.lock().unwrap().len(), expected);
+    }
+    assert_eq!(
+        *engine.media_capture_stops.lock().unwrap(),
+        vec![(item, navigation)]
+    );
+    assert!(shell.items.tab(item).unwrap().capture.is_some());
+}

@@ -846,7 +846,7 @@ impl EngineHost {
     ) {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.forget_certificate_exceptions(profile);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         if let Some(downloads) = self
             .downloads
             .as_ref()

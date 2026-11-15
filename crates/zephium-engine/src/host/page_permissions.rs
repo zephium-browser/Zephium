@@ -14,8 +14,15 @@ use std::time::Duration;
 
 use wry::{
     PermissionRequestDisposition as WryDisposition, PermissionRequestKind as WryRequestKind,
-    PermissionResponse as WryResponse, WebViewExtMacOS,
+    PermissionResponse as WryResponse,
 };
+
+#[cfg(target_os = "macos")]
+use wry::WebViewExtMacOS;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(super) use linux::{CaptureObserver, LinuxRequests};
 
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::permissions::{
@@ -121,6 +128,7 @@ impl PagePermissionBroker {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn core_request(request: &wry::PermissionRequest) -> Option<PagePermissionRequest> {
     let origin = request.origin();
     core_request_from_components(
@@ -168,6 +176,7 @@ fn core_request_from_components(
     })
 }
 
+#[cfg(target_os = "macos")]
 pub(super) fn admit_native_request(
     profile: ProfileId,
     item: Rc<std::cell::Cell<ItemId>>,
@@ -179,6 +188,17 @@ pub(super) fn admit_native_request(
     let Some(request) = core_request(&request) else {
         return WryDisposition::Deny;
     };
+    admit_core_request(profile, item, permit, navigation, presence, request)
+}
+
+fn admit_core_request(
+    profile: ProfileId,
+    item: Rc<std::cell::Cell<ItemId>>,
+    permit: EventPermit,
+    navigation: NavigationEpochTracker,
+    presence: Arc<AtomicBool>,
+    request: PagePermissionRequest,
+) -> WryDisposition {
     let Some(epoch) = navigation.current_committed() else {
         return WryDisposition::Deny;
     };
@@ -249,7 +269,10 @@ impl EngineHost {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
         crate::platform::macos::capture::stop(&view.view);
+        #[cfg(target_os = "linux")]
+        linux::stop(&view.view);
     }
     fn admit_page_permission_request(
         &mut self,
@@ -261,7 +284,7 @@ impl EngineHost {
         request: PagePermissionRequest,
     ) {
         let live = self.views.get(&item).is_some_and(|view| {
-            crate::platform::imp::permission_owner_is_focused(self.parent.0)
+            permission_owner_is_focused(self, view)
                 && view.event_permit.same_generation(&permit)
                 && view.navigation.same_generation(&navigation)
                 && view.navigation.is_current(epoch)
@@ -326,7 +349,7 @@ impl EngineHost {
         };
         let allow = settlement == PagePermissionRequestSettlement::Allow
             && self.views.get(&item).is_some_and(|view| {
-                crate::platform::imp::permission_owner_is_focused(self.parent.0)
+                permission_owner_is_focused(self, view)
                     && view.event_permit.same_generation(&pending.permit)
                     && view.navigation.same_generation(&pending.navigation)
                     && view.navigation.is_current(pending.epoch)
@@ -396,8 +419,16 @@ impl EngineHost {
             return false;
         };
         self.views.get(&item).is_some_and(|view| {
-            view.event_permit.same_generation(permit)
-                && view.view.resolve_permission_request(request, response)
+            view.event_permit.same_generation(permit) && {
+                #[cfg(target_os = "macos")]
+                {
+                    view.view.resolve_permission_request(request, response)
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    view.permission_requests.resolve(request.get(), response)
+                }
+            }
         })
     }
 
@@ -405,6 +436,27 @@ impl EngineHost {
         self.page_permissions
             .presence
             .store(!self.page_permissions.pending.is_empty(), Ordering::Release);
+    }
+}
+
+fn permission_owner_is_focused(host: &EngineHost, view: &super::ObservedView) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = view;
+        crate::platform::imp::permission_owner_is_focused(host.parent.0)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::*;
+        use wry::WebViewExtUnix;
+        let _ = host;
+        let native = view.view.webview();
+        view.presentation_permit.load(Ordering::Acquire)
+            && native.is_mapped()
+            && native
+                .toplevel()
+                .and_then(|w| w.downcast::<gtk::Window>().ok())
+                .is_some_and(|w| w.is_active())
     }
 }
 

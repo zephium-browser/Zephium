@@ -786,6 +786,10 @@ struct WebViewAttributes<'a> {
   pub linux_auth_handler: Option<LinuxAuthHandler>,
   #[cfg(target_os = "linux")]
   pub linux_script_dialog_handler: Option<LinuxScriptDialogHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_download_handler: Option<LinuxDownloadHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_permission_handler: Option<LinuxPermissionHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1061,6 +1065,10 @@ impl Default for WebViewAttributes<'_> {
       linux_auth_handler: None,
       #[cfg(target_os = "linux")]
       linux_script_dialog_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_download_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_permission_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1147,7 +1155,33 @@ type LinuxAuthHandler =
 type LinuxScriptDialogHandler =
   Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool>;
 
+#[cfg(target_os = "linux")]
+type LinuxDownloadHandler = Rc<dyn Fn(&webkit2gtk::Download)>;
+
+#[cfg(target_os = "linux")]
+type LinuxPermissionHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::PermissionRequest) -> bool>;
 impl<'a> WebViewBuilder<'a> {
+  /// Route native GTK permission ownership to an explicit ordinary-page broker.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_permission_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::PermissionRequest) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_permission_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Install an owned native download broker. Unowned views remain denied.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_download_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::Download) + 'static,
+  ) -> Self {
+    self.attrs.linux_download_handler = Some(Rc::new(handler));
+    self
+  }
+
   /// Route a retained GTK script dialog to the ordinary-page host.
   #[cfg(target_os = "linux")]
   pub fn with_linux_script_dialog_handler(
@@ -3592,8 +3626,8 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
-  /// macOS: a content rule refused the navigation to `url`, taken from the
-  /// error itself; the document shown before is still there.
+  /// A content rule (macOS) or certificate (Linux) refused the navigation to
+  /// `url`, taken from the native error; the prior document is still there.
   Refused { url: String },
 }
 
