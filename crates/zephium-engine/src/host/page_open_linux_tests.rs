@@ -966,3 +966,84 @@ fn native_audio_mute_preserves_person_and_focus_intent() {
     });
     assert!(page.is_muted());
 }
+
+#[test]
+fn context_menu_policy_refuses_unowned_actions_and_unsafe_urls() {
+    use webkit2gtk::ContextMenuAction as A;
+    for action in [
+        A::Custom,
+        A::DownloadLinkToDisk,
+        A::DownloadImageToDisk,
+        A::DownloadVideoToDisk,
+        A::DownloadAudioToDisk,
+        A::OpenLinkInNewWindow,
+        A::OpenImageInNewWindow,
+        A::OpenFrameInNewWindow,
+        A::OpenVideoInNewWindow,
+        A::OpenAudioInNewWindow,
+        A::__Unknown(123456),
+    ] {
+        assert!(!super::linux_stock_action_allowed(action, true));
+    }
+    assert!(super::linux_stock_action_allowed(
+        A::CopyLinkToClipboard,
+        false
+    ));
+    assert!(!super::linux_stock_action_allowed(A::InspectElement, false));
+    assert!(super::linux_stock_action_allowed(A::InspectElement, true));
+    for url in [
+        "javascript:alert(1)",
+        "file:///tmp/file",
+        "data:text/plain,x",
+        "https://user:password@example.com/",
+    ] {
+        assert!(!super::linux_menu_url_allowed(url));
+    }
+    assert!(!super::linux_menu_url_allowed(&format!(
+        "https://example.com/{}",
+        "x".repeat(16384)
+    )));
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; localhost native context menu only"]
+fn native_context_menu_filters_unowned_actions() {
+    use webkit2gtk::{ContextMenuExt, ContextMenuItemExt, SettingsExt};
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    webkit2gtk::WebViewExt::settings(&page)
+        .unwrap()
+        .set_enable_developer_extras(false);
+    let observed = Rc::new(RefCell::new(None));
+    let delivered = observed.clone();
+    page.connect_context_menu(move |_, menu, _, _| {
+        *delivered.borrow_mut() = Some(
+            menu.items()
+                .iter()
+                .map(|item| {
+                    (
+                        item.stock_action(),
+                        item.is_separator(),
+                        item.gaction().map(|action| action.name().to_string()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        true
+    });
+    click(&page, 80, 3, gtk::gdk::ModifierType::empty());
+    until(|| observed.borrow().is_some());
+    let items = observed.take().unwrap();
+    assert!(items
+        .iter()
+        .any(|item| item.0 == webkit2gtk::ContextMenuAction::CopyLinkToClipboard));
+    assert!(items
+        .iter()
+        .any(|item| item.2.as_deref() == Some("zephium-open-link-in-new-tab")));
+    for (action, separator, _) in items {
+        if action != webkit2gtk::ContextMenuAction::Custom && !separator {
+            assert!(super::linux_stock_action_allowed(action, false));
+        }
+    }
+}

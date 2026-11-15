@@ -2547,6 +2547,14 @@ impl EngineHost {
         // before the first load, which the browser itself asked for.
         #[cfg(target_os = "linux")]
         {
+            // Filter stock actions before our extension runtime appends its owned actions.
+            super::page_open::install_linux_menu(
+                &wry::WebViewExtUnix::webview(&view),
+                id.clone(),
+                event_permit.clone(),
+                navigation.clone(),
+                presentation_permit.clone(),
+            );
             self.webext_linux.attach_tab(partition, id.get(), &view);
             self.webext_linux
                 .authorize_navigation(partition.profile(), id.get(), url);
@@ -2632,12 +2640,6 @@ impl EngineHost {
                     dialogs.cancel();
                 }
             });
-            super::page_open::install_linux_menu(
-                &view.webview(),
-                id.clone(),
-                event_permit.clone(),
-                navigation.clone(),
-            );
             let permit = crash_permit.clone();
             view.webview()
                 .connect_web_process_terminated(move |_, reason| {
