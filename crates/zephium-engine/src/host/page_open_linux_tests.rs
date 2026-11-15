@@ -880,3 +880,48 @@ fn native_element_fullscreen_uses_shared_owner_and_escape() {
         host.drain().iter().any(|event| matches!(event, EngineEvent::FullscreenChanged { id: owner, active: false } if *owner == id))
     });
 }
+
+#[test]
+#[ignore = "requires isolated GTK display; localhost history only"]
+fn native_history_lists_and_revalidates_jump_targets() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    for path in ["second", "third"] {
+        let url = format!("{}/{path}", fixture.origin);
+        page.load_uri(&url);
+        until(|| {
+            host.drain();
+            page.uri().as_deref() == Some(url.as_str()) && !page.is_loading()
+        });
+    }
+    let snapshot = Rc::new(RefCell::new(None));
+    let result = snapshot.clone();
+    assert!(super::super::try_with(move |host| {
+        assert!(crate::platform::imp::history_session(
+            &host.views[&id].view,
+            |value| {
+                *result.borrow_mut() = value;
+            }
+        ));
+    }));
+    let (entries, current) = snapshot.take().unwrap();
+    assert_eq!(entries[current].1, format!("{}/third", fixture.origin));
+    assert_eq!(entries[current - 1].1, format!("{}/second", fixture.origin));
+    assert_eq!(entries[current - 2].1, format!("{}/page", fixture.origin));
+    let second = entries[current - 1].1.clone();
+    assert!(super::super::try_with(move |host| {
+        let view = &host.views[&id].view;
+        assert!(!crate::platform::imp::go_to_history_entry(
+            view,
+            -1,
+            "https://wrong.invalid/"
+        ));
+        assert!(crate::platform::imp::go_to_history_entry(view, -1, &second));
+    }));
+    until(|| {
+        host.drain();
+        page.uri().as_deref() == Some(format!("{}/second", fixture.origin).as_str())
+            && !page.is_loading()
+    });
+}

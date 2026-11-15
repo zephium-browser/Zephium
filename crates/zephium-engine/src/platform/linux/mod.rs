@@ -8,6 +8,8 @@ pub(crate) use fullscreen::{
     exit_fullscreen, fullscreen_state, install_fullscreen_observer, FullscreenObserver,
 };
 mod guide;
+mod history;
+pub(crate) use history::{go_to_history_entry, history_session};
 mod stage;
 pub(crate) mod tab_preview;
 
@@ -713,17 +715,6 @@ fn validate_storage_postcondition(
 pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
     view.webview().reload_bypass_cache();
     true
-}
-
-pub fn history_session(
-    _view: &wry::WebView,
-    _done: impl FnOnce(Option<(Vec<(String, String)>, usize)>),
-) -> bool {
-    false
-}
-
-pub fn go_to_history_entry(_view: &wry::WebView, _offset: i32, _url: &str) -> bool {
-    false
 }
 
 pub fn stop_loading(view: &wry::WebView) {
