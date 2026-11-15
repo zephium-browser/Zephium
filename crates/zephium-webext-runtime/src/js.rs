@@ -174,6 +174,31 @@ pub fn context_surface(
             namespaces.insert(name.clone(), node);
         }
     }
+    if context_kind == "userScript" {
+        namespaces.retain(|name, _| name == "runtime");
+        if let Some(runtime) = namespaces.get_mut("runtime") {
+            if let Some(properties) = runtime.get_mut("properties").and_then(Value::as_object_mut) {
+                properties.retain(|name, _| {
+                    matches!(
+                        name.as_str(),
+                        "ContextType"
+                            | "OnInstalledReason"
+                            | "OnRestartRequiredReason"
+                            | "PlatformArch"
+                            | "PlatformNaclArch"
+                            | "PlatformOs"
+                            | "RequestUpdateCheckStatus"
+                    )
+                });
+            }
+            if let Some(functions) = runtime.get_mut("functions").and_then(Value::as_object_mut) {
+                functions.retain(|name, _| matches!(name.as_str(), "sendMessage" | "connect"));
+            }
+            if let Some(events) = runtime.get_mut("events").and_then(Value::as_object_mut) {
+                events.retain(|name, _| matches!(name.as_str(), "onMessage" | "onConnect"));
+            }
+        }
+    }
     // A nested namespace cannot be exposed without its parent.
     let names: std::collections::BTreeSet<_> = namespaces.keys().cloned().collect();
     namespaces.retain(|name, _| {

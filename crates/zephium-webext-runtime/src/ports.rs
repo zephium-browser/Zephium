@@ -72,6 +72,13 @@ pub enum MessageRoute {
 impl MessageRoute {
     /// Receiver event appropriate to the source and this route.
     pub fn event(&self, sender: &Sender, connect: bool) -> &'static str {
+        if matches!(self, Self::Runtime) && sender.kind() == ContextKind::UserScript {
+            return if connect {
+                "runtime.onUserScriptConnect"
+            } else {
+                "runtime.onUserScriptMessage"
+            };
+        }
         let external =
             matches!(self, Self::External { .. }) || sender.kind() == ContextKind::ExternalPage;
         match (connect, external) {
@@ -108,8 +115,10 @@ impl MessageRoute {
                 frame,
                 document,
             } => {
-                receiver.kind() == ContextKind::ContentScript
-                    && receiver.tab() == Some(*tab)
+                matches!(
+                    receiver.kind(),
+                    ContextKind::ContentScript | ContextKind::UserScript
+                ) && receiver.tab() == Some(*tab)
                     && frame.is_none_or(|frame| receiver.frame() == Some(frame))
                     && document.is_none_or(|document| receiver.document() == document)
             }
@@ -773,6 +782,13 @@ impl PortService {
         }
         self.release_context_deliveries(context, None, limiter);
         actions
+    }
+
+    /// The authenticated initiating principal determines the receiving event.
+    pub fn connect_event(&self, id: PortId) -> Option<&'static str> {
+        self.ports
+            .get(&id)
+            .map(|port| port.route.event(&port.source, true))
     }
 
     /// Native process exit closes its initiating endpoint with optional error.

@@ -160,6 +160,7 @@ for (const id of cases) {
         ZEPHIUM_WEBEXT_MODULE_PATH: module,
         ZEPHIUM_CONFORMANCE_EXTENSION: extension,
         ZEPHIUM_CONFORMANCE_ID: extensionId,
+        ...(metadata.userScriptsAvailableInitially === true ? { ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS: "1" } : {}),
       },
       stdio: ["pipe", "pipe", "inherit"],
     });

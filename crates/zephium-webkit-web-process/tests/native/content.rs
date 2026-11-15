@@ -174,7 +174,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut table=ScriptTable { admissions: [(INSTALL.into(), 1)].into(),bootstraps: Default::default(), catalogs: Default::default(),
+    let mut table=ScriptTable { admissions: [(INSTALL.into(), 1)].into(), messaging_worlds: Default::default(),bootstraps: Default::default(), catalogs: Default::default(),
         generation:1,entries:vec![
         entry("first",RunAt::DocumentStart,WORLD,"\"use strict\"; let sharedLexical=40; const sharedConstant=2; order.push('start'); globalThis.strictThis=(function(){return this;})()===undefined; globalThis.bootBefore=bootCount===1;"),
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
@@ -382,6 +382,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         "(function(messages){globalThis.catalogText=messages.probe.message;})".into();
     let mut catalog_table = ScriptTable {
         admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
         generation: 3,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -624,6 +625,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     assert!(send(&page, &UiMessage::Attach(attachment.clone()), None));
     let table = ScriptTable {
         admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
         bootstraps: Default::default(),
         catalogs: Default::default(),
         generation: 1,
@@ -840,6 +842,7 @@ pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
         &page,
         &ScriptTable {
             admissions: [(INSTALL.into(), 1)].into(),
+            messaging_worlds: Default::default(),
             generation: 1,
             bootstraps: Default::default(),
             catalogs: Default::default(),
@@ -899,6 +902,7 @@ pub(super) fn admission_epoch(module: &ModuleDirectory, fixture: &Fixture) {
     let mut table = ScriptTable {
         generation: 1,
         admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
         entries: vec![
             entry(
                 "old-main",

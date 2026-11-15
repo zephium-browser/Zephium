@@ -579,13 +579,14 @@ impl ProfileRuntime {
 
     /// A new version replaced a running one: the old background stops, its
     /// storage stays, its alarms are cleared, and the new background gets
-    /// `runtime.onInstalled` with reason `update`.
+    /// `runtime.onInstalled` with reason `update`. Durable user-script reset is
+    /// asynchronous: retry a pending admission with the same generation after
+    /// pumping the runtime; success requires the reset to have settled.
     pub fn install_updated(
         &self,
         spec: InstallSpec,
         previous_version: &str,
     ) -> Result<(), InstallError> {
-        self.inner.check_script_writes(spec.install)?;
         self.inner.activate(
             spec,
             &Activation::Updated {
@@ -596,12 +597,12 @@ impl ProfileRuntime {
 
     /// Stops an extension and keeps its data. Pump the returned drain.
     pub fn install_disabled(&self, install: ExtensionInstallId) -> ExtensionStop {
-        self.inner.deactivate(install, false)
+        self.inner.deactivate(install, false, false)
     }
 
     /// Stops an extension and erases its storage and runtime state.
     pub fn install_removed(&self, install: ExtensionInstallId) -> ExtensionStop {
-        self.inner.deactivate(install, true)
+        self.inner.deactivate(install, true, false)
     }
 
     /// The browser finished starting: `runtime.onStartup` for extensions
@@ -748,6 +749,23 @@ impl ProfileRuntime {
             .filter_map(|entry| entry.requests.as_ref())
             .map(requests::Watch::handlers)
             .sum()
+    }
+
+    /// Changes the browser-owned gate only in disposable native test profiles.
+    #[cfg(feature = "native-tests")]
+    pub fn set_test_user_scripts_allowed(
+        &self,
+        install: ExtensionInstallId,
+        allowed: bool,
+    ) -> Result<(), String> {
+        let result = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.set_test_user_scripts_allowed(install, allowed, out))
+            .map_err(|_| "Runtime is busy.".to_owned())?
+            .map_err(|error| error.message().to_owned());
+        self.inner.run();
+        result
     }
 
     /// Reserve the effective browser-window shortcuts before extension suggestions.
@@ -1703,19 +1721,6 @@ impl Inner {
         })
     }
 
-    fn check_script_writes(&self, install: ExtensionInstallId) -> Result<(), InstallError> {
-        let pending = self
-            .bridge
-            .with_runtime(|host, _| host.has_pending_script_writes(install))
-            .map_err(|_| InstallError::Admission("runtime busy".into()))?;
-        if pending {
-            return Err(InstallError::Admission(
-                "extension state is still being saved or removed; retry after it settles".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn activate(
         self: &Rc<Self>,
         spec: InstallSpec,
@@ -1724,7 +1729,17 @@ impl Inner {
         if self.retired.get() {
             return Err(InstallError::Retired);
         }
-        self.check_script_writes(spec.install)?;
+        let update =
+            matches!(activation, Activation::Updated { .. }).then_some(spec.generation.get());
+        if self
+            .bridge
+            .with_runtime(|host, _| host.script_admission_pending(spec.install, update))
+            .map_err(|_| InstallError::Admission("Runtime is busy.".into()))?
+        {
+            return Err(InstallError::Admission(
+                "Extension script state is pending; retry after it settles.".into(),
+            ));
+        }
         let mut manifest_scripts =
             zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
                 &spec.manifest,
@@ -1764,6 +1779,57 @@ impl Inner {
             }
         }
 
+        let user_script_guid = {
+            use ring::rand::{SecureRandom, SystemRandom};
+            let mut bytes = [0u8; 16];
+            SystemRandom::new().fill(&mut bytes).map_err(|_| {
+                InstallError::Admission("Could not generate user-script identity.".into())
+            })?;
+            bytes[6] = (bytes[6] & 15) | 64;
+            bytes[8] = (bytes[8] & 63) | 128;
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!(
+                "{}-{}-{}-{}-{}",
+                &hex[..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..]
+            )
+        };
+        let user_scripts = if matches!(activation, Activation::Enabled) {
+            match state_directory
+                .as_ref()
+                .map(|directory| storage::read_scripts(&directory.join("user-scripts.json")))
+                .transpose()
+                .map_err(|error| {
+                    InstallError::Admission(format!("Could not restore user scripts: {error}"))
+                })?
+                .flatten()
+            {
+                Some(bytes) => storage::restore_user_scripts(
+                    &bytes,
+                    spec.manifest.version().unwrap_or(""),
+                    |path| {
+                        content::validate_file(
+                            &spec.directory,
+                            path,
+                            zephium_webext_runtime::scripting_registry::ResourceKind::JavaScript,
+                        )
+                    },
+                )
+                .map_err(|error| {
+                    InstallError::Admission(format!("User scripts refused: {error}"))
+                })?,
+                None => Default::default(),
+            }
+        } else {
+            Default::default()
+        };
+
         let catalogs = read_locales(&spec.directory, &spec.manifest, &self.config.locale)
             .map_err(InstallError::Locales)?;
         let messages = Arc::new(
@@ -1796,6 +1862,8 @@ impl Inner {
                 .declarations()
                 .map(|declaration| (declaration.script.clone(), declaration.matcher.clone()))
                 .collect(),
+            user_scripts: user_scripts.clone(),
+            allow_user_scripts: spec.allow_user_scripts && spec.permissions.has_api("userScripts"),
             site_access: spec.permissions.site_access().clone(),
             origins: grants.origins,
             file_access: spec.permissions.file_access(),
@@ -1813,6 +1881,10 @@ impl Inner {
             }
             .to_value(None),
         });
+        candidates
+            .last_mut()
+            .expect("candidate installation")
+            .bootstrap["userScriptDynamicId"] = serde_json::json!(user_script_guid);
         let candidate = content::build(&candidates, self.script_generation.get() + 1);
         if let Some((_, problem)) = candidate.problems.first() {
             return Err(InstallError::Admission(format!(
@@ -1827,8 +1899,27 @@ impl Inner {
         self.bridge.check_script_capacity(&candidate.table).map_err(|error| InstallError::Admission(format!("Content scripts exceed the bounded source publication capacity (32 MiB table, 64 MiB live profile sources, 16 retained generations): {error:?}")))?;
         drop(candidate);
         drop(candidates);
+        if matches!(activation, Activation::Updated { .. }) {
+            if let Some(directory) = &state_directory {
+                self.bridge
+                    .with_runtime(|host, _| {
+                        host.prepare_user_script_reset(
+                            spec.install,
+                            spec.generation.get(),
+                            directory.join("user-scripts.json"),
+                            spec.manifest.version().unwrap_or(""),
+                        )
+                    })
+                    .map_err(|_| InstallError::Admission("Runtime is busy.".into()))?
+                    .map_err(|error| InstallError::Admission(error.message().to_owned()))?;
+            }
+        }
         if self.records.borrow().contains_key(&spec.install) {
-            let _ = self.deactivate(spec.install, false);
+            let _ = self.deactivate(
+                spec.install,
+                false,
+                matches!(activation, Activation::Updated { .. }),
+            );
         }
         self.scheme
             .add_install(
@@ -1884,6 +1975,8 @@ impl Inner {
             background,
             messages,
             manifest_scripts,
+            user_scripts,
+            user_script_guid,
             permissions: spec.permissions,
             unpacked: spec.unpacked,
             allow_user_scripts: spec.allow_user_scripts,
@@ -1898,7 +1991,12 @@ impl Inner {
         Ok(())
     }
 
-    fn deactivate(self: &Rc<Self>, install: ExtensionInstallId, erase: bool) -> ExtensionStop {
+    fn deactivate(
+        self: &Rc<Self>,
+        install: ExtensionInstallId,
+        erase: bool,
+        preserve_reset: bool,
+    ) -> ExtensionStop {
         self.notifications.forget(install);
         let _ = self
             .bridge
@@ -1920,9 +2018,13 @@ impl Inner {
                 self.views.ended(install, &view);
             }
         }
-        let _ = self
-            .bridge
-            .with_runtime(|host, out| host.forget(install, erase, out));
+        let _ = self.bridge.with_runtime(|host, out| {
+            if preserve_reset {
+                host.forget_for_admission(install, erase, true, out)
+            } else {
+                host.forget(install, erase, out)
+            }
+        });
         self.bridge.retire(install);
         self.scheme.remove_install(install);
         let removed = self.records.borrow_mut().remove(&install);

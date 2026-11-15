@@ -321,7 +321,7 @@
     const incognito = own(bootstrap, 'incognito') === true;
     let granted = I.isArray(own(bootstrap, 'permissions')) ? I.ArraySlice(bootstrap.permissions) : [];
     const namespaces = own(surface, 'namespaces') || {};
-    const lastError = E.createLastError();
+    const lastError = E.createLastError(kind === 'userScript');
     let invalid = false;
 
     const handlers = { __proto__: null };
@@ -782,6 +782,10 @@
         get: () => (invalid ? undefined : extensionId),
         set() {},
       });
+      if (kind === 'userScript') I.defineProperty(target, 'dynamicId', {
+        configurable: true, enumerable: true,
+        get: () => invalid ? undefined : own(bootstrap, 'userScriptDynamicId'), set() {},
+      });
       lastError.install(target);
     };
     const extensionExtras = (target) => {
@@ -854,7 +858,7 @@
           const fullName = `${key}.${name}`;
           const spec = functions[name];
           const cached = I.MapGet(memberCache, fullName);
-          if (!available(spec)) {
+          if (!available(spec) || (kind === 'userScript' && own(bootstrap, 'userScriptMessaging') !== true)) {
             if (cached !== undefined && target[name] === cached) I.deleteProperty(target, name);
             continue;
           }
@@ -869,7 +873,7 @@
           const fullName = `${key}.${name}`;
           const spec = eventSpecs[name];
           let event = I.MapGet(eventObjects, fullName);
-          if (!available(spec)) {
+          if (!available(spec) || (kind === 'userScript' && own(bootstrap, 'userScriptMessaging') !== true)) {
             if (event !== undefined && target[name] === event) I.deleteProperty(target, name);
             continue;
           }
@@ -892,6 +896,11 @@
       messaging.invalidate();
     }
     hub.handle('zephium.onInvalidated', (args) => invalidate(typeof args[0] === 'string' ? args[0] : null));
+    hub.handle('zephium.onUserScriptsChanged', (args) => {
+      if (typeof args[0] !== 'boolean') return;
+      bootstrap.userScriptsEnabled = args[0];
+      refresh();
+    });
     hub.handle('zephium.onPermissionsChanged', (args) => {
       if (!I.isArray(args[0])) return;
       granted = I.ArraySlice(args[0]);

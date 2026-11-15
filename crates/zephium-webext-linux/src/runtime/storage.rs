@@ -319,6 +319,43 @@ pub(crate) fn read_scripts(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+pub(crate) fn user_script_record(
+    registry: &zephium_webext_runtime::user_scripts::Registry,
+    version: &str,
+) -> Result<Vec<u8>, ApiError> {
+    let bytes = serde_json::to_vec(&serde_json::json!({"version":version,"registry":registry}))
+        .map_err(|_| ApiError::malformed_arguments())?;
+    if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
+        return Err(ApiError::too_many_pending());
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn restore_user_scripts(
+    bytes: &[u8],
+    version: &str,
+    file: impl FnMut(&str) -> Result<(), ApiError>,
+) -> Result<zephium_webext_runtime::user_scripts::Registry, ApiError> {
+    if bytes.len() as u64 > MAX_STATE_FILE_BYTES {
+        return Err(ApiError::too_many_pending());
+    }
+    let record: Value =
+        serde_json::from_slice(bytes).map_err(|_| ApiError::malformed_arguments())?;
+    if !record
+        .as_object()
+        .is_some_and(|object| object.len() == 2 && object.contains_key("registry"))
+        || !record["version"].is_string()
+    {
+        return Err(ApiError::malformed_arguments());
+    }
+    if record["version"].as_str() != Some(version) {
+        return Ok(Default::default());
+    }
+    let bytes =
+        serde_json::to_vec(&record["registry"]).map_err(|_| ApiError::malformed_arguments())?;
+    zephium_webext_runtime::user_scripts::Registry::restore(&bytes, file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

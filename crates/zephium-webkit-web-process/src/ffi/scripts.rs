@@ -1132,6 +1132,25 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
     let Some((bootstrap, fallback)) = bootstrap else {
         return false;
     };
+    if request.world.starts_with("zephium-webext-us-") {
+        let cached = with_runtime(|runtime| {
+            if !injection_document_live(runtime, page, frame, sequence, request) {
+                return None;
+            }
+            runtime
+                .pages
+                .get(&page)?
+                .frames
+                .get(&frame)?
+                .bootstrapped
+                .get(&request.world)
+                .copied()
+        })
+        .flatten();
+        if let Some(outcome) = cached {
+            return outcome;
+        }
+    }
     if !install_bridge(
         Binding {
             page,

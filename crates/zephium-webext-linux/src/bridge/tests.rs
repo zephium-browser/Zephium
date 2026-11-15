@@ -1194,6 +1194,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
     };
     ScriptTable {
         admissions: [(format!("{:032x}", 10), 1)].into(),
+        messaging_worlds: Default::default(),
         generation,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -1928,4 +1929,92 @@ fn registration_narrowing_keeps_unaffected_contexts_and_revokes_removed_grants()
     h.core.load_started(id);
     assert!(closed(&h.core.take_effects()).contains(&(kept.clone(), CloseReason::Reattached)));
     assert_eq!(h.core.deliver(&kept, vec![3]), Err(DeliverError::Stale));
+}
+
+#[test]
+fn user_messaging_requires_the_document_bootstrap_not_a_later_configuration() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::UserScriptWorldId;
+    use zephium_webkit_web_process_protocol::protocol::ScriptBootstrap;
+    for messaging in [false, true] {
+        let mut h = Harness::new();
+        let user = InjectedWorld::UserScript(UserScriptWorldId::parse("").unwrap());
+        let name = world_name(install(), &user);
+        let mut plan = tab_plan(&[SITE]);
+        plan.worlds[0].world = user;
+        let mut table = script_table(7);
+        table.entries[0].world = name.clone();
+        table.entries[0].admission_world = name.clone();
+        table.entries[0].bootstrap = "void 0".into();
+        table.bootstraps.insert(
+            name.clone(),
+            ScriptBootstrap {
+                install_id: format!("{:032x}", 10),
+                source: "void 0".into(),
+            },
+        );
+        if messaging {
+            table.messaging_worlds.insert(name.clone());
+        }
+        let handle = h
+            .core
+            .prepare_scripts(Rc::new(SealedScripts::new(table.clone()).unwrap()), &plan)
+            .unwrap();
+        h.core.commit_prepared_scripts(handle).unwrap();
+        let (view, generation) = h.tab(77, &plan);
+        let mut facts = info(1, 1, "https://a.test/", true);
+        facts.table_generation = 7;
+        h.event(
+            view,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Created(facts)],
+            },
+        );
+        let evaluation = Evaluation {
+            request_id: None,
+            install_id: format!("{:032x}", 10),
+            script_id: "manifest-0".into(),
+            world: name.clone(),
+            frame_id: 1,
+            document_seq: 1,
+            table_generation: 7,
+            file_index: u16::MAX,
+            success: true,
+        };
+        h.event(
+            view,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Evaluated(evaluation.clone())],
+            },
+        );
+        assert_eq!(
+            senders(&h.post(view, post(generation, 1, 1, &name, "https://a.test/"))).len(),
+            usize::from(messaging)
+        );
+        if !messaging {
+            table.generation = 8;
+            table.messaging_worlds.insert(name.clone());
+            let handle = h
+                .core
+                .prepare_scripts(Rc::new(SealedScripts::new(table).unwrap()), &plan)
+                .unwrap();
+            h.core.commit_prepared_scripts(handle).unwrap();
+            h.event(
+                view,
+                Event::Frames {
+                    generation,
+                    events: vec![FrameEvent::Evaluated(Evaluation {
+                        table_generation: 8,
+                        ..evaluation
+                    })],
+                },
+            );
+            assert!(
+                senders(&h.post(view, post(generation, 1, 1, &name, "https://a.test/"))).is_empty()
+            );
+        }
+    }
 }

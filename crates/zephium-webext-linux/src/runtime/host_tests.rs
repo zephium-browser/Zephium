@@ -212,6 +212,8 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
         .unwrap()
         .into(),
         manifest_scripts: ScriptRegistry::from_manifest(&manifest, |_, _| Ok(())).unwrap(),
+        user_scripts: Default::default(),
+        user_script_guid: "12345678-1234-4234-8234-123456789abc".into(),
         manifest,
         root: PathBuf::from("/nonexistent"),
         background: Some(BackgroundScript {
@@ -1322,7 +1324,7 @@ fn closed_context_releases_queued_script_calls_before_the_durable_write_finishes
     );
     let mut out = Outbox::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while harness.host.has_pending_script_writes(harness.install) {
+    while harness.host.script_admission_pending(harness.install, None) {
         assert!(std::time::Instant::now() < deadline);
         accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
@@ -1410,13 +1412,13 @@ fn retired_installs_keep_the_script_write_barrier_until_io_completion() {
         ]]),
     );
     assert!(replies(&out).is_empty());
-    assert!(harness.host.has_pending_script_writes(harness.install));
+    assert!(harness.host.script_admission_pending(harness.install, None));
     let mut out = Outbox::default();
     accept_script_publications(&mut harness.host, &mut out);
     harness.host.forget(harness.install, false, &mut out);
-    assert!(harness.host.has_pending_script_writes(harness.install));
+    assert!(harness.host.script_admission_pending(harness.install, None));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while harness.host.has_pending_script_writes(harness.install) {
+    while harness.host.script_admission_pending(harness.install, None) {
         assert!(std::time::Instant::now() < deadline);
         accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
@@ -1474,10 +1476,10 @@ fn removal_waits_for_network_io_and_storage_erasure_before_reactivation() {
     harness
         .host
         .forget(harness.install, true, &mut Outbox::default());
-    assert!(harness.host.has_pending_script_writes(harness.install));
+    assert!(harness.host.script_admission_pending(harness.install, None));
     assert!(state_path.join("dnr.json").exists());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while harness.host.has_pending_script_writes(harness.install) {
+    while harness.host.script_admission_pending(harness.install, None) {
         assert!(std::time::Instant::now() < deadline);
         for done in harness.host.network_take() {
             if done.prepared {
@@ -1940,4 +1942,225 @@ fn native_preparation_refusal_cannot_write_or_adopt_script_registrations() {
         .take_ops()
         .iter()
         .any(|op| matches!(op, NativeOp::AbortScripts(id) if *id == ticket)));
+}
+
+#[test]
+fn user_script_candidates_wait_for_publication_and_refuse_restrictive_csp() {
+    let root = tempfile::tempdir().unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let mut h = Harness::new();
+    let mut admission = admitted(h.install);
+    admission.root = root.path().to_owned();
+    admission.state_directory = Some(durable.path().to_owned());
+    admission.allow_user_scripts = true;
+    admission.manifest = Manifest::from_value(
+        json!({"manifest_version":3,"permissions":["userScripts"],"host_permissions":["https://example.com/*"]}),
+    );
+    let (declaration, _) = PermissionDeclaration::from_manifest(&admission.manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = h.sender(ViewKind::Options, "options.html");
+    let out = h.call(
+        &sender,
+        "userScripts.configureWorld",
+        json!([{"messaging":true,"csp":"script-src 'none'"}]),
+    );
+    assert!(replies(&out)[0]
+        .as_ref()
+        .unwrap_err()
+        .contains("cannot enforce"));
+    assert!(!h.host.state.installs[&h.install].user_scripts.messaging(""));
+    assert!(!durable.path().join("user-scripts.json").exists());
+    let out = h.call(&sender, "userScripts.register", json!([[{"id":"user","matches":["https://example.com/*"],"js":[{"code":"globalThis.user=42"}]}]]));
+    assert!(replies(&out).is_empty());
+    assert_eq!(
+        h.host.state.installs[&h.install]
+            .user_scripts
+            .scripts()
+            .count(),
+        0
+    );
+    let ticket = h
+        .host
+        .take_ops()
+        .into_iter()
+        .find_map(|op| {
+            if let NativeOp::PrepareScripts(id) = op {
+                Some(id)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let projected = h.host.pending_script_installs(ticket).unwrap();
+    let built = super::super::content::build(&projected, 1);
+    assert!(built.problems.is_empty());
+    assert!(built
+        .table
+        .entries
+        .iter()
+        .any(|entry| entry.world.starts_with("zephium-webext-us-")
+            && entry.world == entry.admission_world));
+    assert!(built.table.messaging_worlds.is_empty());
+    let mut out = Outbox::default();
+    h.host.script_prepared(ticket, Ok(()), &mut out);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !h.host.state.installs[&h.install]
+        .script_pending
+        .as_ref()
+        .unwrap()
+        .saved
+    {
+        assert!(std::time::Instant::now() < deadline);
+        h.host.storage_done(h.host.storage_take(), &mut out);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(replies(&out).is_empty());
+    assert_eq!(
+        h.host.state.installs[&h.install]
+            .user_scripts
+            .scripts()
+            .count(),
+        0
+    );
+    h.host.script_published(ticket, &mut out);
+    assert_eq!(replies(&out), vec![Ok(Value::Null)]);
+    let bytes = std::fs::read(durable.path().join("user-scripts.json")).unwrap();
+    let restored = super::super::storage::restore_user_scripts(&bytes, "", |_| Ok(())).unwrap();
+    assert_eq!(restored.scripts().count(), 1);
+}
+
+#[test]
+fn user_script_update_reset_is_settled_before_admission_and_cannot_resurrect() {
+    let mut h = Harness::new();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("user-scripts.json");
+    let old = zephium_webext_runtime::user_scripts::Registry::default()
+        .prepare(
+            "userScripts.configureWorld",
+            &[json!({"messaging":true})],
+            |_| Ok(()),
+        )
+        .unwrap()
+        .1
+        .unwrap();
+    std::fs::write(
+        &path,
+        super::super::storage::user_script_record(&old, "1").unwrap(),
+    )
+    .unwrap();
+    assert!(h
+        .host
+        .prepare_user_script_reset(h.install, 7, path.clone(), "2")
+        .is_err());
+    assert!(h.host.script_admission_pending(h.install, Some(7)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while h.host.user_script_resets[&h.install].result.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        h.host
+            .storage_done(h.host.storage_take(), &mut Outbox::default());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(!h.host.script_admission_pending(h.install, Some(7)));
+    assert!(h.host.script_admission_pending(h.install, Some(8)));
+    assert!(h.host.script_admission_pending(h.install, None));
+    assert!(h.host.script_publication_pending());
+    h.host
+        .prepare_user_script_reset(h.install, 7, path.clone(), "2")
+        .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    for version in ["1", "2"] {
+        assert!(
+            !super::super::storage::restore_user_scripts(&bytes, version, |_| panic!(
+                "empty reset has no file"
+            ))
+            .unwrap()
+            .messaging("")
+        );
+    }
+    let mut admission = admitted(h.install);
+    admission.install_generation = 7;
+    h.host.admit(
+        admission,
+        &Activation::Updated {
+            previous_version: "1".into(),
+        },
+        &mut Outbox::default(),
+    );
+    assert!(!h.host.script_publication_pending());
+}
+
+#[test]
+fn failed_user_script_reset_keeps_admission_closed_and_can_retry() {
+    let mut h = Harness::new();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("record");
+    std::fs::create_dir(&path).unwrap();
+    assert!(h
+        .host
+        .prepare_user_script_reset(h.install, 3, path.clone(), "2")
+        .is_err());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while h.host.user_script_resets[&h.install].result.is_none() {
+        assert!(std::time::Instant::now() < deadline);
+        h.host
+            .storage_done(h.host.storage_take(), &mut Outbox::default());
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(matches!(
+        h.host.user_script_resets[&h.install].result,
+        Some(Err(_))
+    ));
+    assert!(h.host.script_admission_pending(h.install, None));
+    assert!(h
+        .host
+        .prepare_user_script_reset(h.install, 4, path.clone(), "2")
+        .is_err());
+    std::fs::remove_dir(&path).unwrap();
+    assert!(h
+        .host
+        .prepare_user_script_reset(h.install, 3, path, "2")
+        .is_err());
+    assert!(h.host.user_script_resets[&h.install].result.is_none());
+}
+
+#[test]
+fn removing_an_update_before_or_after_reset_completion_releases_the_profile_barrier() {
+    for settled in [false, true] {
+        for erase in [false, true] {
+            let mut h = Harness::new();
+            let root = tempfile::tempdir().unwrap();
+            assert!(h
+                .host
+                .prepare_user_script_reset(h.install, 3, root.path().join("user-scripts.json"), "2")
+                .is_err());
+            let ticket = h.host.user_script_resets[&h.install].ticket;
+            if settled {
+                h.host.storage_done(
+                    vec![Done::Scripts {
+                        ticket,
+                        result: Ok(()),
+                    }],
+                    &mut Outbox::default(),
+                );
+            }
+            h.host.forget(h.install, erase, &mut Outbox::default());
+            assert!(h.host.user_script_resets.is_empty());
+            assert_eq!(h.host.script_publication_pending(), !settled);
+            h.host.storage_done(
+                vec![Done::Scripts {
+                    ticket,
+                    result: Ok(()),
+                }],
+                &mut Outbox::default(),
+            );
+            assert!(!h.host.script_publication_pending());
+        }
+    }
 }

@@ -596,3 +596,26 @@ test('dynamic resource locators match canonical paths without changing extension
   assert.equal(chrome.runtime.id, EXTENSION_ID);
   assert.equal(chrome.runtime.getURL('///icons/../popup.html'), `chrome-extension://${EXTENSION_ID}///popup.html`);
 });
+
+test('browser user-script gate event removes held methods before argument validation', () => {
+  const {chrome,host} = extensionContext('background',{permissions:['userScripts'],userScriptsEnabled:true});
+  const held=chrome.userScripts;
+  host.event('zephium.onUserScriptsChanged',[false]);
+  assert.equal(chrome.userScripts,undefined);
+  assert.throws(()=>held.getScripts(Symbol()),{message:"'userScripts.getScripts' is not available in this context."});
+});
+
+test('user-world lastError exists only during its error callback', async () => {
+  const {Z}=createRealm();
+  const state=Z.errors.createLastError(true);
+  const runtime={};
+  state.install(runtime);
+  assert.equal(Object.hasOwn(runtime,'lastError'),false);
+  state.run('refused',()=>{
+    assert.equal(Object.hasOwn(runtime,'lastError'),true);
+    assert.equal(runtime.lastError.message,'refused');
+  });
+  assert.equal(Object.hasOwn(runtime,'lastError'),false);
+  await flush();
+  assert.equal(runtime.lastError,undefined);
+});

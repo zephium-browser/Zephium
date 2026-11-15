@@ -83,6 +83,8 @@ pub struct ScriptTable<S = String> {
     pub generation: u64,
     /// Admitted runtime generation for every source owner.
     pub admissions: BTreeMap<String, u64>,
+    /// User worlds whose immutable bootstrap enables extension messaging.
+    pub messaging_worlds: BTreeSet<String>,
     /// JSON catalogs passed as data to content bootstraps, shared per install.
     /// They count against the existing table and per-document byte budgets.
     pub catalogs: BTreeMap<String, Arc<str>>,
@@ -353,6 +355,13 @@ impl<S: AsRef<str>> ScriptTable<S> {
         {
             return Err(WireError::Invalid);
         }
+        if self.messaging_worlds.len() > super::protocol::MAX_WORLDS
+            || self.messaging_worlds.iter().any(|world| {
+                !world.starts_with("zephium-webext-us-") || !self.bootstraps.contains_key(world)
+            })
+        {
+            return Err(WireError::Invalid);
+        }
         let mut ids = BTreeSet::new();
         let mut worlds = std::collections::BTreeMap::new();
         if self.catalogs.len() > MAX_SCRIPT_ENTRIES {
@@ -496,6 +505,10 @@ impl<S: AsRef<str>> ScriptTable<S> {
             w.string(owner, MAX_INSTALL_ID_BYTES)?;
             w.u64(*epoch);
         }
+        w.count(self.messaging_worlds.len(), super::protocol::MAX_WORLDS)?;
+        for world in &self.messaging_worlds {
+            w.string(world, MAX_WORLD_BYTES)?;
+        }
         w.count(self.bootstraps.len(), MAX_SCRIPT_ENTRIES)?;
         for (world, bootstrap) in &self.bootstraps {
             w.string(world, MAX_WORLD_BYTES)?;
@@ -541,6 +554,12 @@ impl<S: AsRef<str>> ScriptTable<S> {
                 return Err(WireError::Invalid);
             }
         }
+        let mut messaging_worlds = BTreeSet::new();
+        for _ in 0..r.count(super::protocol::MAX_WORLDS)? {
+            if !messaging_worlds.insert(r.string(MAX_WORLD_BYTES)?) {
+                return Err(WireError::Invalid);
+            }
+        }
         let n = r.count(MAX_SCRIPT_ENTRIES)?;
         let mut bootstraps = BTreeMap::new();
         for _ in 0..n {
@@ -581,6 +600,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
         let table = Self {
             generation,
             admissions,
+            messaging_worlds,
             catalogs,
             bootstraps,
             entries,
@@ -781,6 +801,7 @@ mod tests {
     fn table() -> ScriptTable {
         ScriptTable {
             admissions: [("a".repeat(32), 1)].into(),
+            messaging_worlds: Default::default(),
             bootstraps: Default::default(),
             catalogs: Default::default(),
             generation: 9,
@@ -1126,7 +1147,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 
     #[test]

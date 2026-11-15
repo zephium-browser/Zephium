@@ -1,0 +1,102 @@
+{
+  "caseId": "user-scripts-csp",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "default eval",
+      "value": "EvalError"
+    },
+    {
+      "label": "restrictive CSP:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "restrictive CSP:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "empty CSP:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "empty CSP:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "configuration:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "configuration:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "csp": "",
+            "messaging": false
+          }
+        ]
+      }
+    },
+    {
+      "label": "empty-policy eval",
+      "value": "42"
+    },
+    {
+      "label": "reset:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "reset:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "reset configuration:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "reset configuration:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

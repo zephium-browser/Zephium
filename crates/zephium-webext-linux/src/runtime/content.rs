@@ -10,7 +10,7 @@ use zephium_webext_runtime::permissions::SiteAccess;
 use zephium_webext_runtime::scripting_registry::{ExecutionWorld, InjectionTime};
 use zephium_webkit_web_process_protocol::protocol::{
     MatchRule, RunAt, ScriptEntry, ScriptFile, ScriptTable, MAX_BOOTSTRAP_BYTES,
-    MAX_INLINE_SCRIPT_SOURCE_BYTES, MAX_SCRIPT_SOURCE_BYTES,
+    MAX_INLINE_SCRIPT_SOURCE_BYTES, MAX_SCRIPT_SOURCE_BYTES, MAX_SCRIPT_TABLE_BYTES,
 };
 
 use super::host::glue::ContentInstall;
@@ -68,11 +68,24 @@ pub(super) fn validate_file(
     Ok(())
 }
 
+struct MaterializationBudget(usize);
+
+impl MaterializationBudget {
+    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        self.0 = self
+            .0
+            .checked_sub(bytes)
+            .ok_or("Content sources exceed the bounded table materialization budget")?;
+        Ok(())
+    }
+}
+
 fn read(
     root: &std::path::Path,
     extension: &str,
     path: &str,
     limit: usize,
+    budget: &mut MaterializationBudget,
 ) -> Result<ScriptFile, String> {
     let normalized = zephium_webext::manifest::normalize_resource(path)
         .filter(|path| !path.starts_with('_'))
@@ -82,6 +95,12 @@ fn read(
     if !metadata.is_file() || metadata.len() > limit as u64 {
         return Err(format!("{path} is not a file of at most {limit} bytes"));
     }
+    let url = format!("chrome-extension://{extension}/{normalized}");
+    budget.charge(url.len())?;
+    let limit = limit.min(budget.0);
+    if metadata.len() > limit as u64 {
+        return Err("Content sources exceed the bounded table materialization budget".into());
+    }
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(&full)
@@ -90,12 +109,14 @@ fn read(
     if bytes.len() > limit {
         return Err(format!("{path} exceeds the {limit}-byte source limit"));
     }
+    budget.charge(bytes.len())?;
     let source = String::from_utf8(bytes).map_err(|_| format!("{path} is not UTF-8"))?;
-    let source = source.trim_start_matches('\u{feff}').to_owned();
-    Ok(ScriptFile {
-        source,
-        url: format!("chrome-extension://{extension}/{normalized}"),
-    })
+    let source = if source.starts_with('\u{feff}') {
+        source.trim_start_matches('\u{feff}').to_owned()
+    } else {
+        source
+    };
+    Ok(ScriptFile { source, url })
 }
 
 fn bootstrap(data: &serde_json::Value) -> Result<(String, Option<Arc<str>>), String> {
@@ -121,7 +142,7 @@ fn bootstrap(data: &serde_json::Value) -> Result<(String, Option<Arc<str>>), Str
         bundle,
         zephium_webext_runtime::js::context_surface(
             &zephium_webext::manifest::Manifest::from_value(data["manifest"].clone()),
-            "contentScript",
+            data["contextKind"].as_str().unwrap_or("contentScript"),
         ),
         if catalog.is_some() { "" } else { "();" }
     );
@@ -171,8 +192,10 @@ fn webkit_patterns(patterns: &[String]) -> Option<Vec<String>> {
 }
 
 pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
+    let mut budget = MaterializationBudget(MAX_SCRIPT_TABLE_BYTES);
     let mut entries = Vec::new();
     let mut admissions = std::collections::BTreeMap::new();
+    let mut messaging_worlds = std::collections::BTreeSet::new();
     let mut catalogs = std::collections::BTreeMap::new();
     let mut bootstraps = std::collections::BTreeMap::new();
     let mut grants = Vec::new();
@@ -194,6 +217,14 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                 continue;
             }
         };
+        if let Err(problem) = budget.charge(
+            content_bootstrap
+                .len()
+                .saturating_add(catalog.as_ref().map_or(0, |v| v.len())),
+        ) {
+            problems.push((install.install, problem));
+            break;
+        }
         let mut grant_rules = Vec::new();
         let mut own: Vec<ScriptEntry> = Vec::new();
         let mut failed = None;
@@ -203,6 +234,12 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                 ExecutionWorld::Main => String::new(),
             };
             if !script.js.is_empty() {
+                if !world.is_empty() {
+                    if let Err(problem) = budget.charge(content_bootstrap.len()) {
+                        failed = Some(problem);
+                        break;
+                    }
+                }
                 let files: Result<Vec<ScriptFile>, String> = script
                     .js
                     .iter()
@@ -212,6 +249,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                             &install.extension_id,
                             path,
                             MAX_SCRIPT_SOURCE_BYTES,
+                            &mut budget,
                         )
                     })
                     .collect();
@@ -254,12 +292,19 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                         &install.extension_id,
                         path,
                         MAX_INLINE_SCRIPT_SOURCE_BYTES,
+                        &mut budget,
                     ) {
                         Ok(file) => {
                             match install.messages.localize_css(&file.source) {
                                 Ok(localized)
                                     if localized.len() <= MAX_INLINE_SCRIPT_SOURCE_BYTES =>
                                 {
+                                    if let Err(problem) =
+                                        budget.charge(localized.len().saturating_add(1))
+                                    {
+                                        failed = Some(problem);
+                                        break;
+                                    }
                                     source.push_str(&localized)
                                 }
                                 _ => {
@@ -323,9 +368,153 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
             bootstrap: Arc::from(""),
         });
     }
+    for install in installs.iter().filter(|install| install.allow_user_scripts) {
+        use sha2::{Digest, Sha256};
+        use zephium_webext_runtime::context::UserScriptWorldId;
+        use zephium_webext_runtime::user_scripts::World;
+        let Some(hosts) = origins_rule(&install.origins, install.file_access) else {
+            continue;
+        };
+        let owner = hex(install.install);
+        let mut user_data = install.bootstrap.clone();
+        user_data["contextKind"] = serde_json::json!("userScript");
+        user_data["userScriptMessaging"] = serde_json::json!(true);
+        let (messaging_bootstrap, catalog) = match bootstrap(&user_data) {
+            Ok(result) => result,
+            Err(problem) => {
+                problems.push((install.install, problem));
+                continue;
+            }
+        };
+        if let Err(problem) = budget.charge(catalog.as_ref().map_or(0, |v| v.len())) {
+            problems.push((install.install, problem));
+            break;
+        }
+        if let Some(catalog) = catalog {
+            catalogs.insert(owner.clone(), catalog);
+        }
+        user_data["userScriptMessaging"] = serde_json::json!(false);
+        let muted = match bootstrap(&user_data) {
+            Ok((source, _)) => source,
+            Err(problem) => {
+                problems.push((install.install, problem));
+                continue;
+            }
+        };
+        let mut worlds = std::collections::BTreeMap::new();
+        for id in install.user_scripts.world_ids() {
+            let world = InjectedWorld::UserScript(
+                UserScriptWorldId::parse(id).expect("validated user world"),
+            );
+            let name = world_name(install.install, &world);
+            let selected = if install.user_scripts.messaging(id) {
+                &messaging_bootstrap
+            } else {
+                &muted
+            };
+            if let Err(problem) = budget.charge(selected.len().saturating_mul(2)) {
+                problems.push((install.install, problem));
+                break;
+            }
+            let source = if install.user_scripts.messaging(id) {
+                messaging_worlds.insert(name.clone());
+                messaging_bootstrap.clone()
+            } else {
+                muted.to_owned()
+            };
+            bootstraps.insert(
+                name.clone(),
+                zephium_webkit_web_process_protocol::protocol::ScriptBootstrap {
+                    install_id: owner.clone(),
+                    source: source.clone(),
+                },
+            );
+            grants.push(WorldGrant {
+                install: install.install,
+                install_generation: install.install_generation,
+                world,
+                matches: vec![hosts.clone()],
+                bootstrap: Arc::from(""),
+            });
+            worlds.insert(id, (name, source));
+        }
+        admissions.insert(owner.clone(), install.install_generation);
+        for script in install.user_scripts.scripts() {
+            let prepared = (|| -> Result<ScriptEntry, String> {
+                let id = script.world_id.as_deref().unwrap_or("");
+                let (admission_world, bootstrap) =
+                    worlds.get(id).ok_or("Unknown user-script world")?;
+                if script.world != World::Main {
+                    budget.charge(bootstrap.len())?;
+                }
+                let files = script
+                    .js
+                    .iter()
+                    .map(|source| {
+                        if let Some(path) = &source.file {
+                            read(
+                                &install.root,
+                                &install.extension_id,
+                                path,
+                                MAX_SCRIPT_SOURCE_BYTES,
+                                &mut budget,
+                            )
+                        } else if let Some(code) = &source.code {
+                            let url = format!(
+                                "chrome-extension://{}/_user_scripts/{:x}.js",
+                                install.extension_id,
+                                Sha256::digest(code.as_bytes())
+                            );
+                            budget.charge(code.len().saturating_add(url.len()))?;
+                            Ok(ScriptFile {
+                                source: code.clone(),
+                                url,
+                            })
+                        } else {
+                            Err("Missing user-script source".into())
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(ScriptEntry {
+                    install_id: owner.clone(),
+                    script_id: format!("_user-{:x}", Sha256::digest(script.id.as_bytes())),
+                    admission_world: admission_world.clone(),
+                    world: if script.world == World::Main {
+                        String::new()
+                    } else {
+                        admission_world.clone()
+                    },
+                    bootstrap: if script.world == World::Main {
+                        String::new()
+                    } else {
+                        bootstrap.clone()
+                    },
+                    run_at: match script.run_at {
+                        InjectionTime::DocumentStart => RunAt::DocumentStart,
+                        InjectionTime::DocumentEnd => RunAt::DocumentEnd,
+                        InjectionTime::DocumentIdle => RunAt::DocumentIdle,
+                    },
+                    rule: rule(
+                        script
+                            .matcher()
+                            .map_err(|error| error.message().to_owned())?,
+                        script.all_frames,
+                        install.file_access,
+                    ),
+                    files,
+                    css: Vec::new(),
+                })
+            })();
+            match prepared {
+                Ok(entry) => entries.push(entry),
+                Err(problem) => problems.push((install.install, problem)),
+            }
+        }
+    }
     Content {
         table: ScriptTable {
             admissions,
+            messaging_worlds,
             generation,
             catalogs,
             bootstraps,
@@ -339,6 +528,17 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_files_are_bounded_before_reading_the_next_copy() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.js"), "x".repeat(1024)).unwrap();
+        let mut budget = super::MaterializationBudget(1500);
+        super::read(root.path(), "id", "a.js", 4096, &mut budget).unwrap();
+        assert!(super::read(root.path(), "id", "a.js", 4096, &mut budget).is_err());
+        assert!(budget.0 < 500);
+        assert!(budget.charge(usize::MAX).is_err());
+    }
+
     #[test]
     fn large_translation_catalog_fits_without_dropping_messages_or_raising_limits() {
         let messages: serde_json::Map<String, serde_json::Value> = (0..2500)

@@ -43,6 +43,7 @@ pub struct Script {
     /// Installation-local registration identifier.
     pub id: String,
     /// Included URL patterns.
+    #[serde(default)]
     pub matches: Vec<String>,
     /// Ordered code/file sources.
     pub js: Vec<Source>,
@@ -86,6 +87,8 @@ pub struct WorldConfiguration {
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     scripts: BTreeMap<String, Script>,
+    #[serde(default)]
+    order: Vec<String>,
     worlds: BTreeMap<String, WorldConfiguration>,
 }
 
@@ -173,7 +176,19 @@ impl Script {
 impl Registry {
     /// Current registrations in deterministic installation-local order.
     pub fn scripts(&self) -> impl Iterator<Item = &Script> {
-        self.scripts.values()
+        self.order.iter().filter_map(|id| self.scripts.get(id))
+    }
+    /// Default and explicitly referenced/configured isolated principals.
+    pub fn world_ids(&self) -> BTreeSet<&str> {
+        std::iter::once("")
+            .chain(self.worlds.keys().map(String::as_str))
+            .chain(
+                self.scripts
+                    .values()
+                    .filter(|script| script.world == World::UserScript)
+                    .map(|script| script.world_id.as_deref().unwrap_or("")),
+            )
+            .collect()
     }
     /// The effective messaging setting; missing configuration is default-off.
     pub fn messaging(&self, world: &str) -> bool {
@@ -189,6 +204,15 @@ impl Registry {
         }
         let mut state: Self =
             serde_json::from_slice(bytes).map_err(|_| ApiError::malformed_arguments())?;
+        if state.order.is_empty() && !state.scripts.is_empty() {
+            state.order = state.scripts.keys().cloned().collect();
+        }
+        if state.order.len() != state.scripts.len()
+            || state.order.iter().collect::<BTreeSet<_>>().len() != state.order.len()
+            || state.order.iter().any(|id| !state.scripts.contains_key(id))
+        {
+            return Err(ApiError::malformed_arguments());
+        }
         for (id, script) in &mut state.scripts {
             if id != &script.id {
                 return Err(ApiError::malformed_arguments());
@@ -244,8 +268,7 @@ impl Registry {
             "userScripts.getScripts" => {
                 let ids = ids()?;
                 let scripts: Vec<_> = self
-                    .scripts
-                    .values()
+                    .scripts()
                     .filter(|s| ids.as_ref().is_none_or(|ids| ids.contains(&s.id)))
                     .collect();
                 return Ok((json!(scripts), None));
@@ -288,6 +311,9 @@ impl Registry {
                     let mut script: Script = serde_json::from_value(value)
                         .map_err(|_| ApiError::malformed_arguments())?;
                     script.validate(&mut file)?;
+                    if name == "userScripts.register" {
+                        candidate.order.push(script.id.clone());
+                    }
                     candidate.scripts.insert(script.id.clone(), script);
                 }
             }
@@ -301,9 +327,11 @@ impl Registry {
                     }
                     for id in ids {
                         candidate.scripts.remove(&id);
+                        candidate.order.retain(|existing| existing != &id);
                     }
                 } else {
                     candidate.scripts.clear();
+                    candidate.order.clear();
                 }
             }
             "userScripts.configureWorld" => {

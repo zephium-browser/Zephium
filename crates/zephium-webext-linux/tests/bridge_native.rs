@@ -270,7 +270,7 @@ fn native_bridge() {
         .expect("attach");
 
     pump_until(|| bridge.transport(view) == Some(Transport::Module));
-    let table = ScriptTable { admissions: [(format!("{:032x}", 0x5a), 1)].into(), bootstraps: Default::default(), catalogs: Default::default(),
+    let table = ScriptTable { admissions: [(format!("{:032x}", 0x5a), 1)].into(), messaging_worlds: Default::default(), bootstraps: Default::default(), catalogs: Default::default(),
         generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
         admission_world: world_name(install(), &InjectedWorld::Isolated),

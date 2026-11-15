@@ -1654,6 +1654,14 @@ impl Core {
         if !valid {
             return false;
         }
+        if matches!(grant.world, InjectedWorld::UserScript(_))
+            && !self
+                .scripts
+                .get(&evaluation.table_generation)
+                .is_some_and(|table| table.table.messaging_worlds.contains(&evaluation.world))
+        {
+            return true;
+        }
         self.authority
             .record_injection(
                 tab,

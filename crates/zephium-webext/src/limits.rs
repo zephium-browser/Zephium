@@ -118,7 +118,12 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (
         &[Permission("userScripts")],
         "Can't run user scripts",
-        MAC | LIN,
+        MAC,
+    ),
+    (
+        &[Permission("userScripts")],
+        "User scripts require Allow user scripts. Their isolated evaluation, eval and Function ignore page CSP; DOM inline script and style obey page CSP. Only empty world CSP is accepted; Chromium's default user-world CSP is not enforced. Programmatic userScripts.execute is unavailable.",
+        LIN,
     ),
     (
         &[Permission("debugger")],

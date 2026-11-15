@@ -54,6 +54,7 @@ pub struct SealedScripts {
 pub(crate) struct ScriptAuthority {
     pub generation: u64,
     pub admissions: std::collections::BTreeMap<String, u64>,
+    pub messaging_worlds: std::collections::BTreeSet<String>,
     pub bootstraps: std::collections::BTreeMap<String, String>,
     pub entries: Vec<EntryAuthority>,
 }
@@ -75,6 +76,7 @@ impl From<ScriptTable> for ScriptAuthority {
         Self {
             generation: table.generation,
             admissions: table.admissions,
+            messaging_worlds: table.messaging_worlds,
             bootstraps: table
                 .bootstraps
                 .into_iter()
