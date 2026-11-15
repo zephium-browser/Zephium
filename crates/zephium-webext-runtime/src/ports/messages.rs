@@ -444,7 +444,11 @@ impl MessageService {
                 .values()
                 .all(|state| *state == ListenerState::Closed)
             {
-                let result = Err(channel_closed(request.asynchronous));
+                let result = if request.asynchronous {
+                    Err(channel_closed(true))
+                } else {
+                    Ok(None)
+                };
                 if let Some(settlement) = self.finish(id, result) {
                     settlements.push(settlement);
                 }

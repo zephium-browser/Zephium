@@ -282,7 +282,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("background.service_worker")],
-        "Background registrations expose lifecycle state; update stays pending as in Chromium extension workers; unregister, client messaging, push, extension fetch interception and static routes are unsupported",
+        "Background registrations expose lifecycle state; activated update retires the running worker with an unsettled promise; extension-page registration lookup is unavailable. Unregister, client messaging, push, extension fetch interception and static routes are unsupported",
         LIN,
     ),
     (

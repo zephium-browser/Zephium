@@ -42,6 +42,8 @@ pub enum StartReason {
 /// Why a native background must stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopReason {
+    /// An activated extension worker requested a registration update.
+    WorkerUpdate,
     /// The unblocked idle timer expired.
     Idle,
     /// One event exceeded the processing deadline.
@@ -196,6 +198,13 @@ pub enum Observation {
         generation: u64,
         /// Previously started event.
         event: u64,
+    },
+    /// An activated worker requested an update; preserve registration and crash history.
+    WorkerUpdate {
+        /// Target install.
+        install: ExtensionInstallId,
+        /// Authenticated live process generation.
+        generation: u64,
     },
     /// A worker reported failure; native destruction still needs acknowledgment.
     WorkerFailed {
@@ -519,6 +528,7 @@ impl Lifecycle {
             | Observation::Blockers { install, .. }
             | Observation::EventStarted { install, .. }
             | Observation::EventFinished { install, .. }
+            | Observation::WorkerUpdate { install, .. }
             | Observation::WorkerFailed { install, .. }
             | Observation::Crashed { install, .. }
             | Observation::Terminated { install, .. }
@@ -588,6 +598,12 @@ impl Lifecycle {
                 generation, event, ..
             } if live(background, generation) && background.events.remove(&event).is_some() => {
                 background.activity(now);
+            }
+            Observation::WorkerUpdate { generation, .. }
+                if background.generation == generation
+                    && background.state == BackgroundState::Running =>
+            {
+                background.terminate(install, StopReason::WorkerUpdate, commands);
             }
             Observation::WorkerFailed { generation, .. }
                 if background.generation == generation
@@ -800,6 +816,70 @@ mod tests {
             }]
         );
         generation
+    }
+
+    #[test]
+    fn worker_updates_retire_only_current_process_without_crash_backoff() {
+        let clock = ManualClock::default();
+        let mut machine = Lifecycle::new(ProfileId::from(1));
+        let id = install(1);
+        for _ in 0..MAX_CRASHES + 2 {
+            let generation = started(&mut machine, id, &clock);
+            assert!(machine
+                .observe(
+                    Observation::WorkerUpdate {
+                        install: id,
+                        generation: generation + 1
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                machine
+                    .observe(
+                        Observation::WorkerUpdate {
+                            install: id,
+                            generation
+                        },
+                        &clock
+                    )
+                    .unwrap(),
+                [
+                    Command::CancelWork {
+                        install: id,
+                        generation
+                    },
+                    Command::Terminate {
+                        install: id,
+                        generation,
+                        reason: StopReason::WorkerUpdate
+                    }
+                ]
+            );
+            assert!(machine
+                .observe(
+                    Observation::WorkerUpdate {
+                        install: id,
+                        generation
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            assert_eq!(machine.state(id), Some(BackgroundState::Terminating));
+            assert!(machine
+                .observe(
+                    Observation::Terminated {
+                        install: id,
+                        generation
+                    },
+                    &clock
+                )
+                .unwrap()
+                .is_empty());
+            assert_eq!(machine.state(id), Some(BackgroundState::Stopped));
+        }
     }
 
     #[test]

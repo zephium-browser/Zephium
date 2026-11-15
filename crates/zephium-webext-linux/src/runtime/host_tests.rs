@@ -2164,3 +2164,47 @@ fn removing_an_update_before_or_after_reset_completion_releases_the_profile_barr
         }
     }
 }
+
+#[test]
+fn worker_update_requires_exact_live_background_and_keeps_install_admitted() {
+    let mut h = Harness::new();
+    let (background, generation, _) = h.running(&["runtime.onMessage"]);
+    let (_, options) = h.sender(ViewKind::Options, "options.html");
+    assert!(replies(&h.call(&options, "zephium.workerUpdate", json!([])))[0].is_err());
+    assert!(stops(&h.ops()).is_empty());
+    assert!(replies(&h.call(&background, "zephium.workerUpdate", json!([1])))[0].is_err());
+    assert!(stops(&h.ops()).is_empty());
+    h.call(
+        &background,
+        "offscreen.createDocument",
+        json!([{"url":"off.html","reasons":["CLIPBOARD"],"justification":"owned test"}]),
+    );
+    h.ops();
+    h.host
+        .offscreen_loaded(h.install, true, &mut Outbox::default());
+    h.call(&background, "zephium.workerUpdate", json!([]));
+    let ops = h.ops();
+    assert_eq!(stops(&ops), vec![generation]);
+    assert!(!ops
+        .iter()
+        .any(|op| matches!(op, NativeOp::CloseOffscreen { .. })));
+    assert!(h.host.has_offscreen(h.install));
+    h.call(&options, "runtime.sendMessage", json!([null, "{}", null]));
+    assert!(!h
+        .ops()
+        .iter()
+        .any(|op| matches!(op, NativeOp::StartBackground { .. })));
+    h.host
+        .background_stopped(h.install, generation, &mut Outbox::default());
+    assert_eq!(h.state(), Some(BackgroundState::Starting));
+    let (_, replacement, _) = h.boot(&["runtime.onMessage"]);
+    assert!(replacement > generation);
+    h.host.work(
+        Work::WorkerUpdate {
+            sender: Box::new(background),
+        },
+        &mut Outbox::default(),
+    );
+    assert!(stops(&h.ops()).is_empty());
+    assert_eq!(h.state(), Some(BackgroundState::Running));
+}

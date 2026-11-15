@@ -835,3 +835,30 @@ fn one_shot_groups_large_listener_sets_without_changing_callback_authority() {
         .unwrap()
         .is_some());
 }
+
+#[test]
+fn receiver_retired_before_async_ack_settles_as_no_response_and_releases_on_receipt() {
+    let source = content_sender("https://example.com/");
+    let receiver = background_sender();
+    let mut service = MessageService::new();
+    let mut limiter = Limiter::new();
+    let clock = ManualClock::default();
+    let (id, _) = service
+        .send(
+            &source,
+            &MessageRoute::Runtime,
+            &[listener(&receiver, 1)],
+            b"null",
+            &mut limiter,
+            &clock,
+        )
+        .unwrap();
+    let settlements = service.cancel_context(&receiver.context_key(), &mut limiter);
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].result, Ok(None));
+    assert!(service.acknowledge(&source, id, &mut limiter));
+    assert_eq!(limiter.install_bytes(install()), 0);
+    assert!(service
+        .cancel_context(&receiver.context_key(), &mut limiter)
+        .is_empty());
+}

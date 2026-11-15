@@ -223,6 +223,7 @@ pub(crate) fn launch(
         "scriptURL": scope,
         "install": install,
         "installedScripts": installed_scripts,
+        "retireOnUpdate": true,
     });
     let boot = bootstrap.to_value(Some(worker));
     #[cfg(feature = "native-tests")]

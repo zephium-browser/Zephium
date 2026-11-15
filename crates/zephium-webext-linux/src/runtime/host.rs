@@ -376,6 +376,9 @@ impl InstallState {
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    WorkerUpdate {
+        sender: Box<Sender>,
+    },
     OffscreenReady {
         sender: Box<Sender>,
     },
@@ -1454,6 +1457,19 @@ fn rules(_: &mut State, invocation: Invocation<'_>) -> Handled {
     invocation.reply(Err(ApiError::other("This event does not support rules.")))
 }
 
+fn worker_update(state: &mut State, invocation: Invocation<'_>) -> Handled {
+    if !invocation.args().is_empty() {
+        return invocation.reply(Err(ApiError::malformed_arguments()));
+    }
+    if state.install(invocation.sender()).is_err() {
+        return invocation.reply(Err(ApiError::context_invalidated()));
+    }
+    state.work.push(Work::WorkerUpdate {
+        sender: Box::new(invocation.sender().clone()),
+    });
+    invocation.reply(Ok(Value::Null))
+}
+
 /// `zephium.workerReport [kind, detail]` from the adapter's own worker hooks.
 fn worker_report(state: &mut State, invocation: Invocation<'_>) -> Handled {
     let args = invocation.args();
@@ -1632,6 +1648,10 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     ] {
         table.register(name, internal(contexts, rules))?;
     }
+    table.register(
+        "zephium.workerUpdate",
+        internal(ContextMask::of(ContextKind::Background), worker_update),
+    )?;
     table.register(
         "zephium.workerReport",
         internal(ContextMask::of(ContextKind::Background), worker_report),
@@ -3481,12 +3501,14 @@ impl RuntimeHost {
                     generation,
                     reason,
                 } => {
-                    if !matches!(reason, StopReason::Shutdown | StopReason::Idle)
-                        && self
-                            .state
-                            .installs
-                            .get(&install)
-                            .is_some_and(|state| state.offscreen.is_some())
+                    if !matches!(
+                        reason,
+                        StopReason::Shutdown | StopReason::Idle | StopReason::WorkerUpdate
+                    ) && self
+                        .state
+                        .installs
+                        .get(&install)
+                        .is_some_and(|state| state.offscreen.is_some())
                     {
                         self.close_offscreen_now(install, out);
                     }
@@ -4279,6 +4301,22 @@ impl RuntimeHost {
                     &clock,
                 ) {
                     self.finish_send(settlement, out);
+                }
+            }
+            Work::WorkerUpdate { sender } => {
+                let install = sender.install();
+                let generation = self
+                    .live_for(&sender)
+                    .filter(|live| live.activated)
+                    .map(|live| live.generation);
+                if let Some(generation) = generation {
+                    self.observe(
+                        Observation::WorkerUpdate {
+                            install,
+                            generation,
+                        },
+                        out,
+                    );
                 }
             }
             Work::Lifecycle { sender, report } => self.worker_lifecycle(&sender, report, out),

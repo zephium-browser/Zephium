@@ -1,0 +1,1 @@
+{"id":"worker-update-lifecycle","title":"Update retires the worker and the next message wakes the same registration","apis":["runtime.sendMessage","ServiceWorkerRegistration.update"],"permissions":[]}
