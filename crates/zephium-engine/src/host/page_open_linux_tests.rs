@@ -848,3 +848,35 @@ fn native_script_dialogs_settle_and_cancel_with_the_tab() {
     panel.unwrap().response(gtk::ResponseType::Cancel);
     until(|| page.title().as_deref() == Some("cancelled"));
 }
+
+#[test]
+#[ignore = "requires isolated GTK display; localhost element fullscreen only"]
+fn native_element_fullscreen_uses_shared_owner_and_escape() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#script').onclick=()=>document.documentElement.requestFullscreen();document.title='fullscreen-ready'");
+    until(|| page.title().as_deref() == Some("fullscreen-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| {
+        host.drain().iter().any(|event| matches!(event, EngineEvent::FullscreenChanged { id: owner, active: true } if *owner == id))
+    });
+    assert_eq!(
+        host.engine.fullscreen_presentation(),
+        zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
+    );
+    let window = host.window.window().unwrap();
+    let keyboard = window.display().default_seat().unwrap().keyboard().unwrap();
+    let mut event = gtk::gdk::Event::new(gtk::gdk::EventType::KeyPress);
+    event.set_device(Some(&keyboard));
+    let raw: *mut gtk::gdk::ffi::GdkEvent = event.to_glib_none_mut().0;
+    // SAFETY: the event owns this window reference and uses the KeyPress union.
+    unsafe {
+        (*raw).key.window = window.to_glib_full();
+        (*raw).key.keyval = 0xff1b;
+    }
+    assert!(host.window.emit_by_name::<bool>("event", &[&event]));
+    until(|| {
+        host.drain().iter().any(|event| matches!(event, EngineEvent::FullscreenChanged { id: owner, active: false } if *owner == id))
+    });
+}

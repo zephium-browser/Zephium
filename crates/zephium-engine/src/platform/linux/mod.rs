@@ -3,6 +3,10 @@
 
 mod content_filter;
 mod find;
+mod fullscreen;
+pub(crate) use fullscreen::{
+    exit_fullscreen, fullscreen_state, install_fullscreen_observer, FullscreenObserver,
+};
 mod guide;
 mod stage;
 pub(crate) mod tab_preview;
