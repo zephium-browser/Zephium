@@ -286,6 +286,38 @@ fn collapsed_split_leaves_hide_without_invalid_native_bounds_and_reappear_on_res
 }
 
 #[test]
+fn windows_hidden_content_tabs_take_the_low_memory_target() {
+    let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
+    let windows = stages
+        .split("#[cfg(not(target_os = \"macos\"))]\n    fn apply_content(")
+        .nth(1)
+        .expect("Windows/Linux host layout")
+        .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_drop_indicator")
+        .next()
+        .expect("bounded Windows/Linux host layout");
+    let hide = windows
+        .find("MemoryUsageLevel::Low")
+        .expect("hidden content tabs request Low");
+    let show = windows
+        .find("MemoryUsageLevel::Normal")
+        .expect("shown content tabs restore Normal");
+    assert!(hide < show);
+    assert!(windows.contains("hidden_now"));
+    assert!(!windows.contains("Off-screen views keep their memory"));
+
+    let discard = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/discard.rs"));
+    let refuse = discard
+        .split("fn suspend_refused(")
+        .nth(1)
+        .expect("Windows suspend refusal")
+        .split("fn retry_suspend(")
+        .next()
+        .expect("bounded suspend refusal");
+    assert!(refuse.contains("MemoryUsageLevel::Low"));
+    assert!(refuse.contains("refused after its retry"));
+}
+
+#[test]
 fn terminal_native_stage_failures_have_exact_retirement_and_mandatory_fatal_handoff() {
     let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
     let mac_failure = stages

@@ -1542,6 +1542,12 @@ impl EngineHost {
             Some(true) => {}
             Some(false) => {
                 eprintln!("suspend: refused after its retry; the page stays awake");
+                // Still hidden: keep the low memory target so a refused
+                // TrySuspend does not leave the renderer at Normal until shown.
+                if let Some(view) = self.views.get(&id) {
+                    use wry::{MemoryUsageLevel, WebViewExtWindows as _};
+                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
+                }
                 // The shell then stops asking, so its desired set says what
                 // is really suspended.
                 if let (Some(view), Some(partition)) =
