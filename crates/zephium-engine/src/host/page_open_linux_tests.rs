@@ -1184,3 +1184,146 @@ fn native_site_data_clearing_preserves_other_profiles() {
     script(&second, "document.title=(localStorage.getItem('proof')==='second' && document.cookie.includes('proof=second'))?'isolated':'lost'");
     until(|| second.title().as_deref() == Some("isolated"));
 }
+
+struct DownloadFixtureStore;
+impl zephium_core::ports::store::Store for DownloadFixtureStore {
+    fn save_session(&self, _: zephium_core::session::SessionState) {}
+    fn flush(&self) -> bool {
+        true
+    }
+    fn load_session(&self) -> zephium_core::ports::store::SessionLoad {
+        zephium_core::ports::store::SessionLoad::Absent
+    }
+    fn record_visit(&self, _: ProfileId, _: String, _: String) {}
+    fn app_setting(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn set_app_setting(&self, _: String, _: String) -> bool {
+        false
+    }
+    fn search_history(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        vec![]
+    }
+    fn history_page(
+        &self,
+        _: ProfileId,
+        _: &str,
+        _: Option<i64>,
+        _: Option<i64>,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryVisit> {
+        vec![]
+    }
+    fn forget_history_urls(&self, _: ProfileId, _: &[String]) -> u32 {
+        0
+    }
+    fn clear_history(&self, _: ProfileId, _: Option<i64>) -> u32 {
+        0
+    }
+    fn amend_visit_title(&self, _: ProfileId, _: String, _: String) -> bool {
+        false
+    }
+    fn favicon_age(&self, _: ProfileId, _: &str) -> Option<i64> {
+        None
+    }
+    fn save_favicon(&self, _: ProfileId, _: String, _: Option<String>, _: Vec<u8>) {}
+    fn favicon_bytes(&self, _: ProfileId, _: &str) -> Option<(Option<String>, Vec<u8>)> {
+        None
+    }
+    fn download_recovery_profiles(
+        &self,
+        done: Box<dyn FnOnce(zephium_core::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        done(zephium_core::downloads::DownloadStoreReply::Profiles(
+            vec![],
+        ));
+        true
+    }
+    fn download_call(
+        &self,
+        _: ProfileId,
+        _: zephium_core::downloads::DownloadStoreCall,
+        _: Box<dyn FnOnce(zephium_core::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        panic!("private download history must not reach the durable store")
+    }
+}
+
+#[test]
+#[ignore = "requires isolated GTK/WebKitGTK host"]
+fn native_download_uses_shared_confirmation_and_secure_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    use zephium_core::downloads::{DownloadCall, DownloadCompletion, DownloadResponse};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let output = tempfile::tempdir().unwrap();
+    let directory = output.path().to_owned();
+    let profile = host.profile;
+    assert!(super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_directory(profile, directory);
+    }));
+    script(&page, "document.querySelector('#script').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['download fixture'],{type:'text/plain'}));a.download='fixture.txt';document.body.append(a);a.click()};document.title='download-ready'");
+    until(|| page.title().as_deref() == Some("download-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    let mut asked = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::DownloadPermissionRequested { id: owner, prompt } = event {
+                assert_eq!(owner, id);
+                asked = Some(prompt.request);
+            }
+        }
+        asked.is_some()
+    });
+    assert_eq!(
+        host.engine
+            .answer_download_permission(id, asked.unwrap(), true),
+        NativeDispatch::Scheduled
+    );
+    until(|| output.path().join("fixture.txt").exists());
+    let path = output.path().join("fixture.txt");
+    assert_eq!(std::fs::read(&path).unwrap(), b"download fixture");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o111,
+        0
+    );
+    let file = std::fs::File::open(&path).unwrap();
+    use std::os::fd::AsRawFd;
+    assert_eq!(
+        unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                c"user.xdg.origin.url".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        },
+        -1
+    );
+    let (send, response) = mpsc::channel();
+    assert!(host.engine.download_call(
+        Partition::Ephemeral(host.profile),
+        DownloadCall::Updates,
+        DownloadCompletion::new(Box::new(move |result| {
+            send.send(result).unwrap();
+        }))
+    ));
+    let mut result = None;
+    until(|| {
+        result = response.try_recv().ok();
+        result.is_some()
+    });
+    assert!(matches!(result, Some(DownloadResponse::Updates { entries, .. }) if entries.len()==1));
+}

@@ -376,3 +376,9 @@ Linux script dialogs similarly require explicit host ownership. The ordinary-tab
 host retains the native completion, bounds message/default text before copying,
 uses a transient GTK dialog, and cancels on navigation, hiding or retirement.
 Privileged and agent views keep the default close-without-prompt behavior.
+
+- Linux ordinary views may install a native download broker before navigation.
+  A single context dispatcher routes by the actual native originating view;
+  absent ownership cancels. Explicit deny policy remains dominant. Brokered
+  blob/data navigation actions become downloads, never top-level documents.
+  Destination consent, publication protection and lifecycle belong to the host.

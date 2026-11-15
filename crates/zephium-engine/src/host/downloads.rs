@@ -8,6 +8,9 @@ mod platform;
 #[cfg(target_os = "windows")]
 #[path = "downloads/platform_windows.rs"]
 mod platform;
+#[cfg(target_os = "linux")]
+#[path = "downloads/platform_linux.rs"]
+mod platform;
 mod recovery;
 mod site;
 mod ui;
@@ -29,7 +32,7 @@ use zephium_core::ids::{DownloadId, ProfileId};
 use zephium_core::permissions::PageOrigin;
 use zephium_core::ports::{engine::Partition, store::Store};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use super::download_files::verify_file;
 use super::download_files::Destination;
 use super::permits::EventPermit;
@@ -64,8 +67,10 @@ const MAX_UI_CALLS: usize = 4;
 const MAX_BACKGROUND_WORK: usize = 32;
 const RECENT_LIMIT: usize = 64;
 /// How often moving transfers are sampled for progress.
+#[cfg(not(target_os = "linux"))]
 const MOVING_TICK: std::time::Duration = std::time::Duration::from_millis(200);
 /// How often transfers that only wait are looked at.
+#[cfg(not(target_os = "linux"))]
 const WAITING_TICK: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,8 +79,10 @@ enum DecisionPhase {
     NativePicker,
     PreparingDestination,
     PersistingDestination,
+    #[cfg(any(not(target_os = "linux"), test))]
     ResumableInterruption,
     /// A download the person paused themselves.
+    #[cfg(any(not(target_os = "linux"), test))]
     UserPaused,
     /// A finished download of a type that must be confirmed, waiting to be
     /// kept or deleted.
@@ -100,7 +107,9 @@ impl DecisionDeadline {
             DecisionPhase::Admission | DecisionPhase::PersistingDestination => {
                 Duration::from_secs(30)
             }
+            #[cfg(any(not(target_os = "linux"), test))]
             DecisionPhase::ResumableInterruption => Duration::from_secs(5 * 60),
+            #[cfg(any(not(target_os = "linux"), test))]
             DecisionPhase::UserPaused => {
                 return Self {
                     phase,
@@ -146,11 +155,13 @@ impl DecisionDeadline {
 
 /// One native, user-admitted initial navigation may download before its child
 /// is presented. Dropping an unconsumed admission also retires its empty tab.
+#[cfg(not(target_os = "linux"))]
 pub(in crate::host) struct InitialDownload {
     #[cfg(target_os = "macos")]
     pub window: objc2::rc::Retained<objc2_app_kit::NSWindow>,
     pub on_started: Option<Box<dyn FnOnce()>>,
 }
+#[cfg(not(target_os = "linux"))]
 impl Drop for InitialDownload {
     fn drop(&mut self) {
         if let Some(done) = self.on_started.take() {
@@ -163,11 +174,14 @@ struct Transfer {
     partition: Partition,
     record: DownloadRecord,
     native: Native,
+    #[cfg(target_os = "linux")]
+    provenance: Option<(String, String)>,
     _delegate: Delegate,
     source: Option<Source>,
     destination_reply: Option<DestinationReply>,
     destination: Option<Destination>,
     panel: Option<SavePanel>,
+    #[cfg(not(target_os = "linux"))]
     panel_lease: Option<DialogLease>,
     picker_preferences: Option<DownloadPreferences>,
     on_started: Option<Box<dyn FnOnce()>>,
@@ -178,6 +192,7 @@ struct Transfer {
     kept: bool,
     /// A pause the person asked for is in flight; the native stop that
     /// follows is theirs, not a failure.
+    #[cfg(not(target_os = "linux"))]
     user_pausing: bool,
     /// The name an extension asked for, in place of the server's.
     #[cfg(target_os = "macos")]
@@ -240,10 +255,16 @@ pub(crate) struct Downloads {
     preferences: RefCell<HashMap<ProfileId, DownloadPreferences>>,
     calls: RefCell<HashMap<u64, UiCall>>,
     next_call: Cell<u64>,
+    #[cfg(not(target_os = "linux"))]
     sender: mpsc::Sender<Message>,
+    #[cfg(target_os = "linux")]
+    sender: platform::Sender,
+    #[cfg(target_os = "linux")]
+    wake_source: RefCell<Option<gtk::glib::SourceId>>,
     receiver: RefCell<mpsc::Receiver<Message>>,
     timer: RefCell<Option<Timer>>,
     /// The running timer is the slow one: nothing is moving, only waiting.
+    #[cfg(not(target_os = "linux"))]
     timer_slow: Cell<bool>,
     /// When the running timer fires; a sooner deadline replaces it.
     #[cfg(target_os = "windows")]
@@ -318,7 +339,10 @@ impl Downloads {
     }
 
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
+        #[cfg(not(target_os = "linux"))]
         let (sender, receiver) = mpsc::channel();
+        #[cfg(target_os = "linux")]
+        let (sender, receiver, wake) = platform::channel();
         let manager = Rc::new(Self {
             session: DownloadId::generate(),
             store,
@@ -330,8 +354,11 @@ impl Downloads {
             calls: RefCell::new(HashMap::new()),
             next_call: Cell::new(1),
             sender,
+            #[cfg(target_os = "linux")]
+            wake_source: RefCell::new(None),
             receiver: RefCell::new(receiver),
             timer: RefCell::new(None),
+            #[cfg(not(target_os = "linux"))]
             timer_slow: Cell::new(false),
             #[cfg(target_os = "windows")]
             timer_due: Cell::new(None),
@@ -352,6 +379,13 @@ impl Downloads {
             prompts: RefCell::new(HashMap::new()),
             next_prompt: Cell::new(1),
         });
+        #[cfg(target_os = "linux")]
+        if let Some(wake) = wake {
+            manager.install_wake(wake);
+        } else {
+            manager.stopping.set(true);
+            return manager;
+        }
         manager.initialize_recovery();
         manager
     }
@@ -387,6 +421,7 @@ impl Downloads {
         }
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn defer_destination(&self, id: DownloadId, preferences: DownloadPreferences) {
         let mut active = self.active.borrow_mut();
         let Some(transfer) = active.get_mut(&id) else {
@@ -483,7 +518,18 @@ impl Downloads {
             transfer.destination.take().map(|destination| {
                 (
                     destination,
-                    transfer.record.source.clone(),
+                    {
+                        #[cfg(target_os = "linux")]
+                        if matches!(transfer.partition, Partition::Ephemeral(_)) {
+                            String::new()
+                        } else {
+                            transfer.record.source.clone()
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            transfer.record.source.clone()
+                        }
+                    },
                     transfer.partition.profile(),
                     transfer.native.clone(),
                 )
@@ -551,7 +597,7 @@ impl Downloads {
         true
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn note_native_error(&self, id: DownloadId, error: DownloadError) {
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id).filter(|transfer| {
             !transfer.record.state.terminal()
@@ -665,6 +711,7 @@ impl Downloads {
     /// Whether every transfer only waits, on a save panel left open or paused,
     /// with no reply in flight: then nothing needs sampling five times a
     /// second, only its deadline and its page looked at now and then.
+    #[cfg(not(target_os = "linux"))]
     fn only_waiting(&self) -> bool {
         self.work.get() == 0
             && !self.stopping.get()
@@ -701,6 +748,7 @@ impl Downloads {
     }
 
     /// The timer's period for what is going on now, and whether that is the slow one.
+    #[cfg(not(target_os = "linux"))]
     fn tick_period(&self) -> (std::time::Duration, bool) {
         if self.only_waiting() {
             (WAITING_TICK, true)
@@ -751,7 +799,7 @@ impl Downloads {
             } else if transfer.record.state == DownloadState::Paused {
                 #[cfg(target_os = "macos")]
                 let source_available = unsafe { transfer.native.webView() }.is_some();
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 let source_available = true;
                 if transfer
                     .deadline
@@ -876,6 +924,8 @@ impl Downloads {
         let native_notice = matches!(message, Message::Cancelled(_));
         #[cfg(target_os = "windows")]
         let native_notice = matches!(message, Message::RuntimeExited(_));
+        #[cfg(target_os = "linux")]
+        let native_notice = false;
         if !native_notice {
             self.work.set(self.work.get().saturating_sub(1));
         }
@@ -934,6 +984,12 @@ impl Downloads {
                     transfer.record.destination = Some(destination.path.clone());
                     transfer.record.staging = Some(destination.staging_path.clone());
                     transfer.record.staging_identity = Some(destination.staging_identity.clone());
+                    #[cfg(target_os = "linux")]
+                    let destination = {
+                        let mut destination = destination;
+                        destination.set_provenance(transfer.provenance.take());
+                        destination
+                    };
                     transfer.destination = Some(destination);
                     transfer.record.revision += 1;
                     drop(active);
@@ -1054,6 +1110,7 @@ fn needs_confirmation(kept: bool, filename: &str, insecure: bool) -> bool {
 
 /// Only a transfer that is receiving, still has its staging folder, and is
 /// not already being stopped can be paused.
+#[cfg(any(not(target_os = "linux"), test))]
 fn may_pause(
     state: DownloadState,
     cancelling: bool,
@@ -1087,7 +1144,7 @@ fn terminal_outcome(
     (state, error)
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 fn latch_native_error(recorded: &mut Option<DownloadError>, error: DownloadError) {
     recorded.get_or_insert(error);
 }

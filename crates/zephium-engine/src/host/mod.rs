@@ -21,12 +21,12 @@ mod content_rules;
 mod content_styles;
 mod discard;
 mod dispatch;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod download_files;
 #[cfg(target_os = "windows")]
 #[path = "download_files_windows.rs"]
 mod download_files;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) mod downloads;
 mod element_picker;
 #[cfg(target_os = "macos")]
@@ -593,7 +593,7 @@ pub(crate) struct EngineHost {
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
     #[cfg(target_os = "macos")]
     page_permissions: page_permissions::PagePermissionBroker,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     native_open_authority: Arc<crate::NativeOpenAuthority>,

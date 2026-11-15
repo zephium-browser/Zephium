@@ -1136,11 +1136,29 @@ impl InnerWebView {
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
       #[cfg(target_os = "linux")]
       let action_handler = attributes.linux_navigation_action_handler.take();
+      #[cfg(target_os = "linux")]
+      let native_downloads = attributes.linux_download_handler.is_some()
+        && attributes.download_policy == crate::DownloadPolicy::UseHandlers;
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
         let handler = match policy_type {
           PolicyDecisionType::NavigationAction => &navigation_handler,
           _ => return false,
         };
+
+        #[cfg(target_os = "linux")]
+        if native_downloads
+          && policy_decision
+            .dynamic_cast_ref::<NavigationPolicyDecision>()
+            .and_then(NavigationPolicyDecisionExt::navigation_action)
+            .and_then(|action| action.request())
+            .and_then(|request| bounded_request_uri(&request))
+            .is_some_and(|uri| uri.starts_with("blob:") || uri.starts_with("data:"))
+        {
+          unsafe {
+            webkit2gtk::ffi::webkit_policy_decision_download(policy_decision.as_ptr());
+          }
+          return true;
+        }
 
         // Missing action/request/URI state during navigation or teardown must
         // not fall back to WebKit's default allow path.
@@ -1308,6 +1326,38 @@ impl InnerWebView {
     });
     webview.connect_print(|_, _| true);
 
+    #[cfg(target_os = "linux")]
+    if let Some(handler) = attributes
+      .linux_download_handler
+      .take()
+      .filter(|_| attributes.download_policy == crate::DownloadPolicy::UseHandlers)
+    {
+      use webkit2gtk::DownloadExt;
+      const KEY: &str = "wry-linux-download-owner";
+      const INSTALLED: &str = "wry-linux-download-dispatch";
+      unsafe {
+        webview.set_data(KEY, handler);
+      }
+      let context = web_context.context();
+      if unsafe { context.data::<bool>(INSTALLED).is_none() } {
+        context.connect_download_started(|_, download| {
+          let owner = download.web_view().and_then(|view| unsafe {
+            view
+              .data::<crate::LinuxDownloadHandler>(KEY)
+              .map(|handler| handler.as_ref().clone())
+          });
+          if let Some(owner) = owner {
+            owner(download);
+          } else {
+            download.cancel();
+          }
+        });
+        unsafe {
+          context.set_data(INSTALLED, true);
+        }
+      }
+      return;
+    }
     // Download handler
     web_context.register_download_handler(
       attributes.download_policy,

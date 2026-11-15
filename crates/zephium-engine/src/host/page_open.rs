@@ -452,6 +452,7 @@ pub(super) fn install_linux_menu(
     permit: EventPermit,
     navigation: crate::navigation_epoch::NavigationEpochTracker,
     presentation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    downloads: bool,
 ) {
     use gtk::prelude::*;
     use webkit2gtk::{ContextMenuExt, HitTestResultExt, SettingsExt, WebViewExt};
@@ -471,7 +472,7 @@ pub(super) fn install_linux_menu(
         };
         let inspect = webkit2gtk::WebViewExt::settings(page)
             .is_some_and(|settings| settings.enables_developer_extras());
-        filter_linux_menu(menu, inspect, 0, &mut 64);
+        filter_linux_menu(menu, inspect, downloads, 0, &mut 64);
         for (url, name, label) in [
             (
                 hit.media_uri(),
@@ -542,6 +543,7 @@ pub(super) fn install_linux_menu(
 fn filter_linux_menu(
     menu: &webkit2gtk::ContextMenu,
     inspect: bool,
+    downloads: bool,
     depth: usize,
     budget: &mut usize,
 ) {
@@ -552,12 +554,21 @@ fn filter_linux_menu(
             continue;
         }
         *budget -= 1;
-        if !item.is_separator() && !linux_stock_action_allowed(item.stock_action(), inspect) {
+        let download = downloads
+            && matches!(
+                item.stock_action(),
+                webkit2gtk::ContextMenuAction::DownloadLinkToDisk
+                    | webkit2gtk::ContextMenuAction::DownloadImageToDisk
+            );
+        if !(item.is_separator()
+            || linux_stock_action_allowed(item.stock_action(), inspect)
+            || download)
+        {
             menu.remove(&item);
             continue;
         }
         if let Some(submenu) = item.submenu() {
-            filter_linux_menu(&submenu, inspect, depth + 1, budget);
+            filter_linux_menu(&submenu, inspect, downloads, depth + 1, budget);
         }
     }
 }

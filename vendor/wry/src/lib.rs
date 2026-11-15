@@ -786,6 +786,8 @@ struct WebViewAttributes<'a> {
   pub linux_auth_handler: Option<LinuxAuthHandler>,
   #[cfg(target_os = "linux")]
   pub linux_script_dialog_handler: Option<LinuxScriptDialogHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_download_handler: Option<LinuxDownloadHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1061,6 +1063,8 @@ impl Default for WebViewAttributes<'_> {
       linux_auth_handler: None,
       #[cfg(target_os = "linux")]
       linux_script_dialog_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_download_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1147,7 +1151,20 @@ type LinuxAuthHandler =
 type LinuxScriptDialogHandler =
   Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool>;
 
+#[cfg(target_os = "linux")]
+type LinuxDownloadHandler = Rc<dyn Fn(&webkit2gtk::Download)>;
+
 impl<'a> WebViewBuilder<'a> {
+  /// Install an owned native download broker. Unowned views remain denied.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_download_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::Download) + 'static,
+  ) -> Self {
+    self.attrs.linux_download_handler = Some(Rc::new(handler));
+    self
+  }
+
   /// Route a retained GTK script dialog to the ordinary-page host.
   #[cfg(target_os = "linux")]
   pub fn with_linux_script_dialog_handler(

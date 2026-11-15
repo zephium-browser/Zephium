@@ -1343,6 +1343,48 @@ impl EngineHost {
 
         #[cfg(target_os = "linux")]
         {
+            if let Some(downloads) = &self.downloads {
+                let manager = Rc::downgrade(downloads);
+                let permit = event_permit.clone();
+                let intent = download_surface_intent.clone();
+                let tracker = navigation.clone();
+                let item = id.clone();
+                let sink = self.sink.clone();
+                builder = builder
+                    .with_download_policy(DownloadPolicy::UseHandlers)
+                    .with_linux_download_handler(move |native| {
+                        use webkit2gtk::DownloadExt;
+                        let Some(manager) = manager.upgrade() else {
+                            native.cancel();
+                            return;
+                        };
+                        let ask = super::downloads::SiteAsk {
+                            item: item.clone(),
+                            permit: permit.clone(),
+                            sink: sink.clone(),
+                            site: tracker
+                                .committed_snapshot()
+                                .and_then(|(_, url)| url::Url::parse(&url).ok())
+                                .and_then(|url| {
+                                    zephium_core::permissions::PageOrigin::from_url(&url).ok()
+                                }),
+                            opened_by_click: false,
+                        };
+                        if manager
+                            .admit(
+                                partition,
+                                permit.clone(),
+                                intent.clone(),
+                                tracker.clone(),
+                                native,
+                                Some(ask),
+                            )
+                            .is_none()
+                        {
+                            native.cancel();
+                        }
+                    });
+            }
             let dialogs = Rc::downgrade(&script_dialogs);
             builder = builder.with_linux_script_dialog_handler(move |view, dialog| {
                 dialogs
@@ -2554,6 +2596,7 @@ impl EngineHost {
                 event_permit.clone(),
                 navigation.clone(),
                 presentation_permit.clone(),
+                self.downloads.is_some(),
             );
             self.webext_linux.attach_tab(partition, id.get(), &view);
             self.webext_linux

@@ -336,7 +336,7 @@ impl EngineHost {
         // Tab views go in shutdown_common; extension views drain on the loop.
         #[cfg(target_os = "linux")]
         let done = self.webext_linux.shutdown(done);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let done = if let Some(downloads) = &self.downloads {
             let (native_done, download_done) = join_download_shutdown(done);
             downloads.quiesce(None, download_done);
@@ -607,10 +607,10 @@ impl EngineHost {
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 type ShutdownPart = Box<dyn FnOnce(bool) + Send>;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn join_download_shutdown(
     done: Box<dyn FnOnce(bool) + Send>,
 ) -> (ShutdownPart, ShutdownPart) {
