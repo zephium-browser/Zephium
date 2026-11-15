@@ -5,6 +5,7 @@ mod audio;
 pub(crate) use audio::{install_audio_observer, AudioObserver};
 pub(crate) mod browsing_data;
 mod network;
+pub(crate) mod spelling;
 pub(crate) use network::apply_proxy;
 mod content_filter;
 pub(crate) mod file_selection;

@@ -1012,6 +1012,7 @@ impl EngineHost {
                 // Extensions configure the context before its first WebView.
                 #[cfg(target_os = "linux")]
                 {
+                    crate::platform::linux::spelling::configure(context.webkit_context());
                     let sink = self.sink.clone();
                     self.webext_linux.prepare_context(
                         partition,
@@ -3640,5 +3641,14 @@ fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
             zephium_core::ports::engine::NavigationBlockReason::FilterLists,
         ),
         wry::NavigationFailure::Other => NavigationFailureReason::Other,
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EngineHost {
+    pub(crate) fn refresh_linux_spellchecking(&self) {
+        for context in self.web_contexts.values() {
+            crate::platform::linux::spelling::configure(context.webkit_context());
+        }
     }
 }

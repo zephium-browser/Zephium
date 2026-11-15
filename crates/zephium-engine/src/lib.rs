@@ -3752,6 +3752,14 @@ impl Engine for WebviewEngine {
         NativeDispatch::from_scheduled(dispatched)
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_spellchecking_language(&self, language: String) {
+        platform::linux::spelling::set_language(language);
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_spellchecking());
+        });
+    }
+
     fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {
         network::set(proxy);
         #[cfg(target_os = "linux")]

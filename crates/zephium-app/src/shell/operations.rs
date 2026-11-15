@@ -952,6 +952,9 @@ impl Shell {
         if self.proxy.apply(&key, &value) {
             self.engine.set_proxy(self.proxy.server());
         }
+        if key == "ui.language" {
+            self.engine.set_spellchecking_language(value.clone());
+        }
         if key == "tabs.automatic-pip" && value == "false" {
             self.engine.cancel_automatic_pip();
         }

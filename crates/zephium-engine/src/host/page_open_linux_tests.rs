@@ -2605,3 +2605,6 @@ fn native_page_print_is_refused_without_overriding_page_builtins() {
 
 #[path = "page_open_linux_handoff_tests.rs"]
 mod handoff_tests;
+
+#[path = "page_open_linux_spelling_tests.rs"]
+mod spelling_tests;
