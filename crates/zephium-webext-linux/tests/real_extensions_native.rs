@@ -446,9 +446,36 @@ fn dark_reader() {
             .open_page(ExtensionInstallId::from(INSTALL), PageKind::Popup, None)
             .expect("popup");
         pump(&mut host, Duration::from_secs(2));
-        let _ = evaluate(popup.view(), "return chrome.runtime.sendMessage({type:'ui-bg-toggle-active-tab'}).then(()=> 'sent');");
+        let persisted_disabled = format!(
+            "const p = await chrome.storage.local.get({{syncSettings:true}}); const v = await chrome.storage[p.syncSettings ? 'sync' : 'local'].get('disabledFor'); return Array.isArray(v.disabledFor) ? v.disabledFor.includes(new URL({}).host) : 'missing';",
+            serde_json::to_string(&fixture.url("/page")).unwrap(),
+        );
+        assert_eq!(
+            evaluate(popup.view(), &persisted_disabled),
+            "true",
+            "disabled site was saved"
+        );
+        let toggled = evaluate(popup.view(), "return chrome.runtime.sendMessage({type:'ui-bg-toggle-active-tab'}).then(()=> 'sent');");
+        assert_eq!(toggled, "sent");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut saved = String::new();
+        while Instant::now() < deadline {
+            pump(&mut host, Duration::from_millis(100));
+            saved = evaluate(popup.view(), &persisted_disabled);
+            if saved == "false" {
+                break;
+            }
+        }
+        assert_eq!(saved, "false", "re-enabled site was saved before shutdown");
+        println!("WEBEXT dark_reader reenabled_persisted=true");
         drop(popup);
-        pump(&mut host, Duration::from_secs(1));
+        let reenabled = frames(&mut host, &fixture, tab);
+        assert!(
+            reenabled
+                .iter()
+                .any(|(where_, l)| where_ == "top" && *l < 0.3),
+            "dark before restart: {reenabled:?}"
+        );
 
         host.close(tab);
         let mut drain = host.runtime.retire();
