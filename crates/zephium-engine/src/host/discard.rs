@@ -765,7 +765,8 @@ impl EngineHost {
             return false;
         }
         #[cfg(target_os = "linux")]
-        if self.page_permissions.has_pending_for(id)
+        if view.file_uploads.has_pending()
+            || self.page_permissions.has_pending_for(id)
             || self
                 .page_permissions
                 .pending_presence()

@@ -777,13 +777,13 @@ impl EngineHost {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         let load_page_permission_pending = page_permission_pending.clone();
         let presentation_permit = Arc::new(AtomicBool::new(false));
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let file_uploads = super::file_uploads::FileUploadBroker::new(
             event_permit.clone(),
             navigation.clone(),
             presentation_permit.clone(),
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let load_file_uploads = Rc::downgrade(&file_uploads);
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let http_auth = super::http_auth::HttpAuthBroker::new(
@@ -1410,6 +1410,12 @@ impl EngineHost {
                 })
             });
             let dialogs = Rc::downgrade(&script_dialogs);
+            let uploads = Rc::downgrade(&file_uploads);
+            builder = builder.with_linux_file_chooser_handler(move |page, request| {
+                uploads
+                    .upgrade()
+                    .is_some_and(|broker| broker.present(page, request))
+            });
             builder = builder.with_linux_script_dialog_handler(move |view, dialog| {
                 dialogs
                     .upgrade()
@@ -2079,7 +2085,7 @@ impl EngineHost {
                     if let Some(dialogs) = load_script_dialogs.upgrade() {
                         dialogs.navigation_started();
                     }
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
@@ -2707,7 +2713,11 @@ impl EngineHost {
             use wry::WebViewExtUnix;
             let dialogs = Rc::downgrade(&script_dialogs);
             use gtk::prelude::WidgetExt;
+            let uploads = Rc::downgrade(&file_uploads);
             view.webview().connect_unmap(move |_| {
+                if let Some(uploads) = uploads.upgrade() {
+                    uploads.cancel();
+                }
                 if let Some(dialogs) = dialogs.upgrade() {
                     dialogs.cancel();
                 }
@@ -3053,7 +3063,7 @@ impl EngineHost {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             popup_policy,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             file_uploads,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             http_auth,

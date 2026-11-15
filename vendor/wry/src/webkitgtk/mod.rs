@@ -1327,7 +1327,16 @@ impl InnerWebView {
       request.cancel();
       true
     });
-    webview.connect_run_file_chooser(|_, request| {
+    #[cfg(target_os = "linux")]
+    let file_chooser = attributes.linux_file_chooser_handler.take();
+    webview.connect_run_file_chooser(move |_page, request| {
+      #[cfg(target_os = "linux")]
+      if file_chooser.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_page, request)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       request.cancel();
       true
     });

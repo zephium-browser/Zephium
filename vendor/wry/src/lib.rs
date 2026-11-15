@@ -789,6 +789,8 @@ struct WebViewAttributes<'a> {
   #[cfg(target_os = "linux")]
   pub linux_download_handler: Option<LinuxDownloadHandler>,
   #[cfg(target_os = "linux")]
+  pub linux_file_chooser_handler: Option<LinuxFileChooserHandler>,
+  #[cfg(target_os = "linux")]
   pub linux_permission_handler: Option<LinuxPermissionHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
@@ -1068,6 +1070,8 @@ impl Default for WebViewAttributes<'_> {
       #[cfg(target_os = "linux")]
       linux_download_handler: None,
       #[cfg(target_os = "linux")]
+      linux_file_chooser_handler: None,
+      #[cfg(target_os = "linux")]
       linux_permission_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
@@ -1161,7 +1165,21 @@ type LinuxDownloadHandler = Rc<dyn Fn(&webkit2gtk::Download)>;
 #[cfg(target_os = "linux")]
 type LinuxPermissionHandler =
   Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::PermissionRequest) -> bool>;
+#[cfg(target_os = "linux")]
+type LinuxFileChooserHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::FileChooserRequest) -> bool>;
+
 impl<'a> WebViewBuilder<'a> {
+  /// Route native file selection to the owning tab. Unhandled requests cancel.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_file_chooser_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::FileChooserRequest) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_file_chooser_handler = Some(Box::new(handler));
+    self
+  }
+
   /// Route native GTK permission ownership to an explicit ordinary-page broker.
   #[cfg(target_os = "linux")]
   pub fn with_linux_permission_handler(

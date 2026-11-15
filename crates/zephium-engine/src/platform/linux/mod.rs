@@ -7,6 +7,7 @@ pub(crate) mod browsing_data;
 mod network;
 pub(crate) use network::apply_proxy;
 mod content_filter;
+mod file_selection;
 mod find;
 mod fullscreen;
 pub(crate) use fullscreen::{
@@ -449,6 +450,7 @@ pub fn configure(
         .website_data_manager()
         .ok_or("missing attested data manager")?;
     network::configure(&manager)?;
+    file_selection::disable_directories(&view)?;
 
     Ok(())
 }

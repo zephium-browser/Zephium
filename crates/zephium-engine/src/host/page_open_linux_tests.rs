@@ -2000,3 +2000,86 @@ fn native_timed_cookie_clear_is_unsupported_and_preserves_records() {
     script(&page, "document.title=document.cookie.includes('timed=retained')?'broker-kept-cookie':'unexpectedly-removed'");
     until(|| page.title().as_deref() == Some("broker-kept-cookie"));
 }
+
+fn upload_panel(id: ItemId) -> Option<gtk::FileChooserNative> {
+    let result = Rc::new(RefCell::new(None));
+    let slot = result.clone();
+    super::super::try_with(move |host| {
+        *slot.borrow_mut() = host
+            .views
+            .get(&id)
+            .and_then(|v| v.file_uploads.test_panel());
+    });
+    result.take()
+}
+
+#[test]
+#[ignore = "isolated GTK; files-only chooser, exact page files and lifecycle refusal"]
+fn native_uploads_return_only_chosen_regular_files_for_both_input_kinds() {
+    use std::os::unix::{ffi::OsStringExt, fs::symlink};
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["literal%20.txt", "space name.txt", "line\nbreak.txt"];
+    for name in names {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+    for directory in [false, true] {
+        for name in names {
+            script(&page, &format!("document.body.innerHTML='<input type=file {} style=\"position:absolute;left:0;top:0;width:300px;height:40px\">';document.querySelector('input').onchange=async e=>{{document.title=JSON.stringify(await Promise.all([...e.target.files].map(async f=>[f.name,f.webkitRelativePath,await f.text()])))}};document.title='upload-ready'",if directory { "webkitdirectory" } else { "" }));
+            until(|| page.title().as_deref() == Some("upload-ready"));
+            host.window.window().unwrap().focus(0);
+            until(|| host.window.is_active());
+            click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+            until(|| upload_panel(id).is_some());
+            let panel = upload_panel(id).unwrap();
+            assert_eq!(panel.action(), gtk::FileChooserAction::Open);
+            assert!(panel.filenames().is_empty());
+            let path = dir.path().join(name);
+            assert!(panel.select_filename(&path));
+            until(|| panel.filenames() == vec![path.clone()]);
+            panel.emit_by_name::<()>("response", &[&-3_i32]);
+            let expected = serde_json::json!([[name, null, name]]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+            eprintln!("files-only input directory={directory}: page name/content exact, relative path absent");
+        }
+    }
+    let link = dir.path().join("link.txt");
+    symlink(dir.path().join(names[0]), &link).unwrap();
+    let non_utf8 = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
+    std::fs::write(&non_utf8, "refused").unwrap();
+    for (path, accepted) in [(&link, true), (&non_utf8, false)] {
+        script(
+            &page,
+            "document.querySelector('input').value='';document.title='upload-ready'",
+        );
+        until(|| page.title().as_deref() == Some("upload-ready"));
+        host.window.window().unwrap().focus(0);
+        until(|| host.window.is_active());
+        click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+        until(|| upload_panel(id).is_some());
+        let panel = upload_panel(id).unwrap();
+        assert!(panel.select_filename(path));
+        until(|| panel.filenames() == vec![path.clone()]);
+        panel.emit_by_name::<()>("response", &[&-3_i32]);
+        if accepted {
+            let expected = serde_json::json!([[names[0], null, names[0]]]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+        } else {
+            script(&page,"document.title=document.querySelector('input').files.length===0?'refused':'leaked'");
+            until(|| page.title().as_deref() == Some("refused"));
+        }
+    }
+    script(&page, "document.title='lifecycle-ready'");
+    until(|| page.title().as_deref() == Some("lifecycle-ready"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+    until(|| upload_panel(id).is_some());
+    page.load_uri(&format!("{}/next", fixture.origin));
+    until(|| {
+        host.drain();
+        upload_panel(id).is_none() && page.title().as_deref() == Some("child")
+    });
+}

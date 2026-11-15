@@ -393,3 +393,8 @@ GTK TLS load failures retain native certificate-error categories for the shared
 error page. They never grant host-wide certificate exceptions; the Linux shell
 keeps continuation unavailable because the native API cannot scope by port or
 revoke an allowance.
+
+GTK file requests have an opt-in tab-owned callback; unowned requests and
+callback panics cancel. The embedder owns foreground/lifecycle validation,
+files-only native selection, no-follow regular-file validation and safe path
+encoding. Directory upload remains disabled; no privileged builder opts in.
