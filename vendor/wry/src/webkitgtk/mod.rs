@@ -1293,7 +1293,16 @@ impl InnerWebView {
       request.cancel();
       true
     });
-    webview.connect_script_dialog(|_, dialog| {
+    #[cfg(target_os = "linux")]
+    let script_dialog_handler = attributes.linux_script_dialog_handler.take();
+    webview.connect_script_dialog(move |_view, dialog| {
+      #[cfg(target_os = "linux")]
+      if script_dialog_handler.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_view, dialog)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       dialog.close();
       true
     });

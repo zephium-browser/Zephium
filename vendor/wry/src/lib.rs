@@ -784,6 +784,8 @@ struct WebViewAttributes<'a> {
   pub linux_navigation_action_handler: Option<Box<dyn Fn(&str, bool) -> bool>>,
   #[cfg(target_os = "linux")]
   pub linux_auth_handler: Option<LinuxAuthHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_script_dialog_handler: Option<LinuxScriptDialogHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1057,6 +1059,8 @@ impl Default for WebViewAttributes<'_> {
       linux_navigation_action_handler: None,
       #[cfg(target_os = "linux")]
       linux_auth_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_script_dialog_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1139,7 +1143,21 @@ pub struct WebViewBuilder<'a> {
 type LinuxAuthHandler =
   Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::AuthenticationRequest) -> bool>;
 
+#[cfg(target_os = "linux")]
+type LinuxScriptDialogHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool>;
+
 impl<'a> WebViewBuilder<'a> {
+  /// Route a retained GTK script dialog to the ordinary-page host.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_script_dialog_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_script_dialog_handler = Some(Box::new(handler));
+    self
+  }
+
   /// Route password challenges to an owned host responder. Unhandled requests cancel.
   #[cfg(target_os = "linux")]
   pub fn with_linux_auth_handler(

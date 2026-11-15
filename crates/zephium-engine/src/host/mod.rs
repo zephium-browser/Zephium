@@ -59,6 +59,8 @@ mod permits;
 mod popup_sites;
 mod profiles;
 mod resources;
+#[cfg(target_os = "linux")]
+mod script_dialogs;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod scriptlet_source;
 #[cfg(target_os = "macos")]
@@ -250,6 +252,8 @@ struct ObservedView {
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     http_auth: Rc<http_auth::HttpAuthBroker>,
+    #[cfg(target_os = "linux")]
+    script_dialogs: Rc<script_dialogs::ScriptDialogs>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
@@ -404,6 +408,8 @@ impl Drop for ObservedView {
         self.file_uploads.cancel();
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.http_auth.cancel();
+        #[cfg(target_os = "linux")]
+        self.script_dialogs.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()

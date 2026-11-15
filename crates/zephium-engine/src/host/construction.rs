@@ -801,6 +801,14 @@ impl EngineHost {
         let certificate_exceptions = self.certificate_exceptions_for(partition.profile());
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "linux")]
+        let script_dialogs = super::script_dialogs::ScriptDialogs::new(
+            event_permit.clone(),
+            navigation.clone(),
+            presentation_permit.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        let load_script_dialogs = Rc::downgrade(&script_dialogs);
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
@@ -1335,6 +1343,12 @@ impl EngineHost {
 
         #[cfg(target_os = "linux")]
         {
+            let dialogs = Rc::downgrade(&script_dialogs);
+            builder = builder.with_linux_script_dialog_handler(move |view, dialog| {
+                dialogs
+                    .upgrade()
+                    .is_some_and(|broker| broker.present(view, dialog))
+            });
             let action_app_link = app_link.clone();
             builder = builder.with_linux_navigation_action_handler(move |target, gesture| {
                 action_app_link(
@@ -1990,6 +2004,10 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(dialogs) = load_script_dialogs.upgrade() {
+                        dialogs.navigation_started();
+                    }
                     #[cfg(target_os = "macos")]
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
@@ -2607,6 +2625,13 @@ impl EngineHost {
         {
             use webkit2gtk::WebViewExt;
             use wry::WebViewExtUnix;
+            let dialogs = Rc::downgrade(&script_dialogs);
+            use gtk::prelude::WidgetExt;
+            view.webview().connect_unmap(move |_| {
+                if let Some(dialogs) = dialogs.upgrade() {
+                    dialogs.cancel();
+                }
+            });
             super::page_open::install_linux_menu(
                 &view.webview(),
                 id.clone(),
@@ -2924,6 +2949,8 @@ impl EngineHost {
             file_uploads,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             http_auth,
+            #[cfg(target_os = "linux")]
+            script_dialogs,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificates,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]

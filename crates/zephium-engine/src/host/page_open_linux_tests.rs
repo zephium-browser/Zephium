@@ -811,3 +811,40 @@ fn native_http_auth_uses_shared_prompt_and_responder() {
     });
     assert!(has_view(id));
 }
+
+#[test]
+#[ignore = "requires isolated GTK display; localhost alert and confirm only"]
+fn native_script_dialogs_settle_and_cancel_with_the_tab() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "alert('fixture');document.title='alert-returned'");
+    let mut panel = None;
+    until(|| {
+        panel = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Dialog>().ok())
+            .find(|dialog| dialog.is_visible());
+        panel.is_some()
+    });
+    let panel = panel.unwrap();
+    assert_eq!(panel.transient_for().as_ref(), Some(&host.window));
+    panel.response(gtk::ResponseType::Ok);
+    until(|| page.title().as_deref() == Some("alert-returned"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    script(
+        &page,
+        "document.title=confirm('fixture')?'accepted':'cancelled'",
+    );
+    let mut panel = None;
+    until(|| {
+        panel = gtk::Window::list_toplevels()
+            .into_iter()
+            .filter_map(|widget| widget.downcast::<gtk::Dialog>().ok())
+            .find(|dialog| dialog.is_visible());
+        panel.is_some()
+    });
+    panel.unwrap().response(gtk::ResponseType::Cancel);
+    until(|| page.title().as_deref() == Some("cancelled"));
+}

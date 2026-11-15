@@ -372,3 +372,7 @@ Linux ordinary tabs can opt into an owned password-challenge callback. Missing,
 panicking or unhandled callbacks cancel; the host responder is single-use,
 cancels on drop and never requests native credential persistence. Server-trust
 and client-certificate challenges remain denied.
+Linux script dialogs similarly require explicit host ownership. The ordinary-tab
+host retains the native completion, bounds message/default text before copying,
+uses a transient GTK dialog, and cancels on navigation, hiding or retirement.
+Privileged and agent views keep the default close-without-prompt behavior.
