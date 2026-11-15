@@ -1870,6 +1870,11 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             popup.view(),
             r#"globalThis.result=null;(async()=>{
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
+ const captureErrors=[];
+ const captureWindow=await chrome.windows.getCurrent();
+ for(const format of ['png','jpeg']){
+   try{await chrome.tabs.captureVisibleTab(captureWindow.id,{format});captureErrors.push('unexpected success')}catch(error){captureErrors.push(error.message)}
+ }
  const created=await chrome.tabs.create({url:'popup.html#created'});
  await chrome.tabs.update(created.id,{url:'popup.html#updated'});
  const tabCount=(await chrome.tabs.query({})).length;
@@ -1899,7 +1904,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1921,6 +1926,10 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert_eq!(result["restoreError"], "This function is not supported.");
     assert_eq!(result["languageError"], "This function is not supported.");
     assert_eq!(result["managementError"], "This function is not supported.");
+    assert_eq!(
+        result["captureErrors"],
+        json!(vec!["This function is not supported."; 2])
+    );
     assert_eq!(
         result["unavailableErrors"],
         json!(vec!["This function is not supported."; 2])

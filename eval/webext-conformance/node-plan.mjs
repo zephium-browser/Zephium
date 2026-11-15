@@ -45,6 +45,7 @@ const missing = {
   "offscreen-dom-parser": "Real hidden document and native DOMParser, with runtime message delivery.",
   "content-file-authority": "Requires native file-pattern admission and page injection.",
   "webrequest-handler-cache": "Real profile memory and back-forward cache invalidation; native completion required.",
+  "tabs-capture-visible": "Real browser capture and requested image encoding need a native visible document.",
   "management-surface": "Permissioned management surface requires native extension context; operations remain unavailable.",
   "declarative-content-surface": "Native capability-denied custom constructors; presence only, rule execution remains unavailable.",
   "action-image-data": "Native canvas ImageData and packaged icon decoding.",

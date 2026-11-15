@@ -336,14 +336,6 @@ impl RuntimeEngine for EngineSide {
                         });
                 }
             }
-            BrowserCall::Capture {
-                request, tab, jpeg, ..
-            } => {
-                let _ = jpeg;
-                super::dispatch::best_effort_with(move |host| {
-                    host.capture_for_extension(profile, tab, request)
-                });
-            }
         }
     }
 }
@@ -1163,19 +1155,6 @@ impl LinuxExtensions {
         }
     }
 
-    pub(super) fn settle_capture(
-        &mut self,
-        profile: ProfileId,
-        request: u64,
-        result: Result<String, String>,
-    ) {
-        if let Some(entry) = self.profiles.get(&profile) {
-            entry
-                .runtime
-                .settle_browser(request, BrowserSettlement::Capture(result));
-        }
-    }
-
     pub(super) fn actions(
         &mut self,
         profile: ProfileId,
@@ -1537,45 +1516,6 @@ impl super::EngineHost {
     ) -> bool {
         self.webext_linux
             .settle_browser_request(profile, request, settlement)
-    }
-
-    fn capture_for_extension(&mut self, profile: ProfileId, tab: ItemId, request: u64) {
-        let Some(url) = self
-            .views
-            .get(&tab)
-            .filter(|_| {
-                self.partitions
-                    .get(&tab)
-                    .is_some_and(|partition| partition.profile() == profile)
-            })
-            .and_then(|view| view.navigation.committed_snapshot())
-            .map(|(_, committed)| committed)
-        else {
-            self.webext_linux.settle_capture(
-                profile,
-                request,
-                Err("Cannot capture a tab that is not shown.".into()),
-            );
-            return;
-        };
-        self.capture_tab_preview(
-            tab,
-            url,
-            Box::new(move |bytes| {
-                super::dispatch::best_effort_with(move |host| {
-                    let result = bytes
-                        .map(|bytes| {
-                            use base64::Engine as _;
-                            format!(
-                                "data:image/jpeg;base64,{}",
-                                base64::engine::general_purpose::STANDARD.encode(bytes)
-                            )
-                        })
-                        .ok_or_else(|| "Failed to capture tab: the tab is not visible.".to_owned());
-                    host.webext_linux.settle_capture(profile, request, result);
-                });
-            }),
-        );
     }
 }
 

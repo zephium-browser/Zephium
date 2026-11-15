@@ -103,17 +103,6 @@ pub enum BrowserCall {
         /// The tab.
         tab: ItemId,
     },
-    /// Capture the visible tab; answer with [`BrowserSettlement::Capture`].
-    Capture {
-        /// The request.
-        request: u64,
-        /// The tab.
-        tab: ItemId,
-        /// PNG when false, JPEG when true.
-        jpeg: bool,
-        /// JPEG quality.
-        quality: Option<u8>,
-    },
 }
 
 /// The engine's answer to a [`BrowserCall`].
@@ -125,8 +114,6 @@ pub enum BrowserSettlement {
     Data(ExtensionDataReply),
     /// The person answered a prompt.
     Prompt(bool),
-    /// A capture finished: a `data:` URL, or why not.
-    Capture(Result<String, String>),
 }
 
 /// Work the runtime's GTK side performs after a dispatch.
@@ -244,7 +231,6 @@ enum Shape {
         args: Vec<Value>,
     },
     Prompt(PermissionRequest),
-    Capture,
     Inject {
         request: scripting::Request,
         jobs: Vec<FrameJob>,
@@ -858,9 +844,6 @@ impl Shared {
                 }
                 Ok(Value::Bool(false))
             }
-            (Shape::Capture, BrowserSettlement::Capture(result)) => {
-                result.map(Value::String).map_err(ApiError::other)
-            }
             _ => Err(ApiError::context_invalidated()),
         };
         Some(Finished::Reply(pending.responder, result))
@@ -1458,27 +1441,7 @@ impl BrowserState {
                 ),
                 None => self.refuse(invocation),
             },
-            Request::Capture {
-                tab_id,
-                format,
-                quality,
-                ..
-            } => {
-                let Some(tab) = self.tabs.key(tab_id) else {
-                    return invocation
-                        .reply(Err(ApiError::other(format!("No tab with id: {tab_id}."))));
-                };
-                self.pend(
-                    invocation,
-                    Shape::Capture,
-                    Some(Outgoing::Engine(BrowserCall::Capture {
-                        request: 0,
-                        tab,
-                        jpeg: format != "png",
-                        quality,
-                    })),
-                )
-            }
+            Request::Capture { .. } => self.refuse(invocation),
             Request::DetectLanguage { .. } => self.refuse(invocation),
             Request::Discard { .. } => self.refuse(invocation),
         }
@@ -1691,14 +1654,6 @@ fn with_request(call: BrowserCall, id: u64) -> BrowserCall {
             warnings,
             permissions,
             patterns,
-        },
-        BrowserCall::Capture {
-            tab, jpeg, quality, ..
-        } => BrowserCall::Capture {
-            request: id,
-            tab,
-            jpeg,
-            quality,
         },
         other => other,
     }

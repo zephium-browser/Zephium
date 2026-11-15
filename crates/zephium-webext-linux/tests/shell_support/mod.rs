@@ -312,10 +312,6 @@ impl Host {
                         self.runtime
                             .settle_browser(request, BrowserSettlement::Prompt(allowed));
                     }
-                    BrowserCall::Capture { request, .. } => self.runtime.settle_browser(
-                        request,
-                        BrowserSettlement::Capture(Err("Capture is not available.".into())),
-                    ),
                     _ => {}
                 }
             }

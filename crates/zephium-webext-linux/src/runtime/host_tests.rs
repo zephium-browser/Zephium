@@ -308,6 +308,88 @@ fn sessions_restore_refuses_before_queuing_a_browser_mutation() {
     }
 }
 
+#[test]
+fn visible_capture_refuses_without_queuing_engine_work() {
+    use crate::bridge::BridgeViewId;
+    use zephium_core::extensions::{
+        ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+        ExtensionBrowserWindow,
+    };
+    use zephium_webext_runtime::context::FrameId;
+    let mut h = Harness::new();
+    let mut install = admitted(h.install);
+    let manifest = Manifest::from_value(json!({
+        "manifest_version": 3, "name": "capture", "version": "1.0",
+        "host_permissions": ["<all_urls>"], "background": {"service_worker": "sw.js"}
+    }));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    install.manifest = manifest;
+    install.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(install, &Activation::Installed, &mut Outbox::default());
+    let (sender, _, _) = h.boot(&[]);
+    let url = Url::parse("https://capture.test/").unwrap();
+    let item = ItemId::from(10);
+    let tab =
+        ExtensionBrowserTab::from_snapshot(None, item, true, "capture", Some(&url), false, false)
+            .unwrap();
+    let window = ExtensionBrowserWindow::new(7, false, Some(item), vec![tab]).unwrap();
+    h.host.browser.publish_surface(
+        ExtensionBrowserSurface::new(
+            ProfileId::from(1),
+            ExtensionBrowserSurfaceGeneration::new(1).unwrap(),
+            Some(7),
+            vec![window],
+        )
+        .unwrap(),
+    );
+    h.host.frame_lifecycle(
+        &FrameLifecycle::DocumentCreated {
+            view: BridgeViewId(99),
+            owner: ViewRef::Tab(item),
+            frame: FrameId::MAIN,
+            parent: None,
+            opaque: false,
+            creator: None,
+            document: DocumentGeneration::new(42).unwrap(),
+            url,
+        },
+        &mut Outbox::default(),
+    );
+    h.host.browser.take_outgoing();
+    let window_id = replies(&h.call(&sender, "windows.getCurrent", json!([])))[0]
+        .as_ref()
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    for args in [
+        json!([]),
+        json!([window_id, {"format":"png"}]),
+        json!([window_id, {"format":"jpeg","quality":80}]),
+    ] {
+        let out = h.call(&sender, "tabs.captureVisibleTab", args);
+        assert_eq!(
+            replies(&out),
+            vec![Err("This function is not supported.".into())]
+        );
+        assert!(h.host.browser.take_outgoing().is_empty());
+    }
+    let out = h.call(
+        &sender,
+        "tabs.captureVisibleTab",
+        json!([window_id, {"format":"invalid"}]),
+    );
+    let values = replies(&out);
+    assert!(values[0].is_err());
+    assert_ne!(values[0], Err("This function is not supported.".into()));
+    assert!(h.host.browser.take_outgoing().is_empty());
+}
+
 fn events(out: &Outbox) -> Vec<(EventSeq, String, Value)> {
     decoded(out)
         .into_iter()

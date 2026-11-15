@@ -25,8 +25,10 @@ enum Uses {
     Key(&'static str),
     /// A boolean capability on an entry in a manifest array.
     ArrayFlag(&'static str, &'static str),
+    /// An exact string capability in a manifest array.
+    ArrayValue(&'static str, &'static str),
 }
-use Uses::{ArrayFlag, Key, Permission};
+use Uses::{ArrayFlag, ArrayValue, Key, Permission};
 
 /// What each platform's runtime lacks today, in the order shown. A platform
 /// is left out of a row's mask when it supports the feature or has not been
@@ -218,6 +220,11 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
+        &[Permission("activeTab"), ArrayValue("host_permissions", "<all_urls>")],
+        "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
+        LIN,
+    ),
+    (
         &[Permission("webRequest")],
         "Request observation is nonblocking, with WebKit-provided headers and generic net::ERR_FAILED errors; it omits workers, WebSockets, service-worker fetches, authentication, unreported redirects and requests outside initially matching filters",
         LIN,
@@ -338,6 +345,13 @@ pub fn limitations(manifest: &Manifest, permissions: &[String], platform: Platfo
                         permission == name || (name.ends_with('.') && permission.starts_with(name))
                     }),
                     Key(path) => declares(manifest.raw(), path),
+                    ArrayValue(path, value) => manifest
+                        .raw()
+                        .get(path)
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| entry.as_str() == Some(value))
+                        }),
                     ArrayFlag(path, flag) => manifest
                         .raw()
                         .get(path)
@@ -373,6 +387,20 @@ mod tests {
     fn assess(raw: Value, platform: Platform) -> Vec<String> {
         let manifest = Manifest::from_value(raw);
         limitations(&manifest, &manifest.permissions(), platform)
+    }
+
+    #[test]
+    fn capture_warning_requires_a_declared_capture_capability() {
+        let partial = json!({"manifest_version":3,"host_permissions":["https://example.test/*"]});
+        assert!(assess(partial, Platform::Linux).is_empty());
+        for raw in [
+            json!({"manifest_version":3,"host_permissions":["<all_urls>"]}),
+            json!({"manifest_version":3,"permissions":["activeTab"]}),
+        ] {
+            assert_eq!(assess(raw.clone(), Platform::Linux), ["Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available"]);
+            assert!(assess(raw.clone(), Platform::Macos).is_empty());
+            assert!(assess(raw, Platform::Windows).is_empty());
+        }
     }
 
     #[test]
@@ -530,6 +558,7 @@ mod tests {
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Can read browser windows but can't create, resize, focus or close them through the extension API",
                 "Can't detect the language of a tab",
+                "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
                 "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
