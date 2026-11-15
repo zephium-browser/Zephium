@@ -82,6 +82,10 @@ impl Fixture {
                     let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"fixture\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     continue;
                 }
+                if line.contains(" /digest ") && !valid_digest_fixture(&request) {
+                    let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"fixture\", nonce=\"local-nonce\", algorithm=MD5, qop=\"auth\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 if let Some(capability) = line
                     .split(" /permission-child?")
                     .nth(1)
@@ -1735,4 +1739,80 @@ fn native_beforeunload_can_keep_or_leave_the_document() {
     page.load_uri(&format!("{}/leave", fixture.origin));
     visible_dialog().response(gtk::ResponseType::Ok);
     until(|| !page.is_loading() && page.title().as_deref() == Some("child"));
+}
+
+fn valid_digest_fixture(request: &str) -> bool {
+    let Some(header) = request
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| value.trim().strip_prefix("Digest "))
+    else {
+        return false;
+    };
+    let fields: std::collections::HashMap<_, _> = header
+        .split(',')
+        .filter_map(|field| field.trim().split_once('='))
+        .map(|(name, value)| (name, value.trim_matches('"')))
+        .collect();
+    if fields.get("username") != Some(&"fixture")
+        || fields.get("realm") != Some(&"fixture")
+        || fields.get("nonce") != Some(&"local-nonce")
+        || fields.get("uri") != Some(&"/digest")
+        || fields.get("qop") != Some(&"auth")
+    {
+        return false;
+    }
+    let (Some(cnonce), Some(nc), Some(response)) = (
+        fields.get("cnonce"),
+        fields.get("nc"),
+        fields.get("response"),
+    ) else {
+        return false;
+    };
+    let hash = |text: &str| {
+        let mut checksum = gtk::glib::Checksum::new(gtk::glib::ChecksumType::Md5).unwrap();
+        checksum.update(text.as_bytes());
+        checksum.string().unwrap()
+    };
+    let expected = hash(&format!(
+        "{}:local-nonce:{nc}:{cnonce}:auth:{}",
+        hash("fixture:fixture:fixture"),
+        hash("GET:/digest")
+    ));
+    *response == expected
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; loopback fixture credentials only"]
+fn native_digest_auth_uses_shared_prompt_and_verified_response() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&format!("{}/digest", fixture.origin));
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::HttpAuthRequested { id: owner, prompt } = event {
+                assert_eq!(owner, id);
+                assert!(prompt.insecure);
+                assert!(!prompt.proxy);
+                request = Some(prompt.request);
+            }
+        }
+        request.is_some()
+    });
+    assert_eq!(
+        host.engine.answer_http_auth(
+            id,
+            request.unwrap(),
+            zephium_core::http_auth::HttpCredentials::new("fixture".into(), "fixture".into())
+        ),
+        NativeDispatch::Scheduled
+    );
+    until(|| {
+        host.drain();
+        page.title().as_deref() == Some("child") && !page.is_loading()
+    });
+    assert!(has_view(id));
 }
