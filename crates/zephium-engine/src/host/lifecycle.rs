@@ -241,7 +241,7 @@ impl EngineHost {
         }
         #[cfg(target_os = "macos")]
         self.webext.close_page(id);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.revoke_page_permission_requests_for_close(id);
         let profile = self
             .partitions

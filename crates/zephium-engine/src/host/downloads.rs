@@ -314,7 +314,7 @@ impl Downloads {
     }
     /// Admitted macOS transfers keep their WKDownload without the page; only
     /// an unanswered destination decision still depends on it.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(in crate::host) fn has_pending_decision(&self, profile: ProfileId) -> bool {
         self.active.try_borrow().map_or(true, |active| {
             active

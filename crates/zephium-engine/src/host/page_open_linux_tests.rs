@@ -82,6 +82,19 @@ impl Fixture {
                     let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"fixture\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     continue;
                 }
+                if let Some(capability) = line
+                    .split(" /permission-child?")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                {
+                    let body = format!(
+                        "<!doctype html><body><script>{}</script>",
+                        permission_fixture_script(capability)
+                    );
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = stream.write_all(response.as_bytes());
+                    continue;
+                }
                 let page = line.contains(" /page ");
                 let body = if page {
                     "<!doctype html><title>ready</title><style>a,button{position:absolute;left:0;width:200px;height:40px}#blank{top:0}#link{top:60px}#script{top:120px}#post{top:180px}</style><a id=blank href='/blank' target=_blank>blank</a><a id=link href='/link'>link</a><button id=script onclick=\"window.open('/script')\">script</button><form action='/post' method=post target=_blank><input name=proof value=preserved><button id=post>post</button></form>"
@@ -1326,4 +1339,336 @@ fn native_download_uses_shared_confirmation_and_secure_publication() {
         result.is_some()
     });
     assert!(matches!(result, Some(DownloadResponse::Updates { entries, .. }) if entries.len()==1));
+}
+
+struct RawNativeHarness {
+    _data: tempfile::TempDir,
+    page: webkit2gtk::WebView,
+    window: gtk::Window,
+}
+impl RawNativeHarness {
+    fn new() -> Self {
+        Self::create(true)
+    }
+    fn create(private: bool) -> Self {
+        crate::enforce_runtime_security_floor().unwrap();
+        gtk::init().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let manager = if private {
+            webkit2gtk::WebsiteDataManager::new_ephemeral()
+        } else {
+            webkit2gtk::WebsiteDataManager::builder()
+                .base_data_directory(data.path().to_str().unwrap())
+                .base_cache_directory(data.path().to_str().unwrap())
+                .build()
+        };
+        let context = webkit2gtk::WebContext::builder()
+            .website_data_manager(&manager)
+            .process_swap_on_cross_site_navigation_enabled(true)
+            .build();
+        context.set_sandbox_enabled(true);
+        assert!(context.is_sandbox_enabled());
+        let page = webkit2gtk::WebView::with_context(&context);
+        let settings = webkit2gtk::WebViewExt::settings(&page).unwrap();
+        settings.set_enable_media_stream(true);
+        settings.set_enable_mock_capture_devices(true);
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_default_size(800, 600);
+        window.add(&page);
+        window.show_all();
+        window.present();
+        window.window().unwrap().focus(0);
+        until(|| window.is_active());
+        Self {
+            page,
+            window,
+            _data: data,
+        }
+    }
+}
+impl Drop for RawNativeHarness {
+    fn drop(&mut self) {
+        self.page.stop_loading();
+        self.window.close();
+    }
+}
+
+#[test]
+#[ignore = "isolated GTK; verifies missing directory-request metadata without disclosing files"]
+fn native_file_and_directory_requests_have_indistinguishable_public_metadata() {
+    use webkit2gtk::FileChooserRequestExt;
+    let host = RawNativeHarness::new();
+    let fixture = Fixture::new();
+    let requests = Rc::new(RefCell::new(Vec::new()));
+    let observed = requests.clone();
+    host.page.connect_run_file_chooser(move |_, request| {
+        observed.borrow_mut().push((
+            request.selects_multiple(),
+            request.mime_types(),
+            request.selected_files(),
+        ));
+        request.cancel();
+        true
+    });
+    host.page.load_uri(&format!("{}/page", fixture.origin));
+    until(|| host.page.title().as_deref() == Some("ready"));
+    script(&host.page, "document.body.innerHTML='<input type=file accept=\"text/plain\" style=\"position:absolute;top:0;left:0;width:200px;height:40px\"><input type=file webkitdirectory accept=\"text/plain\" style=\"position:absolute;top:60px;left:0;width:200px;height:40px\">';document.title='inputs-ready'");
+    until(|| host.page.title().as_deref() == Some("inputs-ready"));
+    click(&host.page, 20, 1, gtk::gdk::ModifierType::empty());
+    until(|| requests.borrow().len() == 1);
+    click(&host.page, 80, 1, gtk::gdk::ModifierType::empty());
+    until(|| requests.borrow().len() == 2);
+    assert_eq!(requests.borrow()[0], requests.borrow()[1]);
+}
+
+#[test]
+#[ignore = "isolated GTK; real WebKit Permissions Policy, mock capture, no device grants"]
+fn native_permission_policy_requires_explicit_cross_origin_delegation() {
+    use webkit2gtk::{PermissionRequestExt, UserMediaPermissionRequestExt};
+    let first = Fixture::new();
+    let second = Fixture::new();
+    let mut failures = Vec::new();
+    for capability in ["camera", "microphone", "geolocation", "notifications"] {
+        for frame in [
+            "cross-deny",
+            "cross-allow",
+            "same",
+            "srcdoc",
+            "blank",
+            "top",
+        ] {
+            let host = RawNativeHarness::create(capability != "notifications");
+            let count = Rc::new(std::cell::Cell::new(0));
+            let seen = count.clone();
+            host.page.connect_permission_request(move |_, request| {
+                let relevant = match capability {
+                    "camera" => request
+                        .downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
+                        .is_some_and(|r| r.is_for_video_device()),
+                    "microphone" => request
+                        .downcast_ref::<webkit2gtk::UserMediaPermissionRequest>()
+                        .is_some_and(|r| r.is_for_audio_device()),
+                    "geolocation" => request.is::<webkit2gtk::GeolocationPermissionRequest>(),
+                    "notifications" => request.is::<webkit2gtk::NotificationPermissionRequest>(),
+                    _ => false,
+                };
+                if relevant {
+                    seen.set(seen.get() + 1);
+                }
+                request.deny();
+                true
+            });
+            host.page.load_uri(&format!("{}/page", first.origin));
+            until(|| host.page.title().as_deref() == Some("ready"));
+            let child = permission_fixture_script(capability);
+            let source = match frame {
+                "cross-deny" | "cross-allow" | "same" => {
+                    let origin = if frame=="same" { &first.origin } else { &second.origin };
+                    let allow = if frame=="cross-allow" { "camera; microphone; geolocation" } else { "" };
+                    format!("const f=document.createElement('iframe');f.allow={};f.src={};document.body.append(f);", serde_json::to_string(allow).unwrap(), serde_json::to_string(&format!("{origin}/permission-child?{capability}")).unwrap())
+                },
+                "srcdoc" => format!("const f=document.createElement('iframe');f.srcdoc={};document.body.append(f);", serde_json::to_string(&format!("<body><script>{child}</script>")).unwrap()),
+                "top" => child.clone(),
+                "blank" => format!("const f=document.createElement('iframe');document.body.append(f);f.contentDocument.write({});f.contentDocument.close();", serde_json::to_string(&format!("<body><script>{child}</script>")).unwrap()),
+                _ => unreachable!(),
+            };
+            let finished = Rc::new(std::cell::Cell::new(false));
+            let done = finished.clone();
+            host.page.evaluate_javascript(&format!("window.addEventListener('message',e=>{{if(e.data==='permission-failed'||e.data==='notification-ready')document.title=e.data}});{source};document.querySelector('iframe')?.setAttribute('style','position:fixed;left:0;top:0;width:300px;height:100px;z-index:999999')"), None,None,None::<&gtk::gio::Cancellable>,move |result| { result.unwrap(); done.set(true); });
+            if capability == "notifications" {
+                until(|| {
+                    finished.get() && host.page.title().as_deref() == Some("notification-ready")
+                });
+                click(&host.page, 20, 1, gtk::gdk::ModifierType::empty());
+            }
+            until(|| finished.get() && host.page.title().as_deref() == Some("permission-failed"));
+            let actual = count.get();
+            let expected = if frame == "cross-deny"
+                || (capability == "notifications" && frame == "cross-allow")
+            {
+                0
+            } else {
+                1
+            };
+            eprintln!(
+                "policy {capability} {frame}: signals={actual}, page=refused, expected={expected}"
+            );
+            if actual != expected {
+                failures.push(format!(
+                    "{capability}/{frame}: {actual}, expected {expected}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "native policy qualification failed: {failures:?}"
+    );
+}
+
+fn permission_fixture_script(capability: &str) -> String {
+    let operation = match capability {
+        "camera" => "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());parent.postMessage('unexpected-grant','*')},fail)",
+        "microphone" => "navigator.mediaDevices.getUserMedia({audio:true}).then(s=>{s.getTracks().forEach(t=>t.stop());parent.postMessage('unexpected-grant','*')},fail)",
+        "geolocation" => "navigator.geolocation.getCurrentPosition(()=>parent.postMessage('unexpected-grant','*'),fail,{timeout:3000})",
+        "notifications" => "const b=document.createElement('button');b.style='position:fixed;top:0;left:0;width:200px;height:40px';b.textContent='Request';b.onclick=()=>Notification.requestPermission().then(fail,fail);document.body.append(b);parent.postMessage('notification-ready','*')",
+        _ => "fail()",
+    };
+    format!("const fail=()=>parent.postMessage('permission-failed','*');try{{{operation}}}catch(e){{fail()}}")
+}
+
+#[test]
+#[ignore = "isolated GTK; shared consent, mock camera, capture observation and native stop"]
+fn native_permissions_use_shared_consent_and_revoke_capture() {
+    use zephium_core::permissions::{
+        PagePermissionKind, PagePermissionRequestKind, PagePermissionRequestSettlement,
+    };
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let settings = webkit2gtk::WebViewExt::settings(&page).unwrap();
+    settings.set_enable_media_stream(true);
+    settings.set_enable_mock_capture_devices(true);
+    script(&page, "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{window.stream=s;s.getTracks()[0].onended=()=>document.title='stopped';document.title='capturing'},e=>document.title='denied')");
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::PermissionRequested {
+                id: owner,
+                request: r,
+                ..
+            } = event
+            {
+                assert_eq!(owner, id);
+                request = Some(r);
+            }
+        }
+        request.is_some()
+    });
+    let request = request.unwrap();
+    assert_eq!(request.origin.as_str(), fixture.origin);
+    assert_eq!(
+        request.kind,
+        PagePermissionRequestKind::Single(PagePermissionKind::Camera)
+    );
+    assert_eq!(
+        host.engine.settle_page_permission_request(
+            host.profile,
+            id,
+            request.id,
+            PagePermissionRequestSettlement::Allow
+        ),
+        NativeDispatch::Scheduled
+    );
+    let mut capture = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::MediaCaptureChanged {
+                id: owner,
+                navigation,
+                state,
+            } = event
+            {
+                if owner == id && state.is_capturing() {
+                    capture = Some(navigation);
+                }
+            }
+        }
+        capture.is_some() && page.title().as_deref() == Some("capturing")
+    });
+    assert_eq!(
+        host.engine.stop_media_capture(id, capture.unwrap()),
+        NativeDispatch::Scheduled
+    );
+    until(|| {
+        page.title().as_deref() == Some("stopped")
+            && page.camera_capture_state() == webkit2gtk::MediaCaptureState::None
+    });
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
+    page.load_uri(&format!("{}/again", fixture.origin));
+    until(|| {
+        host.drain();
+        !page.is_loading() && page.is_mapped()
+    });
+    script(&page, "navigator.mediaDevices.getUserMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected-cached-grant'},()=>document.title='denied')");
+    let mut second = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::PermissionRequested { request, .. } = event {
+                second = Some(request.id);
+            }
+        }
+        second.is_some() || page.title().as_deref() == Some("unexpected-cached-grant")
+    });
+    assert!(
+        second.is_some(),
+        "native permission cache bypassed the next document's broker"
+    );
+    page.load_uri(&format!("{}/next", fixture.origin));
+    until(|| {
+        host.drain();
+        !page.is_loading()
+    });
+    assert_eq!(
+        host.engine.settle_page_permission_request(
+            host.profile,
+            id,
+            second.unwrap(),
+            PagePermissionRequestSettlement::Allow
+        ),
+        NativeDispatch::Scheduled
+    );
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
+}
+
+#[test]
+#[ignore = "isolated GTK; display-capture activation policy with denied mock requests"]
+fn native_display_capture_requires_activation_before_permission() {
+    use webkit2gtk::PermissionRequestExt;
+    let host = RawNativeHarness::new();
+    let fixture = Fixture::new();
+    let requests = Rc::new(std::cell::Cell::new(0));
+    let observed = requests.clone();
+    host.page.connect_permission_request(move |_, request| {
+        observed.set(observed.get() + 1);
+        request.deny();
+        true
+    });
+    host.page.load_uri(&format!("{}/page", fixture.origin));
+    until(|| host.page.title().as_deref() == Some("ready"));
+    script(&host.page,"navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title=e.name)");
+    until(|| host.page.title().as_deref() != Some("ready"));
+    assert_eq!(host.page.title().as_deref(), Some("InvalidStateError"));
+    assert_eq!(requests.get(), 0);
+    script(&host.page,"document.querySelector('#script').onclick=()=>navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title='display-failed');document.title='display-ready'");
+    until(|| host.page.title().as_deref() == Some("display-ready"));
+    click(&host.page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| host.page.title().as_deref() == Some("display-failed"));
+    assert_eq!(requests.get(), 1, "no positive native activation control");
+}
+
+#[test]
+#[ignore = "isolated GTK and private D-Bus without a desktop portal; no real capture"]
+fn native_display_capture_fails_cleanly_without_portal() {
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.querySelector('#script').onclick=()=>navigator.mediaDevices.getDisplayMedia({video:true}).then(s=>{s.getTracks().forEach(t=>t.stop());document.title='unexpected'},e=>document.title='display-failed');document.title='display-ready'");
+    until(|| page.title().as_deref() == Some("display-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("display-failed"));
+    assert!(!host
+        .drain()
+        .iter()
+        .any(|event| matches!(event, EngineEvent::PermissionRequested { .. })));
+    assert_eq!(
+        page.camera_capture_state(),
+        webkit2gtk::MediaCaptureState::None
+    );
 }

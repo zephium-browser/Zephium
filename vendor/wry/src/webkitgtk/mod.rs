@@ -1195,7 +1195,16 @@ impl InnerWebView {
     // brokers and allows it. `Default` is also fail-closed in this fork: it
     // must never delegate to an unlabelled native WebKit prompt.
     let permission_handler = attributes.permission_handler.take();
+    #[cfg(target_os = "linux")]
+    let native_permission_handler = attributes.linux_permission_handler.take();
     webview.connect_permission_request(move |_webview, request| {
+      #[cfg(target_os = "linux")]
+      if native_permission_handler
+        .as_ref()
+        .is_some_and(|handler| handler(_webview, request))
+      {
+        return true;
+      }
       let response_for = |kind| {
         permission_handler
           .as_ref()

@@ -382,3 +382,9 @@ Privileged and agent views keep the default close-without-prompt behavior.
   absent ownership cancels. Explicit deny policy remains dominant. Brokered
   blob/data navigation actions become downloads, never top-level documents.
   Destination consent, publication protection and lifecycle belong to the host.
+
+Linux ordinary views may install a native permission-request owner before loading.
+Unhandled requests remain denied; the host retains bounded native completions
+and owns foreground, navigation, shared consent and capture revocation checks.
+No native origin is invented by Wry; the host relies on qualified WebKitGTK
+Permissions Policy before applying its top-level-origin attribution.

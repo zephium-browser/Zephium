@@ -48,7 +48,7 @@ mod navigation;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod page_open;
 mod page_ops;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod page_permissions;
 #[cfg(all(
     feature = "agentic-browser",
@@ -119,7 +119,7 @@ pub(crate) use dispatch::try_with_agent_context_terminal;
 pub(crate) use dispatch::try_with_discard_state_erasure;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) use dispatch::with_page_permission_terminal;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent_context};
@@ -254,6 +254,10 @@ struct ObservedView {
     http_auth: Rc<http_auth::HttpAuthBroker>,
     #[cfg(target_os = "linux")]
     script_dialogs: Rc<script_dialogs::ScriptDialogs>,
+    #[cfg(target_os = "linux")]
+    permission_requests: Rc<page_permissions::LinuxRequests>,
+    #[cfg(target_os = "linux")]
+    _capture_observer: page_permissions::CaptureObserver,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
@@ -591,7 +595,7 @@ pub(crate) struct EngineHost {
     // Allocates only after an explicit Shell publication. Ordinary inert
     // startup retains the empty map and creates no native delegate graph.
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     page_permissions: page_permissions::PagePermissionBroker,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,

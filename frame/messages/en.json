@@ -3924,6 +3924,7 @@
   "site_data_clear_failed": "Couldn't clear the data of {site}",
   "native_clear_data_for_this_site_more": "Clear Data for This Site…",
   "page_permission_private": "Private windows don't save this choice.",
+  "page_permission_devices_unavailable": "Camera or microphone access is unavailable on this system.",
   "page_permission_location_off": "Turn on Location Services for Zephium in System Settings › Privacy & Security.",
   "launcher_results_count": "Results: {count}",
   "ntp_background": "Background",

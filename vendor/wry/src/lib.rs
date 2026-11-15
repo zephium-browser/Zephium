@@ -788,6 +788,8 @@ struct WebViewAttributes<'a> {
   pub linux_script_dialog_handler: Option<LinuxScriptDialogHandler>,
   #[cfg(target_os = "linux")]
   pub linux_download_handler: Option<LinuxDownloadHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_permission_handler: Option<LinuxPermissionHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1065,6 +1067,8 @@ impl Default for WebViewAttributes<'_> {
       linux_script_dialog_handler: None,
       #[cfg(target_os = "linux")]
       linux_download_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_permission_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1154,7 +1158,20 @@ type LinuxScriptDialogHandler =
 #[cfg(target_os = "linux")]
 type LinuxDownloadHandler = Rc<dyn Fn(&webkit2gtk::Download)>;
 
+#[cfg(target_os = "linux")]
+type LinuxPermissionHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::PermissionRequest) -> bool>;
 impl<'a> WebViewBuilder<'a> {
+  /// Route native GTK permission ownership to an explicit ordinary-page broker.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_permission_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::PermissionRequest) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_permission_handler = Some(Box::new(handler));
+    self
+  }
+
   /// Install an owned native download broker. Unowned views remain denied.
   #[cfg(target_os = "linux")]
   pub fn with_linux_download_handler(

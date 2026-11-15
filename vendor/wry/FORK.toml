@@ -130,3 +130,7 @@ paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view
 [[patch_sets]]
 name = "GTK view-owned native download broker"
 paths = ["src/lib.rs", "src/webkitgtk/mod.rs"]
+
+[[patch_sets]]
+name = "GTK view-owned native permission broker"
+paths = ["src/lib.rs", "src/webkitgtk/mod.rs"]

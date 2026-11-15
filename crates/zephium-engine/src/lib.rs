@@ -3012,7 +3012,7 @@ impl Engine for WebviewEngine {
         request: PagePermissionRequestId,
         settlement: PagePermissionRequestSettlement,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             // Terminal cleanup stays admissible after item/profile retirement.
             // The host still requires the exact retained tuple and view
@@ -3023,7 +3023,7 @@ impl Engine for WebviewEngine {
                 });
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (profile, item, request, settlement);
             NativeDispatch::Unsupported
@@ -3135,11 +3135,11 @@ impl Engine for WebviewEngine {
         id: ItemId,
         navigation: zephium_core::ports::engine::NavigationPresentationId,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |host| host.stop_media_capture(id, navigation))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (id, navigation);
             NativeDispatch::Unsupported
