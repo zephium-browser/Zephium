@@ -260,6 +260,18 @@ impl NavigationEpochTracker {
         true
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn awaiting_browser_navigation(&self, activity: NavigationActivity) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        !state.revoked
+            && state.activity == Some(activity)
+            && state.current.as_ref().is_some_and(|current| {
+                current.phase == TrackedNavigationPhase::AwaitingStart
+                    && current.request.is_some()
+                    && current.previous_committed.is_some()
+            })
+    }
+
     /// Beforeunload refusal can precede WebKit's Started event entirely.
     #[cfg(target_os = "linux")]
     pub(crate) fn cancel_beforeunload(

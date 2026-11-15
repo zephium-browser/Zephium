@@ -22,39 +22,40 @@ use zephium_core::ports::engine::{
 };
 use zephium_core::split::Pane;
 
-const LOCAL_PDF: &str = r#"%PDF-1.4
-1 0 obj
-<< /Type /Catalog /Pages 2 0 R >>
-endobj
-2 0 obj
-<< /Type /Pages /Kids [3 0 R] /Count 1 >>
-endobj
-3 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
-endobj
-4 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
-endobj
-5 0 obj
-<< /Length 48 >>
-stream
-BT /F1 18 Tf 20 100 Td (Local PDF fixture) Tj ET
-endstream
-endobj
-xref
-0 6
-0000000000 65535 f 
-0000000009 00000 n 
-0000000058 00000 n 
-0000000115 00000 n 
-0000000241 00000 n 
-0000000311 00000 n 
-trailer
-<< /Size 6 /Root 1 0 R >>
-startxref
-409
-%%EOF
-"#;
+const LOCAL_PDF: &str = concat!(
+    "%PDF-1.4\n",
+    "1 0 obj\n",
+    "<< /Type /Catalog /Pages 2 0 R >>\n",
+    "endobj\n",
+    "2 0 obj\n",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n",
+    "endobj\n",
+    "3 0 obj\n",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\n",
+    "endobj\n",
+    "4 0 obj\n",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n",
+    "endobj\n",
+    "5 0 obj\n",
+    "<< /Length 48 >>\n",
+    "stream\n",
+    "BT /F1 18 Tf 20 100 Td (Local PDF fixture) Tj ET\n",
+    "endstream\n",
+    "endobj\n",
+    "xref\n",
+    "0 6\n",
+    "0000000000 65535 f \n",
+    "0000000009 00000 n \n",
+    "0000000058 00000 n \n",
+    "0000000115 00000 n \n",
+    "0000000241 00000 n \n",
+    "0000000311 00000 n \n",
+    "trailer\n",
+    "<< /Size 6 /Root 1 0 R >>\n",
+    "startxref\n",
+    "409\n",
+    "%%EOF\n",
+);
 
 struct Fixture {
     origin: String,

@@ -41,11 +41,34 @@ impl Drop for Pending {
     }
 }
 
+struct Handoff {
+    activity: NavigationActivity,
+    page: gtk::glib::WeakRef<WebView>,
+    owner: gtk::Window,
+    native: Option<ScriptDialog>,
+    focus: Option<gtk::glib::SignalHandlerId>,
+    deadline: Option<gtk::glib::SourceId>,
+}
+impl Drop for Handoff {
+    fn drop(&mut self) {
+        if let Some(signal) = self.focus.take() {
+            self.owner.disconnect(signal);
+        }
+        if let Some(deadline) = self.deadline.take() {
+            deadline.remove();
+        }
+        if let Some(native) = self.native.take() {
+            gtk::glib::idle_add_local_once(move || native.close());
+        }
+    }
+}
+
 pub(super) struct ScriptDialogs {
     permit: EventPermit,
     navigation: NavigationEpochTracker,
     presentation: Arc<AtomicBool>,
     pending: RefCell<Option<Pending>>,
+    handoff: RefCell<Option<Handoff>>,
     last: Cell<Option<Instant>>,
     silenced: Cell<bool>,
     cancelled_load: Box<dyn Fn(Option<zephium_core::ports::engine::NavigationRequestId>)>,
@@ -62,6 +85,7 @@ impl ScriptDialogs {
             navigation,
             presentation,
             pending: RefCell::new(None),
+            handoff: RefCell::new(None),
             last: Cell::new(None),
             silenced: Cell::new(false),
             cancelled_load: Box::new(cancelled_load),
@@ -73,6 +97,10 @@ impl ScriptDialogs {
         self.last.set(None);
     }
     pub(super) fn cancel(&self) {
+        if let Some(handoff) = self.handoff.borrow_mut().take() {
+            self.settle_cancelled_load(handoff.activity);
+            drop(handoff);
+        }
         let pending = self.pending.borrow_mut().take();
         drop(pending);
     }
@@ -88,7 +116,7 @@ impl ScriptDialogs {
     }
     pub(super) fn present(self: &Rc<Self>, page: &WebView, native: &ScriptDialog) -> bool {
         let activity = self.navigation.activity_snapshot();
-        let handled = self.present_owned(page, native);
+        let handled = self.present_owned(page, native) || self.await_foreground(page, native);
         if !handled && native.dialog_type() == ScriptDialogType::BeforeUnloadConfirm {
             if let Some(activity) = activity {
                 self.settle_cancelled_load(activity);
@@ -96,6 +124,77 @@ impl ScriptDialogs {
         }
         handled
     }
+    fn await_foreground(self: &Rc<Self>, page: &WebView, native: &ScriptDialog) -> bool {
+        if native.dialog_type() != ScriptDialogType::BeforeUnloadConfirm
+            || self.pending.borrow().is_some()
+            || self.handoff.borrow().is_some()
+        {
+            return false;
+        }
+        let Some(activity) = self.navigation.activity_snapshot() else {
+            return false;
+        };
+        let Some(owner) = page
+            .toplevel()
+            .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+        else {
+            return false;
+        };
+        if !self.current(activity, true)
+            || !self.navigation.awaiting_browser_navigation(activity)
+            || !page.is_mapped()
+            || !owner.is_visible()
+            || owner.is_active()
+        {
+            return false;
+        }
+        let weak = Rc::downgrade(self);
+        let focus = owner.connect_is_active_notify(move |owner| {
+            if owner.is_active() {
+                if let Some(broker) = weak.upgrade() {
+                    broker.finish_handoff(false);
+                }
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let deadline = gtk::glib::timeout_add_local_once(Duration::from_secs(2), move || {
+            if let Some(broker) = weak.upgrade() {
+                broker.finish_handoff(true);
+            }
+        });
+        *self.handoff.borrow_mut() = Some(Handoff {
+            activity,
+            page: page.downgrade(),
+            owner,
+            native: Some(native.clone()),
+            focus: Some(focus),
+            deadline: Some(deadline),
+        });
+        true
+    }
+    fn finish_handoff(self: &Rc<Self>, expired: bool) {
+        let Some(mut handoff) = self.handoff.borrow_mut().take() else {
+            return;
+        };
+        if expired {
+            handoff.deadline.take();
+        }
+        let valid = !expired
+            && self.current(handoff.activity, true)
+            && self
+                .navigation
+                .awaiting_browser_navigation(handoff.activity);
+        if valid {
+            if let (Some(page), Some(native)) = (handoff.page.upgrade(), handoff.native.as_ref()) {
+                if self.present_owned(&page, native) {
+                    handoff.native.take();
+                    return;
+                }
+            }
+        }
+        self.settle_cancelled_load(handoff.activity);
+    }
+
     fn settle_cancelled_load(&self, activity: NavigationActivity) {
         if self.permit.active_token().is_some() {
             if let Some(request) = self.navigation.cancel_beforeunload(activity) {
