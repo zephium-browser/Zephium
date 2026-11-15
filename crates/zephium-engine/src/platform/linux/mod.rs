@@ -3,6 +3,9 @@
 
 mod audio;
 pub(crate) use audio::{install_audio_observer, AudioObserver};
+pub(crate) mod browsing_data;
+mod network;
+pub(crate) use network::apply_proxy;
 mod content_filter;
 mod find;
 mod fullscreen;
@@ -441,6 +444,11 @@ pub fn configure(
         return Err("WebKitGTK WebContext persistence mode does not match its partition".into());
     }
     attest_website_data_manager(&view, &context, partition, expected_data_directory)?;
+
+    let manager = view
+        .website_data_manager()
+        .ok_or("missing attested data manager")?;
+    network::configure(&manager)?;
 
     // `download-started` belongs to WebContext, not WebView. Persistent tabs
     // share a context, so registering Wry's per-builder callback on every tab

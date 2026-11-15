@@ -12,7 +12,7 @@ mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;

@@ -13,7 +13,7 @@ pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monot
 mod caption_keys;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod card_geometry;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
@@ -2513,7 +2513,7 @@ impl Engine for WebviewEngine {
         call: zephium_core::browsing_data::EngineDataCall,
         completion: zephium_core::browsing_data::EngineDataCompletion,
     ) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(partition.profile()) {
                 completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -2529,7 +2529,7 @@ impl Engine for WebviewEngine {
                 });
             });
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (partition, call);
             completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -3728,6 +3728,10 @@ impl Engine for WebviewEngine {
 
     fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {
         network::set(proxy);
+        #[cfg(target_os = "linux")]
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_proxy());
+        });
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {

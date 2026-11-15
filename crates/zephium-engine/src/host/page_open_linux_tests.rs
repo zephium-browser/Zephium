@@ -672,6 +672,9 @@ impl NativeHarness {
         events
     }
     fn show(&self, url: &str) -> (ItemId, webkit2gtk::WebView) {
+        self.show_partition(Partition::Ephemeral(self.profile), url)
+    }
+    fn show_partition(&self, partition: Partition, url: &str) -> (ItemId, webkit2gtk::WebView) {
         let id = ItemId::generate();
         let bounds = Rect {
             x: 0.0,
@@ -679,9 +682,7 @@ impl NativeHarness {
             width: 800.0,
             height: 600.0,
         };
-        assert!(self
-            .engine
-            .create_view(id, Partition::Ephemeral(self.profile), url, bounds));
+        assert!(self.engine.create_view(id, partition, url, bounds));
         assert_eq!(
             self.engine
                 .set_content(1, Some(Pane::leaf(id)), Some(bounds)),
@@ -1046,4 +1047,140 @@ fn native_context_menu_filters_unowned_actions() {
             assert!(super::linux_stock_action_allowed(action, false));
         }
     }
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; loopback proxy only"]
+fn native_proxy_applies_to_new_and_existing_profile_managers() {
+    let proxy = Fixture::new();
+    let direct = Fixture::new();
+    let host = NativeHarness::new();
+    host.engine.set_proxy(zephium_core::proxy::from_settings(
+        "http",
+        proxy.origin.strip_prefix("http://").unwrap(),
+    ));
+    let target = format!("{}/through-proxy", direct.origin);
+    let (_, page) = host.show(&target);
+    until(|| {
+        host.drain();
+        page.title().as_deref() == Some("child")
+    });
+    let mut seen = false;
+    until(|| {
+        seen |= proxy
+            .requests
+            .try_iter()
+            .any(|request| request.starts_with(&format!("GET {target} ")));
+        seen
+    });
+    host.engine.set_proxy(None);
+    let settled = Arc::new(AtomicBool::new(false));
+    let done = settled.clone();
+    assert!(host.engine.run(move || done.store(true, Ordering::Release)));
+    until(|| settled.load(Ordering::Acquire));
+    page.load_uri(&format!("{}/page", direct.origin));
+    until(|| {
+        host.drain();
+        page.title().as_deref() == Some("ready") && !page.is_loading()
+    });
+    assert!(direct
+        .requests
+        .try_iter()
+        .any(|request| request.starts_with("GET /page ")));
+}
+
+fn data_call(
+    host: &NativeHarness,
+    partition: Partition,
+    call: zephium_core::browsing_data::EngineDataCall,
+) -> zephium_core::browsing_data::EngineDataReply {
+    let (send, receive) = mpsc::channel();
+    host.engine.browsing_data_call(
+        partition,
+        call,
+        zephium_core::browsing_data::EngineDataCompletion::new(move |reply| {
+            let _ = send.send(reply);
+        }),
+    );
+    let mut reply = None;
+    until(|| {
+        host.drain();
+        reply = receive.try_recv().ok();
+        reply.is_some()
+    });
+    reply.unwrap()
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; disposable persistent profiles and localhost data only"]
+fn native_site_data_clearing_preserves_other_profiles() {
+    use webkit2gtk::WebsiteDataManagerExt;
+    use zephium_core::browsing_data::{
+        EngineDataCall as Call, EngineDataFailure as Failure, EngineDataKinds,
+        EngineDataReply as Reply,
+    };
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let first = Partition::Persistent(host.profile);
+    let (_, page) = host.show_partition(first, &format!("{}/page", fixture.origin));
+    let manager = page.website_data_manager().unwrap();
+    assert!(manager.is_itp_enabled());
+    assert!(!manager.is_persistent_credential_storage_enabled());
+    script(&page, "localStorage.setItem('proof','first');document.cookie='proof=first; SameSite=Lax';document.title='stored'");
+    until(|| page.title().as_deref() == Some("stored"));
+    let other = ProfileId::generate();
+    assert_eq!(
+        host.engine.install_content_rules(
+            other,
+            ContentPolicyGeneration::new(1).unwrap(),
+            ContentRules::allow_all(ContentRuleDigest::from_bytes([1; 32]))
+        ),
+        NativeDispatch::Scheduled
+    );
+    let (_, second) = host.show_partition(
+        Partition::Persistent(other),
+        &format!("{}/page", fixture.origin),
+    );
+    script(&second, "localStorage.setItem('proof','second');document.cookie='proof=second; SameSite=Lax';document.title='stored'");
+    until(|| second.title().as_deref() == Some("stored"));
+    let Reply::Sites { sites, partial } = data_call(&host, first, Call::Sites) else {
+        panic!("expected native sites");
+    };
+    assert!(partial, "GTK cannot enumerate file-system-only sites");
+    assert!(sites
+        .iter()
+        .any(|site| site.name == "127.0.0.1" && site.cookies && site.storage));
+    assert_eq!(
+        data_call(&host, Partition::Ephemeral(host.profile), Call::Sites),
+        Reply::Failed(Failure::Unsupported)
+    );
+    assert_eq!(
+        data_call(
+            &host,
+            first,
+            Call::Clear {
+                kinds: EngineDataKinds {
+                    site_data: true,
+                    ..Default::default()
+                },
+                since: Some(1)
+            }
+        ),
+        Reply::Failed(Failure::Unsupported)
+    );
+    assert_eq!(
+        data_call(
+            &host,
+            first,
+            Call::ForgetSite {
+                site: "127.0.0.1".into(),
+                origins: vec![]
+            }
+        ),
+        Reply::PartlyCleared
+    );
+    script(&page, "document.title=(localStorage.getItem('proof')===null && !document.cookie.includes('proof='))?'cleared':'retained'");
+    until(|| page.title().as_deref() == Some("cleared"));
+    script(&second, "document.title=(localStorage.getItem('proof')==='second' && document.cookie.includes('proof=second'))?'isolated':'lost'");
+    until(|| second.title().as_deref() == Some("isolated"));
 }
