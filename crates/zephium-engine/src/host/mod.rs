@@ -35,6 +35,9 @@ mod extension_browser_surface;
 mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
+#[cfg(target_os = "linux")]
+#[path = "file_uploads_linux.rs"]
+mod file_uploads;
 mod focus;
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod fullscreen;
@@ -250,7 +253,7 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     http_auth: Rc<http_auth::HttpAuthBroker>,
@@ -410,7 +413,7 @@ impl Drop for ObservedView {
         self.navigation.revoke();
         #[cfg(target_os = "linux")]
         crate::platform::cosmetic_pull::cancel(&self.view);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.file_uploads.cancel();
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.http_auth.cancel();

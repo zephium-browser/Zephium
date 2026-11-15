@@ -99,6 +99,35 @@ impl Fixture {
                     let _ = stream.write_all(response.as_bytes());
                     continue;
                 }
+                if let Some(kind) = line
+                    .split(" /download-")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                {
+                    if kind == "encoded" {
+                        let compressed: &[u8] = &[
+                            31, 139, 8, 0, 0, 0, 0, 0, 0, 255, 237, 193, 1, 13, 0, 0, 0, 194, 160,
+                            218, 143, 111, 15, 7, 20, 0, 0, 0, 240, 110, 193, 119, 16, 62, 0, 16,
+                            0, 0,
+                        ];
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Disposition: attachment; filename=\"encoded.txt\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",compressed.len());
+                        let _ = stream.write_all(header.as_bytes());
+                        let _ = stream.write_all(compressed);
+                        continue;
+                    }
+                    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"{kind}.txt\"\r\nContent-Length: 262144\r\nConnection: close\r\n\r\n");
+                    let _ = stream.write_all(header.as_bytes());
+                    for index in 0..64 {
+                        if stream.write_all(&[b'x'; 4096]).is_err() {
+                            break;
+                        }
+                        if kind == "failure" && index == 2 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    continue;
+                }
                 let page = line.contains(" /page ");
                 let body = if page {
                     "<!doctype html><title>ready</title><style>a,button{position:absolute;left:0;width:200px;height:40px}#blank{top:0}#link{top:60px}#script{top:120px}#post{top:180px}</style><a id=blank href='/blank' target=_blank>blank</a><a id=link href='/link'>link</a><button id=script onclick=\"window.open('/script')\">script</button><form action='/post' method=post target=_blank><input name=proof value=preserved><button id=post>post</button></form>"
@@ -300,6 +329,7 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
     );
     let mut opened = Vec::new();
     let mut closed = Vec::new();
+    let attributed = RefCell::new(std::collections::HashSet::new());
     let drain = |opened: &mut Vec<(ItemId, bool)>, closed: &mut Vec<ItemId>| {
         for event in events.try_iter() {
             match event {
@@ -323,6 +353,9 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
                     closed.push(id);
                 }
                 EngineEvent::ViewCreationFailed { .. } => panic!("native tab creation failed"),
+                EngineEvent::UrlChanged { id, .. } => {
+                    attributed.borrow_mut().insert(id);
+                }
                 _ => {}
             }
         }
@@ -390,9 +423,12 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
         let (child, actual_foreground) = opened[count];
         assert_eq!(actual_foreground, foreground);
         let child_page = native(child);
+        child_page.connect_load_changed(|page, phase| {
+            eprintln!("popup native phase={phase:?} uri={:?}", page.uri());
+        });
         until(|| {
             drain(&mut opened, &mut closed);
-            child_page.title().is_some()
+            child_page.title().is_some() && attributed.borrow().contains(&child)
         });
         assert_eq!(child_page.context(), page.context());
         assert_eq!(page.uri().as_deref(), Some(url.as_str()));
@@ -1731,7 +1767,7 @@ fn native_prompt_returns_chosen_text_and_null_on_cancel() {
         .unwrap();
     assert_eq!(entry.text(), "initial");
     entry.set_text("chosen <literal>");
-    panel.response(gtk::ResponseType::Ok);
+    entry.emit_activate();
     until(|| page.title().as_deref() == Some("chosen <literal>"));
     host.window.window().unwrap().focus(0);
     until(|| host.window.is_active());
@@ -1744,17 +1780,90 @@ fn native_prompt_returns_chosen_text_and_null_on_cancel() {
 }
 
 #[test]
+#[ignore = "isolated GTK; native find direction/count and unavailable Save As"]
+fn native_find_honors_direction_without_inventing_match_position() {
+    use webkit2gtk::FindControllerExt;
+    use zephium_core::ports::engine::FindRequest;
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    script(
+        &page,
+        "document.body.textContent='needle needle needle';document.title='find-ready'",
+    );
+    until(|| page.title().as_deref() == Some("find-ready"));
+    host.drain();
+    for forward in [false, true, false] {
+        assert_eq!(
+            host.engine.find(
+                id,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward,
+                })
+            ),
+            NativeDispatch::Scheduled
+        );
+        let mut result = None;
+        until(|| {
+            for event in host.drain() {
+                if let EngineEvent::FindResult {
+                    query,
+                    matches,
+                    active,
+                    ..
+                } = event
+                {
+                    assert_eq!(query, "needle");
+                    result = Some((matches, active));
+                }
+            }
+            result.is_some()
+        });
+        assert_eq!(result, Some((3, None)));
+        assert_eq!(
+            page.find_controller().unwrap().options() & webkit2gtk::FindOptions::BACKWARDS.bits(),
+            if forward {
+                0
+            } else {
+                webkit2gtk::FindOptions::BACKWARDS.bits()
+            }
+        );
+    }
+    assert_eq!(host.engine.find(id, None), NativeDispatch::Scheduled);
+    assert_eq!(host.engine.save_page(id), NativeDispatch::Unsupported);
+}
+
+#[test]
 #[ignore = "isolated GTK; trusted activation and beforeunload cancel/leave"]
 fn native_beforeunload_can_keep_or_leave_the_document() {
     let fixture = Fixture::new();
     let host = NativeHarness::new();
-    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
     script(&page, "document.querySelector('#script').onclick=()=>{window.onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture';return 'fixture'};document.title='armed'};document.title='activation-ready'");
     until(|| page.title().as_deref() == Some("activation-ready"));
     click(&page, 140, 1, gtk::gdk::ModifierType::empty());
     until(|| page.title().as_deref() == Some("armed"));
-    page.load_uri(&format!("{}/leave", fixture.origin));
+    host.drain();
+    let request = zephium_core::ports::engine::NavigationRequestId(51);
+    assert!(host
+        .engine
+        .navigate(id, &format!("{}/leave", fixture.origin), request));
     visible_dialog().response(gtk::ResponseType::Cancel);
+    let mut stopped = false;
+    let mut settled = false;
+    until(|| {
+        for event in host.drain() {
+            match event {
+                EngineEvent::LoadingChanged { loading: false, .. } => stopped = true,
+                EngineEvent::NavigationFailed {
+                    request: failed, ..
+                } if failed == request => settled = true,
+                _ => {}
+            }
+        }
+        stopped && settled
+    });
     script(
         &page,
         "document.title=window.onbeforeunload && location.pathname==='/page'?'kept':'lost-document'",
@@ -1762,9 +1871,55 @@ fn native_beforeunload_can_keep_or_leave_the_document() {
     until(|| page.title().as_deref() == Some("kept"));
     host.window.window().unwrap().focus(0);
     until(|| host.window.is_active());
-    page.load_uri(&format!("{}/leave", fixture.origin));
+    assert!(host.engine.navigate(
+        id,
+        &format!("{}/leave", fixture.origin),
+        zephium_core::ports::engine::NavigationRequestId(52)
+    ));
     visible_dialog().response(gtk::ResponseType::Ok);
-    until(|| !page.is_loading() && page.title().as_deref() == Some("child"));
+    until(|| {
+        host.drain();
+        !page.is_loading() && page.title().as_deref() == Some("child")
+    });
+}
+
+#[test]
+#[ignore = "isolated GTK; unowned script dialog and beforeunload refusal"]
+fn native_unowned_dialogs_refuse_without_reentrant_close() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    host.window.hide();
+    script(
+        &page,
+        "alert('hidden');document.title=String(confirm('hidden'))+':'+String(prompt('hidden'))",
+    );
+    until(|| page.title().as_deref() == Some("false:null"));
+    host.window.show_all();
+    host.window.present();
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    script(&page, "document.querySelector('#script').onclick=()=>{onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture'};document.title='armed'};document.title='ready'");
+    until(|| page.title().as_deref() == Some("ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    until(|| page.title().as_deref() == Some("armed"));
+    host.window.hide();
+    let request = zephium_core::ports::engine::NavigationRequestId(61);
+    assert!(host
+        .engine
+        .navigate(id, &format!("{}/leave", fixture.origin), request));
+    let mut settled = false;
+    until(|| {
+        for event in host.drain() {
+            if matches!(event, EngineEvent::NavigationFailed { request: failed, .. } if failed == request)
+            {
+                settled = true;
+            }
+        }
+        settled
+    });
+    script(&page, "document.title=location.pathname");
+    until(|| page.title().as_deref() == Some("/page"));
 }
 
 fn valid_digest_fixture(request: &str) -> bool {
@@ -1999,4 +2154,346 @@ fn native_timed_cookie_clear_is_unsupported_and_preserves_records() {
     );
     script(&page, "document.title=document.cookie.includes('timed=retained')?'broker-kept-cookie':'unexpectedly-removed'");
     until(|| page.title().as_deref() == Some("broker-kept-cookie"));
+}
+
+fn upload_panel(id: ItemId) -> Option<gtk::FileChooserNative> {
+    let result = Rc::new(RefCell::new(None));
+    let slot = result.clone();
+    super::super::try_with(move |host| {
+        *slot.borrow_mut() = host
+            .views
+            .get(&id)
+            .and_then(|v| v.file_uploads.test_panel());
+    });
+    result.take()
+}
+
+#[test]
+#[ignore = "isolated GTK; files-only chooser, exact page files and lifecycle refusal"]
+fn native_uploads_return_only_chosen_regular_files_for_both_input_kinds() {
+    use std::os::unix::{ffi::OsStringExt, fs::symlink};
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let dir = tempfile::tempdir().unwrap();
+    let names = ["literal%20.txt", "space name.txt", "line\nbreak.txt"];
+    for name in names {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+    for directory in [false, true] {
+        for name in names {
+            script(&page, &format!("document.body.innerHTML='<input type=file {} style=\"position:absolute;left:0;top:0;width:300px;height:40px\">';document.querySelector('input').onchange=async e=>{{document.title=JSON.stringify(await Promise.all([...e.target.files].map(async f=>[f.name,f.webkitRelativePath,await f.text()])))}};document.title='upload-ready'",if directory { "webkitdirectory" } else { "" }));
+            until(|| page.title().as_deref() == Some("upload-ready"));
+            host.window.window().unwrap().focus(0);
+            until(|| host.window.is_active());
+            click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+            until(|| upload_panel(id).is_some());
+            let panel = upload_panel(id).unwrap();
+            assert_eq!(panel.action(), gtk::FileChooserAction::Open);
+            assert!(panel.filenames().is_empty());
+            let path = dir.path().join(name);
+            assert!(panel.select_filename(&path));
+            until(|| panel.filenames() == vec![path.clone()]);
+            panel.emit_by_name::<()>("response", &[&-3_i32]);
+            let expected = serde_json::json!([[name, null, name]]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+            eprintln!("files-only input directory={directory}: page name/content exact, relative path absent");
+        }
+    }
+    let link = dir.path().join("link.txt");
+    symlink(dir.path().join(names[0]), &link).unwrap();
+    let non_utf8 = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
+    std::fs::write(&non_utf8, "refused").unwrap();
+    for (path, accepted) in [(&link, true), (&non_utf8, false)] {
+        script(
+            &page,
+            "document.querySelector('input').value='';document.title='upload-ready'",
+        );
+        until(|| page.title().as_deref() == Some("upload-ready"));
+        host.window.window().unwrap().focus(0);
+        until(|| host.window.is_active());
+        click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+        until(|| upload_panel(id).is_some());
+        let panel = upload_panel(id).unwrap();
+        assert!(panel.select_filename(path));
+        until(|| panel.filenames() == vec![path.clone()]);
+        panel.emit_by_name::<()>("response", &[&-3_i32]);
+        if accepted {
+            let expected = serde_json::json!([[names[0], null, names[0]]]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+        } else {
+            script(&page,"document.title=document.querySelector('input').files.length===0?'refused':'leaked'");
+            until(|| page.title().as_deref() == Some("refused"));
+        }
+    }
+    script(&page, "document.title='lifecycle-ready'");
+    until(|| page.title().as_deref() == Some("lifecycle-ready"));
+    host.window.window().unwrap().focus(0);
+    until(|| host.window.is_active());
+    click(&page, 20, 1, gtk::gdk::ModifierType::empty());
+    until(|| upload_panel(id).is_some());
+    page.load_uri(&format!("{}/next", fixture.origin));
+    until(|| {
+        host.drain();
+        upload_panel(id).is_none() && page.title().as_deref() == Some("child")
+    });
+}
+
+#[test]
+#[ignore = "isolated Xvfb; native file-manager URI transfer onto input with special-file refusal"]
+fn native_file_drops_refuse_directories_and_recover_for_regular_files() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    host.window.move_(0, 0);
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.body.innerHTML='<input type=file multiple style=\"position:absolute;left:0;top:0;width:800px;height:500px\">';document.querySelector('input').onchange=async e=>{let f=e.target.files[0];document.title=f?JSON.stringify([f.name,await f.text()]):'empty'};document.title='drop-ready'");
+    until(|| page.title().as_deref() == Some("drop-ready"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("drop%20 name.txt");
+    std::fs::write(&file, "chosen drop").unwrap();
+    let source = gtk::Window::new(gtk::WindowType::Toplevel);
+    source.set_default_size(200, 120);
+    source.move_(900, 0);
+    let label = gtk::EventBox::new();
+    label.add(&gtk::Label::new(Some("File-manager URI source")));
+    source.add(&label);
+    label.drag_source_set(
+        gtk::gdk::ModifierType::BUTTON1_MASK,
+        &[gtk::TargetEntry::new(
+            "text/uri-list",
+            gtk::TargetFlags::empty(),
+            0,
+        )],
+        gtk::gdk::DragAction::COPY,
+    );
+    let selected = Rc::new(RefCell::new(dir.path().to_path_buf()));
+    let selected_uri = selected.clone();
+    label.connect_drag_data_get(move |_, _, data, _, _| {
+        data.set_uris(&[gtk::gio::File::for_path(&*selected_uri.borrow())
+            .uri()
+            .as_str()]);
+    });
+    source.show_all();
+    let deliveries = Rc::new(std::cell::Cell::new(0));
+    let observed = deliveries.clone();
+    page.connect_drag_data_received(move |_, _, _, _, _, _, _| observed.set(observed.get() + 1));
+    for valid in [false, true] {
+        if valid {
+            *selected.borrow_mut() = file.clone();
+        }
+        let before = deliveries.get();
+        let mut driver=std::process::Command::new("python3").args(["-c",r#"
+import ctypes as c,ctypes.util,os,time
+assert os.environ['DISPLAY'] not in (':0',':0.0')
+l=c.CDLL(ctypes.util.find_library('xdo'));l.xdo_new.argtypes=[c.c_char_p];l.xdo_new.restype=c.c_void_p;x=l.xdo_new(None)
+for n,a in [('xdo_move_mouse',[c.c_void_p,c.c_int,c.c_int,c.c_int]),('xdo_mouse_down',[c.c_void_p,c.c_ulong,c.c_int]),('xdo_mouse_up',[c.c_void_p,c.c_ulong,c.c_int])]:getattr(l,n).argtypes=a
+assert l.xdo_move_mouse(x,950,50,0)==0;time.sleep(.2);assert l.xdo_mouse_down(x,0,1)==0
+for px in range(940,300,-40):time.sleep(.08);assert l.xdo_move_mouse(x,px,100,0)==0
+time.sleep(.2);assert l.xdo_mouse_up(x,0,1)==0
+"#]).spawn().unwrap();
+        until(|| {
+            gtk::main_iteration_do(false);
+            driver.try_wait().unwrap().is_some()
+        });
+        until(|| deliveries.get() > before);
+        if valid {
+            let expected = serde_json::json!(["drop%20 name.txt", "chosen drop"]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+        } else {
+            script(&page,"document.title=document.querySelector('input').files.length===0?'directory-refused':'directory-leaked'");
+            until(|| page.title().as_deref() == Some("directory-refused"));
+        }
+    }
+    source.close();
+}
+
+fn download_call(
+    host: &NativeHarness,
+    call: zephium_core::downloads::DownloadCall,
+) -> zephium_core::downloads::DownloadResponse {
+    let (send, recv) = mpsc::channel();
+    assert!(host.engine.download_call(
+        Partition::Ephemeral(host.profile),
+        call,
+        zephium_core::downloads::DownloadCompletion::new(Box::new(move |reply| {
+            let _ = send.send(reply);
+        }))
+    ));
+    let mut response = None;
+    until(|| {
+        response = recv.try_recv().ok();
+        response.is_some()
+    });
+    response.unwrap()
+}
+fn download_entries(host: &NativeHarness) -> Vec<zephium_core::downloads::DownloadView> {
+    match download_call(host, zephium_core::downloads::DownloadCall::Updates) {
+        zephium_core::downloads::DownloadResponse::Updates { entries, .. } => entries,
+        reply => panic!("unexpected download reply: {reply:?}"),
+    }
+}
+fn consent_download(host: &NativeHarness, id: ItemId) {
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::DownloadPermissionRequested { id: owner, prompt } = event {
+                assert_eq!(id, owner);
+                assert!(
+                    !prompt.unclicked,
+                    "unknown activation must not accuse the user"
+                );
+                request = Some(prompt.request);
+            }
+        }
+        request.is_some()
+    });
+    assert_eq!(
+        host.engine
+            .answer_download_permission(id, request.unwrap(), true),
+        NativeDispatch::Scheduled
+    );
+}
+
+#[test]
+#[ignore = "isolated GTK; cancellation while a native destination reply is outstanding"]
+fn native_download_cancel_before_destination_settles_once() {
+    use zephium_core::downloads::{DownloadCall, DownloadState};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let _native = page
+        .download_uri(&format!("{}/download-progress", fixture.origin))
+        .unwrap();
+    let mut pending = None;
+    until(|| {
+        pending = download_entries(&host)
+            .into_iter()
+            .find(|entry| entry.filename == "progress.txt");
+        pending.is_some()
+    });
+    let id = pending.unwrap().id;
+    download_call(&host, DownloadCall::Cancel { id: id.clone() });
+    until(|| {
+        download_entries(&host)
+            .iter()
+            .any(|entry| entry.id == id && entry.state == DownloadState::Cancelled)
+    });
+    // Drain a subsequent load too: cancellation's reply is asynchronous.
+    page.load_uri(&format!("{}/after-cancel", fixture.origin));
+    until(|| {
+        page.uri().as_deref() == Some(format!("{}/after-cancel", fixture.origin).as_str())
+            && !page.is_loading()
+    });
+}
+
+#[test]
+#[ignore = "isolated GTK; network progress, truncation, cancel, data URL and destination picker"]
+fn native_download_edges_settle_through_shared_coordinator() {
+    use webkit2gtk::DownloadExt;
+    use zephium_core::downloads::{DownloadCall, DownloadState};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    let output = tempfile::tempdir().unwrap();
+    let directory = output.path().to_owned();
+    let profile = host.profile;
+    super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_directory(profile, directory)
+    });
+    for kind in ["progress", "encoded", "failure", "cancel"] {
+        let received = Rc::new(std::cell::Cell::new(0_u64));
+        let seen = received.clone();
+        let native = page
+            .download_uri(&format!("{}/download-{kind}", fixture.origin))
+            .unwrap();
+        native.connect_received_data(move |_, bytes| seen.set(seen.get() + bytes));
+        consent_download(&host, id);
+        let mut active = None;
+        until(|| {
+            active = download_entries(&host).into_iter().find(|entry| {
+                entry.filename == format!("{kind}.txt")
+                    && entry.received.parse::<u64>().unwrap() > 0
+            });
+            active.is_some()
+        });
+        if kind == "cancel" {
+            download_call(
+                &host,
+                DownloadCall::Cancel {
+                    id: active.unwrap().id,
+                },
+            );
+        }
+        let expected = match kind {
+            "progress" | "encoded" => DownloadState::Completed,
+            "failure" => DownloadState::Failed,
+            _ => DownloadState::Cancelled,
+        };
+        let mut terminal = None;
+        until(|| {
+            terminal = download_entries(&host)
+                .into_iter()
+                .find(|entry| entry.filename == format!("{kind}.txt") && entry.state.terminal());
+            terminal.is_some()
+        });
+        let terminal = terminal.unwrap();
+        eprintln!(
+            "network {kind} terminal: state={:?}, received={}, total={:?}, error={:?}",
+            terminal.state, terminal.received, terminal.total, terminal.error
+        );
+        assert_eq!(terminal.state, expected);
+        assert!(!terminal.source_is_context);
+        assert!(received.get() > 0);
+        if kind == "progress" || kind == "encoded" {
+            assert_eq!(
+                std::fs::read(output.path().join(format!("{kind}.txt"))).unwrap(),
+                vec![b'x'; if kind == "encoded" { 4096 } else { 262144 }]
+            );
+        } else {
+            assert!(!output.path().join(format!("{kind}.txt")).exists());
+        }
+        eprintln!(
+            "network {kind}: native bytes {}, shared state {expected:?}",
+            received.get()
+        );
+    }
+    // A missing default destination must offer the real save panel.
+    super::super::try_with(move |host| {
+        host.downloads
+            .as_ref()
+            .unwrap()
+            .test_missing_destination(profile)
+    });
+    script(&page,"document.querySelector('#script').onclick=()=>{let a=document.createElement('a');a.href='data:text/plain,chosen%20data';a.download='data.txt';document.body.append(a);a.click()};document.title='data-ready'");
+    until(|| page.title().as_deref() == Some("data-ready"));
+    click(&page, 140, 1, gtk::gdk::ModifierType::empty());
+    consent_download(&host, id);
+    let panel = Rc::new(RefCell::new(None));
+    until(|| {
+        let slot = panel.clone();
+        super::super::try_with(move |host| {
+            *slot.borrow_mut() = host.downloads.as_ref().unwrap().test_save_panel()
+        });
+        panel.borrow().is_some()
+    });
+    let panel = panel.take().unwrap();
+    assert_eq!(panel.action(), gtk::FileChooserAction::Save);
+    assert!(panel.set_current_folder(output.path()));
+    panel.set_current_name("chosen-data.txt");
+    until(|| panel.filename() == Some(output.path().join("chosen-data.txt")));
+    panel.emit_by_name::<()>("response", &[&-3_i32]);
+    until(|| output.path().join("chosen-data.txt").exists());
+    assert_eq!(
+        std::fs::read(output.path().join("chosen-data.txt")).unwrap(),
+        b"chosen data"
+    );
 }

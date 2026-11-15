@@ -260,6 +260,31 @@ impl NavigationEpochTracker {
         true
     }
 
+    /// Beforeunload refusal can precede WebKit's Started event entirely.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn cancel_beforeunload(
+        &self,
+        activity: NavigationActivity,
+    ) -> Option<Option<NavigationRequestId>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.revoked || state.activity != Some(activity) {
+            return None;
+        }
+        let current = state.current.as_ref()?;
+        match current.phase {
+            TrackedNavigationPhase::Committed => Some(None),
+            TrackedNavigationPhase::AwaitingStart => {
+                let request = current.request;
+                Self::restore_previous_locked(&mut state);
+                Some(request)
+            }
+            TrackedNavigationPhase::Started => None,
+        }
+    }
+
     /// Apply URL policy without deriving identity from a policy callback.
     /// Native engines can invoke policy hooks for redirects and frames; the
     /// identity-bearing main-frame event sequence is authoritative.
@@ -723,6 +748,50 @@ fn same_document_origin(current: &str, observed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn beforeunload_refusal_settles_only_the_exact_unstarted_request() {
+        let tracker = NavigationEpochTracker::new();
+        let original = tracker.begin("https://example.com/").unwrap();
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Started,
+            "https://example.com/",
+        ));
+        tracker.observe_navigation(&event(
+            1,
+            NavigationEventPhase::Committed,
+            "https://example.com/",
+        ));
+        tracker
+            .begin_request("https://example.com/first", NavigationRequestId(2))
+            .unwrap();
+        let stale = tracker.activity_snapshot().unwrap();
+        let next = tracker
+            .begin_request("https://example.com/next", NavigationRequestId(3))
+            .unwrap();
+        assert_eq!(tracker.cancel_beforeunload(stale), None);
+        assert_eq!(tracker.current(), Some(next));
+        let current = tracker.activity_snapshot().unwrap();
+        assert_eq!(
+            tracker.cancel_beforeunload(current),
+            Some(Some(NavigationRequestId(3)))
+        );
+        assert_eq!(tracker.current_committed(), Some(original));
+        tracker
+            .begin_request("https://example.com/started", NavigationRequestId(4))
+            .unwrap();
+        tracker.observe_navigation(&event(
+            2,
+            NavigationEventPhase::Started,
+            "https://example.com/started",
+        ));
+        let started = tracker.activity_snapshot().unwrap();
+        assert_eq!(tracker.cancel_beforeunload(started), None);
+        tracker.revoke();
+        assert_eq!(tracker.cancel_beforeunload(started), None);
+    }
 
     #[test]
     fn a_failed_navigation_names_its_request_only_while_it_is_the_one_in_flight() {

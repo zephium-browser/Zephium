@@ -138,3 +138,7 @@ paths = ["src/lib.rs", "src/webkitgtk/mod.rs"]
 [[patch_sets]]
 name = "GTK certificate failure categories"
 paths = ["src/lib.rs", "src/webkitgtk/mod.rs"]
+
+[[patch_sets]]
+name = "GTK tab-owned files-only upload chooser"
+paths = ["src/lib.rs", "src/webkitgtk/mod.rs"]

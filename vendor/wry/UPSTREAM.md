@@ -393,3 +393,18 @@ GTK TLS load failures retain native certificate-error categories for the shared
 error page. They never grant host-wide certificate exceptions; the Linux shell
 keeps continuation unavailable because the native API cannot scope by port or
 revoke an allowance.
+
+GTK file requests have an opt-in tab-owned callback; unowned requests and
+callback panics cancel. The embedder owns foreground/lifecycle validation,
+files-only native selection, no-follow regular-file validation and safe path
+encoding. Directory upload remains disabled; no privileged builder opts in.
+
+GTK script-created windows may emit native Started before exposing a URI.
+Retain that start identity until the same navigation supplies a bounded URI;
+then deliver Started before its redirect, commit or failure. Commit remains the
+only document-attribution boundary; no URL request is replayed.
+GTK print dialogs are transient for the content view's actual owning window;
+printing without an owner is refused rather than creating an unowned dialog.
+Unowned GTK script dialogs are retained and refused in one main-loop idle turn.
+Synchronous close during signal emission clears WebKit's current-dialog pointer
+before its emitter unreferences it; deferred close avoids that native crash.

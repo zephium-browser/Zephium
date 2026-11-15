@@ -3487,7 +3487,15 @@ impl Engine for WebviewEngine {
     }
 
     fn save_page(&self, id: ItemId) -> NativeDispatch {
-        self.run_for_active_item(id, move |h| h.save_page(id))
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.run_for_active_item(id, move |h| h.save_page(id))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
     }
 
     #[cfg(target_os = "macos")]

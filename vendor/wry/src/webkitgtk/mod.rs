@@ -928,6 +928,8 @@ impl InnerWebView {
       let sequence = Rc::new(Cell::new(GtkNavigationSequence::default()));
       let changed_sequence = sequence.clone();
       let changed_handler = navigation_event_handler.clone();
+      let deferred_start = Rc::new(Cell::new(None));
+      let changed_start = deferred_start.clone();
       webview.connect_load_changed(move |webview, load_event| {
         let mut sequence = changed_sequence.get();
         let (transition, native_committed) = match load_event {
@@ -973,7 +975,21 @@ impl InnerWebView {
             webview.set_child_visible(false);
           }
         }
-        if let (Some((id, phase)), Some(url)) = (transition, bounded_webview_uri(webview)) {
+        let url = bounded_webview_uri(webview);
+        if let Some((id, NavigationEventPhase::Started)) = transition {
+          changed_start.set(url.is_none().then_some(id));
+        }
+        if let (Some((id, phase)), Some(url)) = (transition, url) {
+          // Script-created windows can start with no URI. Preserve that native
+          // start and attribute it when the same load first supplies its URI.
+          if changed_start.get() == Some(id) {
+            changed_start.set(None);
+            changed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
           changed_handler(NavigationEvent { id, phase, url });
         }
       });
@@ -1012,6 +1028,13 @@ impl InnerWebView {
             navigation_failure(error)
           };
         if let (Some(id), Some(url)) = (id, url) {
+          if deferred_start.take() == Some(id) {
+            failed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
           if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
             handler(
               id,
@@ -1327,7 +1350,16 @@ impl InnerWebView {
       request.cancel();
       true
     });
-    webview.connect_run_file_chooser(|_, request| {
+    #[cfg(target_os = "linux")]
+    let file_chooser = attributes.linux_file_chooser_handler.take();
+    webview.connect_run_file_chooser(move |_page, request| {
+      #[cfg(target_os = "linux")]
+      if file_chooser.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_page, request)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       request.cancel();
       true
     });
@@ -1345,7 +1377,10 @@ impl InnerWebView {
       }) {
         return true;
       }
-      dialog.close();
+      // Closing inside the signal clears WebKit's current-dialog pointer before
+      // its emitter unreferences it. Retain and refuse after emission returns.
+      let denied = dialog.clone();
+      gtk::glib::idle_add_local_once(move || denied.close());
       true
     });
     webview.connect_print(|_, _| true);
@@ -1504,8 +1539,13 @@ impl InnerWebView {
   }
 
   pub fn print(&self) -> Result<()> {
+    let owner = self
+      .webview
+      .toplevel()
+      .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+      .ok_or_else(|| gtk::glib::bool_error!("print parent window is unavailable"))?;
     let print = webkit2gtk::PrintOperation::new(&self.webview);
-    print.run_dialog(None::<&gtk::Window>);
+    print.run_dialog(Some(&owner));
     Ok(())
   }
 

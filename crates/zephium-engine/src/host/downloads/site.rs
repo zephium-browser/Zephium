@@ -157,7 +157,9 @@ impl Downloads {
             site: hold.site.clone(),
             filename,
             allowed: hold.allowed,
-            unclicked: !hold.clicked,
+            // Linux cannot attribute activation; absence of proof is not proof
+            // that the person did not click. The admission gate still asks.
+            unclicked: !hold.clicked && !cfg!(target_os = "linux"),
         };
         prompts.insert(
             request,

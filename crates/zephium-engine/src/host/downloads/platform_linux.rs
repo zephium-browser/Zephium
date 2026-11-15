@@ -64,7 +64,19 @@ pub(super) fn progress(native: &Native) -> Option<(u64, Option<u64>)> {
     ))
 }
 pub(super) fn completion_bytes(native: &Native) -> Result<Option<u64>, DownloadError> {
-    Ok(Some(native.received_data_length()))
+    let received = native.received_data_length();
+    if let Some(response) = native.response() {
+        let encoded = response
+            .http_headers()
+            .and_then(|headers| headers.one("Content-Encoding"))
+            .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"));
+        // Soup can finish a truncated response without emitting Download::failed.
+        // Encoded Content-Length counts compressed bytes, not the published file.
+        if !encoded && response.content_length() > 0 && received != response.content_length() {
+            return Err(DownloadError::ConnectionLost);
+        }
+    }
+    Ok(Some(received))
 }
 fn portal_open(path: &std::path::Path, directory: bool) -> Result<Option<()>, DownloadError> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -98,24 +110,36 @@ fn portal_open(path: &std::path::Path, directory: bool) -> Result<Option<()>, Do
     let fds = gio::UnixFDList::new();
     let handle = fds.append(file).map_err(|_| DownloadError::Unavailable)?;
     let options: HashMap<String, glib::Variant> = HashMap::new();
-    connection
-        .call_with_unix_fd_list_sync(
-            Some("org.freedesktop.portal.Desktop"),
-            "/org/freedesktop/portal/desktop",
-            "org.freedesktop.portal.OpenURI",
-            if directory {
-                "OpenDirectory"
-            } else {
-                "OpenFile"
-            },
-            Some(&("", glib::variant::Handle(handle), options).to_variant()),
-            None,
-            gio::DBusCallFlags::NO_AUTO_START,
+    let message = gio::DBusMessage::new_method_call(
+        Some("org.freedesktop.portal.Desktop"),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.OpenURI"),
+        if directory {
+            "OpenDirectory"
+        } else {
+            "OpenFile"
+        },
+    );
+    message.set_flags(gio::DBusMessageFlags::NO_AUTO_START);
+    message.set_body(&("", glib::variant::Handle(handle), options).to_variant());
+    message.set_unix_fd_list(Some(&fds));
+    // A portal reply carries an object path and no FDs. The older typed GIO
+    // call wrapper incorrectly requires a non-null output FD list.
+    let (reply, _) = connection
+        .send_message_with_reply_sync(
+            &message,
+            gio::DBusSendMessageFlags::NONE,
             1000,
-            Some(&fds),
             gio::Cancellable::NONE,
         )
         .map_err(|_| DownloadError::Unavailable)?;
+    if reply.message_type() != gio::DBusMessageType::MethodReturn
+        || reply
+            .body()
+            .is_none_or(|body| body.type_().as_str() != "(o)")
+    {
+        return Err(DownloadError::Unavailable);
+    }
     Ok(Some(()))
 }
 pub(super) fn reveal(path: &std::path::Path) -> Result<(), DownloadError> {
@@ -237,17 +261,13 @@ impl Downloads {
         native: &Native,
         ask: Option<SiteAsk>,
     ) -> Option<DownloadId> {
-        let reject = || {
-            native.cancel();
-            None
-        };
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
             || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
         {
-            return reject();
+            return None;
         }
         let view = native.web_view()?;
         let window = view.toplevel()?.downcast::<gtk::Window>().ok()?;
@@ -261,7 +281,7 @@ impl Downloads {
             window: window.downgrade(),
         };
         if !source.live() || !source.in_front() {
-            return reject();
+            return None;
         }
         let uri = native
             .request()
@@ -273,7 +293,7 @@ impl Downloads {
                 && u.username().is_empty()
                 && u.password().is_none()
         }) {
-            return reject();
+            return None;
         }
         let origin = source
             .navigation
@@ -281,9 +301,9 @@ impl Downloads {
             .and_then(|(_, url)| url::Url::parse(&url).ok())
             .and_then(|url| PageOrigin::from_url(&url).ok())
             .or_else(|| parsed.as_ref().and_then(|u| PageOrigin::from_url(u).ok()))?;
-        // GTK has no activation metadata: page downloads require the shared explicit confirmation.
+        // GTK exposes navigation activation but no authenticated action-to-download join.
         let site = match self.site_admission(partition.profile(), ask, &origin, false) {
-            site::SiteAdmission::Refuse => return reject(),
+            site::SiteAdmission::Refuse => return None,
             site::SiteAdmission::Open => None,
             site::SiteAdmission::Hold(hold) => Some(hold),
         };
@@ -311,7 +331,9 @@ impl Downloads {
                         .map_or(0, |t| t.as_secs() as i64),
                     filename: "download".into(),
                     source: origin.as_str().into(),
-                    source_is_context: true,
+                    source_is_context: parsed
+                        .as_ref()
+                        .is_some_and(|url| matches!(url.scheme(), "blob" | "data")),
                     state: DownloadState::Pending,
                     received: 0,
                     total: None,
@@ -489,12 +511,10 @@ impl Downloads {
                 .as_ref()
                 .map(PathBuf::from)
                 .or_else(dirs::download_dir);
-            if let Some(directory) = directory {
+            if let Some(directory) = directory.filter(|path| path.is_dir()) {
                 self.prepare(id, directory.join(filename), preferences.directory_identity);
-            } else {
-                self.cancel(id, Some(DownloadError::Destination));
+                return;
             }
-            return;
         }
         let panel = gtk::FileChooserNative::new(
             Some("Save download"),
@@ -555,8 +575,13 @@ impl Downloads {
         if let Some(panel) = work.2 {
             cancel_directory(&panel);
         }
-        drop(work.1);
-        work.0.cancel();
+        // Dropping the outstanding destination reply already cancels WebKit.
+        // A second cancellation races its asynchronous terminal callback.
+        if let Some(reply) = work.1 {
+            reply.finish(None);
+        } else {
+            work.0.cancel();
+        }
     }
     pub(super) fn choose_directory(
         self: &Rc<Self>,
@@ -633,6 +658,16 @@ impl Downloads {
 
 #[cfg(test)]
 impl Downloads {
+    pub(in crate::host) fn test_missing_destination(&self, profile: ProfileId) {
+        let directory = tempfile::tempdir().unwrap();
+        self.test_directory(profile, directory.path().to_owned());
+    }
+    pub(in crate::host) fn test_save_panel(&self) -> Option<gtk::FileChooserNative> {
+        self.active
+            .borrow()
+            .values()
+            .find_map(|transfer| transfer.panel.clone())
+    }
     pub(in crate::host) fn test_directory(&self, profile: ProfileId, directory: PathBuf) {
         let (directory, receipt) =
             super::super::download_files::select_directory(directory).unwrap();
@@ -655,5 +690,92 @@ impl Drop for Downloads {
         if let Some(timer) = self.timer.get_mut().take() {
             timer.remove();
         }
+    }
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use std::io::BufRead;
+    struct Service(std::process::Child);
+    impl Drop for Service {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated Xvfb and private D-Bus; test-owned GIO handlers and portal only"]
+    fn native_open_uses_gio_or_portal_and_reveals_executables() {
+        gtk::init().unwrap();
+        let data = PathBuf::from(std::env::var_os("XDG_DATA_HOME").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("safe.txt");
+        let script = root.path().join("script.txt");
+        std::fs::write(&plain, "fixture text").unwrap();
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let record = root.path().join("opened.jsonl");
+        let handler = root.path().join("handler.py");
+        std::fs::write(&handler,"import sys,json\nwith open(sys.argv[1],'a') as f:f.write(json.dumps(sys.argv[2:])+'\\n')\n").unwrap();
+        let apps = data.join("applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        std::fs::write(apps.join("download-fixture.desktop"),format!("[Desktop Entry]\nType=Application\nName=Download fixture\nExec=/usr/bin/python3 {} {} %f\nMimeType=text/plain;inode/directory;\nNoDisplay=true\n",handler.display(),record.display())).unwrap();
+        std::fs::write(apps.join("mimeapps.list"),"[Default Applications]\ntext/plain=download-fixture.desktop;\ninode/directory=download-fixture.desktop;\n").unwrap();
+        assert!(portal_open(&plain, false).unwrap().is_none());
+        open(&plain).unwrap();
+        open(&script).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let lines = loop {
+            let text = std::fs::read_to_string(&record).unwrap_or_default();
+            if text.lines().count() == 2 {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "GIO handlers did not run");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let paths: Vec<Vec<String>> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(paths.contains(&vec![plain.to_str().unwrap().into()]));
+        assert!(paths.contains(&vec![root.path().to_str().unwrap().into()]));
+        let portal_log = root.path().join("portal.jsonl");
+        let mut service=Service(std::process::Command::new("python3").args(["-u","-c",r#"
+import dbus,dbus.service,sys,os,json,stat
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+DBusGMainLoop(set_as_default=True);bus=dbus.SessionBus();name=dbus.service.BusName('org.freedesktop.portal.Desktop',bus,do_not_queue=True)
+class Portal(dbus.service.Object):
+ def record(self,kind,fd):
+  fd=fd.take();info=os.fstat(fd);assert stat.S_ISREG(info.st_mode);assert info.st_mode&0o111==0
+  with open(sys.argv[1],'a') as log:log.write(json.dumps([kind,os.read(fd,100).decode()])+'\n')
+  os.close(fd);return dbus.ObjectPath('/org/freedesktop/portal/desktop/request/fixture/1')
+ @dbus.service.method('org.freedesktop.portal.OpenURI',in_signature='sha{sv}',out_signature='o')
+ def OpenFile(self,parent,fd,options):return self.record('file',fd)
+ @dbus.service.method('org.freedesktop.portal.OpenURI',in_signature='sha{sv}',out_signature='o')
+ def OpenDirectory(self,parent,fd,options):return self.record('reveal',fd)
+p=Portal(bus,'/org/freedesktop/portal/desktop');print('READY',flush=True);GLib.MainLoop().run()
+"#]).arg(&portal_log).stdout(std::process::Stdio::piped()).spawn().unwrap());
+        let mut line = String::new();
+        std::io::BufReader::new(service.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "READY");
+        open(&plain).unwrap();
+        open(&script).unwrap();
+        let calls = std::fs::read_to_string(&portal_log).unwrap();
+        let calls: Vec<(String, String)> = calls
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                ("file".into(), "fixture text".into()),
+                ("reveal".into(), "#!/bin/sh\nexit 0\n".into())
+            ]
+        );
+        assert_eq!(std::fs::read_to_string(&record).unwrap().lines().count(), 2);
     }
 }
