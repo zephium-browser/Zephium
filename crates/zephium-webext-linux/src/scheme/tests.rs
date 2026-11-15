@@ -252,3 +252,36 @@ fn a_live_extension_frame_admits_its_own_resources_to_the_tab_only() {
     // Navigation admission never consults frames.
     assert!(!scheme.allows(&web, &uri(A, "private.txt")));
 }
+
+#[test]
+fn dynamic_locators_use_canonical_resource_paths_and_revoke_with_install() {
+    let (root, scheme) = fixture(
+        json!([{"resources":["public*","café.txt"],"matches":["http://127.0.0.1/*"],"use_dynamic_url":true}]),
+    );
+    let resources = scheme.dynamic_resources(1.into()).unwrap();
+    for path in ["/public.txt", "/public.js?x=1#part", "/caf%C3%A9.txt"] {
+        let value = resources
+            .resolve(format!("chrome-extension://{A}{path}"))
+            .unwrap();
+        assert_eq!(
+            Url::parse(&value).unwrap().host_str(),
+            Some(resources.alias.as_str())
+        );
+    }
+    assert_eq!(
+        resources
+            .resolve(format!("chrome-extension://{A}/private.txt"))
+            .unwrap(),
+        format!("chrome-extension://{A}/private.txt")
+    );
+    let old = resources.alias;
+    scheme.remove_install(1.into());
+    assert!(scheme.dynamic_resources(1.into()).is_none());
+    let manifest = Manifest::from_value(
+        json!({"manifest_version":3,"web_accessible_resources":[{"resources":["public*"],"matches":["http://127.0.0.1/*"],"use_dynamic_url":true}]}),
+    );
+    let next = scheme
+        .add_install(1.into(), A, root.path(), &manifest)
+        .unwrap();
+    assert_ne!(old, next);
+}

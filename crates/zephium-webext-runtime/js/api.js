@@ -391,15 +391,78 @@
       return (contexts === undefined || contains(contexts, kind)) && permitted(own(node, 'permissions'));
     };
 
-    function getURL(path) {
-      try {
-        const absolute = new I.URL(path);
-        return I.URLHref(absolute);
-      } catch {
-        // Relative: resolved as a standard URL under the extension origin.
+    const dynamicResources = own(bootstrap, 'dynamicResources');
+    const dynamicPatterns = own(dynamicResources, 'patterns');
+    function normalResourcePath(path) {
+      let output = '', index = 0;
+      while (index < path.length) {
+        const pair = I.StringSlice(path, index + 1, index + 3);
+        const byte = path[index] === '%' ? I.parseInt(pair, 16) : -1;
+        if ((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte === 34 || byte === 45 || byte === 60 || byte === 62 || byte === 95 || byte === 126) {
+          output += I.StringFromCharCode(byte); index += 3; continue;
+        }
+        if (byte >= 128) {
+          const start = index;
+          do { index += 3; } while (path[index] === '%' && I.parseInt(I.StringSlice(path,index+1,index+3),16) >= 128);
+          const encoded = I.StringSlice(path,start,index);
+          try { output += I.decodeURIComponent(encoded); } catch { output += encoded; }
+          continue;
+        }
+        output += path[index++];
       }
-      const resolved = I.URLHref(new I.URL(path, `https://${extensionId}/`));
-      return `${scheme}://${I.StringSlice(resolved, 8)}`;
+      return output;
+    }
+    function resourceMatchPath(path) {
+      try {
+        const base = `${scheme}://${extensionId}/`;
+        const first = I.URLPathname(new I.URL(path, base));
+        for (let i = 0; i < first.length; i++) {
+          if (first[i] !== '%') continue;
+          const byte = I.parseInt(I.StringSlice(first,i+1,i+3),16);
+          if (byte < 32 || byte === 47 || byte === 92) return null;
+        }
+        const decoded = I.decodeURIComponent(first);
+        let start = 0;
+        while (decoded[start] === '/' || decoded[start] === '\\') start++;
+        if (start === decoded.length) return null;
+        const resolved = new I.URL(I.StringSlice(decoded,start), base);
+        if (I.URLProtocol(resolved) !== `${scheme}:` || I.URLHost(resolved) !== extensionId) return null;
+        return normalResourcePath(I.URLPathname(resolved) + I.URLSearch(resolved));
+      } catch { return null; }
+    }
+    function resourceMatches(pattern, path) {
+      if (I.StringEndsWith(pattern, '/*') && I.StringSlice(pattern,0,-2) === path) return true;
+      let position = 0, cursor = 0;
+      while (true) {
+        const star = I.StringIndexOf(pattern, '*', cursor);
+        const part = I.StringSlice(pattern, cursor, star === -1 ? pattern.length : star);
+        if (cursor === 0) {
+          if (!I.StringStartsWith(path, part)) return false;
+          position = part.length;
+        } else if (star === -1) {
+          return I.StringEndsWith(I.StringSlice(path, position), part);
+        } else {
+          const found = I.StringIndexOf(path, part, position);
+          if (found === -1) return false;
+          position = found + part.length;
+        }
+        if (star === -1) return position === path.length;
+        cursor = star + 1;
+      }
+    }
+    function getURL(path) {
+      const slash = I.StringStartsWith(path, '/') ? '' : '/';
+      const resolved = new I.URL(`https://${extensionId}${slash}${path}`);
+      if (I.isArray(dynamicPatterns)) {
+        const pathname = resourceMatchPath(I.URLPathname(resolved));
+        for (let i = 0; i < dynamicPatterns.length; i++) {
+          if (pathname !== null && resourceMatches(dynamicPatterns[i], pathname)) {
+            I.URLSetHostname(resolved, own(dynamicResources, 'alias'));
+            break;
+          }
+        }
+      }
+      return `${scheme}://${I.StringSlice(I.URLHref(resolved), 8)}`;
     }
 
     const predefined = () => {

@@ -567,3 +567,16 @@ test('cookies get preserves null while an empty set result is absent', async () 
   assert.equal(await chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}), undefined);
   assert.deepEqual(plain(await new Promise(resolve => chrome.cookies.set({url:'https://example.com/',name:'gone',expirationDate:1}, (...args)=>resolve(args)))), []);
 });
+
+test('dynamic resource locators match canonical paths without changing extension identity', () => {
+  const alias = 'b'.repeat(32);
+  const {chrome} = extensionContext('popup', {dynamicResources:{alias,patterns:['/public/*','/café.txt']}});
+  for (const path of ['public/a.js', '/public/a.js?x=1#fragment','folder/../public/a.js','public/a/../b.js','café.txt','caf%c3%a9.txt','public/%64ata.txt','public','//remote.test/public/a.js']) {
+    assert.equal(new URL(chrome.runtime.getURL(path)).hostname, alias);
+  }
+  for (const path of ['private.txt','public/../private.txt','https://remote.test/public/a.js','public/%2Fdata.txt','public/%00data.txt']) {
+    assert.equal(new URL(chrome.runtime.getURL(path)).hostname, EXTENSION_ID);
+  }
+  assert.equal(chrome.runtime.id, EXTENSION_ID);
+  assert.equal(chrome.runtime.getURL('///icons/../popup.html'), `chrome-extension://${EXTENSION_ID}///popup.html`);
+});

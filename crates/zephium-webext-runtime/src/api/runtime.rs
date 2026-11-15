@@ -75,27 +75,19 @@ pub fn bootstrap(sender: &Sender, info: &ExtensionInfo) -> Result<Value, ApiErro
     Ok(value)
 }
 
-/// Chrome resolves getURL relative paths under its own extension origin.
+/// Chrome appends the path to the extension origin before URL canonicalization.
 pub fn get_url(sender: &Sender, path: &str) -> Result<String, ApiError> {
-    // Leading slashes are package-relative, including a double slash.
-    let base = Url::parse(&format!(
-        "{}://{}/",
-        sender.scheme().as_str(),
+    let slash = if path.starts_with('/') { "" } else { "/" };
+    let url = Url::parse(&format!(
+        "https://{}{slash}{path}",
         sender.extension_id().as_str()
     ))
-    .map_err(|_| ApiError::context_invalidated())?;
-    let url = base
-        .join(path.trim_start_matches('/'))
-        .map_err(|_| ApiError::other("Invalid URL."))?;
-    if url.scheme() != base.scheme()
-        || url.host_str() != base.host_str()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-    {
-        return Err(ApiError::other("Invalid URL."));
-    }
-    Ok(url.into())
+    .map_err(|_| ApiError::other("Invalid URL."))?;
+    Ok(format!(
+        "{}://{}",
+        sender.scheme().as_str(),
+        &url.as_str()[8..]
+    ))
 }
 
 /// Applies all generated runtime context filters conjunctively.
@@ -147,7 +139,8 @@ fn handle(host: &mut impl BrowserPort, call: Invocation<'_>) -> Handled {
             "runtime.getPlatformInfo" => Ok(info.platform),
             "runtime.getManifest" => Ok(info.manifest),
             "runtime.getVersion" => Ok(info.manifest.get("version").cloned().unwrap_or(json!(""))),
-            "runtime.getURL" => get_url(call.sender(), call.args()[0].as_str().unwrap_or_default())
+            "runtime.getURL" => host
+                .extension_resource_url(call.sender(), call.args()[0].as_str().unwrap_or_default())
                 .map(Value::String),
             "runtime.getContexts" => Ok(contexts(&info, call.sender(), &call.args()[0])),
             "runtime.getBackgroundPage" => {
@@ -269,9 +262,12 @@ mod tests {
             .to_owned();
         assert_eq!(
             get_url(&sender, "///icons/../popup.html").unwrap(),
-            format!("{base}popup.html")
+            format!("{base}//popup.html")
         );
-        assert!(get_url(&sender, "https://foreign.example/").is_err());
+        assert_eq!(
+            get_url(&sender, "https://foreign.example/").unwrap(),
+            format!("{base}https://foreign.example/")
+        );
         assert_eq!(
             bootstrap(&sender, &info).unwrap()["id"],
             sender.extension_id().as_str()

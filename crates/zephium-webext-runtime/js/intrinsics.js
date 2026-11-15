@@ -87,6 +87,8 @@
     JSONParse: JSON.parse,
     JSONStringify: JSON.stringify,
     String,
+    decodeURIComponent,
+    parseInt,
     StringFromCharCode: String.fromCharCode,
     StringSlice: uncurry(StringProto.slice),
     StringIndexOf: uncurry(StringProto.indexOf),

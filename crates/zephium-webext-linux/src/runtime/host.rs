@@ -186,6 +186,7 @@ pub enum Activation {
 
 /// What the façade knows about an install when it admits it.
 pub(crate) struct Admitted {
+    pub dynamic_resources: Option<crate::scheme::DynamicResources>,
     pub install: ExtensionInstallId,
     pub extension_id: ExtensionId,
     pub manifest: Manifest,
@@ -247,6 +248,7 @@ struct PendingScripts {
 }
 
 pub(crate) struct InstallState {
+    dynamic_resources: Option<crate::scheme::DynamicResources>,
     #[cfg(feature = "native-tests")]
     last_worker_activity: Option<(u64, String)>,
     dnr: DnrState,
@@ -312,6 +314,7 @@ impl InstallState {
             incognito,
             unpacked: self.unpacked,
             permissions: &self.granted,
+            dynamic_resources: self.dynamic_resources.as_ref(),
         }
         .to_value(None);
         value["unpacked"] = Value::Bool(self.unpacked);
@@ -834,6 +837,19 @@ impl BrowserPort for State {
         match &self.browser {
             Some(browser) => browser.snapshot(sender),
             None => Err(unsupported()),
+        }
+    }
+
+    fn extension_resource_url(&self, sender: &Sender, path: &str) -> Result<String, ApiError> {
+        let install = self
+            .installs
+            .get(&sender.install())
+            .filter(|install| &install.extension_id == sender.extension_id())
+            .ok_or_else(ApiError::context_invalidated)?;
+        let url = zephium_webext_runtime::api::runtime::get_url(sender, path)?;
+        match &install.dynamic_resources {
+            Some(resources) => resources.resolve(url),
+            None => Ok(url),
         }
     }
 
@@ -2079,6 +2095,7 @@ impl RuntimeHost {
             .unwrap_or_default();
         let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
+            dynamic_resources: admitted.dynamic_resources,
             #[cfg(feature = "native-tests")]
             last_worker_activity: None,
             dnr: DnrState::default(),
@@ -2924,6 +2941,7 @@ impl RuntimeHost {
             incognito,
             unpacked: state.unpacked,
             permissions: &state.granted,
+            dynamic_resources: state.dynamic_resources.as_ref(),
         };
         let launch = background::launch(
             &state.extension_id,

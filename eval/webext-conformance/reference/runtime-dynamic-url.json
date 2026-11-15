@@ -1,0 +1,208 @@
+{
+  "caseId": "runtime-dynamic-url",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "public/data.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/data.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%64ata.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/%64ata.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "caf%c3%a9.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/caf%c3%a9.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%2Fdata.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/public/%2Fdata.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%00data.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/public/%00data.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%23x.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/%23x.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%3Fx.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/%3Fx.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/%252e%252e/private.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/public/%252e%252e/private.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "/public/data.txt?query=1#hash",
+      "value": {
+        "dynamic": true,
+        "hash": "#hash",
+        "path": "/public/data.txt",
+        "search": "?query=1"
+      }
+    },
+    {
+      "label": "x/../public/data.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/public/data.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "public/../private.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/private.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "static.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/static.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "café.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "/caf%C3%A9.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "https://foreign.example/public/data.txt",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "/https://foreign.example/public/data.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "//foreign.example/public/data.txt",
+      "value": {
+        "dynamic": true,
+        "hash": "",
+        "path": "//foreign.example/public/data.txt",
+        "search": ""
+      }
+    },
+    {
+      "label": "///icons/../popup.html",
+      "value": {
+        "dynamic": false,
+        "hash": "",
+        "path": "///popup.html",
+        "search": ""
+      }
+    },
+    {
+      "label": "identity stable",
+      "value": true
+    },
+    {
+      "label": "stable locator",
+      "value": true
+    },
+    {
+      "label": "content alias",
+      "value": true
+    },
+    {
+      "label": "allowed alias",
+      "value": {
+        "allowed": true,
+        "text": "dynamic resource\n"
+      }
+    },
+    {
+      "label": "denied alias",
+      "value": {
+        "allowed": false,
+        "text": ""
+      }
+    },
+    {
+      "label": "private",
+      "value": {
+        "allowed": false,
+        "text": ""
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

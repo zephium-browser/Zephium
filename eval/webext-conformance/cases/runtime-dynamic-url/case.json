@@ -1,0 +1,1 @@
+{"id":"runtime-dynamic-url","title":"Dynamic resource locators preserve canonical identity and host authorization","apis":["runtime.getURL","scripting.executeScript"],"permissions":["scripting"]}

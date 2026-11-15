@@ -1712,6 +1712,11 @@ impl Inner {
             )
             .map_err(|error| InstallError::Locales(error.message().to_owned()))?,
         );
+        let candidate_resources = crate::scheme::DynamicResources::from_manifest(
+            &spec.manifest,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .map_err(InstallError::Scheme)?;
         let mut candidates = self
             .bridge
             .with_runtime(|host, _| host.content_installs())
@@ -1739,6 +1744,7 @@ impl Inner {
                 incognito: self.config.incognito,
                 unpacked: spec.unpacked,
                 permissions: &grants.permissions,
+                dynamic_resources: candidate_resources.as_ref(),
             }
             .to_value(None),
         });
@@ -1800,6 +1806,7 @@ impl Inner {
             },
         );
         let admitted = Admitted {
+            dynamic_resources: self.scheme.dynamic_resources(spec.install),
             install: spec.install,
             extension_id: spec.extension_id,
             listeners: snapshot("listeners.json"),

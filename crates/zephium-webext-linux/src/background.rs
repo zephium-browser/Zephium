@@ -128,6 +128,7 @@ pub(crate) struct Bootstrap<'a> {
     pub incognito: bool,
     pub unpacked: bool,
     pub permissions: &'a [String],
+    pub dynamic_resources: Option<&'a crate::scheme::DynamicResources>,
 }
 
 impl Bootstrap<'_> {
@@ -148,6 +149,9 @@ impl Bootstrap<'_> {
             // Compatibility target matches the pinned Chromium API schema, not the engine.
             "userAgentSuffix": " Chrome/157.0.0.0 ZephiumWebExtensions/1",
         });
+        if let Some(resources) = self.dynamic_resources {
+            value["dynamicResources"] = resources.value();
+        }
         if let (Some(worker), Some(object)) = (worker, value.as_object_mut()) {
             object.insert("worker".into(), worker);
         }
@@ -325,6 +329,7 @@ mod tests {
             incognito: false,
             unpacked: false,
             permissions: &[],
+            dynamic_resources: None,
         };
         for module in [false, true] {
             let script = BackgroundScript {

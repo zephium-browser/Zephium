@@ -244,6 +244,15 @@ impl Scheme {
         Ok(alias)
     }
 
+    pub(crate) fn dynamic_resources(
+        &self,
+        install: ExtensionInstallId,
+    ) -> Option<DynamicResources> {
+        let installs = self.installs.borrow();
+        let entry = installs.get(&install)?;
+        DynamicResources::from_entries(&entry.war, &entry.alias)
+    }
+
     pub(crate) fn set_messages(&self, install: ExtensionInstallId, messages: Arc<Messages>) {
         if let Some(entry) = self.installs.borrow_mut().get_mut(&install) {
             entry.messages = Some(messages);
@@ -648,6 +657,144 @@ fn admitted<'a>(
                 && war.matches.iter().any(|pattern| pattern.matches_url(committed_top_level)))
     });
     allowed.then_some((install, entry, true))
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DynamicResources {
+    alias: String,
+    patterns: Vec<String>,
+}
+
+impl DynamicResources {
+    pub(crate) fn value(&self) -> Value {
+        serde_json::json!({"alias":self.alias,"patterns":self.patterns})
+    }
+
+    pub(crate) fn from_manifest(
+        manifest: &Manifest,
+        alias: &str,
+    ) -> Result<Option<Self>, SchemeError> {
+        let entries = WarEntry::parse(manifest)?;
+        Ok(Self::from_entries(&entries, alias))
+    }
+
+    fn from_entries(entries: &[WarEntry], alias: &str) -> Option<Self> {
+        let patterns: std::collections::BTreeSet<_> = entries
+            .iter()
+            .filter(|entry| entry.dynamic)
+            .flat_map(|entry| &entry.resources)
+            .map(|resource| {
+                let url = Url::parse(&format!("https://resource.invalid/{resource}"))
+                    .expect("validated resource pattern");
+                normal_resource_path(url.path())
+            })
+            .collect();
+        (!patterns.is_empty()).then(|| Self {
+            alias: alias.to_owned(),
+            patterns: patterns.into_iter().collect(),
+        })
+    }
+
+    pub(crate) fn resolve(&self, url: String) -> Result<String, zephium_webext_runtime::ApiError> {
+        let mut parsed = Url::parse(&url)
+            .map_err(|_| zephium_webext_runtime::ApiError::other("Invalid URL."))?;
+        if resource_match_path(&parsed).is_some_and(|path| {
+            self.patterns.iter().any(|pattern| {
+                (pattern.ends_with("/*") && pattern.strip_suffix("/*") == Some(path.as_str()))
+                    || star_matches(pattern, &path)
+            })
+        }) {
+            parsed
+                .set_host(Some(&self.alias))
+                .map_err(|_| zephium_webext_runtime::ApiError::other("Invalid resource alias."))?;
+        }
+        Ok(parsed.into())
+    }
+}
+
+fn percent_byte(bytes: &[u8], index: usize) -> Option<u8> {
+    if bytes.get(index) != Some(&b'%') {
+        return None;
+    }
+    let high = char::from(*bytes.get(index + 1)?).to_digit(16)?;
+    let low = char::from(*bytes.get(index + 2)?).to_digit(16)?;
+    Some((high * 16 + low) as u8)
+}
+
+fn normal_resource_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let mut output = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(byte) = percent_byte(bytes, index) {
+            if byte.is_ascii_alphanumeric() || b"\"-<>_~".contains(&byte) {
+                output.push(char::from(byte));
+                index += 3;
+                continue;
+            }
+            if byte >= 128 {
+                let start = index;
+                let mut unicode = Vec::new();
+                while let Some(byte) = percent_byte(bytes, index).filter(|byte| *byte >= 128) {
+                    unicode.push(byte);
+                    index += 3;
+                }
+                if let Ok(text) = std::str::from_utf8(&unicode) {
+                    output.push_str(text);
+                } else {
+                    output.push_str(&path[start..index]);
+                }
+                continue;
+            }
+        }
+        let ch = path[index..].chars().next().expect("path character");
+        output.push(ch);
+        index += ch.len_utf8();
+    }
+    output
+}
+
+fn resource_match_path(url: &Url) -> Option<String> {
+    let base = Url::parse(&format!("{}://{}/", url.scheme(), url.host_str()?)).ok()?;
+    let first = base.join(url.path()).ok()?;
+    let bytes = first.path().as_bytes();
+    let mut decoded = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(byte) = percent_byte(bytes, index) {
+            if byte < 32 || matches!(byte, b'/' | b'\\') {
+                return None;
+            }
+            decoded.push(byte);
+            index += 3;
+        } else {
+            if bytes[index] == b'%' {
+                return None;
+            }
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8(decoded).ok()?;
+    let relative = decoded.trim_start_matches(['/', '\\']);
+    if relative.is_empty() {
+        return None;
+    }
+    let resolved = base.join(relative).ok()?;
+    if resolved.scheme() != base.scheme()
+        || resolved.host_str() != base.host_str()
+        || resolved.port().is_some()
+        || !resolved.username().is_empty()
+        || resolved.password().is_some()
+    {
+        return None;
+    }
+    let mut path = resolved.path().to_owned();
+    if let Some(query) = resolved.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    Some(normal_resource_path(&path))
 }
 
 struct WarEntry {
