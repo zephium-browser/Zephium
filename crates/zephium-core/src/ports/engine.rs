@@ -1083,6 +1083,10 @@ pub trait Engine {
     /// The proxy views created from now on go through, or none for the
     /// system's. Views already open keep what they were made with.
     fn set_proxy(&self, _proxy: Option<crate::proxy::ProxyServer>) {}
+
+    /// Selects local spell checking dictionaries from the interface language.
+    fn set_spellchecking_language(&self, _language: String) {}
+
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}

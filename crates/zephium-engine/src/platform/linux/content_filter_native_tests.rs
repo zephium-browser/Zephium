@@ -289,3 +289,80 @@ fn native_filter_blocks_requests_and_pause_and_retirement_are_scoped() {
     fixture.load(&view, 5, "allowed:allowed");
     assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 3);
 }
+
+#[test]
+#[ignore = "isolated GTK; native persistent filter reuse and damaged-cache refusal"]
+fn native_filter_cache_reuses_validated_bytecode_without_loading_rule_text() {
+    crate::platform::linux::enforce_runtime_security_floor().unwrap();
+    gtk::init().unwrap();
+    let context = glib::MainContext::default();
+    let _owner = context.acquire().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let text: Arc<str> =
+        Arc::from(r#"[{"trigger":{"url-filter":"/blocked[.]js"},"action":{"type":"block"}}]"#);
+    let digest = [0x63; 32];
+    let run = |text: Arc<dyn zephium_core::blocker::DeclarativeRuleText>| {
+        let result = Rc::new(std::cell::RefCell::new(None));
+        let done = result.clone();
+        let _cancellation = compile(cache.path(), text, digest, move |value| {
+            *done.borrow_mut() = Some(value);
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while result.borrow().is_none() {
+            context.iteration(false);
+            assert!(
+                Instant::now() < deadline,
+                "native cache completion deadline"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        result.take().unwrap()
+    };
+    drop(run(Arc::new(text.clone())).unwrap());
+    struct UnavailableText(usize, Arc<AtomicUsize>);
+    impl zephium_core::blocker::DeclarativeRuleText for UnavailableText {
+        fn len(&self) -> usize {
+            self.0
+        }
+        fn load(&self) -> Option<Arc<str>> {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let unavailable = Arc::new(UnavailableText(text.len(), calls.clone()));
+    let policy = run(unavailable.clone()).expect("warm native hit requires no source text");
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    let fixture = Fixture::new();
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let view = wry::WebViewBuilder::new()
+        .with_incognito(true)
+        .build_gtk(&container)
+        .unwrap();
+    let registration = install_scoped_on_view(
+        &view,
+        &policy,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    fixture.load(&view, 1, "blocked:allowed");
+    assert_eq!(fixture.blocked_requests.load(Ordering::Relaxed), 0);
+    registration.retire().unwrap();
+    view.webview().terminate_web_process();
+    drop(policy);
+    let mut damaged = 0;
+    for entry in std::fs::read_dir(cache.path()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            std::fs::write(entry.path(), b"damaged cache").unwrap();
+            damaged += 1;
+        }
+    }
+    assert!(damaged > 0);
+    assert!(
+        run(unavailable).is_err(),
+        "corrupt bytecode cannot become protection"
+    );
+}

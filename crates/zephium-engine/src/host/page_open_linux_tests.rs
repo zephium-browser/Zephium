@@ -9,7 +9,9 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
-use webkit2gtk::{ContextMenuExt, ContextMenuItemExt, SettingsExt, WebContextExt, WebViewExt};
+use webkit2gtk::{
+    ContextMenuExt, ContextMenuItemExt, FindControllerExt, SettingsExt, WebContextExt, WebViewExt,
+};
 use wry::WebViewExtUnix;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
 use zephium_core::geometry::Rect;
@@ -19,6 +21,41 @@ use zephium_core::ports::engine::{
     Engine, EngineEvent, NativeDispatch, Partition, UserContent, UserContentGeneration,
 };
 use zephium_core::split::Pane;
+
+const LOCAL_PDF: &str = concat!(
+    "%PDF-1.4\n",
+    "1 0 obj\n",
+    "<< /Type /Catalog /Pages 2 0 R >>\n",
+    "endobj\n",
+    "2 0 obj\n",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n",
+    "endobj\n",
+    "3 0 obj\n",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\n",
+    "endobj\n",
+    "4 0 obj\n",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n",
+    "endobj\n",
+    "5 0 obj\n",
+    "<< /Length 48 >>\n",
+    "stream\n",
+    "BT /F1 18 Tf 20 100 Td (Local PDF fixture) Tj ET\n",
+    "endstream\n",
+    "endobj\n",
+    "xref\n",
+    "0 6\n",
+    "0000000000 65535 f \n",
+    "0000000009 00000 n \n",
+    "0000000058 00000 n \n",
+    "0000000115 00000 n \n",
+    "0000000241 00000 n \n",
+    "0000000311 00000 n \n",
+    "trailer\n",
+    "<< /Size 6 /Root 1 0 R >>\n",
+    "startxref\n",
+    "409\n",
+    "%%EOF\n",
+);
 
 struct Fixture {
     origin: String,
@@ -126,6 +163,12 @@ impl Fixture {
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
+                    continue;
+                }
+                if line.contains(" /sample.pdf ") {
+                    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", LOCAL_PDF.len());
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(LOCAL_PDF.as_bytes());
                     continue;
                 }
                 let page = line.contains(" /page ");
@@ -1853,7 +1896,6 @@ fn native_find_honors_direction_without_inventing_match_position() {
         );
     }
     assert_eq!(host.engine.find(id, None), NativeDispatch::Scheduled);
-    assert_eq!(host.engine.save_page(id), NativeDispatch::Unsupported);
 }
 
 #[test]
@@ -2519,3 +2561,51 @@ fn native_download_edges_settle_through_shared_coordinator() {
         b"chosen data"
     );
 }
+
+#[test]
+#[ignore = "isolated GTK; local inline PDF text rendering"]
+fn native_inline_pdf_renders_local_document_text() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&format!("{}/sample.pdf", fixture.origin));
+    let matches = Rc::new(std::cell::Cell::new(0));
+    let found = matches.clone();
+    let controller = page.find_controller().unwrap();
+    controller.connect_found_text(move |_, count| found.set(count));
+    // PDF.js creates its text layer asynchronously after the load commits.
+    let mut next = Instant::now();
+    until(|| {
+        host.drain();
+        if Instant::now() >= next {
+            controller.search(
+                "Local PDF fixture",
+                webkit2gtk::FindOptions::CASE_INSENSITIVE.bits(),
+                10,
+            );
+            next = Instant::now() + Duration::from_millis(250);
+        }
+        matches.get() == 1
+    });
+    assert!(page.context().unwrap().is_sandbox_enabled());
+}
+
+#[test]
+#[ignore = "isolated GTK; page print requests must never show native UI"]
+fn native_page_print_is_refused_without_overriding_page_builtins() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let windows = gtk::Window::list_toplevels().len();
+    script(&page, "const original=window.print;window.print=()=>original();window.print();document.execCommand('print');document.title='print-refused'");
+    until(|| page.title().as_deref() == Some("print-refused"));
+    assert_eq!(gtk::Window::list_toplevels().len(), windows);
+}
+
+#[path = "page_open_linux_handoff_tests.rs"]
+mod handoff_tests;
+#[path = "page_open_linux_spelling_tests.rs"]
+mod spelling_tests;
+
+#[path = "page_open_linux_save_tests.rs"]
+mod save_tests;

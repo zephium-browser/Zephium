@@ -3487,15 +3487,7 @@ impl Engine for WebviewEngine {
     }
 
     fn save_page(&self, id: ItemId) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            self.run_for_active_item(id, move |h| h.save_page(id))
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = id;
-            NativeDispatch::Unsupported
-        }
+        self.run_for_active_item(id, move |h| h.save_page(id))
     }
 
     #[cfg(target_os = "macos")]
@@ -3750,6 +3742,14 @@ impl Engine for WebviewEngine {
         // dropped. No logical/native state changed, and this synchronous
         // return is therefore authoritative rather than a fatal split.
         NativeDispatch::from_scheduled(dispatched)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_spellchecking_language(&self, language: String) {
+        platform::linux::spelling::set_language(language);
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_spellchecking());
+        });
     }
 
     fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {

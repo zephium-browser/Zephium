@@ -458,6 +458,10 @@ unsafe fn exact_cache_identifier(identifier: *const std::ffi::c_char) -> Option<
 }
 
 struct CompileContext<F> {
+    #[cfg(feature = "blocker-bench")]
+    started: std::time::Instant,
+    #[cfg(feature = "blocker-bench")]
+    cache_hit: bool,
     _store: FilterStore,
     _cancellable: webkit2gtk::gio::Cancellable,
     owner_context: glib::MainContext,
@@ -478,6 +482,13 @@ where
     F: FnOnce(Result<NativeContentPolicy, ContentRuleApplyFailure>) + 'static,
 {
     fn finish(mut self: Box<Self>, result: Result<NativeContentPolicy, ContentRuleApplyFailure>) {
+        #[cfg(feature = "blocker-bench")]
+        eprintln!(
+            "blocker-native: cache_hit={} elapsed_ms={:.3} success={}",
+            self.cache_hit,
+            self.started.elapsed().as_secs_f64() * 1000.0,
+            result.is_ok()
+        );
         let done = self.done.take();
         let owner_context = self.owner_context.clone();
         // Release the store, cancellable, encoded bytes, and callback context
@@ -533,6 +544,10 @@ where
         return cancellation_handle;
     };
     let context = Box::new(CompileContext {
+        #[cfg(feature = "blocker-bench")]
+        started: std::time::Instant::now(),
+        #[cfg(feature = "blocker-bench")]
+        cache_hit: true,
         _store: FilterStore(store),
         _cancellable: cancellation,
         owner_context,
@@ -626,6 +641,10 @@ fn save_after_cache_miss<F>(mut context: Box<CompileContext<F>>)
 where
     F: FnOnce(Result<NativeContentPolicy, ContentRuleApplyFailure>) + 'static,
 {
+    #[cfg(feature = "blocker-bench")]
+    {
+        context.cache_hit = false;
+    }
     // Preparation can allocate and invoke GLib wrapper code. Keep the Box
     // owned outside the unwind boundary until all pointers into it are ready.
     let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -721,6 +740,38 @@ unsafe extern "C" fn saved<F>(
     }));
     let result = callback_result.unwrap_or(Err(ContentRuleApplyFailure::NativeCompilation));
     context.finish(result);
+    #[cfg(target_env = "gnu")]
+    glib::idle_add_local_once(|| {
+        // Native compilation has released its scratch and encoded source. Return
+        // free glibc arena pages once; unchanged disk-cache loads never trim.
+        #[cfg(feature = "blocker-bench")]
+        let before = own_pss_kib();
+        #[cfg(feature = "blocker-bench")]
+        let started = std::time::Instant::now();
+        unsafe {
+            libc::malloc_trim(0);
+        }
+        #[cfg(feature = "blocker-bench")]
+        eprintln!(
+            "blocker-native: trim_ms={:.3} pss_before_kib={before:?} pss_after_kib={:?}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            own_pss_kib()
+        );
+    });
+}
+
+#[cfg(all(target_env = "gnu", feature = "blocker-bench"))]
+fn own_pss_kib() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/smaps_rollup")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Pss:")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
 }
 
 fn validated_policy(

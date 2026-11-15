@@ -618,8 +618,7 @@ struct ProtectedScriptSpec {
     all_frames: bool,
 }
 
-const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
-    3 + cfg!(not(target_os = "macos")) as usize + cfg!(target_os = "windows") as usize] = [
+const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec; 3 + 2 * cfg!(target_os = "windows") as usize] = [
     ProtectedScriptSpec {
         id: 6,
         source: CONTENT_STYLE_JS,
@@ -635,9 +634,8 @@ const PROTECTED_SCRIPT_SPECS: [ProtectedScriptSpec;
         source: EXTRACT_HTML_BOOTSTRAP_JS,
         all_frames: false,
     },
-    // WKWebView has no page-initiated print surface, so only WebView2 needs
-    // the guard; on macOS it would only mark built-ins as altered.
-    #[cfg(not(target_os = "macos"))]
+    // GTK refuses the native print signal; its PDF viewer replaces window.print.
+    #[cfg(target_os = "windows")]
     ProtectedScriptSpec {
         id: 3,
         source: crate::PAGE_PRINT_DENY_SCRIPT,
