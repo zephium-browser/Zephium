@@ -3626,8 +3626,8 @@ pub enum FailedDocument {
   /// one (blank when its built-in error page is off). `url` is the address
   /// the navigation was for, from Wry's own in-flight navigation record.
   Replaced { url: String },
-  /// macOS: a content rule refused the navigation to `url`, taken from the
-  /// error itself; the document shown before is still there.
+  /// A content rule (macOS) or certificate (Linux) refused the navigation to
+  /// `url`, taken from the native error; the prior document is still there.
   Refused { url: String },
 }
 

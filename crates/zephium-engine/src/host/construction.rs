@@ -2027,6 +2027,11 @@ impl EngineHost {
                         NavigationFailureReason::Blocked(_) => NavigationFailureReason::Other,
                         reason => reason,
                     };
+                    #[cfg(target_os = "linux")]
+                    let refused_url = match &document {
+                        wry::FailedDocument::Refused { url } => Some(url.clone()),
+                        _ => None,
+                    };
                     let replaced = match document {
                         wry::FailedDocument::Replaced { url } => Some(url),
                         wry::FailedDocument::Kept | wry::FailedDocument::Refused { .. } => None,
@@ -2034,7 +2039,7 @@ impl EngineHost {
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();
                     #[cfg(target_os = "linux")]
-                    let url = replaced;
+                    let url = refused_url.or(replaced);
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let url = matches!(reason, NavigationFailureReason::Certificate(_))
                         .then(|| failure_certificates.upgrade()?.refused_url())

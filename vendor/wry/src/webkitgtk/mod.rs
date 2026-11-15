@@ -981,8 +981,20 @@ impl InnerWebView {
       let tls_failure = Rc::new(Cell::new(None));
       let tls_sequence = sequence.clone();
       let tls_failed = tls_failure.clone();
-      webview.connect_load_failed_with_tls_errors(move |_, _, _, _| {
-        tls_failed.set(tls_sequence.get().active.map(|active| active.id));
+      webview.connect_load_failed_with_tls_errors(move |_, _, _, flags| {
+        use gtk::gio::TlsCertificateFlags as Flags;
+        let problem = if flags.contains(Flags::REVOKED) {
+          crate::CertificateProblem::Revoked
+        } else if flags.contains(Flags::EXPIRED) {
+          crate::CertificateProblem::Expired
+        } else if flags.contains(Flags::BAD_IDENTITY) {
+          crate::CertificateProblem::NameMismatch
+        } else if flags.contains(Flags::UNKNOWN_CA) {
+          crate::CertificateProblem::Untrusted
+        } else {
+          crate::CertificateProblem::Other
+        };
+        tls_failed.set(tls_sequence.get().active.map(|active| (active.id, problem)));
         false
       });
       let failure_handler = attributes.navigation_failure_handler.take();
@@ -993,11 +1005,12 @@ impl InnerWebView {
         let id = current.failed();
         sequence.set(current);
         let url = bounded_utf8_bytes(failing_uri.as_bytes(), PAGE_URL_LIMIT);
-        let reason = if tls_failure.take().is_some_and(|tls| Some(tls) == id) {
-          Some(crate::NavigationFailure::Insecure)
-        } else {
-          navigation_failure(error)
-        };
+        let reason =
+          if let Some((_, problem)) = tls_failure.take().filter(|(tls, _)| Some(*tls) == id) {
+            Some(crate::NavigationFailure::Certificate(problem))
+          } else {
+            navigation_failure(error)
+          };
         if let (Some(id), Some(url)) = (id, url) {
           if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
             handler(
@@ -1005,6 +1018,8 @@ impl InnerWebView {
               reason,
               if committed {
                 crate::FailedDocument::Replaced { url: url.clone() }
+              } else if matches!(reason, crate::NavigationFailure::Certificate(_)) {
+                crate::FailedDocument::Refused { url: url.clone() }
               } else {
                 crate::FailedDocument::Kept
               },

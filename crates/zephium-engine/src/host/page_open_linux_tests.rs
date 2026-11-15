@@ -1816,3 +1816,109 @@ fn native_digest_auth_uses_shared_prompt_and_verified_response() {
     });
     assert!(has_view(id));
 }
+
+struct TlsFixture {
+    origin: String,
+    child: std::process::Child,
+    _files: tempfile::TempDir,
+}
+impl TlsFixture {
+    fn new() -> Self {
+        use std::process::{Command, Stdio};
+        let files = tempfile::tempdir().unwrap();
+        let key = files.path().join("fixture.key");
+        let cert = files.path().join("fixture.pem");
+        let generated = Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-addext",
+                "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-keyout",
+            ])
+            .arg(&key)
+            .arg("-out")
+            .arg(&cert)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let child = Command::new("openssl")
+            .args(["s_server", "-quiet", "-www", "-accept"])
+            .arg(address.to_string())
+            .arg("-key")
+            .arg(key)
+            .arg("-cert")
+            .arg(cert)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let fixture = Self {
+            origin: format!("https://{address}"),
+            child,
+            _files: files,
+        };
+        until(|| std::net::TcpStream::connect(address).is_ok());
+        fixture
+    }
+}
+impl Drop for TlsFixture {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+#[ignore = "isolated GTK; disposable self-signed loopback TLS fixture"]
+fn native_certificate_failure_is_classified_without_a_host_wide_exception() {
+    use zephium_core::ports::engine::NavigationFailureReason;
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let tls = TlsFixture::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&tls.origin);
+    let mut failure = false;
+    until(|| {
+        for event in host.drain() {
+            match event {
+                EngineEvent::NavigationFailureReported {
+                    id: owner,
+                    reason,
+                    url,
+                    replaced_page,
+                } if owner == id => {
+                    assert!(matches!(reason, NavigationFailureReason::Certificate(_)));
+                    assert_eq!(url.as_deref(), Some(format!("{}/", tls.origin).as_str()));
+                    assert!(!replaced_page);
+                    failure = true;
+                }
+                EngineEvent::ViewCreationFailed { .. } => {
+                    panic!("certificate refusal closed the tab")
+                }
+                _ => {}
+            }
+        }
+        failure
+    });
+    assert!(has_view(id));
+    assert_eq!(
+        host.engine
+            .allow_certificate_exception(id, tls.origin.clone()),
+        NativeDispatch::Unsupported
+    );
+    assert_eq!(page.title().as_deref(), Some("ready"));
+}

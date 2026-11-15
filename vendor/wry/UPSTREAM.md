@@ -388,3 +388,8 @@ Unhandled requests remain denied; the host retains bounded native completions
 and owns foreground, navigation, shared consent and capture revocation checks.
 No native origin is invented by Wry; the host relies on qualified WebKitGTK
 Permissions Policy before applying its top-level-origin attribution.
+
+GTK TLS load failures retain native certificate-error categories for the shared
+error page. They never grant host-wide certificate exceptions; the Linux shell
+keeps continuation unavailable because the native API cannot scope by port or
+revoke an allowance.
