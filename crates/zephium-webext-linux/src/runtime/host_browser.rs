@@ -36,6 +36,43 @@ pub(crate) struct ContentInstall {
 }
 
 impl RuntimeHost {
+    pub(crate) fn command(
+        &mut self,
+        key: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        out: &mut Outbox,
+    ) -> bool {
+        use zephium_webext_runtime::api::commands;
+        let Some((install, name, inventory, tab)) = self.browser.command(key, ctrl, shift, alt)
+        else {
+            return false;
+        };
+        let Some(permissions) = self.permissions.get_mut(&install) else {
+            return false;
+        };
+        let Ok(activation) = commands::activate(&inventory, &name, &tab, permissions) else {
+            return false;
+        };
+        match activation {
+            commands::Activation::Action => self.browser.command_action(install, tab.tab.id()),
+            commands::Activation::Command(name) => {
+                let args = json!([name, tabs::project(&tab, permissions)]);
+                self.emit(
+                    install,
+                    "commands.onCommand",
+                    &args,
+                    StartReason::Event,
+                    out,
+                );
+                self.op(super::NativeOp::ScriptsChanged);
+            }
+        }
+        self.settle_blockers(out);
+        true
+    }
+
     pub(crate) fn request_interest(&self) -> bool {
         self.state.registry.has_web_request_listeners()
     }

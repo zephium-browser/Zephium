@@ -641,6 +641,41 @@ pub(super) fn try_open_native_tab(
     })
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn reserve_extension_commands(shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+    best_effort_with(move |host| host.webext_linux.reserve_commands(shortcuts));
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn try_perform_linux_extension_command(
+    key: u32,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    activate: bool,
+) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        let Some(host) = slot.as_ref() else {
+            return false;
+        };
+        let Some(profile) = host
+            .extension_browser_surfaces
+            .iter()
+            .find_map(|(profile, surface)| surface.focused().map(|_| *profile))
+        else {
+            return false;
+        };
+        host.webext_linux
+            .perform_command(profile, key, ctrl, shift, alt, activate)
+    })
+}
+
 /// Synchronous: a key monitor must answer whether it consumed the event.
 #[cfg(target_os = "macos")]
 pub(crate) fn try_perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {

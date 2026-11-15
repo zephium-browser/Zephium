@@ -124,6 +124,8 @@ pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use dispatch::{reserve_extension_commands, try_perform_linux_extension_command};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]

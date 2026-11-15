@@ -8,6 +8,7 @@
 //! handled from an idle source, never re-entrantly.
 
 mod browser;
+mod commands;
 mod content;
 mod errors;
 pub(crate) mod host;
@@ -694,6 +695,27 @@ impl ProfileRuntime {
             .with_runtime(|host, out| host.invoke_action(install, tab, out))
             .map_err(|_| "The extension runtime is busy.".to_owned())
             .and_then(|result| result.map_err(|error| error.message().to_owned()));
+        self.inner.run();
+        result
+    }
+
+    /// Reserve the effective browser-window shortcuts before extension suggestions.
+    pub fn reserve_commands(&self, shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+        self.inner.browser.reserve_commands(shortcuts);
+    }
+
+    /// Whether the effective keymap owns a key, without activating a held-key repeat.
+    pub fn has_command(&self, key: u32, ctrl: bool, shift: bool, alt: bool) -> bool {
+        self.inner.browser.command(key, ctrl, shift, alt).is_some()
+    }
+
+    /// Handle a trusted browser-window key after browser shortcuts have declined it.
+    pub fn perform_command(&self, key: u32, ctrl: bool, shift: bool, alt: bool) -> bool {
+        let result = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.command(key, ctrl, shift, alt, out))
+            .unwrap_or(false);
         self.inner.run();
         result
     }

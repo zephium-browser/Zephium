@@ -289,6 +289,7 @@ pub(crate) enum TabEvent {
 
 #[derive(Default)]
 pub(crate) struct BrowserState {
+    commands: super::commands::Commands,
     profile: Option<ProfileId>,
     surface: Option<ExtensionBrowserSurface>,
     tabs: IdMap<ItemId>,
@@ -334,6 +335,33 @@ fn extension_url(extension: &str, path: &str) -> Option<String> {
 }
 
 impl Shared {
+    pub(crate) fn reserve_commands(&self, shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+        self.state.borrow_mut().commands.reserve(shortcuts);
+    }
+    pub(crate) fn command(
+        &self,
+        key: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> Option<(ExtensionInstallId, String, Vec<Value>, BrowserTab)> {
+        let state = self.state.borrow();
+        let (install, name) = state.commands.find(key, ctrl, shift, alt)?;
+        let snapshot = state.snapshot().ok()?;
+        let tab = snapshot
+            .tabs
+            .iter()
+            .find(|tab| tab.active && Some(tab.window_id) == snapshot.current_window)?
+            .clone();
+        Some((install, name, state.commands.inventory(install), tab))
+    }
+    pub(crate) fn command_action(&self, install: ExtensionInstallId, tab: ItemId) {
+        self.state
+            .borrow_mut()
+            .outgoing
+            .push_back(Outgoing::Engine(BrowserCall::OpenPopup { install, tab }));
+        self.kick_if_queued();
+    }
     pub(crate) fn menu_generation(&self) -> u64 {
         self.state.borrow().menu_generation
     }
@@ -438,6 +466,7 @@ impl Shared {
             install,
             zephium_webext_runtime::api::side_panel::OptionsStore::new(&facts.manifest),
         );
+        state.commands.install(install, &facts.manifest);
         state.installs.insert(install, facts);
         state
             .outgoing
@@ -449,6 +478,7 @@ impl Shared {
     pub(crate) fn forget(&self, install: ExtensionInstallId) -> Vec<Responder> {
         let mut state = self.state.borrow_mut();
         state.installs.remove(&install);
+        state.commands.remove(install);
         state.menu_generation = state.menu_generation.saturating_add(1);
         state.menus.remove(&install);
         state.actions.remove(&install);
@@ -1846,22 +1876,7 @@ impl BrowserPort for Browser {
 
     fn extension_info(&self, sender: &Sender) -> Result<ExtensionInfo, ApiError> {
         let state = self.shared.state.borrow();
-        let commands = state
-            .installs
-            .get(&sender.install())
-            .and_then(|facts| facts.manifest.get("commands")?.as_object().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .take(100)
-            .map(|(name, command)| {
-                let description = command
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                // Shortcuts are not bound on Linux yet, so none is reported.
-                json!({"name": name, "description": description, "shortcut": ""})
-            })
-            .collect();
+        let commands = state.commands.inventory(sender.install());
         Ok(ExtensionInfo {
             commands,
             ..ExtensionInfo::default()

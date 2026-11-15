@@ -175,6 +175,24 @@ compile_error!("the native agentic semantic probe is forbidden in optimized buil
 #[cfg(target_os = "macos")]
 pub use platform::macos::private_api::missing as missing_private_webkit_api;
 
+/// Reserve the browser window's effective bindings before extension suggestions.
+#[cfg(target_os = "linux")]
+pub fn reserve_extension_commands(shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+    host::reserve_extension_commands(shortcuts);
+}
+
+/// Resolve a native window key; repeats query consumption without activating again.
+#[cfg(target_os = "linux")]
+pub fn perform_linux_extension_command(
+    key: u32,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    activate: bool,
+) -> bool {
+    host::try_perform_linux_extension_command(key, ctrl, shift, alt, activate)
+}
+
 /// Runs the extension command a key press in the browser window is the
 /// shortcut of; true when one took it. Call it for keys no browser shortcut
 /// claimed, before the page sees them. Unmodified keys return at once.

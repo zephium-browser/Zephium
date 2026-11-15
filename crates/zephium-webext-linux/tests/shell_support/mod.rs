@@ -42,6 +42,7 @@ pub struct Shell {
     generation: u64,
     next: u128,
     work: Vec<BrowserCall>,
+    pub action_shortcuts: Vec<(ExtensionInstallId, ItemId)>,
 }
 
 pub struct Engine {
@@ -290,6 +291,12 @@ impl Host {
                     eprintln!("shell call {call:?}");
                 }
                 match call {
+                    BrowserCall::OpenPopup { install, tab } => {
+                        self.shell
+                            .borrow_mut()
+                            .action_shortcuts
+                            .push((install, tab));
+                    }
                     BrowserCall::Mutate { request, action } => {
                         let settlement = self.mutate(action);
                         self.runtime

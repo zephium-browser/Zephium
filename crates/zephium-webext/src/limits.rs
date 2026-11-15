@@ -219,11 +219,6 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
-        &[Key("commands")],
-        "Its keyboard shortcuts aren't available yet",
-        LIN,
-    ),
-    (
         &[Key("externally_connectable")],
         "Websites can't message it directly",
         LIN,

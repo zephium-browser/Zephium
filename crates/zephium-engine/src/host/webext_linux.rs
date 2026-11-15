@@ -370,6 +370,7 @@ struct ProfileEntry {
 /// The engine's Linux extension host.
 #[derive(Default)]
 pub(crate) struct LinuxExtensions {
+    reserved_commands: Vec<zephium_core::ports::engine::Shortcut>,
     profiles: HashMap<ProfileId, ProfileEntry>,
     /// Why a profile has no runtime, when creating it failed.
     failed: HashMap<ProfileId, String>,
@@ -540,6 +541,35 @@ fn install_permissions(manifest: &Manifest, load: &WebExtensionLoad) -> InstallP
 }
 
 impl LinuxExtensions {
+    pub(super) fn reserve_commands(
+        &mut self,
+        shortcuts: Vec<zephium_core::ports::engine::Shortcut>,
+    ) {
+        self.reserved_commands = shortcuts;
+        for entry in self.profiles.values() {
+            entry
+                .runtime
+                .reserve_commands(self.reserved_commands.clone());
+        }
+    }
+    pub(super) fn perform_command(
+        &self,
+        profile: ProfileId,
+        key: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        activate: bool,
+    ) -> bool {
+        self.profiles.get(&profile).is_some_and(|entry| {
+            if activate {
+                entry.runtime.perform_command(key, ctrl, shift, alt)
+            } else {
+                entry.runtime.has_command(key, ctrl, shift, alt)
+            }
+        })
+    }
+
     fn module(&mut self) -> Result<PathBuf, String> {
         self.module.get_or_insert_with(resolve_module).clone()
     }
@@ -651,6 +681,7 @@ impl LinuxExtensions {
         let engine: Rc<dyn RuntimeEngine> = side.clone();
         match ProfileRuntime::new(context, config, engine) {
             Ok(runtime) => {
+                runtime.reserve_commands(self.reserved_commands.clone());
                 *side.runtime.borrow_mut() = Some(runtime.clone());
                 GATES.with(|gates| {
                     gates.borrow_mut().insert(profile, Rc::downgrade(&side));

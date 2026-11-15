@@ -107,6 +107,11 @@ impl Keymap {
         self.window_table.clone()
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn recording(&self) -> bool {
+        self.recording.load(Ordering::Acquire)
+    }
+
     #[cfg(target_os = "macos")]
     pub(crate) fn key_table(&self) -> Arc<RwLock<Vec<(Accelerator, &'static str)>>> {
         self.key_table.clone()
@@ -128,6 +133,7 @@ impl Keymap {
             if let Some(Some(launcher)) = self.linux_launcher.get().filter(|_| !recording) {
                 table.push(launcher.focused_shortcut());
             }
+            zephium_engine::reserve_extension_commands(table.clone());
             *write(&self.window_table) = table;
         }
         #[cfg(target_os = "macos")]
