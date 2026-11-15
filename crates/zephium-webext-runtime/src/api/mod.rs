@@ -6,6 +6,7 @@ pub mod action;
 pub mod bookmarks;
 pub mod commands;
 pub mod context_menus;
+pub mod cookies;
 pub mod declarative_net_request;
 pub mod dom;
 pub mod extension;
@@ -57,6 +58,7 @@ where
     declarative_net_request::register(table)?;
     permissions::register(table)?;
     privacy::register(table)?;
+    cookies::register(table)?;
     extension::register(table)?;
     management::register(table)?;
     idle::register(table)?;

@@ -27,6 +27,50 @@ use crate::bridge::Outbox;
 const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 const SECOND: u64 = 1_000_000_000;
 
+#[test]
+fn cookie_authority_requires_live_context_and_settled_current_host_grants() {
+    let mut h = Harness::new();
+    let mut admission = admitted(h.install);
+    admission.manifest = Manifest::from_value(
+        json!({"manifest_version":3,"permissions":["cookies"],"host_permissions":["https://example.com/*"]}),
+    );
+    let (declaration, _) = PermissionDeclaration::from_manifest(&admission.manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = h.sender(ViewKind::Options, "options.html");
+    let url = Url::parse("https://example.com/").unwrap();
+    assert!(!h.host.cookies_allowed(&sender, Some(&url)));
+    h.call(
+        &sender,
+        "cookies.get",
+        json!([{"url":url.as_str(),"name":"x"}]),
+    );
+    assert!(h.host.cookies_allowed(&sender, Some(&url)));
+    assert!(!h
+        .host
+        .cookies_allowed(&sender, Some(&Url::parse("https://other.test/").unwrap())));
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .permission_pending = true;
+    assert!(!h.host.cookies_allowed(&sender, Some(&url)));
+    let state = h.host.state.installs.get_mut(&h.install).unwrap();
+    state.permission_pending = false;
+    state.cookie_revision = 1;
+    assert_eq!(h.host.cookie_revision(&sender), Some(1));
+    h.host
+        .close_context(&sender.context_key(), &mut Outbox::default());
+    assert!(!h.host.cookies_allowed(&sender, Some(&url)));
+}
+
 struct Harness {
     host: RuntimeHost,
     authority: Authority,

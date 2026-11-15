@@ -25,6 +25,7 @@ pub(crate) fn methods() -> impl Iterator<Item = &'static str> {
             .iter()
             .any(|prefix| name.starts_with(prefix))
                 && *name != "management.getSelf"
+                && !super::cookies::METHODS.contains(name)
                 && !name.ends_with(".addListener")
                 && !name.ends_with(".removeListener")
                 && !name.ends_with(".hasListener")

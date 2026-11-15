@@ -1,0 +1,151 @@
+{
+  "caseId": "cookies-url",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "set",
+      "value": {
+        "domain": "127.0.0.1",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "run4-cookie",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": "0",
+        "value": "test-only"
+      }
+    },
+    {
+      "label": "get",
+      "value": {
+        "domain": "127.0.0.1",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "run4-cookie",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": "0",
+        "value": "test-only"
+      }
+    },
+    {
+      "label": "callback",
+      "value": {
+        "domain": "127.0.0.1",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "run4-cookie",
+        "path": "/",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": "0",
+        "value": "test-only"
+      }
+    },
+    {
+      "label": "longest path",
+      "value": {
+        "domain": "127.0.0.1",
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "run4-cookie",
+        "path": "/account",
+        "sameSite": "strict",
+        "secure": true,
+        "session": true,
+        "storeId": "0",
+        "value": "longer-path"
+      }
+    },
+    {
+      "label": "all",
+      "value": [
+        {
+          "domain": "127.0.0.1",
+          "hostOnly": true,
+          "httpOnly": true,
+          "name": "run4-cookie",
+          "path": "/",
+          "sameSite": "strict",
+          "secure": true,
+          "session": true,
+          "storeId": "0",
+          "value": "test-only"
+        },
+        {
+          "domain": "127.0.0.1",
+          "hostOnly": true,
+          "httpOnly": true,
+          "name": "run4-cookie",
+          "path": "/account",
+          "sameSite": "strict",
+          "secure": true,
+          "session": true,
+          "storeId": "0",
+          "value": "longer-path"
+        }
+      ]
+    },
+    {
+      "label": "other host",
+      "value": null
+    },
+    {
+      "label": "stores shape",
+      "value": [
+        {
+          "id": "0",
+          "keys": [
+            "id",
+            "tabIds"
+          ],
+          "tabIds": true
+        }
+      ]
+    },
+    {
+      "label": "remove",
+      "value": {
+        "name": "run4-cookie",
+        "storeId": "0",
+        "url": "https://127.0.0.1/account/page"
+      }
+    },
+    {
+      "label": "after remove",
+      "value": []
+    },
+    {
+      "label": "missing",
+      "value": {
+        "name": "run4-cookie",
+        "storeId": "0",
+        "url": "https://127.0.0.1/account/page"
+      }
+    },
+    {
+      "label": "invalid refused",
+      "value": true
+    },
+    {
+      "label": "invalid refused",
+      "value": true
+    },
+    {
+      "label": "invalid refused",
+      "value": true
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

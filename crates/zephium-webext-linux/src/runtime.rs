@@ -10,6 +10,7 @@
 mod browser;
 mod commands;
 mod content;
+mod cookies;
 mod css;
 mod errors;
 mod handler_cache;
@@ -267,6 +268,7 @@ struct Inner {
     next_request: Cell<u64>,
     notifications: Rc<notifications::Backend>,
     handler_cache: handler_cache::Backend,
+    cookies: cookies::Backend,
 }
 
 /// What every ordinary tab gets, rebuilt when installs or registrations change.
@@ -441,6 +443,7 @@ impl ProfileRuntime {
             next_request: Cell::new(0),
             notifications: Rc::default(),
             handler_cache: handler_cache::Backend::default(),
+            cookies: cookies::Backend::default(),
         });
         let weak = Rc::downgrade(&inner);
         *requests.framed.borrow_mut() = Some(Box::new(move |view| {
@@ -1223,6 +1226,12 @@ impl Inner {
 
     fn execute(self: &Rc<Self>, op: NativeOp) {
         match op {
+            NativeOp::Cookies {
+                revision,
+                sender,
+                request,
+                responder,
+            } => cookies::submit(self, sender, revision, request, responder),
             NativeOp::HandlerCache { sender, responder } => {
                 handler_cache::submit(self, sender, responder)
             }
@@ -1879,6 +1888,7 @@ impl Inner {
     fn retire(self: &Rc<Self>) -> RuntimeDrain {
         self.notifications.retire();
         self.handler_cache.retire();
+        self.cookies.retire();
         if !self.retired.get() {
             let _ = self.bridge.with_runtime(|host, out| host.shutdown(out));
             self.run();

@@ -74,6 +74,12 @@ pub(crate) enum NativeOp {
         request: PermissionRequest,
         responder: Responder,
     },
+    Cookies {
+        sender: Box<Sender>,
+        revision: u64,
+        request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
+    },
     HandlerCache {
         sender: Box<Sender>,
         responder: Responder,
@@ -249,6 +255,7 @@ pub(crate) struct InstallState {
     network_ready: bool,
     network_managed: bool,
     permission_pending: bool,
+    cookie_revision: u64,
     initial_fresh: bool,
     initial_updated: bool,
     pending_network_start: Option<u64>,
@@ -316,6 +323,12 @@ impl InstallState {
 enum Work {
     OffscreenReady {
         sender: Box<Sender>,
+    },
+    Cookies {
+        sender: Box<Sender>,
+        revision: u64,
+        request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
     },
     HandlerCache {
         sender: Box<Sender>,
@@ -868,6 +881,22 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        if let BrowserRequest::Service(zephium_webext_runtime::browser::ServiceRequest::Cookies(
+            request,
+        )) = request
+        {
+            let sender = Box::new(invocation.sender().clone());
+            let revision = self
+                .installs
+                .get(&sender.install())
+                .map_or(0, |state| state.cookie_revision);
+            return self.defer(invocation, |responder| Work::Cookies {
+                revision,
+                sender,
+                request,
+                responder,
+            });
+        }
         if matches!(
             request,
             BrowserRequest::Service(
@@ -1410,6 +1439,7 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::side_panel::register(&mut table)?;
     api::permissions::register(&mut table)?;
     api::privacy::register(&mut table)?;
+    api::cookies::register(&mut table)?;
     api::extension::register(&mut table)?;
     api::management::register(&mut table)?;
     api::idle::register(&mut table)?;
@@ -1594,6 +1624,43 @@ impl RuntimeHost {
         self.settle(responder, result, out);
     }
 
+    pub(crate) fn cookies_allowed(&self, sender: &Sender, url: Option<&url::Url>) -> bool {
+        !self.shutting_down
+            && !sender.incognito()
+            && !self.state.incognito
+            && sender.profile() == self.state.profile
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .state
+                .installs
+                .get(&sender.install())
+                .is_some_and(|state| {
+                    !state.permission_pending && state.extension_id == *sender.extension_id()
+                })
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| {
+                    permissions.has_api("cookies")
+                        && url.is_none_or(|url| permissions.has_host_access(url))
+                })
+    }
+
+    pub(crate) fn cookie_revision(&self, sender: &Sender) -> Option<u64> {
+        self.state
+            .installs
+            .get(&sender.install())
+            .map(|state| state.cookie_revision)
+    }
+
+    pub(crate) fn cookie_stores(&self, sender: &Sender) -> Result<Value, ApiError> {
+        use zephium_webext_runtime::browser::BrowserPort;
+        let snapshot = self.state.snapshot(sender)?;
+        Ok(
+            serde_json::json!([{"id":"0", "tabIds":snapshot.tabs.iter().filter(|tab| !tab.incognito).map(|tab| tab.id).collect::<Vec<_>>()}]),
+        )
+    }
+
     pub(crate) fn handler_cache_allowed(&self, sender: &Sender) -> bool {
         sender.profile() == self.state.profile
             && sender.incognito() == self.state.incognito
@@ -1703,6 +1770,11 @@ impl RuntimeHost {
             .get_mut(&install)
             .expect("validated install")
             .permission_pending = true;
+        self.state
+            .installs
+            .get_mut(&install)
+            .expect("validated install")
+            .cookie_revision = ticket;
         self.network_permission_tickets
             .insert(ticket, (permissions, completion));
         Ok(())
@@ -2026,6 +2098,7 @@ impl RuntimeHost {
             network_ready: !needs_network,
             network_managed: needs_network,
             permission_pending: false,
+            cookie_revision: 0,
             initial_fresh: matches!(activation, Activation::Installed),
             initial_updated: matches!(activation, Activation::Updated { .. }),
             pending_network_start: None,
@@ -3654,6 +3727,23 @@ impl RuntimeHost {
                 }
             }
             Work::RequestInterest => self.kick(),
+            Work::Cookies {
+                revision,
+                sender,
+                request,
+                responder,
+            } => {
+                if self.cookies_allowed(&sender, request.url.as_ref()) {
+                    self.op(NativeOp::Cookies {
+                        revision,
+                        sender,
+                        request,
+                        responder,
+                    });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
             Work::HandlerCache { sender, responder } => {
                 if self.handler_cache_allowed(&sender) {
                     self.op(NativeOp::HandlerCache { sender, responder });

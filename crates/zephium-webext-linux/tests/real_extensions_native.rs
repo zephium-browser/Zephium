@@ -1972,7 +1972,10 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     );
     assert_eq!(
         result["unavailableErrors"],
-        json!(vec!["This function is not supported."; 2])
+        json!([
+            "Cookie access requires an explicit HTTP(S) URL.",
+            "This function is not supported."
+        ])
     );
     assert_eq!(
         result["constructorErrors"],

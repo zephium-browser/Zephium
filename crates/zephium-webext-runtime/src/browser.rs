@@ -377,6 +377,8 @@ pub enum BrowserRequest {
 /// Small native desktop services with no Shell mutation counterpart.
 #[derive(Clone, Debug)]
 pub enum ServiceRequest {
+    /// Read or mutate URL-scoped cookies in the authenticated profile.
+    Cookies(crate::api::cookies::Request),
     /// Query the actual state and controllability of a browser form service.
     FormPrivacy(crate::api::privacy::FormSetting),
     /// Invalidate native memory caches after webRequest handler changes.

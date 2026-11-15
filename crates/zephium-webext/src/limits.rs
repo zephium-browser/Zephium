@@ -298,7 +298,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (&[Key("incognito")], "Can't run in private windows", LIN),
     (
         &[Permission("cookies")],
-        "Can't read or change cookies or report cookie changes",
+        "Linux cookie access requires an explicit granted-host URL; writes require HTTPS and confirmed read-back. Private/partitioned cookies, global enumeration and onChanged are unavailable. SameSite is omitted where Soup cannot distinguish Lax from unspecified",
         LIN,
     ),
     (&[Permission("downloads")], "Can't manage downloads", LIN),

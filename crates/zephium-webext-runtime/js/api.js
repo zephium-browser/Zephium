@@ -557,9 +557,9 @@
       if (invalid) throw new I.Error(T.ERRORS.invalidated);
     };
 
-    function settle(promise, callback, spec) {
+    function settle(promise, callback, spec, name) {
       const withResult = own(spec, 'result') !== false;
-      const optionalResult = own(spec, 'optionalResult') === true;
+      const optionalResult = own(spec, 'optionalResult') === true && name !== 'cookies.get' && name !== 'cookies.set';
       const resultValue = (value) => optionalResult && value === null ? undefined : value;
       if (callback !== null) {
         I.PromiseThen(
@@ -668,7 +668,7 @@
             }
             promise = client.call(fullName, text, false);
           }
-          return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET);
+          return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET, fullName);
         },
       }[member];
       return fn;
