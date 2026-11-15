@@ -2866,7 +2866,6 @@ impl RuntimeHost {
             &bootstrap,
             state.fresh,
             &state.installed_scripts,
-            state.unlimited,
             &state.worker_surface,
         );
         state.live = Some(Live {

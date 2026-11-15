@@ -1,0 +1,64 @@
+{
+  "caseId": "worker-registration",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "registration:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "registration:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": "activated",
+          "installing": true,
+          "scopeRoot": true,
+          "slots": [
+            {
+              "active": null,
+              "installing": "installing",
+              "phase": "install",
+              "waiting": null
+            },
+            {
+              "active": "activating",
+              "installing": null,
+              "phase": "activate",
+              "waiting": null
+            }
+          ],
+          "stable": true,
+          "waiting": true
+        }
+      }
+    },
+    {
+      "label": "update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update:error",
+      "value": {
+        "lastError": null,
+        "message": "A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received"
+      }
+    },
+    {
+      "label": "worker console",
+      "value": []
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -209,18 +209,15 @@ pub(crate) fn launch(
     bootstrap: &Bootstrap<'_>,
     install: bool,
     installed_scripts: &[String],
-    unlimited_storage: bool,
     worker_surface: &str,
 ) -> Result<Launch, SchemeError> {
     let scope = script_url(extension, &script.path);
     let kind = if script.module { "module" } else { "classic" };
-    let quota: u64 = if unlimited_storage { 1 << 30 } else { 10 << 20 };
     let worker = json!({
         "type": kind,
         "scriptURL": scope,
         "install": install,
         "installedScripts": installed_scripts,
-        "storage": {"quota": quota, "usage": 0, "persisted": true},
     });
     let boot = bootstrap.to_value(Some(worker));
     #[cfg(feature = "native-tests")]
@@ -336,8 +333,7 @@ mod tests {
             };
             let worker_surface =
                 zephium_webext_runtime::js::background_surface(&manifest(raw.clone()));
-            let launch =
-                launch(&id, &script, &bootstrap, true, &[], false, &worker_surface).unwrap();
+            let launch = launch(&id, &script, &bootstrap, true, &[], &worker_surface).unwrap();
             assert_eq!(launch.script, "/js/sw.js");
             assert_eq!(
                 launch.url,

@@ -2007,8 +2007,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             "missing {event}: {result}"
         );
     }
-    // An extension document in an ordinary tab keeps that view's defaults,
-    // including after it navigates back to a web page.
+    // Extension storage features are restored on return to ordinary web content.
     let package_tab = host.open(&format!("chrome-extension://{id}/popup.html"), true);
     pump(&mut host, Duration::from_secs(1));
     let package_view = host.shell.borrow().tabs[&package_tab].view.clone();
@@ -2020,11 +2019,26 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         evaluate(&package_view, "return typeof requestIdleCallback;"),
         default_idle
     );
+    assert_eq!(
+        evaluate(&package_view, "return typeof navigator.storage;"),
+        "object"
+    );
+    let storage: Value = serde_json::from_str(&evaluate(
+        &package_view,
+        "return JSON.stringify(await navigator.storage.estimate());",
+    ))
+    .unwrap();
+    assert!(storage["quota"].as_f64().is_some_and(|quota| quota > 0.0));
+    assert!(storage["usage"].as_f64().is_some_and(|usage| usage >= 0.0));
     package_view.load_uri(&fixture.url("/password-form"));
     pump(&mut host, Duration::from_secs(1));
     assert_eq!(
         evaluate(&package_view, "return typeof requestIdleCallback;"),
         default_idle
+    );
+    assert_eq!(
+        evaluate(&package_view, "return typeof navigator.storage;"),
+        "undefined"
     );
     drop(package_view);
     diagnostics::record(

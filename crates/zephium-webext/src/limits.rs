@@ -277,7 +277,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("background.service_worker")],
-        "Background workers lack service-worker registrations, push, extension fetch interception and static routes",
+        "Background registrations expose lifecycle state; worker update/unregister, messaging, push, extension fetch interception and static routes are unsupported",
         LIN,
     ),
     (

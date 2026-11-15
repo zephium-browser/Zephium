@@ -2130,12 +2130,21 @@ impl Inner {
         // An extension document in a tab gets its install's cross-origin
         // access once it commits; anything else loses it before it starts.
         let weak = Rc::downgrade(self);
+        let storage_features = Cell::new(None);
         let loads = view.connect_load_changed(move |view, event| {
             let Some(inner) = weak.upgrade() else {
                 return;
             };
             match event {
-                webkit2gtk::LoadEvent::Started => view.set_cors_allowlist(&[]),
+                webkit2gtk::LoadEvent::Started => {
+                    view.set_cors_allowlist(&[]);
+                    if storage_features.get().is_some() || !inner.records.borrow().is_empty() {
+                        let extension = view
+                            .uri()
+                            .is_some_and(|uri| inner.install_of_uri(&uri).is_some());
+                        crate::settings::storage_for_navigation(view, extension, &storage_features);
+                    }
+                }
                 webkit2gtk::LoadEvent::Committed => {
                     inner.browser.css.clear(tab);
                     let install = view.uri().and_then(|uri| inner.install_of_uri(&uri));

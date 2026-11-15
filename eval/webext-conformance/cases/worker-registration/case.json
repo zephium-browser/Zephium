@@ -1,0 +1,1 @@
+{"id":"worker-registration","title":"Registration slots and browser-owned worker update boundary","apis":["runtime.sendMessage"],"permissions":[]}
