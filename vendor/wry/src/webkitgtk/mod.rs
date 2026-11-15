@@ -928,6 +928,8 @@ impl InnerWebView {
       let sequence = Rc::new(Cell::new(GtkNavigationSequence::default()));
       let changed_sequence = sequence.clone();
       let changed_handler = navigation_event_handler.clone();
+      let deferred_start = Rc::new(Cell::new(None));
+      let changed_start = deferred_start.clone();
       webview.connect_load_changed(move |webview, load_event| {
         let mut sequence = changed_sequence.get();
         let (transition, native_committed) = match load_event {
@@ -973,7 +975,21 @@ impl InnerWebView {
             webview.set_child_visible(false);
           }
         }
-        if let (Some((id, phase)), Some(url)) = (transition, bounded_webview_uri(webview)) {
+        let url = bounded_webview_uri(webview);
+        if let Some((id, NavigationEventPhase::Started)) = transition {
+          changed_start.set(url.is_none().then_some(id));
+        }
+        if let (Some((id, phase)), Some(url)) = (transition, url) {
+          // Script-created windows can start with no URI. Preserve that native
+          // start and attribute it when the same load first supplies its URI.
+          if changed_start.get() == Some(id) {
+            changed_start.set(None);
+            changed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
           changed_handler(NavigationEvent { id, phase, url });
         }
       });
@@ -1012,6 +1028,13 @@ impl InnerWebView {
             navigation_failure(error)
           };
         if let (Some(id), Some(url)) = (id, url) {
+          if deferred_start.take() == Some(id) {
+            failed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
           if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
             handler(
               id,

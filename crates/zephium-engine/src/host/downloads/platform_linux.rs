@@ -261,17 +261,13 @@ impl Downloads {
         native: &Native,
         ask: Option<SiteAsk>,
     ) -> Option<DownloadId> {
-        let reject = || {
-            native.cancel();
-            None
-        };
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
             || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
         {
-            return reject();
+            return None;
         }
         let view = native.web_view()?;
         let window = view.toplevel()?.downcast::<gtk::Window>().ok()?;
@@ -285,7 +281,7 @@ impl Downloads {
             window: window.downgrade(),
         };
         if !source.live() || !source.in_front() {
-            return reject();
+            return None;
         }
         let uri = native
             .request()
@@ -297,7 +293,7 @@ impl Downloads {
                 && u.username().is_empty()
                 && u.password().is_none()
         }) {
-            return reject();
+            return None;
         }
         let origin = source
             .navigation
@@ -307,7 +303,7 @@ impl Downloads {
             .or_else(|| parsed.as_ref().and_then(|u| PageOrigin::from_url(u).ok()))?;
         // GTK exposes navigation activation but no authenticated action-to-download join.
         let site = match self.site_admission(partition.profile(), ask, &origin, false) {
-            site::SiteAdmission::Refuse => return reject(),
+            site::SiteAdmission::Refuse => return None,
             site::SiteAdmission::Open => None,
             site::SiteAdmission::Hold(hold) => Some(hold),
         };
@@ -513,12 +509,10 @@ impl Downloads {
                 .as_ref()
                 .map(PathBuf::from)
                 .or_else(dirs::download_dir);
-            if let Some(directory) = directory {
+            if let Some(directory) = directory.filter(|path| path.is_dir()) {
                 self.prepare(id, directory.join(filename), preferences.directory_identity);
-            } else {
-                self.cancel(id, Some(DownloadError::Destination));
+                return;
             }
-            return;
         }
         let panel = gtk::FileChooserNative::new(
             Some("Save download"),
@@ -579,8 +573,13 @@ impl Downloads {
         if let Some(panel) = work.2 {
             cancel_directory(&panel);
         }
-        drop(work.1);
-        work.0.cancel();
+        // Dropping the outstanding destination reply already cancels WebKit.
+        // A second cancellation races its asynchronous terminal callback.
+        if let Some(reply) = work.1 {
+            reply.finish(None);
+        } else {
+            work.0.cancel();
+        }
     }
     pub(super) fn choose_directory(
         self: &Rc<Self>,
@@ -657,12 +656,9 @@ impl Downloads {
 
 #[cfg(test)]
 impl Downloads {
-    pub(in crate::host) fn test_ask_destination(&self, profile: ProfileId) {
-        self.preferences
-            .borrow_mut()
-            .get_mut(&profile)
-            .unwrap()
-            .ask_destination = true;
+    pub(in crate::host) fn test_missing_destination(&self, profile: ProfileId) {
+        let directory = tempfile::tempdir().unwrap();
+        self.test_directory(profile, directory.path().to_owned());
     }
     pub(in crate::host) fn test_save_panel(&self) -> Option<gtk::FileChooserNative> {
         self.active

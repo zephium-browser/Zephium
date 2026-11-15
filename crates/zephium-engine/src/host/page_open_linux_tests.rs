@@ -329,6 +329,7 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
     );
     let mut opened = Vec::new();
     let mut closed = Vec::new();
+    let attributed = RefCell::new(std::collections::HashSet::new());
     let drain = |opened: &mut Vec<(ItemId, bool)>, closed: &mut Vec<ItemId>| {
         for event in events.try_iter() {
             match event {
@@ -352,6 +353,9 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
                     closed.push(id);
                 }
                 EngineEvent::ViewCreationFailed { .. } => panic!("native tab creation failed"),
+                EngineEvent::UrlChanged { id, .. } => {
+                    attributed.borrow_mut().insert(id);
+                }
                 _ => {}
             }
         }
@@ -419,9 +423,12 @@ fn native_related_tabs_preserve_requests_and_enforce_popup_ownership() {
         let (child, actual_foreground) = opened[count];
         assert_eq!(actual_foreground, foreground);
         let child_page = native(child);
+        child_page.connect_load_changed(|page, phase| {
+            eprintln!("popup native phase={phase:?} uri={:?}", page.uri());
+        });
         until(|| {
             drain(&mut opened, &mut closed);
-            child_page.title().is_some()
+            child_page.title().is_some() && attributed.borrow().contains(&child)
         });
         assert_eq!(child_page.context(), page.context());
         assert_eq!(page.uri().as_deref(), Some(url.as_str()));
@@ -2237,6 +2244,10 @@ fn consent_download(host: &NativeHarness, id: ItemId) {
         for event in host.drain() {
             if let EngineEvent::DownloadPermissionRequested { id: owner, prompt } = event {
                 assert_eq!(id, owner);
+                assert!(
+                    !prompt.unclicked,
+                    "unknown activation must not accuse the user"
+                );
                 request = Some(prompt.request);
             }
         }
@@ -2247,6 +2258,41 @@ fn consent_download(host: &NativeHarness, id: ItemId) {
             .answer_download_permission(id, request.unwrap(), true),
         NativeDispatch::Scheduled
     );
+}
+
+#[test]
+#[ignore = "isolated GTK; cancellation while a native destination reply is outstanding"]
+fn native_download_cancel_before_destination_settles_once() {
+    use zephium_core::downloads::{DownloadCall, DownloadState};
+    let host = NativeHarness::new();
+    let fixture = Fixture::new();
+    assert!(host
+        .engine
+        .initialize_downloads(Arc::new(DownloadFixtureStore), |_| {}));
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let _native = page
+        .download_uri(&format!("{}/download-progress", fixture.origin))
+        .unwrap();
+    let mut pending = None;
+    until(|| {
+        pending = download_entries(&host)
+            .into_iter()
+            .find(|entry| entry.filename == "progress.txt");
+        pending.is_some()
+    });
+    let id = pending.unwrap().id;
+    download_call(&host, DownloadCall::Cancel { id: id.clone() });
+    until(|| {
+        download_entries(&host)
+            .iter()
+            .any(|entry| entry.id == id && entry.state == DownloadState::Cancelled)
+    });
+    // Drain a subsequent load too: cancellation's reply is asynchronous.
+    page.load_uri(&format!("{}/after-cancel", fixture.origin));
+    until(|| {
+        page.uri().as_deref() == Some(format!("{}/after-cancel", fixture.origin).as_str())
+            && !page.is_loading()
+    });
 }
 
 #[test]
@@ -2325,12 +2371,12 @@ fn native_download_edges_settle_through_shared_coordinator() {
             received.get()
         );
     }
-    // Use the real native save panel for a generated data URL.
+    // A missing default destination must offer the real save panel.
     super::super::try_with(move |host| {
         host.downloads
             .as_ref()
             .unwrap()
-            .test_ask_destination(profile)
+            .test_missing_destination(profile)
     });
     script(&page,"document.querySelector('#script').onclick=()=>{let a=document.createElement('a');a.href='data:text/plain,chosen%20data';a.download='data.txt';document.body.append(a);a.click()};document.title='data-ready'");
     until(|| page.title().as_deref() == Some("data-ready"));
