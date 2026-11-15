@@ -1,0 +1,1 @@
+{"id": "webrequest-filter-schemes", "title": "Request filter schemes and unrestricted empty lists are independent of content matching", "apis": ["webRequest.onBeforeRequest"], "permissions": ["webRequest", "scripting"]}

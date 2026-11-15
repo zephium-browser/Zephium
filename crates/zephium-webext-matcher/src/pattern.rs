@@ -35,6 +35,11 @@ pub struct HostPattern {
 impl HostPattern {
     /// Parses a manifest or `permissions` API origin pattern.
     pub fn parse(source: &str) -> Result<Self, MatchPatternError> {
+        // Preserve the host-permission admission boundary independently of
+        // inert fragment literals accepted in content declarations.
+        if source.contains('#') {
+            return Err(MatchPatternError::FragmentNotAllowed);
+        }
         let parsed = MatchPattern::parse(source)?;
         Ok(Self {
             pattern: canonical(&parsed, PathMode::AllPaths)?,

@@ -5,6 +5,7 @@
 //! source scans never create authoritative listener registrations.
 
 mod filters;
+mod request_pattern;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU64;

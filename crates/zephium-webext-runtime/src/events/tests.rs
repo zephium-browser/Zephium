@@ -537,3 +537,32 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn empty_request_filters_and_minus_one_ids_are_unrestricted() {
+    let filter = ListenerFilter::parse(
+        "webRequest.onBeforeRequest",
+        Some(&json!({
+            "urls": [], "types": [], "tabId": -1, "windowId": -1
+        })),
+    )
+    .unwrap();
+    let url = url::Url::parse("https://example.test/file").unwrap();
+    assert!(filter.matches(&EventFacts {
+        url: Some(&url),
+        resource_type: Some("script"),
+        tab_id: Some(4),
+        window_id: Some(7),
+        ..EventFacts::default()
+    }));
+    let restricted = ListenerFilter::parse(
+        "webRequest.onBeforeRequest",
+        Some(&json!({"urls":[],"tabId":4})),
+    )
+    .unwrap();
+    assert!(!restricted.matches(&EventFacts {
+        url: Some(&url),
+        tab_id: Some(5),
+        ..EventFacts::default()
+    }));
+}

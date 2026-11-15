@@ -1,0 +1,1 @@
+{"manifest_version":3,"permissions":["scripting"],"host_permissions":["http://127.0.0.1/*"],"content_scripts":[{"matches":["http://127.0.0.1/page.html#*"],"js":["fragment.js"]},{"matches":["http://127.0.0.1/*"],"js":["valid.js"]}]}
