@@ -58,6 +58,8 @@ mod page_permissions;
     any(target_os = "macos", target_os = "windows")
 ))]
 pub(crate) mod page_reader;
+#[cfg(target_os = "linux")]
+mod page_save_linux;
 mod permits;
 mod popup_sites;
 mod profiles;
@@ -263,6 +265,8 @@ struct ObservedView {
     #[cfg(target_os = "linux")]
     script_dialogs: Rc<script_dialogs::ScriptDialogs>,
     #[cfg(target_os = "linux")]
+    page_save: Rc<page_save_linux::PageSave>,
+    #[cfg(target_os = "linux")]
     permission_requests: Rc<page_permissions::LinuxRequests>,
     #[cfg(target_os = "linux")]
     _capture_observer: page_permissions::CaptureObserver,
@@ -422,6 +426,8 @@ impl Drop for ObservedView {
         self.http_auth.cancel();
         #[cfg(target_os = "linux")]
         self.script_dialogs.cancel();
+        #[cfg(target_os = "linux")]
+        self.page_save.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()

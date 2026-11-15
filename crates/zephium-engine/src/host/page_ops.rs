@@ -32,6 +32,14 @@ fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
 }
 
 impl EngineHost {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn save_page(&self, id: ItemId) {
+        use wry::WebViewExtUnix;
+        if let Some(view) = self.views.get(&id) {
+            view.page_save.present(&view.view.webview());
+        }
+    }
+
     pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
         let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
             let succeeded = view.zoom(scale).is_ok();

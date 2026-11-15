@@ -822,6 +822,14 @@ impl EngineHost {
         #[cfg(target_os = "linux")]
         let load_script_dialogs = Rc::downgrade(&script_dialogs);
         #[cfg(target_os = "linux")]
+        let page_save = super::page_save_linux::PageSave::new(
+            event_permit.clone(),
+            navigation.clone(),
+            presentation_permit.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        let load_page_save = Rc::downgrade(&page_save);
+        #[cfg(target_os = "linux")]
         let permission_requests = Rc::new(super::page_permissions::LinuxRequests::default());
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
@@ -2095,6 +2103,10 @@ impl EngineHost {
             match transition {
                 NavigationTransition::Started(epoch) => {
                     #[cfg(target_os = "linux")]
+                    if let Some(save) = load_page_save.upgrade() {
+                        save.cancel();
+                    }
+                    #[cfg(target_os = "linux")]
                     if let Some(dialogs) = load_script_dialogs.upgrade() {
                         dialogs.navigation_started();
                     }
@@ -2727,7 +2739,11 @@ impl EngineHost {
             let dialogs = Rc::downgrade(&script_dialogs);
             use gtk::prelude::WidgetExt;
             let uploads = Rc::downgrade(&file_uploads);
+            let save = Rc::downgrade(&page_save);
             view.webview().connect_unmap(move |_| {
+                if let Some(save) = save.upgrade() {
+                    save.cancel();
+                }
                 if let Some(uploads) = uploads.upgrade() {
                     uploads.cancel();
                 }
@@ -3082,6 +3098,8 @@ impl EngineHost {
             http_auth,
             #[cfg(target_os = "linux")]
             script_dialogs,
+            #[cfg(target_os = "linux")]
+            page_save,
             #[cfg(target_os = "linux")]
             permission_requests,
             #[cfg(any(target_os = "macos", target_os = "windows"))]

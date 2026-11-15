@@ -1896,7 +1896,6 @@ fn native_find_honors_direction_without_inventing_match_position() {
         );
     }
     assert_eq!(host.engine.find(id, None), NativeDispatch::Scheduled);
-    assert_eq!(host.engine.save_page(id), NativeDispatch::Unsupported);
 }
 
 #[test]
@@ -2605,6 +2604,8 @@ fn native_page_print_is_refused_without_overriding_page_builtins() {
 
 #[path = "page_open_linux_handoff_tests.rs"]
 mod handoff_tests;
-
 #[path = "page_open_linux_spelling_tests.rs"]
 mod spelling_tests;
+
+#[path = "page_open_linux_save_tests.rs"]
+mod save_tests;
