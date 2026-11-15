@@ -1,0 +1,1 @@
+{"id":"ports-initial-message","title":"Ports retain the first background message before connect promise continuations","apis":["runtime.connect","runtime.onConnect","runtime.Port"],"permissions":[]}

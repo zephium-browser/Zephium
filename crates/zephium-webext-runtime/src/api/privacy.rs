@@ -3,7 +3,7 @@
 use crate::browser::{BrowserPort, BrowserRequest, ServiceRequest};
 use crate::dispatch::{ApiTable, RegistrationError};
 
-/// Browser-managed form services exposed by the minimal privacy adapter.
+/// Browser-managed services exposed by the read-only privacy adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FormSetting {
     /// Browser-managed password saving.
@@ -14,6 +14,20 @@ pub enum FormSetting {
     Autofill,
     /// Browser-managed card filling.
     AutofillCreditCard,
+    /// Remote alternative navigation-error pages.
+    AlternateErrorPages,
+    /// HTML anchor ping requests.
+    HyperlinkAuditing,
+    /// Chrome Topics API.
+    Topics,
+    /// Chrome Attribution Reporting and Private Aggregation APIs.
+    AdMeasurement,
+    /// Chrome Protected Audience API.
+    Fledge,
+    /// Browser prediction policy, including native link prefetch.
+    NetworkPrediction,
+    /// Default third-party cookie admission policy.
+    ThirdPartyCookies,
 }
 
 pub(crate) fn methods() -> impl Iterator<Item = &'static str> {
@@ -34,6 +48,15 @@ pub fn register<S: BrowserPort + 'static>(
                 "privacy.services.autofillAddressEnabled.get" => FormSetting::AutofillAddress,
                 "privacy.services.autofillEnabled.get" => FormSetting::Autofill,
                 "privacy.services.autofillCreditCardEnabled.get" => FormSetting::AutofillCreditCard,
+                "privacy.services.alternateErrorPagesEnabled.get" => {
+                    FormSetting::AlternateErrorPages
+                }
+                "privacy.websites.hyperlinkAuditingEnabled.get" => FormSetting::HyperlinkAuditing,
+                "privacy.websites.topicsEnabled.get" => FormSetting::Topics,
+                "privacy.websites.adMeasurementEnabled.get" => FormSetting::AdMeasurement,
+                "privacy.websites.fledgeEnabled.get" => FormSetting::Fledge,
+                "privacy.network.networkPredictionEnabled.get" => FormSetting::NetworkPrediction,
+                "privacy.websites.thirdPartyCookiesAllowed.get" => FormSetting::ThirdPartyCookies,
                 _ => return host.request(BrowserRequest::Unavailable { api: name }, call),
             };
             if call.args()[0]
@@ -108,6 +131,28 @@ mod tests {
         host.reply = Ok(json!({"value":false,"levelOfControl":"not_controllable"}));
         for (name, setting) in [
             (name, FormSetting::PasswordSaving),
+            (
+                "privacy.network.networkPredictionEnabled.get",
+                FormSetting::NetworkPrediction,
+            ),
+            (
+                "privacy.websites.thirdPartyCookiesAllowed.get",
+                FormSetting::ThirdPartyCookies,
+            ),
+            (
+                "privacy.services.alternateErrorPagesEnabled.get",
+                FormSetting::AlternateErrorPages,
+            ),
+            (
+                "privacy.websites.hyperlinkAuditingEnabled.get",
+                FormSetting::HyperlinkAuditing,
+            ),
+            ("privacy.websites.topicsEnabled.get", FormSetting::Topics),
+            (
+                "privacy.websites.adMeasurementEnabled.get",
+                FormSetting::AdMeasurement,
+            ),
+            ("privacy.websites.fledgeEnabled.get", FormSetting::Fledge),
             (
                 "privacy.services.autofillAddressEnabled.get",
                 FormSetting::AutofillAddress,

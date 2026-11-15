@@ -1,0 +1,256 @@
+{
+  "caseId": "user-scripts-execute",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "default isolated",
+      "value": [
+        {
+          "frameId": 0,
+          "result": [
+            "undefined",
+            "undefined",
+            "undefined"
+          ]
+        }
+      ]
+    },
+    {
+      "label": "content isolated",
+      "value": "undefined"
+    },
+    {
+      "label": "MAIN",
+      "value": [
+        {
+          "frameId": 0,
+          "result": "undefined"
+        }
+      ]
+    },
+    {
+      "label": "new world one",
+      "value": [
+        {
+          "frameId": 0,
+          "result": "undefined"
+        }
+      ]
+    },
+    {
+      "label": "new world two",
+      "value": [
+        {
+          "frameId": 0,
+          "result": "undefined"
+        }
+      ]
+    },
+    {
+      "label": "world one retained",
+      "value": [
+        {
+          "frameId": 0,
+          "result": 43
+        }
+      ]
+    },
+    {
+      "label": "interleaved",
+      "value": [
+        {
+          "frameId": 0,
+          "result": [
+            [
+              "code",
+              "file",
+              "last"
+            ],
+            42
+          ]
+        }
+      ]
+    },
+    {
+      "label": "promise resolved by later source",
+      "value": [
+        {
+          "frameId": 0,
+          "result": 43
+        }
+      ]
+    },
+    {
+      "label": "earlier throw",
+      "value": [
+        {
+          "frameId": 0,
+          "result": 44
+        }
+      ]
+    },
+    {
+      "label": "earlier rejected promise",
+      "value": [
+        {
+          "frameId": 0,
+          "result": 45
+        }
+      ]
+    },
+    {
+      "label": "last throw",
+      "value": [
+        {
+          "frameId": 0,
+          "result": null
+        }
+      ]
+    },
+    {
+      "label": "last rejected promise",
+      "value": [
+        {
+          "frameId": 0,
+          "result": null
+        }
+      ]
+    },
+    {
+      "label": "settled then getter read once",
+      "value": [
+        {
+          "frameId": 0,
+          "result": {}
+        }
+      ]
+    },
+    {
+      "label": "last undefined",
+      "value": [
+        {
+          "frameId": 0,
+          "result": null
+        }
+      ]
+    },
+    {
+      "label": "missing last file:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing last file:error",
+      "value": {
+        "lastError": null,
+        "message": "Could not load file: 'missing.js'."
+      }
+    },
+    {
+      "label": "missing file atomic",
+      "value": [
+        {
+          "frameId": 0,
+          "result": "undefined"
+        }
+      ]
+    },
+    {
+      "label": "duplicate file:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "duplicate file:error",
+      "value": {
+        "lastError": null,
+        "message": "Duplicate file specified: 'part.js'."
+      }
+    },
+    {
+      "label": "MAIN worldId:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "MAIN worldId:error",
+      "value": {
+        "lastError": null,
+        "message": "World ID can only be specified for USER_SCRIPT worlds."
+      }
+    },
+    {
+      "label": "registrations remain empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "registrations remain empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "configurations remain empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "configurations remain empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "programmatic parent messaging",
+      "value": [
+        {
+          "frameId": 0,
+          "result": {
+            "frame": 0,
+            "own": true,
+            "probe": 42
+          }
+        }
+      ]
+    },
+    {
+      "label": "existing muted world remains muted",
+      "value": [
+        {
+          "frameId": 0,
+          "result": "undefined"
+        }
+      ]
+    },
+    {
+      "label": "new document messaging",
+      "value": [
+        {
+          "frameId": 0,
+          "result": {
+            "frame": 0,
+            "own": true,
+            "probe": 43
+          }
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

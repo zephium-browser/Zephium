@@ -180,6 +180,7 @@ fn bridge(
 fn tab_plan(fixture: &Fixture) -> AttachPlan {
     AttachPlan {
         worlds: vec![WorldGrant {
+            install_generation: 1,
             install: install(),
             world: InjectedWorld::Isolated,
             matches: [fixture.origin.as_str(), fixture.cross_origin.as_str()]
@@ -269,9 +270,10 @@ fn native_bridge() {
         .expect("attach");
 
     pump_until(|| bridge.transport(view) == Some(Transport::Module));
-    let table = ScriptTable { bootstraps: Default::default(), catalogs: Default::default(),
+    let table = ScriptTable { admissions: [(format!("{:032x}", 0x5a), 1)].into(), messaging_worlds: Default::default(), bootstraps: Default::default(), catalogs: Default::default(),
         generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
+        admission_world: world_name(install(), &InjectedWorld::Isolated),
         run_at: RunAt::DocumentStart, rule: MatchRule { matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
             &["<all_urls>"], &[], &[], &[], Default::default()).expect("matcher"), all_frames: true, file_access: false },
         files: vec![ScriptFile { source: "globalThis.__nativeBridgeScriptCount = (globalThis.__nativeBridgeScriptCount || 0) + 1; globalThis.__bridgeSend({phase:'native-script', href:location.href, value:73});".into(), url: format!("chrome-extension://{EXTENSION}/native-content.js") }],
@@ -336,7 +338,7 @@ fn native_bridge() {
         .frame_target(view, subframe.frame().expect("frame"), subframe.document())
         .expect("host target");
     let request = InjectRequest { install_id: String::new(), token: String::new(), generation: 0, request_id: 0, target,
-        world: world_name(install(), &InjectedWorld::Isolated), kind: InjectionKind::Function,
+        world: world_name(install(), &InjectedWorld::Isolated), admission_world: world_name(install(), &InjectedWorld::Isolated), kind: InjectionKind::Function,
         source: "async (left, right) => { await Promise.resolve(); return {sum:left+right, href:location.href, count:globalThis.__nativeBridgeScriptCount}; }".into(),
         source_fd: None, source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
     };

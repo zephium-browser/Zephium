@@ -82,6 +82,55 @@ fn a_stale_surface_cannot_roll_the_browser_back() {
 }
 
 #[test]
+fn language_results_cannot_cross_same_url_reload_or_tab_removal() {
+    let shared = shared();
+    shared.publish_surface(surface(1, vec![tab(10, "https://a.test/", false)], 10));
+    let id = shared.tab_id(ItemId::from(10)).unwrap();
+    let mut state = shared.state.borrow_mut();
+    let document = DocumentGeneration::new(41).unwrap();
+    state.frames.entry(ItemId::from(10)).or_default().insert(
+        FrameId::MAIN,
+        Frame {
+            document,
+            url: Url::parse("https://a.test/").unwrap(),
+            parent: None,
+            opaque: false,
+            creator: None,
+        },
+    );
+    let document_id = state
+        .snapshot()
+        .unwrap()
+        .tab(id)
+        .unwrap()
+        .document_id
+        .clone();
+    assert_eq!(
+        state
+            .language_reply(id, document, &document_id, Ok("fr".into()))
+            .unwrap(),
+        json!("fr")
+    );
+    state
+        .frames
+        .get_mut(&ItemId::from(10))
+        .unwrap()
+        .get_mut(&FrameId::MAIN)
+        .unwrap()
+        .document = DocumentGeneration::new(42).unwrap();
+    assert!(state
+        .language_reply(id, document, &document_id, Ok("fr".into()))
+        .is_err());
+    drop(state);
+    shared.publish_surface(surface(2, vec![tab(11, "https://a.test/", false)], 11));
+    assert!(shared
+        .state
+        .borrow()
+        .language_reply(id, document, &document_id, Ok("fr".into()))
+        .is_err());
+}
+
+#[test]
 fn data_replies_refuse_unavailable_profiles_and_unknown_methods() {
     assert!(data_reply("history.search", &[], &ExtensionDataReply::Unavailable).is_err());
     assert!(data_reply("history.search", &[], &ExtensionDataReply::Busy).is_err());
@@ -188,4 +237,81 @@ fn test_messages() -> std::sync::Arc<zephium_webext_runtime::i18n::Messages> {
     )
     .unwrap()
     .into()
+}
+
+#[test]
+fn user_execution_wait_budget_covers_queued_sources_and_releases_on_drop() {
+    let shared = shared();
+    let request = scripting::Request::UserExecute {
+        target: scripting::InjectionTarget {
+            tab_id: 1,
+            main_document: DocumentGeneration::new(1).unwrap(),
+            frames: Vec::new(),
+        },
+        sources: vec![zephium_webext_runtime::user_scripts::Source {
+            code: Some("1".into()),
+            file: None,
+        }],
+        world: zephium_webext_runtime::user_scripts::World::UserScript,
+        world_id: None,
+        inject_immediately: false,
+    };
+    let mut permits = Vec::new();
+    for _ in 0..64 {
+        permits.push(shared.reserve_user_execution(&request).unwrap());
+    }
+    assert!(shared.reserve_user_execution(&request).is_err());
+    permits.clear();
+    assert_eq!(shared.execution_budget.get(), (0, 0));
+    let mut large = request;
+    if let scripting::Request::UserExecute { sources, .. } = &mut large {
+        sources[0].code = Some("x".repeat(1024 * 1024));
+    }
+    for _ in 0..15 {
+        permits.push(shared.reserve_user_execution(&large).unwrap());
+    }
+    assert!(shared.reserve_user_execution(&large).is_err());
+    permits.clear();
+    assert_eq!(shared.execution_budget.get(), (0, 0));
+}
+
+#[test]
+fn frame_results_refuse_aggregate_growth_before_retention() {
+    let url = Url::parse("https://a.test/").unwrap();
+    let frame = BrowserFrame {
+        tab: ItemId::from(10),
+        frame: FrameId::MAIN,
+        document: DocumentGeneration::new(1).unwrap(),
+        document_id: "document".into(),
+        origin: DocumentOrigin::of_url(&url),
+        url,
+        parent_frame_id: None,
+        parent_document_id: None,
+        document_lifecycle: "active".into(),
+        frame_type: "outermost_frame".into(),
+        error_occurred: false,
+    };
+    let result = Ok(ExecutionResult::Value(Value::String("\"".repeat(300_000))));
+    let bytes = bounded_frame_result_bytes(&frame, &result, 1024 * 1024 - 2).unwrap();
+    assert!(bytes > 600_000);
+    assert_eq!(
+        bounded_frame_result_bytes(&frame, &result, bytes).unwrap(),
+        bytes
+    );
+    assert!(bounded_frame_result_bytes(&frame, &result, bytes - 1).is_err());
+    assert!(bounded_frame_result_bytes(&frame, &result, 1024 * 1024 - 2 - bytes).is_err());
+    assert_eq!(
+        bounded_frame_result_bytes(&frame, &Err(ApiError::context_invalidated()), 0).unwrap(),
+        0
+    );
+    let step = Step {
+        world: "world".into(),
+        admission_world: "world".into(),
+        kind: InjectionKind::ScriptBatch,
+        source: "1".into(),
+        source_url: "chrome-extension://test/file.js".into(),
+        args_json: "x".repeat(1024 * 1024).into(),
+    };
+    let other = step.clone();
+    assert!(std::sync::Arc::ptr_eq(&step.args_json, &other.args_json));
 }

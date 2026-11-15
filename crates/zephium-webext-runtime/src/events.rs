@@ -1016,6 +1016,8 @@ event_catalog!(
     "runtime.onConnect",
     "runtime.onMessageExternal",
     "runtime.onConnectExternal",
+    "runtime.onUserScriptMessage",
+    "runtime.onUserScriptConnect",
     "runtime.onInstalled",
     "runtime.onStartup",
     "runtime.onSuspend",

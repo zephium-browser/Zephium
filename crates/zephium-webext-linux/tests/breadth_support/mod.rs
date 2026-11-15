@@ -44,10 +44,20 @@ fn capacity20() {
             }
             pump(host, Duration::from_millis(100));
         }
+        let remaining: Vec<_> = views
+            .iter()
+            .enumerate()
+            .filter_map(|(i, view)| view.is_loading().then_some(i))
+            .collect();
+        println!(
+            "CAPACITY_LOAD {}",
+            json!({"remaining":remaining,"timedOut":!remaining.is_empty()})
+        );
         pump(host, Duration::from_secs(2));
     };
     wait_ready(&mut host);
-    let sample = |phase: &str| {
+    let baseline_origins = RefCell::new(vec![None; views.len()]);
+    let sample = |host: &mut Host, phase: &str| {
         let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
         let ticks: u64 = stat
             .rsplit_once(") ")
@@ -61,14 +71,33 @@ fn capacity20() {
         let namespace = std::fs::read_link("/proc/self/ns/pid").unwrap();
         let ready: Vec<_> = views
             .iter()
-            .map(|view| evaluate_bounded(view, "return document.readyState;"))
+            .enumerate()
+            .map(|(index, view)| {
+                println!("CAPACITY_QUERY {}", json!({"phase":phase,"index":index,"pageId":view.page_id(),"fixture":view.uri().is_some_and(|uri| uri == fixture.url("/breadth"))}));
+                let source = format!("return JSON.stringify({{ready:document.readyState,timeOrigin:performance.timeOrigin,fixture:location.href==={}}});", json!(fixture.url("/breadth")));
+                let result = evaluate_observed(view, &source, Some(&mut *host));
+                let Ok(document) = serde_json::from_str::<Value>(&result) else {
+                    let scalar = evaluate_observed_kind(view, "1", Some(&mut *host), true);
+                    let direct = evaluate_observed_kind(view, source.strip_prefix("return ").unwrap(), Some(&mut *host), true);
+                    println!("CAPACITY_DIAGNOSTIC {}", json!({"phase":phase,"index":index,"primary":result,"directScalar":scalar,"directDocument":direct,"replacesPrimary":false}));
+                    return result;
+                };
+                let origin = document["timeOrigin"].as_f64();
+                let fresh = phase == "without-extension" || (origin.is_some() && origin != baseline_origins.borrow()[index]);
+                println!("CAPACITY_DOCUMENT {}", json!({"phase":phase,"index":index,"document":document,"fresh":fresh}));
+                if document["fixture"] != true || origin.is_none() || !fresh {
+                    return "error: capacity fixture/document identity mismatch".into();
+                }
+                if phase == "without-extension" { baseline_origins.borrow_mut()[index] = origin; }
+                document["ready"].as_str().unwrap_or("error: missing document readiness").to_owned()
+            })
             .collect();
         println!(
             "CAPACITY_SAMPLE {}",
             json!({"extension":id,"phase":phase,"pid":std::process::id(),"startTicks":ticks,"pidNamespace":namespace.to_string_lossy(),"tabs":20,"ready":ready})
         );
     };
-    sample("without-extension");
+    sample(&mut host, "without-extension");
     pump(&mut host, Duration::from_secs(1));
     match host.runtime.install_admitted(spec(&directory, &id, 1)) {
         Ok(()) => {
@@ -111,6 +140,10 @@ fn capacity20() {
                                         install,
                                         &zephium_webext_runtime::context::InjectedWorld::Isolated,
                                     ),
+                                    admission_world: zephium_webext_linux::bridge::world_name(
+                                        install,
+                                        &zephium_webext_runtime::context::InjectedWorld::Isolated,
+                                    ),
                                     kind: InjectionKind::Script,
                                     source: source.clone(),
                                     source_fd: None,
@@ -125,7 +158,7 @@ fn capacity20() {
                 }
                 wait_ready(&mut host);
             }
-            sample("with-extension");
+            sample(&mut host, "with-extension");
             pump(&mut host, Duration::from_secs(1));
             snapshot(&id, "CapacityFirstTab", &views[0]);
             snapshot(&id, "CapacityLastTab", &views[19]);
@@ -143,27 +176,81 @@ fn capacity20() {
 }
 
 fn evaluate_bounded(view: &webkit2gtk::WebView, source: &str) -> String {
+    evaluate_observed(view, source, None)
+}
+
+fn evaluate_observed(view: &webkit2gtk::WebView, source: &str, host: Option<&mut Host>) -> String {
+    evaluate_observed_kind(view, source, host, false)
+}
+
+fn evaluate_observed_kind(
+    view: &webkit2gtk::WebView,
+    source: &str,
+    mut host: Option<&mut Host>,
+    direct: bool,
+) -> String {
     let result = Rc::new(RefCell::new(None));
     let observed = result.clone();
     let cancel = gtk::gio::Cancellable::new();
-    view.call_async_javascript_function(source, None, None, None, Some(&cancel), move |value| {
-        *observed.borrow_mut() = Some(
-            value
-                .map(|value| value.to_string())
-                .unwrap_or_else(|error| format!("error: {error}")),
-        );
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    let page = view.page_id();
+    let uri = view.uri();
+    let loading = view.is_loading();
+    let navigations = Rc::new(std::cell::Cell::new(0_u64));
+    let observed_navigation = navigations.clone();
+    let signal = view.connect_load_changed(move |_, event| {
+        if event == webkit2gtk::LoadEvent::Committed {
+            observed_navigation.set(observed_navigation.get() + 1);
+        }
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
+    println!(
+        "NATIVE_QUERY_BEGIN {}",
+        json!({"pageId":page,"loading":loading,"direct":direct})
+    );
+    let callback = move |value: Result<javascriptcore::Value, glib::Error>| {
+        let callback = Instant::now();
+        let value = value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|error| format!("error: {error}"));
+        *observed.borrow_mut() = Some((callback, Instant::now(), value));
+    };
+    if direct {
+        view.evaluate_javascript(source, None, None, Some(&cancel), callback);
+    } else {
+        view.call_async_javascript_function(source, None, None, None, Some(&cancel), callback);
+    }
+    let dispatched = Instant::now();
+    let mut max_iteration = Duration::ZERO;
+    let mut max_work = Duration::ZERO;
     while result.borrow().is_none() && Instant::now() < deadline {
+        let iteration = Instant::now();
         gtk::main_iteration_do(false);
+        max_iteration = max_iteration.max(iteration.elapsed());
+        if let Some(host) = host.as_deref_mut() {
+            let work = Instant::now();
+            host.work();
+            max_work = max_work.max(work.elapsed());
+        }
         std::thread::sleep(Duration::from_millis(1));
     }
     cancel.cancel();
-    let value = result
-        .borrow_mut()
-        .take()
-        .unwrap_or_else(|| "error: native page evaluation timed out after 5 seconds".into());
-    value
+    let completed = result.borrow_mut().take();
+    view.disconnect(signal);
+    let stable = page == view.page_id() && uri == view.uri() && navigations.get() == 0;
+    let accepted = completed.as_ref().is_some_and(|(_, at, _)| *at <= deadline) && stable;
+    println!(
+        "NATIVE_QUERY_END {}",
+        json!({"pageId":page,"stable":stable,"accepted":accepted,"dispatchUs":dispatched.duration_since(started).as_micros(),"callbackUs":completed.as_ref().map(|(at,_,_)|at.duration_since(started).as_micros()),"completedUs":completed.as_ref().map(|(_,at,_)|at.duration_since(started).as_micros()),"returnUs":started.elapsed().as_micros(),"maxGtkUs":max_iteration.as_micros(),"maxWorkUs":max_work.as_micros(),"cancelRequested":true,"loading":view.is_loading()})
+    );
+    if !stable {
+        return "error: native page changed during evaluation".into();
+    }
+    match completed {
+        Some((_, at, value)) if at <= deadline => value,
+        Some(_) => "error: native page evaluation completed after 5 seconds".into(),
+        None => "error: native page evaluation timed out after 5 seconds".into(),
+    }
 }
 
 fn snapshot(id: &str, kind: &str, view: &webkit2gtk::WebView) {
@@ -355,6 +442,36 @@ fn capture() {
         host.close(options_tab);
     } else {
         diagnostics::record(&id, "Options", json!({"kind":"options-not-declared"}));
+    }
+    if matches!(
+        id.as_str(),
+        "dhdgffkkebhmkfjojejmpbldmpobfkfo" | "jinjaccalgkegednnccohejagnlnfdag"
+    ) {
+        let installer = host.open(&fixture.url("/run5.user.js"), true);
+        pump(&mut host, Duration::from_secs(5));
+        let pages: Vec<_> = host
+            .shell
+            .borrow()
+            .tabs
+            .values()
+            .map(|tab| tab.view.clone())
+            .collect();
+        for page in pages {
+            if page
+                .uri()
+                .is_some_and(|uri| uri.starts_with(&format!("chrome-extension://{id}/")))
+            {
+                snapshot(&id, "UserScriptInstaller", &page);
+                interaction(&id, "UserScriptInstallAttempt", &page,
+                    "const buttons=[...document.querySelectorAll('button,input[type=button],input[type=submit]')].filter(e=>e.getClientRects().length&&!e.disabled&&/^(Install|Install script)$/i.test((e.textContent||e.value||'').trim()));if(buttons.length===1)buttons[0].click();return JSON.stringify({matchingInstallButtons:buttons.length,clicked:buttons.length===1});");
+            }
+        }
+        pump(&mut host, Duration::from_secs(5));
+        view.load_uri(&fixture.url("/breadth"));
+        pump(&mut host, Duration::from_secs(5));
+        interaction(&id, "UserScriptGMRoundtrip", &view,
+            "return JSON.stringify({marker:document.documentElement.dataset.run5UserScript||null,expected:'42'});");
+        host.close(installer);
     }
     if id == UBOL.0 {
         interaction(

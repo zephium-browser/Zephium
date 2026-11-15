@@ -444,17 +444,19 @@
       I.MapDelete(pending, id);
       inFlightBytes -= entry.bytes;
       if (entry.internal) internalPending--;
-      if (ok) entry.resolve(value);
-      else entry.reject(value);
+      if (ok) {
+        if (entry.onReply !== undefined) entry.onReply(value);
+        entry.resolve(value);
+      } else entry.reject(value);
       drainWaiting();
     };
 
-    const dispatchCall = (bytes, resolve, reject, internal = false) => {
+    const dispatchCall = (bytes, resolve, reject, internal = false, onReply) => {
       const id = allocate();
       if (id === 0) return reject(ERRORS.tooManyPending);
       I.DataViewSetUint32(new I.DataView(I.TypedArrayBuffer(bytes)), HEADER_BYTES, id, true);
       const size = I.TypedArrayLength(bytes);
-      I.MapSet(pending, id, { __proto__: null, resolve, reject, bytes: size, internal });
+      I.MapSet(pending, id, { __proto__: null, resolve, reject, bytes: size, internal, onReply });
       inFlightBytes += size;
       if (internal) internalPending++;
       const queued = scheduler.push(bytes, (sent) => {
@@ -478,7 +480,7 @@
           I.MapDelete(queue.entries, queue.head++);
           waitingCount--;
           waitingBytes -= I.TypedArrayLength(entry.bytes);
-          dispatchCall(entry.bytes, entry.resolve, entry.reject, entry.internal);
+          dispatchCall(entry.bytes, entry.resolve, entry.reject, entry.internal, entry.onReply);
         }
       } finally { draining = false; }
     }
@@ -558,7 +560,7 @@
       __proto__: null,
       maxMessageBytes: maxBytes,
       // Bounded backpressure preserves the native in-flight and rate limits.
-      call(name, argsText, internal) {
+      call(name, argsText, internal, onReply) {
         return new I.Promise((resolve, reject) => {
           if (invalidated !== null) return reject(invalidated);
           if (argsText.length > maxBytes) return reject(ERRORS.tooLarge);
@@ -573,13 +575,13 @@
           const queue = waiting[internal ? 1 : 0];
           if (!hasRoom() || queue.tail > queue.head || (internal && internalPending >= internalLimit)) {
             if (waitingCount >= 4096) return reject(ERRORS.tooManyPending);
-            I.MapSet(queue.entries, queue.tail++, { __proto__: null, bytes, resolve, reject, internal: !!internal, order: waitingOrder++ });
+            I.MapSet(queue.entries, queue.tail++, { __proto__: null, bytes, resolve, reject, internal: !!internal, onReply, order: waitingOrder++ });
             waitingCount++;
             waitingBytes += size;
             drainWaiting();
             return undefined;
           }
-          return dispatchCall(bytes, resolve, reject, internal);
+          return dispatchCall(bytes, resolve, reject, internal, onReply);
         });
       },
       ack(seq) {

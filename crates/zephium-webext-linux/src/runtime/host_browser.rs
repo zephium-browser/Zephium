@@ -25,11 +25,15 @@ use crate::runtime::browser::{BrowserSettlement, Shared};
 
 /// What the GTK side needs to publish one install's content scripts.
 pub(crate) struct ContentInstall {
+    pub install_generation: u64,
     pub install: ExtensionInstallId,
     pub extension_id: String,
     pub root: PathBuf,
     pub messages: std::sync::Arc<zephium_webext_runtime::i18n::Messages>,
     pub scripts: Vec<(RegisteredScript, ContentScriptMatcher)>,
+    pub user_scripts: zephium_webext_runtime::user_scripts::Registry,
+    pub ephemeral_user_worlds: std::collections::BTreeSet<String>,
+    pub allow_user_scripts: bool,
     pub site_access: SiteAccess,
     pub origins: Vec<String>,
     pub file_access: bool,
@@ -428,6 +432,7 @@ impl RuntimeHost {
             .filter_map(|(install, state)| {
                 let permissions = self.permissions.get(install)?;
                 Some(ContentInstall {
+                    install_generation: state.install_generation,
                     install: *install,
                     extension_id: state.extension_id.as_str().to_owned(),
                     root: state.root.clone(),
@@ -437,6 +442,10 @@ impl RuntimeHost {
                         .declarations()
                         .map(|injection| (injection.script.clone(), injection.matcher.clone()))
                         .collect(),
+                    user_scripts: state.user_scripts.clone(),
+                    ephemeral_user_worlds: state.ephemeral_user_worlds.clone(),
+                    allow_user_scripts: state.allow_user_scripts
+                        && permissions.has_api("userScripts"),
                     site_access: permissions.site_access().clone(),
                     origins: permissions.snapshot().origins,
                     file_access: permissions.file_access(),
@@ -710,7 +719,8 @@ impl RuntimeHost {
             .values()
             .filter(|context| {
                 context.install() == sender.install()
-                    && matches!(context.kind(), ContextKind::ContentScript)
+                    && (context.kind() == ContextKind::ContentScript
+                        || self.state.user_messaging_allowed(context))
                     && targets.iter().any(|(tab, frame, document)| {
                         context.tab() == Some(*tab)
                             && frame.is_none_or(|frame| context.frame() == Some(frame))

@@ -112,6 +112,7 @@ fn native_background_memory() -> Result<(), &'static str> {
                     false,
                 ),
                 allowed_in_incognito: false,
+                allow_user_scripts: false,
                 externally_connectable: None,
                 unpacked: true,
             })

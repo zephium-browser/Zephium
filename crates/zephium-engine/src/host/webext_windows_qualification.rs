@@ -169,6 +169,7 @@ fn package(root: &Path, index: u128) -> WebExtensionLoad {
         permissions: vec![],
         external_native_messaging: false,
         native_messaging_grantable: false,
+        allow_user_scripts: false,
         match_patterns: vec![],
         start_background: false,
     }
@@ -275,6 +276,7 @@ fn native_windows_runtime_recovery() {
             permissions: vec![],
             external_native_messaging: false,
             native_messaging_grantable: false,
+            allow_user_scripts: false,
             match_patterns: vec![],
             start_background: false,
         }

@@ -1,1 +1,1 @@
-{"id":"storage-manager","title":"Extension pages use native origin storage estimates and persistence","apis":[],"permissions":[]}
+{"id":"storage-manager","title":"Extension pages use native origin storage estimates and persistence","apis":["navigator.storage.estimate","navigator.storage.persist","navigator.storage.persisted"],"permissions":[]}

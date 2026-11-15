@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
+import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface, generatedSurface } from './test/harness.mjs';
 
 const keys = (object) => Object.keys(object).sort();
 
@@ -572,7 +572,9 @@ test('unavailable declarative constructors are defined, gated and never inspect 
 
 
 test('cookies get preserves null while an empty set result is absent', async () => {
-  const {chrome, host} = extensionContext('background', {permissions:['cookies']});
+  const realm = createRealm();
+  const host = new FakeHost(realm.Z, 'background');
+  const {chrome} = realm.Z.api.create(generatedSurface, bootstrap({contextKind:'background',permissions:['cookies']}), host.link, {});
   host.handlers['cookies.get'] = () => null;
   host.handlers['cookies.set'] = () => null;
   assert.equal(await chrome.cookies.get({url:'https://example.com/',name:'missing'}), null);
@@ -593,4 +595,27 @@ test('dynamic resource locators match canonical paths without changing extension
   }
   assert.equal(chrome.runtime.id, EXTENSION_ID);
   assert.equal(chrome.runtime.getURL('///icons/../popup.html'), `chrome-extension://${EXTENSION_ID}///popup.html`);
+});
+
+test('browser user-script gate event removes held methods before argument validation', () => {
+  const {chrome,host} = extensionContext('background',{permissions:['userScripts'],userScriptsEnabled:true});
+  const held=chrome.userScripts;
+  host.event('zephium.onUserScriptsChanged',[false]);
+  assert.equal(chrome.userScripts,undefined);
+  assert.throws(()=>held.getScripts(Symbol()),{message:"'userScripts.getScripts' is not available in this context."});
+});
+
+test('user-world lastError exists only during its error callback', async () => {
+  const {Z}=createRealm();
+  const state=Z.errors.createLastError(true);
+  const runtime={};
+  state.install(runtime);
+  assert.equal(Object.hasOwn(runtime,'lastError'),false);
+  state.run('refused',()=>{
+    assert.equal(Object.hasOwn(runtime,'lastError'),true);
+    assert.equal(runtime.lastError.message,'refused');
+  });
+  assert.equal(Object.hasOwn(runtime,'lastError'),false);
+  await flush();
+  assert.equal(runtime.lastError,undefined);
 });

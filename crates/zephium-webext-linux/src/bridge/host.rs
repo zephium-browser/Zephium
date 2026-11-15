@@ -30,7 +30,7 @@ use super::core::{
 use super::plan::AttachPlan;
 use super::policy::{PolicyError, SealedPolicy};
 use super::runtime::{BridgeViewId, DeliverError, Outbox, Runtime};
-use super::scripts::{ScriptTableError, SealedScripts};
+use super::scripts::{PreparedScriptsId, ScriptTableError, SealedScripts};
 use super::ReplyToken;
 
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -401,6 +401,19 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         result
     }
 
+    pub(crate) fn user_execution_ready(
+        &self,
+        view: BridgeViewId,
+        install: ExtensionInstallId,
+        epoch: u64,
+        world: &str,
+    ) -> Result<bool, InjectionError> {
+        self.shared
+            .core
+            .borrow()
+            .user_execution_ready(view.0, install, epoch, world)
+    }
+
     /// Resolves a Chrome frame and host document to an exact native target.
     pub fn frame_target(
         &self,
@@ -469,6 +482,43 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         let generation = self.shared.core.borrow_mut().publish_scripts(table)?;
         self.shared.collect();
         Ok(generation)
+    }
+
+    /// Reserves a sealed, fully checked snapshot before its registry is saved.
+    pub fn prepare_scripts(
+        &self,
+        table: ScriptTable,
+        plan: &AttachPlan,
+    ) -> Result<PreparedScriptsId, ScriptTableError> {
+        let table = Rc::new(SealedScripts::new(table)?);
+        self.shared.core.borrow_mut().prepare_scripts(table, plan)
+    }
+
+    /// Releases a failed or cancelled durable publication's reservation.
+    pub fn abort_prepared_scripts(&self, id: PreparedScriptsId) {
+        self.shared.core.borrow_mut().abort_prepared_scripts(id);
+    }
+
+    /// Adopts durable registry state and its prepared plans before any effects
+    /// or responses are delivered. `Busy` leaves the reservation intact.
+    /// `None` means shutdown or explicit cancellation removed the reservation.
+    /// The closure must not call bridge methods or pump the native event loop.
+    pub fn commit_prepared_scripts<T>(
+        &self,
+        id: PreparedScriptsId,
+        adopt: impl FnOnce(&mut R, &mut Outbox, &AttachPlan) -> T,
+    ) -> Result<Option<T>, Busy> {
+        let mut outbox = Outbox::default();
+        let result = {
+            let mut runtime = self.shared.runtime.try_borrow_mut().map_err(|_| Busy)?;
+            let mut core = self.shared.core.try_borrow_mut().map_err(|_| Busy)?;
+            core.commit_prepared_scripts(id)
+                .map(|plan| adopt(&mut runtime, &mut outbox, &plan))
+        };
+        self.shared.collect();
+        self.shared.deliver_outbox(outbox);
+        self.shared.drain();
+        Ok(result)
     }
 
     /// Runs `work` against the runtime, then delivers what it queued.
@@ -970,14 +1020,14 @@ impl<R: Runtime + 'static> Shared<R> {
     fn settle(&self, id: u64, outgoing: Outgoing, reply: Result<DeliveryStatus, Option<bool>>) {
         let mut core = self.core.borrow_mut();
         match outgoing {
-            Outgoing::Attach { generation } => {
+            Outgoing::Attach { generation, serial } => {
                 let outcome = match reply {
                     Ok(DeliveryStatus::Delivered) => AttachOutcome::Accepted,
                     Ok(_) => AttachOutcome::Refused,
                     Err(Some(true)) => AttachOutcome::Unhandled,
                     Err(_) => AttachOutcome::Failed,
                 };
-                core.attach_settled(id, generation, outcome);
+                core.attach_request_settled(id, generation, serial, outcome);
             }
             Outgoing::Deliver { context, frame } => {
                 core.delivery_settled(id, &context, reply.unwrap_or(DeliveryStatus::Denied), frame);

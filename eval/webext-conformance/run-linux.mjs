@@ -97,7 +97,11 @@ for (const id of cases) {
         }
         response.setHeader("Cache-Control", "no-store");
         const page = `<script>window.pageScriptRan=true;document.documentElement.dataset.pageScript='ran';</script><title>Fixture</title><body><p id="target">fixture</p>`;
-        if (url.pathname === "/data.json") {
+        if (url.pathname === "/language.html") {
+          const declared = {none:"", fr:"fr", de:"de", pl:"pl", en_us:"EN_us", zh_tw:"ZH_tw", invalid:"???"}[url.searchParams.get("hint")] ?? "";
+          response.setHeader("Content-Type", "text/html");
+          response.end(`<!doctype html><html lang="${declared}"><head><title></title></head><body></body></html>`);
+        } else if (url.pathname === "/data.json") {
           response.setHeader("Content-Type", "application/json");
           response.end('{"ok":true}');
         } else if (url.pathname === "/resource.txt") {
@@ -156,6 +160,7 @@ for (const id of cases) {
         ZEPHIUM_WEBEXT_MODULE_PATH: module,
         ZEPHIUM_CONFORMANCE_EXTENSION: extension,
         ZEPHIUM_CONFORMANCE_ID: extensionId,
+        ...(metadata.userScriptsAvailableInitially === true ? { ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS: "1" } : {}),
       },
       stdio: ["pipe", "pipe", "inherit"],
     });

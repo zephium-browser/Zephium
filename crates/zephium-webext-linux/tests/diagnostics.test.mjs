@@ -163,3 +163,22 @@ test('fetch failures retain resource and call site without changing settlement',
   assert(http.records.some(e=>e.kind==='fetch-http-error' && e.status===503));
   assert(!JSON.stringify(http.records).includes('secret'));
 });
+
+
+test('instrumentation preserves immediate port binding before promise observers', async () => {
+  const realm = createRealm({addEventListener() {}});
+  const host = new FakeHost(realm.Z, 'popup');
+  host.handlers['zephium.diagnostic'] = () => null;
+  host.handlers['runtime.connect'] = () => host.LATER;
+  const wrap = realm.run(script);
+  const api = wrap((entry, spec, boot) => realm.Z.api.create(spec, boot, host.link, {}), false)('page', surface, bootstrap({contextKind:'popup'}));
+  const port = api.runtime.connect({name:'liveness'});
+  const messages = [];
+  port.onMessage.addListener(message => messages.push(message.ready));
+  host.reply(host.callsTo('runtime.connect')[0].id, '7');
+  host.portMessage(7n, {ready:true});
+  assert.deepEqual(messages, [true]);
+  await flush();
+  port.postMessage('confirmed');
+  assert.deepEqual(host.portMessages, [{port:7n, message:'confirmed'}]);
+});

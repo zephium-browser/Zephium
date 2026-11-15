@@ -7,7 +7,7 @@
 //! `ProfileRuntime::settle_browser`. Nothing here trusts a renderer claim the
 //! bridge did not verify.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -115,11 +115,21 @@ pub enum BrowserSettlement {
     Data(ExtensionDataReply),
     /// The person answered a prompt.
     Prompt(bool),
+    /// A bounded declared-language observation, fenced to the requested document.
+    Language(Result<String, ApiError>),
 }
 
 /// Work the runtime's GTK side performs after a dispatch.
 pub(crate) enum Outgoing {
     Engine(BrowserCall),
+    PrepareInjection {
+        pending: u64,
+    },
+    Language {
+        pending: u64,
+        tab: ItemId,
+        document: DocumentGeneration,
+    },
     Inject {
         pending: u64,
         frame: usize,
@@ -133,10 +143,11 @@ pub(crate) enum Outgoing {
 #[derive(Clone, Debug)]
 pub(crate) struct Step {
     pub world: String,
+    pub admission_world: String,
     pub kind: InjectionKind,
     pub source: std::sync::Arc<str>,
     pub source_url: String,
-    pub args_json: String,
+    pub args_json: std::sync::Arc<str>,
 }
 
 impl Step {
@@ -223,6 +234,17 @@ struct FrameJob {
 }
 
 enum Shape {
+    AwaitInjection {
+        request: scripting::Request,
+        admission_world: String,
+        deadline: std::time::Instant,
+        _permit: ExecutionPermit,
+    },
+    Language {
+        tab_id: i32,
+        document: DocumentGeneration,
+        document_id: String,
+    },
     Mutations {
         remaining: VecDeque<CoreAction>,
         reply: Reply,
@@ -235,6 +257,7 @@ enum Shape {
     Inject {
         request: scripting::Request,
         jobs: Vec<FrameJob>,
+        result_bytes: usize,
     },
 }
 
@@ -299,8 +322,29 @@ pub(crate) struct BrowserState {
 #[derive(Default)]
 pub(crate) struct Shared {
     state: RefCell<BrowserState>,
+    execution_budget: Rc<Cell<(usize, usize)>>,
     kick: RefCell<Option<Rc<dyn Fn()>>>,
     pub(crate) css: super::css::Sheets,
+}
+
+pub(crate) struct ExecutionPermit {
+    budget: Rc<Cell<(usize, usize)>>,
+    bytes: usize,
+}
+
+impl Drop for ExecutionPermit {
+    fn drop(&mut self) {
+        let (count, bytes) = self.budget.get();
+        self.budget
+            .set((count.saturating_sub(1), bytes.saturating_sub(self.bytes)));
+    }
+}
+
+pub(crate) struct AwaitingInjection {
+    pub sender: Sender,
+    pub tab: Option<ItemId>,
+    pub admission_world: String,
+    pub deadline: std::time::Instant,
 }
 
 /// The [`BrowserPort`] the runtime host dispatches to.
@@ -441,6 +485,204 @@ impl Shared {
         if let Some(kick) = kick {
             kick();
         }
+    }
+
+    pub(crate) fn reserve_user_execution(
+        &self,
+        request: &scripting::Request,
+    ) -> Result<ExecutionPermit, ApiError> {
+        let scripting::Request::UserExecute {
+            sources, world_id, ..
+        } = request
+        else {
+            return Err(ApiError::malformed_arguments());
+        };
+        let bytes = sources
+            .iter()
+            .map(|source| {
+                source
+                    .code
+                    .as_ref()
+                    .map_or(0, String::len)
+                    .saturating_add(source.file.as_ref().map_or(0, String::len))
+                    .saturating_add(128)
+            })
+            .sum::<usize>()
+            .saturating_add(world_id.as_ref().map_or(0, String::len))
+            .saturating_add(
+                request
+                    .target()
+                    .frames
+                    .iter()
+                    .map(|frame| {
+                        frame
+                            .url
+                            .as_str()
+                            .len()
+                            .saturating_mul(2)
+                            .saturating_add(frame.document_id.len())
+                            .saturating_add(
+                                frame.parent_document_id.as_ref().map_or(0, String::len),
+                            )
+                            .saturating_add(1024)
+                    })
+                    .sum::<usize>(),
+            );
+        let (count, held) = self.execution_budget.get();
+        if count >= 64 || held.saturating_add(bytes) > MAX_INJECTED_FILE_BYTES as usize {
+            return Err(ApiError::too_many_pending());
+        }
+        self.execution_budget.set((count + 1, held + bytes));
+        Ok(ExecutionPermit {
+            budget: self.execution_budget.clone(),
+            bytes,
+        })
+    }
+
+    pub(crate) fn scripting_deferred(
+        &self,
+        request: scripting::Request,
+        sender: Sender,
+        permissions: InstallPermissions,
+        responder: Responder,
+        permit: ExecutionPermit,
+    ) -> Option<Finished> {
+        let mut state = self.state.borrow_mut();
+        if state.pending.len() >= MAX_PENDING {
+            return Some(Finished::Reply(
+                responder,
+                Err(ApiError::too_many_pending()),
+            ));
+        }
+        let scripting::Request::UserExecute { world_id, .. } = &request else {
+            return Some(Finished::Reply(
+                responder,
+                Err(ApiError::malformed_arguments()),
+            ));
+        };
+        let world = zephium_webext_runtime::context::InjectedWorld::UserScript(
+            zephium_webext_runtime::context::UserScriptWorldId::parse(
+                world_id.as_deref().unwrap_or(""),
+            )
+            .expect("validated user world"),
+        );
+        let admission_world = crate::bridge::world_name(sender.install(), &world);
+        let Some(id) = state.next.checked_add(1) else {
+            return Some(Finished::Reply(
+                responder,
+                Err(ApiError::too_many_pending()),
+            ));
+        };
+        state.next = id;
+        state.pending.insert(
+            id,
+            Pending {
+                responder,
+                install: sender.install(),
+                sender,
+                permissions,
+                shape: Shape::AwaitInjection {
+                    request,
+                    admission_world,
+                    deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    _permit: permit,
+                },
+            },
+        );
+        state
+            .outgoing
+            .push_back(Outgoing::PrepareInjection { pending: id });
+        drop(state);
+        self.kick_if_queued();
+        None
+    }
+
+    pub(crate) fn awaiting_injection(&self, id: u64) -> Option<AwaitingInjection> {
+        let state = self.state.borrow();
+        let pending = state.pending.get(&id)?;
+        let Shape::AwaitInjection {
+            request,
+            admission_world,
+            deadline,
+            ..
+        } = &pending.shape
+        else {
+            return None;
+        };
+        Some(AwaitingInjection {
+            sender: pending.sender.clone(),
+            tab: state.tabs.key(request.target().tab_id),
+            admission_world: admission_world.clone(),
+            deadline: *deadline,
+        })
+    }
+
+    pub(crate) fn materialize_injection(
+        &self,
+        id: u64,
+        result: Result<(), ApiError>,
+    ) -> Result<Vec<Outgoing>, Box<Finished>> {
+        let finished = |responder, result| Box::new(Finished::Reply(responder, result));
+        let mut state = self.state.borrow_mut();
+        let Some(mut pending) = state.pending.remove(&id) else {
+            return Ok(Vec::new());
+        };
+        let Shape::AwaitInjection {
+            mut request,
+            _permit,
+            ..
+        } = pending.shape
+        else {
+            state.pending.insert(id, pending);
+            return Ok(Vec::new());
+        };
+        if let Err(error) = result {
+            return Err(finished(pending.responder, Err(error)));
+        }
+        let mut jobs = match state.injection_jobs(&request, pending.install) {
+            Ok(jobs) => jobs,
+            Err(error) => return Err(finished(pending.responder, Err(error))),
+        };
+        if jobs.is_empty() {
+            return Err(finished(
+                pending.responder,
+                scripting::reply(&request, Vec::new()),
+            ));
+        }
+        if let scripting::Request::UserExecute { sources, .. } = &mut request {
+            sources.clear();
+        }
+        let outgoing = jobs
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(frame, job)| {
+                job.steps.pop_front().map(|step| Outgoing::Inject {
+                    pending: id,
+                    frame,
+                    tab: job.frame.tab,
+                    target: Box::new(job.frame.clone()),
+                    install: pending.install,
+                    step: Box::new(step),
+                })
+            })
+            .collect();
+        pending.shape = Shape::Inject {
+            request,
+            jobs,
+            result_bytes: 1,
+        };
+        state.pending.insert(id, pending);
+        Ok(outgoing)
+    }
+
+    pub(crate) fn cancel_awaiting_injections(
+        &self,
+        context: &zephium_webext_runtime::context::ContextKey,
+    ) {
+        self.state.borrow_mut().pending.retain(|_, pending| {
+            pending.responder.context() != context
+                || !matches!(pending.shape, Shape::AwaitInjection { .. })
+        });
     }
 
     pub(crate) fn take_outgoing(&self) -> Vec<Outgoing> {
@@ -832,6 +1074,14 @@ impl Shared {
                     }
                 }
             }
+            (
+                Shape::Language {
+                    tab_id,
+                    document,
+                    document_id,
+                },
+                BrowserSettlement::Language(result),
+            ) => state.language_reply(*tab_id, *document, document_id, result),
             (Shape::Data { method, args }, BrowserSettlement::Data(reply)) => {
                 data_reply(method, args, &reply)
             }
@@ -898,7 +1148,10 @@ impl Shared {
         let mut state = self.state.borrow_mut();
         let pending = state.pending.get_mut(&id)?;
         let install = pending.install;
-        let Shape::Inject { jobs, .. } = &mut pending.shape else {
+        let Shape::Inject {
+            jobs, result_bytes, ..
+        } = &mut pending.shape
+        else {
             return None;
         };
         let job = jobs.get_mut(frame)?;
@@ -908,7 +1161,6 @@ impl Shared {
             job.steps.clear();
             None
         };
-        job.result = Some(outcome);
         if let Some(step) = next {
             let target = Box::new(job.frame.clone());
             state.outgoing.push_back(Outgoing::Inject {
@@ -921,6 +1173,18 @@ impl Shared {
             });
             return None;
         }
+        match bounded_frame_result_bytes(&job.frame, &outcome, 1024 * 1024 - *result_bytes) {
+            Ok(bytes) => *result_bytes += bytes,
+            Err(error) => {
+                let pending = state.pending.remove(&id)?;
+                state.injections.retain(|_, (pending, _)| *pending != id);
+                state.outgoing.retain(
+                    |call| !matches!(call, Outgoing::Inject { pending, .. } if *pending == id),
+                );
+                return Some(Finished::Reply(pending.responder, Err(error)));
+            }
+        }
+        job.result = Some(outcome);
         if jobs
             .iter()
             .any(|job| job.result.is_none() || !job.steps.is_empty())
@@ -928,7 +1192,7 @@ impl Shared {
             return None;
         }
         let pending = state.pending.remove(&id)?;
-        let Shape::Inject { request, jobs } = pending.shape else {
+        let Shape::Inject { request, jobs, .. } = pending.shape else {
             return None;
         };
         let results = jobs
@@ -945,6 +1209,47 @@ impl Shared {
             scripting::reply(&request, results),
         ))
     }
+}
+
+fn bounded_frame_result_bytes(
+    frame: &BrowserFrame,
+    result: &Result<ExecutionResult, ApiError>,
+    budget: usize,
+) -> Result<usize, ApiError> {
+    let Ok(result) = result else { return Ok(0) };
+    struct Counter {
+        bytes: usize,
+        budget: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.budget.saturating_sub(self.bytes) {
+                return Err(std::io::Error::other("injection reply exceeds limit"));
+            }
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let header =
+        json!({"frameId": frame.frame.get(), "documentId": frame.document_id, "result": null});
+    // One delimiter per row plus the initial byte accounts for array framing.
+    let overhead = header.to_string().len() - 4 + 1;
+    if overhead > budget {
+        return Err(ApiError::message_too_large());
+    }
+    let mut counter = Counter {
+        bytes: overhead,
+        budget,
+    };
+    let value = match result {
+        ExecutionResult::Value(value) => value,
+        ExecutionResult::Exception => &Value::Null,
+    };
+    serde_json::to_writer(&mut counter, value).map_err(|_| ApiError::message_too_large())?;
+    Ok(counter.bytes)
 }
 
 fn action_icon_path(
@@ -1085,6 +1390,21 @@ fn diff(previous: &BrowserSnapshot, current: &BrowserSnapshot) -> Vec<TabEvent> 
 }
 
 impl BrowserState {
+    fn language_reply(
+        &self,
+        tab_id: i32,
+        document: DocumentGeneration,
+        document_id: &str,
+        result: Result<String, ApiError>,
+    ) -> Result<Value, ApiError> {
+        let snapshot = self.snapshot()?;
+        let tab = snapshot.tab(tab_id)?;
+        if tab.document != document || tab.document_id != document_id {
+            return Err(ApiError::context_invalidated());
+        }
+        result.map(Value::String)
+    }
+
     fn snapshot(&self) -> Result<BrowserSnapshot, ApiError> {
         let Some(surface) = self.surface.as_ref() else {
             // Before the shell publishes its first surface there are no tabs.
@@ -1256,6 +1576,12 @@ impl BrowserState {
         let id = self.next;
         let first = first.map(|first| match first {
             Outgoing::Engine(call) => Outgoing::Engine(with_request(call, id)),
+            Outgoing::PrepareInjection { .. } => Outgoing::PrepareInjection { pending: id },
+            Outgoing::Language { tab, document, .. } => Outgoing::Language {
+                pending: id,
+                tab,
+                document,
+            },
             Outgoing::Inject {
                 frame,
                 tab,
@@ -1297,10 +1623,22 @@ impl BrowserState {
         if self.pending.len() >= MAX_PENDING {
             return invocation.reply(Err(ApiError::too_many_pending()));
         }
-        let install = invocation.sender().install();
         let sender = invocation.sender().clone();
         let permissions = invocation.permissions().clone();
         let (handled, responder) = invocation.defer();
+        self.queue_injection(request, jobs, sender, permissions, responder);
+        handled
+    }
+
+    fn queue_injection(
+        &mut self,
+        request: scripting::Request,
+        jobs: Vec<FrameJob>,
+        sender: Sender,
+        permissions: InstallPermissions,
+        responder: Responder,
+    ) {
+        let install = sender.install();
         self.next = self.next.wrapping_add(1);
         let id = self.next;
         let mut jobs = jobs;
@@ -1323,10 +1661,13 @@ impl BrowserState {
                 install,
                 sender,
                 permissions,
-                shape: Shape::Inject { request, jobs },
+                shape: Shape::Inject {
+                    request,
+                    jobs,
+                    result_bytes: 1,
+                },
             },
         );
-        handled
     }
 
     fn mutate(
@@ -1443,7 +1784,28 @@ impl BrowserState {
                 None => self.refuse(invocation),
             },
             Request::Capture { .. } => self.refuse(invocation),
-            Request::DetectLanguage { .. } => self.refuse(invocation),
+            Request::DetectLanguage {
+                tab_id,
+                document,
+                document_id,
+            } => {
+                let Some(tab) = self.tabs.key(tab_id) else {
+                    return invocation.reply(Err(ApiError::context_invalidated()));
+                };
+                self.pend(
+                    invocation,
+                    Shape::Language {
+                        tab_id,
+                        document,
+                        document_id,
+                    },
+                    Some(Outgoing::Language {
+                        pending: 0,
+                        tab,
+                        document,
+                    }),
+                )
+            }
             Request::Discard { .. } => self.refuse(invocation),
         }
     }
@@ -1524,10 +1886,25 @@ impl BrowserState {
         request: scripting::Request,
         invocation: Invocation<'_>,
     ) -> Handled {
-        let install = invocation.sender().install();
-        let Some(facts) = self.installs.get(&install).cloned() else {
-            return invocation.reply(Err(ApiError::context_invalidated()));
+        let jobs = match self.injection_jobs(&request, invocation.sender().install()) {
+            Ok(jobs) => jobs,
+            Err(error) => return invocation.reply(Err(error)),
         };
+        if jobs.is_empty() {
+            return invocation.reply(scripting::reply(&request, Vec::new()));
+        }
+        self.pend_injection(invocation, request, jobs)
+    }
+
+    fn injection_jobs(
+        &self,
+        request: &scripting::Request,
+        install: ExtensionInstallId,
+    ) -> Result<Vec<FrameJob>, ApiError> {
+        let facts = self
+            .installs
+            .get(&install)
+            .ok_or_else(ApiError::context_invalidated)?;
         let isolated = crate::bridge::world_name(
             install,
             &zephium_webext_runtime::context::InjectedWorld::Isolated,
@@ -1540,11 +1917,12 @@ impl BrowserState {
                 ..
             } => {
                 let world = match world {
-                    ExecutionWorld::Isolated => isolated,
+                    ExecutionWorld::Isolated => isolated.clone(),
                     ExecutionWorld::Main => String::new(),
                 };
                 match source {
                     ScriptSource::Function { source, args } => Ok(vec![Step {
+                        admission_world: isolated.clone(),
                         world,
                         kind: if *inject_immediately {
                             InjectionKind::Function
@@ -1553,13 +1931,14 @@ impl BrowserState {
                         },
                         source: source.clone().into(),
                         source_url: format!("chrome-extension://{}/", facts.extension_id),
-                        args_json: Value::Array(args.clone()).to_string(),
+                        args_json: Value::Array(args.clone()).to_string().into(),
                     }]),
                     ScriptSource::Files(files) => files
                         .iter()
                         .map(|file| {
-                            let (source, url) = read_package_file(&facts, file)?;
+                            let (source, url) = read_package_file(facts, file)?;
                             Ok(Step {
+                                admission_world: isolated.clone(),
                                 world: world.clone(),
                                 kind: if *inject_immediately {
                                     InjectionKind::Script
@@ -1574,12 +1953,27 @@ impl BrowserState {
                         .collect(),
                 }
             }
+            scripting::Request::UserExecute {
+                sources,
+                world,
+                world_id,
+                inject_immediately,
+                ..
+            } => user_execution_step(
+                facts,
+                install,
+                sources,
+                *world,
+                world_id.as_deref(),
+                *inject_immediately,
+            )
+            .map(|step| vec![step]),
             scripting::Request::Css { .. } => Err(unsupported()),
         };
-        let steps = match steps {
-            Ok(steps) => steps,
-            Err(error) => return invocation.reply(Err(error)),
-        };
+        let steps = steps?;
+        if steps.iter().any(|step| step.args_json.len() > 1024 * 1024) {
+            return Err(ApiError::message_too_large());
+        }
         let jobs: Vec<FrameJob> = request
             .target()
             .frames
@@ -1590,10 +1984,7 @@ impl BrowserState {
                 result: None,
             })
             .collect();
-        if jobs.is_empty() || steps.is_empty() {
-            return invocation.reply(scripting::reply(&request, Vec::new()));
-        }
-        self.pend_injection(invocation, request, jobs)
+        Ok(jobs)
     }
 }
 
@@ -1618,7 +2009,80 @@ fn font_list() -> Vec<Value> {
         .collect()
 }
 
+fn user_execution_step(
+    facts: &InstallFacts,
+    install: ExtensionInstallId,
+    sources: &[zephium_webext_runtime::user_scripts::Source],
+    world: zephium_webext_runtime::user_scripts::World,
+    world_id: Option<&str>,
+    immediate: bool,
+) -> Result<Step, ApiError> {
+    use sha2::{Digest, Sha256};
+    use zephium_webext_runtime::context::{InjectedWorld, UserScriptWorldId};
+    let mut joined = String::new();
+    let mut slices = Vec::new();
+    for source in sources {
+        let remaining = (MAX_INJECTED_FILE_BYTES as usize)
+            .checked_sub(joined.len())
+            .ok_or_else(ApiError::message_too_large)?;
+        let (code, url) = match (&source.code, &source.file) {
+            (Some(code), None) if code.len() <= remaining => (
+                code.clone(),
+                format!(
+                    "chrome-extension://{}/_user_scripts/{:x}.js",
+                    facts.extension_id,
+                    Sha256::digest(code.as_bytes())
+                ),
+            ),
+            (None, Some(file)) => read_package_file_bounded(facts, file, remaining as u64)?,
+            _ => return Err(ApiError::message_too_large()),
+        };
+        let start = joined.len();
+        joined.push_str(&code);
+        slices.push(json!([start, joined.len(), url]));
+    }
+    let args_json = Value::Array(slices).to_string();
+    let mut identity = Sha256::new();
+    identity.update(joined.as_bytes());
+    identity.update(args_json.as_bytes());
+    let source_url = format!(
+        "chrome-extension://{}/_user_scripts/batch-{:x}.js",
+        facts.extension_id,
+        identity.finalize()
+    );
+    let principal = InjectedWorld::UserScript(
+        UserScriptWorldId::parse(world_id.unwrap_or(""))
+            .ok_or_else(ApiError::malformed_arguments)?,
+    );
+    let admission_world = crate::bridge::world_name(install, &principal);
+    Ok(Step {
+        world: if world == zephium_webext_runtime::user_scripts::World::Main {
+            String::new()
+        } else {
+            admission_world.clone()
+        },
+        admission_world,
+        kind: if immediate {
+            InjectionKind::ScriptBatch
+        } else {
+            InjectionKind::ScriptBatchAtIdle
+        },
+        source: joined.into(),
+        source_url,
+        args_json: args_json.into(),
+    })
+}
+
 fn read_package_file(facts: &InstallFacts, file: &str) -> Result<(String, String), ApiError> {
+    read_package_file_bounded(facts, file, MAX_INJECTED_FILE_BYTES)
+}
+
+fn read_package_file_bounded(
+    facts: &InstallFacts,
+    file: &str,
+    limit: u64,
+) -> Result<(String, String), ApiError> {
+    let limit = limit.min(MAX_INJECTED_FILE_BYTES);
     let missing = || ApiError::other(format!("Could not load file: '{file}'."));
     let path = zephium_webext::manifest::normalize_resource(file)
         .filter(|path| !path.starts_with('_'))
@@ -1628,22 +2092,19 @@ fn read_package_file(facts: &InstallFacts, file: &str) -> Result<(String, String
     if !metadata.is_file() {
         return Err(missing());
     }
-    if metadata.len() > MAX_INJECTED_FILE_BYTES {
+    if metadata.len() > limit {
         return Err(ApiError::other(format!(
-            "Script '{file}' exceeds the {MAX_INJECTED_FILE_BYTES}-byte source limit."
+            "Script '{file}' exceeds the {limit}-byte source limit."
         )));
     }
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(&full)
-        .and_then(|file| {
-            file.take(MAX_INJECTED_FILE_BYTES + 1)
-                .read_to_end(&mut bytes)
-        })
+        .and_then(|file| file.take(limit + 1).read_to_end(&mut bytes))
         .map_err(|_| missing())?;
-    if bytes.len() as u64 > MAX_INJECTED_FILE_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(ApiError::other(format!(
-            "Script '{file}' exceeds the {MAX_INJECTED_FILE_BYTES}-byte source limit."
+            "Script '{file}' exceeds the {limit}-byte source limit."
         )));
     }
     let text = String::from_utf8(bytes).map_err(|_| missing())?;
@@ -1764,9 +2225,27 @@ impl Browser {
                 )
             }
             BrowserRequest::Permissions(_) => state.refuse(invocation),
-            BrowserRequest::Service(ServiceRequest::FormPrivacy(_)) => invocation.reply(Ok(
-                json!({"value":false,"levelOfControl":"not_controllable"}),
-            )),
+            BrowserRequest::Service(ServiceRequest::FormPrivacy(setting)) => {
+                use zephium_webext_runtime::api::privacy::FormSetting;
+                let value = match setting {
+                    FormSetting::NetworkPrediction
+                    | FormSetting::ThirdPartyCookies
+                    | FormSetting::HyperlinkAuditing => {
+                        return invocation.reply(Err(unsupported()))
+                    }
+                    FormSetting::PasswordSaving
+                    | FormSetting::AutofillAddress
+                    | FormSetting::Autofill
+                    | FormSetting::AutofillCreditCard
+                    | FormSetting::AlternateErrorPages
+                    | FormSetting::Topics
+                    | FormSetting::AdMeasurement
+                    | FormSetting::Fledge => false,
+                };
+                invocation.reply(Ok(
+                    json!({"value":value,"levelOfControl":"not_controllable"}),
+                ))
+            }
             BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => {
                 invocation.reply(Ok(json!("active")))
             }

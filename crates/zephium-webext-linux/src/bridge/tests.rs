@@ -61,6 +61,7 @@ fn world() -> String {
 fn tab_plan(origins: &[&str]) -> AttachPlan {
     AttachPlan {
         worlds: vec![WorldGrant {
+            install_generation: 1,
             install: install(),
             world: InjectedWorld::Isolated,
             matches: origins
@@ -176,7 +177,7 @@ impl Harness {
             .find_map(|effect| match effect {
                 Effect::Send {
                     view,
-                    outgoing: Outgoing::Attach { generation },
+                    outgoing: Outgoing::Attach { generation, .. },
                     ..
                 } if view == id => Some(generation),
                 _ => None,
@@ -607,7 +608,7 @@ fn navigation_reattachment_and_crashes_end_contexts() {
         .iter()
         .find_map(|effect| match effect {
             Effect::Send {
-                outgoing: Outgoing::Attach { generation },
+                outgoing: Outgoing::Attach { generation, .. },
                 ..
             } => Some(*generation),
             _ => None,
@@ -781,7 +782,7 @@ fn missing_or_refused_modules_leave_all_views_unavailable() {
             .filter_map(|effect| match effect {
                 Effect::Send {
                     view,
-                    outgoing: Outgoing::Attach { generation },
+                    outgoing: Outgoing::Attach { generation, .. },
                     ..
                 } => Some((view, generation)),
                 _ => None,
@@ -846,7 +847,7 @@ fn policies_reach_live_views_and_every_later_attachment() {
         .into_iter()
         .find_map(|effect| match effect {
             Effect::Send {
-                outgoing: Outgoing::Attach { generation },
+                outgoing: Outgoing::Attach { generation, .. },
                 ..
             } => Some(generation),
             _ => None,
@@ -1072,7 +1073,7 @@ fn immediate_structural_widening_keeps_the_live_context_and_generation() {
         .expect("widen");
     let effects = h.core.take_effects();
     assert!(closed(&effects).is_empty());
-    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next }, .. } if *next == generation)));
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next, .. }, .. } if *next == generation)));
     h.core.deliver(&sender.context_key(), vec![1, 2]).unwrap();
     assert!(
         h.core.take_effects().is_empty(),
@@ -1192,6 +1193,8 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
         RunAt, ScriptEntry, ScriptFile, ScriptTable,
     };
     ScriptTable {
+        admissions: [(format!("{:032x}", 10), 1)].into(),
+        messaging_worlds: Default::default(),
         generation,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -1199,6 +1202,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
             install_id: format!("{:032x}", 10),
             script_id: "manifest-0".into(),
             world: world(),
+            admission_world: world(),
             run_at: RunAt::DocumentStart,
             rule: MatchRule::for_origin(SITE).expect("rule"),
             files: vec![ScriptFile {
@@ -1209,6 +1213,187 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
             bootstrap: String::new(),
         }],
     }
+}
+
+#[test]
+fn sealed_scripts_keep_source_bytes_only_in_the_sealed_file() {
+    use std::os::unix::fs::FileExt;
+    use zephium_webkit_web_process_protocol::protocol::{ScriptBootstrap, ScriptTable};
+
+    let mut table = script_table(7);
+    let catalog: std::sync::Arc<str> = "{\"message\":{\"message\":\"hello\"}}".into();
+    table
+        .catalogs
+        .insert(format!("{:032x}", 10), catalog.clone());
+    table.bootstraps.insert(
+        world(),
+        ScriptBootstrap {
+            install_id: format!("{:032x}", 10),
+            source: "void 0".into(),
+        },
+    );
+    table.entries[0].bootstrap = "void 0".into();
+    let bytes = table.encode().unwrap();
+    let sealed = super::scripts::SealedScripts::new(table).unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&catalog), 1);
+    assert!(sealed.table.entries[0].has_bootstrap);
+    assert_eq!(sealed.table.entries[0].files.len(), 1);
+    assert_eq!(sealed.table.bootstraps[&world()], format!("{:032x}", 10));
+    let file = std::fs::File::from(sealed.fd().try_clone_to_owned().unwrap());
+    let mut retained = vec![0; sealed.len() as usize];
+    file.read_exact_at(&mut retained, 0).unwrap();
+    assert_eq!(retained, bytes);
+    assert_eq!(
+        ScriptTable::decode(&retained).unwrap().entries[0].files[0].source,
+        "void 0"
+    );
+}
+
+#[test]
+fn reserved_script_publication_serializes_admission_and_keeps_revocation() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::BindError;
+    let mut h = Harness::new();
+    let plan = tab_plan(&[SITE]);
+    let (view, _) = h.tab(2, &plan);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(7)).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(8)).unwrap()), &plan)
+        .unwrap();
+    assert!(
+        h.core.take_effects().is_empty(),
+        "preparation must not publish"
+    );
+    assert!(h
+        .core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(9)).unwrap()))
+        .is_err());
+    assert!(h.core.check_script_capacity(1).is_err());
+    assert_eq!(
+        h.core.admit(admission(install(), EXTENSION)),
+        Err(BindError::PublicationPending)
+    );
+    let mut revoked = plan.clone();
+    revoked.worlds.clear();
+    h.core.update_plan(view, &revoked, true).unwrap();
+    let committed = h.core.commit_prepared_scripts(prepared).unwrap();
+    assert!(
+        committed.worlds.is_empty(),
+        "a save cannot restore a revoked grant"
+    );
+    assert!(h.core.commit_prepared_scripts(prepared).is_none());
+    assert!(h.core.check_script_capacity(1).is_ok());
+}
+
+#[test]
+fn reserved_user_worlds_require_explicit_owned_grants_and_retirement_is_inert() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::UserScriptWorldId;
+    let mut h = Harness::new();
+    let mut plan = tab_plan(&[SITE]);
+    let world_id = InjectedWorld::UserScript(UserScriptWorldId::parse("custom").unwrap());
+    let mut table = script_table(1);
+    table.entries[0].world = world_name(install(), &world_id);
+    table.entries[0].admission_world = table.entries[0].world.clone();
+    assert!(h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(table.clone()).unwrap()), &plan)
+        .is_err());
+    plan.worlds.push(WorldGrant {
+        install_generation: 1,
+        world: world_id,
+        ..plan.worlds[0].clone()
+    });
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(table).unwrap()), &plan)
+        .unwrap();
+    h.core.retire(install());
+    let committed = h.core.commit_prepared_scripts(prepared).unwrap();
+    assert!(committed.worlds.is_empty());
+    assert!(committed.extension_pages.is_empty());
+    assert_eq!(
+        h.core.admit(admission(install(), EXTENSION)),
+        Err(zephium_webext_runtime::context::BindError::GenerationNotNewer)
+    );
+}
+
+#[test]
+fn aborted_publication_handles_cannot_commit_or_abort_a_reused_generation() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let plan = tab_plan(&[SITE]);
+    let old = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(1)).unwrap()), &plan)
+        .unwrap();
+    h.core.abort_prepared_scripts(old);
+    let new = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(1)).unwrap()), &plan)
+        .unwrap();
+    assert_ne!(old, new);
+    h.core.abort_prepared_scripts(old);
+    assert!(h.core.commit_prepared_scripts(old).is_none());
+    assert!(h.core.commit_prepared_scripts(new).is_some());
+}
+
+#[test]
+fn replacement_admission_cannot_reuse_old_sources_or_cached_grants() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    let mut h = Harness::new();
+    let old = tab_plan(&[SITE]);
+    let (view, _) = h.tab(2, &old);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(7)).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    let prepared = h
+        .core
+        .prepare_scripts(Rc::new(SealedScripts::new(script_table(8)).unwrap()), &old)
+        .unwrap();
+    h.core.retire(install());
+    let effects = h.core.take_effects();
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { view: id, outgoing: Outgoing::Attach { .. }, .. } if *id == view)));
+    let stale_tab = h.core.register_tab(ItemId::from(99), &old).unwrap();
+    let effects = h.core.take_effects();
+    for effect in effects {
+        if let Effect::Send {
+            view: id,
+            name,
+            bytes,
+            ..
+        } = effect
+        {
+            if id == stale_tab {
+                if let UiMessage::Attach(attach) = decode_ui(name, &bytes).unwrap() {
+                    assert!(attach.worlds.is_empty());
+                    assert!(attach.extension_origins.is_empty());
+                }
+            }
+        }
+    }
+    h.core.commit_prepared_scripts(prepared).unwrap();
+    let mut replacement = admission(install(), EXTENSION);
+    replacement.generation = ExtensionRuntimeGeneration::INITIAL.next().unwrap();
+    h.core.admit(replacement).unwrap();
+    assert!(h
+        .core
+        .publish_scripts(Rc::new(SealedScripts::new(script_table(9)).unwrap()))
+        .is_err());
+    let mut current = script_table(9);
+    current.admissions.insert(format!("{:032x}", 10), 2);
+    h.core
+        .publish_scripts(Rc::new(SealedScripts::new(current).unwrap()))
+        .unwrap();
 }
 
 #[test]
@@ -1295,6 +1480,7 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
             document_seq: 1,
         },
         world: world(),
+        admission_world: world(),
         kind: InjectionKind::Function,
         source: "() => Promise.resolve(7)".into(),
         source_fd: None,
@@ -1302,6 +1488,21 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
         args_json: "[]".into(),
         timeout_ms: 10,
     };
+    let mut main = request.clone();
+    main.world.clear();
+    main.admission_world = world_name(
+        install(),
+        &InjectedWorld::UserScript(
+            zephium_webext_runtime::context::UserScriptWorldId::parse("").unwrap(),
+        ),
+    );
+    assert_eq!(
+        h.core.inject(id, install(), main, h.now),
+        Err(super::core::InjectionError::Denied)
+    );
+    let mut mismatched = request.clone();
+    mismatched.admission_world = "zephium-webext-isolated-missing".into();
+    assert!(h.core.inject(id, install(), mismatched, h.now).is_err());
     let id_request = h
         .core
         .inject(id, install(), request.clone(), h.now)
@@ -1426,6 +1627,7 @@ fn large_injections_send_only_metadata_and_reuse_one_sealed_file() {
             document_seq: 1,
         },
         world: world(),
+        admission_world: world(),
         kind: InjectionKind::Script,
         source: " ".repeat(128 * 1024).into(),
         source_fd: None,
@@ -1530,6 +1732,7 @@ fn programmatic_bootstrap_receipts_require_the_exact_live_request_on_old_documen
                         document_seq: 1,
                     },
                     world: world(),
+                    admission_world: world(),
                     kind: InjectionKind::Script,
                     source: "void 0;".into(),
                     source_fd: None,
@@ -1744,4 +1947,168 @@ fn registration_narrowing_keeps_unaffected_contexts_and_revokes_removed_grants()
     h.core.load_started(id);
     assert!(closed(&h.core.take_effects()).contains(&(kept.clone(), CloseReason::Reattached)));
     assert_eq!(h.core.deliver(&kept, vec![3]), Err(DeliverError::Stale));
+}
+
+#[test]
+fn user_messaging_requires_the_document_bootstrap_not_a_later_configuration() {
+    use super::scripts::SealedScripts;
+    use std::rc::Rc;
+    use zephium_webext_runtime::context::UserScriptWorldId;
+    use zephium_webkit_web_process_protocol::protocol::ScriptBootstrap;
+    for messaging in [false, true] {
+        let mut h = Harness::new();
+        let user = InjectedWorld::UserScript(UserScriptWorldId::parse("").unwrap());
+        let name = world_name(install(), &user);
+        let mut plan = tab_plan(&[SITE]);
+        plan.worlds[0].world = user;
+        let mut table = script_table(7);
+        table.entries[0].world = name.clone();
+        table.entries[0].admission_world = name.clone();
+        table.entries[0].bootstrap = "void 0".into();
+        table.bootstraps.insert(
+            name.clone(),
+            ScriptBootstrap {
+                install_id: format!("{:032x}", 10),
+                source: "void 0".into(),
+            },
+        );
+        if messaging {
+            table.messaging_worlds.insert(name.clone());
+        }
+        let handle = h
+            .core
+            .prepare_scripts(Rc::new(SealedScripts::new(table.clone()).unwrap()), &plan)
+            .unwrap();
+        h.core.commit_prepared_scripts(handle).unwrap();
+        let (view, generation) = h.tab(77, &plan);
+        let mut facts = info(1, 1, "https://a.test/", true);
+        facts.table_generation = 7;
+        h.event(
+            view,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Created(facts)],
+            },
+        );
+        let evaluation = Evaluation {
+            request_id: None,
+            install_id: format!("{:032x}", 10),
+            script_id: "manifest-0".into(),
+            world: name.clone(),
+            frame_id: 1,
+            document_seq: 1,
+            table_generation: 7,
+            file_index: u16::MAX,
+            success: true,
+        };
+        h.event(
+            view,
+            Event::Frames {
+                generation,
+                events: vec![FrameEvent::Evaluated(evaluation.clone())],
+            },
+        );
+        assert_eq!(
+            senders(&h.post(view, post(generation, 1, 1, &name, "https://a.test/"))).len(),
+            usize::from(messaging)
+        );
+        if !messaging {
+            table.generation = 8;
+            table.messaging_worlds.insert(name.clone());
+            let handle = h
+                .core
+                .prepare_scripts(Rc::new(SealedScripts::new(table).unwrap()), &plan)
+                .unwrap();
+            h.core.commit_prepared_scripts(handle).unwrap();
+            h.event(
+                view,
+                Event::Frames {
+                    generation,
+                    events: vec![FrameEvent::Evaluated(Evaluation {
+                        table_generation: 8,
+                        ..evaluation
+                    })],
+                },
+            );
+            assert!(
+                senders(&h.post(view, post(generation, 1, 1, &name, "https://a.test/"))).is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn execution_readiness_requires_positive_table_ack_and_latest_attach_serial() {
+    use super::scripts::SealedScripts;
+    use zephium_webkit_web_process_protocol::protocol::ScriptBootstrap;
+    let mut h = Harness::new();
+    let (view, generation) = h.tab(5, &tab_plan(&[SITE]));
+    let mut table = script_table(7);
+    table.entries[0].bootstrap = "void 0".into();
+    table.bootstraps.insert(
+        world(),
+        ScriptBootstrap {
+            install_id: format!("{:032x}", 10),
+            source: "void 0".into(),
+        },
+    );
+    h.core
+        .publish_scripts(std::rc::Rc::new(SealedScripts::new(table).unwrap()))
+        .unwrap();
+    h.core.take_effects();
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core.scripts_settled(view, generation + 1, 7, Some(true));
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core.scripts_settled(view, generation, 7, Some(true));
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
+    let mut serials = Vec::new();
+    for sites in [
+        vec![SITE, "https://b.test"],
+        vec![SITE, "https://b.test", "https://c.test"],
+    ] {
+        h.core.update_plan(view, &tab_plan(&sites), true).unwrap();
+        serials.push(
+            h.core
+                .take_effects()
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Send {
+                        outgoing: Outgoing::Attach { serial, .. },
+                        ..
+                    } => Some(serial),
+                    _ => None,
+                })
+                .unwrap(),
+        );
+    }
+    h.core
+        .attach_request_settled(view, generation, serials[0], AttachOutcome::Accepted);
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(false)
+    );
+    h.core
+        .attach_request_settled(view, generation, serials[1], AttachOutcome::Accepted);
+    assert_eq!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
+    assert!(h
+        .core
+        .user_execution_ready(view, install(), 2, &world())
+        .is_err());
+    h.core.process_gone(view);
+    assert_ne!(
+        h.core.user_execution_ready(view, install(), 1, &world()),
+        Ok(true)
+    );
 }

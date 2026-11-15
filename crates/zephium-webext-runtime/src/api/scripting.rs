@@ -78,6 +78,19 @@ pub enum Request {
         /// Run immediately instead of waiting for document idle.
         inject_immediately: bool,
     },
+    /// Execute ordered classic sources in a dedicated user world or explicitly MAIN.
+    UserExecute {
+        /// Exact admitted destinations.
+        target: InjectionTarget,
+        /// Ordered package and inline sources.
+        sources: Vec<crate::user_scripts::Source>,
+        /// Dedicated user principal or page world.
+        world: crate::user_scripts::World,
+        /// Named user principal; absent selects the default.
+        world_id: Option<String>,
+        /// Run immediately instead of document idle.
+        inject_immediately: bool,
+    },
     /// Insert or remove CSS using an install-scoped source/origin identity.
     Css {
         /// Whether the caller selected all frames rather than exact frame identities.
@@ -97,7 +110,9 @@ impl Request {
     /// Exact documents admitted by the handler.
     pub fn target(&self) -> &InjectionTarget {
         match self {
-            Self::Execute { target, .. } | Self::Css { target, .. } => target,
+            Self::Execute { target, .. }
+            | Self::UserExecute { target, .. }
+            | Self::Css { target, .. } => target,
         }
     }
 }
@@ -184,6 +199,53 @@ pub fn register<S: BrowserPort + 'static>(
         })?;
     }
     Ok(())
+}
+
+/// Prepares a schema-validated user-script execution using the ordinary target authority.
+pub fn prepare_user_execute(
+    host: &impl BrowserPort,
+    call: &Invocation<'_>,
+) -> Result<Request, ApiError> {
+    let details = call
+        .args()
+        .first()
+        .ok_or_else(ApiError::malformed_arguments)?;
+    let world: crate::user_scripts::World = details
+        .get("world")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| ApiError::malformed_arguments())?
+        .unwrap_or_default();
+    if world == crate::user_scripts::World::Main && details.get("worldId").is_some() {
+        return Err(ApiError::other(
+            "World ID can only be specified for USER_SCRIPT worlds.",
+        ));
+    }
+    let id = crate::user_scripts::world_id(details.get("worldId").and_then(Value::as_str), world)?;
+    let mut sources: Vec<crate::user_scripts::Source> =
+        serde_json::from_value(details["js"].clone())
+            .map_err(|_| ApiError::malformed_arguments())?;
+    let mut unique = std::collections::BTreeSet::new();
+    crate::user_scripts::validate_sources(&mut sources, |file| {
+        if !unique.insert(file.to_owned()) {
+            return Err(ApiError::other(format!(
+                "Duplicate file specified: '{file}'."
+            )));
+        }
+        host.validate_resource(call.sender(), file)
+    })?;
+    let target = target(host, call, &details["target"])?;
+    Ok(Request::UserExecute {
+        target,
+        sources,
+        world,
+        world_id: (!id.is_empty()).then_some(id),
+        inject_immediately: details
+            .get("injectImmediately")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 fn files(

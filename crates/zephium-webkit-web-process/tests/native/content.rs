@@ -42,6 +42,7 @@ fn entry(id: &str, run_at: RunAt, world: &str, source: &str) -> ScriptEntry {
         install_id: INSTALL.into(),
         script_id: id.into(),
         world: world.into(),
+        admission_world: if world.is_empty() { WORLD } else { world }.into(),
         run_at,
         rule: rule(true),
         files: vec![file(id, source)],
@@ -143,6 +144,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         token: TOKEN.into(),
         generation: 1,
         worlds: vec![WorldRule {
+            install_generation: 1,
             install_id: INSTALL.into(),
             name: WORLD.into(),
             matches: vec![rule(true)],
@@ -172,15 +174,27 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut table=ScriptTable {bootstraps: Default::default(), catalogs: Default::default(),
+    let mut table=ScriptTable { admissions: [(INSTALL.into(), 1)].into(), messaging_worlds: Default::default(),bootstraps: Default::default(), catalogs: Default::default(),
         generation:1,entries:vec![
         entry("first",RunAt::DocumentStart,WORLD,"\"use strict\"; let sharedLexical=40; const sharedConstant=2; order.push('start'); globalThis.strictThis=(function(){return this;})()===undefined; globalThis.bootBefore=bootCount===1;"),
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
         entry("main",RunAt::DocumentStart,"","globalThis.mainOverride='native';document.documentElement.dataset.startRoot='present';"),
         top_only,excluded,
-        entry("end",RunAt::DocumentEnd,WORLD,"order.push('end');document.documentElement.dataset.nativeEnd='yes';globalThis.endState=document.readyState;"),
-        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,startRoot:document.documentElement.dataset.startRoot,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
+        entry("end",RunAt::DocumentEnd,WORLD,"order.push('end');document.documentElement.dataset.nativeEnd='yes';globalThis.endState=document.readyState;globalThis.endTaskRan=false;setTimeout(()=>{endTaskRan=true},0);"),
+        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,idleYield:idleTaskRan&&endTaskRan,idleLexical:idleShared+1,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,startRoot:document.documentElement.dataset.startRoot,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
     ]};
+    table.entries.last_mut().unwrap().files.insert(0, ScriptFile {
+        source: "let idleShared=41;globalThis.idleTaskRan=false;setTimeout(()=>{idleTaskRan=true},0);".into(),
+        url: format!("chrome-extension://{ID}/idle-first.js"),
+    });
+    let mut denied_main = entry(
+        "wrong-main-grant",
+        RunAt::DocumentStart,
+        "",
+        "globalThis.wrongMainGrantRan=true;",
+    );
+    denied_main.admission_world = "zephium-webext-ungranted-user-world".into();
+    table.entries.push(denied_main);
     for script in &mut table.entries {
         if !script.world.is_empty() {
             script.bootstrap = bootstrap.into();
@@ -199,6 +213,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(
         evaluate(
             &page,
+            "return globalThis.wrongMainGrantRan === undefined;",
+            None
+        ),
+        "true"
+    );
+    assert_eq!(
+        evaluate(
+            &page,
             "return document.getElementById('blank').contentWindow.blankInlineSawMain;",
             None
         ),
@@ -214,6 +236,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
             value["order"],
             json!(["bootstrap", "start", "end", "idle"]),
             "{value}"
+        );
+        assert_eq!(
+            value["idleYield"], true,
+            "event loop runs between idle files: {value}"
+        );
+        assert_eq!(
+            value["idleLexical"], 42,
+            "idle files share lexical scope: {value}"
         );
         assert_eq!(value["sharedAnswer"], 42, "{value}");
         assert_eq!(value["strictThis"], true, "{value}");
@@ -253,9 +283,18 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         .unwrap();
     let request=InjectRequest {install_id:INSTALL.into(),token:TOKEN.into(),generation:1,request_id:100,
         target:InjectionTarget::Frame{frame_id:target.frame_id,document_seq:target.document_seq},
-        world:WORLD.into(),kind:InjectionKind::Function,
+        world:WORLD.into(),admission_world:WORLD.into(),kind:InjectionKind::Function,
         source:"async (a,b)=>{await Promise.resolve();return {answer:a+b,lexical:sharedLexical,href:location.href};}".into(),
         source_fd: None, source_url:format!("chrome-extension://{ID}/execute.js"),args_json:"[20,22]".into(),timeout_ms:1000};
+    let mut denied_main = request.clone();
+    denied_main.world.clear();
+    denied_main.admission_world = "zephium-webext-us-missing".into();
+    denied_main.request_id = 99;
+    denied_main.source = "()=>{globalThis.unauthorizedUserMain=true}".into();
+    assert_eq!(
+        inject(&page, &events, denied_main)[0].status,
+        InjectionStatus::Denied
+    );
     let results = inject(&page, &events, request.clone());
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, InjectionStatus::Success);
@@ -263,6 +302,76 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(value["answer"], 42);
     assert_eq!(value["lexical"], 40);
     assert_eq!(value["href"], target.uri);
+    for (index, sources, expected, timed_out) in [
+        (
+            0,
+            vec![
+                "new Promise(resolve=>{globalThis.batchResolve=resolve})",
+                "batchResolve(1);42",
+            ],
+            "42",
+            false,
+        ),
+        (1, vec!["throw new Error('earlier')", "43"], "43", false),
+        (
+            2,
+            vec!["Promise.reject(new Error('earlier'))", "44"],
+            "44",
+            false,
+        ),
+        (3, vec!["45", "throw new Error('last')"], "null", false),
+        (
+            4,
+            vec!["46", "Promise.reject(new Error('last'))"],
+            "null",
+            false,
+        ),
+        (
+            5,
+            vec!["let batchLexical=20", "batchLexical+22"],
+            "42",
+            false,
+        ),
+        (6, vec!["new Promise(()=>{})", "47"], "null", true),
+        (
+            7,
+            vec!["new Error().stack.includes('batch-0.js')"],
+            "true",
+            false,
+        ),
+        (8, vec!["({then(resolve){const g=resolve.constructor('return globalThis')();resolve(g===globalThis)}})"], "true", false),
+        (9, vec!["(()=>{let n=0;const o={};Object.defineProperty(o,'then',{get(){return ++n===1?undefined:()=>{throw 1}},enumerable:false});return o})()"], "{}", false),
+    ] {
+        let mut batch = request.clone();
+        batch.request_id = 400 + index;
+        batch.kind = InjectionKind::ScriptBatch;
+        batch.timeout_ms = if timed_out { 30 } else { 1000 };
+        let mut joined = String::new();
+        let mut rows = Vec::new();
+        for (part, source) in sources.iter().enumerate() {
+            let start = joined.len();
+            joined.push_str(source);
+            rows.push(serde_json::json!([
+                start,
+                joined.len(),
+                format!("chrome-extension://{ID}/batch-{part}.js")
+            ]));
+        }
+        batch.source = joined.into();
+        batch.args_json = serde_json::Value::Array(rows).to_string();
+        let result = inject(&page, &events, batch);
+        assert_eq!(
+            result[0].status,
+            if timed_out {
+                InjectionStatus::TimedOut
+            } else {
+                InjectionStatus::Success
+            },
+            "batch {index}"
+        );
+        assert_eq!(result[0].result_json, expected, "batch {index}");
+    }
+    println!("WEBEXT native_batch separate_lexicals=true ordered_promises=true earlier_failures_preserve_last=true source_urls=true timeout=true");
     let mut stale = request.clone();
     stale.request_id = 101;
     stale.target = InjectionTarget::Frame {
@@ -312,6 +421,17 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         refused.source = source.into();
         assert_eq!(inject(&page, &events, refused)[0].status, status);
     }
+    let mut realm = request.clone();
+    realm.request_id = 500;
+    realm.source =
+        "()=>({then(resolve){resolve(resolve.constructor('return globalThis')()===globalThis)}})"
+            .into();
+    assert_eq!(inject(&page, &events, realm)[0].result_json, "true");
+    let mut poison = request.clone();
+    poison.request_id = 501;
+    poison.source = "()=>{const old=Promise.resolve;Promise.resolve=()=>{throw new Error('poisoned')};return {then(resolve){Promise.resolve=old;resolve(42)}}}".into();
+    assert_eq!(inject(&page, &events, poison)[0].result_json, "42");
+    let mut removed = request.clone();
     let mut all = request;
     all.request_id = 103;
     all.target = InjectionTarget::AllFrames;
@@ -321,6 +441,37 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert!(results
         .iter()
         .all(|r| r.status == InjectionStatus::Success && r.result_json == "42"));
+    let same = reports
+        .iter()
+        .find(|post| post.uri.ends_with("?same"))
+        .unwrap();
+    removed.request_id = 502;
+    removed.kind = InjectionKind::ScriptBatch;
+    removed.target = InjectionTarget::Frame {
+        frame_id: same.frame_id,
+        document_seq: same.document_seq,
+    };
+    let first = "globalThis.savedParentDocument=parent.document;frameElement.remove();";
+    let second = "savedParentDocument.documentElement.dataset.detachedBatchExecuted='yes';";
+    removed.source = format!("{first}{second}").into();
+    removed.args_json = serde_json::json!([
+        [0, first.len(), removed.source_url],
+        [first.len(), first.len() + second.len(), removed.source_url]
+    ])
+    .to_string();
+    let removed_results = inject(&page, &events, removed);
+    assert!(removed_results
+        .iter()
+        .all(|result| result.status != InjectionStatus::Success));
+    assert_eq!(
+        evaluate(
+            &page,
+            "return document.documentElement.dataset.detachedBatchExecuted || 'absent';",
+            None
+        ),
+        "absent"
+    );
+    println!("WEBEXT native_await_target_realm single=true batch=true private_realm_absent=true captured_resolve=true detached_batch_stopped=true");
     let mut later = table.clone();
     later.generation = 2;
     later.entries.push(entry(
@@ -351,6 +502,8 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     catalog_entry.bootstrap =
         "(function(messages){globalThis.catalogText=messages.probe.message;})".into();
     let mut catalog_table = ScriptTable {
+        admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
         generation: 3,
         bootstraps: Default::default(),
         catalogs: Default::default(),
@@ -415,6 +568,7 @@ pub(super) fn timing(module: &ModuleDirectory, fixture: &Fixture) {
             token: TOKEN.into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -466,6 +620,7 @@ fn binding(page: &webkit2gtk::WebView, events: &Rc<RefCell<Vec<Event>>>, fixture
             token: TOKEN.into(),
             generation: 2,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -584,12 +739,14 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut attachment=Attach {token:TOKEN.into(),generation:1,worlds:vec![WorldRule {
+    let mut attachment=Attach {token:TOKEN.into(),generation:1,worlds:vec![WorldRule { install_generation: 1,
         install_id:INSTALL.into(),name:WORLD.into(),matches:vec![MatchRule{matcher,all_frames:true,file_access:false}],
         bootstrap:"globalThis.livePost=__zephiumPost;globalThis.bootCount=(globalThis.bootCount||0)+1;".into(),
     }],..Attach::default()};
     assert!(send(&page, &UiMessage::Attach(attachment.clone()), None));
     let table = ScriptTable {
+        admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
         bootstraps: Default::default(),
         catalogs: Default::default(),
         generation: 1,
@@ -630,6 +787,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     attachment.worlds[0].matches.push(rule(true));
     let added_world = "zephium-webext-added-world";
     attachment.worlds.push(WorldRule {
+        install_generation: 1,
         install_id: INSTALL.into(),
         name: added_world.into(),
         matches: vec![rule(true)],
@@ -664,6 +822,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
                 document_seq: original.document_seq,
             },
             world: added_world.into(),
+            admission_world: added_world.into(),
             kind: InjectionKind::Function,
             source: "()=>globalThis.newWorldReady===true".into(),
             source_fd: None,
@@ -702,6 +861,7 @@ pub(super) fn frame_facts(module: &ModuleDirectory, fixture: &Fixture) {
             token: TOKEN.into(),
             generation: 1,
             worlds: vec![WorldRule {
+                install_generation: 1,
                 install_id: INSTALL.into(),
                 name: WORLD.into(),
                 matches: vec![rule(true)],
@@ -759,4 +919,145 @@ pub(super) fn frame_facts(module: &ModuleDirectory, fixture: &Fixture) {
     );
     page.stop_loading();
     println!("WEBEXT native_frame_facts parent=true cross_parent=true sandbox_attribute=true sandbox_csp=true data_opaque=true");
+}
+
+pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
+    page.connect_user_message_received(|_, message| {
+        if message.name().as_deref() != Some(EVENT_MESSAGE) {
+            return false;
+        }
+        message.send_reply(&webkit2gtk::UserMessage::new("observed", None));
+        true
+    });
+    load(&page, &format!("{}/frame?csp-inert", fixture.origin));
+    assert!(send(
+        &page,
+        &UiMessage::Attach(Attach {
+            token: TOKEN.into(),
+            generation: 1,
+            worlds: vec![WorldRule {
+                install_generation: 1,
+                install_id: INSTALL.into(),
+                name: WORLD.into(),
+                matches: vec![rule(false)],
+                bootstrap: String::new()
+            }],
+            ..Attach::default()
+        }),
+        None
+    ));
+    let source = r#"
+        globalThis.worldProbe={evaluated:eval('40+2'),constructed:new Function('return 42')(),workerImports:typeof importScripts};
+        const injectedScript=document.createElement('script');
+        injectedScript.textContent="document.documentElement.dataset.inlineRan='yes'";
+        document.head.append(injectedScript);
+        const injectedStyle=document.createElement('style');
+        injectedStyle.textContent='#target{color:rgb(1,2,3)}';
+        document.head.append(injectedStyle);
+        worldProbe.inlineRan=document.documentElement.dataset.inlineRan==='yes';
+        worldProbe.styleApplied=getComputedStyle(document.getElementById('target')).color==='rgb(1, 2, 3)';
+    "#;
+    assert!(publish(
+        &page,
+        &ScriptTable {
+            admissions: [(INSTALL.into(), 1)].into(),
+            messaging_worlds: Default::default(),
+            generation: 1,
+            bootstraps: Default::default(),
+            catalogs: Default::default(),
+            entries: vec![entry("world-csp", RunAt::DocumentEnd, WORLD, source)]
+        },
+        true
+    ));
+    for (route, allowed) in [("user-world-csp", false), ("user-world-open", true)] {
+        load(&page, &format!("{}/{route}", fixture.origin));
+        let value: Value = serde_json::from_str(&evaluate(
+            &page,
+            "return JSON.stringify(worldProbe);",
+            Some(WORLD),
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"evaluated":42,"constructed":42,"workerImports":"undefined","inlineRan":allowed,"styleApplied":allowed}),
+            "{route}"
+        );
+        assert_eq!(
+            evaluate(&page, "return typeof worldProbe;", None),
+            "undefined"
+        );
+    }
+    println!("WEBEXT native_world_csp eval_unrestricted=true function_unrestricted=true dom_inline_obeys_page_csp=true dom_style_obeys_page_csp=true import_scripts_absent=true");
+}
+
+pub(super) fn admission_epoch(module: &ModuleDirectory, fixture: &Fixture) {
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
+    page.connect_user_message_received(|_, message| {
+        if message.name().as_deref() != Some(EVENT_MESSAGE) {
+            return false;
+        }
+        message.send_reply(&webkit2gtk::UserMessage::new("observed", None));
+        true
+    });
+    load(&page, &format!("{}/frame?epoch-inert", fixture.origin));
+    assert!(send(
+        &page,
+        &UiMessage::Attach(Attach {
+            token: TOKEN.into(),
+            generation: 1,
+            worlds: vec![WorldRule {
+                install_generation: 2,
+                install_id: INSTALL.into(),
+                name: WORLD.into(),
+                matches: vec![rule(false)],
+                bootstrap: String::new()
+            }],
+            ..Attach::default()
+        }),
+        None
+    ));
+    let mut table = ScriptTable {
+        generation: 1,
+        admissions: [(INSTALL.into(), 1)].into(),
+        messaging_worlds: Default::default(),
+        entries: vec![
+            entry(
+                "old-main",
+                RunAt::DocumentEnd,
+                "",
+                "globalThis.epochRan=true;",
+            ),
+            entry(
+                "old-isolated",
+                RunAt::DocumentEnd,
+                WORLD,
+                "globalThis.epochRan=true;",
+            ),
+        ],
+        ..ScriptTable::default()
+    };
+    assert!(publish(&page, &table, true));
+    load(&page, &format!("{}/frame?epoch-old", fixture.origin));
+    for world in [None, Some(WORLD)] {
+        assert_eq!(
+            evaluate(&page, "return typeof epochRan;", world),
+            "undefined"
+        );
+    }
+    table.generation = 2;
+    table.admissions.insert(INSTALL.into(), 2);
+    assert!(publish(&page, &table, true));
+    load(&page, &format!("{}/frame?epoch-new", fixture.origin));
+    for world in [None, Some(WORLD)] {
+        assert_eq!(
+            evaluate(&page, "return globalThis.epochRan === true;", world),
+            "true"
+        );
+    }
+    println!("WEBEXT native_admission_epoch old_main_refused=true old_isolated_refused=true fresh_sources_execute=true");
 }

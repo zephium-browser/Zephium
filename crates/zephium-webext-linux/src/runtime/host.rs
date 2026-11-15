@@ -80,6 +80,11 @@ pub(crate) enum NativeOp {
         request: zephium_webext_runtime::api::cookies::Request,
         responder: Responder,
     },
+    Privacy {
+        sender: Box<Sender>,
+        setting: zephium_webext_runtime::api::privacy::FormSetting,
+        responder: Responder,
+    },
     HandlerCache {
         sender: Box<Sender>,
         responder: Responder,
@@ -140,6 +145,9 @@ pub(crate) enum NativeOp {
     Notify(Notice),
     /// Content-script registrations changed: republish the script table.
     ScriptsChanged,
+    PrepareScripts(u64),
+    CommitScripts(u64),
+    AbortScripts(u64),
 }
 
 pub(crate) enum PermissionCompletion {
@@ -186,6 +194,7 @@ pub enum Activation {
 
 /// What the façade knows about an install when it admits it.
 pub(crate) struct Admitted {
+    pub install_generation: u64,
     pub dynamic_resources: Option<crate::scheme::DynamicResources>,
     pub install: ExtensionInstallId,
     pub extension_id: ExtensionId,
@@ -194,8 +203,11 @@ pub(crate) struct Admitted {
     pub background: Option<BackgroundScript>,
     pub messages: Arc<Messages>,
     pub manifest_scripts: ScriptRegistry,
+    pub user_scripts: zephium_webext_runtime::user_scripts::Registry,
+    pub user_script_guid: String,
     pub permissions: InstallPermissions,
     pub unpacked: bool,
+    pub allow_user_scripts: bool,
     pub state_directory: Option<PathBuf>,
     pub listeners: Option<Vec<u8>>,
     pub alarms: Option<Vec<u8>>,
@@ -234,20 +246,53 @@ enum Offscreen {
     Open,
 }
 
+struct UserExecution {
+    permit: linux_browser::ExecutionPermit,
+    request: zephium_webext_runtime::api::scripting::Request,
+    sender: Sender,
+    permissions: InstallPermissions,
+}
+
 struct ScriptCall {
+    execution: Option<Box<UserExecution>>,
     responder: Responder,
     sender: Box<Sender>,
     name: &'static str,
     args: Vec<Value>,
 }
 
+enum ScriptCandidate {
+    Content(ScriptRegistry),
+    User(zephium_webext_runtime::user_scripts::Registry),
+    UserWorlds(std::collections::BTreeSet<String>),
+}
+
+impl ScriptCandidate {
+    fn record(&self, version: &str) -> Result<(&'static str, Vec<u8>), ApiError> {
+        match self {
+            Self::UserWorlds(_) => Err(ApiError::malformed_arguments()),
+            Self::Content(registry) => serde_json::to_vec(&registry.snapshot())
+                .map(|bytes| ("scripts.json", bytes))
+                .map_err(|_| ApiError::malformed_arguments()),
+            Self::User(registry) => super::storage::user_script_record(registry, version)
+                .map(|bytes| ("user-scripts.json", bytes)),
+        }
+    }
+}
+
 struct PendingScripts {
+    execution: Option<Box<UserExecution>>,
     ticket: u64,
     responder: Responder,
-    candidate: ScriptRegistry,
+    candidate: ScriptCandidate,
+    write: Option<(PathBuf, Vec<u8>)>,
+    writing: bool,
+    saved: bool,
+    value: Value,
 }
 
 pub(crate) struct InstallState {
+    install_generation: u64,
     dynamic_resources: Option<crate::scheme::DynamicResources>,
     #[cfg(feature = "native-tests")]
     last_worker_activity: Option<(u64, String)>,
@@ -272,9 +317,13 @@ pub(crate) struct InstallState {
     unlimited: bool,
     clipboard: bool,
     unpacked: bool,
+    allow_user_scripts: bool,
     queue: EventQueue,
     alarms: Alarms,
     scripts: ScriptRegistry,
+    user_scripts: zephium_webext_runtime::user_scripts::Registry,
+    ephemeral_user_worlds: std::collections::BTreeSet<String>,
+    user_script_guid: String,
     script_calls: VecDeque<ScriptCall>,
     script_pending: Option<PendingScripts>,
     fresh: bool,
@@ -313,17 +362,23 @@ impl InstallState {
             ui_language,
             incognito,
             unpacked: self.unpacked,
+            allow_user_scripts: self.allow_user_scripts,
             permissions: &self.granted,
             dynamic_resources: self.dynamic_resources.as_ref(),
         }
         .to_value(None);
         value["unpacked"] = Value::Bool(self.unpacked);
+        value["userScriptsEnabled"] = Value::Bool(self.allow_user_scripts);
+        value["userScriptDynamicId"] = Value::String(self.user_script_guid.clone());
         value
     }
 }
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    WorkerUpdate {
+        sender: Box<Sender>,
+    },
     OffscreenReady {
         sender: Box<Sender>,
     },
@@ -331,6 +386,11 @@ enum Work {
         sender: Box<Sender>,
         revision: u64,
         request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
+    },
+    Privacy {
+        sender: Box<Sender>,
+        setting: zephium_webext_runtime::api::privacy::FormSetting,
         responder: Responder,
     },
     HandlerCache {
@@ -422,7 +482,6 @@ enum Work {
         name: String,
         route: TabRoute,
     },
-    ScriptsChanged,
 }
 
 /// A `tabs.sendMessage`/`tabs.connect` destination.
@@ -450,6 +509,7 @@ pub(crate) struct State {
     unix_millis: u64,
     contexts: HashMap<ContextKey, Value>,
     browser: Option<Box<dyn BrowserPort>>,
+    browser_shared: Rc<linux_browser::Shared>,
 }
 
 struct At(u64);
@@ -576,10 +636,23 @@ impl EventsHost for State {
 impl MessagingHost for State {
     fn message_request(&mut self, request: MessageRequest, invocation: Invocation<'_>) -> Handled {
         let sender = Box::new(invocation.sender().clone());
+        if sender.kind() == ContextKind::UserScript && !self.user_messaging_allowed(&sender) {
+            return invocation.reply(Err(ApiError::other(
+                "Messaging is disabled for this user-script world.",
+            )));
+        }
         let own = |target: &MessageTarget| {
             matches!(target, MessageTarget::Runtime { extension_id }
                 if extension_id.as_ref().is_none_or(|id| id == sender.extension_id()))
         };
+        if sender.kind() == ContextKind::UserScript
+            && !matches!(&request,
+            MessageRequest::Send { target, .. } | MessageRequest::Connect { target, .. } if own(target))
+        {
+            return invocation.reply(Err(ApiError::other(
+                "User scripts can message only their owning extension.",
+            )));
+        }
         match request {
             MessageRequest::Send { target, payload } if own(&target) => {
                 self.defer(invocation, |responder| Work::Send {
@@ -684,6 +757,7 @@ impl ScriptingHost for State {
         let args = invocation.take_args();
         self.defer(invocation, |responder| {
             Work::Scripts(ScriptCall {
+                execution: None,
                 responder,
                 sender,
                 name,
@@ -718,9 +792,10 @@ impl ScriptingHost for State {
         sender: &Sender,
         candidate: ScriptRegistry,
     ) -> Result<(), ApiError> {
-        self.install(sender)?.scripts = candidate;
-        self.work.push(Work::ScriptsChanged);
-        Ok(())
+        let _ = (sender, candidate);
+        Err(ApiError::other(
+            "Script publication requires prepared native admission.",
+        ))
     }
 }
 
@@ -808,7 +883,61 @@ fn context_info(sender: &Sender, script: Option<&str>) -> Option<Value> {
     Some(value)
 }
 
+impl State {
+    fn user_messaging_allowed(&self, sender: &Sender) -> bool {
+        // Core records USER_SCRIPT injection authority only after a messaging-enabled bootstrap.
+        sender.user_script_world().is_some() && self.user_scripts_allowed(sender)
+    }
+}
+
 impl BrowserPort for State {
+    fn user_scripts_request(&mut self, mut invocation: Invocation<'_>) -> Handled {
+        let execution = if invocation.name() == "userScripts.execute" {
+            let request = match zephium_webext_runtime::api::scripting::prepare_user_execute(
+                self,
+                &invocation,
+            ) {
+                Ok(request) => request,
+                Err(error) => return invocation.reply(Err(error)),
+            };
+            let permit = match self.browser_shared.reserve_user_execution(&request) {
+                Ok(permit) => permit,
+                Err(error) => return invocation.reply(Err(error)),
+            };
+            Some(Box::new(UserExecution {
+                permit,
+                request,
+                sender: invocation.sender().clone(),
+                permissions: invocation.permissions().clone(),
+            }))
+        } else {
+            None
+        };
+        let sender = Box::new(invocation.sender().clone());
+        let name = invocation.name();
+        let args = if execution.is_some() {
+            Vec::new()
+        } else {
+            invocation.take_args()
+        };
+        self.defer(invocation, |responder| {
+            Work::Scripts(ScriptCall {
+                execution,
+                responder,
+                sender,
+                name,
+                args,
+            })
+        })
+    }
+
+    fn user_scripts_allowed(&self, sender: &Sender) -> bool {
+        sender.profile() == self.profile
+            && sender.incognito() == self.incognito
+            && self.installs.get(&sender.install()).is_some_and(|state| {
+                &state.extension_id == sender.extension_id() && state.allow_user_scripts
+            })
+    }
     fn context_menu(
         &mut self,
         sender: &Sender,
@@ -889,6 +1018,22 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        use zephium_webext_runtime::api::privacy::FormSetting;
+        if let BrowserRequest::Service(
+            zephium_webext_runtime::browser::ServiceRequest::FormPrivacy(
+                setting @ (FormSetting::NetworkPrediction
+                | FormSetting::ThirdPartyCookies
+                | FormSetting::HyperlinkAuditing),
+            ),
+        ) = request
+        {
+            let sender = Box::new(invocation.sender().clone());
+            return self.defer(invocation, |responder| Work::Privacy {
+                sender,
+                setting,
+                responder,
+            });
+        }
         if let BrowserRequest::Service(zephium_webext_runtime::browser::ServiceRequest::Cookies(
             request,
         )) = request
@@ -1205,6 +1350,12 @@ fn sender_json(sender: &Sender, browser: &linux_browser::Shared) -> Value {
     value
 }
 
+struct UserScriptReset {
+    generation: u64,
+    ticket: u64,
+    result: Option<Result<(), ApiError>>,
+}
+
 /// Exactly what one start of the host needs.
 pub(crate) struct HostConfig {
     pub profile: ProfileId,
@@ -1235,6 +1386,8 @@ pub struct RuntimeHost {
     tickets: HashMap<u64, (Responder, Box<Sender>)>,
     next_ticket: u64,
     retired_script_writes: HashMap<ExtensionInstallId, u64>,
+    script_releasing: Option<u64>,
+    user_script_resets: HashMap<ExtensionInstallId, UserScriptReset>,
     sends: HashMap<u64, (MessageId, Responder)>,
     awaiting: HashMap<u64, ContextKey>,
     ops: VecDeque<NativeOp>,
@@ -1302,6 +1455,19 @@ fn internal(
 
 fn rules(_: &mut State, invocation: Invocation<'_>) -> Handled {
     invocation.reply(Err(ApiError::other("This event does not support rules.")))
+}
+
+fn worker_update(state: &mut State, invocation: Invocation<'_>) -> Handled {
+    if !invocation.args().is_empty() {
+        return invocation.reply(Err(ApiError::malformed_arguments()));
+    }
+    if state.install(invocation.sender()).is_err() {
+        return invocation.reply(Err(ApiError::context_invalidated()));
+    }
+    state.work.push(Work::WorkerUpdate {
+        sender: Box::new(invocation.sender().clone()),
+    });
+    invocation.reply(Ok(Value::Null))
 }
 
 /// `zephium.workerReport [kind, detail]` from the adapter's own worker hooks.
@@ -1483,6 +1649,10 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
         table.register(name, internal(contexts, rules))?;
     }
     table.register(
+        "zephium.workerUpdate",
+        internal(ContextMask::of(ContextKind::Background), worker_update),
+    )?;
+    table.register(
         "zephium.workerReport",
         internal(ContextMask::of(ContextKind::Background), worker_report),
     )?;
@@ -1570,6 +1740,7 @@ impl RuntimeHost {
         Ok(Self {
             dispatcher: Dispatcher::new(table),
             state: State {
+                browser_shared: browser.clone(),
                 network_tabs: HashMap::new(),
                 profile: config.profile,
                 incognito: config.incognito,
@@ -1605,6 +1776,8 @@ impl RuntimeHost {
             tickets: HashMap::new(),
             next_ticket: 0,
             retired_script_writes: HashMap::new(),
+            script_releasing: None,
+            user_script_resets: HashMap::new(),
             sends: HashMap::new(),
             awaiting: HashMap::new(),
             ops: VecDeque::new(),
@@ -1652,6 +1825,25 @@ impl RuntimeHost {
                     permissions.has_api("cookies")
                         && url.is_none_or(|url| permissions.has_host_access(url))
                 })
+    }
+
+    pub(crate) fn privacy_allowed(&self, sender: &Sender) -> bool {
+        !self.shutting_down
+            && !sender.incognito()
+            && !self.state.incognito
+            && sender.profile() == self.state.profile
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .state
+                .installs
+                .get(&sender.install())
+                .is_some_and(|state| {
+                    !state.permission_pending && state.extension_id == *sender.extension_id()
+                })
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| permissions.has_api("privacy"))
     }
 
     pub(crate) fn cookie_revision(&self, sender: &Sender) -> Option<u64> {
@@ -1720,6 +1912,12 @@ impl RuntimeHost {
         manifest: Manifest,
         completion: PermissionCompletion,
     ) -> Result<(), (String, Box<PermissionCompletion>)> {
+        if self.script_publication_pending() {
+            return Err((
+                "Script publication is pending; retry the permission change.".into(),
+                Box::new(completion),
+            ));
+        }
         let Some(state) = self
             .state
             .installs
@@ -2045,19 +2243,138 @@ impl RuntimeHost {
         self.network_retiring.contains_key(&install)
     }
 
-    pub(crate) fn has_pending_script_writes(&self, install: ExtensionInstallId) -> bool {
-        self.network_retiring(install)
-            || self.retired_script_writes.contains_key(&install)
+    #[cfg(feature = "native-tests")]
+    pub(crate) fn set_test_user_scripts_allowed(
+        &mut self,
+        install: ExtensionInstallId,
+        allowed: bool,
+        out: &mut Outbox,
+    ) -> Result<(), ApiError> {
+        if self.script_publication_pending() {
+            return Err(ApiError::too_many_pending());
+        }
+        self.state
+            .installs
+            .get_mut(&install)
+            .ok_or_else(ApiError::context_invalidated)?
+            .allow_user_scripts = allowed;
+        let senders: Vec<_> = self
+            .router
+            .contexts
+            .values()
+            .filter(|sender| sender.install() == install)
+            .cloned()
+            .collect();
+        for sender in senders {
+            if sender.kind() == ContextKind::UserScript && !allowed {
+                self.close_context(&sender.context_key(), out);
+            } else if let Some(sequence) = EventSeq::new(direct_sequence()) {
+                if let Ok(frame) = protocol::user_scripts_changed(&sender, sequence, allowed) {
+                    out.deliver(sender.context_key(), frame);
+                }
+            }
+        }
+        self.op(NativeOp::RefreshPermissions { install });
+        Ok(())
+    }
+
+    fn script_publication_pending(&self) -> bool {
+        !self.user_script_resets.is_empty() || self.script_publication_busy()
+    }
+
+    fn script_publication_busy(&self) -> bool {
+        self.script_releasing.is_some()
+            || !self.retired_script_writes.is_empty()
             || self
                 .state
                 .installs
-                .get(&install)
-                .is_some_and(|state| state.script_pending.is_some())
+                .values()
+                .any(|state| state.script_pending.is_some())
+    }
+
+    pub(crate) fn script_admission_pending(
+        &self,
+        install: ExtensionInstallId,
+        update: Option<u64>,
+    ) -> bool {
+        self.network_retiring(install)
+            || self.script_publication_busy()
+            || self.user_script_resets.iter().any(|(owner, reset)| {
+                *owner != install || update != Some(reset.generation) || reset.result.is_none()
+            })
+    }
+
+    pub(crate) fn prepare_user_script_reset(
+        &mut self,
+        install: ExtensionInstallId,
+        generation: u64,
+        path: PathBuf,
+        version: &str,
+    ) -> Result<(), ApiError> {
+        if let Some(reset) = self.user_script_resets.get(&install) {
+            if reset.generation != generation {
+                return Err(ApiError::other(
+                    "Another extension update is awaiting admission.",
+                ));
+            }
+            if matches!(reset.result, Some(Ok(()))) {
+                return Ok(());
+            }
+            if reset.result.is_none() {
+                return Err(ApiError::other(
+                    "User-script update reset is pending; retry after it settles.",
+                ));
+            }
+        }
+        if self.script_publication_busy()
+            || self
+                .user_script_resets
+                .keys()
+                .any(|owner| *owner != install)
+        {
+            return Err(ApiError::other(
+                "Script publication is pending; retry extension update.",
+            ));
+        }
+        let bytes = super::storage::user_script_record(&Default::default(), version)?;
+        let ticket = self
+            .next_ticket
+            .checked_add(1)
+            .ok_or_else(ApiError::too_many_pending)?;
+        self.next_ticket = ticket;
+        if !self.storage.submit(Job::CommitScripts {
+            ticket,
+            path,
+            bytes,
+        }) {
+            return Err(ApiError::other(
+                "User-script update reset could not be queued.",
+            ));
+        }
+        self.user_script_resets.insert(
+            install,
+            UserScriptReset {
+                generation,
+                ticket,
+                result: None,
+            },
+        );
+        Err(ApiError::other(
+            "User-script update reset is pending; retry after it settles.",
+        ))
     }
 
     pub(crate) fn admit(&mut self, admitted: Admitted, activation: &Activation, out: &mut Outbox) {
         let now = self.tick_clock();
         let install = admitted.install;
+        if matches!(activation, Activation::Updated { .. })
+            && self.user_script_resets.get(&install).is_some_and(|reset| {
+                reset.generation == admitted.install_generation
+                    && matches!(reset.result, Some(Ok(())))
+            })
+        {
+            self.user_script_resets.remove(&install);
+        }
         let granted = admitted.permissions.snapshot().permissions;
         let unlimited = admitted.permissions.has_api("unlimitedStorage");
         let clipboard = crate::offscreen::clipboard_authorized(&admitted.permissions);
@@ -2095,6 +2412,7 @@ impl RuntimeHost {
             .unwrap_or_default();
         let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
+            install_generation: admitted.install_generation,
             dynamic_resources: admitted.dynamic_resources,
             #[cfg(feature = "native-tests")]
             last_worker_activity: None,
@@ -2122,9 +2440,13 @@ impl RuntimeHost {
             unlimited,
             clipboard,
             unpacked: admitted.unpacked,
+            allow_user_scripts: admitted.allow_user_scripts,
             queue: EventQueue::new(install),
             alarms: Alarms::new(),
             scripts,
+            user_scripts: admitted.user_scripts,
+            ephemeral_user_worlds: Default::default(),
+            user_script_guid: admitted.user_script_guid,
             script_calls: VecDeque::new(),
             script_pending: None,
             fresh: matches!(
@@ -2302,13 +2624,35 @@ impl RuntimeHost {
 
     /// Forgets a stopped install. `erase` also deletes its data.
     pub(crate) fn forget(&mut self, install: ExtensionInstallId, erase: bool, out: &mut Outbox) {
+        self.forget_for_admission(install, erase, false, out);
+    }
+
+    pub(crate) fn forget_for_admission(
+        &mut self,
+        install: ExtensionInstallId,
+        erase: bool,
+        preserve_reset: bool,
+        out: &mut Outbox,
+    ) {
+        if !preserve_reset {
+            if let Some(reset) = self.user_script_resets.remove(&install) {
+                if reset.result.is_none() {
+                    self.retired_script_writes.insert(install, reset.ticket);
+                }
+            }
+        }
         let Some(state) = self.state.installs.remove(&install) else {
+            self.resume_script_calls(out);
             return;
         };
         // Removal is a FIFO barrier even when installation preparation failed.
         self.network.submit(network::Job::Remove { install });
-        if let Some(pending) = &state.script_pending {
-            self.retired_script_writes.insert(install, pending.ticket);
+        if let Some(pending) = state.script_pending {
+            if pending.writing {
+                self.retired_script_writes.insert(install, pending.ticket);
+            }
+            self.script_releasing = Some(pending.ticket);
+            self.op(NativeOp::AbortScripts(pending.ticket));
         }
         let contexts: Vec<ContextKey> = self
             .router
@@ -2335,6 +2679,7 @@ impl RuntimeHost {
         } else {
             self.storage.submit(Job::Close { install });
         }
+        self.resume_script_calls(out);
     }
 
     /// `runtime.onStartup` for installs that listen to it.
@@ -2591,26 +2936,33 @@ impl RuntimeHost {
                     }
                 }
                 Done::Scripts { ticket, result } => {
+                    if let Some(reset) = self
+                        .user_script_resets
+                        .values_mut()
+                        .find(|reset| reset.ticket == ticket)
+                    {
+                        reset.result = Some(result);
+                        continue;
+                    }
                     self.retired_script_writes
                         .retain(|_, pending| *pending != ticket);
-                    let install = self.state.installs.iter().find_map(|(id, state)| {
+                    if let Some(state) = self.state.installs.values_mut().find(|state| {
                         state
                             .script_pending
                             .as_ref()
-                            .filter(|pending| pending.ticket == ticket)
-                            .map(|_| *id)
-                    });
-                    if let Some(install) = install {
-                        if let Some(state) = self.state.installs.get_mut(&install) {
-                            if let Some(pending) = state.script_pending.take() {
-                                if result.is_ok() {
-                                    state.scripts = pending.candidate;
-                                    self.op(NativeOp::ScriptsChanged);
-                                }
-                                self.settle(pending.responder, result.map(|()| Value::Null), out);
+                            .is_some_and(|pending| pending.ticket == ticket && pending.writing)
+                    }) {
+                        let pending = state.script_pending.as_mut().expect("pending publication");
+                        pending.writing = false;
+                        match result {
+                            Ok(()) => {
+                                pending.saved = true;
+                                self.op(NativeOp::CommitScripts(ticket));
                             }
+                            Err(error) => self.abort_script_publication(ticket, error, out),
                         }
-                        self.process_script_calls(install, out);
+                    } else {
+                        self.resume_script_calls(out);
                     }
                 }
                 Done::Call {
@@ -2642,23 +2994,282 @@ impl RuntimeHost {
         self.settle_blockers(out);
     }
 
+    fn resume_script_calls(&mut self, out: &mut Outbox) {
+        let installs: Vec<_> = self.state.installs.keys().copied().collect();
+        for install in installs {
+            self.process_script_calls(install, out);
+        }
+    }
+
+    pub(crate) fn pending_script_installs(&self, ticket: u64) -> Option<Vec<glue::ContentInstall>> {
+        let (install, pending) = self.state.installs.iter().find_map(|(install, state)| {
+            state
+                .script_pending
+                .as_ref()
+                .filter(|pending| pending.ticket == ticket)
+                .map(|pending| (*install, pending))
+        })?;
+        let mut installs = self.content_installs();
+        let projection = installs.iter_mut().find(|entry| entry.install == install)?;
+        match &pending.candidate {
+            ScriptCandidate::Content(registry) => {
+                projection.scripts = registry
+                    .declarations()
+                    .map(|injection| (injection.script.clone(), injection.matcher.clone()))
+                    .collect()
+            }
+            ScriptCandidate::User(registry) => projection.user_scripts = registry.clone(),
+            ScriptCandidate::UserWorlds(worlds) => {
+                projection.ephemeral_user_worlds = worlds.clone()
+            }
+        }
+        Some(installs)
+    }
+
+    pub(crate) fn script_prepared(
+        &mut self,
+        ticket: u64,
+        result: Result<(), ApiError>,
+        out: &mut Outbox,
+    ) {
+        if let Err(error) = result {
+            self.abort_script_publication(ticket, error, out);
+            return;
+        }
+        let Some(pending) = self.state.installs.values_mut().find_map(|state| {
+            state
+                .script_pending
+                .as_mut()
+                .filter(|pending| pending.ticket == ticket)
+        }) else {
+            self.op(NativeOp::AbortScripts(ticket));
+            return;
+        };
+        if pending.writing || pending.saved {
+            return;
+        }
+        if let Some((path, bytes)) = pending.write.take() {
+            if self.storage.submit(Job::CommitScripts {
+                ticket,
+                path,
+                bytes,
+            }) {
+                pending.writing = true;
+            } else {
+                self.abort_script_publication(
+                    ticket,
+                    ApiError::other("Extension script registrations could not be saved."),
+                    out,
+                );
+            }
+        } else {
+            pending.saved = true;
+            self.op(NativeOp::CommitScripts(ticket));
+        }
+    }
+
+    pub(crate) fn script_published(&mut self, ticket: u64, out: &mut Outbox) {
+        let Some(state) = self.state.installs.values_mut().find(|state| {
+            state
+                .script_pending
+                .as_ref()
+                .is_some_and(|pending| pending.ticket == ticket && pending.saved)
+        }) else {
+            return;
+        };
+        let pending = state.script_pending.take().expect("saved publication");
+        match pending.candidate {
+            ScriptCandidate::Content(registry) => state.scripts = registry,
+            ScriptCandidate::User(registry) => state.user_scripts = registry,
+            ScriptCandidate::UserWorlds(worlds) => state.ephemeral_user_worlds = worlds,
+        }
+        let revoked: Vec<_> = self
+            .router
+            .contexts
+            .values()
+            .filter(|sender| {
+                sender.kind() == ContextKind::UserScript
+                    && !self.state.user_messaging_allowed(sender)
+            })
+            .map(Sender::context_key)
+            .collect();
+        for context in revoked {
+            self.close_context(&context, out);
+        }
+        if let Some(execution) = pending.execution {
+            self.launch_user_execution(execution, pending.responder, out);
+        } else {
+            self.settle(pending.responder, Ok(pending.value), out);
+        }
+        self.resume_script_calls(out);
+    }
+
+    pub(crate) fn abort_script_publication(
+        &mut self,
+        ticket: u64,
+        error: ApiError,
+        out: &mut Outbox,
+    ) {
+        if let Some(state) = self.state.installs.values_mut().find(|state| {
+            state
+                .script_pending
+                .as_ref()
+                .is_some_and(|pending| pending.ticket == ticket)
+        }) {
+            let pending = state.script_pending.take().expect("pending publication");
+            self.settle(pending.responder, Err(error), out);
+        }
+        self.script_releasing = Some(ticket);
+        self.op(NativeOp::AbortScripts(ticket));
+    }
+
+    pub(crate) fn script_reservation_released(&mut self, ticket: u64, out: &mut Outbox) {
+        if self.script_releasing == Some(ticket) {
+            self.script_releasing = None;
+        }
+        self.resume_script_calls(out);
+    }
+
+    pub(crate) fn user_execution_allowed(&self, sender: &Sender) -> bool {
+        self.state.user_scripts_allowed(sender)
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| permissions.has_api("userScripts"))
+    }
+
+    fn launch_user_execution(
+        &mut self,
+        execution: Box<UserExecution>,
+        responder: Responder,
+        out: &mut Outbox,
+    ) {
+        if !self.user_execution_allowed(&execution.sender)
+            || self.state.install(&execution.sender).is_err()
+        {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        if let Some(finished) = self.browser.scripting_deferred(
+            execution.request,
+            execution.sender,
+            execution.permissions,
+            responder,
+            execution.permit,
+        ) {
+            self.finish(finished, out);
+        }
+    }
+
     fn process_script_calls(&mut self, install: ExtensionInstallId, out: &mut Outbox) {
         loop {
+            if self.script_publication_pending() {
+                return;
+            }
             let Some(state) = self.state.installs.get_mut(&install) else {
                 return;
             };
-            if state.script_pending.is_some() {
-                return;
-            }
-            let Some(call) = state.script_calls.pop_front() else {
+            let Some(mut call) = state.script_calls.pop_front() else {
                 return;
             };
-            let prepared = zephium_webext_runtime::scripting_registry::prepare_registration(
-                &self.state,
-                &call.sender,
-                call.name,
-                &call.args,
-            );
+            if self
+                .state
+                .installs
+                .values()
+                .any(|state| state.permission_pending)
+            {
+                self.settle(
+                    call.responder,
+                    Err(ApiError::other(
+                        "Permission publication is pending; retry script registration.",
+                    )),
+                    out,
+                );
+                continue;
+            }
+            let prepared = if let Some(execution) = &call.execution {
+                (|| {
+                    let state = self
+                        .state
+                        .installs
+                        .get(&install)
+                        .filter(|state| state.allow_user_scripts)
+                        .ok_or_else(ApiError::context_invalidated)?;
+                    let zephium_webext_runtime::api::scripting::Request::UserExecute {
+                        world,
+                        world_id,
+                        ..
+                    } = &execution.request
+                    else {
+                        return Err(ApiError::malformed_arguments());
+                    };
+                    let id = world_id.as_deref().unwrap_or("");
+                    let known = *world == zephium_webext_runtime::user_scripts::World::Main
+                        || state.user_scripts.world_ids().contains(id)
+                        || state.ephemeral_user_worlds.contains(id);
+                    if known {
+                        return Ok((Value::Null, None));
+                    }
+                    let mut worlds = state.ephemeral_user_worlds.clone();
+                    worlds.insert(id.to_owned());
+                    let all: std::collections::BTreeSet<_> = state
+                        .user_scripts
+                        .world_ids()
+                        .into_iter()
+                        .chain(worlds.iter().map(String::as_str))
+                        .filter(|id| !id.is_empty())
+                        .collect();
+                    if all.len() > zephium_webext_runtime::user_scripts::MAX_WORLDS {
+                        return Err(ApiError::too_many_pending());
+                    }
+                    Ok((Value::Null, Some(ScriptCandidate::UserWorlds(worlds))))
+                })()
+            } else if call.name.starts_with("userScripts.") {
+                self.state
+                    .installs
+                    .get(&install)
+                    .filter(|state| state.allow_user_scripts)
+                    .ok_or_else(|| {
+                        ApiError::other("User scripts are not allowed for this extension.")
+                    })
+                    .and_then(|state| {
+                        state.user_scripts.prepare(call.name, &call.args, |path| {
+                            super::content::validate_file(
+                                &state.root,
+                                path,
+                                ResourceKind::JavaScript,
+                            )
+                        })
+                    })
+                    .and_then(|(value, candidate)| {
+                        if let Some(registry) = &candidate {
+                            let state = self
+                                .state
+                                .installs
+                                .get(&install)
+                                .ok_or_else(ApiError::context_invalidated)?;
+                            let worlds: std::collections::BTreeSet<_> = registry
+                                .world_ids()
+                                .into_iter()
+                                .chain(state.ephemeral_user_worlds.iter().map(String::as_str))
+                                .filter(|id| !id.is_empty())
+                                .collect();
+                            if worlds.len() > zephium_webext_runtime::user_scripts::MAX_WORLDS {
+                                return Err(ApiError::too_many_pending());
+                            }
+                        }
+                        Ok((value, candidate.map(ScriptCandidate::User)))
+                    })
+            } else {
+                zephium_webext_runtime::scripting_registry::prepare_registration(
+                    &self.state,
+                    &call.sender,
+                    call.name,
+                    &call.args,
+                )
+                .map(|(value, candidate)| (value, candidate.map(ScriptCandidate::Content)))
+            };
             let (value, candidate) = match prepared {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -2667,7 +3278,11 @@ impl RuntimeHost {
                 }
             };
             let Some(candidate) = candidate else {
-                self.settle(call.responder, Ok(value), out);
+                if let Some(execution) = call.execution.take() {
+                    self.launch_user_execution(execution, call.responder, out);
+                } else {
+                    self.settle(call.responder, Ok(value), out);
+                }
                 continue;
             };
             let state = self
@@ -2675,42 +3290,42 @@ impl RuntimeHost {
                 .installs
                 .get_mut(&install)
                 .expect("admitted install");
-            if let Some(directory) = &state.state_directory {
-                let bytes = match serde_json::to_vec(&candidate.snapshot()) {
-                    Ok(bytes) if bytes.len() as u64 <= super::storage::MAX_STATE_FILE_BYTES => {
-                        bytes
-                    }
-                    _ => {
-                        self.settle(call.responder, Err(ApiError::too_many_pending()), out);
-                        continue;
-                    }
-                };
-                self.next_ticket += 1;
-                let ticket = self.next_ticket;
-                if self.storage.submit(Job::CommitScripts {
-                    ticket,
-                    path: directory.join("scripts.json"),
-                    bytes,
-                }) {
-                    state.script_pending = Some(PendingScripts {
-                        ticket,
-                        responder: call.responder,
-                        candidate,
-                    });
-                    return;
-                }
-                self.settle(
-                    call.responder,
-                    Err(ApiError::other(
-                        "Extension script registrations could not be saved.",
-                    )),
-                    out,
-                );
+            let write = if matches!(candidate, ScriptCandidate::UserWorlds(_)) {
+                None
+            } else if let Some(directory) = &state.state_directory {
+                let (file, bytes) =
+                    match candidate.record(state.manifest["version"].as_str().unwrap_or("")) {
+                        Ok((file, bytes))
+                            if bytes.len() as u64 <= super::storage::MAX_STATE_FILE_BYTES =>
+                        {
+                            (file, bytes)
+                        }
+                        _ => {
+                            self.settle(call.responder, Err(ApiError::too_many_pending()), out);
+                            continue;
+                        }
+                    };
+                Some((directory.join(file), bytes))
             } else {
-                state.scripts = candidate;
-                self.op(NativeOp::ScriptsChanged);
-                self.settle(call.responder, Ok(value), out);
-            }
+                None
+            };
+            let Some(ticket) = self.next_ticket.checked_add(1) else {
+                self.settle(call.responder, Err(ApiError::too_many_pending()), out);
+                continue;
+            };
+            self.next_ticket = ticket;
+            state.script_pending = Some(PendingScripts {
+                execution: call.execution,
+                ticket,
+                responder: call.responder,
+                candidate,
+                write,
+                writing: false,
+                saved: false,
+                value,
+            });
+            self.op(NativeOp::PrepareScripts(ticket));
+            return;
         }
     }
 
@@ -2886,12 +3501,14 @@ impl RuntimeHost {
                     generation,
                     reason,
                 } => {
-                    if !matches!(reason, StopReason::Shutdown | StopReason::Idle)
-                        && self
-                            .state
-                            .installs
-                            .get(&install)
-                            .is_some_and(|state| state.offscreen.is_some())
+                    if !matches!(
+                        reason,
+                        StopReason::Shutdown | StopReason::Idle | StopReason::WorkerUpdate
+                    ) && self
+                        .state
+                        .installs
+                        .get(&install)
+                        .is_some_and(|state| state.offscreen.is_some())
                     {
                         self.close_offscreen_now(install, out);
                     }
@@ -2940,6 +3557,7 @@ impl RuntimeHost {
             ui_language: &ui_language,
             incognito,
             unpacked: state.unpacked,
+            allow_user_scripts: state.allow_user_scripts,
             permissions: &state.granted,
             dynamic_resources: state.dynamic_resources.as_ref(),
         };
@@ -3327,8 +3945,13 @@ impl RuntimeHost {
         responder: Responder,
         out: &mut Outbox,
     ) {
+        if sender.kind() == ContextKind::UserScript && !self.state.user_messaging_allowed(&sender) {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        let event = MessageRoute::Runtime.event(&sender, false);
         let install = sender.install();
-        if self.needs_background(install, "runtime.onMessage") {
+        if self.needs_background(install, event) {
             let parked = Parked::Send {
                 sender,
                 payload,
@@ -3351,7 +3974,7 @@ impl RuntimeHost {
             .flat_map(|context| {
                 self.state
                     .registry
-                    .listeners(context, "runtime.onMessage", &facts)
+                    .listeners(context, event, &facts)
                     .into_iter()
                     .map(|listener| MessageListener {
                         sender: context.clone(),
@@ -3439,6 +4062,11 @@ impl RuntimeHost {
     }
 
     fn connect(&mut self, sender: Box<Sender>, name: &str, responder: Responder, out: &mut Outbox) {
+        if sender.kind() == ContextKind::UserScript && !self.state.user_messaging_allowed(&sender) {
+            self.settle(responder, Err(ApiError::context_invalidated()), out);
+            return;
+        }
+        let event = MessageRoute::Runtime.event(&sender, true);
         let begun = self
             .router
             .ports
@@ -3452,7 +4080,7 @@ impl RuntimeHost {
         };
         self.settle(responder, Ok(Value::String(port.get().to_string())), out);
         let install = sender.install();
-        if self.needs_background(install, "runtime.onConnect") {
+        if self.needs_background(install, event) {
             let parked = Parked::Connect {
                 port,
                 deadline: self.state.now.saturating_add(PARKED_TIMEOUT_NANOS),
@@ -3468,6 +4096,9 @@ impl RuntimeHost {
     }
 
     fn complete_connect(&mut self, install: ExtensionInstallId, port: PortId, out: &mut Outbox) {
+        let Some(event) = self.router.ports.connect_event(port) else {
+            return;
+        };
         let receivers: Vec<Sender> = self
             .router
             .contexts
@@ -3475,10 +4106,7 @@ impl RuntimeHost {
             .filter(|context| {
                 context.install() == install
                     && context.kind().is_extension_page()
-                    && self
-                        .state
-                        .registry
-                        .has_listeners(context, "runtime.onConnect")
+                    && self.state.registry.has_listeners(context, event)
             })
             .cloned()
             .collect();
@@ -3675,6 +4303,22 @@ impl RuntimeHost {
                     self.finish_send(settlement, out);
                 }
             }
+            Work::WorkerUpdate { sender } => {
+                let install = sender.install();
+                let generation = self
+                    .live_for(&sender)
+                    .filter(|live| live.activated)
+                    .map(|live| live.generation);
+                if let Some(generation) = generation {
+                    self.observe(
+                        Observation::WorkerUpdate {
+                            install,
+                            generation,
+                        },
+                        out,
+                    );
+                }
+            }
             Work::Lifecycle { sender, report } => self.worker_lifecycle(&sender, report, out),
             Work::Installed { sender, responder } => self.worker_installed(&sender, responder, out),
             Work::Booted { sender } => {
@@ -3748,6 +4392,21 @@ impl RuntimeHost {
                         revision,
                         sender,
                         request,
+                        responder,
+                    });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
+            Work::Privacy {
+                sender,
+                setting,
+                responder,
+            } => {
+                if self.privacy_allowed(&sender) {
+                    self.op(NativeOp::Privacy {
+                        sender,
+                        setting,
                         responder,
                     });
                 } else {
@@ -3870,7 +4529,6 @@ impl RuntimeHost {
                 }
             }
             Work::PersistAlarms(install) => self.persist_alarms(install),
-            Work::ScriptsChanged => self.op(NativeOp::ScriptsChanged),
             Work::SendTab {
                 responder,
                 sender,
@@ -4081,6 +4739,7 @@ impl RuntimeHost {
 
     fn close_context(&mut self, context: &ContextKey, out: &mut Outbox) {
         self.dispatcher.cancel_context(context);
+        self.browser.cancel_awaiting_injections(context);
         let limiter = self.dispatcher.limiter_mut();
         let actions = self.router.ports.cancel_context(context, limiter);
         self.router.port_actions(actions, limiter, out);
@@ -4312,6 +4971,39 @@ impl Runtime for RuntimeHost {
         let _ = now;
         self.note_sender(sender);
         let decoded = Envelope::decode(envelope, Direction::FromContext, u64::MAX);
+        if sender.kind() == ContextKind::UserScript {
+            let allowed = self.state.user_messaging_allowed(sender)
+                && match &decoded {
+                    Ok(Envelope::Call { name, .. }) => matches!(
+                        name.as_str(),
+                        "runtime.sendMessage"
+                            | "runtime.connect"
+                            | "zephium.addListener"
+                            | "zephium.removeListener"
+                            | "zephium.respond"
+                    ),
+                    Ok(
+                        Envelope::EventAck { .. }
+                        | Envelope::PortMessage { .. }
+                        | Envelope::PortDisconnect { .. },
+                    ) => true,
+                    _ => false,
+                };
+            if !allowed {
+                if let Ok(Envelope::Call { id, .. }) = &decoded {
+                    if let Some(reply) = frame(
+                        sender.kind(),
+                        &Envelope::Reply {
+                            id: *id,
+                            result: Err("This operation is unavailable in this user-script world."),
+                        },
+                    ) {
+                        out.deliver(sender.context_key(), reply);
+                    }
+                }
+                return;
+            }
+        }
         #[cfg(feature = "native-tests")]
         if let Ok(Envelope::Call { id, name, args }) = &decoded {
             if name.as_str() == "zephium.diagnostic" && crate::diagnostics::enabled() {

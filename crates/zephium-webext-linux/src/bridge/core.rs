@@ -24,7 +24,9 @@ use super::frames::{FrameChange, FrameTable};
 use super::plan::{AttachPlan, PlanError, ResolvedPlan};
 use super::policy::SealedPolicy;
 use super::runtime::{BridgeViewId, CloseReason, DeliverError, FrameLifecycle, ViewRef};
-use super::scripts::{ScriptTableError, SealedScripts, SealedSource, SourceCache};
+use super::scripts::{
+    PreparedScriptsId, ScriptTableError, SealedScripts, SealedSource, SourceCache,
+};
 use super::ReplyToken;
 
 /// Views one profile bridge tracks.
@@ -40,6 +42,8 @@ pub const MAX_QUEUED_BYTES_PER_PROFILE: usize = 256 * 1024 * 1024;
 /// Deliveries awaiting the module's answer, per context and per view.
 pub const MAX_INFLIGHT_PER_CONTEXT: usize = 16;
 pub const MAX_INFLIGHT_PER_VIEW: usize = 64;
+
+const MAX_INSTALL_GENERATIONS: usize = 4096;
 
 const TAB_MESSAGE_CAP: u64 = 8 * 1024 * 1024;
 
@@ -85,6 +89,7 @@ pub(crate) enum AttachOutcome {
 pub(crate) enum Outgoing {
     Attach {
         generation: u64,
+        serial: u64,
     },
     Detach {
         generation: u64,
@@ -208,6 +213,8 @@ struct View {
     contexts: HashSet<ContextKey>,
     inflight: usize,
     sent_tables: BTreeSet<u64>,
+    accepted_scripts: Option<(u64, u64)>,
+    attach_serial: u64,
 }
 
 impl View {
@@ -255,10 +262,18 @@ enum Admission {
     Refused(Refusal),
 }
 
+struct PreparedScripts {
+    id: PreparedScriptsId,
+    table: Rc<SealedScripts>,
+    plan: AttachPlan,
+    resolved: ResolvedPlan,
+}
+
 pub(crate) struct Core {
     authority: Authority,
     scheme: ExtensionScheme,
     extensions: HashMap<ExtensionInstallId, ExtensionId>,
+    install_generations: HashMap<ExtensionInstallId, u64>,
     token: String,
     views: BTreeMap<u64, View>,
     contexts: HashMap<ContextKey, Target>,
@@ -270,6 +285,7 @@ pub(crate) struct Core {
     policy_publications: BTreeMap<u64, (usize, bool)>,
     scripts: BTreeMap<u64, Rc<SealedScripts>>,
     current_scripts: u64,
+    prepared_scripts: Option<PreparedScripts>,
     sources: SourceCache,
     source_documents: BTreeMap<(u64, u64, u64, u64), Vec<Rc<SealedSource>>>,
     table_leases: BTreeMap<(u64, u64), BTreeSet<u64>>,
@@ -309,6 +325,7 @@ impl Core {
             authority: Authority::new(profile, incognito, scheme),
             scheme,
             extensions: HashMap::new(),
+            install_generations: HashMap::new(),
             token,
             views: BTreeMap::new(),
             contexts: HashMap::new(),
@@ -320,6 +337,7 @@ impl Core {
             policy_publications: BTreeMap::new(),
             scripts: BTreeMap::new(),
             current_scripts: 0,
+            prepared_scripts: None,
             sources: SourceCache::default(),
             source_documents: BTreeMap::new(),
             table_leases: BTreeMap::new(),
@@ -368,18 +386,107 @@ impl Core {
     // ---- installs ----
 
     pub fn admit(&mut self, admission: InstallAdmission) -> Result<(), BindError> {
+        if self.prepared_scripts.is_some() {
+            return Err(BindError::PublicationPending);
+        }
+        if self
+            .install_generations
+            .get(&admission.install)
+            .is_some_and(|old| *old >= admission.generation.get())
+        {
+            return Err(BindError::GenerationNotNewer);
+        }
+        if self.install_generations.len() >= MAX_INSTALL_GENERATIONS
+            && !self.install_generations.contains_key(&admission.install)
+        {
+            return Err(BindError::TooManyInstallGenerations);
+        }
+        let install_generation = admission.generation.get();
         let install = admission.install;
         let extension = admission.extension_id.clone();
         self.authority.admit(admission)?;
+        if self.extensions.contains_key(&install) {
+            self.revoke_install_plans(install);
+        }
         self.extensions.insert(install, extension);
+        self.install_generations.insert(install, install_generation);
         self.close_install(install);
         Ok(())
     }
 
     pub fn retire(&mut self, install: ExtensionInstallId) {
         self.authority.retire(install);
-        self.extensions.remove(&install);
+        self.revoke_install_plans(install);
         self.close_install(install);
+    }
+
+    fn revoke_install_plans(&mut self, install: ExtensionInstallId) {
+        let extension = self.extensions.remove(&install);
+        let origin = extension
+            .as_ref()
+            .map(|extension| format!("{}://{}", self.scheme.as_str(), extension.as_str()));
+        if let Some(prepared) = &mut self.prepared_scripts {
+            prepared
+                .plan
+                .worlds
+                .retain(|grant| grant.install != install);
+            prepared
+                .resolved
+                .worlds
+                .retain(|_, grant| grant.install != install);
+            prepared
+                .plan
+                .external
+                .retain(|rule| rule.install_id != install_hex(install));
+            prepared
+                .resolved
+                .external
+                .retain(|rule| rule.install_id != install_hex(install));
+            if let Some(extension) = &extension {
+                prepared
+                    .plan
+                    .extension_pages
+                    .retain(|page| &page.extension != extension);
+            }
+            if let Some(origin) = &origin {
+                prepared.resolved.pages.remove(origin);
+            }
+        }
+        let plans: Vec<_> = self
+            .views
+            .iter()
+            .map(|(id, view)| {
+                let mut plan = view.plan.clone();
+                plan.worlds.retain(|_, grant| grant.install != install);
+                plan.external
+                    .retain(|rule| rule.install_id != install_hex(install));
+                if let Some(origin) = &origin {
+                    plan.pages.remove(origin);
+                }
+                (*id, plan)
+            })
+            .collect();
+        for (id, plan) in plans {
+            let _ = self.apply_resolved_plan(id, plan, true);
+        }
+        self.close_install(install);
+    }
+
+    fn retain_active_grants(&self, plan: &mut ResolvedPlan) {
+        plan.worlds.retain(|_, grant| {
+            self.extensions.contains_key(&grant.install)
+                && self.install_generations.get(&grant.install) == Some(&grant.install_generation)
+        });
+        plan.external.retain(|rule| {
+            u128::from_str_radix(&rule.install_id, 16)
+                .ok()
+                .is_some_and(|id| self.extensions.contains_key(&ExtensionInstallId::from(id)))
+        });
+        plan.pages.retain(|origin, _| {
+            self.extensions.values().any(|extension| {
+                *origin == format!("{}://{}", self.scheme.as_str(), extension.as_str())
+            })
+        });
     }
 
     fn close_install(&mut self, install: ExtensionInstallId) {
@@ -426,8 +533,9 @@ impl Core {
         {
             return Err(RegisterError::Duplicate);
         }
-        let resolved = ResolvedPlan::resolve(plan, self.authority_scheme(), None)
+        let mut resolved = ResolvedPlan::resolve(plan, self.authority_scheme(), None)
             .map_err(RegisterError::Plan)?;
+        self.retain_active_grants(&mut resolved);
         self.register(Role::Tab(tab), resolved, tab_id)
     }
 
@@ -499,6 +607,8 @@ impl Core {
                 contexts: HashSet::new(),
                 inflight: 0,
                 sent_tables: BTreeSet::new(),
+                accepted_scripts: None,
+                attach_serial: 0,
             },
         );
         self.attach_now(id);
@@ -520,8 +630,89 @@ impl Core {
             ),
             Role::Tab(_) => None,
         };
-        let resolved =
+        let mut resolved =
             ResolvedPlan::resolve(plan, scheme, owner.as_ref()).map_err(RegisterError::Plan)?;
+        self.retain_active_grants(&mut resolved);
+        let Some(view) = self.views.get_mut(&id) else {
+            return Err(RegisterError::Closed);
+        };
+        if let Some(prepared) = &mut self.prepared_scripts {
+            let mut previous = view.plan.clone();
+            if (!previous.observe_requests && resolved.observe_requests)
+                || (!previous.observe_forms && resolved.observe_forms)
+                || (!previous.apply_policy && resolved.apply_policy)
+            {
+                return Err(RegisterError::Bind(BindError::PublicationPending));
+            }
+            previous.observe_requests = resolved.observe_requests;
+            previous.observe_forms = resolved.observe_forms;
+            previous.apply_policy = resolved.apply_policy;
+            if !previous.widens(&resolved) {
+                return Err(RegisterError::Bind(BindError::PublicationPending));
+            }
+            prepared.plan.observe_requests &= resolved.observe_requests;
+            prepared.resolved.observe_requests &= resolved.observe_requests;
+            prepared.plan.observe_forms &= resolved.observe_forms;
+            prepared.resolved.observe_forms &= resolved.observe_forms;
+            prepared.plan.apply_policy &= resolved.apply_policy;
+            prepared.resolved.apply_policy &= resolved.apply_policy;
+            let removed_pages: HashSet<_> = view
+                .plan
+                .pages
+                .keys()
+                .filter(|origin| !resolved.pages.contains_key(*origin))
+                .cloned()
+                .collect();
+            prepared
+                .resolved
+                .pages
+                .retain(|origin, _| !removed_pages.contains(origin));
+            prepared.plan.extension_pages.retain(|page| {
+                !removed_pages.contains(&format!(
+                    "{}://{}",
+                    scheme.as_str(),
+                    page.extension.as_str()
+                ))
+            });
+            let removed_external: Vec<_> = view
+                .plan
+                .external
+                .iter()
+                .filter(|rule| !resolved.external.contains(rule))
+                .collect();
+            prepared
+                .resolved
+                .external
+                .retain(|rule| !removed_external.contains(&rule));
+            prepared
+                .plan
+                .external
+                .retain(|rule| !removed_external.contains(&rule));
+            let changed: HashSet<_> = view
+                .plan
+                .worlds
+                .iter()
+                .filter(|(name, old)| resolved.worlds.get(*name) != Some(*old))
+                .map(|(_, old)| old.install)
+                .collect();
+            prepared
+                .plan
+                .worlds
+                .retain(|grant| !changed.contains(&grant.install));
+            prepared
+                .resolved
+                .worlds
+                .retain(|_, grant| !changed.contains(&grant.install));
+        }
+        self.apply_resolved_plan(id, resolved, immediately)
+    }
+
+    fn apply_resolved_plan(
+        &mut self,
+        id: u64,
+        resolved: ResolvedPlan,
+        immediately: bool,
+    ) -> Result<(), RegisterError> {
         let Some(view) = self.views.get_mut(&id) else {
             return Err(RegisterError::Closed);
         };
@@ -611,6 +802,10 @@ impl Core {
         let Ok(bytes) = encode_ui(&UiMessage::Attach(attach)) else {
             return;
         };
+        let Some(serial) = view.attach_serial.checked_add(1) else {
+            return;
+        };
+        view.attach_serial = serial;
         view.attached = Some((generation, view.plan.clone()));
         view.phase = Phase::InFlight(generation);
         view.reattach_on_navigation = false;
@@ -618,7 +813,7 @@ impl Core {
             view: id,
             name: ATTACH_MESSAGE,
             bytes,
-            outgoing: Outgoing::Attach { generation },
+            outgoing: Outgoing::Attach { generation, serial },
             policy: None,
             scripts: None,
             source: None,
@@ -670,6 +865,7 @@ impl Core {
         }
         self.closed = true;
         self.policy = None;
+        self.prepared_scripts = None;
     }
 
     fn attach_now(&mut self, id: u64) {
@@ -702,6 +898,10 @@ impl Core {
             self.stats.attach_refused += 1;
             return;
         };
+        let Some(serial) = view.attach_serial.checked_add(1) else {
+            return;
+        };
+        view.attach_serial = serial;
         view.attached = Some((generation, view.plan.clone()));
         view.phase = Phase::InFlight(generation);
         view.reattach_on_navigation = false;
@@ -709,18 +909,32 @@ impl Core {
             view: id,
             name: ATTACH_MESSAGE,
             bytes,
-            outgoing: Outgoing::Attach { generation },
+            outgoing: Outgoing::Attach { generation, serial },
             policy: None,
             scripts: None,
             source: None,
         });
     }
 
+    #[cfg(test)]
     pub fn attach_settled(&mut self, id: u64, generation: u64, outcome: AttachOutcome) {
+        let Some(serial) = self.views.get(&id).map(|view| view.attach_serial) else {
+            return;
+        };
+        self.attach_request_settled(id, generation, serial, outcome);
+    }
+
+    pub fn attach_request_settled(
+        &mut self,
+        id: u64,
+        generation: u64,
+        serial: u64,
+        outcome: AttachOutcome,
+    ) {
         let Some(view) = self.views.get_mut(&id) else {
             return;
         };
-        if view.phase != Phase::InFlight(generation) {
+        if view.phase != Phase::InFlight(generation) || view.attach_serial != serial {
             return;
         }
         match outcome {
@@ -826,6 +1040,7 @@ impl Core {
             return;
         };
         view.inflight = 0;
+        view.accepted_scripts = None;
         let mut changes = Vec::new();
         view.frames.clear(&mut changes);
 
@@ -1362,37 +1577,59 @@ impl Core {
         let Some(attached) = view.attached_plan() else {
             return false;
         };
+        let Some(install) = u128::from_str_radix(&evaluation.install_id, 16)
+            .ok()
+            .map(ExtensionInstallId::from)
+        else {
+            return false;
+        };
+        let Some(epoch) = self
+            .install_generations
+            .get(&install)
+            .filter(|_| self.extensions.contains_key(&install))
+        else {
+            return false;
+        };
         if evaluation.world.is_empty() {
-            let allowed = |plan: &ResolvedPlan| {
-                plan.worlds.iter().any(|(name, grant)| {
-                    install_hex(grant.install) == evaluation.install_id
-                        && plan.admits_world(name, &frame.document.facts).is_some()
-                })
-            };
-            return allowed(&view.plan)
-                && allowed(attached)
-                && frame.document.facts.table_generation == evaluation.table_generation
+            return frame.document.facts.table_generation == evaluation.table_generation
                 && self
                     .scripts
                     .get(&evaluation.table_generation)
                     .is_some_and(|table| {
-                        table.table.entries.iter().any(|entry| {
-                            entry.install_id == evaluation.install_id
-                                && entry.script_id == evaluation.script_id
-                                && entry.world.is_empty()
-                                && entry.rule.matches(&frame.document.facts)
-                                && usize::from(evaluation.file_index) < entry.files.len()
-                        })
+                        table.table.admissions.get(&evaluation.install_id) == Some(epoch)
+                            && table.table.entries.iter().any(|entry| {
+                                entry.install_id == evaluation.install_id
+                                    && entry.script_id == evaluation.script_id
+                                    && entry.world.is_empty()
+                                    && [&view.plan, attached].iter().all(|plan| {
+                                        plan.admits_world(
+                                            &entry.admission_world,
+                                            &frame.document.facts,
+                                        )
+                                        .is_some_and(
+                                            |grant| {
+                                                install_hex(grant.install) == entry.install_id
+                                                    && grant.install_generation == *epoch
+                                            },
+                                        )
+                                    })
+                                    && entry.rule.matches(&frame.document.facts)
+                                    && usize::from(evaluation.file_index) < entry.files.len()
+                            })
                     });
         }
-        let (Some(grant), Some(_)) = (
+        let (Some(grant), Some(attached_grant)) = (
             view.plan
                 .admits_world(&evaluation.world, &frame.document.facts),
             attached.admits_world(&evaluation.world, &frame.document.facts),
         ) else {
             return false;
         };
-        if install_hex(grant.install) != evaluation.install_id {
+        if install_hex(grant.install) != evaluation.install_id
+            || grant.install_generation != *epoch
+            || attached_grant.install != install
+            || attached_grant.install_generation != *epoch
+        {
             return false;
         }
         let programmatic = evaluation.script_id.is_empty()
@@ -1401,8 +1638,9 @@ impl Core {
             && self
                 .scripts
                 .get(&evaluation.table_generation)
+                .filter(|table| table.table.admissions.get(&evaluation.install_id) == Some(epoch))
                 .and_then(|table| table.table.bootstraps.get(&evaluation.world))
-                .is_some_and(|bootstrap| bootstrap.install_id == evaluation.install_id)
+                .is_some_and(|install| *install == evaluation.install_id)
             && evaluation
                 .request_id
                 .and_then(|id| self.injections.get(&id))
@@ -1412,6 +1650,8 @@ impl Core {
                         && Some(pending.generation) == view.generation()
                         && install_hex(pending.install) == evaluation.install_id
                         && pending.world == evaluation.world
+                        && pending.admission_world == evaluation.world
+                        && pending.install_generation == *epoch
                         && pending.targets.get(&evaluation.frame_id)
                             == Some(&evaluation.document_seq)
                 });
@@ -1427,21 +1667,30 @@ impl Core {
                     .scripts
                     .get(&evaluation.table_generation)
                     .is_some_and(|table| {
-                        table.table.entries.iter().any(|entry| {
-                            entry.install_id == evaluation.install_id
-                                && entry.script_id == evaluation.script_id
-                                && entry.world == evaluation.world
-                                && entry.rule.matches(&frame.document.facts)
-                                && if evaluation.file_index == u16::MAX {
-                                    !entry.bootstrap.is_empty()
-                                } else {
-                                    usize::from(evaluation.file_index) < entry.files.len()
-                                }
-                        })
+                        table.table.admissions.get(&evaluation.install_id) == Some(epoch)
+                            && table.table.entries.iter().any(|entry| {
+                                entry.install_id == evaluation.install_id
+                                    && entry.script_id == evaluation.script_id
+                                    && entry.world == evaluation.world
+                                    && entry.rule.matches(&frame.document.facts)
+                                    && if evaluation.file_index == u16::MAX {
+                                        entry.has_bootstrap
+                                    } else {
+                                        usize::from(evaluation.file_index) < entry.files.len()
+                                    }
+                            })
                     })
         };
         if !valid {
             return false;
+        }
+        if matches!(grant.world, InjectedWorld::UserScript(_))
+            && !self
+                .scripts
+                .get(&evaluation.table_generation)
+                .is_some_and(|table| table.table.messaging_worlds.contains(&evaluation.world))
+        {
+            return true;
         }
         self.authority
             .record_injection(
@@ -1468,6 +1717,9 @@ impl Core {
     }
 
     pub fn check_script_capacity(&self, length: usize) -> Result<(), ScriptTableError> {
+        if self.prepared_scripts.is_some() {
+            return Err(ScriptTableError::Generation);
+        }
         let retained: Vec<_> = self
             .scripts
             .iter()
@@ -1493,14 +1745,37 @@ impl Core {
         Ok(())
     }
 
-    pub fn publish_scripts(&mut self, table: Rc<SealedScripts>) -> Result<u64, ScriptTableError> {
-        for (world, bootstrap) in &table.table.bootstraps {
-            let install = u128::from_str_radix(&bootstrap.install_id, 16)
+    fn validate_script_owners(
+        &self,
+        table: &SealedScripts,
+        plan: Option<&ResolvedPlan>,
+    ) -> Result<(), ScriptTableError> {
+        for (owner, epoch) in &table.table.admissions {
+            let install = u128::from_str_radix(owner, 16)
+                .map(ExtensionInstallId::from)
+                .map_err(|_| ScriptTableError::InvalidOwner)?;
+            if !self.extensions.contains_key(&install)
+                || self.install_generations.get(&install) != Some(epoch)
+            {
+                return Err(ScriptTableError::InvalidOwner);
+            }
+        }
+        for (world, owner) in &table.table.bootstraps {
+            let install = u128::from_str_radix(owner, 16)
                 .ok()
                 .map(ExtensionInstallId::from)
                 .ok_or(ScriptTableError::InvalidOwner)?;
             if !self.extensions.contains_key(&install)
-                || *world != super::world_name(install, &InjectedWorld::Isolated)
+                || !plan.map_or_else(
+                    || *world == super::world_name(install, &InjectedWorld::Isolated),
+                    |plan| {
+                        plan.worlds.get(world).is_some_and(|grant| {
+                            grant.install == install
+                                && table.table.admissions.get(owner)
+                                    == Some(&grant.install_generation)
+                        })
+                    },
+                )
             {
                 return Err(ScriptTableError::InvalidOwner);
             }
@@ -1514,12 +1789,34 @@ impl Core {
                 .extensions
                 .get(&install)
                 .ok_or(ScriptTableError::InvalidOwner)?;
+            if !plan.map_or_else(
+                || entry.admission_world == super::world_name(install, &InjectedWorld::Isolated),
+                |plan| {
+                    plan.worlds
+                        .get(&entry.admission_world)
+                        .is_some_and(|grant| {
+                            grant.install == install
+                                && table.table.admissions.get(&entry.install_id)
+                                    == Some(&grant.install_generation)
+                        })
+                },
+            ) {
+                return Err(ScriptTableError::InvalidOwner);
+            }
             if entry.files.iter().chain(&entry.css).any(|file| {
-                !Url::parse(&file.url).is_ok_and(|url| url.host_str() == Some(extension.as_str()))
+                !Url::parse(file).is_ok_and(|url| url.host_str() == Some(extension.as_str()))
             }) {
                 return Err(ScriptTableError::InvalidOwner);
             }
         }
+        Ok(())
+    }
+
+    pub fn publish_scripts(&mut self, table: Rc<SealedScripts>) -> Result<u64, ScriptTableError> {
+        if self.prepared_scripts.is_some() {
+            return Err(ScriptTableError::Generation);
+        }
+        self.validate_script_owners(&table, None)?;
         let generation = table.table.generation;
         if generation <= self.current_scripts {
             return Err(ScriptTableError::Generation);
@@ -1538,6 +1835,114 @@ impl Core {
             self.send_scripts(id);
         }
         Ok(generation)
+    }
+
+    pub fn prepare_scripts(
+        &mut self,
+        table: Rc<SealedScripts>,
+        plan: &AttachPlan,
+    ) -> Result<PreparedScriptsId, ScriptTableError> {
+        if self.closed
+            || self.prepared_scripts.is_some()
+            || table.table.generation <= self.current_scripts
+        {
+            return Err(ScriptTableError::Generation);
+        }
+        let resolved =
+            ResolvedPlan::resolve(plan, self.scheme, None).map_err(ScriptTableError::Plan)?;
+        if resolved.worlds.values().any(|grant| {
+            !self.extensions.contains_key(&grant.install)
+                || self.install_generations.get(&grant.install) != Some(&grant.install_generation)
+        }) {
+            return Err(ScriptTableError::InvalidOwner);
+        }
+        let probe = resolved.attach(&self.token, u64::MAX, PageRole::OrdinaryTab);
+        let bytes = encode_ui(&UiMessage::Attach(probe)).map_err(ScriptTableError::Wire)?;
+        if bytes.len() > zephium_webkit_web_process_protocol::protocol::MAX_ATTACH_BYTES {
+            return Err(ScriptTableError::InvalidSize);
+        }
+        self.validate_script_owners(&table, Some(&resolved))?;
+        self.collect_scripts();
+        // The current table can acquire a new document lease while disk I/O runs.
+        let reserved = self
+            .scripts
+            .values()
+            .map(|table| table.len() as usize)
+            .sum::<usize>();
+        if self.scripts.len() >= 16
+            || reserved
+                .saturating_add(self.sources.bytes())
+                .saturating_add(table.len() as usize)
+                > 64 * 1024 * 1024
+        {
+            return Err(ScriptTableError::Generation);
+        }
+        static NEXT_PUBLICATION: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let id = PreparedScriptsId(
+            NEXT_PUBLICATION
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |next| next.checked_add(1),
+                )
+                .map_err(|_| ScriptTableError::Generation)?,
+        );
+        self.prepared_scripts = Some(PreparedScripts {
+            id,
+            table,
+            plan: plan.clone(),
+            resolved,
+        });
+        Ok(id)
+    }
+
+    pub fn abort_prepared_scripts(&mut self, id: PreparedScriptsId) {
+        if self
+            .prepared_scripts
+            .as_ref()
+            .is_some_and(|pending| pending.id == id)
+        {
+            self.prepared_scripts = None;
+        }
+    }
+
+    pub fn commit_prepared_scripts(&mut self, id: PreparedScriptsId) -> Option<AttachPlan> {
+        if self.closed
+            || self
+                .prepared_scripts
+                .as_ref()
+                .is_none_or(|pending| pending.id != id)
+        {
+            return None;
+        }
+        let prepared = self.prepared_scripts.take()?;
+        let tabs: Vec<_> = self
+            .views
+            .iter()
+            .filter(|(_, view)| matches!(view.role, Role::Tab(_)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in tabs {
+            // All failure-prone resolution happened before the durable write.
+            let _ = self.apply_resolved_plan(id, prepared.resolved.clone(), false);
+            let widening = self.views.get(&id).is_some_and(|view| {
+                view.reattach_on_navigation
+                    && view
+                        .attached_plan()
+                        .is_some_and(|old| view.plan.widens(old))
+            });
+            if widening {
+                self.attach_widening(id);
+            }
+        }
+        self.current_scripts = prepared.table.table.generation;
+        self.scripts.insert(self.current_scripts, prepared.table);
+        self.collect_scripts();
+        for view in self.views() {
+            self.send_scripts(view);
+        }
+        Some(prepared.plan)
     }
 
     fn send_scripts(&mut self, id: u64) {
@@ -1596,6 +2001,19 @@ impl Core {
         table_generation: u64,
         accepted: Option<bool>,
     ) {
+        if accepted == Some(true) {
+            if let Some(view) = self.views.get_mut(&id).filter(|view| {
+                view.generation() == Some(generation)
+                    && view.sent_tables.contains(&table_generation)
+            }) {
+                if view
+                    .accepted_scripts
+                    .is_none_or(|(epoch, table)| epoch != generation || table_generation >= table)
+                {
+                    view.accepted_scripts = Some((generation, table_generation));
+                }
+            }
+        }
         if accepted == Some(false) {
             if let Some(leases) = self.table_leases.get_mut(&(id, generation)) {
                 leases.remove(&table_generation);
@@ -1874,6 +2292,8 @@ struct Execution {
     generation: u64,
     install: ExtensionInstallId,
     world: String,
+    admission_world: String,
+    install_generation: u64,
     targets: BTreeMap<u64, u64>,
     bytes: usize,
     deadline: u64,
@@ -1893,6 +2313,48 @@ pub enum InjectionError {
 }
 
 impl Core {
+    pub fn user_execution_ready(
+        &self,
+        id: u64,
+        install: ExtensionInstallId,
+        epoch: u64,
+        world: &str,
+    ) -> Result<bool, InjectionError> {
+        let view = self.views.get(&id).ok_or(InjectionError::Stale)?;
+        if self.closed
+            || self.install_generations.get(&install) != Some(&epoch)
+            || !matches!(view.role, Role::Tab(_))
+        {
+            return Err(InjectionError::Denied);
+        }
+        let grant = |plan: &ResolvedPlan| {
+            plan.worlds
+                .get(world)
+                .is_some_and(|grant| grant.install == install && grant.install_generation == epoch)
+        };
+        if !grant(&view.plan) {
+            return Err(InjectionError::Denied);
+        }
+        let generation = match view.phase {
+            Phase::Pending | Phase::InFlight(_) => return Ok(false),
+            Phase::Refused(_) => return Err(InjectionError::Denied),
+            Phase::Live(generation) => generation,
+        };
+        if !view.attached_plan().is_some_and(grant) {
+            return Err(InjectionError::Denied);
+        }
+        let owner = install_hex(install);
+        let Some(table) = self.scripts.get(&self.current_scripts) else {
+            return Ok(false);
+        };
+        if table.table.admissions.get(&owner) != Some(&epoch)
+            || table.table.bootstraps.get(world) != Some(&owner)
+        {
+            return Err(InjectionError::Denied);
+        }
+        Ok(view.accepted_scripts == Some((generation, self.current_scripts)))
+    }
+
     pub fn frame_target(
         &self,
         id: u64,
@@ -1951,18 +2413,19 @@ impl Core {
         if targets.is_empty() {
             return Err(InjectionError::Stale);
         }
+        let epoch = self
+            .install_generations
+            .get(&install)
+            .ok_or(InjectionError::Denied)?;
         for frame_id in targets.keys() {
             let frame = view.frames.get(*frame_id).ok_or(InjectionError::Stale)?;
             let admitted = |plan: &ResolvedPlan| {
-                if request.world.is_empty() {
-                    plan.worlds.iter().any(|(name, grant)| {
-                        grant.install == install
-                            && plan.admits_world(name, &frame.document.facts).is_some()
-                    })
-                } else {
-                    plan.admits_world(&request.world, &frame.document.facts)
-                        .is_some_and(|grant| grant.install == install)
-                }
+                (request.world.is_empty() || request.world == request.admission_world)
+                    && plan
+                        .admits_world(&request.admission_world, &frame.document.facts)
+                        .is_some_and(|grant| {
+                            grant.install == install && grant.install_generation == *epoch
+                        })
             };
             if !admitted(&view.plan) || !admitted(attached) {
                 return Err(InjectionError::Denied);
@@ -1995,7 +2458,18 @@ impl Core {
             request.kind,
             zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
                 | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
         );
+        if matches!(
+            request.kind,
+            zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
+        ) {
+            request
+                .batch_sources(Some(&request.source))
+                .map_err(|_| InjectionError::Invalid)?;
+        }
         let mut validation = request.clone();
         if packaged && request.source.len() > 64 * 1024 {
             validation.source_fd = Some(zephium_webkit_web_process_protocol::protocol::SourceFd {
@@ -2010,6 +2484,8 @@ impl Core {
                 request.kind,
                 zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
                     | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
             ) {
             let source = self
                 .sources
@@ -2021,7 +2497,12 @@ impl Core {
                         self.scripts
                             .values()
                             .map(|table| table.len() as usize)
-                            .sum(),
+                            .sum::<usize>()
+                            .saturating_add(
+                                self.prepared_scripts
+                                    .as_ref()
+                                    .map_or(0, |pending| pending.table.len() as usize),
+                            ),
                     ),
                 )
                 .map_err(|_| InjectionError::Backpressure)?;
@@ -2075,6 +2556,8 @@ impl Core {
                 generation,
                 install,
                 world: request.world.clone(),
+                admission_world: request.admission_world.clone(),
+                install_generation: *epoch,
                 targets,
                 bytes,
                 deadline: now_ms
@@ -2128,22 +2611,23 @@ impl Core {
         };
         if result.status == InjectionStatus::Success {
             let admitted = |plan: &ResolvedPlan| {
-                if result.world.is_empty() {
-                    plan.worlds.iter().any(|(name, grant)| {
-                        grant.install == pending.install
-                            && plan.admits_world(name, &frame.document.facts).is_some()
-                    })
-                } else {
-                    plan.admits_world(&result.world, &frame.document.facts)
-                        .is_some_and(|grant| grant.install == pending.install)
-                }
+                self.install_generations.get(&pending.install) == Some(&pending.install_generation)
+                    && plan
+                        .admits_world(&pending.admission_world, &frame.document.facts)
+                        .is_some_and(|grant| {
+                            grant.install == pending.install
+                                && grant.install_generation == pending.install_generation
+                        })
             };
             if !admitted(&view.plan) || !view.attached_plan().is_some_and(admitted) {
                 result.status = InjectionStatus::Denied;
                 result.result_json = "null".into();
             }
         }
-        if result.status == InjectionStatus::Success && !result.world.is_empty() {
+        if result.status == InjectionStatus::Success
+            && !result.world.is_empty()
+            && !result.world.starts_with("zephium-webext-us-")
+        {
             let Some(grant) = view
                 .plan
                 .admits_world(&result.world, &frame.document.facts)

@@ -16,6 +16,8 @@ mod errors;
 mod handler_cache;
 pub(crate) mod host;
 mod icons;
+mod language;
+mod native_privacy;
 mod notifications;
 mod requests;
 mod storage;
@@ -131,6 +133,8 @@ pub struct InstallSpec {
     pub permissions: InstallPermissions,
     /// Whether the person allowed it in private windows.
     pub allowed_in_incognito: bool,
+    /// Explicit per-install user-script permission, default-off in the registry.
+    pub allow_user_scripts: bool,
     /// Its `externally_connectable` pages.
     pub externally_connectable: Option<ExternallyConnectable>,
     /// Unpacked (developer) install: relaxed alarm minimum.
@@ -256,6 +260,8 @@ struct Inner {
     network_publication: RefCell<Option<NetworkPublication>>,
     network_tabs: RefCell<HashMap<BridgeViewId, ItemId>>,
     idle: Cell<bool>,
+    injection_waiters: RefCell<std::collections::BTreeSet<u64>>,
+    injection_poll: RefCell<Option<glib::SourceId>>,
     running: Cell<bool>,
     retired: Cell<bool>,
     events: RefCell<VecDeque<NativeEvent>>,
@@ -264,6 +270,8 @@ struct Inner {
     tabs: RefCell<HashMap<BridgeViewId, TabEntry>>,
     content: RefCell<TabContent>,
     script_generation: Cell<u64>,
+    prepared_content: RefCell<Option<PreparedContent>>,
+    content_dirty: Cell<bool>,
     observing_requests: Cell<bool>,
     next_request: Cell<u64>,
     notifications: Rc<notifications::Backend>,
@@ -278,6 +286,12 @@ struct TabContent {
     document_start: bool,
     scripts: Vec<PageScript>,
     styles: Vec<content::TabStyle>,
+}
+
+struct PreparedContent {
+    ticket: u64,
+    reservation: crate::bridge::PreparedScriptsId,
+    content: TabContent,
 }
 
 struct TabEntry {
@@ -431,6 +445,8 @@ impl ProfileRuntime {
             network_publication: RefCell::new(None),
             network_tabs: RefCell::new(HashMap::new()),
             idle: Cell::new(false),
+            injection_waiters: RefCell::new(Default::default()),
+            injection_poll: RefCell::new(None),
             running: Cell::new(false),
             retired: Cell::new(false),
             events: RefCell::new(VecDeque::new()),
@@ -439,6 +455,8 @@ impl ProfileRuntime {
             tabs: RefCell::new(HashMap::new()),
             content: RefCell::new(TabContent::default()),
             script_generation: Cell::new(0),
+            prepared_content: RefCell::new(None),
+            content_dirty: Cell::new(false),
             observing_requests: Cell::new(false),
             next_request: Cell::new(0),
             notifications: Rc::default(),
@@ -565,13 +583,14 @@ impl ProfileRuntime {
 
     /// A new version replaced a running one: the old background stops, its
     /// storage stays, its alarms are cleared, and the new background gets
-    /// `runtime.onInstalled` with reason `update`.
+    /// `runtime.onInstalled` with reason `update`. Durable user-script reset is
+    /// asynchronous: retry a pending admission with the same generation after
+    /// pumping the runtime; success requires the reset to have settled.
     pub fn install_updated(
         &self,
         spec: InstallSpec,
         previous_version: &str,
     ) -> Result<(), InstallError> {
-        self.inner.check_script_writes(spec.install)?;
         self.inner.activate(
             spec,
             &Activation::Updated {
@@ -582,12 +601,12 @@ impl ProfileRuntime {
 
     /// Stops an extension and keeps its data. Pump the returned drain.
     pub fn install_disabled(&self, install: ExtensionInstallId) -> ExtensionStop {
-        self.inner.deactivate(install, false)
+        self.inner.deactivate(install, false, false)
     }
 
     /// Stops an extension and erases its storage and runtime state.
     pub fn install_removed(&self, install: ExtensionInstallId) -> ExtensionStop {
-        self.inner.deactivate(install, true)
+        self.inner.deactivate(install, true, false)
     }
 
     /// The browser finished starting: `runtime.onStartup` for extensions
@@ -734,6 +753,23 @@ impl ProfileRuntime {
             .filter_map(|entry| entry.requests.as_ref())
             .map(requests::Watch::handlers)
             .sum()
+    }
+
+    /// Changes the browser-owned gate only in disposable native test profiles.
+    #[cfg(feature = "native-tests")]
+    pub fn set_test_user_scripts_allowed(
+        &self,
+        install: ExtensionInstallId,
+        allowed: bool,
+    ) -> Result<(), String> {
+        let result = self
+            .inner
+            .bridge
+            .with_runtime(|host, out| host.set_test_user_scripts_allowed(install, allowed, out))
+            .map_err(|_| "Runtime is busy.".to_owned())?
+            .map_err(|error| error.message().to_owned());
+        self.inner.run();
+        result
     }
 
     /// Reserve the effective browser-window shortcuts before extension suggestions.
@@ -1231,6 +1267,11 @@ impl Inner {
                 request,
                 responder,
             } => cookies::submit(self, sender, revision, request, responder),
+            NativeOp::Privacy {
+                sender,
+                setting,
+                responder,
+            } => native_privacy::submit(self, sender, setting, responder),
             NativeOp::HandlerCache { sender, responder } => {
                 handler_cache::submit(self, sender, responder)
             }
@@ -1347,6 +1388,7 @@ impl Inner {
                 });
             }
             NativeOp::RefreshPermissions { install } => {
+                self.revoke_content_grants(install);
                 self.refresh_content(crate::bridge::Reattach::Now);
                 let mut views: Vec<_> = self
                     .views
@@ -1386,6 +1428,49 @@ impl Inner {
                 }
             }
             NativeOp::ScriptsChanged => self.refresh_content(crate::bridge::Reattach::WidenNow),
+            NativeOp::PrepareScripts(ticket) => {
+                let installs = self
+                    .bridge
+                    .with_runtime(|host, _| host.pending_script_installs(ticket))
+                    .ok()
+                    .flatten();
+                let result = installs
+                    .ok_or_else(zephium_webext_runtime::ApiError::context_invalidated)
+                    .and_then(|installs| self.stage_content(&installs, ticket));
+                let result = match result {
+                    Ok(prepared) => {
+                        *self.prepared_content.borrow_mut() = Some(prepared);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.script_prepared(ticket, result, out));
+            }
+            NativeOp::CommitScripts(ticket) => self.commit_content(ticket),
+            NativeOp::AbortScripts(ticket) => {
+                let prepared = {
+                    let mut pending = self.prepared_content.borrow_mut();
+                    if pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.ticket == ticket)
+                    {
+                        pending.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(prepared) = prepared {
+                    self.bridge.abort_prepared_scripts(prepared.reservation);
+                }
+                if self.content_dirty.get() {
+                    self.refresh_content(crate::bridge::Reattach::Now);
+                }
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.script_reservation_released(ticket, out));
+            }
         }
     }
 
@@ -1640,19 +1725,6 @@ impl Inner {
         })
     }
 
-    fn check_script_writes(&self, install: ExtensionInstallId) -> Result<(), InstallError> {
-        let pending = self
-            .bridge
-            .with_runtime(|host, _| host.has_pending_script_writes(install))
-            .map_err(|_| InstallError::Admission("runtime busy".into()))?;
-        if pending {
-            return Err(InstallError::Admission(
-                "extension state is still being saved or removed; retry after it settles".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn activate(
         self: &Rc<Self>,
         spec: InstallSpec,
@@ -1661,7 +1733,17 @@ impl Inner {
         if self.retired.get() {
             return Err(InstallError::Retired);
         }
-        self.check_script_writes(spec.install)?;
+        let update =
+            matches!(activation, Activation::Updated { .. }).then_some(spec.generation.get());
+        if self
+            .bridge
+            .with_runtime(|host, _| host.script_admission_pending(spec.install, update))
+            .map_err(|_| InstallError::Admission("Runtime is busy.".into()))?
+        {
+            return Err(InstallError::Admission(
+                "Extension script state is pending; retry after it settles.".into(),
+            ));
+        }
         let mut manifest_scripts =
             zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
                 &spec.manifest,
@@ -1701,6 +1783,57 @@ impl Inner {
             }
         }
 
+        let user_script_guid = {
+            use ring::rand::{SecureRandom, SystemRandom};
+            let mut bytes = [0u8; 16];
+            SystemRandom::new().fill(&mut bytes).map_err(|_| {
+                InstallError::Admission("Could not generate user-script identity.".into())
+            })?;
+            bytes[6] = (bytes[6] & 15) | 64;
+            bytes[8] = (bytes[8] & 63) | 128;
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            format!(
+                "{}-{}-{}-{}-{}",
+                &hex[..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..]
+            )
+        };
+        let user_scripts = if matches!(activation, Activation::Enabled) {
+            match state_directory
+                .as_ref()
+                .map(|directory| storage::read_scripts(&directory.join("user-scripts.json")))
+                .transpose()
+                .map_err(|error| {
+                    InstallError::Admission(format!("Could not restore user scripts: {error}"))
+                })?
+                .flatten()
+            {
+                Some(bytes) => storage::restore_user_scripts(
+                    &bytes,
+                    spec.manifest.version().unwrap_or(""),
+                    |path| {
+                        content::validate_file(
+                            &spec.directory,
+                            path,
+                            zephium_webext_runtime::scripting_registry::ResourceKind::JavaScript,
+                        )
+                    },
+                )
+                .map_err(|error| {
+                    InstallError::Admission(format!("User scripts refused: {error}"))
+                })?,
+                None => Default::default(),
+            }
+        } else {
+            Default::default()
+        };
+
         let catalogs = read_locales(&spec.directory, &spec.manifest, &self.config.locale)
             .map_err(InstallError::Locales)?;
         let messages = Arc::new(
@@ -1724,6 +1857,7 @@ impl Inner {
         candidates.retain(|candidate| candidate.install != spec.install);
         let grants = spec.permissions.snapshot();
         candidates.push(host::glue::ContentInstall {
+            install_generation: spec.generation.get(),
             install: spec.install,
             extension_id: spec.extension_id.as_str().to_owned(),
             root: spec.directory.clone(),
@@ -1732,6 +1866,9 @@ impl Inner {
                 .declarations()
                 .map(|declaration| (declaration.script.clone(), declaration.matcher.clone()))
                 .collect(),
+            user_scripts: user_scripts.clone(),
+            ephemeral_user_worlds: Default::default(),
+            allow_user_scripts: spec.allow_user_scripts && spec.permissions.has_api("userScripts"),
             site_access: spec.permissions.site_access().clone(),
             origins: grants.origins,
             file_access: spec.permissions.file_access(),
@@ -1743,11 +1880,16 @@ impl Inner {
                 ui_language: &self.config.locale.ui_language,
                 incognito: self.config.incognito,
                 unpacked: spec.unpacked,
+                allow_user_scripts: spec.allow_user_scripts,
                 permissions: &grants.permissions,
                 dynamic_resources: candidate_resources.as_ref(),
             }
             .to_value(None),
         });
+        candidates
+            .last_mut()
+            .expect("candidate installation")
+            .bootstrap["userScriptDynamicId"] = serde_json::json!(user_script_guid);
         let candidate = content::build(&candidates, self.script_generation.get() + 1);
         if let Some((_, problem)) = candidate.problems.first() {
             return Err(InstallError::Admission(format!(
@@ -1762,8 +1904,27 @@ impl Inner {
         self.bridge.check_script_capacity(&candidate.table).map_err(|error| InstallError::Admission(format!("Content scripts exceed the bounded source publication capacity (32 MiB table, 64 MiB live profile sources, 16 retained generations): {error:?}")))?;
         drop(candidate);
         drop(candidates);
+        if matches!(activation, Activation::Updated { .. }) {
+            if let Some(directory) = &state_directory {
+                self.bridge
+                    .with_runtime(|host, _| {
+                        host.prepare_user_script_reset(
+                            spec.install,
+                            spec.generation.get(),
+                            directory.join("user-scripts.json"),
+                            spec.manifest.version().unwrap_or(""),
+                        )
+                    })
+                    .map_err(|_| InstallError::Admission("Runtime is busy.".into()))?
+                    .map_err(|error| InstallError::Admission(error.message().to_owned()))?;
+            }
+        }
         if self.records.borrow().contains_key(&spec.install) {
-            let _ = self.deactivate(spec.install, false);
+            let _ = self.deactivate(
+                spec.install,
+                false,
+                matches!(activation, Activation::Updated { .. }),
+            );
         }
         self.scheme
             .add_install(
@@ -1806,6 +1967,7 @@ impl Inner {
             },
         );
         let admitted = Admitted {
+            install_generation: spec.generation.get(),
             dynamic_resources: self.scheme.dynamic_resources(spec.install),
             install: spec.install,
             extension_id: spec.extension_id,
@@ -1818,8 +1980,11 @@ impl Inner {
             background,
             messages,
             manifest_scripts,
+            user_scripts,
+            user_script_guid,
             permissions: spec.permissions,
             unpacked: spec.unpacked,
+            allow_user_scripts: spec.allow_user_scripts,
             state_directory,
         };
         self.notifications
@@ -1831,7 +1996,12 @@ impl Inner {
         Ok(())
     }
 
-    fn deactivate(self: &Rc<Self>, install: ExtensionInstallId, erase: bool) -> ExtensionStop {
+    fn deactivate(
+        self: &Rc<Self>,
+        install: ExtensionInstallId,
+        erase: bool,
+        preserve_reset: bool,
+    ) -> ExtensionStop {
         self.notifications.forget(install);
         let _ = self
             .bridge
@@ -1853,12 +2023,47 @@ impl Inner {
                 self.views.ended(install, &view);
             }
         }
-        let _ = self
-            .bridge
-            .with_runtime(|host, out| host.forget(install, erase, out));
+        let _ = self.bridge.with_runtime(|host, out| {
+            if preserve_reset {
+                host.forget_for_admission(install, erase, true, out)
+            } else {
+                host.forget(install, erase, out)
+            }
+        });
         self.bridge.retire(install);
         self.scheme.remove_install(install);
-        self.records.borrow_mut().remove(&install);
+        let removed = self.records.borrow_mut().remove(&install);
+        let scripts: Vec<_> = self
+            .records
+            .borrow()
+            .keys()
+            .copied()
+            .filter_map(|id| self.page_script(id, ContextKind::ExtensionTab))
+            .collect();
+        {
+            let mut content = self.content.borrow_mut();
+            content.plan.worlds.retain(|grant| grant.install != install);
+            content.plan.external.retain(|rule| {
+                rule.install_id
+                    != install
+                        .bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+            });
+            if let Some(record) = removed {
+                content
+                    .plan
+                    .extension_pages
+                    .retain(|page| page.extension != record.extension_id);
+            }
+            content.scripts = scripts;
+            content.styles.retain(|style| style.install != install);
+        }
+        let views = self.tabs.borrow().keys().copied().collect::<Vec<_>>();
+        for view in views {
+            self.apply_tab_content(view);
+        }
         self.run();
         ExtensionStop {
             runtime: Rc::downgrade(self),
@@ -1994,8 +2199,84 @@ impl Inner {
 }
 
 impl Inner {
+    fn prepare_user_injection(self: &Rc<Self>, pending: u64) {
+        use zephium_webext_runtime::ApiError;
+        let Some(waiting) = self.browser.awaiting_injection(pending) else {
+            return;
+        };
+        let allowed = self
+            .bridge
+            .with_runtime(|host, _| host.user_execution_allowed(&waiting.sender))
+            .unwrap_or(false);
+        let outcome = if !allowed || self.retired.get() {
+            Err(ApiError::context_invalidated())
+        } else if std::time::Instant::now() >= waiting.deadline {
+            Err(ApiError::other("User-script world admission timed out."))
+        } else if let Some(view) = waiting.tab.and_then(|tab| self.browser.view_of(tab)) {
+            match self.bridge.user_execution_ready(
+                view,
+                waiting.sender.install(),
+                waiting.sender.generation().get(),
+                &waiting.admission_world,
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => {
+                    self.injection_waiters.borrow_mut().insert(pending);
+                    return;
+                }
+                Err(_) => Err(ApiError::cannot_access_page()),
+            }
+        } else {
+            Err(ApiError::context_invalidated())
+        };
+        match self.browser.materialize_injection(pending, outcome) {
+            Ok(outgoing) => {
+                for item in outgoing {
+                    self.outgoing(item);
+                }
+            }
+            Err(finished) => {
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.finish(*finished, out));
+            }
+        }
+    }
+
+    fn arm_injection_wait(self: &Rc<Self>) {
+        if self.injection_waiters.borrow().is_empty() || self.injection_poll.borrow().is_some() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let source = glib::timeout_add_local(std::time::Duration::from_millis(10), move || {
+            let Some(inner) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let ids = std::mem::take(&mut *inner.injection_waiters.borrow_mut());
+            for id in ids {
+                inner.prepare_user_injection(id);
+            }
+            if inner.injection_waiters.borrow().is_empty() {
+                inner.injection_poll.borrow_mut().take();
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+        *self.injection_poll.borrow_mut() = Some(source);
+    }
+
     fn outgoing(self: &Rc<Self>, item: browser::Outgoing) {
         match item {
+            browser::Outgoing::PrepareInjection { pending } => {
+                self.prepare_user_injection(pending);
+                self.arm_injection_wait();
+            }
+            browser::Outgoing::Language {
+                pending,
+                tab,
+                document,
+            } => language::submit(self, pending, tab, document),
             browser::Outgoing::Engine(call) => {
                 if let Some(engine) = self.engine.upgrade() {
                     engine.browser_call(call);
@@ -2020,11 +2301,12 @@ impl Inner {
                         request_id: 0,
                         target: native,
                         world: step.world.clone(),
+                        admission_world: step.admission_world.clone(),
                         kind: step.kind,
                         source: step.source.clone(),
                         source_fd: None,
                         source_url: step.source_url.clone(),
-                        args_json: step.args_json.clone(),
+                        args_json: step.args_json.to_string(),
                         timeout_ms: step.timeout_ms(),
                     };
                     self.bridge.inject(view, install, request).ok()
@@ -2041,37 +2323,60 @@ impl Inner {
         }
     }
 
-    /// Republishes the content-script table and every tab's plan, page
-    /// scripts and style sheets. New documents see the change.
-    fn refresh_content(self: &Rc<Self>, when: crate::bridge::Reattach) {
-        if self.retired.get() {
-            return;
+    fn revoke_content_grants(&self, install: ExtensionInstallId) {
+        let plan = {
+            let mut content = self.content.borrow_mut();
+            content.plan.worlds.retain(|grant| grant.install != install);
+            let owner = install
+                .bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            content
+                .plan
+                .external
+                .retain(|rule| rule.install_id != owner);
+            content.styles.retain(|style| style.install != install);
+            content.plan.clone()
+        };
+        let views: Vec<_> = self.tabs.borrow().keys().copied().collect();
+        for view in views {
+            if let Err(error) = self
+                .bridge
+                .update_plan(view, &plan, crate::bridge::Reattach::Now)
+            {
+                eprintln!("extensions: restrictive content plan refused: {error:?}");
+                self.bridge.detach(view);
+            }
+            self.apply_tab_content(view);
         }
-        let installs = self
-            .bridge
-            .with_runtime(|host, _| host.content_installs())
-            .unwrap_or_default();
-        let generation = self.script_generation.get() + 1;
-        self.script_generation.set(generation);
-        let mut built = content::build(&installs, generation);
-        for (install, problem) in &built.problems {
-            eprintln!("extensions: {install} content scripts withheld: {problem}");
+    }
+
+    fn stage_content(
+        &self,
+        installs: &[host::glue::ContentInstall],
+        ticket: u64,
+    ) -> Result<PreparedContent, zephium_webext_runtime::ApiError> {
+        use zephium_webext_runtime::ApiError;
+        if self.retired.get() || self.prepared_content.borrow().is_some() {
+            return Err(ApiError::context_invalidated());
         }
-        if built.grants.len() > zephium_webkit_web_process_protocol::protocol::MAX_WORLDS {
-            eprintln!("extensions: content scripts limited to the first 16 extensions");
-            built
-                .grants
-                .truncate(zephium_webkit_web_process_protocol::protocol::MAX_WORLDS);
+        let generation = self
+            .script_generation
+            .get()
+            .checked_add(1)
+            .ok_or_else(ApiError::too_many_pending)?;
+        let built = content::build(installs, generation);
+        if let Some((_, problem)) = built.problems.first() {
+            return Err(ApiError::other(format!(
+                "Content-script publication refused: {problem}"
+            )));
         }
         let document_start = built.table.entries.iter().any(|entry| {
             entry.run_at == zephium_webkit_web_process_protocol::protocol::RunAt::DocumentStart
         });
-        if let Err(error) = self.bridge.publish_scripts(built.table) {
-            eprintln!("extensions: content-script table refused: {error:?}");
-            return;
-        }
-        let installs: Vec<ExtensionInstallId> = self.records.borrow().keys().copied().collect();
-        let scripts: Vec<PageScript> = installs
+        let ids: Vec<_> = self.records.borrow().keys().copied().collect();
+        let scripts: Vec<_> = ids
             .into_iter()
             .filter_map(|install| self.page_script(install, ContextKind::ExtensionTab))
             .collect();
@@ -2091,18 +2396,123 @@ impl Inner {
             observe_requests: measure_requests(),
             ..AttachPlan::default()
         };
-        *self.content.borrow_mut() = TabContent {
-            plan: plan.clone(),
-            document_start,
-            scripts,
-            styles: built.styles,
-        };
-        let views: Vec<BridgeViewId> = self.tabs.borrow().keys().copied().collect();
-        for view in views {
-            if let Err(error) = self.bridge.update_plan(view, &plan, when) {
-                eprintln!("extensions: a tab kept its previous plan: {error:?}");
+        let reservation = self
+            .bridge
+            .prepare_scripts(built.table, &plan)
+            .map_err(|error| {
+                ApiError::other(format!("Content-script publication refused: {error:?}"))
+            })?;
+        self.script_generation.set(generation);
+        Ok(PreparedContent {
+            ticket,
+            reservation,
+            content: TabContent {
+                plan,
+                document_start,
+                scripts,
+                styles: built.styles,
+            },
+        })
+    }
+
+    fn commit_content(self: &Rc<Self>, ticket: u64) {
+        let reservation = self
+            .prepared_content
+            .borrow()
+            .as_ref()
+            .filter(|p| p.ticket == ticket)
+            .map(|p| p.reservation);
+        let Some(reservation) = reservation else {
+            if ticket != 0 {
+                let _ = self.bridge.with_runtime(|host, out| {
+                    host.abort_script_publication(
+                        ticket,
+                        zephium_webext_runtime::ApiError::context_invalidated(),
+                        out,
+                    )
+                });
             }
-            self.apply_tab_content(view);
+            return;
+        };
+        let result = self
+            .bridge
+            .commit_prepared_scripts(reservation, |host, out, plan| {
+                let mut prepared = self
+                    .prepared_content
+                    .borrow_mut()
+                    .take()
+                    .expect("reserved content");
+                prepared.content.plan = plan.clone();
+                prepared
+                    .content
+                    .styles
+                    .retain(|style| self.records.borrow().contains_key(&style.install));
+                prepared.content.scripts.retain(|script| {
+                    script.allow.iter().all(|allow| {
+                        plan.extension_pages.iter().any(|page| {
+                            *allow == format!("chrome-extension://{}/*", page.extension.as_str())
+                        })
+                    })
+                });
+                *self.content.borrow_mut() = prepared.content;
+                let views: Vec<_> = self.tabs.borrow().keys().copied().collect();
+                for view in views {
+                    self.apply_tab_content(view);
+                }
+                if ticket != 0 {
+                    host.script_published(ticket, out);
+                }
+            });
+        match result {
+            Ok(Some(())) => {
+                if self.content_dirty.get() {
+                    self.refresh_content(crate::bridge::Reattach::Now);
+                }
+            }
+            Ok(None) => {
+                self.prepared_content.borrow_mut().take();
+                if ticket != 0 {
+                    let _ = self.bridge.with_runtime(|host, out| {
+                        host.abort_script_publication(
+                            ticket,
+                            zephium_webext_runtime::ApiError::context_invalidated(),
+                            out,
+                        )
+                    });
+                }
+            }
+            Err(_) => {
+                let weak = Rc::downgrade(self);
+                glib::idle_add_local_once(move || {
+                    if let Some(inner) = weak.upgrade() {
+                        inner.commit_content(ticket);
+                        inner.run();
+                    }
+                });
+            }
+        }
+    }
+
+    /// New documents use one preflighted snapshot and its matching grants.
+    fn refresh_content(self: &Rc<Self>, _when: crate::bridge::Reattach) {
+        if self.retired.get() {
+            return;
+        }
+        self.content_dirty.set(true);
+        if self.prepared_content.borrow().is_some() {
+            return;
+        }
+        let installs = self
+            .bridge
+            .with_runtime(|host, _| host.content_installs())
+            .unwrap_or_default();
+        match self.stage_content(&installs, 0) {
+            Ok(prepared) => {
+                *self.prepared_content.borrow_mut() = Some(prepared);
+                self.content_dirty.set(false);
+                self.commit_content(0);
+            }
+            Err(error) => eprintln!("extensions: {}", error.message()),
         }
     }
 

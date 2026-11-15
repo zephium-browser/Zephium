@@ -9,6 +9,7 @@ fn load() -> WebExtensionLoad {
         root: "/fixture".into(),
         external_native_messaging: false,
         native_messaging_grantable: false,
+        allow_user_scripts: false,
         permissions: vec![],
         match_patterns: vec![],
         start_background: false,

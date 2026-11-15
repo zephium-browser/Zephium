@@ -1,0 +1,111 @@
+{
+  "caseId": "tabs-language-metadata",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "none:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "none:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "und"
+      }
+    },
+    {
+      "label": "fr:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "fr:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "fr"
+      }
+    },
+    {
+      "label": "de:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "de:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "de"
+      }
+    },
+    {
+      "label": "pl:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "pl:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "pl"
+      }
+    },
+    {
+      "label": "en_us:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "en_us:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "en"
+      }
+    },
+    {
+      "label": "zh_tw:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "zh_tw:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "zh-TW"
+      }
+    },
+    {
+      "label": "invalid:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invalid:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "und"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

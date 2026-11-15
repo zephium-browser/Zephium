@@ -114,7 +114,7 @@
         apiTrace.length = 0;
       }, 20000);
     }
-    client.call = function (name, payload, internal) {
+    client.call = function (name, payload, internal, onReply) {
       const stack = text(new Error('API call'));
       const sequence = ++callSequence;
       const command = commandOf(name, payload);
@@ -129,7 +129,7 @@
       }
       if (pending.size < 4096) pending.set(sequence, {name, internal: !!internal, stack: stack.slice(0, 768)});
       const outstanding = client.outstanding;
-      return apply(then, apply(call, this, [name, payload, internal]), [(result) => {
+      return apply(then, apply(call, this, [name, payload, internal, onReply]), [(result) => {
         pending.delete(sequence);
         if (tracingName) trace({phase:'resolved', sequence, name:tracingName, result: result === null || typeof result === 'boolean' || typeof result === 'number' ? result : shape(result)});
         return result;

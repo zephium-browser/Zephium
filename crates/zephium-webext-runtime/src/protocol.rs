@@ -305,6 +305,20 @@ pub fn invalidated(sender: &Sender, sequence: EventSeq) -> Result<Vec<u8>, ApiEr
     )
 }
 
+/// Projects the browser-owned user-script gate to existing bindings.
+pub fn user_scripts_changed(
+    sender: &Sender,
+    sequence: EventSeq,
+    allowed: bool,
+) -> Result<Vec<u8>, ApiError> {
+    notification(
+        sender,
+        sequence,
+        "zephium.onUserScriptsChanged",
+        json!([allowed]),
+    )
+}
+
 /// Encodes a permissions projection. Permission changes remain authoritative in
 /// Rust; the binding only updates which API members it exposes.
 pub fn permissions_changed(

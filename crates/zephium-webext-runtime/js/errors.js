@@ -36,9 +36,16 @@
 
   // One `lastError` slot shared by `runtime.lastError` and
   // `extension.lastError`, cleared before the callback's next task.
-  function createLastError() {
+  function createLastError(lazy = false) {
     let current;
     let running = 0;
+    const targets = [];
+    const sync = () => {
+      for (let i=0;i<targets.length;i++) {
+        if (current === undefined) I.deleteProperty(targets[i], 'lastError');
+        else I.defineProperty(targets[i], 'lastError', {configurable:true,enumerable:false,get:read,set(){}});
+      }
+    };
     const read = () => {
       if (current !== undefined) current.checked = true;
       return current === undefined ? undefined : current.value;
@@ -51,12 +58,14 @@
           ? undefined
           : { __proto__: null, value: { message }, checked: false };
       current = scope;
+      if (lazy) sync();
       running++;
       try {
         return fn();
       } finally {
         running--;
-        if (nested) current = previous;
+        if (lazy) { current = previous; sync(); }
+        else if (nested) current = previous;
         if (scope !== undefined) {
           I.queueMicrotask(() => {
             if (current === scope) current = undefined;
@@ -66,6 +75,7 @@
       }
     };
     const install = (target) => {
+      if (lazy) { I.ArrayPush(targets, target); sync(); return; }
       I.defineProperty(target, 'lastError', { configurable: true, enumerable: false, get: read, set() {} });
     };
     return { __proto__: null, run, install, read };

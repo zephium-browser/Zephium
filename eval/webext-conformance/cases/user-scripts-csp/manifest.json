@@ -1,0 +1,1 @@
+{"manifest_version":3,"permissions":["userScripts","scripting","tabs"],"host_permissions":["http://127.0.0.1/*"]}

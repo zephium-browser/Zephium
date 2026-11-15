@@ -1,6 +1,10 @@
 export async function run(h) {
-  for (const name of ["passwordSavingEnabled", "autofillEnabled", "autofillAddressEnabled", "autofillCreditCardEnabled"]) {
-    const setting = chrome.privacy.services[name];
+  for (const [scope, name] of [
+    ...["passwordSavingEnabled", "autofillEnabled", "autofillAddressEnabled", "autofillCreditCardEnabled", "alternateErrorPagesEnabled"].map(name => ["services", name]),
+    ...["hyperlinkAuditingEnabled", "topicsEnabled", "adMeasurementEnabled", "fledgeEnabled"].map(name => ["websites", name]),
+    ["network", "networkPredictionEnabled"],
+  ]) {
+    const setting = chrome.privacy[scope][name];
     const result = await setting.get({});
     h.record(name, {
       keys: Object.keys(result).sort(),

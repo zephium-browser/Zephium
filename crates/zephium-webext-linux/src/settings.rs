@@ -101,3 +101,34 @@ pub(crate) fn storage_for_navigation(
         previous.set(extension.then_some(saved));
     }
 }
+
+pub(crate) fn link_prefetch_enabled(settings: &webkit2gtk::Settings) -> Option<bool> {
+    // The feature borrows its list; all access stays on the GTK thread.
+    unsafe {
+        let list = webkit_settings_get_all_features();
+        if list.is_null() {
+            return None;
+        }
+        let count = webkit_feature_list_get_length(list);
+        let mut result = None;
+        if count <= 4096 {
+            for index in 0..count {
+                let feature = webkit_feature_list_get(list, index);
+                if feature.is_null() {
+                    continue;
+                }
+                let identifier = webkit_feature_get_identifier(feature);
+                if !identifier.is_null() && CStr::from_ptr(identifier).to_bytes() == b"LinkPrefetch"
+                {
+                    result = Some(
+                        webkit_settings_get_feature_enabled(settings.to_glib_none().0, feature)
+                            != 0,
+                    );
+                    break;
+                }
+            }
+        }
+        webkit_feature_list_unref(list);
+        result
+    }
+}

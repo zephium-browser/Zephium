@@ -41,6 +41,14 @@ pub fn register<S: BrowserPort + 'static>(
 ) -> Result<(), RegistrationError> {
     for name in methods() {
         table.register_generated(name, move |host: &mut S, call| {
+            if name.starts_with("userScripts.") {
+                if !host.user_scripts_allowed(call.sender()) {
+                    return call.reply(Err(crate::ApiError::other(
+                        "User scripts are not allowed for this extension.",
+                    )));
+                }
+                return host.user_scripts_request(call);
+            }
             host.request(BrowserRequest::Unavailable { api: name }, call)
         })?;
     }

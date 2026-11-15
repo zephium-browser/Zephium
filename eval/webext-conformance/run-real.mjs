@@ -8,6 +8,7 @@ const require=createRequire(new URL('../../frame/package.json', import.meta.url)
 const {chromium}=require('playwright');
 if(require('playwright/package.json').version!=='1.63.0')throw Error('Playwright pin mismatch');
 const [name, extension, output]=process.argv.slice(2);
+const userScriptManager=Boolean(process.env.ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS)&&['dhdgffkkebhmkfjojejmpbldmpobfkfo','jinjaccalgkegednnccohejagnlnfdag'].includes(name);
 await mkdir(output,{recursive:true});
 const profile=await mkdtemp(join(tmpdir(),'pm-chromium-'));
 const trace=join(output,name+'.jsonl');
@@ -18,7 +19,8 @@ const fixture=await readFile(new URL('./fixtures/breadth/index.html',import.meta
 const video=await readFile(new URL('./fixtures/breadth/video.webm',import.meta.url));
 const mediaInput=await readFile(new URL('./fixtures/breadth/media.js',import.meta.url),'utf8');
 const jsonInput=await readFile(new URL('./fixtures/breadth/json.js',import.meta.url),'utf8');
-const server=createServer((req,res)=>{if(['/analytics.analytics/analytics.min.js','/run3-control.json'].includes(req.url)){log('filter-fixture-hit',{path:req.url});res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end('{"ownedFilteringFixture":true}');return}if(req.url==='/video.webm'){res.writeHead(200,{'content-type':'video/webm','content-length':video.length});res.end(video);return}const isJSON=req.url==='/breadth.json';res.writeHead(200,{'content-type':isJSON?'application/json':'text/html','cache-control':'no-store'});res.end(isJSON?'{"fixture":true,"items":[1,2,3]}':fixture)});
+const userScript=await readFile(new URL('./fixtures/breadth/run5.user.js',import.meta.url));
+const server=createServer((req,res)=>{if(req.url==='/run5.user.js'){res.writeHead(200,{'content-type':'application/javascript','cache-control':'no-store'});res.end(userScript);return}if(['/analytics.analytics/analytics.min.js','/run3-control.json'].includes(req.url)){log('filter-fixture-hit',{path:req.url});res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});res.end('{"ownedFilteringFixture":true}');return}if(req.url==='/video.webm'){res.writeHead(200,{'content-type':'video/webm','content-length':video.length});res.end(video);return}const isJSON=req.url==='/breadth.json';res.writeHead(200,{'content-type':isJSON?'application/json':'text/html','cache-control':'no-store'});res.end(isJSON?'{"fixture":true,"items":[1,2,3]}':fixture)});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const fixtureURL=`http://127.0.0.1:${server.address().port}/breadth`;
 const instrument=`(()=>{
@@ -70,9 +72,21 @@ try{
  }
  }
  ws.onmessage=({data})=>{const m=JSON.parse(data);if(m.id){const p=pending.get(m.id);if(!p)return;pending.delete(m.id);clearTimeout(p.timer);m.error?p.reject(Error(JSON.stringify(m.error))):p.resolve(m.result)}else event(m).catch(e=>log('capture-error',{method:m.method,error:e.message}))};
- await send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true,filter:[{type:'browser',exclude:true},{type:'browser_ui',exclude:true},{type:'tab',exclude:true},{}]});
+ if(userScriptManager)log('control-observability',{workerAutoAttach:false,reason:'Avoid worker debugger lifetime/startup interference in manager permission restart'});
+ await send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:true,flatten:true,filter:[...(userScriptManager?[{type:'service_worker',exclude:true}]:[]),{type:'browser',exclude:true},{type:'browser_ui',exclude:true},{type:'tab',exclude:true},{}]});
  if(name==='ddkjiahejlhfcafbddmgiahcphecmpfh'){const absent=await context.newPage();await absent.goto(fixtureURL);const filter=await readFile(new URL('./fixtures/breadth/filter.js',import.meta.url),'utf8');log('interaction',{phase:'filtering-absent',state:await absent.evaluate('(async()=>{'+filter+'})()')});await absent.close();}
  const {id}=await send('Extensions.loadUnpacked',{path:extension});log('installed',{id});if(id!==name)throw Error('Loaded identity differs from signed CRX publisher identity');
+ if(userScriptManager){
+  const step=async(label,operation)=>{log('user-scripts-gate-stage',{label,phase:'before'});let timer;try{const result=await Promise.race([operation(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('User scripts setup timeout: '+label)),15000)})]);log('user-scripts-gate-stage',{label,phase:'after'});return result}finally{clearTimeout(timer)}};
+  const settings=await step('open',()=>context.newPage());
+  await step('navigate',()=>settings.goto('chrome://extensions'));
+  await step('enable',()=>settings.evaluate(extensionId=>chrome.developerPrivate.updateExtensionConfiguration({extensionId,userScriptsAccess:true}),id));
+  await step('disable',()=>settings.evaluate(extensionId=>chrome.management.setEnabled(extensionId,false),id));
+  await step('restart',()=>settings.evaluate(extensionId=>chrome.management.setEnabled(extensionId,true),id));
+  const gate=await step('readback',()=>settings.evaluate(async extensionId=>{const info=await chrome.developerPrivate.getExtensionInfo(extensionId);return {allowed:info.userScriptsAccess?.isActive,state:info.state,restarted:true}},id));
+  if(!gate.allowed||gate.state!=='ENABLED')throw Error('User scripts permission or enabled-state readback failed');
+  log('user-scripts-gate',gate);await settings.close();
+ }
  const page=await context.newPage();await page.goto(fixtureURL);log('fixture-open',{url:fixtureURL});for(const initial of context.pages()){if(initial!==page&&initial.url()==='about:blank')await initial.close();}
  await new Promise(r=>setTimeout(r,5000));
  for(const installedPage of context.pages()){if(installedPage.url().startsWith(`chrome-extension://${id}/`))await installedPage.waitForLoadState('load');}
@@ -98,6 +112,20 @@ try{
  if(popupPath){const forced=await context.newPage();await page.bringToFront();log('forced-popup-before',{path:popupPath});await forced.goto(`chrome-extension://${id}/${popupPath}`).catch(e=>log('forced-popup-navigation-error',{error:e.message}));await new Promise(r=>setTimeout(r,5000));await snapshot('forced-popup');if(name==='ddkjiahejlhfcafbddmgiahcphecmpfh'){const config=await readFile(new URL('./fixtures/breadth/filter-config.js',import.meta.url),'utf8');log('interaction',{phase:'filtering-configuration',state:await forced.evaluate('(async()=>{'+config+'})()')});}await forced.close()}
  const optionsPath=manifest.options_ui?.page||manifest.options_page;
  if(optionsPath){const options=await context.newPage();await options.goto(`chrome-extension://${id}/${optionsPath}`).catch(e=>log('options-navigation-error',{error:e.message}));await new Promise(r=>setTimeout(r,5000));await snapshot('options');await options.close()}
+ if(['dhdgffkkebhmkfjojejmpbldmpobfkfo','jinjaccalgkegednnccohejagnlnfdag'].includes(id)){
+  const installer=await context.newPage();await installer.goto(fixtureURL.replace('/breadth','/run5.user.js')).catch(e=>log('userscript-navigation',{error:e.message}));
+  await new Promise(r=>setTimeout(r,5000));await snapshot('userscript-installer');
+  for(const candidate of context.pages())if(candidate.url().startsWith(`chrome-extension://${id}/`)){
+   const attempt=await candidate.evaluate(()=>{const buttons=[...document.querySelectorAll('button,input[type=button],input[type=submit]')].filter(e=>e.getClientRects().length&&!e.disabled&&/^(Install|Install script)$/i.test((e.textContent||e.value||'').trim()));if(buttons.length===1)buttons[0].click();return {matchingInstallButtons:buttons.length,clicked:buttons.length===1}}).catch(e=>({error:e.message}));log('userscript-install-attempt',attempt);
+  }
+  await new Promise(r=>setTimeout(r,5000));await page.goto(fixtureURL);await new Promise(r=>setTimeout(r,5000));log('userscript-gm-roundtrip',{marker:await page.evaluate(()=>document.documentElement.dataset.run5UserScript||null),expected:'42'});
+  if(userScriptManager&&(optionsPath||popupPath)){
+   const observer=await context.newPage();
+   try{await observer.goto(`chrome-extension://${id}/${optionsPath||popupPath}`);const state=await observer.evaluate(async()=>{const worlds=await chrome.userScripts.getWorldConfigurations();const scripts=await chrome.userScripts.getScripts();return {worlds,registrationCount:scripts.length,registrations:scripts.slice(0,64).map(script=>({id:script.id,world:script.world,worldId:script.worldId,sourceCount:script.js.length}))}});log('userscript-registry',state)}catch(e){log('userscript-registry-error',{error:e.message})}finally{await observer.close()}
+  }
+  if(!installer.isClosed())await installer.close();
+ }
+
  if(name==='ddkjiahejlhfcafbddmgiahcphecmpfh'){const filter=await readFile(new URL('./fixtures/breadth/filter.js',import.meta.url),'utf8');log('interaction',{phase:'filtering',state:await page.evaluate('(async()=>{'+filter+'})()')});}
  await page.goto(fixtureURL.replace('/breadth','/breadth.json'));await new Promise(r=>setTimeout(r,3000));await snapshot('json-document');log('interaction',{phase:'json-controls',state:await page.evaluate('(async()=>{'+jsonInput+'})()')});
  if(manifest.chrome_url_overrides?.newtab){const newtab=await context.newPage();await newtab.goto('chrome://newtab/').catch(e=>log('newtab-error',{error:e.message}));await new Promise(r=>setTimeout(r,3000));await snapshot('newtab')}

@@ -387,6 +387,10 @@ pub enum BindError {
     NotExternallyConnectable,
     /// The profile's injection record budget is exhausted.
     TooManyInjections,
+    /// A durable script publication must settle before admission can change.
+    PublicationPending,
+    /// The profile reached its bounded runtime admission history.
+    TooManyInstallGenerations,
 }
 
 impl BindError {

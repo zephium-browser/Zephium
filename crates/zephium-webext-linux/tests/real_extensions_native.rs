@@ -124,6 +124,13 @@ impl Fixture {
                     let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     continue;
                 }
+                if path == "/run5.user.js" {
+                    let body = include_str!(
+                        "../../../eval/webext-conformance/fixtures/breadth/run5.user.js"
+                    );
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    continue;
+                }
                 if path == "/video.webm" {
                     let body = include_bytes!(
                         "../../../eval/webext-conformance/fixtures/breadth/video.webm"
@@ -279,6 +286,7 @@ fn spec(directory: &Path, id: &str, generation: u64) -> InstallSpec {
             false,
         ),
         allowed_in_incognito: false,
+        allow_user_scripts: std::env::var_os("ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS").is_some(),
         externally_connectable: None,
         unpacked: false,
     }
@@ -1834,7 +1842,12 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         "update this probe when WebKit enables idle callbacks by default"
     );
     drop(plain);
-    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let profile_context = context();
+    webkit2gtk::WebsiteDataManagerExt::set_itp_enabled(
+        &profile_context.website_data_manager().unwrap(),
+        true,
+    );
+    let (mut host, _engine) = host(profile_context, &module, state.path(), id);
     let _initial_tab = host.open("about:blank", true);
     let install = ExtensionInstallId::from(INSTALL);
     host.runtime
@@ -1909,9 +1922,11 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             r#"globalThis.result=null;(async()=>{
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
  const privacy={};
- for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled']){
+ for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled','alternateErrorPagesEnabled']){
    privacy[name]=await chrome.privacy.services[name].get({});
  }
+ privacy.networkPredictionEnabled=await chrome.privacy.network.networkPredictionEnabled.get({});
+ for(const name of ['hyperlinkAuditingEnabled','topicsEnabled','adMeasurementEnabled','fledgeEnabled','thirdPartyCookiesAllowed']) privacy[name]=await chrome.privacy.websites[name].get({});
  const privacyErrors=[];
  for(const run of [()=>chrome.privacy.services.passwordSavingEnabled.set({value:true}),()=>chrome.privacy.services.passwordSavingEnabled.clear({}),()=>chrome.privacy.services.passwordSavingEnabled.get({incognito:true})]){
    try{await run();privacyErrors.push('unexpected success')}catch(error){privacyErrors.push(error.message)}
@@ -1940,8 +1955,8 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  try{await chrome.management.getAll()}catch(error){managementError=error.message}
  let restoreError='unexpected success';
  try{await chrome.sessions.restore()}catch(error){restoreError=error.message}
- let languageError='unexpected success';
- try{await chrome.tabs.detectLanguage(created.id)}catch(error){languageError=error.message}
+ const languageTab=(await chrome.tabs.query({})).find(tab=>tab.url?.startsWith('http://127.0.0.1:'));
+ const declaredLanguage=await chrome.tabs.detectLanguage(languageTab.id);
  const windowsUnchanged=(await chrome.tabs.query({})).length===tabCount;
  let cancelledIdle=false;
  const cancelled=requestIdleCallback(()=>cancelledIdle=true);
@@ -1951,7 +1966,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,languageError,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={privacy,privacyErrors,created,captureErrors,windowErrors,windowsUnchanged,restoreError,declaredLanguage,constructorErrors,managementError,unavailableErrors,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1971,19 +1986,29 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert_eq!(result["nativeIdle"], true);
     assert_eq!(result["foreign"], true);
     assert_eq!(result["restoreError"], "This function is not supported.");
-    assert_eq!(result["languageError"], "This function is not supported.");
+    assert_eq!(result["declaredLanguage"], "und");
     assert_eq!(result["managementError"], "This function is not supported.");
     for name in [
         "passwordSavingEnabled",
         "autofillEnabled",
         "autofillAddressEnabled",
         "autofillCreditCardEnabled",
+        "alternateErrorPagesEnabled",
+        "topicsEnabled",
+        "adMeasurementEnabled",
+        "fledgeEnabled",
+        "networkPredictionEnabled",
+        "thirdPartyCookiesAllowed",
     ] {
         assert_eq!(
             result["privacy"][name],
             json!({"value":false,"levelOfControl":"not_controllable"})
         );
     }
+    assert_eq!(
+        result["privacy"]["hyperlinkAuditingEnabled"],
+        json!({"value":true,"levelOfControl":"not_controllable"})
+    );
     assert_eq!(
         result["privacyErrors"],
         json!([

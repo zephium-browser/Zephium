@@ -63,6 +63,8 @@ pub struct ScriptEntry<S = String> {
     pub script_id: String,
     /// An empty name selects MAIN, which receives no binding bootstrap.
     pub world: String,
+    /// Exact grant required even when execution selects MAIN.
+    pub admission_world: String,
     pub run_at: RunAt,
     pub rule: MatchRule,
     pub files: Vec<ScriptFile<S>>,
@@ -79,6 +81,10 @@ pub struct ScriptBootstrap<S = String> {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScriptTable<S = String> {
     pub generation: u64,
+    /// Admitted runtime generation for every source owner.
+    pub admissions: BTreeMap<String, u64>,
+    /// User worlds whose immutable bootstrap enables extension messaging.
+    pub messaging_worlds: BTreeSet<String>,
     /// JSON catalogs passed as data to content bootstraps, shared per install.
     /// They count against the existing table and per-document byte budgets.
     pub catalogs: BTreeMap<String, Arc<str>>,
@@ -124,6 +130,8 @@ pub enum InjectionKind {
     RemoveCss = 3,
     ScriptAtIdle = 4,
     FunctionAtIdle = 5,
+    ScriptBatch = 6,
+    ScriptBatchAtIdle = 7,
 }
 
 impl InjectionKind {
@@ -135,6 +143,8 @@ impl InjectionKind {
             3 => Ok(Self::RemoveCss),
             4 => Ok(Self::ScriptAtIdle),
             5 => Ok(Self::FunctionAtIdle),
+            6 => Ok(Self::ScriptBatch),
+            7 => Ok(Self::ScriptBatchAtIdle),
             _ => Err(WireError::Invalid),
         }
     }
@@ -154,6 +164,7 @@ pub struct InjectRequest {
     pub request_id: u64,
     pub target: InjectionTarget,
     pub world: String,
+    pub admission_world: String,
     pub kind: InjectionKind,
     pub source: Arc<str>,
     pub source_fd: Option<SourceFd>,
@@ -301,7 +312,79 @@ fn json(value: &str, max: usize, array: bool) -> Result<(), WireError> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSource {
+    pub range: std::ops::Range<usize>,
+    pub url: String,
+}
+
 impl InjectRequest {
+    pub fn batch_sources(&self, source: Option<&str>) -> Result<Vec<BatchSource>, WireError> {
+        if !matches!(
+            self.kind,
+            InjectionKind::ScriptBatch | InjectionKind::ScriptBatchAtIdle
+        ) {
+            return Err(WireError::Invalid);
+        }
+        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)?;
+        let rows: serde_json::Value =
+            serde_json::from_str(&self.args_json).map_err(|_| WireError::Invalid)?;
+        let rows = rows.as_array().ok_or(WireError::Invalid)?;
+        if rows.is_empty() || rows.len() > MAX_SCRIPT_FILES {
+            return Err(WireError::Oversized);
+        }
+        let expected = self
+            .source_fd
+            .as_ref()
+            .map_or(self.source.len(), |fd| fd.length as usize);
+        if source.is_some_and(|source| source.len() != expected) {
+            return Err(WireError::Invalid);
+        }
+        let owner = url::Url::parse(&self.source_url).map_err(|_| WireError::Invalid)?;
+        let mut offset = 0;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = row
+                .as_array()
+                .filter(|row| row.len() == 3)
+                .ok_or(WireError::Invalid)?;
+            let start = row[0]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(WireError::Invalid)?;
+            let end = row[1]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(WireError::Invalid)?;
+            let url = row[2]
+                .as_str()
+                .filter(|url| valid_source_url(url))
+                .ok_or(WireError::Invalid)?;
+            if start != offset
+                || end < start
+                || end > expected
+                || source.is_some_and(|source| {
+                    !source.is_char_boundary(start) || !source.is_char_boundary(end)
+                })
+                || url::Url::parse(url)
+                    .map_err(|_| WireError::Invalid)?
+                    .host_str()
+                    != owner.host_str()
+            {
+                return Err(WireError::Invalid);
+            }
+            result.push(BatchSource {
+                range: start..end,
+                url: url.to_owned(),
+            });
+            offset = end;
+        }
+        if offset != expected {
+            return Err(WireError::Invalid);
+        }
+        Ok(result)
+    }
+
     pub fn validate(&self) -> Result<(), WireError> {
         if self.source.len() > MAX_INLINE_SCRIPT_SOURCE_BYTES
             || self
@@ -316,20 +399,31 @@ impl InjectRequest {
                 || !self.source.is_empty()
                 || !matches!(
                     self.kind,
-                    InjectionKind::Script | InjectionKind::ScriptAtIdle
+                    InjectionKind::Script
+                        | InjectionKind::ScriptAtIdle
+                        | InjectionKind::ScriptBatch
+                        | InjectionKind::ScriptBatchAtIdle
                 )
         }) {
             return Err(WireError::Invalid);
         }
         if !valid_install_id(&self.install_id)
             || !(1..=MAX_INJECT_TIMEOUT_MS).contains(&self.timeout_ms)
-            || (!self.world.is_empty() && !valid_world_name(&self.world))
+            || !valid_world_name(&self.admission_world)
+            || (!self.world.is_empty() && self.world != self.admission_world)
             || !valid_source_url(&self.source_url)
             || self.source.contains('\0')
         {
             return Err(WireError::Invalid);
         }
-        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)
+        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)?;
+        if matches!(
+            self.kind,
+            InjectionKind::ScriptBatch | InjectionKind::ScriptBatchAtIdle
+        ) {
+            self.batch_sources(self.source_fd.is_none().then_some(self.source.as_ref()))?;
+        }
+        Ok(())
     }
 }
 
@@ -340,6 +434,21 @@ impl<S: AsRef<str>> ScriptTable<S> {
         }
         if self.entries.len() > MAX_SCRIPT_ENTRIES {
             return Err(WireError::Oversized);
+        }
+        if self.admissions.len() > MAX_SCRIPT_ENTRIES
+            || self
+                .admissions
+                .iter()
+                .any(|(owner, epoch)| !valid_install_id(owner) || *epoch == 0)
+        {
+            return Err(WireError::Invalid);
+        }
+        if self.messaging_worlds.len() > super::protocol::MAX_WORLDS
+            || self.messaging_worlds.iter().any(|world| {
+                !world.starts_with("zephium-webext-us-") || !self.bootstraps.contains_key(world)
+            })
+        {
+            return Err(WireError::Invalid);
         }
         let mut ids = BTreeSet::new();
         let mut worlds = std::collections::BTreeMap::new();
@@ -354,6 +463,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
             if !valid_world_name(world)
                 || world.is_empty()
                 || !valid_install_id(&bootstrap.install_id)
+                || !self.admissions.contains_key(&bootstrap.install_id)
                 || bootstrap.source.as_ref().is_empty()
                 || bootstrap.source.as_ref().contains('\0')
             {
@@ -425,11 +535,15 @@ impl<S: AsRef<str>> ScriptTable<S> {
             }
         }
         for entry in &self.entries {
-            if !valid_install_id(&entry.install_id)
+            if !self.admissions.contains_key(&entry.install_id)
+                || !valid_install_id(&entry.install_id)
                 || entry.script_id.is_empty()
                 || entry.script_id.len() > MAX_SCRIPT_ID_BYTES
                 || entry.script_id.chars().any(char::is_control)
                 || (!entry.world.is_empty() && !valid_world_name(&entry.world))
+                || entry.admission_world.is_empty()
+                || !valid_world_name(&entry.admission_world)
+                || (!entry.world.is_empty() && entry.world != entry.admission_world)
                 || (entry.world.is_empty() && !entry.bootstrap.is_empty())
                 || (entry.files.is_empty() && entry.css.is_empty())
                 || entry.bootstrap.contains('\0')
@@ -474,6 +588,15 @@ impl<S: AsRef<str>> ScriptTable<S> {
         self.validate()?;
         let mut w = Writer::new(48);
         w.u64(self.generation);
+        w.count(self.admissions.len(), MAX_SCRIPT_ENTRIES)?;
+        for (owner, epoch) in &self.admissions {
+            w.string(owner, MAX_INSTALL_ID_BYTES)?;
+            w.u64(*epoch);
+        }
+        w.count(self.messaging_worlds.len(), super::protocol::MAX_WORLDS)?;
+        for world in &self.messaging_worlds {
+            w.string(world, MAX_WORLD_BYTES)?;
+        }
         w.count(self.bootstraps.len(), MAX_SCRIPT_ENTRIES)?;
         for (world, bootstrap) in &self.bootstraps {
             w.string(world, MAX_WORLD_BYTES)?;
@@ -490,6 +613,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
             w.string(&entry.install_id, MAX_INSTALL_ID_BYTES)?;
             w.string(&entry.script_id, MAX_SCRIPT_ID_BYTES)?;
             w.string(&entry.world, MAX_WORLD_BYTES)?;
+            w.string(&entry.admission_world, MAX_WORLD_BYTES)?;
             w.u8(entry.run_at as u8);
             w.rule(&entry.rule)?;
             w.files(&entry.files)?;
@@ -509,6 +633,21 @@ impl<S: AsRef<str>> ScriptTable<S> {
         let mut r = Reader::new(bytes, MAX_SCRIPT_TABLE_BYTES)?;
         r.header(48)?;
         let generation = r.u64()?;
+        let mut admissions = BTreeMap::new();
+        for _ in 0..r.count(MAX_SCRIPT_ENTRIES)? {
+            if admissions
+                .insert(r.string(MAX_INSTALL_ID_BYTES)?, r.u64()?)
+                .is_some()
+            {
+                return Err(WireError::Invalid);
+            }
+        }
+        let mut messaging_worlds = BTreeSet::new();
+        for _ in 0..r.count(super::protocol::MAX_WORLDS)? {
+            if !messaging_worlds.insert(r.string(MAX_WORLD_BYTES)?) {
+                return Err(WireError::Invalid);
+            }
+        }
         let n = r.count(MAX_SCRIPT_ENTRIES)?;
         let mut bootstraps = BTreeMap::new();
         for _ in 0..n {
@@ -537,6 +676,7 @@ impl<S: AsRef<str>> ScriptTable<S> {
                 install_id: r.string(MAX_INSTALL_ID_BYTES)?,
                 script_id: r.string(MAX_SCRIPT_ID_BYTES)?,
                 world: r.string(MAX_WORLD_BYTES)?,
+                admission_world: r.string(MAX_WORLD_BYTES)?,
                 run_at: RunAt::decode(r.u8()?)?,
                 rule: r.rule()?,
                 files: r.files(&source)?,
@@ -547,6 +687,8 @@ impl<S: AsRef<str>> ScriptTable<S> {
         r.end()?;
         let table = Self {
             generation,
+            admissions,
+            messaging_worlds,
             catalogs,
             bootstraps,
             entries,
@@ -620,6 +762,7 @@ impl Writer {
             InjectionTarget::AllFrames => self.u8(1),
         }
         self.string(&value.world, MAX_WORLD_BYTES)?;
+        self.string(&value.admission_world, MAX_WORLD_BYTES)?;
         self.u8(value.kind as u8);
         self.string(&value.source, MAX_INLINE_SCRIPT_SOURCE_BYTES)?;
         self.boolean(value.source_fd.is_some());
@@ -700,6 +843,7 @@ impl<'a> Reader<'a> {
             request_id,
             target,
             world: self.string(MAX_WORLD_BYTES)?,
+            admission_world: self.string(MAX_WORLD_BYTES)?,
             kind: InjectionKind::decode(self.u8()?)?,
             source: self.string(MAX_INLINE_SCRIPT_SOURCE_BYTES)?.into(),
             source_fd: if self.boolean()? {
@@ -746,6 +890,8 @@ mod tests {
 
     fn table() -> ScriptTable {
         ScriptTable {
+            admissions: [("a".repeat(32), 1)].into(),
+            messaging_worlds: Default::default(),
             bootstraps: Default::default(),
             catalogs: Default::default(),
             generation: 9,
@@ -753,6 +899,7 @@ mod tests {
                 install_id: "a".repeat(32),
                 script_id: "_manifest_0".into(),
                 world: "zephium-webext-isolated".into(),
+                admission_world: "zephium-webext-isolated".into(),
                 run_at: RunAt::DocumentStart,
                 rule: MatchRule {
                     matcher: ContentScriptMatcher::new(
@@ -793,6 +940,7 @@ mod tests {
                 document_seq: 3,
             },
             world: "zephium-webext-isolated".into(),
+            admission_world: "zephium-webext-isolated".into(),
             kind: InjectionKind::Function,
             source: "async value => value + 1".into(),
             source_fd: None,
@@ -800,6 +948,49 @@ mod tests {
             args_json: "[41]".into(),
             timeout_ms: 1000,
         }
+    }
+
+    #[test]
+    fn batches_bound_slices_utf8_owner_and_exact_admission() {
+        let mut value = request();
+        value.kind = InjectionKind::ScriptBatch;
+        value.source = "é42".into();
+        let url = value.source_url.clone();
+        value.args_json = serde_json::json!([[0, 2, url], [2, 4, url]]).to_string();
+        for kind in [InjectionKind::ScriptBatch, InjectionKind::ScriptBatchAtIdle] {
+            value.kind = kind;
+            let message = UiMessage::Inject(value.clone());
+            assert_eq!(
+                decode_ui(INJECT_MESSAGE, &encode_ui(&message).unwrap()),
+                Ok(message)
+            );
+        }
+        for rows in [
+            serde_json::json!([]),
+            serde_json::json!([[0, 1, url], [1, 4, url]]),
+            serde_json::json!([[0, 2, url], [1, 4, url]]),
+            serde_json::json!([[0, 5, url]]),
+            serde_json::json!([[0, 3, url]]),
+            serde_json::json!([[0, 4, format!("chrome-extension://{}/x.js", "b".repeat(32))]]),
+        ] {
+            value.args_json = rows.to_string();
+            assert!(value.validate().is_err());
+        }
+        value.args_json = serde_json::json!([[0, 4, url]]).to_string();
+        value.admission_world.clear();
+        assert!(value.validate().is_err());
+        value.admission_world = "zephium-webext-us-other".into();
+        assert!(value.validate().is_err());
+        value.world.clear();
+        assert!(value.validate().is_ok());
+        value.source_fd = Some(SourceFd {
+            index: 0,
+            length: 4,
+        });
+        value.source = "".into();
+        assert!(value.validate().is_ok());
+        assert!(value.batch_sources(Some("é42")).is_ok());
+        assert!(value.batch_sources(Some("bad")).is_err());
     }
 
     #[test]
@@ -898,6 +1089,26 @@ mod tests {
     }
 
     #[test]
+    fn table_requires_bounded_nonzero_admission_for_every_owner() {
+        let original = table();
+        for admissions in [
+            BTreeMap::new(),
+            [("a".repeat(32), 0)].into(),
+            [("wrong".into(), 1)].into(),
+        ] {
+            let mut candidate = original.clone();
+            candidate.admissions = admissions;
+            assert!(candidate.encode().is_err());
+        }
+        assert_eq!(
+            ScriptTable::decode(&original.encode().unwrap())
+                .unwrap()
+                .admissions,
+            original.admissions
+        );
+    }
+
+    #[test]
     fn table_decoder_rejects_every_truncation_trailing_bytes_and_old_version() {
         let bytes = table().encode().expect("table");
         for at in 0..bytes.len() {
@@ -918,6 +1129,29 @@ mod tests {
             changed[at] ^= 0xff;
             let _ = ScriptTable::decode(&changed);
         }
+    }
+
+    #[test]
+    fn user_union_and_exact_main_admission_survive_the_wire() {
+        let mut value = table();
+        let entry = &mut value.entries[0];
+        entry.world.clear();
+        entry.bootstrap.clear();
+        entry.admission_world = "zephium-webext-dedicated-user-world".into();
+        entry.rule.matcher = ContentScriptMatcher::user_script(
+            &["https://a.test/*"],
+            &["https://b.test/private/*"],
+            &["https://b.test/*"],
+            &[],
+        )
+        .unwrap();
+        let bytes = value.encode().unwrap();
+        assert_eq!(ScriptTable::decode(&bytes).unwrap(), value);
+        let mut old = bytes;
+        old[3] = b'3';
+        assert_eq!(ScriptTable::decode(&old), Err(WireError::Version));
+        value.entries[0].admission_world.clear();
+        assert_eq!(value.encode(), Err(WireError::Invalid));
     }
 
     #[test]
@@ -1047,7 +1281,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]

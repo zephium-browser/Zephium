@@ -134,7 +134,8 @@ impl Sheets {
                 "Exact non-main-frame CSS targets are not supported on Linux.",
             ));
         }
-        if *all_frames
+        if !remove
+            && *all_frames
             && target
                 .frames
                 .iter()

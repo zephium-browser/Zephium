@@ -66,6 +66,96 @@
         ],
         "valueType": "boolean"
       }
+    },
+    {
+      "label": "alternateErrorPagesEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "hyperlinkAuditingEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "topicsEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "adMeasurementEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "fledgeEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "networkPredictionEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
     }
   ],
   "schemaVersion": 1,

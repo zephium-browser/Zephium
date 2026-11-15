@@ -1,0 +1,49 @@
+{
+  "caseId": "worker-update-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "initial registration",
+      "value": {
+        "phases": [
+          "install",
+          "activate"
+        ],
+        "root": true,
+        "state": "activated"
+      }
+    },
+    {
+      "label": "update channel:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update channel:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "woken same registration",
+      "value": {
+        "newBoot": true,
+        "phases": [],
+        "root": true,
+        "state": "activated"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

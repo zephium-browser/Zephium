@@ -624,8 +624,39 @@ test('registration follows host lifecycle without inventing another worker', asy
   assert.equal(registration.active, self.serviceWorker);
   assert.equal(registration.installing, null);
   assert.equal(registration.waiting, null);
-  await assert.rejects(registration.update(), { name: 'NotSupportedError' });
+  let settled = false;
+  const update = registration.update();
+  update.then(() => { settled = true; }, () => { settled = true; });
+  assert.notEqual(update, registration.update());
+  assert.throws(() => registration.update.call({}), /Illegal invocation/);
+  await flush();
+  assert.equal(settled, false);
+  assert.equal(host.callsTo('zephium.workerUpdate').length, 0);
   const restarted = workerRealm({ install: false });
   assert.equal(restarted.self.registration.active, restarted.self.serviceWorker);
   assert.equal(restarted.self.registration.installing, null);
+});
+
+test('activated update requests native retirement only on the opted-in adapter', async () => {
+  const { self, host } = workerRealm({ retireOnUpdate: true });
+  await assert.rejects(self.registration.update(), { name: 'InvalidStateError' });
+  assert.equal(host.callsTo('zephium.workerUpdate').length, 0);
+  await until(() => self.serviceWorker.state === 'activated');
+  host.handlers['zephium.workerUpdate'] = () => null;
+  self.registration.update();
+  await flush();
+  assert.deepEqual(host.callsTo('zephium.workerUpdate').map(call => plain(call.args)), [[]]);
+});
+
+test('early restarted-worker updates wait for native activation acknowledgment', async () => {
+  const { self, host } = workerRealm({ install: false, retireOnUpdate: true });
+  let activated;
+  host.handlers['zephium.workerLifecycle'] = ([state], call) => { if (state !== 'activated') return null; activated = call.id; return host.LATER; };
+  host.handlers['zephium.workerUpdate'] = () => null;
+  self.registration.update();
+  self.registration.update();
+  await until(() => activated !== undefined);
+  assert.equal(host.callsTo('zephium.workerUpdate').length, 0);
+  host.reply(activated, null);
+  await until(() => host.callsTo('zephium.workerUpdate').length === 1);
 });

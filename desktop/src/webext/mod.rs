@@ -89,6 +89,9 @@ struct Entry {
     version: String,
     description: String,
     enabled: bool,
+    /// Explicit permission for separately isolated user scripts.
+    #[serde(default)]
+    allow_user_scripts: bool,
     /// Directory under `packages/<id>/` WebKit loads.
     package: String,
     /// Authenticated CRX bytes, ZIP bytes, or the frozen original folder tree.
@@ -910,4 +913,15 @@ fn startup_restore_never_waits_for_package_preparation() {
         immediate.is_ok(),
         "setup waited for legacy package preparation"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn user_script_registry_permission_defaults_off_and_round_trips() {
+    let old = serde_json::json!({"install":"test", "id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "name":"fixture", "version":"1", "description":"", "enabled":true, "package":"fixture", "compat":"fixture", "permissions":["userScripts"], "hosts":[]});
+    let mut entry: Entry = serde_json::from_value(old).unwrap();
+    assert!(!entry.allow_user_scripts);
+    entry.allow_user_scripts = true;
+    let restored: Entry = serde_json::from_slice(&serde_json::to_vec(&entry).unwrap()).unwrap();
+    assert!(restored.allow_user_scripts);
 }

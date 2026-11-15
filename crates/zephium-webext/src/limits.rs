@@ -118,7 +118,12 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (
         &[Permission("userScripts")],
         "Can't run user scripts",
-        MAC | LIN,
+        MAC,
+    ),
+    (
+        &[Permission("userScripts")],
+        "User scripts require Allow user scripts. Their isolated evaluation, eval and Function ignore page CSP; DOM inline script and style obey page CSP. Only empty world CSP is accepted; Chromium's default user-world CSP is not enforced. Programmatic execution requires effective host grants; activeTab-only targets are unavailable. Batches are limited to 256 sources and 16 MiB; pending preparation to 64 calls and 16 MiB per profile.",
+        LIN,
     ),
     (
         &[Permission("debugger")],
@@ -177,7 +182,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("privacy")],
-        "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
+        "Privacy getters are read-only: absent form, remote-error and Chrome advertising services report inactive; hyperlink auditing reads live settings, network prediction requires disabled native prefetch, and third-party cookies require verified ITP",
         LIN,
     ),
     (
@@ -216,7 +221,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("tabs")],
-        "Can't detect the language of a tab",
+        "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable",
         LIN,
     ),
     (
@@ -277,7 +282,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Key("background.service_worker")],
-        "Background registrations expose lifecycle state; worker update/unregister, messaging, push, extension fetch interception and static routes are unsupported",
+        "Background registrations expose lifecycle state; activated update retires the running worker with an unsettled promise; extension-page registration lookup is unavailable. Unregister, client messaging, push, extension fetch interception and static routes are unsupported",
         LIN,
     ),
     (
@@ -431,7 +436,7 @@ mod tests {
         let raw = json!({"manifest_version":3,"permissions":["tabs"]});
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
-            ["Can read browser windows but can't create, resize, focus or close them through the extension API", "Can't detect the language of a tab"]
+            ["Can read browser windows but can't create, resize, focus or close them through the extension API", "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable"]
         );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
@@ -552,12 +557,12 @@ mod tests {
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
             [
-                "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
+                "Privacy getters are read-only: absent form, remote-error and Chrome advertising services report inactive; hyperlink auditing reads live settings, network prediction requires disabled native prefetch, and third-party cookies require verified ITP",
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Can read browser windows but can't create, resize, focus or close them through the extension API",
-                "Can't detect the language of a tab",
+                "Tab language uses a bounded HTML lang declaration or und; body-text, header and meta language detection are unavailable",
                 "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",

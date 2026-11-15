@@ -286,7 +286,7 @@
     };
   }
 
-  function defineRegistration(global, config, serviceWorker) {
+  function defineRegistration(global, config, serviceWorker, requestUpdate) {
     const key = {};
     let registration;
     let changed = null;
@@ -305,10 +305,14 @@
       update() {
         check(this);
         const installing = state() === 'parsed' || state() === 'installing';
+        // Chromium's extension embedder blocks the update job without settling it.
+        if (!installing) {
+          if (state() === 'activated') requestUpdate();
+          return new I.Promise(() => {});
+        }
         return I.PromiseReject(new I.DOMException(
-          installing ? "Failed to update a ServiceWorker for scope ('" + scope + "'): The service worker is still installing."
-            : 'Extension workers are updated by the browser extension installer.',
-          installing ? 'InvalidStateError' : 'NotSupportedError'));
+          "Failed to update a ServiceWorker for scope ('" + scope + "'): The service worker is still installing.",
+          'InvalidStateError'));
       }
       unregister() {
         check(this);
@@ -391,7 +395,19 @@
 
     const serviceWorker = defineServiceWorker(global, config);
     I.defineProperty(members, 'serviceWorker', { get: () => serviceWorker.worker, configurable: true, enumerable: true });
-    const registration = defineRegistration(global, config, serviceWorker);
+    let hostReady = false;
+    let updateRequested = false;
+    const flushUpdate = () => {
+      if (!hostReady || !updateRequested) return;
+      updateRequested = false;
+      I.PromiseThen(context.client.call('zephium.workerUpdate', '[]', true), undefined, () => {});
+    };
+    const registration = defineRegistration(global, config, serviceWorker, () => {
+      if (own(config, 'retireOnUpdate') === true) {
+        updateRequested = true;
+        flushUpdate();
+      }
+    });
     I.defineProperty(members, 'registration', { get: () => registration, configurable: true, enumerable: true });
     const classes = defineEventClasses(global);
     hidden(global, 'ExtendableEvent', classes.ExtendableEvent);
@@ -444,6 +460,8 @@
       if (state !== 'activated' && own(config, 'install') === true) serviceWorker.set('redundant');
       I.PromiseThen(report(state, detail), () => {
         if (state === 'activated') {
+          hostReady = true;
+          flushUpdate();
           return I.PromiseThen(serviceWorker.set('activated'), () => context.hub.release());
         }
       }, () => { if (own(config, 'install') === true) serviceWorker.set('redundant'); });

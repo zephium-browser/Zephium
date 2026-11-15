@@ -44,7 +44,11 @@ fn control(
     args: &Value,
 ) -> Result<Value, String> {
     match operation {
-        "disableUserScripts" => Ok(json!({"enabled": false, "backendAvailable": false})),
+        "disableUserScripts" => {
+            host.runtime
+                .set_test_user_scripts_allowed(ExtensionInstallId::from(INSTALL), false)?;
+            Ok(json!({"enabled": false, "backendAvailable": true}))
+        }
         "consoleMessages" => Ok(Value::Array(
             host.runtime
                 .errors(ExtensionInstallId::from(INSTALL))
@@ -133,6 +137,7 @@ fn conformance_host() {
             false,
         ),
         allowed_in_incognito: false,
+        allow_user_scripts: std::env::var_os("ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS").is_some(),
         externally_connectable: None,
         unpacked: true,
     });

@@ -127,6 +127,7 @@ pub(crate) struct Bootstrap<'a> {
     pub ui_language: &'a str,
     pub incognito: bool,
     pub unpacked: bool,
+    pub allow_user_scripts: bool,
     pub permissions: &'a [String],
     pub dynamic_resources: Option<&'a crate::scheme::DynamicResources>,
 }
@@ -143,7 +144,7 @@ impl Bootstrap<'_> {
             "incognito": self.incognito,
             "unpacked": self.unpacked,
             "permissions": self.permissions,
-            "userScriptsEnabled": false,
+            "userScriptsEnabled": self.allow_user_scripts,
             "unavailableSyncApis": true,
             "offscreenReadyHandshake": true,
             // Compatibility target matches the pinned Chromium API schema, not the engine.
@@ -222,6 +223,7 @@ pub(crate) fn launch(
         "scriptURL": scope,
         "install": install,
         "installedScripts": installed_scripts,
+        "retireOnUpdate": true,
     });
     let boot = bootstrap.to_value(Some(worker));
     #[cfg(feature = "native-tests")]
@@ -328,6 +330,7 @@ mod tests {
             ui_language: "en-US",
             incognito: false,
             unpacked: false,
+            allow_user_scripts: false,
             permissions: &[],
             dynamic_resources: None,
         };
