@@ -740,6 +740,38 @@ unsafe extern "C" fn saved<F>(
     }));
     let result = callback_result.unwrap_or(Err(ContentRuleApplyFailure::NativeCompilation));
     context.finish(result);
+    #[cfg(target_env = "gnu")]
+    glib::idle_add_local_once(|| {
+        // Native compilation has released its scratch and encoded source. Return
+        // free glibc arena pages once; unchanged disk-cache loads never trim.
+        #[cfg(feature = "blocker-bench")]
+        let before = own_pss_kib();
+        #[cfg(feature = "blocker-bench")]
+        let started = std::time::Instant::now();
+        unsafe {
+            libc::malloc_trim(0);
+        }
+        #[cfg(feature = "blocker-bench")]
+        eprintln!(
+            "blocker-native: trim_ms={:.3} pss_before_kib={before:?} pss_after_kib={:?}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            own_pss_kib()
+        );
+    });
+}
+
+#[cfg(all(target_env = "gnu", feature = "blocker-bench"))]
+fn own_pss_kib() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/smaps_rollup")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Pss:")?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
 }
 
 fn validated_policy(
