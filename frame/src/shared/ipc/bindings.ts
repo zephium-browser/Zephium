@@ -1401,6 +1401,13 @@ export type DownloadCall = { kind: "updates" } | { kind: "retry_cleanup" } | { k
 /**  Deletes a finished download that was held for its type. */
 { kind: "discard"; id: string } | { kind: "open"; id: string } | { kind: "reveal"; id: string } | { kind: "forget"; id: string } | { kind: "clear" } | { kind: "preferences" } | { kind: "choose_directory" } | { kind: "set_ask_destination"; enabled: boolean };
 
+/**  Operations supported by the native transfer adapter, independent of UI state. */
+export type DownloadCapabilities = {
+	pause: boolean,
+	resume: boolean,
+	restart: boolean,
+};
+
 export type DownloadCleanup = {
 	running: boolean,
 	error: DownloadError | null,
@@ -1425,6 +1432,7 @@ export type DownloadResponse = { kind: "updates"; entries: DownloadView[]; remov
 export type DownloadState = "pending" | "receiving" | "paused" | "held" | "cancelling" | "finalizing" | "completed" | "cancelled" | "interrupted" | "failed";
 
 export type DownloadView = {
+	capabilities?: DownloadCapabilities,
 	id: string,
 	revision: string,
 	created_at: string,

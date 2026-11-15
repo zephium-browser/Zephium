@@ -14,6 +14,7 @@ const entry: DownloadView = {
   total: null,
   error: null,
   insecure: false,
+  capabilities: { pause: true, resume: true, restart: false },
 };
 describe("native download progress", () => {
   it("keeps an unknown transfer length indeterminate", () => {

@@ -34,6 +34,7 @@ const entry: DownloadView = {
   total: "100",
   error: null,
   insecure: false,
+  capabilities: { pause: true, resume: true, restart: false },
 };
 function deferred() {
   let resolve!: (response: DownloadResponse) => void;

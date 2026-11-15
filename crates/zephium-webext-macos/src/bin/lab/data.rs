@@ -82,6 +82,7 @@ pub fn download(id: u64, filename: &str, state: DownloadState) -> DownloadItem {
     DownloadItem {
         id,
         view: DownloadView {
+            capabilities: zephium_core::downloads::DownloadCapabilities::native(),
             id: format!("01J00000000000000000000{id:03}"),
             revision: "00000001".into(),
             created_at: "1700000000".into(),
