@@ -284,6 +284,7 @@ pub(super) fn stage(
             version: version.clone(),
             description: description.clone(),
             enabled: true,
+            allow_user_scripts: existing.is_some_and(|entry| entry.allow_user_scripts),
             package: zephium_webext::package::publication_identity(
                 &source,
                 &revision,

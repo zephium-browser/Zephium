@@ -86,6 +86,7 @@ fn lenient_spec(install: u128, index: u8, directory: &Path) -> InstallSpec {
             false,
         ),
         allowed_in_incognito: false,
+        allow_user_scripts: false,
         externally_connectable: None,
         unpacked: true,
     }

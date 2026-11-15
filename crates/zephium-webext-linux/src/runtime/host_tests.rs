@@ -28,6 +28,56 @@ const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 const SECOND: u64 = 1_000_000_000;
 
 #[test]
+fn user_script_permission_is_browser_owned_and_default_off() {
+    let mut h = Harness::new();
+    let mut admission = admitted(h.install);
+    admission.manifest =
+        Manifest::from_value(json!({"manifest_version":3,"permissions":["userScripts"]}));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&admission.manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = h.sender(ViewKind::Options, "options.html");
+    assert!(!h.host.state.user_scripts_allowed(&sender));
+    assert_eq!(
+        h.host
+            .page_bootstrap(h.install, ContextKind::Options)
+            .unwrap()["userScriptsEnabled"],
+        false
+    );
+    let out = h.call(&sender, "userScripts.getScripts", json!([]));
+    assert!(replies(&out)[0]
+        .as_ref()
+        .unwrap_err()
+        .contains("not allowed"));
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .allow_user_scripts = true;
+    assert!(h.host.state.user_scripts_allowed(&sender));
+    assert_eq!(
+        h.host
+            .page_bootstrap(h.install, ContextKind::Options)
+            .unwrap()["userScriptsEnabled"],
+        true
+    );
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .allow_user_scripts = false;
+    assert!(!h.host.state.user_scripts_allowed(&sender));
+}
+
+#[test]
 fn cookie_authority_requires_live_context_and_settled_current_host_grants() {
     let mut h = Harness::new();
     let mut admission = admitted(h.install);
@@ -126,6 +176,7 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
             false,
         ),
         unpacked: true,
+        allow_user_scripts: false,
         state_directory: None,
         listeners: None,
         alarms: None,

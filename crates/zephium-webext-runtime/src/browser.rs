@@ -399,6 +399,14 @@ pub enum ServiceRequest {
 /// defer through Invocation::defer and retain its Responder until core/native
 /// settlement. Admission must never be reported as durable or native success.
 pub trait BrowserPort {
+    /// Browser-owned per-install permission; JavaScript cannot grant it.
+    fn user_scripts_allowed(&self, _sender: &Sender) -> bool {
+        false
+    }
+    /// Durable user-script operations, after the generated caller/permission checks.
+    fn user_scripts_request(&mut self, invocation: Invocation<'_>) -> Handled {
+        invocation.reply(Err(unsupported()))
+    }
     /// Returns same-profile ordinary browser facts. Must omit all privileged and Work views.
     fn snapshot(&self, sender: &Sender) -> Result<BrowserSnapshot, ApiError>;
     /// Returns current installation/bootstrap facts for the authenticated generation.

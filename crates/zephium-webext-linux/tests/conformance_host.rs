@@ -133,6 +133,7 @@ fn conformance_host() {
             false,
         ),
         allowed_in_incognito: false,
+        allow_user_scripts: std::env::var_os("ZEPHIUM_WEBEXT_ALLOW_USER_SCRIPTS").is_some(),
         externally_connectable: None,
         unpacked: true,
     });

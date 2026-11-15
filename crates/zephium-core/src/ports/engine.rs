@@ -59,6 +59,8 @@ pub struct WebExtensionLoad {
     /// The authenticated package may ask for native-app access it declares
     /// optional; the person answers at run time.
     pub native_messaging_grantable: bool,
+    /// Explicit per-install permission for user-script registration and execution.
+    pub allow_user_scripts: bool,
     pub match_patterns: Vec<String>,
     /// Set when the package changed since WebKit last ran it, so its
     /// background runs once and WebKit relearns what it listens for.

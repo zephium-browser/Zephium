@@ -873,7 +873,9 @@ impl LinuxExtensions {
         load: &WebExtensionLoad,
     ) -> Option<GrantChange> {
         let entry = self.profiles.get_mut(&profile)?;
-        entry.installs.get(&load.install)?;
+        if entry.installs.get(&load.install)?.load.allow_user_scripts != load.allow_user_scripts {
+            return None;
+        }
         let manifest = Manifest::load(&load.root).ok()?;
         let loaded = WebExtensionLoaded {
             name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
@@ -928,6 +930,7 @@ impl LinuxExtensions {
             directory: load.root.clone(),
             permissions: install_permissions(&manifest, &load),
             allowed_in_incognito: false,
+            allow_user_scripts: load.allow_user_scripts,
             externally_connectable: None,
             unpacked: false,
             manifest,

@@ -131,6 +131,8 @@ pub struct InstallSpec {
     pub permissions: InstallPermissions,
     /// Whether the person allowed it in private windows.
     pub allowed_in_incognito: bool,
+    /// Explicit per-install user-script permission, default-off in the registry.
+    pub allow_user_scripts: bool,
     /// Its `externally_connectable` pages.
     pub externally_connectable: Option<ExternallyConnectable>,
     /// Unpacked (developer) install: relaxed alarm minimum.
@@ -1743,6 +1745,7 @@ impl Inner {
                 ui_language: &self.config.locale.ui_language,
                 incognito: self.config.incognito,
                 unpacked: spec.unpacked,
+                allow_user_scripts: spec.allow_user_scripts,
                 permissions: &grants.permissions,
                 dynamic_resources: candidate_resources.as_ref(),
             }
@@ -1820,6 +1823,7 @@ impl Inner {
             manifest_scripts,
             permissions: spec.permissions,
             unpacked: spec.unpacked,
+            allow_user_scripts: spec.allow_user_scripts,
             state_directory,
         };
         self.notifications

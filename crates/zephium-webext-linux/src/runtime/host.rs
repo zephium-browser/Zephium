@@ -196,6 +196,7 @@ pub(crate) struct Admitted {
     pub manifest_scripts: ScriptRegistry,
     pub permissions: InstallPermissions,
     pub unpacked: bool,
+    pub allow_user_scripts: bool,
     pub state_directory: Option<PathBuf>,
     pub listeners: Option<Vec<u8>>,
     pub alarms: Option<Vec<u8>>,
@@ -272,6 +273,7 @@ pub(crate) struct InstallState {
     unlimited: bool,
     clipboard: bool,
     unpacked: bool,
+    allow_user_scripts: bool,
     queue: EventQueue,
     alarms: Alarms,
     scripts: ScriptRegistry,
@@ -313,11 +315,13 @@ impl InstallState {
             ui_language,
             incognito,
             unpacked: self.unpacked,
+            allow_user_scripts: self.allow_user_scripts,
             permissions: &self.granted,
             dynamic_resources: self.dynamic_resources.as_ref(),
         }
         .to_value(None);
         value["unpacked"] = Value::Bool(self.unpacked);
+        value["userScriptsEnabled"] = Value::Bool(self.allow_user_scripts);
         value
     }
 }
@@ -809,6 +813,13 @@ fn context_info(sender: &Sender, script: Option<&str>) -> Option<Value> {
 }
 
 impl BrowserPort for State {
+    fn user_scripts_allowed(&self, sender: &Sender) -> bool {
+        sender.profile() == self.profile
+            && sender.incognito() == self.incognito
+            && self.installs.get(&sender.install()).is_some_and(|state| {
+                &state.extension_id == sender.extension_id() && state.allow_user_scripts
+            })
+    }
     fn context_menu(
         &mut self,
         sender: &Sender,
@@ -2122,6 +2133,7 @@ impl RuntimeHost {
             unlimited,
             clipboard,
             unpacked: admitted.unpacked,
+            allow_user_scripts: admitted.allow_user_scripts,
             queue: EventQueue::new(install),
             alarms: Alarms::new(),
             scripts,
@@ -2940,6 +2952,7 @@ impl RuntimeHost {
             ui_language: &ui_language,
             incognito,
             unpacked: state.unpacked,
+            allow_user_scripts: state.allow_user_scripts,
             permissions: &state.granted,
             dynamic_resources: state.dynamic_resources.as_ref(),
         };
