@@ -31,7 +31,7 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use zephium_core::ports::engine::NavigationFailureReason;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
@@ -1881,11 +1881,12 @@ impl EngineHost {
         // WebView2 can put its error document in place of the shown page;
         // the failure handler names that navigation for its Failed event.
         let replaced_navigation = Rc::new(Cell::new(None::<wry::NavigationId>));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let failure_permit = load_permit.clone();
             let failure_sink = on_load.clone();
             let failure_id = load_id.clone();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let failure_certificates = Rc::downgrade(&certificates);
             let failure_replaced = replaced_navigation.clone();
             let failure_navigation = navigation.clone();
@@ -1928,6 +1929,9 @@ impl EngineHost {
                     };
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();
+                    #[cfg(target_os = "linux")]
+                    let url = replaced;
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let url = matches!(reason, NavigationFailureReason::Certificate(_))
                         .then(|| failure_certificates.upgrade()?.refused_url())
                         .flatten()
@@ -3431,7 +3435,7 @@ pub(super) fn raw_content_permission_on(
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
     match failure {
         wry::NavigationFailure::Offline => NavigationFailureReason::Offline,

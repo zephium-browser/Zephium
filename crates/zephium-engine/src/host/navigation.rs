@@ -726,6 +726,11 @@ impl EngineHost {
             // download save panel before the user can choose its destination.
             return;
         }
+        if cfg!(target_os = "linux") {
+            // The shared shell covers the failed address; keep the native tab
+            // hidden and reusable even when its first load never committed.
+            return;
+        }
         eprintln!("view-create: provisional first-load navigation failed before commit");
         self.close(id);
         if let Some(token) = token {

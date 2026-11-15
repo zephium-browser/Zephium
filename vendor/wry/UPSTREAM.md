@@ -359,3 +359,9 @@ Standalone Linux validation also scopes protocol body accounting to its actual
 consumers (Apple, Windows, Linux body support and unit tests) and removes two
 redundant references in the GTK protocol callback. Body limits and admission
 behavior are unchanged; strict Clippy remains enabled for the default graph.
+
+Linux's opt-in navigation-failure callback precedes the identity terminal event.
+Native cancellation and download conversion emit cancellation, never failure.
+An installed failure owner suppresses WebKit's default error document; provisional
+failures retain the previous document. TLS refusals remain fail-closed and are
+reported as insecure connections, without a context-wide certificate exception.

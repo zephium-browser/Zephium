@@ -504,3 +504,94 @@ fn host_menu_admits_only_bounded_credential_free_web_urls() {
         "a".repeat(16 * 1024)
     )));
 }
+
+#[test]
+#[ignore = "requires isolated GTK display and admitted sandboxed WebKitGTK; localhost only"]
+fn native_navigation_failure_keeps_first_tab_and_can_recover() {
+    let admission = crate::enforce_runtime_security_floor().unwrap();
+    gtk::init().unwrap();
+    let fixture = Fixture::new();
+    let data = tempfile::tempdir().unwrap();
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    let container = gtk::Fixed::new();
+    window.add(&container);
+    window.show_all();
+    crate::install_container(container).unwrap();
+    let (send, events) = mpsc::channel();
+    let engine = crate::install(
+        Arc::new(|job| {
+            gtk::glib::idle_add_once(job);
+            true
+        }),
+        data.path().to_owned(),
+        admission,
+        crate::InitialUserContent::new(
+            UserContentGeneration::new(1).unwrap(),
+            UserContent::default(),
+        ),
+        move |event| {
+            let _ = send.send(event);
+        },
+        |reason| panic!("native host sealed: {reason}"),
+    )
+    .unwrap();
+    let _cleanup = PanicCleanup(&engine);
+    let profile = ProfileId::generate();
+    assert_eq!(
+        engine.install_content_rules(
+            profile,
+            ContentPolicyGeneration::new(1).unwrap(),
+            ContentRules::allow_all(ContentRuleDigest::from_bytes([1; 32]))
+        ),
+        NativeDispatch::Scheduled
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable = format!("http://{}/", listener.local_addr().unwrap());
+    drop(listener);
+    let id = ItemId::generate();
+    assert!(engine.create_view(
+        id,
+        Partition::Ephemeral(profile),
+        &unavailable,
+        Rect::default()
+    ));
+    let mut reported = false;
+    until(|| {
+        for event in events.try_iter() {
+            match event {
+                EngineEvent::NavigationFailureReported {
+                    id: failed,
+                    url,
+                    replaced_page,
+                    ..
+                } => {
+                    assert_eq!(failed, id);
+                    assert!(url.is_none());
+                    assert!(!replaced_page);
+                    reported = true;
+                }
+                EngineEvent::ViewCreationFailed { .. } => panic!("first load closed its tab"),
+                _ => {}
+            }
+        }
+        reported
+    });
+    assert!(has_view(id));
+    let page = native(id);
+    assert!(!page.is_mapped());
+    page.load_uri(&format!("{}/page", fixture.origin));
+    until(|| page.title().as_deref() == Some("ready"));
+    assert!(has_view(id));
+    let (send, done) = mpsc::channel();
+    engine.shutdown(Box::new(move |clean| {
+        let _ = send.send(clean);
+    }));
+    let mut settled = None;
+    until(|| {
+        settled = done.try_recv().ok();
+        settled.is_some()
+    });
+    assert_eq!(settled, Some(true));
+    super::super::make_unavailable_for_test();
+    window.close();
+}

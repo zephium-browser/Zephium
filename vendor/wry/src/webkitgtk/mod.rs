@@ -321,9 +321,65 @@ impl GtkNavigationSequence {
   }
 }
 
+fn navigation_failure(error: &gtk::glib::Error) -> Option<crate::NavigationFailure> {
+  use gtk::gio::{IOErrorEnum, ResolverError};
+  use webkit2gtk::{NetworkError, PluginError, PolicyError};
+  if error.matches(NetworkError::Cancelled)
+    || error.matches(PolicyError::FrameLoadInterruptedByPolicyChange)
+    || error.matches(PluginError::WillHandleLoad)
+    || error.matches(IOErrorEnum::Cancelled)
+  {
+    return None;
+  }
+  Some(
+    if error.matches(ResolverError::NotFound) || error.matches(IOErrorEnum::HostNotFound) {
+      crate::NavigationFailure::HostNotFound
+    } else if error.matches(IOErrorEnum::TimedOut) {
+      crate::NavigationFailure::TimedOut
+    } else if error.matches(IOErrorEnum::NetworkUnreachable) {
+      crate::NavigationFailure::Offline
+    } else if error.matches(IOErrorEnum::ConnectionRefused)
+      || error.matches(IOErrorEnum::HostUnreachable)
+      || error.matches(NetworkError::Transport)
+    {
+      crate::NavigationFailure::Unreachable
+    } else {
+      crate::NavigationFailure::Other
+    },
+  )
+}
+
 #[cfg(test)]
 mod navigation_sequence_tests {
   use super::*;
+
+  #[test]
+  fn cancellations_and_download_conversion_are_not_load_failures() {
+    for error in [
+      gtk::glib::Error::new(webkit2gtk::NetworkError::Cancelled, "cancelled"),
+      gtk::glib::Error::new(
+        webkit2gtk::PolicyError::FrameLoadInterruptedByPolicyChange,
+        "policy",
+      ),
+      gtk::glib::Error::new(webkit2gtk::PluginError::WillHandleLoad, "download"),
+    ] {
+      assert_eq!(navigation_failure(&error), None);
+    }
+    assert_eq!(
+      navigation_failure(&gtk::glib::Error::new(
+        gtk::gio::IOErrorEnum::TimedOut,
+        "timeout"
+      )),
+      Some(crate::NavigationFailure::TimedOut)
+    );
+    assert_eq!(
+      navigation_failure(&gtk::glib::Error::new(
+        gtk::gio::ResolverError::NotFound,
+        "dns"
+      )),
+      Some(crate::NavigationFailure::HostNotFound)
+    );
+  }
 
   #[test]
   fn redirects_keep_one_identity_and_failure_suppresses_success() {
@@ -922,22 +978,49 @@ impl InnerWebView {
         }
       });
 
+      let tls_failure = Rc::new(Cell::new(None));
+      let tls_sequence = sequence.clone();
+      let tls_failed = tls_failure.clone();
+      webview.connect_load_failed_with_tls_errors(move |_, _, _, _| {
+        tls_failed.set(tls_sequence.get().active.map(|active| active.id));
+        false
+      });
+      let failure_handler = attributes.navigation_failure_handler.take();
       let failed_handler = navigation_event_handler.clone();
-      webview.connect_load_failed(move |_webview, _load_event, failing_uri, _error| {
+      webview.connect_load_failed(move |_webview, _load_event, failing_uri, error| {
         let mut current = sequence.get();
+        let committed = current.active.is_some_and(|active| active.committed);
         let id = current.failed();
         sequence.set(current);
         let url = bounded_utf8_bytes(failing_uri.as_bytes(), PAGE_URL_LIMIT);
+        let reason = if tls_failure.take().is_some_and(|tls| Some(tls) == id) {
+          Some(crate::NavigationFailure::Insecure)
+        } else {
+          navigation_failure(error)
+        };
         if let (Some(id), Some(url)) = (id, url) {
+          if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
+            handler(
+              id,
+              reason,
+              if committed {
+                crate::FailedDocument::Replaced { url: url.clone() }
+              } else {
+                crate::FailedDocument::Kept
+              },
+            );
+          }
           failed_handler(NavigationEvent {
             id,
-            phase: NavigationEventPhase::Failed,
+            phase: if reason.is_some() {
+              NavigationEventPhase::Failed
+            } else {
+              NavigationEventPhase::Cancelled
+            },
             url,
           });
         }
-        // Preserve WebKit's ordinary error-page behavior. The identity event
-        // is observational and does not weaken the navigation policy.
-        false
+        failure_handler.is_some()
       });
     }
 
