@@ -38,6 +38,11 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         LIN,
     ),
     (
+        &[ArrayFlag("content_scripts", "match_origin_as_fallback")],
+        "Content scripts can't use origin fallback in opaque data documents because their initiating origin is unavailable",
+        LIN,
+    ),
+    (
         &[ArrayFlag("web_accessible_resources", "use_dynamic_url")],
         "Dynamic public resource URLs aren't returned by runtime.getURL, and rule redirects to those resources aren't available",
         LIN,
