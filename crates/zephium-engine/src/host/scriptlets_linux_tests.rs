@@ -319,3 +319,6 @@ fn native_scriptlets_refuse_privileged_documents_and_their_remote_children() {
     });
     assert_eq!(fixture.requests.load(Ordering::Relaxed), 1);
 }
+
+#[path = "scriptlets_linux_youtube_tests.rs"]
+mod youtube;
