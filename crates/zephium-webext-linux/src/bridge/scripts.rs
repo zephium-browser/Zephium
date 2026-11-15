@@ -41,7 +41,51 @@ impl From<rustix::io::Errno> for ScriptTableError {
 pub struct SealedScripts {
     fd: OwnedFd,
     length: u32,
-    pub(crate) table: ScriptTable,
+    pub(crate) table: ScriptAuthority,
+}
+
+#[derive(Debug)]
+pub(crate) struct ScriptAuthority {
+    pub generation: u64,
+    pub bootstraps: std::collections::BTreeMap<String, String>,
+    pub entries: Vec<EntryAuthority>,
+}
+
+#[derive(Debug)]
+pub(crate) struct EntryAuthority {
+    pub install_id: String,
+    pub script_id: String,
+    pub world: String,
+    pub rule: zephium_webkit_web_process_protocol::protocol::MatchRule,
+    pub files: Vec<String>,
+    pub css: Vec<String>,
+    pub has_bootstrap: bool,
+}
+
+impl From<ScriptTable> for ScriptAuthority {
+    fn from(table: ScriptTable) -> Self {
+        Self {
+            generation: table.generation,
+            bootstraps: table
+                .bootstraps
+                .into_iter()
+                .map(|(world, bootstrap)| (world, bootstrap.install_id))
+                .collect(),
+            entries: table
+                .entries
+                .into_iter()
+                .map(|entry| EntryAuthority {
+                    install_id: entry.install_id,
+                    script_id: entry.script_id,
+                    world: entry.world,
+                    rule: entry.rule,
+                    files: entry.files.into_iter().map(|file| file.url).collect(),
+                    css: entry.css.into_iter().map(|file| file.url).collect(),
+                    has_bootstrap: !entry.bootstrap.is_empty(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl SealedScripts {
@@ -66,7 +110,7 @@ impl SealedScripts {
         Ok(Self {
             fd: file.into(),
             length,
-            table,
+            table: table.into(),
         })
     }
 

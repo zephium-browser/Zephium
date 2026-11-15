@@ -1402,7 +1402,7 @@ impl Core {
                 .scripts
                 .get(&evaluation.table_generation)
                 .and_then(|table| table.table.bootstraps.get(&evaluation.world))
-                .is_some_and(|bootstrap| bootstrap.install_id == evaluation.install_id)
+                .is_some_and(|install| *install == evaluation.install_id)
             && evaluation
                 .request_id
                 .and_then(|id| self.injections.get(&id))
@@ -1433,7 +1433,7 @@ impl Core {
                                 && entry.world == evaluation.world
                                 && entry.rule.matches(&frame.document.facts)
                                 && if evaluation.file_index == u16::MAX {
-                                    !entry.bootstrap.is_empty()
+                                    entry.has_bootstrap
                                 } else {
                                     usize::from(evaluation.file_index) < entry.files.len()
                                 }
@@ -1494,8 +1494,8 @@ impl Core {
     }
 
     pub fn publish_scripts(&mut self, table: Rc<SealedScripts>) -> Result<u64, ScriptTableError> {
-        for (world, bootstrap) in &table.table.bootstraps {
-            let install = u128::from_str_radix(&bootstrap.install_id, 16)
+        for (world, owner) in &table.table.bootstraps {
+            let install = u128::from_str_radix(owner, 16)
                 .ok()
                 .map(ExtensionInstallId::from)
                 .ok_or(ScriptTableError::InvalidOwner)?;
@@ -1515,7 +1515,7 @@ impl Core {
                 .get(&install)
                 .ok_or(ScriptTableError::InvalidOwner)?;
             if entry.files.iter().chain(&entry.css).any(|file| {
-                !Url::parse(&file.url).is_ok_and(|url| url.host_str() == Some(extension.as_str()))
+                !Url::parse(file).is_ok_and(|url| url.host_str() == Some(extension.as_str()))
             }) {
                 return Err(ScriptTableError::InvalidOwner);
             }

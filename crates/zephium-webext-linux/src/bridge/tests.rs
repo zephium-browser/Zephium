@@ -1212,6 +1212,40 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
 }
 
 #[test]
+fn sealed_scripts_keep_source_bytes_only_in_the_sealed_file() {
+    use std::os::unix::fs::FileExt;
+    use zephium_webkit_web_process_protocol::protocol::{ScriptBootstrap, ScriptTable};
+
+    let mut table = script_table(7);
+    let catalog: std::sync::Arc<str> = "{\"message\":{\"message\":\"hello\"}}".into();
+    table
+        .catalogs
+        .insert(format!("{:032x}", 10), catalog.clone());
+    table.bootstraps.insert(
+        world(),
+        ScriptBootstrap {
+            install_id: format!("{:032x}", 10),
+            source: "void 0".into(),
+        },
+    );
+    table.entries[0].bootstrap = "void 0".into();
+    let bytes = table.encode().unwrap();
+    let sealed = super::scripts::SealedScripts::new(table).unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&catalog), 1);
+    assert!(sealed.table.entries[0].has_bootstrap);
+    assert_eq!(sealed.table.entries[0].files.len(), 1);
+    assert_eq!(sealed.table.bootstraps[&world()], format!("{:032x}", 10));
+    let file = std::fs::File::from(sealed.fd().try_clone_to_owned().unwrap());
+    let mut retained = vec![0; sealed.len() as usize];
+    file.read_exact_at(&mut retained, 0).unwrap();
+    assert_eq!(retained, bytes);
+    assert_eq!(
+        ScriptTable::decode(&retained).unwrap().entries[0].files[0].source,
+        "void 0"
+    );
+}
+
+#[test]
 fn document_snapshot_claims_are_checked_against_sent_history_without_ack_races() {
     use super::scripts::{ScriptTableError, SealedScripts};
     use std::rc::Rc;
