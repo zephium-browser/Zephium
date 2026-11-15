@@ -200,8 +200,9 @@ fn validate_privileged_window_ownership() -> Result<(), Box<dyn Error>> {
     }
     if isolated_ui_qa || adblock_qa {
         let target = env::var("CARGO_CFG_TARGET_OS")?;
-        let supported_target =
-            target == "macos" || ((file_workflows_qa || adblock_qa) && target == "windows");
+        let supported_target = target == "macos"
+            || ((file_workflows_qa || adblock_qa) && target == "windows")
+            || (adblock_qa && target == "linux");
         if !supported_target
             || (env::var("PROFILE").as_deref() != Ok("debug") && !protection_qa_profile)
             || rendering_probe

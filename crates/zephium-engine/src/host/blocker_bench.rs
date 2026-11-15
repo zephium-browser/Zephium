@@ -63,6 +63,23 @@ fn add_to_view(view: &wry::WebView, source: &str) -> bool {
     .is_ok()
 }
 
+#[cfg(target_os = "linux")]
+fn add_to_view(view: &wry::WebView, source: &str) -> bool {
+    use webkit2gtk::{UserContentManagerExt, WebViewExt};
+    use wry::WebViewExtUnix;
+    let Some(manager) = view.webview().user_content_manager() else {
+        return false;
+    };
+    manager.add_script(&webkit2gtk::UserScript::new(
+        source,
+        webkit2gtk::UserContentInjectedFrames::TopFrame,
+        webkit2gtk::UserScriptInjectionTime::Start,
+        &["http://*/*", "https://*/*"],
+        &[],
+    ));
+    true
+}
+
 impl EngineHost {
     /// Answers `None` when the page has no view or gives no string result.
     pub(crate) fn blocker_bench_evaluate(
@@ -98,4 +115,56 @@ impl EngineHost {
         }
         all
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct ScriptletMeasurement {
+    manager: webkit2gtk::UserContentManager,
+    before: webkit2gtk::UserScript,
+    after: webkit2gtk::UserScript,
+}
+
+#[cfg(target_os = "linux")]
+impl ScriptletMeasurement {
+    pub(super) fn start(manager: &webkit2gtk::UserContentManager) -> Self {
+        use webkit2gtk::UserContentManagerExt;
+        let script = |source| {
+            webkit2gtk::UserScript::new(
+                source,
+                webkit2gtk::UserContentInjectedFrames::AllFrames,
+                webkit2gtk::UserScriptInjectionTime::Start,
+                &["http://*/*", "https://*/*"],
+                &[],
+            )
+        };
+        let before = script("performance.mark('zephium-qa-scriptlets-start');");
+        let after =
+            script("performance.measure('zephium-qa-scriptlets', 'zephium-qa-scriptlets-start');");
+        manager.add_script(&before);
+        Self {
+            manager: manager.clone(),
+            before,
+            after,
+        }
+    }
+
+    pub(super) fn finish(self) -> Self {
+        use webkit2gtk::UserContentManagerExt;
+        self.manager.add_script(&self.after);
+        self
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ScriptletMeasurement {
+    fn drop(&mut self) {
+        use webkit2gtk::UserContentManagerExt;
+        self.manager.remove_script(&self.before);
+        self.manager.remove_script(&self.after);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn record_timing(stage: &str, duration: std::time::Duration) {
+    eprintln!("blocker-qa-timing stage={stage} ns={}", duration.as_nanos());
 }

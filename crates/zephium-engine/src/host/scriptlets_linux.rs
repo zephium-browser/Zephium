@@ -34,6 +34,8 @@ impl Program {
              if (!origin.startsWith('http://') && !origin.startsWith('https://')) return;\n\
              }}\n{source}\n}})();"
         );
+        #[cfg(feature = "blocker-bench")]
+        eprintln!("blocker-qa-program bytes={}", guarded.len());
         Some(Self {
             digest,
             script: webkit2gtk::UserScript::new(
@@ -48,7 +50,10 @@ impl Program {
 }
 
 #[derive(Default)]
-pub(super) struct ViewScriptlet(RefCell<Option<Installed>>);
+pub(super) struct ViewScriptlet(
+    RefCell<Option<Installed>>,
+    #[cfg(feature = "blocker-bench")] RefCell<Option<super::blocker_bench::ScriptletMeasurement>>,
+);
 
 struct Installed {
     manager: webkit2gtk::UserContentManager,
@@ -70,9 +75,18 @@ impl ViewScriptlet {
             .map(|installed| installed.program.digest)
             == program.as_ref().map(|program| program.digest)
         {
+            #[cfg(not(feature = "blocker-bench"))]
             return;
+            #[cfg(feature = "blocker-bench")]
+            if self.1.borrow().is_some() {
+                return;
+            }
         }
+        #[cfg(feature = "blocker-bench")]
+        drop(self.1.take());
         drop(self.0.take());
+        #[cfg(feature = "blocker-bench")]
+        let measurement = super::blocker_bench::ScriptletMeasurement::start(manager);
         if let Some(program) = program {
             manager.add_script(&program.script);
             self.0.replace(Some(Installed {
@@ -80,6 +94,8 @@ impl ViewScriptlet {
                 program,
             }));
         }
+        #[cfg(feature = "blocker-bench")]
+        self.1.replace(Some(measurement.finish()));
     }
 }
 

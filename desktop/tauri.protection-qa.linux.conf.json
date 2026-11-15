@@ -1,0 +1,29 @@
+{
+  "productName": "Zephium Protection QA",
+  "identifier": "app.zephium.protection-qa",
+  "build": {
+    "devUrl": null
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "Zephium Protection QA",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 680,
+        "minHeight": 480,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "transparent": true,
+        "trafficLightPosition": {
+          "x": 7,
+          "y": 22
+        },
+        "url": "browser.html",
+        "decorations": false
+      }
+    ]
+  }
+}

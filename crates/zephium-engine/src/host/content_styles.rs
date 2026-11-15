@@ -596,6 +596,8 @@ impl EngineHost {
             {
                 return None;
             }
+            #[cfg(all(target_os = "linux", feature = "blocker-bench"))]
+            let lookup_started = std::time::Instant::now();
             let plan = match delivery
                 .provider
                 .as_ref()
@@ -606,6 +608,8 @@ impl EngineHost {
                 Ok(None) => zephium_core::blocker::DocumentStylePlan::empty(),
                 Err(_) => return None,
             };
+            #[cfg(all(target_os = "linux", feature = "blocker-bench"))]
+            super::blocker_bench::record_timing("cosmetic_lookup", lookup_started.elapsed());
             let fingerprint = plan.fingerprint().as_bytes().iter().fold(
                 String::with_capacity(64),
                 |mut output, byte| {
@@ -673,6 +677,8 @@ impl EngineHost {
             return;
         }
         let completion = Mutex::new(Some(delivery));
+        #[cfg(all(target_os = "linux", feature = "blocker-bench"))]
+        let delivery_started = std::time::Instant::now();
         let _ = view.evaluate_script_with_callback(&script, move |result| {
             let Some(delivery) = completion.lock().unwrap_or_else(|p| p.into_inner()).take() else {
                 return;
@@ -687,6 +693,11 @@ impl EngineHost {
                         .navigation
                         .matches_committed_snapshot(delivery.key.epoch, &delivery.key.url)
                 {
+                    #[cfg(all(target_os = "linux", feature = "blocker-bench"))]
+                    super::blocker_bench::record_timing(
+                        "cosmetic_delivery",
+                        delivery_started.elapsed(),
+                    );
                     state.applied_key = Some(delivery.key.clone());
                     state.generic_enabled = delivery.generic_enabled;
                     state.generic_fingerprint = delivery.generic_fingerprint.clone();

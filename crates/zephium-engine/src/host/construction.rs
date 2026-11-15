@@ -1657,7 +1657,7 @@ impl EngineHost {
         }
         #[cfg(all(
             feature = "blocker-bench",
-            any(target_os = "macos", target_os = "windows")
+            any(target_os = "macos", target_os = "windows", target_os = "linux")
         ))]
         for source in super::blocker_bench::preloads() {
             builder = builder.with_initialization_script_for_main_only(source, true);

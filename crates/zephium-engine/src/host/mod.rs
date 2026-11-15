@@ -6,7 +6,7 @@ mod agent_cookie_source;
 mod automatic_pip;
 #[cfg(all(
     feature = "blocker-bench",
-    any(target_os = "macos", target_os = "windows")
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
 ))]
 mod blocker_bench;
 mod blocker_statistics;

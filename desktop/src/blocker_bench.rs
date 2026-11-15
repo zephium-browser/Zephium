@@ -286,6 +286,12 @@ fn millis(duration: Duration) -> f64 {
 }
 
 fn uptime() -> Duration {
+    #[cfg(target_os = "linux")]
+    return crate::APP_STARTED
+        .get()
+        .map(Instant::elapsed)
+        .unwrap_or_default();
+    #[cfg(not(target_os = "linux"))]
     crate::diagnostics::uptime().unwrap_or_default()
 }
 
