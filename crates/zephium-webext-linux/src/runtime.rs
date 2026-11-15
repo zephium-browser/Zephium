@@ -1950,6 +1950,7 @@ impl Inner {
                         world: step.world.clone(),
                         kind: step.kind,
                         source: step.source.clone(),
+                        source_fd: None,
                         source_url: step.source_url.clone(),
                         args_json: step.args_json.clone(),
                         timeout_ms: step.timeout_ms(),
@@ -2025,9 +2026,9 @@ impl Inner {
         };
         let views: Vec<BridgeViewId> = self.tabs.borrow().keys().copied().collect();
         for view in views {
-            if let Err(error) =
-                self.bridge
-                    .update_plan(view, &plan, crate::bridge::Reattach::AtNextNavigation)
+            if let Err(error) = self
+                .bridge
+                .update_plan(view, &plan, crate::bridge::Reattach::Now)
             {
                 eprintln!("extensions: a tab kept its previous plan: {error:?}");
             }

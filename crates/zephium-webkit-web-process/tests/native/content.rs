@@ -255,7 +255,7 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         target:InjectionTarget::Frame{frame_id:target.frame_id,document_seq:target.document_seq},
         world:WORLD.into(),kind:InjectionKind::Function,
         source:"async (a,b)=>{await Promise.resolve();return {answer:a+b,lexical:sharedLexical,href:location.href};}".into(),
-        source_url:format!("chrome-extension://{ID}/execute.js"),args_json:"[20,22]".into(),timeout_ms:1000};
+        source_fd: None, source_url:format!("chrome-extension://{ID}/execute.js"),args_json:"[20,22]".into(),timeout_ms:1000};
     let results = inject(&page, &events, request.clone());
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, InjectionStatus::Success);
@@ -664,6 +664,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
             world: added_world.into(),
             kind: InjectionKind::Function,
             source: "()=>globalThis.newWorldReady===true".into(),
+            source_fd: None,
             source_url: format!("chrome-extension://{ID}/new-world.js"),
             args_json: "[]".into(),
             timeout_ms: 1000,

@@ -802,6 +802,7 @@ impl<R: Runtime + 'static> Shared<R> {
                 outgoing,
                 policy,
                 scripts,
+                source,
             } => self.send(
                 view,
                 name,
@@ -810,7 +811,9 @@ impl<R: Runtime + 'static> Shared<R> {
                 policy
                     .as_ref()
                     .map(|policy| policy.fd())
-                    .or_else(|| scripts.as_ref().map(|scripts| scripts.fd())),
+                    .or_else(|| scripts.as_ref().map(|scripts| scripts.fd()))
+                    .or_else(|| source.as_ref().map(|source| source.fd())),
+                (scripts.clone(), source.clone()),
             ),
             Effect::Reply(token) => {
                 if let Some((_, message)) = self.replies.borrow_mut().remove(&token.0) {
@@ -879,6 +882,10 @@ impl<R: Runtime + 'static> Shared<R> {
         bytes: Vec<u8>,
         outgoing: Outgoing,
         descriptor: Option<BorrowedFd<'_>>,
+        leases: (
+            Option<Rc<super::scripts::SealedScripts>>,
+            Option<Rc<super::scripts::SealedSource>>,
+        ),
     ) {
         let host = self.hosts.borrow().get(&id).and_then(|host| {
             host.process_alive
@@ -887,6 +894,11 @@ impl<R: Runtime + 'static> Shared<R> {
         let Some((Some(view), cancellable)) = host else {
             self.settle(id, outgoing, Err(None));
             return;
+        };
+        let cancellable = if matches!(outgoing, Outgoing::Detach { .. }) {
+            gio::Cancellable::new()
+        } else {
+            cancellable
         };
         let parameters = glib::Variant::from_data::<Vec<u8>, _>(bytes);
         let message = match descriptor {
@@ -906,6 +918,7 @@ impl<R: Runtime + 'static> Shared<R> {
         let delivery = matches!(outgoing, Outgoing::Deliver { .. });
         let cancelled = cancellable.clone();
         view.send_message_to_page(&message, Some(&cancellable), move |reply| {
+            let _leases = leases;
             pending.set(pending.get().saturating_sub(1));
             if cancelled.is_cancelled() {
                 return;
@@ -964,7 +977,9 @@ impl<R: Runtime + 'static> Shared<R> {
             Outgoing::Inject { request_id } => {
                 core.injection_transport_settled(request_id, reply == Ok(DeliveryStatus::Delivered))
             }
-            Outgoing::Detach => {}
+            Outgoing::Detach { generation } => {
+                core.detach_settled(id, generation, reply == Ok(DeliveryStatus::Delivered))
+            }
         }
     }
 }

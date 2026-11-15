@@ -1600,6 +1600,14 @@ fn runtime_compatibility() {
         "content_scripts":[{"matches":["http://127.0.0.1/*"],"js":["content.js"],"run_at":"document_start"}]
     }).to_string()).unwrap();
     std::fs::write(package.path().join("build.info"), "package-only").unwrap();
+    std::fs::write(
+        package.path().join("large.js"),
+        format!(
+            "/*{}*/globalThis.largeRuns=(globalThis.largeRuns||0)+1;globalThis.largeRuns;",
+            "x".repeat(1024 * 1024)
+        ),
+    )
+    .unwrap();
     std::fs::write(package.path().join("worker.js"), r#"
 const packageReady = fetch(chrome.runtime.getURL('build.info')).then(r=>r.text());
 chrome.contextMenus.onClicked.addListener(()=>{});
@@ -1615,8 +1623,10 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       userAgent:navigator.userAgent,chrome:typeof globalThis.chrome,browser:typeof globalThis.browser,
       nativePost:typeof globalThis.__zephiumPost,nativeReceiver:typeof globalThis.__zephiumRegisterReceiver
     })});
+    const large = [];
+    for(let i=0;i<2;i++) large.push((await chrome.scripting.executeScript({target,files:['large.js']}))[0].result);
     await configurationReady;
-    respond({main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
+    respond({large,main:main[0].result,immediate:immediate[0].result,idle:idle[0].result,package:await packageReady,workerUA:navigator.userAgent,
       panel:await chrome.sidePanel.getOptions({}),native:await nativeReady,port:await portReady});
   })().catch(e=>respond({error:String(e)}));
   return true;
@@ -1659,6 +1669,7 @@ chrome.runtime.sendMessage({probe:true}, result=>{
         .open_page(install, PageKind::Popup, None)
         .unwrap();
     pump(&mut host, Duration::from_secs(1));
+    assert_eq!(result["large"], json!([1, 2]), "{result}");
     let popup_ua = evaluate(popup.view(), "return navigator.userAgent;");
     let main_ua = evaluate(&view, "return navigator.userAgent;");
     let remote = evaluate(

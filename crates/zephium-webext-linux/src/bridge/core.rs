@@ -24,7 +24,7 @@ use super::frames::{FrameChange, FrameTable};
 use super::plan::{AttachPlan, PlanError, ResolvedPlan};
 use super::policy::SealedPolicy;
 use super::runtime::{BridgeViewId, CloseReason, DeliverError, FrameLifecycle, ViewRef};
-use super::scripts::{ScriptTableError, SealedScripts};
+use super::scripts::{ScriptTableError, SealedScripts, SealedSource, SourceCache};
 use super::ReplyToken;
 
 /// Views one profile bridge tracks.
@@ -86,7 +86,9 @@ pub(crate) enum Outgoing {
     Attach {
         generation: u64,
     },
-    Detach,
+    Detach {
+        generation: u64,
+    },
     Deliver {
         context: ContextKey,
         frame: DeliveryFrame,
@@ -110,6 +112,7 @@ pub(crate) enum Effect {
         outgoing: Outgoing,
         policy: Option<Rc<SealedPolicy>>,
         scripts: Option<Rc<SealedScripts>>,
+        source: Option<Rc<SealedSource>>,
     },
     Reply(ReplyToken),
     Receive {
@@ -266,6 +269,9 @@ pub(crate) struct Core {
     policy_publications: BTreeMap<u64, (usize, bool)>,
     scripts: BTreeMap<u64, Rc<SealedScripts>>,
     current_scripts: u64,
+    sources: SourceCache,
+    source_documents: BTreeMap<(u64, u64, u64, u64), Vec<Rc<SealedSource>>>,
+    table_leases: BTreeMap<(u64, u64), BTreeSet<u64>>,
     next_request: u64,
     injections: HashMap<u64, Execution>,
     injection_bytes: usize,
@@ -313,6 +319,9 @@ impl Core {
             policy_publications: BTreeMap::new(),
             scripts: BTreeMap::new(),
             current_scripts: 0,
+            sources: SourceCache::default(),
+            source_documents: BTreeMap::new(),
+            table_leases: BTreeMap::new(),
             next_request: 0,
             injections: HashMap::new(),
             injection_bytes: 0,
@@ -373,6 +382,7 @@ impl Core {
     }
 
     fn close_install(&mut self, install: ExtensionInstallId) {
+        self.sources.retire(install);
         let requests: Vec<u64> = self
             .injections
             .iter()
@@ -595,6 +605,7 @@ impl Core {
             outgoing: Outgoing::Attach { generation },
             policy: None,
             scripts: None,
+            source: None,
         });
     }
 
@@ -611,9 +622,10 @@ impl Core {
                     view: id,
                     name: DETACH_MESSAGE,
                     bytes,
-                    outgoing: Outgoing::Detach,
+                    outgoing: Outgoing::Detach { generation },
                     policy: None,
                     scripts: None,
+                    source: None,
                 });
             }
         }
@@ -624,6 +636,15 @@ impl Core {
         match view.role {
             Role::Tab(tab) => self.authority.tab_closed(tab),
             Role::Owned(owned) => self.authority.close_view(owned),
+        }
+    }
+
+    pub fn detach_settled(&mut self, id: u64, generation: u64, accepted: bool) {
+        if accepted {
+            self.source_documents
+                .retain(|(owner, epoch, _, _), _| *owner != id || *epoch > generation);
+            self.table_leases
+                .retain(|(owner, epoch), _| *owner != id || *epoch > generation);
         }
     }
 
@@ -675,6 +696,7 @@ impl Core {
             outgoing: Outgoing::Attach { generation },
             policy: None,
             scripts: None,
+            source: None,
         });
     }
 
@@ -687,6 +709,15 @@ impl Core {
         }
         match outcome {
             AttachOutcome::Accepted => {
+                self.source_documents
+                    .retain(|(owner, epoch, _, _), _| *owner != id || *epoch >= generation);
+                self.table_leases
+                    .retain(|(owner, epoch), _| *owner != id || *epoch >= generation);
+                view.sent_tables.retain(|table| {
+                    self.table_leases
+                        .get(&(id, generation))
+                        .is_some_and(|tables| tables.contains(table))
+                });
                 view.phase = Phase::Live(generation);
                 let apply = view.plan.apply_policy;
                 self.send_scripts(id);
@@ -747,6 +778,9 @@ impl Core {
 
     /// The view's web process went away or was replaced.
     pub fn process_gone(&mut self, id: u64) {
+        self.source_documents
+            .retain(|(owner, _, _, _), _| *owner != id);
+        self.table_leases.retain(|(owner, _), _| *owner != id);
         self.reset_view(id, CloseReason::ProcessGone);
         if let Some(view) = self.views.get_mut(&id) {
             view.phase = Phase::Pending;
@@ -777,8 +811,7 @@ impl Core {
         view.inflight = 0;
         let mut changes = Vec::new();
         view.frames.clear(&mut changes);
-        view.sent_tables
-            .retain(|generation| *generation == self.current_scripts);
+
         let buffered = view.buffer.take();
         let had_state = !changes.is_empty() || !view.contexts.is_empty() || !buffered.is_empty();
         let contexts: Vec<ContextKey> = view.contexts.iter().cloned().collect();
@@ -834,6 +867,17 @@ impl Core {
                             refused += 1;
                         }
                     }
+                }
+                if let Some(view) = self.views.get(&id) {
+                    self.source_documents
+                        .retain(|(owner, epoch, frame, document), _| {
+                            *owner != id
+                                || *epoch != generation
+                                || view
+                                    .frames
+                                    .get(*frame)
+                                    .is_some_and(|frame| frame.document.seq == *document)
+                        });
                 }
                 self.stats.frame_records_refused += refused;
                 self.apply_changes(id, changes, CloseReason::DocumentGone);
@@ -1373,12 +1417,12 @@ impl Core {
             return Err(ScriptTableError::Generation);
         }
         let live: HashSet<u64> = self
-            .views
+            .table_leases
             .values()
-            .flat_map(|view| view.sent_tables.iter().copied())
+            .flat_map(|tables| tables.iter().copied())
             .collect();
         self.scripts
-            .retain(|generation, _| live.contains(generation));
+            .retain(|generation, table| live.contains(generation) || Rc::strong_count(table) > 1);
         if self.scripts.len() >= 16
             || self
                 .scripts
@@ -1386,6 +1430,7 @@ impl Core {
                 .map(|table| u64::from(table.len()))
                 .sum::<u64>()
                 + u64::from(table.len())
+                + self.sources.bytes() as u64
                 > 64 * 1024 * 1024
         {
             return Err(ScriptTableError::Generation);
@@ -1424,6 +1469,10 @@ impl Core {
         if let Ok(bytes) = encode_ui(&message) {
             if let Some(view) = self.views.get_mut(&id) {
                 view.sent_tables.insert(table.table.generation);
+                self.table_leases
+                    .entry((id, generation))
+                    .or_default()
+                    .insert(table.table.generation);
             }
             self.effects.push(Effect::Send {
                 view: id,
@@ -1434,6 +1483,7 @@ impl Core {
                 },
                 policy: None,
                 scripts: Some(table),
+                source: None,
             });
         }
     }
@@ -1550,6 +1600,7 @@ impl Core {
                         },
                         policy: None,
                         scripts: None,
+                        source: None,
                     },
                     Err(_) => {
                         target.queued_bytes -= frame.bytes.len();
@@ -1661,6 +1712,7 @@ impl Core {
                 outgoing: Outgoing::Policy { policy_generation },
                 policy: Some(policy),
                 scripts: None,
+                source: None,
             });
         }
     }
@@ -1811,6 +1863,45 @@ impl Core {
             frame_id,
             document_seq,
         };
+        if request.source_fd.is_some()
+            || !Url::parse(&request.source_url).is_ok_and(|url| {
+                self.extensions
+                    .get(&install)
+                    .is_some_and(|extension| url.host_str() == Some(extension.as_str()))
+            })
+        {
+            return Err(InjectionError::Invalid);
+        }
+        request.validate().map_err(|_| InjectionError::Invalid)?;
+        let source = if request.source.len() > 64 * 1024
+            && matches!(
+                request.kind,
+                zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
+                    | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+            ) {
+            let source = self
+                .sources
+                .source(
+                    install,
+                    &request.source_url,
+                    &request.source,
+                    (64usize * 1024 * 1024).saturating_sub(
+                        self.scripts
+                            .values()
+                            .map(|table| table.len() as usize)
+                            .sum(),
+                    ),
+                )
+                .map_err(|_| InjectionError::Backpressure)?;
+            request.source_fd = Some(zephium_webkit_web_process_protocol::protocol::SourceFd {
+                index: 0,
+                length: source.length,
+            });
+            request.source = "".into();
+            Some(source)
+        } else {
+            None
+        };
         let first =
             encode_ui(&UiMessage::Inject(request.clone())).map_err(|_| InjectionError::Invalid)?;
         let bytes = first
@@ -1832,6 +1923,17 @@ impl Core {
                 encode_ui(&UiMessage::Inject(request.clone()))
                     .map_err(|_| InjectionError::Invalid)?,
             );
+        }
+        if let Some(source) = &source {
+            for (&frame, &document) in &targets {
+                let leases = self
+                    .source_documents
+                    .entry((id, generation, frame, document))
+                    .or_default();
+                if !leases.iter().any(|lease| Rc::ptr_eq(lease, source)) {
+                    leases.push(source.clone());
+                }
+            }
         }
         self.injection_bytes += bytes;
         self.injections.insert(
@@ -1856,6 +1958,7 @@ impl Core {
                 outgoing: Outgoing::Inject { request_id },
                 policy: None,
                 scripts: None,
+                source: source.clone(),
             });
         }
         Ok(request_id)

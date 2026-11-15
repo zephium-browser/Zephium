@@ -7,7 +7,7 @@ pub use crate::scripts::*;
 use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
 use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";

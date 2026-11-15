@@ -321,7 +321,7 @@ fn native_bridge() {
     let request = InjectRequest { install_id: String::new(), token: String::new(), generation: 0, request_id: 0, target,
         world: world_name(install(), &InjectedWorld::Isolated), kind: InjectionKind::Function,
         source: "async (left, right) => { await Promise.resolve(); return {sum:left+right, href:location.href, count:globalThis.__nativeBridgeScriptCount}; }".into(),
-        source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
+        source_fd: None, source_url: format!("chrome-extension://{EXTENSION}/native-execute.js"), args_json: "[19,23]".into(), timeout_ms: 2000,
     };
     let request_id = bridge
         .inject(view, install(), request.clone())

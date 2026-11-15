@@ -48,6 +48,7 @@ struct Runtime {
     next_injection: u64,
     idle_injections: usize,
     script_tables: BTreeMap<(u64, u64), RcWeak<PublishedScripts>>,
+    source_maps: BTreeMap<(u64, u64), RcWeak<PublishedSource>>,
     policy_maps: BTreeMap<(u64, u64), RcWeak<PublishedPolicy>>,
 }
 
@@ -78,6 +79,7 @@ struct NativeFrame {
     receivers: BTreeMap<String, *mut Object>,
     scripts: Option<Rc<PublishedScripts>>,
     phases: [bool; 3],
+    sources: BTreeMap<(u64, u64), Rc<PublishedSource>>,
     bootstrapped: BTreeMap<String, bool>,
 }
 
@@ -266,6 +268,7 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
                 next_injection: 0,
                 idle_injections: 0,
                 script_tables: BTreeMap::new(),
+                source_maps: BTreeMap::new(),
                 policy_maps: BTreeMap::new(),
             });
             true
@@ -820,7 +823,26 @@ fn handle_message(page: *mut Object, message: *mut Object, input: UiMessage) -> 
         UiMessage::Deliver(deliver) => {
             deliver_to_frame(id, &deliver) == protocol::DeliveryStatus::Delivered
         }
-        UiMessage::Inject(request) => scripts::inject(id, request),
+        UiMessage::Inject(request) => {
+            if !with_runtime(|runtime| {
+                runtime
+                    .state
+                    .validate_message(id, &request.token, request.generation)
+            })
+            .unwrap_or(false)
+            {
+                return false;
+            }
+            let source = if let Some(fd) = &request.source_fd {
+                let Some(source) = map_source(message, fd.index, fd.length as usize) else {
+                    return false;
+                };
+                Some(source)
+            } else {
+                None
+            };
+            scripts::inject(id, request, source)
+        }
         UiMessage::Scripts(update) => {
             if !with_runtime(|runtime| {
                 runtime
@@ -1061,6 +1083,7 @@ unsafe extern "C" fn window_cleared(
                     receivers: BTreeMap::new(),
                     scripts: native.scripts.clone(),
                     phases: [false; 3],
+                    sources: BTreeMap::new(),
                     bootstrapped: BTreeMap::new(),
                 },
             );
@@ -1561,6 +1584,13 @@ fn map_scripts(message: *mut Object, index: u32, length: usize) -> Option<Rc<Pub
             .values()
             .filter_map(RcWeak::upgrade)
             .map(|table| table.mapping.length)
+            .chain(
+                runtime
+                    .source_maps
+                    .values()
+                    .filter_map(RcWeak::upgrade)
+                    .map(|source| source.mapping.length),
+            )
             .sum();
         total.saturating_add(length) <= MAX_PROCESS_SCRIPT_BYTES
     })
@@ -1591,6 +1621,64 @@ fn map_scripts(message: *mut Object, index: u32, length: usize) -> Option<Rc<Pub
             .insert(identity, Rc::downgrade(&table));
     });
     Some(table)
+}
+
+struct PublishedSource {
+    data: &'static str,
+    mapping: MappedBytes,
+}
+
+impl PublishedSource {
+    fn source(&self) -> &str {
+        self.data
+    }
+}
+
+fn map_source(message: *mut Object, index: u32, length: usize) -> Option<Rc<PublishedSource>> {
+    let mapping = map_region(message, index, length, protocol::MAX_SCRIPT_SOURCE_BYTES)?;
+    if let Some(Some(source)) = with_runtime(|runtime| {
+        runtime
+            .source_maps
+            .get(&mapping.identity)
+            .and_then(RcWeak::upgrade)
+    }) {
+        return Some(source);
+    }
+    let allowed = with_runtime(|runtime| {
+        runtime
+            .source_maps
+            .retain(|_, source| source.strong_count() != 0);
+        let bytes: usize = runtime
+            .source_maps
+            .values()
+            .filter_map(RcWeak::upgrade)
+            .map(|source| source.mapping.length)
+            .chain(
+                runtime
+                    .script_tables
+                    .values()
+                    .filter_map(RcWeak::upgrade)
+                    .map(|table| table.mapping.length),
+            )
+            .sum();
+        bytes.saturating_add(length) <= MAX_PROCESS_SCRIPT_BYTES
+    })
+    .unwrap_or(false);
+    if !allowed {
+        return None;
+    }
+    // Only this owner keeps the validated immutable source span alive.
+    let bytes: &'static [u8] =
+        unsafe { std::slice::from_raw_parts(mapping.pointer.cast::<u8>(), mapping.length) };
+    let data = std::str::from_utf8(bytes)
+        .ok()
+        .filter(|source| !source.contains('\0'))?;
+    let identity = mapping.identity;
+    let source = Rc::new(PublishedSource { data, mapping });
+    with_runtime(|runtime| {
+        runtime.source_maps.insert(identity, Rc::downgrade(&source));
+    });
+    Some(source)
 }
 
 fn map_region(

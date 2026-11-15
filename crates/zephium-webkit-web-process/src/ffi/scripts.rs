@@ -1043,6 +1043,7 @@ struct IdleInjection {
     reserved: bool,
     page: u64,
     request: InjectRequest,
+    source: Option<RcWeak<PublishedSource>>,
     deadline: std::time::Instant,
 }
 
@@ -1106,7 +1107,11 @@ unsafe extern "C" fn idle_injection(data: *mut c_void) -> c_int {
             with_runtime(|runtime| {
                 runtime.idle_injections = runtime.idle_injections.saturating_sub(1)
             });
-            inject(waiting.page, request);
+            inject(
+                waiting.page,
+                request,
+                waiting.source.as_ref().and_then(RcWeak::upgrade),
+            );
         } else {
             publish_result(
                 PendingInjection {
@@ -1130,7 +1135,17 @@ unsafe extern "C" fn idle_injection(data: *mut c_void) -> c_int {
     })
 }
 
-pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
+pub(super) fn inject(
+    page: u64,
+    request: InjectRequest,
+    mapped: Option<Rc<PublishedSource>>,
+) -> bool {
+    let source = mapped
+        .as_ref()
+        .map_or(request.source.as_ref(), |source| source.source());
+    if request.source_fd.is_some() != mapped.is_some() {
+        return false;
+    }
     if !with_runtime(|runtime| {
         runtime
             .state
@@ -1221,7 +1236,7 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
                         page,
                         frame_id,
                         sequence,
-                        request.source.len().saturating_add(request.args_json.len()),
+                        source.len().saturating_add(request.args_json.len()),
                     )
                     .map_err(|_| InjectionStatus::Oversized)?;
             }
@@ -1243,7 +1258,20 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
             };
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_millis(u64::from(request.timeout_ms));
-            with_runtime(|runtime| runtime.idle_injections += 1);
+            with_runtime(|runtime| {
+                runtime.idle_injections += 1;
+                if let Some(source) = &mapped {
+                    if let Some(frame) = runtime
+                        .pages
+                        .get_mut(&page)
+                        .and_then(|page| page.frames.get_mut(&frame_id))
+                    {
+                        frame
+                            .sources
+                            .insert(source.mapping.identity, source.clone());
+                    }
+                }
+            });
             unsafe {
                 raw::g_timeout_add_full(
                     0,
@@ -1253,6 +1281,7 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
                         reserved: true,
                         page,
                         request,
+                        source: mapped.as_ref().map(Rc::downgrade),
                         deadline,
                     }))
                     .cast(),
@@ -1267,6 +1296,19 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
         ) {
             publish_result(pending, InjectionStatus::Unsupported, "null".into());
             continue;
+        }
+        if let Some(source) = &mapped {
+            with_runtime(|runtime| {
+                if let Some(frame) = runtime
+                    .pages
+                    .get_mut(&page)
+                    .and_then(|page| page.frames.get_mut(&frame_id))
+                {
+                    frame
+                        .sources
+                        .insert(source.mapping.identity, source.clone());
+                }
+            });
         }
         if !prepare_injection_world(page, frame_id, sequence, &request) {
             publish_result(pending, InjectionStatus::EvaluationFailed, "null".into());
@@ -1395,8 +1437,7 @@ pub(super) fn inject(page: u64, request: InjectRequest) -> bool {
                 }
                 value
             } else {
-                let (value, success) =
-                    evaluate(&target_context, &request.source, &request.source_url);
+                let (value, success) = evaluate(&target_context, source, &request.source_url);
                 if !success {
                     finish(id, InjectionStatus::EvaluationFailed, "null".into());
                     continue;

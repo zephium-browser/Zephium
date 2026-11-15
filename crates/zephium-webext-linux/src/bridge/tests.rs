@@ -874,7 +874,7 @@ fn detach_and_shutdown_end_everything() {
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::Send {
-            outgoing: Outgoing::Detach,
+            outgoing: Outgoing::Detach { .. },
             ..
         }
     )));
@@ -1252,6 +1252,7 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
         world: world(),
         kind: InjectionKind::Function,
         source: "() => Promise.resolve(7)".into(),
+        source_fd: None,
         source_url: format!("chrome-extension://{EXTENSION}/execute.js"),
         args_json: "[]".into(),
         timeout_ms: 10,
@@ -1359,4 +1360,77 @@ fn persistently_rate_limited_delivery_has_a_finite_retry_budget() {
             ..
         }
     )));
+}
+
+#[test]
+fn large_injections_send_only_metadata_and_reuse_one_sealed_file() {
+    use zephium_webkit_web_process_protocol::protocol::{
+        InjectRequest, InjectionKind, InjectionTarget,
+    };
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    h.core.take_effects();
+    let request = InjectRequest {
+        install_id: String::new(),
+        token: String::new(),
+        generation: 0,
+        request_id: 0,
+        target: InjectionTarget::Frame {
+            frame_id: 1,
+            document_seq: 1,
+        },
+        world: world(),
+        kind: InjectionKind::Script,
+        source: " ".repeat(128 * 1024).into(),
+        source_fd: None,
+        source_url: format!("chrome-extension://{EXTENSION}/large.js"),
+        args_json: "[]".into(),
+        timeout_ms: 1000,
+    };
+    let mut sources = Vec::new();
+    for _ in 0..2 {
+        h.core
+            .inject(id, install(), request.clone(), h.now)
+            .unwrap();
+        for effect in h.core.take_effects() {
+            if let Effect::Send {
+                bytes,
+                source: Some(source),
+                ..
+            } = effect
+            {
+                assert!(bytes.len() < 1024);
+                sources.push(source);
+            }
+        }
+    }
+    assert_eq!(sources.len(), 2);
+    assert!(std::rc::Rc::ptr_eq(&sources[0], &sources[1]));
+    let mut forged = request;
+    forged.source_fd = Some(zephium_webkit_web_process_protocol::protocol::SourceFd {
+        index: 0,
+        length: 128 * 1024,
+    });
+    assert!(h.core.inject(id, install(), forged, h.now).is_err());
+    let retired = std::rc::Rc::downgrade(&sources[0]);
+    sources.clear();
+    h.core.retire(install());
+    h.core.take_effects();
+    assert!(
+        retired.upgrade().is_some(),
+        "live native document retains the mapped bytes"
+    );
+    h.core.detach(id);
+    h.core.take_effects();
+    h.core.detach_settled(id, generation, false);
+    assert!(
+        retired.upgrade().is_some(),
+        "failed detach is not proof of release"
+    );
+    h.core.detach_settled(id, generation, true);
+    assert!(
+        retired.upgrade().is_none(),
+        "native detach acknowledgment releases retired mappings"
+    );
 }

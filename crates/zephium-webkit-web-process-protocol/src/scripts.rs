@@ -132,6 +132,12 @@ impl InjectionKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceFd {
+    pub index: u32,
+    pub length: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InjectRequest {
     pub install_id: String,
     pub token: String,
@@ -140,7 +146,8 @@ pub struct InjectRequest {
     pub target: InjectionTarget,
     pub world: String,
     pub kind: InjectionKind,
-    pub source: String,
+    pub source: Arc<str>,
+    pub source_fd: Option<SourceFd>,
     pub source_url: String,
     pub args_json: String,
     pub timeout_ms: u32,
@@ -287,8 +294,23 @@ fn json(value: &str, max: usize, array: bool) -> Result<(), WireError> {
 
 impl InjectRequest {
     pub fn validate(&self) -> Result<(), WireError> {
-        if self.source.len() > MAX_SCRIPT_SOURCE_BYTES {
+        if self.source.len() > MAX_SCRIPT_SOURCE_BYTES
+            || self
+                .source_fd
+                .as_ref()
+                .is_some_and(|fd| fd.length as usize > MAX_SCRIPT_SOURCE_BYTES)
+        {
             return Err(WireError::Oversized);
+        }
+        if self.source_fd.as_ref().is_some_and(|fd| {
+            fd.length == 0
+                || !self.source.is_empty()
+                || !matches!(
+                    self.kind,
+                    InjectionKind::Script | InjectionKind::ScriptAtIdle
+                )
+        }) {
+            return Err(WireError::Invalid);
         }
         if !valid_install_id(&self.install_id)
             || !(1..=MAX_INJECT_TIMEOUT_MS).contains(&self.timeout_ms)
@@ -539,6 +561,11 @@ impl Writer {
         self.string(&value.world, MAX_WORLD_BYTES)?;
         self.u8(value.kind as u8);
         self.string(&value.source, MAX_SCRIPT_SOURCE_BYTES)?;
+        self.boolean(value.source_fd.is_some());
+        if let Some(fd) = &value.source_fd {
+            self.u32(fd.index);
+            self.u32(fd.length);
+        }
         self.string(&value.source_url, MAX_URI_BYTES)?;
         self.string(&value.args_json, MAX_ARGS_JSON_BYTES)?;
         self.u32(value.timeout_ms);
@@ -608,7 +635,15 @@ impl<'a> Reader<'a> {
             target,
             world: self.string(MAX_WORLD_BYTES)?,
             kind: InjectionKind::decode(self.u8()?)?,
-            source: self.string(MAX_SCRIPT_SOURCE_BYTES)?,
+            source: self.string(MAX_SCRIPT_SOURCE_BYTES)?.into(),
+            source_fd: if self.boolean()? {
+                Some(SourceFd {
+                    index: self.u32()?,
+                    length: self.u32()?,
+                })
+            } else {
+                None
+            },
             source_url: self.string(MAX_URI_BYTES)?,
             args_json: self.string(MAX_ARGS_JSON_BYTES)?,
             timeout_ms: self.u32()?,
@@ -693,6 +728,7 @@ mod tests {
             world: "zephium-webext-isolated".into(),
             kind: InjectionKind::Function,
             source: "async value => value + 1".into(),
+            source_fd: None,
             source_url: format!("chrome-extension://{}/execute.js", "a".repeat(32)),
             args_json: "[41]".into(),
             timeout_ms: 1000,
@@ -914,7 +950,33 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
+    }
+
+    #[test]
+    fn source_descriptors_are_exclusive_bounded_and_only_for_scripts() {
+        let mut request = request();
+        request.kind = InjectionKind::Script;
+        request.source = "".into();
+        request.source_fd = Some(SourceFd {
+            index: 0,
+            length: 128 * 1024,
+        });
+        let message = crate::protocol::UiMessage::Inject(request.clone());
+        let encoded = crate::protocol::encode_ui(&message).unwrap();
+        assert!(encoded.len() < 1024);
+        assert_eq!(
+            crate::protocol::decode_ui(crate::protocol::INJECT_MESSAGE, &encoded).unwrap(),
+            message
+        );
+        request.kind = InjectionKind::Function;
+        assert_eq!(request.validate(), Err(WireError::Invalid));
+        request.kind = InjectionKind::Script;
+        request.source = "code".into();
+        assert_eq!(request.validate(), Err(WireError::Invalid));
+        request.source = "".into();
+        request.source_fd.as_mut().unwrap().length = MAX_SCRIPT_SOURCE_BYTES as u32 + 1;
+        assert_eq!(request.validate(), Err(WireError::Oversized));
     }
 
     #[test]

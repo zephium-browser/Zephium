@@ -133,7 +133,7 @@ pub(crate) enum Outgoing {
 pub(crate) struct Step {
     pub world: String,
     pub kind: InjectionKind,
-    pub source: String,
+    pub source: std::sync::Arc<str>,
     pub source_url: String,
     pub args_json: String,
 }
@@ -1550,7 +1550,7 @@ impl BrowserState {
                         } else {
                             InjectionKind::FunctionAtIdle
                         },
-                        source: source.clone(),
+                        source: source.clone().into(),
                         source_url: format!("chrome-extension://{}/", facts.extension_id),
                         args_json: Value::Array(args.clone()).to_string(),
                     }]),
@@ -1565,7 +1565,7 @@ impl BrowserState {
                                 } else {
                                     InjectionKind::ScriptAtIdle
                                 },
-                                source,
+                                source: source.into(),
                                 source_url: url,
                                 args_json: "[]".into(),
                             })
