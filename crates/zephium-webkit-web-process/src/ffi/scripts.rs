@@ -389,11 +389,15 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             return None;
         }
         let native = runtime.pages.get_mut(&page)?.frames.get_mut(&frame)?;
-        if native.phases[index] {
+        if native.phases[index] || (phase == RunAt::DocumentIdle && native.idle_scheduled) {
             return None;
         }
         native.phases[index] = true;
         let table = native.scripts.clone()?;
+        if phase == RunAt::DocumentIdle {
+            native.phases[index] = false;
+            native.idle_scheduled = true;
+        }
         let attach = runtime.state.attachment(page)?;
         let entries = table
             .table()
@@ -411,25 +415,132 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
-        Some((table, entries))
+        Some((table, entries, attach.generation))
     })
     .flatten();
-    let Some((table, entries)) = work else {
+    let Some((table, entries, generation)) = work else {
         return;
     };
+    if phase == RunAt::DocumentIdle && entries.is_empty() {
+        with_runtime(|runtime| {
+            if let Some(frame) = runtime
+                .pages
+                .get_mut(&page)
+                .and_then(|page| page.frames.get_mut(&frame))
+            {
+                frame.phases[2] = true;
+            }
+        });
+        return;
+    }
+    if phase == RunAt::DocumentIdle {
+        unsafe {
+            raw::g_timeout_add_full(
+                200,
+                1,
+                Some(idle_script_file),
+                Box::into_raw(Box::new(IdleScripts {
+                    document,
+                    generation,
+                    table: Rc::downgrade(&table),
+                    entries: entries.into(),
+                    file: 0,
+                }))
+                .cast(),
+                Some(idle_scripts_destroyed),
+            );
+        }
+    } else {
+        run_entries(&document, &table, &entries, None);
+    }
+}
+
+struct IdleScripts {
+    document: Document,
+    generation: u64,
+    table: RcWeak<PublishedScripts>,
+    entries: VecDeque<usize>,
+    file: usize,
+}
+
+unsafe extern "C" fn idle_scripts_destroyed(data: *mut c_void) {
+    boundary(|| unsafe {
+        drop(Box::from_raw(data.cast::<IdleScripts>()));
+    });
+}
+
+unsafe extern "C" fn idle_script_file(data: *mut c_void) -> c_int {
+    boundary(|| unsafe {
+        let waiting = &mut *data.cast::<IdleScripts>();
+        let document = &waiting.document;
+        let attached = with_runtime(|runtime| {
+            runtime
+                .state
+                .attachment(document.page)
+                .is_some_and(|attach| attach.generation == waiting.generation)
+        })
+        .unwrap_or(false);
+        if !attached || !live(document) {
+            return 0;
+        }
+        let Some(table) = waiting.table.upgrade() else {
+            return 0;
+        };
+        if let Some(index) = waiting.entries.front().copied() {
+            run_entries(document, &table, &[index], Some(waiting.file));
+            waiting.file += 1;
+            if waiting.file >= table.table().entries[index].files.len() {
+                waiting.entries.pop_front();
+                waiting.file = 0;
+            }
+        }
+        if waiting.entries.is_empty() {
+            with_runtime(|runtime| {
+                if runtime
+                    .state
+                    .frame(document.page, document.frame)
+                    .is_some_and(|frame| frame.document_seq == document.sequence)
+                {
+                    if let Some(frame) = runtime
+                        .pages
+                        .get_mut(&document.page)
+                        .and_then(|page| page.frames.get_mut(&document.frame))
+                    {
+                        frame.phases[2] = true;
+                    }
+                }
+            });
+            0
+        } else {
+            1
+        }
+    })
+}
+
+fn run_entries(
+    document: &Document,
+    table: &PublishedScripts,
+    entries: &[usize],
+    selected_file: Option<usize>,
+) {
+    let Document {
+        page,
+        frame,
+        sequence,
+    } = *document;
     if !flush_frame_events(page) {
         return;
     }
     let table_generation = table.table().generation;
-    'entries: for index in entries {
+    'entries: for index in entries.iter().copied() {
         let entry = &table.table().entries[index];
         if with_runtime(|runtime| runtime.state.script_budget_exhausted(page, frame, sequence))
             .unwrap_or(true)
         {
             break;
         }
-        if !entry_admitted(&document, entry) {
-            if !live(&document) {
+        if !entry_admitted(document, entry) {
+            if !live(document) {
                 break;
             }
             continue;
@@ -519,7 +630,10 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             }
         }
         for (file_index, file) in entry.files.iter().enumerate() {
-            if !entry_admitted(&document, entry) {
+            if selected_file.is_some_and(|selected| selected != file_index) {
+                continue;
+            }
+            if !entry_admitted(document, entry) {
                 break;
             }
             let charged = with_runtime(|runtime| {

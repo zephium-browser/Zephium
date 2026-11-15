@@ -178,9 +178,13 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
         entry("main",RunAt::DocumentStart,"","globalThis.mainOverride='native';document.documentElement.dataset.startRoot='present';"),
         top_only,excluded,
-        entry("end",RunAt::DocumentEnd,WORLD,"order.push('end');document.documentElement.dataset.nativeEnd='yes';globalThis.endState=document.readyState;"),
-        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,startRoot:document.documentElement.dataset.startRoot,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
+        entry("end",RunAt::DocumentEnd,WORLD,"order.push('end');document.documentElement.dataset.nativeEnd='yes';globalThis.endState=document.readyState;globalThis.endTaskRan=false;setTimeout(()=>{endTaskRan=true},0);"),
+        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,idleYield:idleTaskRan&&endTaskRan,idleLexical:idleShared+1,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,startRoot:document.documentElement.dataset.startRoot,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
     ]};
+    table.entries.last_mut().unwrap().files.insert(0, ScriptFile {
+        source: "let idleShared=41;globalThis.idleTaskRan=false;setTimeout(()=>{idleTaskRan=true},0);".into(),
+        url: format!("chrome-extension://{ID}/idle-first.js"),
+    });
     for script in &mut table.entries {
         if !script.world.is_empty() {
             script.bootstrap = bootstrap.into();
@@ -214,6 +218,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
             value["order"],
             json!(["bootstrap", "start", "end", "idle"]),
             "{value}"
+        );
+        assert_eq!(
+            value["idleYield"], true,
+            "event loop runs between idle files: {value}"
+        );
+        assert_eq!(
+            value["idleLexical"], 42,
+            "idle files share lexical scope: {value}"
         );
         assert_eq!(value["sharedAnswer"], 42, "{value}");
         assert_eq!(value["strictThis"], true, "{value}");

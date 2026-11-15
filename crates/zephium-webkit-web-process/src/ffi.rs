@@ -80,6 +80,7 @@ struct NativeFrame {
     receivers: BTreeMap<String, *mut Object>,
     scripts: Option<Rc<PublishedScripts>>,
     phases: [bool; 3],
+    idle_scheduled: bool,
     sources: BTreeMap<(u64, u64), Rc<PublishedSource>>,
     bootstrapped: BTreeMap<String, bool>,
 }
@@ -1133,6 +1134,7 @@ unsafe extern "C" fn window_cleared(
                     receivers: BTreeMap::new(),
                     scripts: native.scripts.clone(),
                     phases: [false; 3],
+                    idle_scheduled: false,
                     sources: BTreeMap::new(),
                     bootstrapped: BTreeMap::new(),
                 },
