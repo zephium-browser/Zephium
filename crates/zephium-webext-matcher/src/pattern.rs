@@ -538,6 +538,7 @@ pub struct ContentScriptMatcher {
     set: MatchSet,
     include_globs: Box<[UrlGlob]>,
     exclude_globs: Box<[UrlGlob]>,
+    user_script: bool,
 }
 
 impl ContentScriptMatcher {
@@ -581,7 +582,47 @@ impl ContentScriptMatcher {
             set,
             include_globs: parse_globs(include_globs, 0)?,
             exclude_globs: parse_globs(exclude_globs, include_globs.len())?,
+            user_script: false,
         })
+    }
+
+    /// User scripts include a URL when either a match pattern or include glob
+    /// matches. Exclusions still win; inherited-origin matching is unavailable.
+    pub fn user_script<S: AsRef<str>>(
+        matches: &[S],
+        exclude_matches: &[S],
+        include_globs: &[S],
+        exclude_globs: &[S],
+    ) -> Result<Self, ContentMatchError> {
+        if matches.is_empty() && include_globs.is_empty() {
+            return Err(ContentMatchError::Patterns(MatchSetError::MissingMatches));
+        }
+        let normalize = |source: &S| {
+            MatchPattern::parse(source.as_ref())
+                .and_then(|pattern| canonical(&pattern, PathMode::Keep))
+                .map(|pattern| pattern.as_str().to_owned())
+                .unwrap_or_else(|_| source.as_ref().to_owned())
+        };
+        let set = MatchSet::parse_user(
+            matches.iter().map(normalize),
+            exclude_matches.iter().map(normalize),
+        )
+        .map_err(ContentMatchError::Patterns)?;
+        let mut matcher = Self::new(
+            &["<all_urls>"],
+            &[],
+            &include_globs.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            &exclude_globs.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            MatchOptions::default(),
+        )?;
+        matcher.set = set;
+        matcher.user_script = true;
+        Ok(matcher)
+    }
+
+    /// Whether include globs are alternatives to match patterns.
+    pub fn is_user_script(&self) -> bool {
+        self.user_script
     }
 
     /// The parsed `matches`/`exclude_matches` set.
@@ -609,6 +650,28 @@ impl ContentScriptMatcher {
             || is_extension_gallery(&url)
         {
             return false;
+        }
+        if self.user_script {
+            return matches!(url.scheme(), "http" | "https" | "file")
+                && url
+                    .path()
+                    .len()
+                    .saturating_add(url.query().map_or(0, |q| q.len() + 1))
+                    <= MAX_MATCH_URL_BYTES
+                && !self
+                    .set
+                    .excludes()
+                    .iter()
+                    .any(|pattern| pattern.matches_url(&url))
+                && !self
+                    .exclude_globs
+                    .iter()
+                    .any(|glob| glob.matches(url.as_str()))
+                && (self.set.matches_url(&url)
+                    || self
+                        .include_globs
+                        .iter()
+                        .any(|glob| glob.matches(url.as_str())));
         }
         self.set.matches_url(&url)
             && (self.include_globs.is_empty()
@@ -654,6 +717,61 @@ mod tests {
 
     fn script(matches: &[&str], options: MatchOptions) -> ContentScriptMatcher {
         ContentScriptMatcher::new(matches, &[], &[], &[], options).expect("test script")
+    }
+
+    #[test]
+    fn user_globs_are_union_with_patterns_but_cannot_bypass_refusals() {
+        let user = ContentScriptMatcher::user_script(
+            &["https://a.test/*"],
+            &["https://b.test/private/*"],
+            &[
+                "https://b.test/*",
+                "file:///*",
+                "chrome://*",
+                "https://chromewebstore.google.com/*",
+            ],
+            &["*blocked*"],
+        )
+        .unwrap();
+        for (value, access, expected) in [
+            ("https://a.test/", false, true),
+            ("https://b.test/", false, true),
+            ("https://b.test/private/x", false, false),
+            ("https://a.test/blocked", false, false),
+            ("https://c.test/", false, false),
+            ("chrome://settings/", true, false),
+            ("https://chromewebstore.google.com/", true, false),
+            ("file:///x", false, false),
+            ("file:///x", true, true),
+        ] {
+            let target = url(value);
+            let origin = DocumentOrigin::of_url(&target);
+            assert_eq!(
+                user.matches(
+                    &FrameDocument {
+                        url: &target,
+                        origin: &origin,
+                        creator_url: None
+                    },
+                    access
+                ),
+                expected,
+                "{value}"
+            );
+        }
+        assert!(ContentScriptMatcher::user_script::<&str>(&[], &[], &[], &[]).is_err());
+        let globs =
+            ContentScriptMatcher::user_script(&[], &[], &["https://a.test/*"], &[]).unwrap();
+        let target = url("https://a.test/");
+        let origin = DocumentOrigin::of_url(&target);
+        assert!(globs.matches(
+            &FrameDocument {
+                url: &target,
+                origin: &origin,
+                creator_url: None
+            },
+            false
+        ));
     }
 
     #[test]

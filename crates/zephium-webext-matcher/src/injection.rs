@@ -1068,6 +1068,24 @@ impl MatchSet {
         Self::new(matches, exclude_matches, options)
     }
 
+    pub(crate) fn parse_user<M: AsRef<str>, E: AsRef<str>>(
+        matches: impl IntoIterator<Item = M>,
+        exclude_matches: impl IntoIterator<Item = E>,
+    ) -> Result<Self, MatchSetError> {
+        let mut count = 0;
+        let matches = parse_pattern_list(matches, MatchPatternList::Matches, &mut count)?;
+        let exclude_matches = parse_pattern_list(
+            exclude_matches,
+            MatchPatternList::ExcludeMatches,
+            &mut count,
+        )?;
+        Ok(Self {
+            matches: matches.into_boxed_slice(),
+            exclude_matches: exclude_matches.into_boxed_slice(),
+            options: MatchOptions::default(),
+        })
+    }
+
     /// An explicit set matching every supported content URL.
     pub fn all_urls() -> Self {
         Self {

@@ -41,3 +41,6 @@ pub use context::{
 pub use dispatch::{ApiTable, Dispatcher, Handled, Inbound, Invocation, MethodSpec, Responder};
 pub use errors::{ApiError, ApiErrorKind};
 pub use permissions::{Gate, InstallPermissions, RevocationEffect, Target};
+
+/// Bounded persistent user-script registry and world policy.
+pub mod user_scripts;
