@@ -124,6 +124,13 @@ impl Fixture {
                     let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     continue;
                 }
+                if path == "/run5.user.js" {
+                    let body = include_str!(
+                        "../../../eval/webext-conformance/fixtures/breadth/run5.user.js"
+                    );
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    continue;
+                }
                 if path == "/video.webm" {
                     let body = include_bytes!(
                         "../../../eval/webext-conformance/fixtures/breadth/video.webm"
