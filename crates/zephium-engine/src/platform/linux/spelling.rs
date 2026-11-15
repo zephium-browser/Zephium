@@ -14,7 +14,7 @@ pub(crate) fn configure(context: &webkit2gtk::WebContext) {
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .clone();
-    let languages: Vec<String> = match language {
+    let mut languages: Vec<String> = match language {
         Some(language) => vec![language.replace('-', "_")],
         None => gtk::glib::language_names()
             .iter()
@@ -27,8 +27,12 @@ pub(crate) fn configure(context: &webkit2gtk::WebContext) {
                     .unwrap_or(language)
                     .replace('-', "_")
             })
+            .filter(|language| !matches!(language.as_str(), "C" | "POSIX"))
             .collect(),
     };
+    if languages.is_empty() {
+        languages.push("en".into());
+    }
     let languages: Vec<&str> = languages.iter().map(String::as_str).collect();
     configure_languages(context, &languages);
 }
