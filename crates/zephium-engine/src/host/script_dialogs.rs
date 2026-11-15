@@ -23,6 +23,7 @@ impl Drop for Lease {
 struct Pending {
     identity: Rc<()>,
     activity: NavigationActivity,
+    before_unload: bool,
     page: gtk::glib::WeakRef<WebView>,
     owner: gtk::Window,
     panel: gtk::Dialog,
@@ -47,12 +48,14 @@ pub(super) struct ScriptDialogs {
     pending: RefCell<Option<Pending>>,
     last: Cell<Option<Instant>>,
     silenced: Cell<bool>,
+    cancelled_load: Box<dyn Fn(Option<zephium_core::ports::engine::NavigationRequestId>)>,
 }
 impl ScriptDialogs {
     pub(super) fn new(
         permit: EventPermit,
         navigation: NavigationEpochTracker,
         presentation: Arc<AtomicBool>,
+        cancelled_load: impl Fn(Option<zephium_core::ports::engine::NavigationRequestId>) + 'static,
     ) -> Rc<Self> {
         Rc::new(Self {
             permit,
@@ -61,6 +64,7 @@ impl ScriptDialogs {
             pending: RefCell::new(None),
             last: Cell::new(None),
             silenced: Cell::new(false),
+            cancelled_load: Box::new(cancelled_load),
         })
     }
     pub(super) fn navigation_started(&self) {
@@ -72,13 +76,34 @@ impl ScriptDialogs {
         let pending = self.pending.borrow_mut().take();
         drop(pending);
     }
-    fn current(&self, activity: NavigationActivity) -> bool {
+    fn current(&self, activity: NavigationActivity, before_unload: bool) -> bool {
         self.permit.active_token().is_some()
             && self.navigation.matches_activity(activity)
-            && self.navigation.current_committed().is_some()
+            && if before_unload {
+                self.navigation.resident_document_snapshot().is_some()
+            } else {
+                self.navigation.current_committed().is_some()
+            }
             && self.presentation.load(Ordering::Acquire)
     }
     pub(super) fn present(self: &Rc<Self>, page: &WebView, native: &ScriptDialog) -> bool {
+        let activity = self.navigation.activity_snapshot();
+        let handled = self.present_owned(page, native);
+        if !handled && native.dialog_type() == ScriptDialogType::BeforeUnloadConfirm {
+            if let Some(activity) = activity {
+                self.settle_cancelled_load(activity);
+            }
+        }
+        handled
+    }
+    fn settle_cancelled_load(&self, activity: NavigationActivity) {
+        if self.permit.active_token().is_some() {
+            if let Some(request) = self.navigation.cancel_beforeunload(activity) {
+                (self.cancelled_load)(request);
+            }
+        }
+    }
+    fn present_owned(self: &Rc<Self>, page: &WebView, native: &ScriptDialog) -> bool {
         let Some(activity) = self.navigation.activity_snapshot() else {
             return false;
         };
@@ -88,15 +113,16 @@ impl ScriptDialogs {
         else {
             return false;
         };
+        let kind = native.dialog_type();
+        let before_unload = kind == ScriptDialogType::BeforeUnloadConfirm;
         if self.silenced.get()
-            || !self.current(activity)
+            || !self.current(activity, before_unload)
             || !page.is_mapped()
             || !owner.is_active()
             || self.pending.borrow().is_some()
         {
             return false;
         }
-        let kind = native.dialog_type();
         if !matches!(
             kind,
             ScriptDialogType::Alert
@@ -171,7 +197,7 @@ impl ScriptDialogs {
                 broker.finish(&response_identity, response);
             }
         });
-        if !self.current(activity) || !page.is_mapped() || !owner.is_active() {
+        if !self.current(activity, before_unload) || !page.is_mapped() || !owner.is_active() {
             panel.close();
             return false;
         }
@@ -179,6 +205,7 @@ impl ScriptDialogs {
         *self.pending.borrow_mut() = Some(Pending {
             identity,
             activity,
+            before_unload,
             page: page.downgrade(),
             owner,
             panel: panel.clone(),
@@ -203,7 +230,7 @@ impl ScriptDialogs {
         self.silenced
             .set(self.silenced.get() || pending.suppress.is_active());
         let admitted = response == gtk::ResponseType::Ok
-            && self.current(pending.activity)
+            && self.current(pending.activity, pending.before_unload)
             && pending.owner.is_visible()
             && pending.page.upgrade().is_some_and(|page| {
                 page.is_mapped() && page.toplevel().as_ref() == Some(pending.owner.upcast_ref())
@@ -221,6 +248,9 @@ impl ScriptDialogs {
                 _ => {}
             }
             native.close();
+            if pending.before_unload && !admitted {
+                self.settle_cancelled_load(pending.activity);
+            }
         }
     }
 }

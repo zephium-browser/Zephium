@@ -802,11 +802,23 @@ impl EngineHost {
         #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
         #[cfg(target_os = "linux")]
-        let script_dialogs = super::script_dialogs::ScriptDialogs::new(
-            event_permit.clone(),
-            navigation.clone(),
-            presentation_permit.clone(),
-        );
+        let script_dialogs = {
+            let permit = event_permit.clone();
+            let sink = self.sink.clone();
+            let item = id.clone();
+            super::script_dialogs::ScriptDialogs::new(
+                event_permit.clone(),
+                navigation.clone(),
+                presentation_permit.clone(),
+                move |request| {
+                    let id = item.get();
+                    permit.emit(&sink, EngineEvent::LoadingChanged { id, loading: false });
+                    if let Some(request) = request {
+                        permit.emit(&sink, EngineEvent::NavigationFailed { id, request });
+                    }
+                },
+            )
+        };
         #[cfg(target_os = "linux")]
         let load_script_dialogs = Rc::downgrade(&script_dialogs);
         #[cfg(target_os = "linux")]

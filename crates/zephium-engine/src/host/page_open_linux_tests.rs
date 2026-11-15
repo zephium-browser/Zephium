@@ -1777,13 +1777,31 @@ fn native_prompt_returns_chosen_text_and_null_on_cancel() {
 fn native_beforeunload_can_keep_or_leave_the_document() {
     let fixture = Fixture::new();
     let host = NativeHarness::new();
-    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
     script(&page, "document.querySelector('#script').onclick=()=>{window.onbeforeunload=e=>{e.preventDefault();e.returnValue='fixture';return 'fixture'};document.title='armed'};document.title='activation-ready'");
     until(|| page.title().as_deref() == Some("activation-ready"));
     click(&page, 140, 1, gtk::gdk::ModifierType::empty());
     until(|| page.title().as_deref() == Some("armed"));
-    page.load_uri(&format!("{}/leave", fixture.origin));
+    host.drain();
+    let request = zephium_core::ports::engine::NavigationRequestId(51);
+    assert!(host
+        .engine
+        .navigate(id, &format!("{}/leave", fixture.origin), request));
     visible_dialog().response(gtk::ResponseType::Cancel);
+    let mut stopped = false;
+    let mut settled = false;
+    until(|| {
+        for event in host.drain() {
+            match event {
+                EngineEvent::LoadingChanged { loading: false, .. } => stopped = true,
+                EngineEvent::NavigationFailed {
+                    request: failed, ..
+                } if failed == request => settled = true,
+                _ => {}
+            }
+        }
+        stopped && settled
+    });
     script(
         &page,
         "document.title=window.onbeforeunload && location.pathname==='/page'?'kept':'lost-document'",
@@ -1791,9 +1809,16 @@ fn native_beforeunload_can_keep_or_leave_the_document() {
     until(|| page.title().as_deref() == Some("kept"));
     host.window.window().unwrap().focus(0);
     until(|| host.window.is_active());
-    page.load_uri(&format!("{}/leave", fixture.origin));
+    assert!(host.engine.navigate(
+        id,
+        &format!("{}/leave", fixture.origin),
+        zephium_core::ports::engine::NavigationRequestId(52)
+    ));
     visible_dialog().response(gtk::ResponseType::Ok);
-    until(|| !page.is_loading() && page.title().as_deref() == Some("child"));
+    until(|| {
+        host.drain();
+        !page.is_loading() && page.title().as_deref() == Some("child")
+    });
 }
 
 fn valid_digest_fixture(request: &str) -> bool {
