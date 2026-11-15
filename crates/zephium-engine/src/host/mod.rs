@@ -39,7 +39,7 @@ mod focus;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod generic_styles;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod http_auth;
 mod lifecycle;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -248,7 +248,7 @@ struct ObservedView {
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     http_auth: Rc<http_auth::HttpAuthBroker>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificates: Rc<certificates::CertificateWatch>,
@@ -402,7 +402,7 @@ impl Drop for ObservedView {
         crate::platform::cosmetic_pull::cancel(&self.view);
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.http_auth.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration

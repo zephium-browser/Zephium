@@ -27,6 +27,76 @@ pub(super) type NativeResponder = wry::HttpAuthResponder;
 #[cfg(target_os = "windows")]
 pub(super) type NativeResponder = crate::platform::imp::BasicAuthResponder;
 
+#[cfg(target_os = "linux")]
+pub(super) struct NativeResponder(Option<webkit2gtk::AuthenticationRequest>);
+
+#[cfg(target_os = "linux")]
+impl NativeResponder {
+    pub(super) fn new(request: &webkit2gtk::AuthenticationRequest) -> Self {
+        use webkit2gtk::AuthenticationRequestExt;
+        request.set_can_save_credentials(false);
+        Self(Some(request.clone()))
+    }
+    fn respond(mut self, credentials: Option<(&str, &str)>) {
+        use gtk::glib::translate::{ToGlibPtr, ToGlibPtrMut};
+        use webkit2gtk::AuthenticationRequestExt;
+        let Some(request) = self.0.take() else {
+            return;
+        };
+        if let Some((username, password)) = credentials {
+            let mut credential = webkit2gtk::Credential::new(
+                username,
+                password,
+                webkit2gtk::CredentialPersistence::None,
+            );
+            // SAFETY: request and credential are owned on the GTK thread throughout the call.
+            unsafe {
+                webkit2gtk::ffi::webkit_authentication_request_authenticate(
+                    request.to_glib_none().0,
+                    credential.to_glib_none_mut().0,
+                );
+            }
+        } else {
+            request.cancel();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for NativeResponder {
+    fn drop(&mut self) {
+        use webkit2gtk::AuthenticationRequestExt;
+        if let Some(request) = self.0.take() {
+            request.cancel();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn native_challenge(
+    request: &webkit2gtk::AuthenticationRequest,
+) -> Option<AuthChallenge> {
+    use webkit2gtk::{AuthenticationRequestExt, AuthenticationScheme};
+    if !matches!(
+        request.scheme(),
+        AuthenticationScheme::HttpBasic | AuthenticationScheme::HttpDigest
+    ) {
+        return None;
+    }
+    let security = request.security_origin()?;
+    let origin = AuthOrigin::new(
+        &security.protocol()?,
+        &security.host()?,
+        Some(security.port()),
+    )?;
+    Some(AuthChallenge {
+        insecure: origin.scheme() != "https",
+        origin,
+        proxy: request.is_for_proxy(),
+        previous_failures: None,
+    })
+}
+
 pub(super) struct PendingNative {
     responder: Option<NativeResponder>,
     _timeout: Option<crate::platform::imp::ContentPolicyTimeout>,
@@ -262,7 +332,7 @@ fn origin(url: &str) -> Option<AuthOrigin> {
     AuthOrigin::of_url(&Url::parse(url).ok()?)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn schedule_timeout(
     callback: impl FnOnce() + Send + 'static,
 ) -> Option<crate::platform::imp::ContentPolicyTimeout> {

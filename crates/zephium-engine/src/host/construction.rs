@@ -785,13 +785,13 @@ impl EngineHost {
         );
         #[cfg(target_os = "macos")]
         let load_file_uploads = Rc::downgrade(&file_uploads);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let http_auth = super::http_auth::HttpAuthBroker::new(
             id.clone(),
             event_permit.clone(),
             self.sink.clone(),
         );
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let load_http_auth = Rc::downgrade(&http_auth);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let certificates = Rc::new(super::certificates::CertificateWatch::default());
@@ -1342,6 +1342,18 @@ impl EngineHost {
                     gesture,
                     zephium_core::navigation::AppLinkSource::Unknown,
                 )
+            });
+            let auth_broker = Rc::downgrade(&http_auth);
+            builder = builder.with_linux_auth_handler(move |view, request| {
+                use webkit2gtk::WebViewExt;
+                let responder = super::http_auth::NativeResponder::new(request);
+                if let (Some(broker), Some(challenge)) = (
+                    auth_broker.upgrade(),
+                    super::http_auth::native_challenge(request),
+                ) {
+                    broker.challenge(challenge, view.uri().as_deref(), responder);
+                }
+                true
             });
         }
 
@@ -1982,7 +1994,7 @@ impl EngineHost {
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_started(&event.url);
                     }
@@ -2009,7 +2021,7 @@ impl EngineHost {
                 }
                 NavigationTransition::Redirected(_) => {
                     load_site_scope.navigating(&event.url);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_redirected(&event.url);
                     }
@@ -2021,7 +2033,7 @@ impl EngineHost {
                 NavigationTransition::Committed(epoch) => {
                     #[cfg(target_os = "macos")]
                     load_replay.commit();
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_committed(&event.url);
                     }
@@ -2066,7 +2078,7 @@ impl EngineHost {
                 } => {
                     #[cfg(target_os = "macos")]
                     load_replay.abandon();
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_failed();
                     }
@@ -2910,7 +2922,7 @@ impl EngineHost {
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
             file_uploads,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             http_auth,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificates,

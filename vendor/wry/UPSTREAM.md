@@ -368,3 +368,7 @@ reported as insecure connections, without a context-wide certificate exception.
 The optional Linux navigation-action interceptor exposes native gesture evidence
 before ordinary navigation policy. A handled action remains natively denied;
 the host's existing external-application confirmation broker owns any launch.
+Linux ordinary tabs can opt into an owned password-challenge callback. Missing,
+panicking or unhandled callbacks cancel; the host responder is single-use,
+cancels on drop and never requests native credential persistence. Server-trust
+and client-certificate challenges remain denied.

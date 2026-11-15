@@ -3058,14 +3058,14 @@ impl Engine for WebviewEngine {
         request: u32,
         credentials: Option<zephium_core::http_auth::HttpCredentials>,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             // A retiring view cancels its own native request as it drops.
             self.run_for_active_item(item, move |host| {
                 host.answer_http_auth(item, request, credentials)
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (item, request, credentials);
             NativeDispatch::Unsupported

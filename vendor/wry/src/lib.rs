@@ -782,6 +782,8 @@ struct WebViewAttributes<'a> {
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
   #[cfg(target_os = "linux")]
   pub linux_navigation_action_handler: Option<Box<dyn Fn(&str, bool) -> bool>>,
+  #[cfg(target_os = "linux")]
+  pub linux_auth_handler: Option<LinuxAuthHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -1053,6 +1055,8 @@ impl Default for WebViewAttributes<'_> {
       navigation_handler: None,
       #[cfg(target_os = "linux")]
       linux_navigation_action_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_auth_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1131,7 +1135,21 @@ pub struct WebViewBuilder<'a> {
   error: crate::Result<()>,
 }
 
+#[cfg(target_os = "linux")]
+type LinuxAuthHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::AuthenticationRequest) -> bool>;
+
 impl<'a> WebViewBuilder<'a> {
+  /// Route password challenges to an owned host responder. Unhandled requests cancel.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_auth_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::AuthenticationRequest) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_auth_handler = Some(Box::new(handler));
+    self
+  }
+
   /// Intercept a GTK navigation action using native user-gesture evidence.
   /// Returning true consumes the request; the native navigation is denied.
   #[cfg(target_os = "linux")]

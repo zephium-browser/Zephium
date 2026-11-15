@@ -74,6 +74,14 @@ impl Fixture {
                 }
                 let request = String::from_utf8_lossy(&request).into_owned();
                 let line = request.lines().next().unwrap_or_default().to_owned();
+                if line.contains(" /auth ")
+                    && !request
+                        .lines()
+                        .any(|line| line == "Authorization: Basic Zml4dHVyZTpmaXh0dXJl")
+                {
+                    let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"fixture\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 let page = line.contains(" /page ");
                 let body = if page {
                     "<!doctype html><title>ready</title><style>a,button{position:absolute;left:0;width:200px;height:40px}#blank{top:0}#link{top:60px}#script{top:120px}#post{top:180px}</style><a id=blank href='/blank' target=_blank>blank</a><a id=link href='/link'>link</a><button id=script onclick=\"window.open('/script')\">script</button><form action='/post' method=post target=_blank><input name=proof value=preserved><button id=post>post</button></form>"
@@ -768,4 +776,38 @@ fn native_external_link_uses_shared_confirmation_with_unknown_source() {
     assert!(!crate::platform::imp::open_external_app(
         "javascript:alert(1)"
     ));
+}
+
+#[test]
+#[ignore = "requires isolated GTK display; loopback fixture credentials only"]
+fn native_http_auth_uses_shared_prompt_and_responder() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&format!("{}/auth", fixture.origin));
+    let mut request = None;
+    until(|| {
+        for event in host.drain() {
+            if let EngineEvent::HttpAuthRequested { id: owner, prompt } = event {
+                assert_eq!(owner, id);
+                assert!(prompt.insecure);
+                assert!(!prompt.proxy);
+                request = Some(prompt.request);
+            }
+        }
+        request.is_some()
+    });
+    assert_eq!(
+        host.engine.answer_http_auth(
+            id,
+            request.unwrap(),
+            zephium_core::http_auth::HttpCredentials::new("fixture".into(), "fixture".into())
+        ),
+        NativeDispatch::Scheduled
+    );
+    until(|| {
+        host.drain();
+        page.title().as_deref() == Some("child") && !page.is_loading()
+    });
+    assert!(has_view(id));
 }

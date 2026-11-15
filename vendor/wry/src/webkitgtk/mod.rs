@@ -1271,10 +1271,17 @@ impl InnerWebView {
       }
     });
 
-    // These surfaces have no origin-labelled Zephium broker yet. Claim the
-    // signal and complete the request with a denial rather than allowing a
-    // page to summon privileged native UI.
-    webview.connect_authenticate(|_, request| {
+    // Unowned native prompts remain denied, including callback failures.
+    #[cfg(target_os = "linux")]
+    let auth_handler = attributes.linux_auth_handler.take();
+    webview.connect_authenticate(move |_view, request| {
+      #[cfg(target_os = "linux")]
+      if auth_handler.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_view, request)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       request.cancel();
       true
     });
