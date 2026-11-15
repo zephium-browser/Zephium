@@ -1,0 +1,13 @@
+{
+  "id": "notifications-lifecycle",
+  "title": "notifications lifecycle",
+  "apis": [
+    "notifications.create",
+    "notifications.update",
+    "notifications.clear",
+    "notifications.getAll"
+  ],
+  "permissions": [
+    "notifications"
+  ]
+}

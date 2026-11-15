@@ -68,6 +68,12 @@ const MAX_INSTALLED_SCRIPTS: usize = 256;
 
 /// GTK-side work the host asks for, in order.
 pub(crate) enum NativeOp {
+    Notifications {
+        sender: Box<Sender>,
+        root: PathBuf,
+        request: zephium_webext_runtime::api::notifications::Request,
+        responder: Responder,
+    },
     /// Publish `launch`, create the hidden view, attach and load it.
     StartBackground {
         install: ExtensionInstallId,
@@ -259,6 +265,11 @@ impl InstallState {
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    Notifications {
+        sender: Box<Sender>,
+        request: zephium_webext_runtime::api::notifications::Request,
+        responder: Responder,
+    },
     Dnr {
         responder: Responder,
         sender: Box<Sender>,
@@ -796,6 +807,14 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        if let BrowserRequest::Notifications(request) = request {
+            let sender = Box::new(invocation.sender().clone());
+            return self.defer(invocation, |responder| Work::Notifications {
+                sender,
+                request,
+                responder,
+            });
+        }
         if let BrowserRequest::Runtime(request) = request {
             let sender = Box::new(invocation.sender().clone());
             return self.defer(invocation, |responder| Work::Runtime {
@@ -3367,6 +3386,27 @@ impl RuntimeHost {
                     }
                 } else {
                     self.record_error(install, kind, sender.kind(), message, detail);
+                }
+            }
+            Work::Notifications {
+                sender,
+                request,
+                responder,
+            } => {
+                if let Some(root) = self
+                    .state
+                    .installs
+                    .get(&sender.install())
+                    .map(|state| state.root.clone())
+                {
+                    self.op(NativeOp::Notifications {
+                        sender,
+                        root,
+                        request,
+                        responder,
+                    });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
                 }
             }
             Work::Runtime {

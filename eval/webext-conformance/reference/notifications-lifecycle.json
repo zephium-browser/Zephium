@@ -1,0 +1,127 @@
+{
+  "caseId": "notifications-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "permission:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "permission:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "granted"
+      }
+    },
+    {
+      "label": "create:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "same"
+      }
+    },
+    {
+      "label": "inventory:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "inventory:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "same": true
+        }
+      }
+    },
+    {
+      "label": "update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "clear:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clear:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "missing clear:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing clear:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    },
+    {
+      "label": "missing update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    },
+    {
+      "label": "empty inventory:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "empty inventory:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {}
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

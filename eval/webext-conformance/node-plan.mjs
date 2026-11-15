@@ -39,6 +39,8 @@ export const omittedCalls = {
 };
 
 const missing = {
+  "notifications-lifecycle":
+    "Real desktop notification service and native create/update/clear settlement.",
   "runtime-self-message":
     "Real worker startup and native sender-context exclusion; checked by both browser runners.",
   "scripting-repeat-file":

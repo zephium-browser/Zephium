@@ -36,6 +36,23 @@ pub(crate) struct ContentInstall {
 }
 
 impl RuntimeHost {
+    pub(crate) fn notification_allowed(&self, install: ExtensionInstallId) -> bool {
+        self.permissions
+            .get(&install)
+            .is_some_and(|permissions| permissions.has_api("notifications"))
+    }
+    pub(crate) fn notification_event(
+        &mut self,
+        install: ExtensionInstallId,
+        name: &str,
+        args: &Value,
+        out: &mut Outbox,
+    ) {
+        if self.notification_allowed(install) {
+            self.emit(install, name, args, StartReason::Event, out);
+        }
+    }
+
     pub(crate) fn command(
         &mut self,
         key: u32,

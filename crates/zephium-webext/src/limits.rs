@@ -198,7 +198,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("notifications")],
-        "Can't show notifications",
+        "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
         LIN,
     ),
     (
@@ -413,7 +413,7 @@ mod tests {
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
                 "Opens separate extension windows as browser tabs",
-                "Can't show notifications",
+                "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "Can't insert or remove CSS programmatically",
             ]
         );

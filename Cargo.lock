@@ -7902,6 +7902,8 @@ dependencies = [
 name = "zephium-webext-linux"
 version = "0.1.0"
 dependencies = [
+ "async-io",
+ "futures-lite",
  "gio",
  "glib",
  "gtk",
@@ -7916,6 +7918,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "webkit2gtk",
+ "zbus",
  "zephium-core",
  "zephium-webext",
  "zephium-webext-dnr",

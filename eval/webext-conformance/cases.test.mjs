@@ -4,7 +4,7 @@ import { readFile, readdir } from "node:fs/promises";
 const root = new URL("./", import.meta.url);
 test("every case is self-describing MV3 with an unambiguous checked reference", async () => {
   const names = (await readdir(new URL("cases/", root))).sort();
-  assert.ok(names.length >= 40 && names.length <= 60);
+  assert.equal(names.length, 60);
   const references = (await readdir(new URL("reference/", root)))
     .filter((name) => name.endsWith(".json"))
     .map((name) => name.slice(0, -5))

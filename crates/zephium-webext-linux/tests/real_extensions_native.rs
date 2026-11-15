@@ -2059,3 +2059,185 @@ fn window_commands_wake_and_effective_inventory() {
     host.close(tab);
     assert!(host.runtime.retire().run(Duration::from_secs(10)));
 }
+
+struct NotificationService(std::process::Child);
+impl NotificationService {
+    fn start() -> Self {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new("python3")
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/runtime_support/notifications.py"),
+            )
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "READY");
+        Self(child)
+    }
+    fn proxy(&self) -> zbus::Proxy<'static> {
+        futures_lite::future::block_on(async {
+            let connection = zbus::Connection::session().await.unwrap();
+            zbus::Proxy::new_owned(
+                connection,
+                "org.freedesktop.Notifications",
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+            )
+            .await
+            .unwrap()
+        })
+    }
+    fn ids(&self) -> Vec<u32> {
+        futures_lite::future::block_on(self.proxy().call("TestIds", &())).unwrap()
+    }
+    fn action(&self, id: u32, action: &str) {
+        futures_lite::future::block_on(self.proxy().call::<_, _, ()>("TestAction", &(id, action)))
+            .unwrap();
+    }
+    fn close(&self, id: u32, reason: u32) {
+        futures_lite::future::block_on(self.proxy().call::<_, _, ()>("TestClose", &(id, reason)))
+            .unwrap();
+    }
+}
+impl Drop for NotificationService {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+#[ignore = "private native runtime and D-Bus notification service"]
+fn notifications_service_owner_events_cleanup_and_wake() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    std::fs::write(package.path().join("manifest.json"),json!({"manifest_version":3,"name":"Notifications fixture","version":"1","permissions":["notifications","storage"],"background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"}}).to_string()).unwrap();
+    std::fs::write(package.path().join("worker.js"),r#"
+for(const event of ['onClicked','onClosed','onButtonClicked'])chrome.notifications[event].addListener(async(...args)=>{await chrome.storage.local.set({[event]:args});});
+"#).unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><button>Notification fixture</button>",
+    )
+    .unwrap();
+    let icon =
+        gtk::gdk_pixbuf::Pixbuf::new(gtk::gdk_pixbuf::Colorspace::Rgb, true, 8, 2, 2).unwrap();
+    icon.fill(0xff00ffff);
+    icon.savev(package.path().join("icon.png"), "png", &[])
+        .unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    assert!(evaluate(popup.view(),"try{await chrome.notifications.create('same',{type:'basic',iconUrl:'icon.png',title:'test',message:'body'});return 'unexpected'}catch(e){return e.message}").contains("notification service is unavailable"));
+    let service = NotificationService::start();
+    assert_eq!(evaluate(popup.view(),"return await chrome.notifications.create('same',{type:'list',iconUrl:'icon.png',title:'test',message:'<b>literal</b>',items:[{title:'one',message:'two'}],buttons:[{title:'Act'}]});"),"same");
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "return await chrome.notifications.update('same',{title:'updated'});"
+        ),
+        "true"
+    );
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "return JSON.stringify(await chrome.notifications.getAll());"
+        ),
+        "{\"same\":true}"
+    );
+    let native = service.ids()[0];
+    assert_eq!(service.ids().len(), 1);
+    let second_install = ExtensionInstallId::from(INSTALL + 1);
+    let mut second_spec = spec(package.path(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1);
+    second_spec.install = second_install;
+    host.runtime.install_admitted(second_spec).unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    let second_popup = host
+        .runtime
+        .open_page(second_install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    assert_eq!(
+        evaluate(
+            second_popup.view(),
+            "return JSON.stringify(await chrome.notifications.getAll());"
+        ),
+        "{}"
+    );
+    assert_eq!(evaluate(second_popup.view(), "return await chrome.notifications.create('same',{type:'basic',iconUrl:'icon.png',title:'second',message:'body'});"), "same");
+    assert_eq!(service.ids().len(), 2);
+    assert_eq!(
+        evaluate(
+            second_popup.view(),
+            "return await chrome.notifications.clear('same');"
+        ),
+        "true"
+    );
+    assert_eq!(service.ids(), vec![native]);
+    drop(second_popup);
+    let _stop = host.runtime.install_disabled(second_install);
+    assert_eq!(evaluate(popup.view(), "try{await chrome.notifications.create('oversized',{type:'basic',iconUrl:'icon.png',title:'test',message:'x'.repeat(33000)});return false}catch{return true}"), "true");
+    assert_eq!(evaluate(popup.view(),"try{await chrome.notifications.create('bad',{type:'basic',iconUrl:'icon.png',title:'reject',message:'body'});return false}catch{return true}"),"true");
+    assert_eq!(service.ids().len(), 1);
+    assert_eq!(evaluate(popup.view(),"try{await chrome.notifications.create('bad',{type:'basic',iconUrl:'missing.png',title:'test',message:'body'});return false}catch{return true}"),"true");
+    drop(popup);
+    host.runtime
+        .memory_pressure(zephium_webext_linux::runtime::MemoryPressure::Critical);
+    pump(&mut host, Duration::from_secs(2));
+    assert_eq!(
+        host.runtime.background(install).unwrap().state,
+        zephium_webext_runtime::lifecycle::BackgroundState::Stopped
+    );
+    service.action(native, "default");
+    service.action(native, "button-0");
+    service.action(native, "button-99");
+    service.close(native, 2);
+    pump(&mut host, Duration::from_secs(2));
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    let events: Value = serde_json::from_str(&evaluate(
+        popup.view(),
+        "return JSON.stringify(await chrome.storage.local.get(null));",
+    ))
+    .unwrap();
+    println!("NOTIFICATIONS native {events}");
+    assert_eq!(events["onClicked"], json!(["same"]));
+    assert_eq!(events["onButtonClicked"], json!(["same", 0]));
+    assert_eq!(events["onClosed"], json!(["same", true]));
+    assert_eq!(evaluate(popup.view(),"return await chrome.notifications.create('restart',{type:'basic',iconUrl:'icon.png',title:'test',message:'body'});"),"restart");
+    drop(service);
+    pump(&mut host, Duration::from_millis(200));
+    let replacement = NotificationService::start();
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "return JSON.stringify(await chrome.notifications.getAll());"
+        ),
+        "{}"
+    );
+    assert_eq!(evaluate(popup.view(),"return await chrome.notifications.create('cleanup',{type:'basic',iconUrl:'icon.png',title:'test',message:'body'});"),"cleanup");
+    drop(popup);
+    let _stop = host.runtime.install_disabled(install);
+    pump(&mut host, Duration::from_secs(1));
+    assert!(replacement.ids().is_empty());
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
+}

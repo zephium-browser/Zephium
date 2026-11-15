@@ -13,6 +13,7 @@ mod content;
 mod errors;
 pub(crate) mod host;
 mod icons;
+mod notifications;
 mod requests;
 mod storage;
 
@@ -260,6 +261,7 @@ struct Inner {
     script_generation: Cell<u64>,
     observing_requests: Cell<bool>,
     next_request: Cell<u64>,
+    notifications: Rc<notifications::Backend>,
 }
 
 /// What every ordinary tab gets, rebuilt when installs or registrations change.
@@ -431,6 +433,7 @@ impl ProfileRuntime {
             script_generation: Cell::new(0),
             observing_requests: Cell::new(false),
             next_request: Cell::new(0),
+            notifications: Rc::default(),
         });
         let weak = Rc::downgrade(&inner);
         *requests.framed.borrow_mut() = Some(Box::new(move |view| {
@@ -1162,6 +1165,12 @@ impl Inner {
 
     fn execute(self: &Rc<Self>, op: NativeOp) {
         match op {
+            NativeOp::Notifications {
+                sender,
+                root,
+                request,
+                responder,
+            } => notifications::submit(self, sender, root, request, responder),
             NativeOp::StartBackground {
                 install,
                 generation,
@@ -1541,6 +1550,8 @@ impl Inner {
             unpacked: spec.unpacked,
             state_directory,
         };
+        self.notifications
+            .install(spec.install, spec.generation.get());
         let _ = self
             .bridge
             .with_runtime(|host, out| host.admit(admitted, activation, out));
@@ -1549,6 +1560,7 @@ impl Inner {
     }
 
     fn deactivate(self: &Rc<Self>, install: ExtensionInstallId, erase: bool) -> ExtensionStop {
+        self.notifications.forget(install);
         let _ = self
             .bridge
             .with_runtime(|host, out| host.stop(install, out));
@@ -1664,6 +1676,7 @@ impl Inner {
     }
 
     fn retire(self: &Rc<Self>) -> RuntimeDrain {
+        self.notifications.retire();
         if !self.retired.get() {
             let _ = self.bridge.with_runtime(|host, out| host.shutdown(out));
             self.run();
