@@ -335,9 +335,8 @@ pub(crate) fn install(
     main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
-        crate::NativeOpenAuthority,
-    >,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    native_open_authority: Arc<crate::NativeOpenAuthority>,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
@@ -442,7 +441,7 @@ pub(crate) fn install(
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             downloads: None,
-            #[cfg(any(target_os="macos",target_os="windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             native_open_authority,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
@@ -618,7 +617,7 @@ where
     with_priority(HostTaskPriority::Normal, None, f)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn try_open_native_tab(
     source: zephium_core::ids::ItemId,
     permit: &super::permits::EventPermit,

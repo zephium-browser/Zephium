@@ -41,7 +41,7 @@ use objc2::rc::Retained;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
 pub(super) enum NativeViewPurpose {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     NativeTab(wry::NewWindowOpener),
     Tab,
     #[cfg(not(all(unix, not(target_os = "macos"))))]
@@ -52,7 +52,7 @@ impl NativeViewPurpose {
     const fn resource_class(&self) -> NativeResourceClass {
         match self {
             Self::Tab => NativeResourceClass::Tab,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::NativeTab(_) => NativeResourceClass::Tab,
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             Self::WarmSpare => NativeResourceClass::WarmSpare,
@@ -635,7 +635,7 @@ impl EngineHost {
     ) -> Option<ObservedView> {
         let report_failure = purpose.reports_failure();
         let popup_opener = match purpose {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             NativeViewPurpose::NativeTab(opener) => Some(opener),
             _ => None::<wry::NewWindowOpener>,
         };
@@ -722,7 +722,7 @@ impl EngineHost {
             .clone();
         let site_scope =
             super::content_styles::ViewSiteScope::new(site_preferences, navigation, url);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
             self.popup_sites_for(partition.profile()),
         ));
@@ -799,7 +799,7 @@ impl EngineHost {
         let load_certificates = Rc::downgrade(&certificates);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let certificate_exceptions = self.certificate_exceptions_for(partition.profile());
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
@@ -1199,6 +1199,14 @@ impl EngineHost {
             builder
         };
 
+        #[cfg(target_os = "linux")]
+        let builder = if let Some(opener) = popup_opener.as_ref() {
+            use wry::WebViewBuilderExtUnix;
+            builder.with_related_view(opener.webview.clone())
+        } else {
+            builder
+        };
+
         #[cfg(target_os = "windows")]
         let permission_presentation = presentation_permit.clone();
         #[cfg(target_os = "windows")]
@@ -1412,7 +1420,7 @@ impl EngineHost {
         #[cfg(all(unix, not(target_os = "macos")))]
         let _ = focus_shuts;
 
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if native_popup || cfg!(target_os = "windows") {
                 let closing_item = id.clone();
@@ -1442,9 +1450,10 @@ impl EngineHost {
             let source = id.clone();
             let permit = event_permit.clone();
             let tracker = navigation.clone();
-            let burst = Cell::new((std::time::Instant::now(), 0u8));
+            let burst = super::popup_sites::PopupBurst::new();
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let popup_app_link = app_link.clone();
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
@@ -1458,6 +1467,7 @@ impl EngineHost {
                 );
                 // A new window does not say which frame asked, so no kept
                 // answer opens it.
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if features.user_initiated
                     && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
                 {
@@ -1480,18 +1490,10 @@ impl EngineHost {
                         );
                     }
                 };
-                let (started, count) = burst.get();
-                let (started, count) =
-                    if now.duration_since(started) >= std::time::Duration::from_secs(1) {
-                        (now, 0)
-                    } else {
-                        (started, count)
-                    };
-                if !features.user_initiated || count >= 8 {
+                if !burst.admit(features.user_initiated, now) {
                     report_blocked();
                     return wry::NewWindowResponse::Deny;
                 }
-                burst.set((started, count + 1));
                 let Some(activity) = tracker.activity_snapshot() else {
                     report_blocked();
                     return wry::NewWindowResponse::Deny;
@@ -2577,6 +2579,12 @@ impl EngineHost {
         {
             use webkit2gtk::WebViewExt;
             use wry::WebViewExtUnix;
+            super::page_open::install_linux_menu(
+                &view.webview(),
+                id.clone(),
+                event_permit.clone(),
+                navigation.clone(),
+            );
             let permit = crash_permit.clone();
             view.webview()
                 .connect_web_process_terminated(move |_, reason| {
@@ -2881,7 +2889,7 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             suspend_attempt: None,
             site_scope,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             popup_policy,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
@@ -2890,7 +2898,7 @@ impl EngineHost {
             http_auth,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificates,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             download_surface_intent,
             event_permit,
             navigation,

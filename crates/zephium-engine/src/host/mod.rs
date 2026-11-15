@@ -45,7 +45,7 @@ mod lifecycle;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod media;
 mod navigation;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
@@ -243,7 +243,7 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
@@ -255,7 +255,7 @@ struct ObservedView {
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     download_surface_intent: Arc<AtomicBool>,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -589,7 +589,7 @@ pub(crate) struct EngineHost {
     page_permissions: page_permissions::PagePermissionBroker,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     native_open_authority: Arc<crate::NativeOpenAuthority>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,

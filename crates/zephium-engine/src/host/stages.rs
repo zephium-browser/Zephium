@@ -179,6 +179,9 @@ impl EngineHost {
         let Some(view) = self.views.get(&id) else {
             return false;
         };
+        #[cfg(target_os = "linux")]
+        view.download_surface_intent
+            .store(!expected.is_empty(), Ordering::Release);
         if expected.is_empty() {
             // Guarded WebKitGTK construction stays unmapped. Preserve that
             // fail-closed state when the retained layout has already moved on;
@@ -390,7 +393,7 @@ impl EngineHost {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         for (id, view) in &self.views {
             if stage.has_view(*id) || tabs.contains(id) {
                 view.download_surface_intent

@@ -1472,13 +1472,13 @@ fn retirement_filtering_sink(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) struct NativeOpenAuthority {
     retirement: Arc<Mutex<RetirementGate>>,
     dispatch: MainThreadDispatch,
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
 }
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl NativeOpenAuthority {
     pub(crate) fn reserve(
         &self,
@@ -1763,7 +1763,7 @@ pub fn install(
         dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         Arc::new(NativeOpenAuthority {
             retirement: retirement.clone(),
             dispatch: dispatch.clone(),

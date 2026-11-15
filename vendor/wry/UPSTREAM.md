@@ -338,3 +338,24 @@ it takes the video back, so without a handler that brings the page on screen
 the button does nothing for a background tab. A missing handler keeps
 upstream's no-op; a panic is contained. Like the other private selectors it
 must be reviewed during upstream rebases.
+
+### Linux native new-tab adoption
+
+The WebKitGTK backend delivers the opt-in host page-close callback without
+invalidating the host's widget. Modified link clicks use the native URIRequest
+and the same new-window handler with a related child; create-signal requests
+return the related view without replaying the navigation. Native gesture and
+Shift/Control/button evidence determine admission and foreground intent. Host
+callbacks are panic-contained; missing handlers keep the existing denial.
+Automatic script windows default off; an ordinary-view host can change the
+native setting for its committed-site popup policy. No dependency, upstream
+revision or standalone lockfile changes accompany these Linux hooks.
+
+The Linux host can describe a user-owned menu selection with `for_user_tab`.
+This does not change native gesture admission: the host separately authenticates
+the selected document and opens a fresh GET without referrer or script opener.
+
+Standalone Linux validation also scopes protocol body accounting to its actual
+consumers (Apple, Windows, Linux body support and unit tests) and removes two
+redundant references in the GTK protocol callback. Body limits and admission
+behavior are unchanged; strict Clippy remains enabled for the default graph.

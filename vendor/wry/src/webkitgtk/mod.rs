@@ -76,6 +76,31 @@ use crate::{
 #[cfg(not(test))]
 use self::web_context::WebContextExt;
 
+fn modified_link(action: &webkit2gtk::NavigationAction) -> bool {
+  action.navigation_type() == webkit2gtk::NavigationType::LinkClicked
+    && modified_button(action.mouse_button(), action.modifiers())
+}
+
+fn modified_button(button: u32, modifiers: u32) -> bool {
+  button == 2 || (button == 1 && modifiers & gdk::ModifierType::CONTROL_MASK.bits() != 0)
+}
+
+fn new_window_features(
+  webview: &WebView,
+  action: &webkit2gtk::NavigationAction,
+) -> NewWindowFeatures {
+  NewWindowFeatures {
+    user_initiated: action.is_user_gesture(),
+    foreground: !modified_link(action)
+      || action.modifiers() & gdk::ModifierType::SHIFT_MASK.bits() != 0,
+    size: None,
+    position: None,
+    opener: NewWindowOpener {
+      webview: webview.clone(),
+    },
+  }
+}
+
 const WEBVIEW_ID: &str = "webview_id";
 const NATIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_HANDLER_NAME: &str = "wryIpc";
@@ -776,6 +801,7 @@ impl InnerWebView {
       // Fullscreen is a page-triggered native surface and must remain off
       // until the embedder owns an origin/gesture-labelled lifecycle broker.
       settings.set_enable_fullscreen(false);
+      settings.set_javascript_can_open_windows_automatically(false);
       settings
         .set_enable_back_forward_navigation_gestures(attributes.back_forward_navigation_gestures);
 
@@ -810,7 +836,14 @@ impl InnerWebView {
     // logical view/widget ownership. Preserve the child by default and retain
     // legacy destruction only behind an explicit host policy.
     let page_close_policy = attributes.page_close_policy;
+    #[cfg(target_os = "linux")]
+    let page_close_handler = attributes.page_close_handler.take();
     webview.connect_close(move |webview| {
+      #[cfg(target_os = "linux")]
+      if let Some(handler) = &page_close_handler {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+        return;
+      }
       if page_close_policy == crate::PageClosePolicy::DestroyContainer {
         unsafe { webview.destroy() };
       }
@@ -928,23 +961,46 @@ impl InnerWebView {
 
     // window creation handler
     if let Some(new_window_req_handler) = attributes.new_window_req_handler.take() {
+      let new_window_req_handler = Rc::new(new_window_req_handler);
+      let modified_link_handler = new_window_req_handler.clone();
+      webview.connect_decide_policy(move |webview, decision, kind| {
+        if kind != PolicyDecisionType::NavigationAction {
+          return false;
+        }
+        let Some(action) = decision
+          .dynamic_cast_ref::<NavigationPolicyDecision>()
+          .and_then(NavigationPolicyDecisionExt::navigation_action)
+        else {
+          return false;
+        };
+        if !modified_link(&action) {
+          return false;
+        }
+        webkit2gtk::PolicyDecisionExt::ignore(decision);
+        // Keep the native request; replaying its URL loses request metadata.
+        if let Some(request) = action.request() {
+          if let Some(url) = bounded_request_uri(&request) {
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              modified_link_handler(url, new_window_features(webview, &action))
+            }))
+            .unwrap_or(NewWindowResponse::Deny);
+            if let NewWindowResponse::Create { webview: child } = response {
+              child.load_request(&request);
+            }
+          }
+        }
+        true
+      });
       let related_webviews = Rc::new(Mutex::new(HashMap::new()));
       webview.connect_create(move |webview, action| {
         let url = action
           .request()
           .and_then(|request| bounded_request_uri(&request))?;
-        match new_window_req_handler(
-          url.clone(),
-          NewWindowFeatures {
-            user_initiated: action.is_user_gesture(),
-            foreground: true,
-            size: None,
-            position: None,
-            opener: NewWindowOpener {
-              webview: webview.clone(),
-            },
-          },
-        ) {
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+          new_window_req_handler(url.clone(), new_window_features(webview, action))
+        }))
+        .unwrap_or(NewWindowResponse::Deny);
+        match response {
           NewWindowResponse::Allow => {
             let related_webviews = related_webviews.clone();
             let toplevel = webview.toplevel()?;
@@ -2049,5 +2105,24 @@ mod ffi {
       result: *mut gio::ffi::GAsyncResult,
       error: *mut *mut glib::ffi::GError,
     ) -> *mut glib::ffi::GList;
+  }
+}
+
+#[cfg(test)]
+mod new_window_tests {
+  use super::*;
+
+  #[test]
+  fn only_middle_and_control_primary_clicks_are_new_tab_links() {
+    assert!(modified_button(2, 0));
+    assert!(modified_button(1, gdk::ModifierType::CONTROL_MASK.bits()));
+    assert!(modified_button(
+      1,
+      (gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK).bits()
+    ));
+    assert!(!modified_button(1, 0));
+    assert!(!modified_button(1, gdk::ModifierType::SHIFT_MASK.bits()));
+    assert!(!modified_button(3, gdk::ModifierType::CONTROL_MASK.bits()));
+    assert!(!modified_button(0, gdk::ModifierType::CONTROL_MASK.bits()));
   }
 }
