@@ -1,0 +1,14 @@
+{
+  "id": "webrequest-lifecycle",
+  "title": "webrequest lifecycle",
+  "apis": [
+    "webRequest.onBeforeRequest",
+    "webRequest.onBeforeRedirect",
+    "webRequest.onCompleted",
+    "webRequest.onErrorOccurred"
+  ],
+  "permissions": [
+    "scripting",
+    "webRequest"
+  ]
+}

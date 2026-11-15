@@ -1,0 +1,1 @@
+{"id":"css-removal-inherited","title":"Remove an existing all-frame sheet after an inherited child appears","apis":["scripting.insertCSS","scripting.removeCSS"],"permissions":["scripting"]}

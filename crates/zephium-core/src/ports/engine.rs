@@ -59,6 +59,8 @@ pub struct WebExtensionLoad {
     /// The authenticated package may ask for native-app access it declares
     /// optional; the person answers at run time.
     pub native_messaging_grantable: bool,
+    /// Explicit per-install permission for user-script registration and execution.
+    pub allow_user_scripts: bool,
     pub match_patterns: Vec<String>,
     /// Set when the package changed since WebKit last ran it, so its
     /// background runs once and WebKit relearns what it listens for.
@@ -1083,6 +1085,10 @@ pub trait Engine {
     /// The proxy views created from now on go through, or none for the
     /// system's. Views already open keep what they were made with.
     fn set_proxy(&self, _proxy: Option<crate::proxy::ProxyServer>) {}
+
+    /// Selects local spell checking dictionaries from the interface language.
+    fn set_spellchecking_language(&self, _language: String) {}
+
     /// Prebuild a hidden webview for `partition` so the next open adopts it
     /// instead of paying the renderer spawn. Safe moment: after a page load.
     fn warm_spare(&self, _partition: Partition) {}

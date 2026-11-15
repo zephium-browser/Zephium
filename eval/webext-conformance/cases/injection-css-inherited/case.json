@@ -1,0 +1,11 @@
+{
+  "id": "injection-css-inherited",
+  "title": "CSS inherited-origin frame qualification",
+  "apis": [
+    "scripting.insertCSS",
+    "scripting.executeScript"
+  ],
+  "permissions": [
+    "scripting"
+  ]
+}

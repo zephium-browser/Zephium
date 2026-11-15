@@ -1,0 +1,154 @@
+{
+  "caseId": "windows-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "current window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "current window:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "incognito": false,
+          "state": "normal",
+          "tabs": [
+            {
+              "active": false,
+              "id": "<tab:1>",
+              "index": 0,
+              "windowId": "<window:1>"
+            },
+            {
+              "active": true,
+              "id": "<tab:2>",
+              "index": 1,
+              "windowId": "<window:1>"
+            }
+          ],
+          "type": "normal",
+          "windowId": "<window:1>"
+        }
+      }
+    },
+    {
+      "label": "create normal window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create normal window:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "incognito": false,
+          "state": "normal",
+          "tabs": [
+            {
+              "active": true,
+              "id": "<tab:3>",
+              "index": 0,
+              "windowId": "<window:2>"
+            }
+          ],
+          "type": "normal",
+          "windowId": "<window:2>"
+        }
+      }
+    },
+    {
+      "label": "get populated window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get populated window:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "incognito": false,
+          "state": "normal",
+          "tabs": [
+            {
+              "active": true,
+              "id": "<tab:3>",
+              "index": 0,
+              "windowId": "<window:2>"
+            }
+          ],
+          "type": "normal",
+          "windowId": "<window:2>"
+        }
+      }
+    },
+    {
+      "label": "update window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update window:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "incognito": false,
+          "state": "normal",
+          "type": "normal",
+          "windowId": "<window:2>"
+        }
+      }
+    },
+    {
+      "label": "remove window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove window:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "removed event",
+      "value": {
+        "windowId": "<window:2>"
+      }
+    },
+    {
+      "label": "get removed window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get removed window:error",
+      "value": {
+        "lastError": null,
+        "message": "No window with id: <window:2>."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

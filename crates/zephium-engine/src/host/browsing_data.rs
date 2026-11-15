@@ -8,13 +8,13 @@
 use std::collections::{HashMap, HashSet};
 
 use zephium_core::browsing_data::EngineDataFailure;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use zephium_core::browsing_data::{EngineDataCall, EngineDataCompletion, EngineDataReply};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::Partition;
 
 use super::profiles::{bind_profile_persistence_class, ProfilePersistenceClass};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use super::EngineHost;
 
 /// The profile a data call may act on, or why none.
@@ -37,7 +37,7 @@ pub(super) fn admitted_profile(
     Ok(profile)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl EngineHost {
     pub(crate) fn browsing_data_call(
         &mut self,
@@ -66,6 +66,24 @@ impl EngineHost {
                 EngineDataCall::Sites => native::sites(profile, done),
                 EngineDataCall::ForgetSite { site, .. } => native::forget_site(profile, site, done),
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use webkit2gtk::WebsiteDataManagerExt;
+            // Only the exact store attested during ordinary view construction.
+            // Never create a default context or guess a directory for a data call.
+            let manager = self
+                .linux_data_managers
+                .get(&profile)
+                .filter(|managers| managers.len() == 1)
+                .and_then(|managers| managers.first())
+                .filter(|manager| !manager.is_ephemeral())
+                .filter(|_| !self.linux_unverifiable_data_managers.contains(&profile));
+            let Some(manager) = manager else {
+                done.finish(EngineDataReply::Failed(EngineDataFailure::Unavailable));
+                return;
+            };
+            crate::platform::imp::browsing_data::call(manager, call, done);
         }
         #[cfg(target_os = "windows")]
         {
@@ -104,6 +122,15 @@ impl EngineHost {
             EngineDataCall::ForgetSite { site, origins } => {
                 native::forget_site(&target, site, origins, done)
             }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl EngineHost {
+    pub(crate) fn refresh_linux_proxy(&self) {
+        for manager in self.linux_data_managers.values().flatten() {
+            crate::platform::imp::apply_proxy(manager);
         }
     }
 }

@@ -1,0 +1,42 @@
+{
+  "caseId": "i18n-large-catalog",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "extension catalog",
+      "value": "Translated message 3999: bounded data bounded data bounded data bounded data "
+    },
+    {
+      "label": "content catalog ready at document start:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "content catalog ready at document start:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "dataOnly": true,
+              "first": "Translated message 0: bounded data bounded data bounded data bounded data ",
+              "last": "Translated message 3999: bounded data bounded data bounded data bounded data ",
+              "literal": "\");globalThis.catalogExecuted=true;/*"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

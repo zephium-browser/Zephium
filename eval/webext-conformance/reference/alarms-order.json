@@ -1,0 +1,117 @@
+{
+  "caseId": "alarms-order",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "alarm.create",
+      "value": {
+        "name": "first",
+        "when": "past"
+      }
+    },
+    {
+      "label": "alarm.onAlarm",
+      "value": {
+        "name": "first",
+        "periodInMinutes": null,
+        "scheduled": "due"
+      }
+    },
+    {
+      "label": "first.getAfterFire:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "first.getAfterFire:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": null
+      }
+    },
+    {
+      "label": "alarm.create",
+      "value": {
+        "name": "second",
+        "when": "past"
+      }
+    },
+    {
+      "label": "alarm.onAlarm",
+      "value": {
+        "name": "second",
+        "periodInMinutes": null,
+        "scheduled": "due"
+      }
+    },
+    {
+      "label": "second.getAfterFire:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "second.getAfterFire:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": null
+      }
+    },
+    {
+      "label": "replacement.get:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "replacement.get:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "replacement",
+          "periodInMinutes": null,
+          "scheduled": "future"
+        }
+      }
+    },
+    {
+      "label": "replacement.clear:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "replacement.clear:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "getAll.final:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getAll.final:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

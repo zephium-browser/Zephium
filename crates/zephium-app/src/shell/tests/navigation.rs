@@ -704,6 +704,16 @@ fn only_a_local_hosts_refused_certificate_has_a_way_past() {
     refuse(&mut shell, "http://nas.local", "https://nas.local:5001/");
     let failure = tab(&screen).failure.unwrap();
     assert_eq!(failure.url, "https://nas.local:5001/");
+    if cfg!(target_os = "linux") {
+        assert!(
+            !failure.can_continue,
+            "GTK has no exact revocable exception"
+        );
+        shell.handle(Command::ContinuePastCertificate(id));
+        assert!(allowed(&engine).is_empty());
+        assert!(shell.continued_certificates.is_empty());
+        return;
+    }
     assert!(failure.can_continue);
     shell.handle(Command::ContinuePastCertificate(id));
     assert_eq!(

@@ -1,0 +1,89 @@
+{
+  "caseId": "navigation-fragment",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "fragment one:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "fragment one:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "requested": "one"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "fragment one event",
+      "value": {
+        "documentId": "<document:1>",
+        "documentLifecycle": "active",
+        "event": "onReferenceFragmentUpdated",
+        "frameId": 0,
+        "frameType": "outermost_frame",
+        "parentFrameId": -1,
+        "tabId": "<tab:1>",
+        "transitionQualifiers": [],
+        "transitionType": "link",
+        "url": "<origin:a>/page.html#one"
+      }
+    },
+    {
+      "label": "fragment two:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "fragment two:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "requested": "two"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "fragment two event",
+      "value": {
+        "documentId": "<document:1>",
+        "documentLifecycle": "active",
+        "event": "onReferenceFragmentUpdated",
+        "frameId": 0,
+        "frameType": "outermost_frame",
+        "parentFrameId": -1,
+        "tabId": "<tab:1>",
+        "transitionQualifiers": [
+          "client_redirect"
+        ],
+        "transitionType": "link",
+        "url": "<origin:a>/page.html#two"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

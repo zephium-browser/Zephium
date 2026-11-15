@@ -59,5 +59,15 @@ impl Downloads {
             self.begin_shutdown_recovery();
         }
         self.ensure_timer();
+        #[cfg(target_os = "linux")]
+        {
+            // An idle manager has no deadline or worker reply to wake settlement.
+            let weak = Rc::downgrade(self);
+            gtk::glib::idle_add_local_once(move || {
+                if let Some(manager) = weak.upgrade() {
+                    manager.tick();
+                }
+            });
+        }
     }
 }

@@ -1,0 +1,167 @@
+export const fullCases = [
+  "action-tab-state",
+  "alarms-clamp",
+  "alarms-create-forms",
+  "alarms-order",
+  "commands-inventory",
+  "dnr-dynamic-session",
+  "dnr-matched-permission",
+  "dnr-regex-support",
+  "i18n-fallback",
+  "i18n-placeholders",
+  "i18n-predefined",
+  "identity-redirect-url",
+  "navigation-document",
+  "permissions-inventory",
+  "permissions-request-gesture",
+  "ports-disconnect",
+  "runtime-callback-promise",
+  "runtime-burst",
+  "runtime-last-error-unchecked",
+  "runtime-response-styles",
+  "storage-bytes",
+  "storage-get-forms",
+  "storage-on-changed",
+  "storage-quota",
+  "storage-session-access",
+  "tabs-lifecycle",
+  "tabs-query-permission",
+  "tabs-query-redaction",
+  "windows-lifecycle",
+];
+
+export const omittedCalls = {
+  "scripting-register-lifecycle": [
+    "existing document is unchanged",
+    "new document uses registered script",
+    "new document uses updated script",
+    "unregistration preserves existing injection",
+    "later document has no injection",
+  ],
+};
+
+const missing = {
+  "extension-isolation": "Native extension COOP/COEP, shared memory and Wasm CSP enforcement.",
+  "offscreen-dom-parser": "Real hidden document and native DOMParser, with runtime message delivery.",
+  "content-file-authority": "Requires native file-pattern admission and page injection.",
+  "webrequest-handler-cache": "Real profile memory and back-forward cache invalidation; native completion required.",
+  "tabs-capture-visible": "Real browser capture and requested image encoding need a native visible document.",
+  "management-surface": "Permissioned management surface requires native extension context; operations remain unavailable.",
+  "declarative-content-surface": "Native capability-denied custom constructors; presence only, rule execution remains unavailable.",
+  "action-image-data": "Native canvas ImageData and packaged icon decoding.",
+  "content-fragment-pattern": "Real fragment/query document matching and content injection.",
+  "document-start-root": "Real HTML parser root creation and MAIN/ISOLATED document-start ordering.",
+  "i18n-css": "Native stylesheet resource localization and computed styles.",
+  "i18n-large-catalog": "Sealed catalog data transfer into a native document-start isolated world.",
+  "tabs-relative-url": "Nested native background worker and committed extension-page navigation.",
+  "user-scripts-unavailable": "Real browser feature-access revocation and held API references.",
+  "webrequest-filter-schemes": "Real resource filter registration and delivery for an empty filter.",
+  "worker-self-state": "Real worker install/activate lifecycle and ServiceWorker state transitions.",
+  "notifications-lifecycle":
+    "Real desktop notification service and native create/update/clear settlement.",
+  "injection-css-inherited":
+    "Native CSS matching for inherited-origin frame documents.",
+  "webrequest-lifecycle":
+    "Native resource redirects, completion and network failure signals.",
+  "runtime-self-message":
+    "Real worker startup and native sender-context exclusion; checked by both browser runners.",
+  "scripting-repeat-file":
+    "Real manifest and programmatic execution in the same document and isolated world.",
+  "dnr-block-allow": "Real network interception requires the native browser runner.",
+  "dnr-extension-redirect":
+    "Real extension resource network redirect requires the native browser runner.",
+  "dnr-upgrade-scheme":
+    "Real network scheme upgrade requires the native browser runner.",
+  "injection-all-frames": "Native content injection into a real frame tree.",
+  "injection-css": "Native isolated CSS injection and computed page styles.",
+  "injection-exclusions-globs": "Native document matching and page injection.",
+  "injection-lexical-entries":
+    "Native content script lexical environments across entries.",
+  "injection-lexical-files":
+    "Native content script lexical environments across files.",
+  "injection-match-about-blank":
+    "Native about:blank/srcdoc frame origins and injection.",
+  "injection-match-origin-fallback":
+    "Native blob/data frame origins and injection.",
+  "injection-run-at":
+    "Real parser, document readiness, script worlds and injection ordering.",
+  "navigation-fragment":
+    "Real location.hash/location.replace execution and native same-document events.",
+  "navigation-frames":
+    "Real child-frame loading and native parent/child event ordering.",
+  "navigation-history":
+    "Real page History API execution and native same-document events.",
+  "origin-context-csp":
+    "Real extension origin, CSP enforcement and page evaluation.",
+  "origin-fetch-permissions":
+    "Real extension/content fetch, CORS and host authorization.",
+  "ports-background-stop":
+    "Real background worker teardown and native disconnect delivery.",
+  "ports-navigation":
+    "Real content document teardown and replacement during navigation.",
+  "resources-origin-access":
+    "Real extension resource protocol and cross-origin access enforcement.",
+  "runtime-sender-frames":
+    "Real injected frame principals and native sender metadata.",
+  "scripting-execute-errors":
+    "Native page execution, promise rejection and file execution.",
+  "scripting-execute-frames":
+    "Native execution across a real document/frame tree.",
+  "scripting-execute-sync-async":
+    "Native page function execution and promise settlement.",
+  "scripting-execute-worlds":
+    "Native MAIN/ISOLATED world separation and page DOM.",
+  "tabs-active-tab":
+    "Real browser action gesture, content execution and navigation revocation.",
+  "tabs-message-frames":
+    "Real content injection, frame routing and sender documents.",
+  "worker-classic-environment":
+    "Real classic service worker environment and import cache lifecycle.",
+  "worker-install-activate":
+    "Real service worker installation and activation lifecycle.",
+  "worker-module-environment":
+    "Real module service worker environment and module loading.",
+};
+
+export const supportedCases = [
+  ...fullCases,
+  ...Object.keys(omittedCalls),
+].sort();
+
+export function inventory(caseIds) {
+  return caseIds.map((id) => {
+    if (fullCases.includes(id)) return { id, coverage: "full" };
+    if (Object.hasOwn(omittedCalls, id))
+      return {
+        id,
+        coverage: "partial",
+        reason:
+          "Registration metadata only; native page injection remains unexecuted.",
+        omittedCalls: omittedCalls[id],
+      };
+    if (!Object.hasOwn(missing, id))
+      throw new Error(`Unclassified Node case ${id}`);
+    return { id, coverage: "unavailable", reason: missing[id] };
+  });
+}
+
+// Projection is explicit, label based, and checked against the immutable oracle.
+export function projectReference(reference, omitted) {
+  const labels = new Set(
+    omitted.flatMap((label) => [`${label}:call`, `${label}:result`]),
+  );
+  for (const label of labels) {
+    if (
+      reference.observations.filter((row) => row.label === label).length !== 1
+    )
+      throw new Error(
+        `Missing or duplicate projected reference observation ${label}`,
+      );
+  }
+  return {
+    ...reference,
+    observations: reference.observations.filter(
+      (row) => !labels.has(row.label),
+    ),
+  };
+}

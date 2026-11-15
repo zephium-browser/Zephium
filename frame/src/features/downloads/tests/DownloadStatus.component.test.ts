@@ -27,6 +27,7 @@ const entry: DownloadView = {
   total: "100",
   error: null,
   insecure: false,
+  capabilities: { pause: true, resume: true, restart: false },
 };
 
 function serving(initial: DownloadView, next: (call: DownloadCall) => DownloadView | null) {
@@ -97,4 +98,13 @@ test("the card sits flush with the column's edges, which the window already inse
   const column = screen.container.getBoundingClientRect();
   expect(card.left).toBe(column.left);
   expect(card.right).toBe(column.right);
+});
+
+test("a native transfer without pause still offers cancellation", async () => {
+  serving({ ...entry, capabilities: { pause: false, resume: false, restart: false } }, () => null);
+  await render(DownloadStatus, { props: { profile, onopen: () => {} } });
+  await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+  await expect
+    .element(page.getByRole("button", { name: "Pause", exact: true }))
+    .not.toBeInTheDocument();
 });

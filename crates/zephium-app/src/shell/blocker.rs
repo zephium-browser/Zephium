@@ -2746,6 +2746,11 @@ impl Shell {
         if entry.startup_hold != Some(token) {
             return;
         }
+        if cfg!(target_os = "linux") {
+            // Keep restored pages behind the enabled policy; chrome is independent.
+            crate::diagnostic!("content blocker: startup still awaiting protected page admission");
+            return;
+        }
         entry.startup_hold = None;
         entry.startup_unprotected = true;
         let waiting = entry

@@ -32,6 +32,14 @@ fn saveable_source(read: Option<(String, bool)>) -> Option<String> {
 }
 
 impl EngineHost {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn save_page(&self, id: ItemId) {
+        use wry::WebViewExtUnix;
+        if let Some(view) = self.views.get(&id) {
+            view.page_save.present(&view.view.webview());
+        }
+    }
+
     pub(crate) fn zoom(&mut self, id: ItemId, scale: f64, request: ZoomRequestId) {
         let Some((permit, applied_scale, succeeded)) = self.views.get_mut(&id).map(|view| {
             let succeeded = view.zoom(scale).is_ok();
@@ -164,6 +172,7 @@ impl EngineHost {
     /// Saves the page through the platform's own Save As. On macOS the page's
     /// source is read first, so the panel can offer it beside the web
     /// archive; a page that gives none still saves as an archive.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn save_page(&self, id: ItemId) {
         let Some(view) = self.views.get(&id) else {
             return;
@@ -191,8 +200,6 @@ impl EngineHost {
         } {
             eprintln!("engine: Save As is unavailable: {error}");
         }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let _ = view;
     }
 
     /// Run-owned agent pages are never in `views`, so they never get the

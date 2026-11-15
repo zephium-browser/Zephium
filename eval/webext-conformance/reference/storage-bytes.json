@@ -1,0 +1,349 @@
+{
+  "caseId": "storage-bytes",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "local.empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "local.all:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.all:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 47
+      }
+    },
+    {
+      "label": "local.one:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.one:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 15
+      }
+    },
+    {
+      "label": "local.selected:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.selected:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 25
+      }
+    },
+    {
+      "label": "local.omitted.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.omitted.callback:callback",
+      "value": {
+        "args": [
+          47
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "local.omitted.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "local.omitted.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "local.missing:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.missing:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "local.afterRemove:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.afterRemove:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 32
+      }
+    },
+    {
+      "label": "sync.empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "sync.all:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.all:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 47
+      }
+    },
+    {
+      "label": "sync.one:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.one:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 15
+      }
+    },
+    {
+      "label": "sync.selected:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.selected:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 25
+      }
+    },
+    {
+      "label": "sync.omitted.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.omitted.callback:callback",
+      "value": {
+        "args": [
+          47
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "sync.omitted.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "sync.omitted.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "sync.missing:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.missing:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "sync.afterRemove:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.afterRemove:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 32
+      }
+    },
+    {
+      "label": "session.empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "session.all:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.all:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 64
+      }
+    },
+    {
+      "label": "session.one:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.one:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "session.selected:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.selected:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 64
+      }
+    },
+    {
+      "label": "session.omitted.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.omitted.callback:callback",
+      "value": {
+        "args": [
+          64
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "session.omitted.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "session.omitted.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "session.missing:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.missing:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 0
+      }
+    },
+    {
+      "label": "session.afterRemove:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.afterRemove:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": 64
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

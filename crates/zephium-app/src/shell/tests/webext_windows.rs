@@ -9,6 +9,7 @@ fn load(seed: u128) -> WebExtensionLoad {
         root: format!("/fixture/{seed}").into(),
         external_native_messaging: false,
         native_messaging_grantable: false,
+        allow_user_scripts: false,
         permissions: vec![],
         match_patterns: vec![],
         start_background: false,

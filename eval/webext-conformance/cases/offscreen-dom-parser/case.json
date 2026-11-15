@@ -1,0 +1,1 @@
+{"id": "offscreen-dom-parser", "title": "Real hidden document parses inert HTML and closes", "apis": ["offscreen.createDocument", "offscreen.closeDocument", "offscreen.hasDocument", "runtime.sendMessage"], "permissions": ["offscreen"], "timeoutMs": 60000}

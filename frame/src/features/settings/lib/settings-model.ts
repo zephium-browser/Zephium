@@ -1,7 +1,7 @@
 import * as m from "$shared/i18n/messages";
 import { preferences } from "$domain/preferences";
 import { fields } from "./catalog";
-import { IS_WINDOWS } from "$shared/platform";
+import { IS_WINDOWS, SUPPORTS_BLOCKER_STATISTICS } from "$shared/platform";
 import {
   Settings01Icon,
   PaintBoardIcon,
@@ -198,6 +198,7 @@ export function searchSettings(query: string) {
         shown.has(field.section) &&
         (showPreviews || !("preview" in field)) &&
         (!("windowsOnly" in field) || IS_WINDOWS) &&
+        (!("requiresBlockerStatistics" in field) || SUPPORTS_BLOCKER_STATISTICS) &&
         matches(field.label() + " " + field.description()),
     )
     .map(([id, field]) => ({
@@ -233,7 +234,8 @@ export function searchSections(query: string) {
             (f) =>
               f.section === section.id &&
               (showPreviews || !("preview" in f)) &&
-              (!("windowsOnly" in f) || IS_WINDOWS),
+              (!("windowsOnly" in f) || IS_WINDOWS) &&
+              (!("requiresBlockerStatistics" in f) || SUPPORTS_BLOCKER_STATISTICS),
           )
           .flatMap((f) => [f.label(), f.description()]),
       ]

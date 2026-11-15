@@ -1,0 +1,187 @@
+{
+  "caseId": "user-scripts-worlds",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "register:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "register:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "get scripts:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get scripts:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "allFrames": false,
+            "id": "default",
+            "js": [
+              {
+                "code": "\n      globalThis.userMarker='default';\n      document.documentElement.dataset.userOwn = String(chrome.runtime.id.length === 32);\n      document.documentElement.dataset.userSurface = JSON.stringify(Object.keys(chrome.runtime).sort());\n      chrome.runtime.sendMessage({kind:'user'}).then(value => document.documentElement.dataset.userReply=JSON.stringify(value));\n      chrome.runtime.onMessage.addListener((message,sender,reply)=>reply('from-user'));\n      const port=chrome.runtime.connect({name:'user'});\n      port.onMessage.addListener(value=>{document.documentElement.dataset.userPort=String(value);port.disconnect();});\n      port.postMessage(41);\n    "
+              }
+            ],
+            "matches": [
+              "http://127.0.0.1/*"
+            ],
+            "runAt": "document_start",
+            "world": "USER_SCRIPT"
+          },
+          {
+            "allFrames": false,
+            "id": "muted",
+            "js": [
+              {
+                "code": "\n      document.documentElement.dataset.muted=JSON.stringify({other:typeof userMarker,send:typeof chrome.runtime.sendMessage,connect:typeof chrome.runtime.connect,onMessage:typeof chrome.runtime.onMessage,onConnect:typeof chrome.runtime.onConnect,getURL:typeof chrome.runtime.getURL,id:chrome.runtime.id.length===32,guid:/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(chrome.runtime.dynamicId)});\n    "
+              }
+            ],
+            "matches": [
+              "http://127.0.0.1/*"
+            ],
+            "runAt": "document_end",
+            "world": "USER_SCRIPT",
+            "worldId": "muted"
+          },
+          {
+            "allFrames": false,
+            "id": "main",
+            "js": [
+              {
+                "code": "globalThis.mainUserMarker=42;document.documentElement.dataset.mainUser=String(globalThis.chrome?.runtime===undefined);"
+              }
+            ],
+            "matches": [
+              "http://127.0.0.1/*"
+            ],
+            "runAt": "document_idle",
+            "world": "MAIN"
+          }
+        ]
+      }
+    },
+    {
+      "label": "worlds",
+      "value": {
+        "isolated": "undefined",
+        "main": "true",
+        "mainHidden": "undefined",
+        "muted": {
+          "connect": "undefined",
+          "getURL": "undefined",
+          "guid": true,
+          "id": true,
+          "onConnect": "undefined",
+          "onMessage": "undefined",
+          "other": "undefined",
+          "send": "undefined"
+        },
+        "own": "true",
+        "port": "42",
+        "reply": {
+          "frame": 0,
+          "kind": "user",
+          "own": true
+        },
+        "surface": [
+          "ContextType",
+          "OnInstalledReason",
+          "OnRestartRequiredReason",
+          "PlatformArch",
+          "PlatformNaclArch",
+          "PlatformOs",
+          "RequestUpdateCheckStatus",
+          "connect",
+          "dynamicId",
+          "id",
+          "onConnect",
+          "onMessage",
+          "sendMessage"
+        ]
+      }
+    },
+    {
+      "label": "tab to user:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "tab to user:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": "from-user"
+      }
+    },
+    {
+      "label": "update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "unregister:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unregister:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "empty:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "empty:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

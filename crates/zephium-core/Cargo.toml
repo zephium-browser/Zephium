@@ -8,6 +8,7 @@ license.workspace = true
 ipc-types = []
 
 [dependencies]
+zephium-webext-matcher = { path = "../zephium-webext-matcher", version = "=0.1.0" }
 ulid.workspace = true
 url.workspace = true
 serde.workspace = true

@@ -1,0 +1,7 @@
+{
+  "name": { "message": "Classic fixture" },
+  "greeting": {
+    "message": "Hello $who$, $1",
+    "placeholders": { "who": { "content": "fixture" } }
+  }
+}

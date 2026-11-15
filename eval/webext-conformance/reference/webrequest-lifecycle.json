@@ -1,0 +1,24 @@
+{
+  "caseId": "webrequest-lifecycle",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "observed lifecycle",
+      "value": {
+        "before": true,
+        "distinctResources": 2,
+        "error": true,
+        "exactTab": true,
+        "redirect": true,
+        "redirectedCompletionKeepsId": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "navigation-fragment",
+  "title": "Hash assignment and replacement emit fragment navigation events",
+  "apis": [
+    "webNavigation.onReferenceFragmentUpdated",
+    "scripting.executeScript"
+  ],
+  "permissions": ["webNavigation", "scripting"]
+}

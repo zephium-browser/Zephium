@@ -227,7 +227,7 @@ fn only_tabs_a_person_reads_sign_in_or_get_certificate_exceptions() {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[test]
 fn an_app_link_from_another_site_is_heard_only_after_a_click() {
     use zephium_core::navigation::AppLinkSource;

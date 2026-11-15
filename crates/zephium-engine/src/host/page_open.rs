@@ -156,6 +156,25 @@ impl EngineHost {
                 return NewWindowResponse::Deny;
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            use gtk::prelude::*;
+            use wry::WebViewExtUnix;
+            let observed = view.view.webview();
+            let owner = crate::platform::imp::container();
+            if !owner
+                .as_ref()
+                .is_some_and(|owner| observed.is_ancestor(owner))
+                || observed != features.opener.webview
+                || !observed.is_mapped()
+                || !observed
+                    .toplevel()
+                    .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+                    .is_some_and(|window| window.is_active())
+            {
+                return NewWindowResponse::Deny;
+            }
+        }
         self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
     }
 
@@ -188,16 +207,21 @@ impl EngineHost {
         };
         let adoption = self.native_open_authority.adoption(child, active.clone());
         let foreground = features.foreground;
-        self.native_tab_download_ask =
-            self.views
-                .get(&source)
-                .map(|view| super::downloads::SiteAsk {
-                    item: Rc::new(Cell::new(source)),
-                    permit: view.event_permit.clone(),
-                    sink: self.sink.clone(),
-                    site: super::construction::committed_origin(&view.navigation),
-                    opened_by_click: clicked,
-                });
+        #[cfg(target_os = "linux")]
+        let _ = clicked;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.native_tab_download_ask =
+                self.views
+                    .get(&source)
+                    .map(|view| super::downloads::SiteAsk {
+                        item: Rc::new(Cell::new(source)),
+                        permit: view.event_permit.clone(),
+                        sink: self.sink.clone(),
+                        site: super::construction::committed_origin(&view.navigation),
+                        opened_by_click: clicked,
+                    });
+        }
         let built = self.build_view(
             Rc::new(Cell::new(child)),
             partition,
@@ -206,7 +230,10 @@ impl EngineHost {
             EventPermit::bound(&active),
             NativeViewPurpose::NativeTab(features.opener),
         );
-        self.native_tab_download_ask = None;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.native_tab_download_ask = None;
+        }
         let Some(view) = built else {
             self.native_open_authority.release_failed(child, &active);
             return NewWindowResponse::Deny;
@@ -223,6 +250,11 @@ impl EngineHost {
             self.native_open_authority.release_failed(child, &active);
             return NewWindowResponse::Deny;
         }
+        #[cfg(target_os = "linux")]
+        let native = {
+            use wry::WebViewExtUnix;
+            view.view.webview()
+        };
         #[cfg(target_os = "macos")]
         let native = {
             use objc2::rc::Retained;
@@ -257,7 +289,7 @@ impl EngineHost {
                 adoption,
             },
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             NewWindowResponse::Create { webview: native }
         }
@@ -407,4 +439,187 @@ mod tests {
             assert!(!windows_menu_item_allowed(name));
         }
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "page_open_linux_tests.rs"]
+mod linux_tests;
+
+#[cfg(target_os = "linux")]
+pub(super) fn install_linux_menu(
+    page: &webkit2gtk::WebView,
+    source: Rc<Cell<ItemId>>,
+    permit: EventPermit,
+    navigation: crate::navigation_epoch::NavigationEpochTracker,
+    presentation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    downloads: bool,
+) {
+    use gtk::prelude::*;
+    use webkit2gtk::{ContextMenuExt, HitTestResultExt, SettingsExt, WebViewExt};
+    page.connect_context_menu(move |page, menu, _, hit| {
+        if permit.active_token().is_none()
+            || !presentation.load(Ordering::Acquire)
+            || !page.is_mapped()
+            || !page
+                .toplevel()
+                .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+                .is_some_and(|window| window.is_active())
+        {
+            return true;
+        }
+        let Some(activity) = navigation.activity_snapshot() else {
+            return true;
+        };
+        let inspect = webkit2gtk::WebViewExt::settings(page)
+            .is_some_and(|settings| settings.enables_developer_extras());
+        filter_linux_menu(menu, inspect, downloads, 0, &mut 64);
+        for (url, name, label) in [
+            (
+                hit.media_uri(),
+                "zephium-open-media-in-new-tab",
+                "Open Media in New Tab",
+            ),
+            (
+                hit.image_uri(),
+                "zephium-open-image-in-new-tab",
+                "Open Image in New Tab",
+            ),
+            (
+                hit.link_uri(),
+                "zephium-open-link-in-new-tab",
+                "Open Link in New Tab",
+            ),
+        ] {
+            let Some(url) = url.filter(|url| linux_menu_url_allowed(url)) else {
+                continue;
+            };
+            let action = gtk::gio::SimpleAction::new(name, None);
+            let page = page.downgrade();
+            let permit = permit.clone();
+            let navigation = navigation.clone();
+            let source = source.clone();
+            let used = Cell::new(false);
+            action.connect_activate(move |_, _| {
+                if used.replace(true) || !navigation.matches_activity(activity) {
+                    return;
+                }
+                let (page, permit, navigation, source, url) = (
+                    page.clone(),
+                    permit.clone(),
+                    navigation.clone(),
+                    source.clone(),
+                    url.clone(),
+                );
+                gtk::glib::idle_add_local_once(move || {
+                    if !navigation.matches_activity(activity) {
+                        return;
+                    }
+                    let Some(page) = page.upgrade() else {
+                        return;
+                    };
+                    if let NewWindowResponse::Create { webview } =
+                        super::dispatch::try_open_native_tab(
+                            source.get(),
+                            &permit,
+                            activity,
+                            &url,
+                            NewWindowFeatures::for_user_tab(page),
+                            true,
+                        )
+                    {
+                        webview.load_uri(&url);
+                    }
+                });
+            });
+            menu.prepend(&webkit2gtk::ContextMenuItem::from_gaction(
+                &action, label, None,
+            ));
+        }
+        false
+    });
+}
+
+#[cfg(target_os = "linux")]
+fn filter_linux_menu(
+    menu: &webkit2gtk::ContextMenu,
+    inspect: bool,
+    downloads: bool,
+    depth: usize,
+    budget: &mut usize,
+) {
+    use webkit2gtk::{ContextMenuExt, ContextMenuItemExt};
+    for item in menu.items() {
+        if depth >= 4 || *budget == 0 {
+            menu.remove(&item);
+            continue;
+        }
+        *budget -= 1;
+        let download = downloads
+            && matches!(
+                item.stock_action(),
+                webkit2gtk::ContextMenuAction::DownloadLinkToDisk
+                    | webkit2gtk::ContextMenuAction::DownloadImageToDisk
+            );
+        if !(item.is_separator()
+            || linux_stock_action_allowed(item.stock_action(), inspect)
+            || download)
+        {
+            menu.remove(&item);
+            continue;
+        }
+        if let Some(submenu) = item.submenu() {
+            filter_linux_menu(&submenu, inspect, downloads, depth + 1, budget);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stock_action_allowed(action: webkit2gtk::ContextMenuAction, inspect: bool) -> bool {
+    use webkit2gtk::ContextMenuAction::*;
+    match action {
+        OpenLink
+        | CopyLinkToClipboard
+        | CopyImageToClipboard
+        | CopyImageUrlToClipboard
+        | GoBack
+        | GoForward
+        | Stop
+        | Reload
+        | Copy
+        | Cut
+        | Paste
+        | Delete
+        | SelectAll
+        | SpellingGuess
+        | NoGuessesFound
+        | IgnoreSpelling
+        | LearnSpelling
+        | IgnoreGrammar
+        | Bold
+        | Italic
+        | Underline
+        | CopyVideoLinkToClipboard
+        | CopyAudioLinkToClipboard
+        | ToggleMediaControls
+        | ToggleMediaLoop
+        | EnterVideoFullscreen
+        | MediaPlay
+        | MediaPause
+        | MediaMute
+        | InsertEmoji
+        | PasteAsPlainText => true,
+        InspectElement => inspect,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_menu_url_allowed(url: &str) -> bool {
+    url.len() <= 16 * 1024
+        && url::Url::parse(url).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
 }

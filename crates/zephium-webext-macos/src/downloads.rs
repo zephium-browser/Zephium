@@ -459,6 +459,7 @@ mod tests {
 
     fn view(state: DownloadState, error: Option<DownloadError>) -> DownloadView {
         DownloadView {
+            capabilities: zephium_core::downloads::DownloadCapabilities::native(),
             id: "01HZZZZZZZZZZZZZZZZZZZZZZZ".into(),
             revision: "00000001".into(),
             created_at: "1700000000".into(),

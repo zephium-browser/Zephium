@@ -173,6 +173,7 @@ impl WebExtensions {
                     entry.publisher_verified,
                 ) || (entry.publisher_verified && entry.native_messaging_granted),
             native_messaging_grantable: entry.publisher_verified,
+            allow_user_scripts: entry.allow_user_scripts,
             match_patterns: granted_sites(entry),
             start_background,
         }
@@ -751,6 +752,8 @@ pub(in crate::webext) async fn list(
 fn platform() -> Platform {
     if cfg!(target_os = "windows") {
         Platform::Windows
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
     } else {
         Platform::Macos
     }
@@ -773,9 +776,11 @@ fn extension_state(
     }
 }
 
+#[derive(serde::Deserialize)]
 enum RegistryMutation {
     Enabled { id: String, enabled: bool },
     Pinned { id: String, pinned: bool },
+    AllowUserScripts { id: String, allowed: bool },
     Access { id: String, access: Access },
     Uninstall { id: String },
 }
@@ -811,6 +816,7 @@ fn execute_mutation(
     let mut registry = extensions.registry(profile);
     let id = match &mutation {
         RegistryMutation::Enabled { id, .. }
+        | RegistryMutation::AllowUserScripts { id, .. }
         | RegistryMutation::Pinned { id, .. }
         | RegistryMutation::Access { id, .. }
         | RegistryMutation::Uninstall { id } => id,
@@ -823,6 +829,10 @@ fn execute_mutation(
     let removed = match mutation {
         RegistryMutation::Enabled { enabled, .. } => {
             registry.extensions[position].enabled = enabled;
+            None
+        }
+        RegistryMutation::AllowUserScripts { allowed, .. } => {
+            registry.extensions[position].allow_user_scripts = allowed;
             None
         }
         RegistryMutation::Access { access, .. } => {
@@ -964,7 +974,7 @@ pub(in crate::webext) async fn set_access(
 ) -> Result<(), String> {
     let access = match mode {
         "all" => Access::All,
-        "click" if !cfg!(target_os = "windows") => Access::Click,
+        "click" if !cfg!(any(target_os = "windows", target_os = "linux")) => Access::Click,
         "sites" => {
             let mut sites: Vec<String> = sites.iter().filter_map(|site| site_host(site)).collect();
             sites.sort();
@@ -1112,6 +1122,10 @@ fn hardening_rejected_startup_delivery_settles_as_failed_instead_of_starting_for
 #[tokio::test(flavor = "current_thread")]
 async fn registry_mutations_leave_the_async_executor_responsive() {
     for mutation in [
+        RegistryMutation::AllowUserScripts {
+            id: "missing".into(),
+            allowed: true,
+        },
         RegistryMutation::Enabled {
             id: "missing".into(),
             enabled: false,

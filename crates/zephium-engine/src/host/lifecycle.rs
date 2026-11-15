@@ -241,7 +241,7 @@ impl EngineHost {
         }
         #[cfg(target_os = "macos")]
         self.webext.close_page(id);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.revoke_page_permission_requests_for_close(id);
         let profile = self
             .partitions
@@ -256,7 +256,7 @@ impl EngineHost {
                 );
             }
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.forget_fullscreen(id);
         #[cfg(all(
             feature = "agentic-browser",
@@ -264,6 +264,9 @@ impl EngineHost {
         ))]
         crate::platform::imp::page_glow::forget(id);
         let removed = self.views.remove(&id);
+        #[cfg(target_os = "linux")]
+        self.webext_linux
+            .detach_tab(id, removed.as_ref().map(|observed| &observed.view));
         self.navigation_snapshots.remove(&id);
         self.partitions.remove(&id);
         #[cfg(target_os = "windows")]
@@ -330,7 +333,10 @@ impl EngineHost {
             done(false);
             return;
         }
-        #[cfg(target_os = "macos")]
+        // Tab views go in shutdown_common; extension views drain on the loop.
+        #[cfg(target_os = "linux")]
+        let done = self.webext_linux.shutdown(done);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let done = if let Some(downloads) = &self.downloads {
             let (native_done, download_done) = join_download_shutdown(done);
             downloads.quiesce(None, download_done);
@@ -601,10 +607,10 @@ impl EngineHost {
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 type ShutdownPart = Box<dyn FnOnce(bool) + Send>;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn join_download_shutdown(
     done: Box<dyn FnOnce(bool) + Send>,
 ) -> (ShutdownPart, ShutdownPart) {

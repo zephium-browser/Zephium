@@ -1,0 +1,1 @@
+[{"id":0,"priority":0,"action":{"type":"unknown"},"condition":{"urlFilter":"||*","regexFilter":"(?=unsupported)","requestDomains":[]}},null,{"id":1,"action":{"type":"block"},"condition":{}},{"id":1,"action":{"type":"allow"},"condition":{}}]

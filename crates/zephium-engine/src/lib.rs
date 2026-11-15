@@ -13,12 +13,12 @@ pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monot
 mod caption_keys;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod card_geometry;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod fullscreen;
 mod haptics;
 #[cfg(any(target_os = "windows", test))]
@@ -174,6 +174,24 @@ compile_error!("the native agentic semantic probe is forbidden in optimized buil
 
 #[cfg(target_os = "macos")]
 pub use platform::macos::private_api::missing as missing_private_webkit_api;
+
+/// Reserve the browser window's effective bindings before extension suggestions.
+#[cfg(target_os = "linux")]
+pub fn reserve_extension_commands(shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+    host::reserve_extension_commands(shortcuts);
+}
+
+/// Resolve a native window key; repeats query consumption without activating again.
+#[cfg(target_os = "linux")]
+pub fn perform_linux_extension_command(
+    key: u32,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    activate: bool,
+) -> bool {
+    host::try_perform_linux_extension_command(key, ctrl, shift, alt, activate)
+}
 
 /// Runs the extension command a key press in the browser window is the
 /// shortcut of; true when one took it. Call it for keys no browser shortcut
@@ -596,7 +614,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRules};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionSettlement, ExtensionActionSnapshotSettlement,
 };
@@ -1472,13 +1490,13 @@ fn retirement_filtering_sink(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) struct NativeOpenAuthority {
     retirement: Arc<Mutex<RetirementGate>>,
     dispatch: MainThreadDispatch,
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
 }
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl NativeOpenAuthority {
     pub(crate) fn reserve(
         &self,
@@ -1763,7 +1781,7 @@ pub fn install(
         dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         Arc::new(NativeOpenAuthority {
             retirement: retirement.clone(),
             dispatch: dispatch.clone(),
@@ -1804,7 +1822,7 @@ pub fn enforce_runtime_security_floor() -> Result<RuntimeSecurityAdvisories, Str
 
 /// Reports active downloads across all profiles. Call on the native main thread;
 /// false means the host could not admit the query and will not call `done`.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub fn downloads_in_progress(done: impl FnOnce(bool) + 'static) -> bool {
     host::try_with(move |host| {
         done(
@@ -1830,7 +1848,7 @@ impl WebviewEngine {
         store: Arc<dyn zephium_core::ports::store::Store + Send + Sync>,
         notify: impl Fn(ProfileId) + Send + Sync + 'static,
     ) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run(move || {
                 host::try_with(move |host| {
@@ -1843,7 +1861,7 @@ impl WebviewEngine {
                 });
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (store, notify);
             true
@@ -2209,7 +2227,7 @@ impl WebviewEngine {
     /// result, or `None` when the page gave none within the engine's limits.
     #[cfg(all(
         feature = "blocker-bench",
-        any(target_os = "macos", target_os = "windows")
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
     ))]
     #[doc(hidden)]
     pub fn blocker_bench_evaluate(
@@ -2240,7 +2258,7 @@ impl WebviewEngine {
     /// took it.
     #[cfg(all(
         feature = "blocker-bench",
-        any(target_os = "macos", target_os = "windows")
+        any(target_os = "macos", target_os = "windows", target_os = "linux")
     ))]
     #[doc(hidden)]
     pub fn blocker_bench_preload(&self, script: String) -> std::sync::mpsc::Receiver<bool> {
@@ -2349,11 +2367,11 @@ pub fn page_mute_supported() -> bool {
     {
         platform::macos::audio::mute_supported()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         true
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
@@ -2467,7 +2485,7 @@ impl Engine for WebviewEngine {
     }
     // Only these platforms hold downloads; elsewhere the trait's default
     // keeps nothing.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn set_download_sites(
         &self,
         profile: ProfileId,
@@ -2513,7 +2531,7 @@ impl Engine for WebviewEngine {
         call: zephium_core::browsing_data::EngineDataCall,
         completion: zephium_core::browsing_data::EngineDataCompletion,
     ) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(partition.profile()) {
                 completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -2529,7 +2547,7 @@ impl Engine for WebviewEngine {
                 });
             });
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (partition, call);
             completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -2543,7 +2561,7 @@ impl Engine for WebviewEngine {
         call: zephium_core::downloads::DownloadCall,
         done: zephium_core::downloads::DownloadCompletion,
     ) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run(move || {
                 host::try_with(move |host| {
@@ -2557,7 +2575,7 @@ impl Engine for WebviewEngine {
                 });
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (partition, call);
             done.finish(zephium_core::downloads::DownloadResponse::Error {
@@ -2739,7 +2757,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn load_web_extension(
         &self,
         profile: ProfileId,
@@ -2753,7 +2771,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn unload_web_extension(
         &self,
         profile: ProfileId,
@@ -2764,7 +2782,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn open_web_extension_options(
         &self,
         profile: ProfileId,
@@ -2777,7 +2795,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn answer_web_extension_access(
         &self,
         profile: ProfileId,
@@ -2791,7 +2809,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn answer_web_extension_data(
         &self,
         profile: ProfileId,
@@ -2805,7 +2823,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn web_extension_data_changed(
         &self,
         profile: ProfileId,
@@ -2816,7 +2834,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fn remove_web_extension(
         &self,
         profile: ProfileId,
@@ -2833,7 +2851,7 @@ impl Engine for WebviewEngine {
         tab: ItemId,
         surface_generation: ExtensionBrowserSurfaceGeneration,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
                 return NativeDispatch::Rejected;
@@ -2872,7 +2890,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (profile, tab, surface_generation);
             NativeDispatch::Unsupported
@@ -2880,7 +2898,7 @@ impl Engine for WebviewEngine {
     }
 
     fn invoke_extension_action(&self, request: ExtensionActionRequest) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let profile = request.runtime().profile();
             if !lock_retirement_gate(&self.retirement).profile_is_active(profile) {
@@ -2918,7 +2936,7 @@ impl Engine for WebviewEngine {
                 }
             }))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = request;
             NativeDispatch::Unsupported
@@ -2988,7 +3006,17 @@ impl Engine for WebviewEngine {
             }
             NativeDispatch::from_scheduled(scheduled)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let _ = first_url_after_reply;
+            NativeDispatch::from_scheduled(self.run(move || {
+                host::best_effort_with(move |host| {
+                    let _ =
+                        host.settle_linux_extension_browser_request(profile, request, settlement);
+                });
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (profile, request, settlement, first_url_after_reply);
             NativeDispatch::Unsupported
@@ -3002,7 +3030,7 @@ impl Engine for WebviewEngine {
         request: PagePermissionRequestId,
         settlement: PagePermissionRequestSettlement,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             // Terminal cleanup stays admissible after item/profile retirement.
             // The host still requires the exact retained tuple and view
@@ -3013,7 +3041,7 @@ impl Engine for WebviewEngine {
                 });
             }))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (profile, item, request, settlement);
             NativeDispatch::Unsupported
@@ -3048,14 +3076,14 @@ impl Engine for WebviewEngine {
         request: u32,
         credentials: Option<zephium_core::http_auth::HttpCredentials>,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             // A retiring view cancels its own native request as it drops.
             self.run_for_active_item(item, move |host| {
                 host.answer_http_auth(item, request, credentials)
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (item, request, credentials);
             NativeDispatch::Unsupported
@@ -3068,13 +3096,13 @@ impl Engine for WebviewEngine {
         request: u32,
         allow: bool,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(item, move |host| {
                 host.answer_download_permission(item, request, allow)
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (item, request, allow);
             NativeDispatch::Unsupported
@@ -3082,7 +3110,7 @@ impl Engine for WebviewEngine {
     }
 
     fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
-        if cfg!(target_os = "windows") {
+        if cfg!(any(target_os = "windows", target_os = "linux")) {
             zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
         } else {
             zephium_core::ports::engine::FullscreenPresentation::OwnWindow
@@ -3109,11 +3137,11 @@ impl Engine for WebviewEngine {
     }
 
     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = id;
             NativeDispatch::Unsupported
@@ -3125,11 +3153,11 @@ impl Engine for WebviewEngine {
         id: ItemId,
         navigation: zephium_core::ports::engine::NavigationPresentationId,
     ) -> NativeDispatch {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |host| host.stop_media_capture(id, navigation))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (id, navigation);
             NativeDispatch::Unsupported
@@ -3382,11 +3410,11 @@ impl Engine for WebviewEngine {
         if !page_mute_supported() {
             return NativeDispatch::Unsupported;
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |h| h.set_muted(id, muted))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (id, muted);
             NativeDispatch::Unsupported
@@ -3716,8 +3744,20 @@ impl Engine for WebviewEngine {
         NativeDispatch::from_scheduled(dispatched)
     }
 
+    #[cfg(target_os = "linux")]
+    fn set_spellchecking_language(&self, language: String) {
+        platform::linux::spelling::set_language(language);
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_spellchecking());
+        });
+    }
+
     fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {
         network::set(proxy);
+        #[cfg(target_os = "linux")]
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_proxy());
+        });
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {

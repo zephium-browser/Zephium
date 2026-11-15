@@ -169,6 +169,7 @@ async fn update(
             *entry = Entry {
                 install: entry.install.clone(),
                 enabled: entry.enabled,
+                allow_user_scripts: entry.allow_user_scripts,
                 access: entry.access.clone(),
                 pinned: entry.pinned,
                 native_messaging_granted: fresh.publisher_verified

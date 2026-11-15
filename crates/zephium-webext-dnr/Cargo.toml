@@ -1,0 +1,24 @@
+[package]
+name = "zephium-webext-dnr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["compile"]
+compile = ["dep:serde", "dep:serde_json"]
+
+[dependencies]
+regex = "=1.12.4"
+regex-syntax = "=0.8.11"
+regex-automata = { version = "=0.4.18", features = ["dfa-build", "dfa-search"] }
+memchr = "=2.8.2"
+crc32fast = "=1.5.0"
+url.workspace = true
+psl = "=2.1.220"
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[[example]]
+name = "corpus"
+required-features = ["compile"]

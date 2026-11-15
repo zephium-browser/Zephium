@@ -10,3 +10,6 @@ const userAgent = navigator.userAgent;
 export const IS_MAC = userAgent.includes("Mac");
 export const IS_WINDOWS = userAgent.includes("Windows");
 export const IS_LINUX = userAgent.includes("Linux");
+
+/** Native engines with an attributable content-block decision counter. */
+export const SUPPORTS_BLOCKER_STATISTICS = IS_MAC || IS_WINDOWS;

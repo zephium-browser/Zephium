@@ -30,7 +30,9 @@ Its security-relevant deltas currently enforce these invariants:
   contexts require an explicit profile data directory. Incognito views reject
   a supplied persistent context rather than reclassifying it after potential
   filesystem access. Incognito related views must use the exact supplied
-  ephemeral context.
+  ephemeral context. `WebContext::webkit_context` exposes the native context
+  so the embedder can add sandbox paths and Web-process extension setup before
+  the first WebView, when WebKit has not yet launched a Web process.
 - WebView2 construction exposes a pre-controller hardening hook and tracks
   partially constructed controller ownership so failures remain cleanable.
   `native_cleanup.rs` models the ordered, retryable ownership debt. The Windows
@@ -336,3 +338,73 @@ it takes the video back, so without a handler that brings the page on screen
 the button does nothing for a background tab. A missing handler keeps
 upstream's no-op; a panic is contained. Like the other private selectors it
 must be reviewed during upstream rebases.
+
+### Linux native new-tab adoption
+
+The WebKitGTK backend delivers the opt-in host page-close callback without
+invalidating the host's widget. Modified link clicks use the native URIRequest
+and the same new-window handler with a related child; create-signal requests
+return the related view without replaying the navigation. Native gesture and
+Shift/Control/button evidence determine admission and foreground intent. Host
+callbacks are panic-contained; missing handlers keep the existing denial.
+Automatic script windows default off; an ordinary-view host can change the
+native setting for its committed-site popup policy. No dependency, upstream
+revision or standalone lockfile changes accompany these Linux hooks.
+
+The Linux host can describe a user-owned menu selection with `for_user_tab`.
+This does not change native gesture admission: the host separately authenticates
+the selected document and opens a fresh GET without referrer or script opener.
+
+Standalone Linux validation also scopes protocol body accounting to its actual
+consumers (Apple, Windows, Linux body support and unit tests) and removes two
+redundant references in the GTK protocol callback. Body limits and admission
+behavior are unchanged; strict Clippy remains enabled for the default graph.
+
+Linux's opt-in navigation-failure callback precedes the identity terminal event.
+Native cancellation and download conversion emit cancellation, never failure.
+An installed failure owner suppresses WebKit's default error document; provisional
+failures retain the previous document. TLS refusals remain fail-closed and are
+reported as insecure connections, without a context-wide certificate exception.
+The optional Linux navigation-action interceptor exposes native gesture evidence
+before ordinary navigation policy. A handled action remains natively denied;
+the host's existing external-application confirmation broker owns any launch.
+Linux ordinary tabs can opt into an owned password-challenge callback. Missing,
+panicking or unhandled callbacks cancel; the host responder is single-use,
+cancels on drop and never requests native credential persistence. Server-trust
+and client-certificate challenges remain denied.
+Linux script dialogs similarly require explicit host ownership. The ordinary-tab
+host retains the native completion, bounds message/default text before copying,
+uses a transient GTK dialog, and cancels on navigation, hiding or retirement.
+Privileged and agent views keep the default close-without-prompt behavior.
+
+- Linux ordinary views may install a native download broker before navigation.
+  A single context dispatcher routes by the actual native originating view;
+  absent ownership cancels. Explicit deny policy remains dominant. Brokered
+  blob/data navigation actions become downloads, never top-level documents.
+  Destination consent, publication protection and lifecycle belong to the host.
+
+Linux ordinary views may install a native permission-request owner before loading.
+Unhandled requests remain denied; the host retains bounded native completions
+and owns foreground, navigation, shared consent and capture revocation checks.
+No native origin is invented by Wry; the host relies on qualified WebKitGTK
+Permissions Policy before applying its top-level-origin attribution.
+
+GTK TLS load failures retain native certificate-error categories for the shared
+error page. They never grant host-wide certificate exceptions; the Linux shell
+keeps continuation unavailable because the native API cannot scope by port or
+revoke an allowance.
+
+GTK file requests have an opt-in tab-owned callback; unowned requests and
+callback panics cancel. The embedder owns foreground/lifecycle validation,
+files-only native selection, no-follow regular-file validation and safe path
+encoding. Directory upload remains disabled; no privileged builder opts in.
+
+GTK script-created windows may emit native Started before exposing a URI.
+Retain that start identity until the same navigation supplies a bounded URI;
+then deliver Started before its redirect, commit or failure. Commit remains the
+only document-attribution boundary; no URL request is replayed.
+GTK print dialogs are transient for the content view's actual owning window;
+printing without an owner is refused rather than creating an unowned dialog.
+Unowned GTK script dialogs are retained and refused in one main-loop idle turn.
+Synchronous close during signal emission clears WebKit's current-dialog pointer
+before its emitter unreferences it; deferred close avoids that native crash.

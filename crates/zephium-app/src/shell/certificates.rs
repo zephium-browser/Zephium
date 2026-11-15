@@ -30,9 +30,17 @@ impl Shell {
         ) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
+        if !cfg!(any(target_os = "macos", target_os = "windows")) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::UnsupportedCommand,
+            );
+        }
         // The engine accepts only the leaf it refused at this origin.
-        if self.engine.allow_certificate_exception(id, url.to_string()) == NativeDispatch::Rejected
-        {
+        if !matches!(
+            self.engine.allow_certificate_exception(id, url.to_string()),
+            NativeDispatch::Scheduled
+        ) {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::NativeDispatchRejected,

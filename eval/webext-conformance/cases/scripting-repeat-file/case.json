@@ -1,0 +1,1 @@
+{"id":"scripting-repeat-file","title":"Explicit script execution repeats a manifest file in the same world and document","apis":["scripting.executeScript"],"permissions":["scripting"]}

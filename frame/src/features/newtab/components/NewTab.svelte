@@ -34,7 +34,7 @@
     SkyPrint,
     type Scene,
   } from "$shared/sky";
-  import { IS_WINDOWS } from "$shared/platform";
+  import { IS_WINDOWS, SUPPORTS_BLOCKER_STATISTICS } from "$shared/platform";
   import NewTabAccount from "./NewTabAccount.svelte";
 
   let {
@@ -85,7 +85,9 @@
       : null;
   });
   let showWordmark = $derived(preferences.value("ui.newtab-wordmark") !== "false");
-  let showTrackers = $derived(preferences.value("ui.newtab-trackers") !== "false");
+  let showTrackers = $derived(
+    SUPPORTS_BLOCKER_STATISTICS && preferences.value("ui.newtab-trackers") !== "false",
+  );
   let showGreeting = $derived(preferences.value("ui.newtab-greeting") === "true");
   let showClock = $derived(preferences.value("ui.newtab-clock") === "true");
   let showDue = $derived(

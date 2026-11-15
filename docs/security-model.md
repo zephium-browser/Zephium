@@ -216,8 +216,9 @@ Any change that breaks one of these invariants must fail review and release:
    fixed main label.
 5. Raw content permissions are denied by the pinned Wry permission callback.
    Privileged and agent downloads/new windows remain denied. Human macOS and
-   Windows tabs opt into the native download and new-tab brokers described below;
-   Linux retains denial. No new window is forwarded to an unmanaged OS browser.
+   Windows tabs opt into the native download and new-tab brokers described below.
+   Linux human tabs use the same new-tab adoption and popup policy with related
+   WebKitGTK views; downloads retain denial. No new window is forwarded to an unmanaged OS browser.
    Linux additionally cancels file-chooser requests from both raw and privileged
    WebViews. macOS raw foreground views opt into a native upload picker bound to
    the exact view/navigation and labelled with WebKit's initiating-frame origin;
@@ -438,7 +439,7 @@ broker the built-in viewer with a supported native API, packaged malicious-PDF t
 and an explicit risk decision are separate Windows stable-release gates. Zephium does
 not claim that the current source tree denies this path.
 
-**Human native new tabs.** On macOS and Windows, native user-initiated links,
+**Human native new tabs.** On macOS, Windows and Linux, native user-initiated links,
 modifier clicks and script-created windows use the original native opener and
 request. macOS disables automatic JavaScript windows in WKPreferences; Windows
 requires NewWindowRequested.IsUserInitiated. Admission additionally checks the
@@ -449,6 +450,11 @@ adoption failures deny the request. macOS uses WebKit's supplied configuration
 with a fresh per-view script controller; Windows uses the same environment and
 profile and registers request filters after SetNewWindow, before completing its
 deferral. The host never retries a POST/blob/navigation as a plain URL GET.
+Linux uses related WebKitGTK views and preserves native requests. Its host-owned
+link context-menu action is a distinct user operation: a bounded HTTP(S) URL is
+opened as a fresh GET without referrer or script opener, after navigation,
+generation, presentation and native foreground checks. Stock new-window menu
+items are removed; their gesture-less `create` requests retain the popup policy.
 
 Rust owns each child through an exactly-once adoption lease. Abandoned adoption
 retires the native controller. Foreground requests select their child only after

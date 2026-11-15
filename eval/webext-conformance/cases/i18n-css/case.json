@@ -1,0 +1,1 @@
+{"id":"i18n-css","title":"CSS files localize messages while literal CSS stays unchanged","apis":["i18n","manifest.content_scripts.css","scripting.insertCSS","scripting.removeCSS"],"permissions":["scripting"]}

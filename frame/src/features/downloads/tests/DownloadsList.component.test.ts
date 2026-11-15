@@ -24,6 +24,7 @@ test("resuming after a pause starts a fresh time-left estimate", async () => {
     total: "10000",
     error: null,
     insecure: false,
+    capabilities: { pause: true, resume: true, restart: false },
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => ({
     kind: call.kind === "list" ? "page" : "updates",
@@ -84,6 +85,7 @@ test("native completion replaces cancellation with ID-scoped open and reveal act
     total: "100",
     error: null,
     insecure: false,
+    capabilities: { pause: true, resume: true, restart: false },
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -148,6 +150,7 @@ test("a folder the system refused says so once and offers another folder", async
     total: null,
     error: "permission",
     insecure: false,
+    capabilities: { pause: true, resume: true, restart: false },
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "list")
@@ -198,6 +201,7 @@ test.each<[DownloadError, string]>([
       total: "100",
       error,
       insecure: false,
+      capabilities: { pause: true, resume: true, restart: false },
     };
     native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
       call.kind === "list"
@@ -241,6 +245,7 @@ test("retry resumes a retained interrupted transfer by ID and keeps cancellation
     total: "100",
     error: "connection_lost",
     insecure: false,
+    capabilities: { pause: true, resume: true, restart: false },
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) => {
     if (call.kind === "resume") {
@@ -290,6 +295,7 @@ test("a resumable short response explains retry without presenting a finished co
     total: "100",
     error: "integrity",
     insecure: false,
+    capabilities: { pause: true, resume: true, restart: false },
   };
   native.call.mockImplementation(async (_profile: string, call: DownloadCall) =>
     call.kind === "list"
@@ -361,6 +367,7 @@ const base: DownloadView = {
   total: "100",
   error: null,
   insecure: false,
+  capabilities: { pause: true, resume: true, restart: false },
 };
 
 test("a receiving download can be paused and then resumed, and a pause is not shown as a problem", async () => {
@@ -432,4 +439,21 @@ test("deleting a held download sends the discard and no keep", async () => {
   expect(native.call).not.toHaveBeenCalledWith(profile, { kind: "keep", id: base.id });
   await expect.element(page.getByText("Cancelled · example.com")).toBeVisible();
   await screen.unmount();
+});
+
+test("native operation capabilities hide unavailable pause and resume controls", async () => {
+  const profile = "00000000000000000000000001";
+  const capabilities = { pause: false, resume: false, restart: false };
+  for (const state of ["receiving", "paused"] as const) {
+    serving({ ...base, state, capabilities }, () => null);
+    const screen = await render(DownloadsList, { profile });
+    await expect.element(page.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Pause", exact: true }))
+      .not.toBeInTheDocument();
+    await expect
+      .element(page.getByRole("button", { name: "Resume", exact: true }))
+      .not.toBeInTheDocument();
+    await screen.unmount();
+  }
 });

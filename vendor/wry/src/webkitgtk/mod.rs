@@ -76,6 +76,31 @@ use crate::{
 #[cfg(not(test))]
 use self::web_context::WebContextExt;
 
+fn modified_link(action: &webkit2gtk::NavigationAction) -> bool {
+  action.navigation_type() == webkit2gtk::NavigationType::LinkClicked
+    && modified_button(action.mouse_button(), action.modifiers())
+}
+
+fn modified_button(button: u32, modifiers: u32) -> bool {
+  button == 2 || (button == 1 && modifiers & gdk::ModifierType::CONTROL_MASK.bits() != 0)
+}
+
+fn new_window_features(
+  webview: &WebView,
+  action: &webkit2gtk::NavigationAction,
+) -> NewWindowFeatures {
+  NewWindowFeatures {
+    user_initiated: action.is_user_gesture(),
+    foreground: !modified_link(action)
+      || action.modifiers() & gdk::ModifierType::SHIFT_MASK.bits() != 0,
+    size: None,
+    position: None,
+    opener: NewWindowOpener {
+      webview: webview.clone(),
+    },
+  }
+}
+
 const WEBVIEW_ID: &str = "webview_id";
 const NATIVE_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_HANDLER_NAME: &str = "wryIpc";
@@ -296,9 +321,65 @@ impl GtkNavigationSequence {
   }
 }
 
+fn navigation_failure(error: &gtk::glib::Error) -> Option<crate::NavigationFailure> {
+  use gtk::gio::{IOErrorEnum, ResolverError};
+  use webkit2gtk::{NetworkError, PluginError, PolicyError};
+  if error.matches(NetworkError::Cancelled)
+    || error.matches(PolicyError::FrameLoadInterruptedByPolicyChange)
+    || error.matches(PluginError::WillHandleLoad)
+    || error.matches(IOErrorEnum::Cancelled)
+  {
+    return None;
+  }
+  Some(
+    if error.matches(ResolverError::NotFound) || error.matches(IOErrorEnum::HostNotFound) {
+      crate::NavigationFailure::HostNotFound
+    } else if error.matches(IOErrorEnum::TimedOut) {
+      crate::NavigationFailure::TimedOut
+    } else if error.matches(IOErrorEnum::NetworkUnreachable) {
+      crate::NavigationFailure::Offline
+    } else if error.matches(IOErrorEnum::ConnectionRefused)
+      || error.matches(IOErrorEnum::HostUnreachable)
+      || error.matches(NetworkError::Transport)
+    {
+      crate::NavigationFailure::Unreachable
+    } else {
+      crate::NavigationFailure::Other
+    },
+  )
+}
+
 #[cfg(test)]
 mod navigation_sequence_tests {
   use super::*;
+
+  #[test]
+  fn cancellations_and_download_conversion_are_not_load_failures() {
+    for error in [
+      gtk::glib::Error::new(webkit2gtk::NetworkError::Cancelled, "cancelled"),
+      gtk::glib::Error::new(
+        webkit2gtk::PolicyError::FrameLoadInterruptedByPolicyChange,
+        "policy",
+      ),
+      gtk::glib::Error::new(webkit2gtk::PluginError::WillHandleLoad, "download"),
+    ] {
+      assert_eq!(navigation_failure(&error), None);
+    }
+    assert_eq!(
+      navigation_failure(&gtk::glib::Error::new(
+        gtk::gio::IOErrorEnum::TimedOut,
+        "timeout"
+      )),
+      Some(crate::NavigationFailure::TimedOut)
+    );
+    assert_eq!(
+      navigation_failure(&gtk::glib::Error::new(
+        gtk::gio::ResolverError::NotFound,
+        "dns"
+      )),
+      Some(crate::NavigationFailure::HostNotFound)
+    );
+  }
 
   #[test]
   fn redirects_keep_one_identity_and_failure_suppresses_success() {
@@ -776,6 +857,7 @@ impl InnerWebView {
       // Fullscreen is a page-triggered native surface and must remain off
       // until the embedder owns an origin/gesture-labelled lifecycle broker.
       settings.set_enable_fullscreen(false);
+      settings.set_javascript_can_open_windows_automatically(false);
       settings
         .set_enable_back_forward_navigation_gestures(attributes.back_forward_navigation_gestures);
 
@@ -810,7 +892,14 @@ impl InnerWebView {
     // logical view/widget ownership. Preserve the child by default and retain
     // legacy destruction only behind an explicit host policy.
     let page_close_policy = attributes.page_close_policy;
+    #[cfg(target_os = "linux")]
+    let page_close_handler = attributes.page_close_handler.take();
     webview.connect_close(move |webview| {
+      #[cfg(target_os = "linux")]
+      if let Some(handler) = &page_close_handler {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+        return;
+      }
       if page_close_policy == crate::PageClosePolicy::DestroyContainer {
         unsafe { webview.destroy() };
       }
@@ -839,6 +928,8 @@ impl InnerWebView {
       let sequence = Rc::new(Cell::new(GtkNavigationSequence::default()));
       let changed_sequence = sequence.clone();
       let changed_handler = navigation_event_handler.clone();
+      let deferred_start = Rc::new(Cell::new(None));
+      let changed_start = deferred_start.clone();
       webview.connect_load_changed(move |webview, load_event| {
         let mut sequence = changed_sequence.get();
         let (transition, native_committed) = match load_event {
@@ -884,27 +975,90 @@ impl InnerWebView {
             webview.set_child_visible(false);
           }
         }
-        if let (Some((id, phase)), Some(url)) = (transition, bounded_webview_uri(webview)) {
+        let url = bounded_webview_uri(webview);
+        if let Some((id, NavigationEventPhase::Started)) = transition {
+          changed_start.set(url.is_none().then_some(id));
+        }
+        if let (Some((id, phase)), Some(url)) = (transition, url) {
+          // Script-created windows can start with no URI. Preserve that native
+          // start and attribute it when the same load first supplies its URI.
+          if changed_start.get() == Some(id) {
+            changed_start.set(None);
+            changed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
           changed_handler(NavigationEvent { id, phase, url });
         }
       });
 
+      let tls_failure = Rc::new(Cell::new(None));
+      let tls_sequence = sequence.clone();
+      let tls_failed = tls_failure.clone();
+      webview.connect_load_failed_with_tls_errors(move |_, _, _, flags| {
+        use gtk::gio::TlsCertificateFlags as Flags;
+        let problem = if flags.contains(Flags::REVOKED) {
+          crate::CertificateProblem::Revoked
+        } else if flags.contains(Flags::EXPIRED) {
+          crate::CertificateProblem::Expired
+        } else if flags.contains(Flags::BAD_IDENTITY) {
+          crate::CertificateProblem::NameMismatch
+        } else if flags.contains(Flags::UNKNOWN_CA) {
+          crate::CertificateProblem::Untrusted
+        } else {
+          crate::CertificateProblem::Other
+        };
+        tls_failed.set(tls_sequence.get().active.map(|active| (active.id, problem)));
+        false
+      });
+      let failure_handler = attributes.navigation_failure_handler.take();
       let failed_handler = navigation_event_handler.clone();
-      webview.connect_load_failed(move |_webview, _load_event, failing_uri, _error| {
+      webview.connect_load_failed(move |_webview, _load_event, failing_uri, error| {
         let mut current = sequence.get();
+        let committed = current.active.is_some_and(|active| active.committed);
         let id = current.failed();
         sequence.set(current);
         let url = bounded_utf8_bytes(failing_uri.as_bytes(), PAGE_URL_LIMIT);
+        let reason =
+          if let Some((_, problem)) = tls_failure.take().filter(|(tls, _)| Some(*tls) == id) {
+            Some(crate::NavigationFailure::Certificate(problem))
+          } else {
+            navigation_failure(error)
+          };
         if let (Some(id), Some(url)) = (id, url) {
+          if deferred_start.take() == Some(id) {
+            failed_handler(NavigationEvent {
+              id,
+              phase: NavigationEventPhase::Started,
+              url: url.clone(),
+            });
+          }
+          if let (Some(handler), Some(reason)) = (&failure_handler, reason) {
+            handler(
+              id,
+              reason,
+              if committed {
+                crate::FailedDocument::Replaced { url: url.clone() }
+              } else if matches!(reason, crate::NavigationFailure::Certificate(_)) {
+                crate::FailedDocument::Refused { url: url.clone() }
+              } else {
+                crate::FailedDocument::Kept
+              },
+            );
+          }
           failed_handler(NavigationEvent {
             id,
-            phase: NavigationEventPhase::Failed,
+            phase: if reason.is_some() {
+              NavigationEventPhase::Failed
+            } else {
+              NavigationEventPhase::Cancelled
+            },
             url,
           });
         }
-        // Preserve WebKit's ordinary error-page behavior. The identity event
-        // is observational and does not weaken the navigation policy.
-        false
+        failure_handler.is_some()
       });
     }
 
@@ -928,23 +1082,46 @@ impl InnerWebView {
 
     // window creation handler
     if let Some(new_window_req_handler) = attributes.new_window_req_handler.take() {
+      let new_window_req_handler = Rc::new(new_window_req_handler);
+      let modified_link_handler = new_window_req_handler.clone();
+      webview.connect_decide_policy(move |webview, decision, kind| {
+        if kind != PolicyDecisionType::NavigationAction {
+          return false;
+        }
+        let Some(action) = decision
+          .dynamic_cast_ref::<NavigationPolicyDecision>()
+          .and_then(NavigationPolicyDecisionExt::navigation_action)
+        else {
+          return false;
+        };
+        if !modified_link(&action) {
+          return false;
+        }
+        webkit2gtk::PolicyDecisionExt::ignore(decision);
+        // Keep the native request; replaying its URL loses request metadata.
+        if let Some(request) = action.request() {
+          if let Some(url) = bounded_request_uri(&request) {
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              modified_link_handler(url, new_window_features(webview, &action))
+            }))
+            .unwrap_or(NewWindowResponse::Deny);
+            if let NewWindowResponse::Create { webview: child } = response {
+              child.load_request(&request);
+            }
+          }
+        }
+        true
+      });
       let related_webviews = Rc::new(Mutex::new(HashMap::new()));
       webview.connect_create(move |webview, action| {
         let url = action
           .request()
           .and_then(|request| bounded_request_uri(&request))?;
-        match new_window_req_handler(
-          url.clone(),
-          NewWindowFeatures {
-            user_initiated: action.is_user_gesture(),
-            foreground: true,
-            size: None,
-            position: None,
-            opener: NewWindowOpener {
-              webview: webview.clone(),
-            },
-          },
-        ) {
+        let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+          new_window_req_handler(url.clone(), new_window_features(webview, action))
+        }))
+        .unwrap_or(NewWindowResponse::Deny);
+        match response {
           NewWindowResponse::Allow => {
             let related_webviews = related_webviews.clone();
             let toplevel = webview.toplevel()?;
@@ -995,20 +1172,50 @@ impl InnerWebView {
 
     // Navigation handler
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
+      #[cfg(target_os = "linux")]
+      let action_handler = attributes.linux_navigation_action_handler.take();
+      #[cfg(target_os = "linux")]
+      let native_downloads = attributes.linux_download_handler.is_some()
+        && attributes.download_policy == crate::DownloadPolicy::UseHandlers;
       webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
         let handler = match policy_type {
           PolicyDecisionType::NavigationAction => &navigation_handler,
           _ => return false,
         };
 
+        #[cfg(target_os = "linux")]
+        if native_downloads
+          && policy_decision
+            .dynamic_cast_ref::<NavigationPolicyDecision>()
+            .and_then(NavigationPolicyDecisionExt::navigation_action)
+            .and_then(|action| action.request())
+            .and_then(|request| bounded_request_uri(&request))
+            .is_some_and(|uri| uri.starts_with("blob:") || uri.starts_with("data:"))
+        {
+          unsafe {
+            webkit2gtk::ffi::webkit_policy_decision_download(policy_decision.as_ptr());
+          }
+          return true;
+        }
+
         // Missing action/request/URI state during navigation or teardown must
         // not fall back to WebKit's default allow path.
         let allow = policy_decision
           .dynamic_cast_ref::<NavigationPolicyDecision>()
           .and_then(NavigationPolicyDecisionExt::navigation_action)
-          .and_then(|action| action.request())
-          .and_then(|request| bounded_request_uri(&request))
-          .map(handler)
+          .and_then(|action| {
+            let url = bounded_request_uri(&action.request()?)?;
+            #[cfg(target_os = "linux")]
+            if action_handler.as_ref().is_some_and(|handler| {
+              std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                handler(&url, action.is_user_gesture())
+              }))
+              .unwrap_or(true)
+            }) {
+              return Some(false);
+            }
+            Some(handler(url))
+          })
           .unwrap_or(false);
         let pointer = policy_decision.as_ptr();
         unsafe {
@@ -1026,7 +1233,16 @@ impl InnerWebView {
     // brokers and allows it. `Default` is also fail-closed in this fork: it
     // must never delegate to an unlabelled native WebKit prompt.
     let permission_handler = attributes.permission_handler.take();
+    #[cfg(target_os = "linux")]
+    let native_permission_handler = attributes.linux_permission_handler.take();
     webview.connect_permission_request(move |_webview, request| {
+      #[cfg(target_os = "linux")]
+      if native_permission_handler
+        .as_ref()
+        .is_some_and(|handler| handler(_webview, request))
+      {
+        return true;
+      }
       let response_for = |kind| {
         permission_handler
           .as_ref()
@@ -1120,14 +1336,30 @@ impl InnerWebView {
       }
     });
 
-    // These surfaces have no origin-labelled Zephium broker yet. Claim the
-    // signal and complete the request with a denial rather than allowing a
-    // page to summon privileged native UI.
-    webview.connect_authenticate(|_, request| {
+    // Unowned native prompts remain denied, including callback failures.
+    #[cfg(target_os = "linux")]
+    let auth_handler = attributes.linux_auth_handler.take();
+    webview.connect_authenticate(move |_view, request| {
+      #[cfg(target_os = "linux")]
+      if auth_handler.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_view, request)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       request.cancel();
       true
     });
-    webview.connect_run_file_chooser(|_, request| {
+    #[cfg(target_os = "linux")]
+    let file_chooser = attributes.linux_file_chooser_handler.take();
+    webview.connect_run_file_chooser(move |_page, request| {
+      #[cfg(target_os = "linux")]
+      if file_chooser.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_page, request)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
       request.cancel();
       true
     });
@@ -1135,12 +1367,56 @@ impl InnerWebView {
       request.cancel();
       true
     });
-    webview.connect_script_dialog(|_, dialog| {
-      dialog.close();
+    #[cfg(target_os = "linux")]
+    let script_dialog_handler = attributes.linux_script_dialog_handler.take();
+    webview.connect_script_dialog(move |_view, dialog| {
+      #[cfg(target_os = "linux")]
+      if script_dialog_handler.as_ref().is_some_and(|handler| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(_view, dialog)))
+          .unwrap_or(false)
+      }) {
+        return true;
+      }
+      // Closing inside the signal clears WebKit's current-dialog pointer before
+      // its emitter unreferences it. Retain and refuse after emission returns.
+      let denied = dialog.clone();
+      gtk::glib::idle_add_local_once(move || denied.close());
       true
     });
     webview.connect_print(|_, _| true);
 
+    #[cfg(target_os = "linux")]
+    if let Some(handler) = attributes
+      .linux_download_handler
+      .take()
+      .filter(|_| attributes.download_policy == crate::DownloadPolicy::UseHandlers)
+    {
+      use webkit2gtk::DownloadExt;
+      const KEY: &str = "wry-linux-download-owner";
+      const INSTALLED: &str = "wry-linux-download-dispatch";
+      unsafe {
+        webview.set_data(KEY, handler);
+      }
+      let context = web_context.context();
+      if unsafe { context.data::<bool>(INSTALLED).is_none() } {
+        context.connect_download_started(|_, download| {
+          let owner = download.web_view().and_then(|view| unsafe {
+            view
+              .data::<crate::LinuxDownloadHandler>(KEY)
+              .map(|handler| handler.as_ref().clone())
+          });
+          if let Some(owner) = owner {
+            owner(download);
+          } else {
+            download.cancel();
+          }
+        });
+        unsafe {
+          context.set_data(INSTALLED, true);
+        }
+      }
+      return;
+    }
     // Download handler
     web_context.register_download_handler(
       attributes.download_policy,
@@ -1263,8 +1539,13 @@ impl InnerWebView {
   }
 
   pub fn print(&self) -> Result<()> {
+    let owner = self
+      .webview
+      .toplevel()
+      .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+      .ok_or_else(|| gtk::glib::bool_error!("print parent window is unavailable"))?;
     let print = webkit2gtk::PrintOperation::new(&self.webview);
-    print.run_dialog(None::<&gtk::Window>);
+    print.run_dialog(Some(&owner));
     Ok(())
   }
 
@@ -2049,5 +2330,24 @@ mod ffi {
       result: *mut gio::ffi::GAsyncResult,
       error: *mut *mut glib::ffi::GError,
     ) -> *mut glib::ffi::GList;
+  }
+}
+
+#[cfg(test)]
+mod new_window_tests {
+  use super::*;
+
+  #[test]
+  fn only_middle_and_control_primary_clicks_are_new_tab_links() {
+    assert!(modified_button(2, 0));
+    assert!(modified_button(1, gdk::ModifierType::CONTROL_MASK.bits()));
+    assert!(modified_button(
+      1,
+      (gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK).bits()
+    ));
+    assert!(!modified_button(1, 0));
+    assert!(!modified_button(1, gdk::ModifierType::SHIFT_MASK.bits()));
+    assert!(!modified_button(3, gdk::ModifierType::CONTROL_MASK.bits()));
+    assert!(!modified_button(0, gdk::ModifierType::CONTROL_MASK.bits()));
   }
 }

@@ -1,0 +1,83 @@
+{
+  "caseId": "injection-match-about-blank",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "frame injection markers:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame injection markers:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "allFrames": "blank-enabled",
+              "name": "",
+              "top": true,
+              "topOnly": "regular-match",
+              "url": "<origin:a>/frames.html"
+            }
+          },
+          {
+            "documentId": "<document:2>",
+            "frameId": "<frame:1>",
+            "result": {
+              "allFrames": "blank-enabled",
+              "name": "blank",
+              "top": false,
+              "topOnly": null,
+              "url": "about:blank"
+            }
+          },
+          {
+            "documentId": "<document:3>",
+            "frameId": "<frame:2>",
+            "result": {
+              "allFrames": "blank-enabled",
+              "name": "srcdoc",
+              "top": false,
+              "topOnly": null,
+              "url": "about:srcdoc"
+            }
+          },
+          {
+            "documentId": "<document:4>",
+            "frameId": "<frame:3>",
+            "result": {
+              "allFrames": "blank-enabled",
+              "name": "same",
+              "top": false,
+              "topOnly": "regular-match",
+              "url": "<origin:a>/frame.html?kind=same"
+            }
+          },
+          {
+            "documentId": "<document:5>",
+            "frameId": "<frame:4>",
+            "result": {
+              "allFrames": "blank-enabled",
+              "name": "cross",
+              "top": false,
+              "topOnly": "regular-match",
+              "url": "<origin:b>/frame.html?kind=cross"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

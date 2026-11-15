@@ -1,0 +1,11 @@
+{
+  "id": "ports-disconnect",
+  "title": "Port messages and disconnect from both endpoints",
+  "apis": [
+    "runtime.connect",
+    "runtime.onConnect",
+    "runtime.Port",
+    "runtime.onMessage"
+  ],
+  "permissions": []
+}

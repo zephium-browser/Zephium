@@ -1,0 +1,163 @@
+{
+  "caseId": "privacy-form-services",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "passwordSavingEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "autofillEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "autofillAddressEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "autofillCreditCardEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "alternateErrorPagesEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "hyperlinkAuditingEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "topicsEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "adMeasurementEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "fledgeEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    },
+    {
+      "label": "networkPredictionEnabled",
+      "value": {
+        "callbackShape": [
+          "levelOfControl",
+          "value"
+        ],
+        "controlValid": true,
+        "keys": [
+          "levelOfControl",
+          "value"
+        ],
+        "valueType": "boolean"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

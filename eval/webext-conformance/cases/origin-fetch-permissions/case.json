@@ -1,0 +1,6 @@
+{
+  "id": "origin-fetch-permissions",
+  "title": "Extension fetch succeeds with a host grant and fails without one",
+  "apis": ["fetch", "manifest.host_permissions"],
+  "permissions": []
+}

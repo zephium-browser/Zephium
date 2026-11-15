@@ -1,0 +1,12 @@
+[package]
+name = "zephium-webext-matcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

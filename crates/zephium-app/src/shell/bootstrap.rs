@@ -13,6 +13,11 @@ impl Shell {
         }
         // Before any view exists: none may start out on the wrong route.
         self.engine.set_proxy(self.proxy.server());
+        self.engine.set_spellchecking_language(
+            self.store
+                .app_setting("ui.language")
+                .unwrap_or_else(|| "system".into()),
+        );
         // Runtime update state is independent of session recovery and chrome
         // reloads. Querying the sticky engine state also repairs a callback
         // that arrived before the shell callback ingress was installed.

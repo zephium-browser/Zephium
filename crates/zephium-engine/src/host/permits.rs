@@ -35,6 +35,9 @@ pub(super) struct EventPermit {
     state: Arc<Mutex<EventPermitState>>,
     #[cfg(target_os = "windows")]
     extensions: Option<ExtensionNavigationGrants>,
+    /// The ordinary tab whose extension navigations the Linux host admits.
+    #[cfg(target_os = "linux")]
+    extension_tab: Option<(zephium_core::ids::ProfileId, ItemId)>,
 }
 
 #[cfg(target_os = "windows")]
@@ -56,6 +59,8 @@ impl EventPermit {
             state: Arc::new(Mutex::new(EventPermitState::Inactive)),
             #[cfg(target_os = "windows")]
             extensions: None,
+            #[cfg(target_os = "linux")]
+            extension_tab: None,
         }
     }
 
@@ -64,7 +69,19 @@ impl EventPermit {
             state: Arc::new(Mutex::new(EventPermitState::Bound(Arc::downgrade(token)))),
             #[cfg(target_os = "windows")]
             extensions: None,
+            #[cfg(target_os = "linux")]
+            extension_tab: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn with_extension_tab(
+        mut self,
+        profile: zephium_core::ids::ProfileId,
+        tab: ItemId,
+    ) -> Self {
+        self.extension_tab = Some((profile, tab));
+        self
     }
 
     #[cfg(target_os = "windows")]
@@ -90,6 +107,13 @@ impl EventPermit {
         if let (Some(grants), Ok(url)) = (&self.extensions, url::Url::parse(target)) {
             return navigation::extension_document_id(&url)
                 .is_some_and(|id| grants.lock().is_ok_and(|grants| grants.contains(id)));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some((profile, tab)) = self.extension_tab {
+            return url::Url::parse(target).is_ok_and(|url| {
+                navigation::extension_document_id(&url).is_some()
+                    && super::webext_linux::admits_extension_navigation(profile, tab, target)
+            });
         }
         false
     }

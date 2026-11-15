@@ -26,12 +26,12 @@ thread_local! {
     static EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
     #[cfg(target_os = "macos")]
     static EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     static PENDING_PAGE_PERMISSION_TERMINALS: Cell<PagePermissionTerminalSlots> =
         const { Cell::new(PagePermissionTerminalSlots::EMPTY) };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     static PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED: Cell<bool> = const { Cell::new(false) };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     static PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED: Cell<bool> = const { Cell::new(false) };
     #[cfg(not(target_os = "windows"))]
     static PENDING_CONTENT_POLICY_TERMINALS: Cell<ContentPolicyTerminalSlots> =
@@ -54,10 +54,10 @@ const EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY: usize =
 #[cfg(target_os = "macos")]
 type ExtensionBrowserRequestTerminalSlots =
     ExactTerminalSlots<EXTENSION_BROWSER_REQUEST_TERMINAL_CAPACITY>;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const PAGE_PERMISSION_TERMINAL_CAPACITY: usize =
     3 * super::page_permissions::MAX_PENDING_PAGE_PERMISSION_REQUESTS;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type PagePermissionTerminalSlots = ExactTerminalSlots<PAGE_PERMISSION_TERMINAL_CAPACITY>;
 
 /// Inline, noncoalescing terminal ring.
@@ -65,7 +65,7 @@ type PagePermissionTerminalSlots = ExactTerminalSlots<PAGE_PERMISSION_TERMINAL_C
 /// Native callbacks and their independently scheduled cancellation barriers
 /// can contribute at most two exact tasks per logical reservation. The ring
 /// never allocates, grows, replaces, or silently drops an accepted terminal.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct ExactTerminalSlots<const CAPACITY: usize> {
     slots: [Option<HostTask>; CAPACITY],
     head: usize,
@@ -79,7 +79,7 @@ struct ExactTerminalSlots<const CAPACITY: usize> {
     overflow_predecessors: usize,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
     const EMPTY: Self = Self {
         slots: [const { None }; CAPACITY],
@@ -130,7 +130,7 @@ impl<const CAPACITY: usize> ExactTerminalSlots<CAPACITY> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl<const CAPACITY: usize> Default for ExactTerminalSlots<CAPACITY> {
     fn default() -> Self {
         Self::EMPTY
@@ -239,7 +239,7 @@ enum HostTaskKey {
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     Fullscreen(ItemId),
     Discard(ItemId),
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -335,9 +335,8 @@ pub(crate) fn install(
     main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
-        crate::NativeOpenAuthority,
-    >,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    native_open_authority: Arc<crate::NativeOpenAuthority>,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
@@ -398,13 +397,13 @@ pub(crate) fn install(
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
         drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
     });
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
@@ -438,11 +437,11 @@ pub(crate) fn install(
             agent_cookie_quarantined_profiles: HashSet::new(),
             native_resources: NativeResourceLedger::default(),
             extension_browser_surfaces: HashMap::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             downloads: None,
-            #[cfg(any(target_os="macos",target_os="windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             native_open_authority,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
@@ -500,7 +499,7 @@ pub(crate) fn install(
             discarded_state_revision: 0,
             user_content,
             shortcuts: Arc::default(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             fullscreen: crate::fullscreen::FullscreenLedger::default(),
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
@@ -522,10 +521,12 @@ pub(crate) fn install(
             webext: Default::default(),
             #[cfg(target_os = "macos")]
             scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
+            #[cfg(target_os = "linux")]
+            webext_linux: Default::default(),
             #[cfg(target_os = "windows")]
             hidden: std::collections::HashSet::new(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -616,7 +617,7 @@ where
     with_priority(HostTaskPriority::Normal, None, f)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn try_open_native_tab(
     source: zephium_core::ids::ItemId,
     permit: &super::permits::EventPermit,
@@ -636,6 +637,41 @@ pub(super) fn try_open_native_tab(
             return wry::NewWindowResponse::Deny;
         };
         host.open_native_tab(source, permit, activity, url, features, clicked)
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn reserve_extension_commands(shortcuts: Vec<zephium_core::ports::engine::Shortcut>) {
+    best_effort_with(move |host| host.webext_linux.reserve_commands(shortcuts));
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn try_perform_linux_extension_command(
+    key: u32,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    activate: bool,
+) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        let Some(host) = slot.as_ref() else {
+            return false;
+        };
+        let Some(profile) = host
+            .extension_browser_surfaces
+            .iter()
+            .find_map(|(profile, surface)| surface.focused().map(|_| *profile))
+        else {
+            return false;
+        };
+        host.webext_linux
+            .perform_command(profile, key, ctrl, shift, alt, activate)
     })
 }
 
@@ -701,13 +737,13 @@ pub(crate) fn make_unavailable_for_test() {
     EXTENSION_BROWSER_REQUEST_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
     #[cfg(target_os = "macos")]
     EXTENSION_BROWSER_REQUEST_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
         drop(pending.replace(PagePermissionTerminalSlots::EMPTY));
     });
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PAGE_PERMISSION_TERMINAL_INVARIANT_FAILED.with(|failed| failed.set(false));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     PAGE_PERMISSION_TERMINAL_FAILURE_REPORTED.with(|reported| reported.set(false));
     #[cfg(not(target_os = "windows"))]
     PENDING_CONTENT_POLICY_TERMINALS.with(|pending| {
@@ -903,7 +939,7 @@ fn drain_extension_browser_request_terminals_with_host(host: &mut EngineHost) ->
 /// fixed page-permission cohort. This channel is independent from extension
 /// delegates and ordinary renderer ingress: no unrelated callback can strand
 /// a retained WebKit permission completion.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn with_page_permission_terminal<F>(f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -937,7 +973,7 @@ where
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn drain_page_permission_terminals() -> bool {
     enum Drain {
         Complete(bool),
@@ -960,7 +996,7 @@ fn drain_page_permission_terminals() -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
     loop {
         let task = PENDING_PAGE_PERMISSION_TERMINALS.with(|pending| {
@@ -1050,7 +1086,7 @@ where
 
 /// Each callback re-reads the view's native state when it runs, so only the
 /// newest of adjacent callbacks for one view needs to survive.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn with_fullscreen_observation<F>(id: ItemId, f: F)
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1331,7 +1367,7 @@ where
         Executed,
         Reentrant,
         Unavailable,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         TerminalFailed,
     }
 
@@ -1350,7 +1386,7 @@ where
                 if !drain_extension_browser_request_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if !drain_page_permission_terminals_with_host(host) {
                     return Access::TerminalFailed;
                 }
@@ -1370,7 +1406,7 @@ where
     });
     match access {
         Access::Unavailable => return false,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         Access::TerminalFailed => return false,
         Access::Reentrant => {
             return PENDING.with(|pending| {
@@ -1421,7 +1457,7 @@ where
         return false;
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if !drain_page_permission_terminals() {
         HOST_SEALED.with(|sealed| sealed.set(true));
         return false;
@@ -1489,7 +1525,7 @@ where
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         if !drain_page_permission_terminals() {
             HOST_SEALED.with(|sealed| sealed.set(true));
             return false;

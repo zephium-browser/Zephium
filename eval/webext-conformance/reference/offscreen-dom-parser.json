@@ -1,0 +1,111 @@
+{
+  "caseId": "offscreen-dom-parser",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "create parser:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "create parser:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "parsed result:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "parsed result:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "scriptRan": false,
+          "tabs": "undefined",
+          "text": "owned",
+          "title": "Parsed"
+        }
+      }
+    },
+    {
+      "label": "parser survives idle:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "parser survives idle:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    },
+    {
+      "label": "parsed after idle:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "parsed after idle:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "scriptRan": false,
+          "tabs": "undefined",
+          "text": "owned",
+          "title": "Parsed"
+        }
+      }
+    },
+    {
+      "label": "close parser:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "close parser:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "parser closed:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "parser closed:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": false
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

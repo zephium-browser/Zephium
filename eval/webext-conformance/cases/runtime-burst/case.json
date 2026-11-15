@@ -1,0 +1,1 @@
+{"id":"runtime-burst","title":"Large concurrent API bursts settle through bounded transport backpressure","apis":["storage.local.get","declarativeNetRequest.isRegexSupported"],"permissions":["storage","declarativeNetRequest"]}

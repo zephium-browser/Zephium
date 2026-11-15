@@ -552,6 +552,7 @@ pub fn install_shortcuts(
     };
     presses.register_window(&gtk_window);
     let pressed = presses.clone();
+    let command_window = window.clone();
     gtk_window.connect_key_press_event(move |_, event| {
         let state = event.state();
         let modifiers = observed_shortcut_modifiers(state);
@@ -565,7 +566,30 @@ pub fn install_shortcuts(
             .find(|s| shortcut_modifiers(s) == modifiers && vk_keyval(s.key) == Some(keyval))
             .map(|s| s.id.clone());
         let Some(id) = hit else {
-            return glib::Propagation::Proceed;
+            use gtk::gdk::ModifierType as M;
+            use tauri::Manager;
+            if command_window.label() != "main"
+                || command_window
+                    .app_handle()
+                    .try_state::<crate::keymap::Keymap>()
+                    .is_some_and(|keymap| keymap.recording())
+                || !(modifiers - (M::CONTROL_MASK | M::SHIFT_MASK | M::MOD1_MASK)).is_empty()
+            {
+                return glib::Propagation::Proceed;
+            }
+            let Some(key) = (0..=255).find(|key| vk_keyval(*key) == Some(keyval)) else {
+                return glib::Propagation::Proceed;
+            };
+            let ctrl = modifiers.contains(M::CONTROL_MASK);
+            let shift = modifiers.contains(M::SHIFT_MASK);
+            let alt = modifiers.contains(M::MOD1_MASK);
+            if !zephium_engine::perform_linux_extension_command(key, ctrl, shift, alt, false) {
+                return glib::Propagation::Proceed;
+            }
+            if pressed.admit(event.hardware_keycode()) {
+                zephium_engine::perform_linux_extension_command(key, ctrl, shift, alt, true);
+            }
+            return glib::Propagation::Stop;
         };
         if pressed.admit(event.hardware_keycode()) {
             on(&id);
@@ -796,7 +820,12 @@ fn vk_keyval(vk: u32) -> Option<u32> {
         0x26 => 0xff52,
         0x27 => 0xff53,
         0x28 => 0xff54,
+        0x2D => 0xff63,
         0x2E => 0xffff,
+        0xB0 => 0x1008ff17,
+        0xB1 => 0x1008ff16,
+        0xB2 => 0x1008ff15,
+        0xB3 => 0x1008ff14,
         f @ 0x70..=0x7B => 0xffbe + (f - 0x70),
         0xBA => ';' as u32,
         0xBB => '=' as u32,

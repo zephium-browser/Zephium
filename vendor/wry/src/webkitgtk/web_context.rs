@@ -224,6 +224,15 @@ pub trait WebContextExt {
   );
 }
 
+impl super::WebContext {
+  /// The native context, for embedder setup that WebKit accepts only before
+  /// the context has a WebView or Web process (sandbox paths, Web-process
+  /// extension directory and initialization data).
+  pub fn webkit_context(&self) -> &WebContext {
+    &self.os.context
+  }
+}
+
 impl WebContextExt for super::WebContext {
   fn context(&self) -> &WebContext {
     &self.os.context
@@ -248,10 +257,10 @@ impl WebContextExt for super::WebContext {
       #[cfg(feature = "tracing")]
       let span = tracing::info_span!(parent: None, "wry::custom_protocol::handle", uri = tracing::field::Empty).entered();
 
-      if let Some(uri) = bounded_scheme_request_uri(&request) {
+      if let Some(uri) = bounded_scheme_request_uri(request) {
 
         let Some(permit) = protocol_admission.try_acquire() else {
-          finish_scheme_request_with_empty_status(&request, CUSTOM_PROTOCOL_OVERFLOW_STATUS);
+          finish_scheme_request_with_empty_status(request, CUSTOM_PROTOCOL_OVERFLOW_STATUS);
           return;
         };
 

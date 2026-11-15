@@ -1,0 +1,49 @@
+{
+  "caseId": "css-removal-inherited",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "insert before inherited child:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "insert before inherited child:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "remove after inherited child:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove after inherited child:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "main style removed",
+      "value": ""
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

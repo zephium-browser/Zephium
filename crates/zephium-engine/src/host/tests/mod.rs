@@ -29,7 +29,8 @@ fn protected_document_start_scripts_flow_through_the_ordered_builder_path() {
 fn raw_popups_use_owned_native_adoption_with_explicit_gesture_and_scope_checks() {
     let raw_policy = raw_view_construction_policy();
     assert!(raw_policy.contains("with_new_window_req_handler"));
-    assert!(raw_policy.contains("!features.user_initiated"));
+    assert!(raw_policy.contains("!burst.admit(features.user_initiated, now)"));
+    assert!(include_str!("../popup_sites.rs").contains("if !authorized || count >= 8"));
     let boundary = include_str!("../page_open.rs");
     assert!(boundary.contains("presentation_permit.load(Ordering::Acquire)"));
     assert!(boundary.contains("same_generation(permit)"));

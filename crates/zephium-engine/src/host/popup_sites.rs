@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 use std::rc::Rc;
 
 use zephium_core::ids::{ItemId, ProfileId};
@@ -18,7 +18,7 @@ use super::EngineHost;
 pub(super) struct PopupSites(RefCell<HashSet<PageOrigin>>);
 
 impl PopupSites {
-    #[cfg(any(target_os = "macos", target_os = "windows", test))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
     fn allows(&self, url: &str) -> bool {
         let Some(origin) = url::Url::parse(url)
             .ok()
@@ -42,14 +42,14 @@ impl PopupSites {
 /// WebKit's automatic-window gate is open on the view, from WebKit itself:
 /// a native popup shares its opener's preferences, so a cached flag could be
 /// stale.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 pub(super) struct ViewPopupPolicy {
     sites: Rc<PopupSites>,
     #[cfg(target_os = "macos")]
     webview: RefCell<Option<objc2::rc::Weak<objc2_web_kit::WKWebView>>>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 impl ViewPopupPolicy {
     pub(super) fn new(sites: Rc<PopupSites>) -> Self {
         Self {
@@ -79,7 +79,7 @@ impl ViewPopupPolicy {
 
     /// Whether the person clicked for the request, rather than an allowed
     /// site's document opening it by itself.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn clicked(&self, user_initiated: bool) -> bool {
         clicked(user_initiated, self.automatic())
     }
@@ -105,14 +105,38 @@ impl ViewPopupPolicy {
 
 /// While WebKit's automatic gate is open it reports every request as a
 /// click, so only the allowed site's own document is believed then.
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn admits(user_initiated: bool, site_allowed: bool, automatic: bool) -> bool {
     site_allowed || clicked(user_initiated, automatic)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn clicked(user_initiated: bool, automatic: bool) -> bool {
     user_initiated && !automatic
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
+pub(super) struct PopupBurst(std::cell::Cell<(std::time::Instant, u8)>);
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
+impl PopupBurst {
+    pub(super) fn new() -> Self {
+        Self(std::cell::Cell::new((std::time::Instant::now(), 0)))
+    }
+
+    pub(super) fn admit(&self, authorized: bool, now: std::time::Instant) -> bool {
+        let (started, count) = self.0.get();
+        let (started, count) = if now.duration_since(started) >= std::time::Duration::from_secs(1) {
+            (now, 0)
+        } else {
+            (started, count)
+        };
+        if !authorized || count >= 8 {
+            return false;
+        }
+        self.0.set((started, count + 1));
+        true
+    }
 }
 
 impl EngineHost {
@@ -124,7 +148,7 @@ impl EngineHost {
             .entry(profile)
             .or_default()
             .replace(origins);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let items: Vec<ItemId> = self
                 .views
@@ -142,7 +166,7 @@ impl EngineHost {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(super) fn popup_sites_for(&mut self, profile: ProfileId) -> Rc<PopupSites> {
         self.popup_sites.entry(profile).or_default().clone()
     }
@@ -167,7 +191,22 @@ impl EngineHost {
                 .setJavaScriptCanOpenWindowsAutomatically(allowed);
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    pub(super) fn apply_popup_policy(&self, item: ItemId) {
+        use webkit2gtk::{SettingsExt, WebViewExt};
+        use wry::WebViewExtUnix;
+        let Some(view) = self.views.get(&item) else {
+            return;
+        };
+        let allowed = view
+            .navigation
+            .committed_snapshot()
+            .is_some_and(|(_, url)| view.popup_policy.sites.allows(&url));
+        if let Some(settings) = view.view.webview().settings() {
+            settings.set_javascript_can_open_windows_automatically(allowed);
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub(super) fn apply_popup_policy(&self, _item: ItemId) {}
 }
 
@@ -184,6 +223,21 @@ mod tests {
                 .collect(),
         );
         sites
+    }
+
+    #[test]
+    fn popup_bursts_are_bounded_and_refusals_do_not_consume_capacity() {
+        let burst = PopupBurst::new();
+        let now = burst.0.get().0;
+        for _ in 0..32 {
+            assert!(!burst.admit(false, now));
+        }
+        for _ in 0..8 {
+            assert!(burst.admit(true, now));
+        }
+        assert!(!burst.admit(true, now));
+        assert!(!burst.admit(true, now + std::time::Duration::from_millis(999)));
+        assert!(burst.admit(true, now + std::time::Duration::from_secs(1)));
     }
 
     #[test]

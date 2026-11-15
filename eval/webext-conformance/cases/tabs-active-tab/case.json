@@ -1,0 +1,6 @@
+{
+  "id": "tabs-active-tab",
+  "title": "A real action invocation grants activeTab and cross-origin navigation revokes it",
+  "apis": ["action.onClicked", "scripting.executeScript", "tabs.update"],
+  "permissions": ["activeTab", "scripting", "storage"]
+}

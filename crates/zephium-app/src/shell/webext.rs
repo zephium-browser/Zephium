@@ -408,6 +408,7 @@ fn unchanged(loaded: &WebExtensionLoad, wanted: &WebExtensionLoad) -> bool {
         && loaded.permissions == wanted.permissions
         && loaded.external_native_messaging == wanted.external_native_messaging
         && loaded.native_messaging_grantable == wanted.native_messaging_grantable
+        && loaded.allow_user_scripts == wanted.allow_user_scripts
         && loaded.match_patterns == wanted.match_patterns
 }
 
@@ -424,6 +425,7 @@ mod tests {
             permissions: vec!["storage".into()],
             external_native_messaging: false,
             native_messaging_grantable: false,
+            allow_user_scripts: false,
             match_patterns: vec!["<all_urls>".into()],
             start_background: true,
         };
@@ -432,6 +434,11 @@ mod tests {
             ..loaded.clone()
         };
         assert!(unchanged(&loaded, &settled));
+        let user_scripts_changed = WebExtensionLoad {
+            allow_user_scripts: true,
+            ..settled.clone()
+        };
+        assert!(!unchanged(&loaded, &user_scripts_changed));
         let narrowed = WebExtensionLoad {
             match_patterns: vec!["*://github.com/*".into()],
             ..settled.clone()

@@ -1,0 +1,245 @@
+{
+ "max": 1048576,
+ "accepted": [
+  {
+   "name": "call",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "call",
+    "id": 7,
+    "name": "tabs.query",
+    "args": "[]"
+   },
+   "hex": "1b0000000101070000000a746162732e7175657279020000005b5d"
+  },
+  {
+   "name": "call with a long dotted name",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "call",
+    "id": 4294967295,
+    "name": "privacy.services.passwordSavingEnabled.set",
+    "args": "[{\"value\":false}]"
+   },
+   "hex": "4a0000000101ffffffff2a707269766163792e73657276696365732e70617373776f7264536176696e67456e61626c65642e736574110000005b7b2276616c7565223a66616c73657d5d"
+  },
+  {
+   "name": "call with empty arguments",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "call",
+    "id": 1,
+    "name": "zephium.addListener",
+    "args": ""
+   },
+   "hex": "22000000010101000000137a65706869756d2e6164644c697374656e657200000000"
+  },
+  {
+   "name": "reply",
+   "direction": "toContext",
+   "frame": {
+    "kind": "reply",
+    "id": 1,
+    "ok": true,
+    "value": "null"
+   },
+   "hex": "1300000001020100000000040000006e756c6c"
+  },
+  {
+   "name": "reply error",
+   "direction": "toContext",
+   "frame": {
+    "kind": "reply",
+    "id": 42,
+    "ok": false,
+    "error": "Could not establish connection. Receiving end does not exist."
+   },
+   "hex": "4c00000001022a000000013d000000436f756c64206e6f742065737461626c69736820636f6e6e656374696f6e2e20526563656976696e6720656e6420646f6573206e6f742065786973742e"
+  },
+  {
+   "name": "reply error in UTF-8",
+   "direction": "toContext",
+   "frame": {
+    "kind": "reply",
+    "id": 3,
+    "ok": false,
+    "error": "Ошибка ✓ 🙂"
+   },
+   "hex": "240000000102030000000115000000d09ed188d0b8d0b1d0bad0b020e29c9320f09f9982"
+  },
+  {
+   "name": "event",
+   "direction": "toContext",
+   "frame": {
+    "kind": "event",
+    "seq": "1",
+    "name": "runtime.onMessage",
+    "args": "[\"{\\\"a\\\":1}\",{\"id\":\"x\"},\"5\"]"
+   },
+   "hex": "40000000010301000000000000001172756e74696d652e6f6e4d6573736167651c0000005b227b5c22615c223a317d222c7b226964223a2278227d2c2235225d"
+  },
+  {
+   "name": "event with the largest sequence",
+   "direction": "toContext",
+   "frame": {
+    "kind": "event",
+    "seq": "18446744073709551615",
+    "name": "storage.onChanged",
+    "args": "[{},\"local\"]"
+   },
+   "hex": "300000000103ffffffffffffffff1173746f726167652e6f6e4368616e6765640c0000005b7b7d2c226c6f63616c225d"
+  },
+  {
+   "name": "ack beyond 2^53",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "ack",
+    "seq": "9007199254740993"
+   },
+   "hex": "0e00000001040100000000002000"
+  },
+  {
+   "name": "port message from a context",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "portMessage",
+    "port": "3",
+    "payload": "{\"hello\":\"world\"}"
+   },
+   "hex": "2300000001050300000000000000110000007b2268656c6c6f223a22776f726c64227d"
+  },
+  {
+   "name": "port message to a context",
+   "direction": "toContext",
+   "frame": {
+    "kind": "portMessage",
+    "port": "1099511627776",
+    "payload": "\"é\""
+   },
+   "hex": "16000000010500000000000100000400000022c3a922"
+  },
+  {
+   "name": "port message with an opaque payload",
+   "direction": "toContext",
+   "frame": {
+    "kind": "portMessage",
+    "port": "5",
+    "payloadHex": "00ff10"
+   },
+   "hex": "15000000010505000000000000000300000000ff10"
+  },
+  {
+   "name": "disconnect from a context",
+   "direction": "fromContext",
+   "frame": {
+    "kind": "portDisconnect",
+    "port": "12",
+    "error": null
+   },
+   "hex": "0f00000001060c0000000000000000"
+  },
+  {
+   "name": "disconnect with an error",
+   "direction": "toContext",
+   "frame": {
+    "kind": "portDisconnect",
+    "port": "12",
+    "error": "Attempting to use a disconnected port object"
+   },
+   "hex": "3f00000001060c00000000000000012c000000417474656d7074696e6720746f20757365206120646973636f6e6e656374656420706f7274206f626a656374"
+  }
+ ],
+ "rejected": [
+  {
+   "name": "truncated header",
+   "direction": "fromContext",
+   "hex": "1b0000",
+   "error": "Truncated"
+  },
+  {
+   "name": "length prefix short of the message",
+   "direction": "fromContext",
+   "hex": "1b00000001",
+   "error": "LengthMismatch"
+  },
+  {
+   "name": "trailing bytes",
+   "direction": "fromContext",
+   "hex": "1c0000000101070000000a746162732e7175657279020000005b5d00",
+   "error": "TrailingBytes"
+  },
+  {
+   "name": "unsupported version",
+   "direction": "fromContext",
+   "hex": "1b0000000201070000000a746162732e7175657279020000005b5d",
+   "error": "UnsupportedVersion"
+  },
+  {
+   "name": "unknown kind",
+   "direction": "fromContext",
+   "hex": "1b0000000163070000000a746162732e7175657279020000005b5d",
+   "error": "UnknownKind"
+  },
+  {
+   "name": "zero call id",
+   "direction": "fromContext",
+   "hex": "1b0000000101000000000a746162732e7175657279020000005b5d",
+   "error": "ZeroId"
+  },
+  {
+   "name": "malformed name",
+   "direction": "fromContext",
+   "hex": "1b0000000101070000000a2d6162732e7175657279020000005b5d",
+   "error": "InvalidName"
+  },
+  {
+   "name": "name without a namespace",
+   "direction": "fromContext",
+   "hex": "150000000101070000000474616273020000005b5d",
+   "error": "InvalidName"
+  },
+  {
+   "name": "a call travelling to a context",
+   "direction": "toContext",
+   "hex": "1b0000000101070000000a746162732e7175657279020000005b5d",
+   "error": "WrongDirection"
+  },
+  {
+   "name": "a reply travelling from a context",
+   "direction": "fromContext",
+   "hex": "1300000001020100000000040000006e756c6c",
+   "error": "WrongDirection"
+  },
+  {
+   "name": "a context sending a disconnect error",
+   "direction": "fromContext",
+   "hex": "3f00000001060c00000000000000012c000000417474656d7074696e6720746f20757365206120646973636f6e6e656374656420706f7274206f626a656374",
+   "error": "WrongDirection"
+  },
+  {
+   "name": "reply status other than 0 or 1",
+   "direction": "toContext",
+   "hex": "1300000001020100000002040000006e756c6c",
+   "error": "InvalidFlag"
+  },
+  {
+   "name": "error text that is not UTF-8",
+   "direction": "toContext",
+   "hex": "4c00000001022a000000013d000000436f756c64206e6f742065737461626c69736820636f6e6e656374696f6e2e20526563656976696e6720656e6420646f6573206e6f74206578697374ff",
+   "error": "InvalidUtf8"
+  },
+  {
+   "name": "declared argument length past the end",
+   "direction": "fromContext",
+   "hex": "1b0000000101070000000a746162732e7175657279030000005b5d",
+   "error": "Truncated"
+  },
+  {
+   "name": "larger than the receiver accepts",
+   "direction": "fromContext",
+   "hex": "1b0000000101070000000a746162732e7175657279020000005b5d",
+   "max": 26,
+   "error": "TooLarge"
+  }
+ ]
+}

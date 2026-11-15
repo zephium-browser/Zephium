@@ -1,0 +1,13 @@
+{
+  "id": "tabs-lifecycle",
+  "title": "Tab create update and remove event order",
+  "apis": [
+    "tabs.create",
+    "tabs.update",
+    "tabs.remove",
+    "tabs.onCreated",
+    "tabs.onUpdated",
+    "tabs.onRemoved"
+  ],
+  "permissions": ["tabs"]
+}

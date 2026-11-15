@@ -1,0 +1,1 @@
+{"id":"webrequest-handler-cache","title":"Handler cache invalidation completion and argument validation","apis":["webRequest.handlerBehaviorChanged"],"permissions":["webRequest"]}

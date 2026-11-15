@@ -1,0 +1,6 @@
+{
+  "id": "injection-match-about-blank",
+  "title": "match_about_blank extends injection into blank and srcdoc child frames",
+  "apis": ["manifest.content_scripts", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

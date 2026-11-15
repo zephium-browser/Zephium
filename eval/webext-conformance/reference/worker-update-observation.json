@@ -1,0 +1,57 @@
+{
+  "caseId": "worker-update-observation",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "worker ready:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "worker ready:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": "activated"
+        }
+      }
+    },
+    {
+      "label": "self update observed for 1000ms",
+      "value": [
+        {
+          "phase": "before"
+        },
+        {
+          "phase": "returned",
+          "thenable": true
+        }
+      ]
+    },
+    {
+      "label": "page update:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "page update:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "settlement": "unsettled after 1000ms"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

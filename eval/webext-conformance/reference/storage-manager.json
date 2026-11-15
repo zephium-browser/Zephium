@@ -1,0 +1,36 @@
+{
+  "caseId": "storage-manager",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "native interface",
+      "value": {
+        "estimate": "function",
+        "persist": "function",
+        "persisted": "function"
+      }
+    },
+    {
+      "label": "estimate",
+      "value": {
+        "quotaFinite": true,
+        "usageFinite": true
+      }
+    },
+    {
+      "label": "persistence",
+      "value": {
+        "acceptedType": "boolean",
+        "beforeType": "boolean",
+        "settled": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

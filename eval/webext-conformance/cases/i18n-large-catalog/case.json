@@ -1,0 +1,1 @@
+{"id": "i18n-large-catalog", "title": "Large locale catalogs remain synchronous data without enlarging executable bootstrap source", "apis": ["i18n.getMessage", "scripting.executeScript"], "permissions": ["scripting"]}

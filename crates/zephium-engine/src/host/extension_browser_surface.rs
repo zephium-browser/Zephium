@@ -146,6 +146,8 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         self.reconcile_windows_extension_popup(&surface);
+        #[cfg(target_os = "linux")]
+        self.webext_linux.publish(&surface);
         self.extension_browser_surfaces.insert(profile, surface);
         true
     }

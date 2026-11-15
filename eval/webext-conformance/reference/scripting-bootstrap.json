@@ -1,0 +1,27 @@
+{
+  "caseId": "scripting-bootstrap",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "native API from programmatic world",
+      "value": {
+        "fromTab": true,
+        "value": 1
+      }
+    },
+    {
+      "label": "native API from programmatic world",
+      "value": {
+        "fromTab": true,
+        "value": 2
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -31,7 +31,7 @@ pub(in crate::host) struct SiteAsk {
 
 /// A transfer that may not choose its destination until the person answers.
 pub(super) struct SiteHold {
-    ask: SiteAsk,
+    ask: Box<SiteAsk>,
     site: PageOrigin,
     allowed: bool,
     clicked: bool,
@@ -89,7 +89,7 @@ impl Downloads {
             DownloadGate::Open => SiteAdmission::Open,
             DownloadGate::Refuse => SiteAdmission::Refuse,
             DownloadGate::Ask => SiteAdmission::Hold(SiteHold {
-                ask,
+                ask: Box::new(ask),
                 site,
                 allowed: remembered == Some(true),
                 clicked,
@@ -157,7 +157,9 @@ impl Downloads {
             site: hold.site.clone(),
             filename,
             allowed: hold.allowed,
-            unclicked: !hold.clicked,
+            // Linux cannot attribute activation; absence of proof is not proof
+            // that the person did not click. The admission gate still asks.
+            unclicked: !hold.clicked && !cfg!(target_os = "linux"),
         };
         prompts.insert(
             request,

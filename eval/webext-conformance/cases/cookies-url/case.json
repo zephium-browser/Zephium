@@ -1,0 +1,1 @@
+{"id":"cookies-url","title":"URL-scoped native cookies, HttpOnly and confirmed mutations","apis":["cookies.get","cookies.getAll","cookies.set","cookies.remove","cookies.getAllCookieStores"],"permissions":["cookies"]}

@@ -1,0 +1,486 @@
+{
+  "package": {
+    "id": "ghmbeldphafepmbegfdlkpapadhbakde",
+    "name": "Proton Pass",
+    "version": "1.43.0",
+    "sha256": "9f52c73fb98f9a53ab62d273b659e28e42a488ffaeae18436776080c6e485b9a",
+    "license": "GPL-3.0",
+    "source": "https://github.com/ProtonMail/WebClients"
+  },
+  "engine": {
+    "name": "Chromium",
+    "version": "153.0.8010.12",
+    "playwright": "1.63.0",
+    "revision": "1243",
+    "headless": false,
+    "sandbox": true
+  },
+  "action": "popup",
+  "backgroundUnhandled": [],
+  "repeatedEvaluation": {
+    "source": "client.js",
+    "message": "This script should only be loaded in a browser extension.",
+    "line": 238,
+    "evaluation": 2,
+    "previousSuccess": true,
+    "maximum": 1
+  },
+  "traces": [
+    {
+      "file": "chromium-round5-20261114T190715Z-I02Y/proton_pass.jsonl",
+      "sha256": "a466cb8082c392af679888dd7f4d48878f5df5b1cf1d2005597eaf6d56f319cc",
+      "rows": [
+        {
+          "line": 428,
+          "record": {
+            "seq": 428,
+            "ms": 770,
+            "kind": "instrument",
+            "session": "0EAF21DC7FB391135D69D7AB9D195556",
+            "target": {
+              "targetId": "484B42169C9665849688D8D511CD212E",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "context": 1,
+            "event": {
+              "kind": "api-call",
+              "call": 90,
+              "api": "chrome.scripting.executeScript",
+              "args": [
+                {
+                  "target": {
+                    "tabId": 1761707531,
+                    "allFrames": false,
+                    "frameIds": "[undefined]"
+                  },
+                  "files": [
+                    "client.js"
+                  ],
+                  "world": "[undefined]"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "line": 443,
+          "record": {
+            "seq": 443,
+            "ms": 794,
+            "kind": "script-evaluation",
+            "session": "06733267BCBD00FC69AB464A47273C4C",
+            "target": {
+              "targetId": "3ECAFEF4492D780E2D36AD42C0A35D8E",
+              "type": "page",
+              "title": "",
+              "url": "about:blank",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+            "scriptId": "7",
+            "context": 5,
+            "reason": "instrumentation"
+          }
+        },
+        {
+          "line": 445,
+          "record": {
+            "seq": 445,
+            "ms": 798,
+            "kind": "instrument",
+            "session": "0EAF21DC7FB391135D69D7AB9D195556",
+            "target": {
+              "targetId": "484B42169C9665849688D8D511CD212E",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "context": 1,
+            "event": {
+              "kind": "api-result",
+              "call": 90,
+              "api": "chrome.scripting.executeScript",
+              "value": [
+                {
+                  "documentId": "3CE1C6B4A063B46B29BA9AC964A0DCE8",
+                  "frameId": 0,
+                  "result": null
+                }
+              ]
+            }
+          }
+        },
+        {
+          "line": 450,
+          "record": {
+            "seq": 450,
+            "ms": 799,
+            "kind": "instrument",
+            "session": "0EAF21DC7FB391135D69D7AB9D195556",
+            "target": {
+              "targetId": "484B42169C9665849688D8D511CD212E",
+              "type": "service_worker",
+              "title": "Service Worker chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/background.js",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "context": 1,
+            "event": {
+              "kind": "api-call",
+              "call": 95,
+              "api": "chrome.scripting.executeScript",
+              "args": [
+                {
+                  "target": {
+                    "tabId": 1761707531,
+                    "allFrames": false,
+                    "frameIds": "[undefined]"
+                  },
+                  "files": [
+                    "client.js"
+                  ],
+                  "world": "[undefined]"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "line": 455,
+          "record": {
+            "seq": 455,
+            "ms": 810,
+            "kind": "script-evaluation",
+            "session": "06733267BCBD00FC69AB464A47273C4C",
+            "target": {
+              "targetId": "3ECAFEF4492D780E2D36AD42C0A35D8E",
+              "type": "page",
+              "title": "",
+              "url": "about:blank",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+            "scriptId": "9",
+            "context": 5,
+            "reason": "instrumentation"
+          }
+        },
+        {
+          "line": 456,
+          "record": {
+            "seq": 456,
+            "ms": 812,
+            "kind": "Runtime.exceptionThrown",
+            "session": "06733267BCBD00FC69AB464A47273C4C",
+            "target": {
+              "targetId": "3ECAFEF4492D780E2D36AD42C0A35D8E",
+              "type": "page",
+              "title": "",
+              "url": "about:blank",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "data": {
+              "timestamp": 1794683319153.748,
+              "exceptionDetails": {
+                "exceptionId": 1,
+                "text": "Uncaught",
+                "lineNumber": 237,
+                "columnNumber": 2930,
+                "scriptId": "9",
+                "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                "stackTrace": {
+                  "callFrames": [
+                    {
+                      "functionName": "",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 2930
+                    },
+                    {
+                      "functionName": "48868",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 12134
+                    },
+                    {
+                      "functionName": "r",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 12271
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 29481
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 341182
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "9",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 341186
+                    }
+                  ]
+                },
+                "exception": {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "Error",
+                  "description": "Error: This script should only be loaded in a browser extension.\n    at Object.<anonymous> (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:2931)\n    at 48868 (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12135)\n    at r (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12272)\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:29482\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341183\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341187",
+                  "objectId": "8247154559655719335.5.9",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "Error: This script should only be loaded in a browser extension.\n    at Object.<anonymous> (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:2931)\n    at 48868 (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12135)\n    at r (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12272)\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:29482\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341183\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341187",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "Error: This script should only be loaded in a brow\u2026eldphafepmbegfdlkpapadhbakde/client.js:238:341187"
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "This script should only be loaded in a browser extension."
+                      }
+                    ]
+                  }
+                },
+                "executionContextId": 5
+              }
+            }
+          }
+        },
+        {
+          "line": 457,
+          "record": {
+            "seq": 457,
+            "ms": 812,
+            "kind": "paused",
+            "session": "06733267BCBD00FC69AB464A47273C4C",
+            "reason": "instrumentation",
+            "data": {
+              "scriptId": "10",
+              "url": ""
+            },
+            "frames": [
+              {
+                "url": "",
+                "location": {
+                  "scriptId": "10",
+                  "lineNumber": 0,
+                  "columnNumber": 0
+                }
+              }
+            ]
+          }
+        },
+        {
+          "line": 609,
+          "record": {
+            "seq": 609,
+            "ms": 35596,
+            "kind": "page-state",
+            "phase": "forced-popup",
+            "session": "88175A790156D2C1DEB071E54AEA0D71",
+            "state": "{\"url\":\"chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/popup.html#/\",\"ready\":\"complete\",\"text\":\"Welcome to\\nSign in to your account\\nSign in with Proton\\nCreate a Proton account\",\"controls\":[\"Sign in with Proton\",\"Create a Proton account\"]}"
+          }
+        }
+      ]
+    },
+    {
+      "file": "chromium-round5-20261114T190522Z-mcGq/proton_pass.jsonl",
+      "sha256": "e4bd9a583b3fbb3394ec7660a2e6514a40373e46cd7af43484e06d491449f1c9",
+      "rows": [
+        {
+          "line": 162,
+          "record": {
+            "seq": 162,
+            "ms": 578,
+            "kind": "Runtime.exceptionThrown",
+            "session": "10DE749AC0457918E30903875914E252",
+            "target": {
+              "targetId": "8FF15BC272D1634B9C4D912DC87949AF",
+              "type": "page",
+              "title": "",
+              "url": "about:blank",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "E6E04243E9A292C0E6B21B2BCE3F227A"
+            },
+            "data": {
+              "timestamp": 1794683204787.096,
+              "exceptionDetails": {
+                "exceptionId": 1,
+                "text": "Uncaught",
+                "lineNumber": 237,
+                "columnNumber": 2930,
+                "scriptId": "10",
+                "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                "stackTrace": {
+                  "callFrames": [
+                    {
+                      "functionName": "",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 2930
+                    },
+                    {
+                      "functionName": "48868",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 12134
+                    },
+                    {
+                      "functionName": "r",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 12271
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 29481
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 341182
+                    },
+                    {
+                      "functionName": "",
+                      "scriptId": "10",
+                      "url": "chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js",
+                      "lineNumber": 237,
+                      "columnNumber": 341186
+                    }
+                  ]
+                },
+                "exception": {
+                  "type": "object",
+                  "subtype": "error",
+                  "className": "Error",
+                  "description": "Error: This script should only be loaded in a browser extension.\n    at Object.<anonymous> (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:2931)\n    at 48868 (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12135)\n    at r (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12272)\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:29482\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341183\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341187",
+                  "objectId": "1840666449676090388.5.1",
+                  "preview": {
+                    "type": "object",
+                    "subtype": "error",
+                    "description": "Error: This script should only be loaded in a browser extension.\n    at Object.<anonymous> (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:2931)\n    at 48868 (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12135)\n    at r (chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:12272)\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:29482\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341183\n    at chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/client.js:238:341187",
+                    "overflow": false,
+                    "properties": [
+                      {
+                        "name": "stack",
+                        "type": "string",
+                        "value": "Error: This script should only be loaded in a brow\u2026eldphafepmbegfdlkpapadhbakde/client.js:238:341187"
+                      },
+                      {
+                        "name": "message",
+                        "type": "string",
+                        "value": "This script should only be loaded in a browser extension."
+                      }
+                    ]
+                  }
+                },
+                "executionContextId": 5
+              }
+            }
+          }
+        },
+        {
+          "line": 232,
+          "record": {
+            "seq": 232,
+            "ms": 35507,
+            "kind": "page-state",
+            "phase": "forced-popup",
+            "session": "96FCDF2FFC8FF60CB7183998AEE6CA8B",
+            "state": "{\"url\":\"chrome-extension://ghmbeldphafepmbegfdlkpapadhbakde/popup.html#/\",\"ready\":\"complete\",\"text\":\"Welcome to\\nSign in to your account\\nSign in with Proton\\nCreate a Proton account\",\"controls\":[\"Sign in with Proton\",\"Create a Proton account\"]}"
+          }
+        }
+      ]
+    },
+    {
+      "file": "chromium-round5-20261114T190715Z-I02Y/proton_pass.jsonl",
+      "sha256": "a466cb8082c392af679888dd7f4d48878f5df5b1cf1d2005597eaf6d56f319cc",
+      "rows": [
+        {
+          "line": 491,
+          "record": {
+            "seq": 491,
+            "ms": 1799,
+            "kind": "Network.loadingFailed",
+            "session": "D0D61E2F18D62AF356BB02EFEA084A80",
+            "target": {
+              "targetId": "21E469DE48FE35EDF7D242199A38A71C",
+              "type": "page",
+              "title": "",
+              "url": "https://account.proton.me/pass/extension-onboarding",
+              "attached": true,
+              "canAccessOpener": false,
+              "browserContextId": "83A9059137545DBDAE196E08B0C8C4C9"
+            },
+            "data": {
+              "requestId": "A28EA540798C6B6413C0D0F477A0DCFC",
+              "timestamp": 68808.587028,
+              "type": "Document",
+              "errorText": "net::ERR_PROXY_CONNECTION_FAILED",
+              "canceled": false
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "offlineErrors": [
+    {
+      "kind": "resource-failed",
+      "context": "ContentScript",
+      "origin": "https://account.proton.me",
+      "maximum": 1,
+      "traceLine": 491
+    },
+    {
+      "kind": "load-failed",
+      "context": "ContentScript",
+      "origin": "https://account.proton.me",
+      "maximum": 1,
+      "traceLine": 491
+    }
+  ]
+}

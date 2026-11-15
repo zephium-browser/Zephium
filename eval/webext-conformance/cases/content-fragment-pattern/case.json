@@ -1,0 +1,1 @@
+{"id": "content-fragment-pattern", "title": "Literal fragment match patterns stay inert without discarding valid content scripts", "apis": ["scripting.executeScript"], "permissions": ["scripting"]}

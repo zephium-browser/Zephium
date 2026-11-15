@@ -1,0 +1,83 @@
+{
+  "caseId": "scripting-execute-worlds",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "isolated world sees DOM:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "isolated world sees DOM:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "domMarker": "ran",
+              "ownGlobal": "isolated",
+              "pageGlobal": "undefined"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "main world sees page globals:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "main world sees page globals:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "domMarker": "shared-dom",
+              "ownGlobal": "main",
+              "pageGlobal": true,
+              "priorProbe": "undefined",
+              "runtime": "undefined"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "isolated global survived main write:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "isolated global survived main write:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": "isolated"
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

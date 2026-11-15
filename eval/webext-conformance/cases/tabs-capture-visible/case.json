@@ -1,0 +1,1 @@
+{"id": "tabs-capture-visible", "title": "Visible tab capture preserves the requested image format", "apis": ["tabs.captureVisibleTab"], "permissions": []}

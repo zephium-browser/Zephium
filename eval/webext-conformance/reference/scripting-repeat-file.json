@@ -1,0 +1,53 @@
+{
+  "caseId": "scripting-repeat-file",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "manifest count:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "manifest count:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": 1
+          }
+        ]
+      }
+    },
+    {
+      "label": "repeat count:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "repeat count:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": 3
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

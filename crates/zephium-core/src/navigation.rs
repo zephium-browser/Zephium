@@ -378,11 +378,14 @@ pub enum AppLinkSource {
     Unknown,
 }
 
-/// Syntactic browser-tab target. Windows extension documents additionally
-/// require the engine's live, profile-specific installation grant. This is not
-/// permission to load an extension or to expose its resources to web pages.
+/// Syntactic browser-tab target. Windows and Linux extension documents
+/// additionally require the engine's live, profile-specific installation
+/// grant. This is not permission to load an extension or to expose its
+/// resources to web pages.
 pub fn is_browser_target(url: &Url) -> bool {
-    is_allowed(url) || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
+    is_allowed(url)
+        || (cfg!(any(target_os = "windows", target_os = "linux"))
+            && extension_document_id(url).is_some())
 }
 
 pub fn is_browser_target_str(target: &str) -> bool {

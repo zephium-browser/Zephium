@@ -11,6 +11,11 @@ import type { MediaImportV1_Deserialize } from "$shared/ipc/bindings";
 import { loadNewTab } from "$features/newtab";
 import { loadSettings, handleNativeSection } from "$features/settings";
 
+vi.mock("$shared/platform", async (original) => ({
+  ...(await original<typeof import("$shared/platform")>()),
+  SUPPORTS_BLOCKER_STATISTICS: true,
+}));
+
 async function settingsScreen() {
   const { default: Settings } = await loadSettings();
   handleNativeSection("settings.section.newtab");

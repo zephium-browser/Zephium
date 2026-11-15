@@ -1,0 +1,948 @@
+// Builds `chrome` (and `browser`, the same object) for one extension context
+// from the surface data and the context's bootstrap blob. Every async method
+// takes a trailing callback (`runtime.lastError` survives its microtasks) or
+// returns a promise; synchronous members are served from the bootstrap.
+//
+// Surface (`surface.generated.js`, one JSON value):
+//   { version: 1, namespaces: { "<dotted name>": Namespace } }
+//   Namespace { contexts?: Kind[], permissions?: string[] (any one suffices), manifest?: string[],
+//               functions?: { name: Function }, events?: { name: Event },
+//               properties?: { name: JSON constant or enum } }
+//   Function  { parameters?: Param[] (no callback), returns?: "async" | "sync",
+//               callback?: boolean, callbackRequired?: true, promise?: false, result?: false,
+//               optionalResult?: true,
+//               signature?: string, setting?: ValueSchema, contexts?, permissions? }
+//   ValueSchema { type, optional?, enum?, properties?, items? } for ChromeSetting.set
+//   Param     { name, type: Type | Type[], optional?: true, serializeFunctions?: string[] }
+//   Type      string integer number boolean object array function binary any
+//   Event     { contexts?, permissions?, filter?: "url" | "request" | "window", blocking?: true, rules?: true }
+//   Kind      background popup options extensionTab offscreen extensionFrame
+//             contentScript userScript externalPage
+// Omitted `contexts` means every kind. "sync" functions exist only where the
+// binding implements them (LOCAL below). A sync return with callback:true is
+// mixed mode and requires a custom implementation; it is currently omitted.
+//
+// Bootstrap: { extensionId, scheme, contextKind, manifest (as getManifest
+// returns it), messages (resolved Chrome message catalog, or flattened strings),
+// uiLanguage, incognito, permissions (granted API permissions), worker? }.
+//
+// Host protocol beyond plain `namespace.method` calls (arguments are the
+// parameters in order, null for an omitted optional one; u64 ids are decimal
+// strings): `zephium.addListener [event, listenerId, filter|null,
+// extraInfoSpec|null]` and `zephium.removeListener [event, listenerId]`
+// report each listener; filtered events carry the matched listener ids as a last
+// argument; `zephium.eventResult [seq, listenerId, value]` for blocking
+// listeners; `runtime.sendMessage [id|null, messageJson, options|null]`,
+// `tabs.sendMessage [tabId, messageJson, options|null]` and
+// `runtime.sendNativeMessage [app, messageJson]` reply null (no response) or
+// `{response: json|null}`; message events carry `[messageJson, sender,
+// messageId, listenerIds]`, answered by
+// `zephium.respond [messageId, listenerId, {response}|{error}|{async:'callback'|'promise'}|null]`;
+// `runtime.connect`, `tabs.connect` and `runtime.connectNative` reply with the
+// port id, and connect events carry `[portId, name, sender]`; the host sends
+// `zephium.onInvalidated [message|null]` and
+// `zephium.onPermissionsChanged [permissions]` as events.
+(function api(Z) {
+  'use strict';
+  const I = Z.I;
+  const E = Z.errors;
+  const T = Z.transport;
+  const EV = Z.events;
+  const P = Z.ports;
+
+  const KINDS = [
+    'background',
+    'popup',
+    'options',
+    'extensionTab',
+    'offscreen',
+    'extensionFrame',
+    'contentScript',
+    'userScript',
+    'externalPage',
+  ];
+  const TYPES = ['string', 'integer', 'number', 'boolean', 'object', 'array', 'function', 'binary', 'any'];
+  const INT32_MIN = -2147483648;
+  const INT32_MAX = 2147483647;
+  const RTL = ['ar', 'dv', 'fa', 'he', 'iw', 'ku', 'ps', 'sd', 'ug', 'ur', 'yi'];
+
+  const own = (object, key) =>
+    object !== null && typeof object === 'object' && I.hasOwn(object, key) ? object[key] : undefined;
+  const contains = (list, value) => I.isArray(list) && I.ArrayIndexOf(list, value) !== -1;
+
+  const isArrayBuffer = (value) => T.arrayBufferLength(value) >= 0;
+  function typeName(value) {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'number')
+      return I.isInteger(value) && value >= INT32_MIN && value <= INT32_MAX ? 'integer' : 'number';
+    if (typeof value === 'object') {
+      if (I.isArray(value)) return 'array';
+      if (isArrayBuffer(value)) return 'binary';
+      return 'object';
+    }
+    return typeof value;
+  }
+  function typeMatches(type, value) {
+    if (I.isArray(type)) {
+      for (let i = 0; i < type.length; i++) if (typeMatches(type[i], value)) return true;
+      return false;
+    }
+    const found = typeName(value);
+    switch (type) {
+      case 'any':
+        return true;
+      case 'number':
+        return found === 'number' || found === 'integer';
+      case 'object':
+        return found === 'object';
+      default:
+        return found === type;
+    }
+  }
+  const typeLabel = (type) => (I.isArray(type) ? `[${I.ArrayJoin(type, '|')}]` : type || 'any');
+
+  function matchesSetting(spec, value, depth) {
+    if (depth >= 32) return false;
+    if (value === undefined || value === null) return own(spec, 'optional') === true;
+    if (!typeMatches(own(spec, 'type'), value)) return false;
+    const choices = own(spec, 'enum');
+    if (I.isArray(choices) && !contains(choices, value)) return false;
+    const properties = own(spec, 'properties');
+    if (properties !== undefined) {
+      const names = I.keys(value);
+      for (let i = 0; i < names.length; i++) if (!I.hasOwn(properties, names[i])) return false;
+      const expected = I.keys(properties);
+      for (let i = 0; i < expected.length; i++) {
+        const name = expected[i];
+        if (!matchesSetting(properties[name], own(value, name), depth + 1)) return false;
+      }
+    }
+    const items = own(spec, 'items');
+    if (items !== undefined) {
+      for (let i = 0; i < value.length; i++) if (!matchesSetting(items, value[i], depth + 1)) return false;
+    }
+    return true;
+  }
+
+  function signatureOf(params, async) {
+    const parts = [];
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
+      I.ArrayPush(parts, `${p.optional ? 'optional ' : ''}${typeLabel(p.type)} ${p.name}`);
+    }
+    if (async) I.ArrayPush(parts, 'optional function callback');
+    return I.ArrayJoin(parts, ', ');
+  }
+
+  // Chrome's argument matching: optional parameters whose type does not fit
+  // are skipped, null/undefined stand for an omitted optional parameter, and
+  // anything left over or missing is "No matching signature.".
+  function resolveArguments(name, signature, params, args) {
+    const values = [];
+    let at = 0;
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
+      if (at >= args.length) {
+        if (!p.optional) throw E.invocation(name, signature, 'No matching signature.');
+        I.ArrayPush(values, null);
+        continue;
+      }
+      const value = args[at];
+      if (value === null || value === undefined) {
+        if (!p.optional) throw E.invocation(name, signature, 'No matching signature.');
+        I.ArrayPush(values, null);
+        at++;
+        continue;
+      }
+      if (!typeMatches(p.type, value)) {
+        if (!p.optional) {
+          const detail = I.isArray(p.type)
+            ? `Error at parameter '${p.name}': Value did not match any choice.`
+            : `Error at parameter '${p.name}': Invalid type: expected ${typeLabel(p.type)}, found ${typeName(value)}.`;
+          throw E.invocation(name, signature, detail);
+        }
+        I.ArrayPush(values, null);
+        continue;
+      }
+      I.ArrayPush(values, value);
+      at++;
+    }
+    if (at < args.length) throw E.invocation(name, signature, 'No matching signature.');
+    return values;
+  }
+
+  const FIRE_AND_FORGET = I.freeze({ __proto__: null, promise: false });
+  const CALLBACK = I.freeze({ __proto__: null, name: 'callback', type: 'function', optional: true });
+
+  function normalizeParams(raw) {
+    const params = [];
+    if (!I.isArray(raw)) return params;
+    for (let i = 0; i < raw.length; i++) {
+      const p = raw[i];
+      const type = own(p, 'type');
+      const valid = I.isArray(type) ? type.length > 0 : contains(TYPES, type);
+      I.ArrayPush(params, {
+        __proto__: null,
+        name: typeof own(p, 'name') === 'string' ? p.name : `arg${i}`,
+        type: valid ? type : 'any',
+        optional: own(p, 'optional') === true,
+        serializeFunctions: I.isArray(own(p, 'serializeFunctions')) ? p.serializeFunctions : null,
+      });
+    }
+    return params;
+  }
+
+  // `scripting.executeScript({func})` and the like send functions as source.
+  function prepare(values, params) {
+    const out = [];
+    for (let i = 0; i < values.length; i++) {
+      let value = values[i];
+      const names = params[i] ? params[i].serializeFunctions : null;
+      if (names !== null && value !== null && typeof value === 'object' && !I.isArray(value)) {
+        const copy = { __proto__: null };
+        const keys = I.keys(value);
+        for (let k = 0; k < keys.length; k++) copy[keys[k]] = value[keys[k]];
+        for (let n = 0; n < names.length; n++) {
+          if (typeof copy[names[n]] === 'function') copy[names[n]] = I.FunctionToString(copy[names[n]]);
+        }
+        value = copy;
+      }
+      I.ArrayPush(out, value);
+    }
+    return out;
+  }
+
+  // ImageData uses prototype getters and typed pixels, neither of which JSON
+  // preserves. Copy only bounded raster data; Rust validates it again.
+  function iconDetails(details) {
+    const input = own(details, 'imageData');
+    if (input === undefined) return details;
+    const resembles = image => image !== null && typeof image === 'object' &&
+      'width' in image && 'height' in image && 'data' in image;
+    const invalid = () => new I.Error('The imageData property must contain an ImageData object or dictionary of ImageData objects.');
+    const image = value => {
+      if (!resembles(value)) throw invalid();
+      let rawWidth, rawHeight, pixels, native = false;
+      if (I.ImageDataWidth && I.ImageDataHeight && I.ImageDataData) {
+        try {
+          rawWidth = I.ImageDataWidth(value); rawHeight = I.ImageDataHeight(value);
+          pixels = I.ImageDataData(value); native = true;
+        } catch { /* Chrome also accepts structural ImageData objects. */ }
+      }
+      const width = (native ? rawWidth : value.width) | 0;
+      const height = (native ? rawHeight : value.height) | 0;
+      if (width <= 0 || height <= 0) throw new I.Error('ImageData has invalid dimensions.');
+      if (width > 256 || height > 256) throw new I.Error('Icon invalid.');
+      if (!native) pixels = value.data;
+      const length = width * height * 4;
+      if (pixels === null || pixels === undefined || ((native ? I.TypedArrayLength(pixels) : pixels.length) | 0) !== length)
+        throw new I.Error('ImageData data length does not match dimensions.');
+      const data = [];
+      for (let i = 0; i < length; i++) I.ArrayPush(data, pixels[i] & 255);
+      return { __proto__: null, width, height, data };
+    };
+    const images = { __proto__: null };
+    if (resembles(input)) {
+      const copied = image(input);
+      images[I.String(copied.width)] = copied;
+    } else {
+      if (input === null || typeof input !== 'object') throw invalid();
+      const keys = I.keys(input);
+      if (keys.length === 0) throw invalid();
+      if (keys.length > 16) throw new I.Error('Icon invalid.');
+      for (let i = 0; i < keys.length; i++) images[keys[i]] = image(input[keys[i]]);
+    }
+    const output = { __proto__: null, imageData: images };
+    if (own(details, 'tabId') !== undefined) output.tabId = details.tabId;
+    return output;
+  }
+
+  function deepFreeze(value) {
+    if (value === null || typeof value !== 'object') return value;
+    const keys = I.keys(value);
+    for (let i = 0; i < keys.length; i++) deepFreeze(value[keys[i]]);
+    return I.freeze(value);
+  }
+
+  const define = (target, key, value) =>
+    I.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
+
+  // Chrome's base::ReplaceStringPlaceholders: `$1`-`$9` substitute, `$$`
+  // runs keep all but one `$`, any other `$x` is dropped.
+  function substitute(message, substitutions, placeholders, escapeLt) {
+    let out = '';
+    for (let i = 0; i < message.length; i++) {
+      const c = message[i];
+      if (c !== '$') {
+        out += c === '<' && escapeLt ? '&lt;' : c;
+        continue;
+      }
+      if (i + 1 >= message.length) break;
+      i++;
+      if (message[i] === '$') {
+        while (i < message.length && message[i] === '$') {
+          out += '$';
+          i++;
+        }
+        i--;
+        continue;
+      }
+      const code = I.StringCharCodeAt(message, i);
+      if (placeholders !== undefined && (code < 0x31 || code > 0x39)) {
+        const end = I.StringIndexOf(message, '$', i);
+        if (end !== -1) {
+          const name = I.StringToLowerCase(I.StringSlice(message, i, end));
+          const content = own(own(placeholders, name), 'content');
+          if (typeof content === 'string') {
+            out += substitute(content, substitutions, undefined, escapeLt);
+            i = end;
+            continue;
+          }
+        }
+      }
+      if (code < 0x31 || code > 0x39) continue;
+      const index = code - 0x31;
+      if (index < substitutions.length) out += substitutions[index];
+    }
+    return out;
+  }
+
+  function create(surface, bootstrap, link, options) {
+    const global = own(options, 'global') || I.global;
+    const kind = own(bootstrap, 'contextKind');
+    if (!contains(KINDS, kind)) throw new I.TypeError(`Unknown extension context kind: ${kind}`);
+    const extensionId = I.String(own(bootstrap, 'extensionId'));
+    const scheme = typeof own(bootstrap, 'scheme') === 'string' ? bootstrap.scheme : 'chrome-extension';
+    const manifestText = I.JSONStringify(own(bootstrap, 'manifest') || {});
+    const manifest = I.JSONParse(manifestText);
+    const messages = own(bootstrap, 'messages') || {};
+    const uiLanguage = typeof own(bootstrap, 'uiLanguage') === 'string' ? bootstrap.uiLanguage : 'en-US';
+    const incognito = own(bootstrap, 'incognito') === true;
+    let granted = I.isArray(own(bootstrap, 'permissions')) ? I.ArraySlice(bootstrap.permissions) : [];
+    const namespaces = own(surface, 'namespaces') || {};
+    const lastError = E.createLastError(kind === 'userScript');
+    let invalid = false;
+
+    const handlers = { __proto__: null };
+    const dead = { __proto__: null, send: () => false, listen() {} };
+    // Native adapters may identify their Chrome API compatibility in extension
+    // realms. Keep the engine token and leave network headers to the web engine.
+    const suffix = own(bootstrap, 'userAgentSuffix');
+    const navigator = global.navigator;
+    if (kind !== 'externalPage' && typeof suffix === 'string' && suffix.length <= 128 &&
+        navigator && typeof navigator.userAgent === 'string') {
+      const userAgent = navigator.userAgent + suffix;
+      I.defineProperty(navigator, 'userAgent', { value: userAgent, configurable: true, enumerable: true });
+    }
+    const client = T.createClient(link || dead, {
+      maxMessageBytes: T.messageLimit(kind),
+      idBase: own(options, 'idBase'),
+      idLimit: own(options, 'idLimit'),
+      handlers: {
+        __proto__: null,
+        event: (seq, name, text) => handlers.event(seq, name, text),
+        portMessage: (port, payload) => handlers.portMessage(port, payload),
+        portDisconnect: (port, error) => handlers.portDisconnect(port, error),
+        invalidated: message => invalidate(message),
+      },
+    });
+    if (!link) client.invalidate(T.ERRORS.invalidated);
+    const callJson = (name, args, internal) => client.call(name, I.JSONStringify(args), internal);
+    const hub = EV.createHub({
+      __proto__: null,
+      call: (name, args) => callJson(name, args, true),
+      ack: (seq) => client.ack(seq),
+      lastError,
+    });
+    const eventObjects = new I.Map();
+    const chrome = {};
+    const objects = new I.Map();
+    const presentEvents = new I.Set();
+    const memberCache = new I.Map();
+    const messaging = P.createMessaging({
+      __proto__: null,
+      client,
+      hub,
+      lastError,
+      messageLimit: client.maxMessageBytes,
+      eventFor: (name) => (I.SetHas(presentEvents, name) ? I.MapGet(eventObjects, name) : undefined),
+    });
+    handlers.event = hub.deliver;
+    handlers.portMessage = messaging.portMessage;
+    handlers.portDisconnect = messaging.portDisconnect;
+
+    const permitted = (list) => {
+      if (!I.isArray(list) || list.length === 0) return true;
+      for (let i = 0; i < list.length; i++) if (contains(granted, list[i])) return true;
+      return false;
+    };
+    const available = (node) => {
+      const contexts = own(node, 'contexts');
+      const features = own(node, 'manifest');
+      if (own(node, 'unpackedOnly') === true && own(bootstrap, 'unpacked') !== true) return false;
+      const required = own(node, 'requiredPermissions');
+      if (I.isArray(required)) {
+        for (let i = 0; i < required.length; i++) if (!contains(granted, required[i])) return false;
+      }
+      if (I.isArray(features)) {
+        for (let i = 0; i < features.length; i++) if (!I.hasOwn(manifest, features[i]) || manifest[features[i]] === null) return false;
+      }
+      return (contexts === undefined || contains(contexts, kind)) && permitted(own(node, 'permissions'));
+    };
+
+    const dynamicResources = own(bootstrap, 'dynamicResources');
+    const dynamicPatterns = own(dynamicResources, 'patterns');
+    function normalResourcePath(path) {
+      let output = '', index = 0;
+      while (index < path.length) {
+        const pair = I.StringSlice(path, index + 1, index + 3);
+        const byte = path[index] === '%' ? I.parseInt(pair, 16) : -1;
+        if ((byte >= 48 && byte <= 57) || (byte >= 65 && byte <= 90) || (byte >= 97 && byte <= 122) || byte === 34 || byte === 45 || byte === 60 || byte === 62 || byte === 95 || byte === 126) {
+          output += I.StringFromCharCode(byte); index += 3; continue;
+        }
+        if (byte >= 128) {
+          const start = index;
+          do { index += 3; } while (path[index] === '%' && I.parseInt(I.StringSlice(path,index+1,index+3),16) >= 128);
+          const encoded = I.StringSlice(path,start,index);
+          try { output += I.decodeURIComponent(encoded); } catch { output += encoded; }
+          continue;
+        }
+        output += path[index++];
+      }
+      return output;
+    }
+    function unsupportedResourceCharacter(cp) {
+      return cp === 0x85
+        || cp === 0xa0
+        || cp === 0xad
+        || cp === 0x34f
+        || (cp >= 0x600 && cp <= 0x605)
+        || cp === 0x61c
+        || cp === 0x6dd
+        || cp === 0x70f
+        || cp === 0x8e2
+        || (cp >= 0x115f && cp <= 0x1160)
+        || cp === 0x1680
+        || (cp >= 0x17b4 && cp <= 0x17b5)
+        || (cp >= 0x180b && cp <= 0x180e)
+        || (cp >= 0x2000 && cp <= 0x200f)
+        || (cp >= 0x2028 && cp <= 0x202f)
+        || (cp >= 0x205f && cp <= 0x206f)
+        || cp === 0x2800
+        || cp === 0x3000
+        || cp === 0x3164
+        || (cp >= 0xfe00 && cp <= 0xfe0f)
+        || cp === 0xfeff
+        || cp === 0xffa0
+        || (cp >= 0xfff0 && cp <= 0xfffb)
+        || cp === 0x110bd
+        || cp === 0x110cd
+        || (cp >= 0x13430 && cp <= 0x13438)
+        || (cp >= 0x1bca0 && cp <= 0x1bca3)
+        || (cp >= 0x1d173 && cp <= 0x1d17a)
+        || (cp >= 0x1f50f && cp <= 0x1f510)
+        || (cp >= 0x1f512 && cp <= 0x1f513)
+        || (cp >= 0xe0000 && cp <= 0xe0fff);
+    }
+    function resourceMatchPath(path) {
+      try {
+        const base = `${scheme}://${extensionId}/`;
+        const first = I.URLPathname(new I.URL(path, base));
+        for (let i = 0; i < first.length; i++) {
+          if (first[i] !== '%') continue;
+          const byte = I.parseInt(I.StringSlice(first,i+1,i+3),16);
+          if (byte < 32 || byte === 47 || byte === 92) return null;
+        }
+        const decoded = I.decodeURIComponent(first);
+        let start = 0;
+        while (decoded[start] === '/' || decoded[start] === '\\') start++;
+        if (start === decoded.length) return null;
+        const resolved = new I.URL(I.StringSlice(decoded,start), base);
+        if (I.URLProtocol(resolved) !== `${scheme}:` || I.URLHost(resolved) !== extensionId) return null;
+        const normal = normalResourcePath(I.URLPathname(resolved) + I.URLSearch(resolved));
+        for (let i = 0; i < normal.length; i++)
+          if (unsupportedResourceCharacter(I.StringCodePointAt(normal, i))) return null;
+        return normal;
+      } catch { return null; }
+    }
+    function resourceMatches(pattern, path) {
+      if (I.StringEndsWith(pattern, '/*') && I.StringSlice(pattern,0,-2) === path) return true;
+      let position = 0, cursor = 0;
+      while (true) {
+        const star = I.StringIndexOf(pattern, '*', cursor);
+        const part = I.StringSlice(pattern, cursor, star === -1 ? pattern.length : star);
+        if (cursor === 0) {
+          if (!I.StringStartsWith(path, part)) return false;
+          position = part.length;
+        } else if (star === -1) {
+          return I.StringEndsWith(I.StringSlice(path, position), part);
+        } else {
+          const found = I.StringIndexOf(path, part, position);
+          if (found === -1) return false;
+          position = found + part.length;
+        }
+        if (star === -1) return position === path.length;
+        cursor = star + 1;
+      }
+    }
+    function getURL(path) {
+      const slash = I.StringStartsWith(path, '/') ? '' : '/';
+      const resolved = new I.URL(`https://${extensionId}${slash}${path}`);
+      if (I.isArray(dynamicPatterns)) {
+        const pathname = resourceMatchPath(I.URLPathname(resolved));
+        for (let i = 0; i < dynamicPatterns.length; i++) {
+          if (pathname !== null && resourceMatches(dynamicPatterns[i], pathname)) {
+            I.URLSetHostname(resolved, own(dynamicResources, 'alias'));
+            break;
+          }
+        }
+      }
+      return `${scheme}://${I.StringSlice(I.URLHref(resolved), 8)}`;
+    }
+
+    const predefined = () => {
+      const language = I.StringToLowerCase(I.StringSlice(uiLanguage, 0, 2));
+      const rtl = contains(RTL, language);
+      let locale = '';
+      for (let i = 0; i < uiLanguage.length; i++) locale += uiLanguage[i] === '-' ? '_' : uiLanguage[i];
+      return {
+        __proto__: null,
+        '@@extension_id': extensionId,
+        '@@ui_locale': locale,
+        '@@bidi_dir': rtl ? 'rtl' : 'ltr',
+        '@@bidi_reversed_dir': rtl ? 'ltr' : 'rtl',
+        '@@bidi_start_edge': rtl ? 'right' : 'left',
+        '@@bidi_end_edge': rtl ? 'left' : 'right',
+      };
+    };
+
+    function getMessage(values) {
+      const name = I.StringToLowerCase(I.String(values[0]));
+      const entry = own(messages, name);
+      let message = typeof entry === 'string' ? entry : own(entry, 'message');
+      const placeholders = own(entry, 'placeholders');
+      if (typeof message !== 'string') message = predefined()[name];
+      if (typeof message !== 'string') return '';
+      const raw = values[1];
+      let substitutions = [];
+      if (I.isArray(raw)) {
+        if (raw.length > 9) return undefined;
+        for (let i = 0; i < raw.length; i++) I.ArrayPush(substitutions, I.String(raw[i]));
+      } else if (raw !== null && raw !== undefined) {
+        substitutions = [I.String(raw)];
+      }
+      return substitute(message, substitutions, placeholders, own(values[2], 'escapeLt') === true);
+    }
+
+    const checkConnectInfo = (name, signature, info) => {
+      if (info === null) return '';
+      const portName = own(info, 'name');
+      if (portName === undefined) return '';
+      if (typeof portName !== 'string') {
+        throw E.invocation(
+          name,
+          signature,
+          `Error at parameter 'connectInfo': Error at property 'name': Invalid type: expected string, found ${typeName(portName)}.`,
+        );
+      }
+      return portName;
+    };
+
+    const shadowRoot = (values, name, signature) => {
+      const element = values[0];
+      if (!I.isElement(element)) {
+        throw E.invocation(
+          name,
+          signature,
+          "Error at parameter 'element': Value must be an instance of HTMLElement.",
+        );
+      }
+      return I.ElementShadowRoot ? I.ElementShadowRoot(element) : null;
+    };
+
+    // Members the binding serves itself. Sync ones return a value; async ones
+    // return a promise (or `P.NO_RESPONSE`).
+    const LOCAL = {
+      __proto__: null,
+      'runtime.getURL': (v) => getURL(I.String(v[0])),
+      'extension.getURL': (v) => getURL(I.String(v[0])),
+      'runtime.getManifest': () => I.JSONParse(manifestText),
+      'identity.getRedirectURL': (v) => {
+        let path = v[0] === null || v[0] === undefined ? '/' : v[0];
+        if (path[0] !== '/') path = '/' + path;
+        return `https://${extensionId}.chromiumapp.org${path}`;
+      },
+      'i18n.getMessage': getMessage,
+      'i18n.getUILanguage': () => uiLanguage,
+      'extension.getViews': () => [],
+      'extension.getBackgroundPage': () => null,
+      'dom.openOrClosedShadowRoot': shadowRoot,
+      'runtime.connect': (v, name, signature) =>
+        messaging.connect('runtime.connect', [v[0], v[1]], checkConnectInfo(name, signature, v[1])),
+      'tabs.connect': (v, name, signature) =>
+        messaging.connect('tabs.connect', [v[0], v[1]], checkConnectInfo(name, signature, v[1])),
+      'runtime.connectNative': (v) => messaging.connect('runtime.connectNative', [v[0]], ''),
+      'runtime.sendMessage': (v) => messaging.send('runtime.sendMessage', [v[0]], v[1], [v[2]]),
+      'tabs.sendMessage': (v) => messaging.send('tabs.sendMessage', [v[0]], v[1], [v[2]]),
+      'runtime.sendNativeMessage': (v) => messaging.send('runtime.sendNativeMessage', [v[0]], v[1], []),
+    };
+
+    // Chrome's MassageSendMessageArguments: a two-argument call is
+    // (message, options) only when the first cannot be an extension id.
+    const massageSendMessage = (args) => {
+      args = I.ArraySlice(args);
+      let callback = null;
+      if (args.length > 0 && typeof args[args.length - 1] === 'function')
+        callback = I.ArraySplice(args, args.length - 1, 1)[0];
+      let target = null;
+      let message;
+      let messageOptions = null;
+      let extra = false;
+      switch (args.length) {
+        case 0:
+          break;
+        case 1:
+          message = args[0];
+          break;
+        case 2:
+          if (typeof args[0] === 'string' || args[0] === null || args[0] === undefined) {
+            target = args[0];
+            message = args[1];
+          } else {
+            message = args[0];
+            messageOptions = args[1];
+          }
+          break;
+        case 3:
+          target = args[0];
+          message = args[1];
+          messageOptions = args[2];
+          break;
+        default:
+          extra = true;
+      }
+      return { __proto__: null, values: [target, message, messageOptions, callback], extra };
+    };
+
+    const sendMessageParams = [
+      { __proto__: null, name: 'extensionId', type: 'string', optional: true },
+      { __proto__: null, name: 'message', type: 'any', optional: false },
+      { __proto__: null, name: 'options', type: 'object', optional: true },
+      CALLBACK,
+    ];
+    const massaged = (name, signature, args) => {
+      const shaped = massageSendMessage(args);
+      if (shaped.extra) throw E.invocation(name, signature, 'No matching signature.');
+      const values = shaped.values;
+      for (let i = 0; i < sendMessageParams.length; i++) {
+        const p = sendMessageParams[i];
+        const value = values[i];
+        if (value === null || value === undefined) {
+          if (!p.optional) throw E.invocation(name, signature, 'No matching signature.');
+          values[i] = null;
+        } else if (!typeMatches(p.type, value)) {
+          throw E.invocation(
+            name,
+            signature,
+            `Error at parameter '${p.name}': Invalid type: expected ${p.type}, found ${typeName(value)}.`,
+          );
+        }
+      }
+      return values;
+    };
+
+    const ensureValid = () => {
+      if (invalid) throw new I.Error(T.ERRORS.invalidated);
+    };
+
+    function settle(promise, callback, spec, name) {
+      const withResult = own(spec, 'result') !== false;
+      const optionalResult = own(spec, 'optionalResult') === true && name !== 'cookies.get';
+      const resultValue = (value) => optionalResult && value === null ? undefined : value;
+      if (callback !== null) {
+        I.PromiseThen(
+          promise,
+          (value) => {
+            if (value === P.NO_RESPONSE) return E.invokeCallback(lastError, callback, [], P.PORT_CLOSED);
+            const args = withResult && !(optionalResult && value === null) ? [value] : [];
+            return E.invokeCallback(lastError, callback, args, null);
+          },
+          (failure) => E.invokeCallback(lastError, callback, [], E.messageOf(failure)),
+        );
+        return undefined;
+      }
+      if (own(spec, 'promise') === false) {
+        I.PromiseThen(promise, undefined, (failure) => lastError.run(E.messageOf(failure), () => undefined));
+        return undefined;
+      }
+      return new I.Promise((resolve, reject) => {
+        I.PromiseThen(
+          promise,
+          (value) => resolve(value === P.NO_RESPONSE || !withResult ? undefined : resultValue(value)),
+          (failure) => reject(new I.Error(E.messageOf(failure))),
+        );
+      });
+    }
+
+    let nextMenuId = 0;
+    function makeFunction(fullName, spec) {
+      const returns = own(spec, 'returns') === 'sync' ? 'sync' : 'async';
+      if (fullName === 'contextMenus.create') {
+        const params = normalizeParams(own(spec, 'parameters'));
+        I.ArrayPush(params, CALLBACK);
+        return function create(...args) {
+          ensureValid();
+          const values = resolveArguments(fullName, spec.signature, params, args);
+          const properties = values[0];
+          const callback = values[values.length - 1];
+          const id = own(properties, 'id') === undefined ? ++nextMenuId : properties.id;
+          const promise = own(properties, 'onclick') === undefined
+            ? client.call(fullName, I.JSONStringify([properties]), false)
+            : I.PromiseReject(new I.Error('This function is not supported.'));
+          settle(promise, callback, spec);
+          return id;
+        };
+      }
+      const local = LOCAL[fullName];
+      if (returns === 'sync' && (local === undefined || own(spec, 'callback') === true)) {
+        if (own(bootstrap, 'unavailableSyncApis') !== true) return undefined;
+        const params = normalizeParams(own(spec, 'parameters'));
+        if (own(spec, 'callback') === true) I.ArrayPush(params,
+          own(spec, 'callbackRequired') === true ? { __proto__: null, name: 'callback', type: 'function', optional: false } : CALLBACK);
+        return function (...args) {
+          ensureValid();
+          resolveArguments(fullName, spec.signature || signatureOf(params, false), params, args);
+          throw new I.Error('This function is not supported.');
+        };
+      }
+      const params = normalizeParams(own(spec, 'parameters'));
+      const async = returns === 'async';
+      const takesCallback = async && own(spec, 'callback') !== false;
+      const displayName = I.StringStartsWith(fullName, 'storage.')
+        ? `storage.${I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1)}`
+        : I.StringStartsWith(fullName, 'privacy.')
+          ? `types.ChromeSetting.${I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1)}`
+          : fullName;
+      const signature =
+        typeof own(spec, 'signature') === 'string' ? spec.signature : signatureOf(params, takesCallback);
+      const parsed = takesCallback ? I.ArraySlice(params) : params;
+      if (takesCallback)
+        I.ArrayPush(parsed, own(spec, 'callbackRequired') === true
+          ? { __proto__: null, name: 'callback', type: 'function', optional: false }
+          : CALLBACK);
+      const usesMassage = fullName === 'runtime.sendMessage';
+      const member = I.StringSlice(fullName, I.StringLastIndexOf(fullName, '.') + 1);
+      const fn = {
+        [member](...args) {
+          ensureValid();
+          const setting = own(spec, 'setting');
+          if (setting !== undefined && args.length > 0 && !matchesSetting(setting, args[0], 0))
+            throw new I.TypeError('Invalid invocation');
+          const values = usesMassage
+            ? massaged(displayName, signature, args)
+            : resolveArguments(displayName, signature, parsed, args);
+          if (!async) return local(values, fullName, signature);
+          const callback = takesCallback ? values[values.length - 1] : null;
+          const callValues = takesCallback ? I.ArraySlice(values, 0, values.length - 1) : values;
+          if (fullName === 'action.setIcon' || fullName === 'browserAction.setIcon' || fullName === 'pageAction.setIcon')
+            callValues[0] = iconDetails(callValues[0]);
+          let promise;
+          if (fullName === 'contextMenus.update' && own(callValues[1], 'onclick') !== undefined) {
+            promise = I.PromiseReject(new I.Error('This function is not supported.'));
+          } else if (local !== undefined) {
+            promise = local(callValues, fullName, signature);
+          } else {
+            let text;
+            try {
+              text = I.JSONStringify(prepare(callValues, params));
+            } catch {
+              throw E.invocation(displayName, signature, 'Value is unserializable.');
+            }
+            promise = client.call(fullName, text, false);
+          }
+          return settle(promise, callback, takesCallback ? spec : FIRE_AND_FORGET, fullName);
+        },
+      }[member];
+      if (I.StringStartsWith(fullName, 'userScripts.')) {
+        return { [member](...args) {
+          ensureValid();
+          if (own(bootstrap, 'userScriptsEnabled') === false)
+            throw new I.Error(`'${fullName}' is not available in this context.`);
+          return I.apply(fn, this, args);
+        } }[member];
+      }
+      return fn;
+    }
+
+    const runtimeExtras = (target) => {
+      I.defineProperty(target, 'id', {
+        configurable: true,
+        enumerable: true,
+        get: () => (invalid ? undefined : extensionId),
+        set() {},
+      });
+      if (kind === 'userScript') I.defineProperty(target, 'dynamicId', {
+        configurable: true, enumerable: true,
+        get: () => invalid ? undefined : own(bootstrap, 'userScriptDynamicId'), set() {},
+      });
+      lastError.install(target);
+    };
+    const extensionExtras = (target) => {
+      define(target, 'inIncognitoContext', incognito);
+      lastError.install(target);
+    };
+
+    const keys = I.keys(namespaces);
+    const depth = (key) => {
+      let count = 0;
+      for (let i = 0; i < key.length; i++) if (key[i] === '.') count++;
+      return count;
+    };
+    const ordered = [];
+    for (let d = 0; d < 8; d++) {
+      for (let i = 0; i < keys.length; i++) if (depth(keys[i]) === d) I.ArrayPush(ordered, keys[i]);
+    }
+
+    const presence = new I.Map();
+    const isPresent = (key) => I.MapGet(presence, key) === true;
+    const clearPresentEvents = () => {
+      const names = [];
+      I.SetForEach(presentEvents, (name) => I.ArrayPush(names, name));
+      for (let i = 0; i < names.length; i++) I.SetDelete(presentEvents, names[i]);
+    };
+
+    // Brings every namespace and member in line with the context kind and
+    // the granted permissions: unavailable ones are absent, not stubs.
+    function refresh() {
+      clearPresentEvents();
+      for (let n = 0; n < ordered.length; n++) {
+        const key = ordered[n];
+        const node = namespaces[key];
+        const dot = I.StringLastIndexOf(key, '.');
+        const parentKey = dot === -1 ? null : I.StringSlice(key, 0, dot);
+        const parent = parentKey === null ? chrome : I.MapGet(objects, parentKey);
+        const leaf = I.StringSlice(key, dot + 1);
+        let target = I.MapGet(objects, key);
+        if ((parentKey !== null && !isPresent(parentKey)) || !available(node)
+          || (key === 'userScripts' && own(bootstrap, 'userScriptsEnabled') === false)) {
+          if (target !== undefined && parent !== undefined && parent[leaf] === target) I.deleteProperty(parent, leaf);
+          I.MapSet(presence, key, false);
+          continue;
+        }
+        if (target === undefined) {
+          target = {};
+          const properties = own(node, 'properties') || {};
+          const propertyNames = I.keys(properties);
+          for (let i = 0; i < propertyNames.length; i++) {
+            define(target, propertyNames[i], deepFreeze(I.JSONParse(I.JSONStringify(properties[propertyNames[i]]))));
+          }
+          if (own(bootstrap, 'unavailableSyncApis') === true) {
+            const constructors = I.keys(own(node, 'constructors') || {});
+            for (let i = 0; i < constructors.length; i++) {
+              define(target, constructors[i], function () {
+                ensureValid();
+                throw new I.Error('This function is not supported.');
+              });
+            }
+          }
+          if (key === 'runtime') runtimeExtras(target);
+          if (key === 'extension') extensionExtras(target);
+          I.MapSet(objects, key, target);
+        }
+        I.MapSet(presence, key, true);
+        const functions = own(node, 'functions') || {};
+        const functionNames = I.keys(functions);
+        for (let i = 0; i < functionNames.length; i++) {
+          const name = functionNames[i];
+          const fullName = `${key}.${name}`;
+          const spec = functions[name];
+          const cached = I.MapGet(memberCache, fullName);
+          if (!available(spec) || (kind === 'userScript' && own(bootstrap, 'userScriptMessaging') !== true)) {
+            if (cached !== undefined && target[name] === cached) I.deleteProperty(target, name);
+            continue;
+          }
+          const fn = I.MapHas(memberCache, fullName) ? cached : makeFunction(fullName, spec);
+          I.MapSet(memberCache, fullName, fn);
+          if (fn !== undefined && target[name] !== fn) define(target, name, fn);
+        }
+        const eventSpecs = own(node, 'events') || {};
+        const eventNames = I.keys(eventSpecs);
+        for (let i = 0; i < eventNames.length; i++) {
+          const name = eventNames[i];
+          const fullName = `${key}.${name}`;
+          const spec = eventSpecs[name];
+          let event = I.MapGet(eventObjects, fullName);
+          if (!available(spec) || (kind === 'userScript' && own(bootstrap, 'userScriptMessaging') !== true)) {
+            if (event !== undefined && target[name] === event) I.deleteProperty(target, name);
+            continue;
+          }
+          if (event === undefined) {
+            event = hub.event(fullName, spec);
+            I.MapSet(eventObjects, fullName, event);
+          }
+          I.SetAdd(presentEvents, fullName);
+          if (target[name] !== event) define(target, name, event);
+        }
+        if (parent[leaf] !== target) define(parent, leaf, target);
+      }
+    }
+    refresh();
+
+    function invalidate(message) {
+      if (invalid) return;
+      invalid = true;
+      client.invalidate(message || T.ERRORS.invalidated);
+      messaging.invalidate();
+    }
+    hub.handle('zephium.onInvalidated', (args) => invalidate(typeof args[0] === 'string' ? args[0] : null));
+    hub.handle('zephium.onUserScriptsChanged', (args) => {
+      if (typeof args[0] !== 'boolean') return;
+      bootstrap.userScriptsEnabled = args[0];
+      refresh();
+    });
+    hub.handle('zephium.onPermissionsChanged', (args) => {
+      if (!I.isArray(args[0])) return;
+      granted = I.ArraySlice(args[0]);
+      refresh();
+    });
+
+    if (own(options, 'defineGlobals') !== false) {
+      define(global, 'chrome', chrome);
+      define(global, 'browser', chrome);
+    }
+    if (kind === 'offscreen' && own(bootstrap, 'offscreenReadyHandshake') === true) {
+      let sent = false;
+      const ready = () => {
+        if (sent || invalid) return;
+        sent = true;
+        I.PromiseThen(client.call('zephium.offscreenReady', '[]', true), undefined, () => undefined);
+      };
+      const afterLoad = () => I.setTimeout(ready, 0);
+      if (I.DocumentReadyState?.(global.document) === 'complete') afterLoad();
+      else I.addEventListener(global, 'load', afterLoad, {once: true});
+    }
+
+    return {
+      __proto__: null,
+      chrome,
+      client,
+      hub,
+      messaging,
+      lastError,
+      invalidate,
+      refresh,
+      get invalidated() {
+        return invalid;
+      },
+    };
+  }
+
+  // An extension page or offscreen document: the native bridge is in this
+  // frame's default world.
+  function page(surface, bootstrap) {
+    return create(surface, bootstrap, T.nativeLink(I.global), {}).chrome;
+  }
+
+  return I.freeze({ __proto__: null, create, page, resolveArguments, signatureOf, substitute, typeName, KINDS });
+})

@@ -818,7 +818,8 @@ fn tab_view(
                     Reason::Blocked(_) => zephium_ipc::TabFailureReason::Blocked,
                     Reason::Other => zephium_ipc::TabFailureReason::Other,
                 },
-                can_continue: (certificate.is_some()
+                can_continue: (cfg!(any(target_os = "macos", target_os = "windows"))
+                    && certificate.is_some()
                     && zephium_core::certificates::may_continue(&failure.url))
                     || failure.can_continue,
                 certificate,

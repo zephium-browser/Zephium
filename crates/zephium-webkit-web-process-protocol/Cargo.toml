@@ -1,0 +1,15 @@
+[package]
+name = "zephium-webkit-web-process-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zephium-webext-matcher = { path = "../zephium-webext-matcher", version = "=0.1.0" }
+url.workspace = true
+serde_json.workspace = true
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0", default-features = false }
+
+[dev-dependencies]
+zephium-webext-dnr = { path = "../zephium-webext-dnr", version = "=0.1.0" }

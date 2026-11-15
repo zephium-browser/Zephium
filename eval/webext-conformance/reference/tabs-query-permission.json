@@ -1,0 +1,105 @@
+{
+  "caseId": "tabs-query-permission",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "get with tabs permission:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get with tabs permission:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": false,
+          "id": "<tab:1>",
+          "index": 2,
+          "pinned": false,
+          "status": "complete",
+          "title": "Fixture",
+          "url": "<origin:b>/page.html?tab=metadata",
+          "windowId": "<window:1>"
+        }
+      }
+    },
+    {
+      "label": "pin tab:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "pin tab:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "pinned": true,
+          "tabId": "<tab:1>"
+        }
+      }
+    },
+    {
+      "label": "query combined filters:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query combined filters:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "active": false,
+            "id": "<tab:1>",
+            "index": 0,
+            "pinned": true,
+            "status": "complete",
+            "title": "Fixture",
+            "url": "<origin:b>/page.html?tab=metadata",
+            "windowId": "<window:1>"
+          }
+        ]
+      }
+    },
+    {
+      "label": "query unmatched URL:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query unmatched URL:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "query invalid window:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query invalid window:error",
+      "value": {
+        "lastError": null,
+        "message": "Error in invocation of tabs.query(object queryInfo, optional function callback): Error at parameter 'queryInfo': Error at property 'windowId': Value must be at least -2."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

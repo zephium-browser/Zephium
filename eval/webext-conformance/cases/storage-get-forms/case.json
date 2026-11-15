@@ -1,0 +1,6 @@
+{
+  "id": "storage-get-forms",
+  "title": "Storage get forms across local, sync, session, and managed",
+  "apis": ["storage.StorageArea.get", "storage.StorageArea.set"],
+  "permissions": ["storage"]
+}

@@ -1,0 +1,67 @@
+// Copyright 2012 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// This features file defines manifest keys implemented under src/chrome.
+// See chrome/common/extensions/api/_features.md to understand this file, as
+// well as feature.h, simple_feature.h, and feature_provider.h.
+
+{
+  "app.linked_icons": {
+    "channel": "stable",
+    "extension_types": ["hosted_app"]
+  },
+  "app.launch": {
+    "channel": "stable",
+    "extension_types": ["legacy_packaged_app", "hosted_app"]
+  },
+  "chrome_settings_overrides": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "platforms": ["win", "mac"]
+  },
+  "file_browser_handlers": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "minimum_chrome_version": {
+    "channel": "stable",
+    "extension_types": [
+      "extension", "legacy_packaged_app", "hosted_app", "platform_app", "theme"
+    ]
+  },
+  "natively_connectable": {
+    "channel": "dev",
+    "extension_types": ["extension"]
+  },
+  "omnibox": {
+    "channel": "stable",
+    "extension_types": ["extension", "legacy_packaged_app"]
+  },
+  "platforms": {
+    "channel": "stable",
+    "extension_types": "all"
+  },
+  "side_panel": {
+    "channel": "stable",
+    "extension_types": ["extension"],
+    "min_manifest_version": 3
+  },
+  "storage": {
+    "channel": "stable",
+    "extension_types": [
+      "extension",
+      "legacy_packaged_app",
+      "platform_app",
+      "login_screen_extension"
+    ]
+  },
+  "theme": {
+    "channel": "stable",
+    "extension_types": ["theme"]
+  },
+  "url_handlers": {
+    "channel": "stable",
+    "extension_types": ["platform_app"]
+  }
+}

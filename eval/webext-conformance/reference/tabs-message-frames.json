@@ -1,0 +1,182 @@
+{
+  "caseId": "tabs-message-frames",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "frames",
+      "value": [
+        {
+          "documentId": "<document:1>",
+          "frameId": 0,
+          "parentFrameId": -1,
+          "url": "<origin:a>/frames.html"
+        },
+        {
+          "documentId": "<document:2>",
+          "frameId": "<frame:1>",
+          "parentFrameId": 0,
+          "url": "<origin:a>/frame.html?kind=same"
+        },
+        {
+          "documentId": "<document:3>",
+          "frameId": "<frame:2>",
+          "parentFrameId": 0,
+          "url": "<origin:b>/frame.html?kind=cross"
+        },
+        {
+          "documentId": "<document:4>",
+          "frameId": "<frame:3>",
+          "parentFrameId": 0,
+          "url": "about:blank"
+        },
+        {
+          "documentId": "<document:5>",
+          "frameId": "<frame:4>",
+          "parentFrameId": 0,
+          "url": "about:srcdoc"
+        }
+      ]
+    },
+    {
+      "label": "frame top:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame top:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "",
+          "top": true,
+          "url": "<origin:a>/frames.html"
+        }
+      }
+    },
+    {
+      "label": "frame /frame.html:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame /frame.html:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "same",
+          "top": false,
+          "url": "<origin:a>/frame.html?kind=same"
+        }
+      }
+    },
+    {
+      "label": "frame /frame.html:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame /frame.html:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "cross",
+          "top": false,
+          "url": "<origin:b>/frame.html?kind=cross"
+        }
+      }
+    },
+    {
+      "label": "frame blank:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame blank:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "blank",
+          "top": false,
+          "url": "about:blank"
+        }
+      }
+    },
+    {
+      "label": "frame srcdoc:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frame srcdoc:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "srcdoc",
+          "top": false,
+          "url": "about:srcdoc"
+        }
+      }
+    },
+    {
+      "label": "matching frame and document:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "matching frame and document:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "name": "same",
+          "top": false,
+          "url": "<origin:a>/frame.html?kind=same"
+        }
+      }
+    },
+    {
+      "label": "mismatched frame and document:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "mismatched frame and document:error",
+      "value": {
+        "lastError": null,
+        "message": "Could not establish connection. Receiving end does not exist."
+      }
+    },
+    {
+      "label": "missing frame:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing frame:error",
+      "value": {
+        "lastError": null,
+        "message": "Could not establish connection. Receiving end does not exist."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

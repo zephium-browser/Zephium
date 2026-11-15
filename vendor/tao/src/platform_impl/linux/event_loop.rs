@@ -607,6 +607,10 @@ impl<T: 'static> EventLoop<T> {
 
             let tx_clone = event_tx.clone();
             window.connect_configure_event(move |window, event| {
+              // A popover's own surface also configures through its toplevel.
+              if event.window() != window.window() {
+                return false;
+              }
               let scale_factor = window.scale_factor();
 
               let (x, y) = window

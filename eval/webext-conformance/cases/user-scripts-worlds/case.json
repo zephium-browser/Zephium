@@ -1,0 +1,1 @@
+{"id":"user-scripts-worlds","title":"Dedicated persistent user worlds and opt-in messaging","apis":["userScripts.register","userScripts.update","userScripts.unregister","userScripts.getScripts","userScripts.configureWorld","runtime.onUserScriptMessage","runtime.onUserScriptConnect"],"permissions":["userScripts","scripting","tabs"],"userScriptsAvailableInitially":true}

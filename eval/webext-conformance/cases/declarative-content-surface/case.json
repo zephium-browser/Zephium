@@ -1,0 +1,1 @@
+{"id": "declarative-content-surface", "title": "Declarative content custom constructor availability", "apis": ["declarativeContent.PageStateMatcher", "declarativeContent.ShowAction", "declarativeContent.ShowPageAction", "declarativeContent.SetIcon", "declarativeContent.RequestContentScript"], "permissions": ["declarativeContent"]}

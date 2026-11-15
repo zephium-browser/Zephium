@@ -1,0 +1,37 @@
+{
+  "caseId": "injection-lexical-files",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "lexical binding shared across files:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "lexical binding shared across files:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "count": 2,
+              "strictThisUndefined": true,
+              "windowProperty": false
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

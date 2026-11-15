@@ -1,8 +1,7 @@
 //! Find in page through WebKitGTK's find controller. It highlights and
-//! counts but does not say which match is current, so the position is kept
-//! here from the steps taken.
+//! counts but does not expose the current match index.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use webkit2gtk::glib::prelude::ObjectExt;
@@ -17,8 +16,6 @@ pub(crate) type FindReport = Box<dyn Fn(String, u32, Option<u32>)>;
 pub(crate) struct FindSession {
     controller: FindController,
     query: Rc<RefCell<String>>,
-    active: Rc<Cell<u32>>,
-    matches: Rc<Cell<u32>>,
     handlers: Vec<SignalHandlerId>,
 }
 
@@ -33,41 +30,22 @@ impl Drop for FindSession {
 
 fn open(controller: FindController, report: FindReport) -> FindSession {
     let query = Rc::new(RefCell::new(String::new()));
-    let active = Rc::new(Cell::new(0u32));
-    let matches = Rc::new(Cell::new(0u32));
     let report = Rc::new(report);
     let found = {
-        let (query, active, matches, report) = (
-            query.clone(),
-            active.clone(),
-            matches.clone(),
-            report.clone(),
-        );
+        let (query, report) = (query.clone(), report.clone());
         controller.connect_found_text(move |_, count| {
-            matches.set(count);
-            let position = active.get().clamp(1, count.max(1));
-            active.set(position);
-            report(
-                query.borrow().clone(),
-                count,
-                (count > 0).then_some(position),
-            );
+            report(query.borrow().clone(), count, None);
         })
     };
     let failed = {
-        let (query, active, matches, report) =
-            (query.clone(), active.clone(), matches.clone(), report);
+        let query = query.clone();
         controller.connect_failed_to_find_text(move |_| {
-            matches.set(0);
-            active.set(0);
             report(query.borrow().clone(), 0, None);
         })
     };
     FindSession {
         controller,
         query,
-        active,
-        matches,
         handlers: vec![found, failed],
     }
 }
@@ -94,18 +72,6 @@ pub(crate) fn find(
     };
     let repeat = *active.query.borrow() == request.query;
     if repeat {
-        // Advance the kept position before WebKit answers with the count.
-        let count = active.matches.get();
-        if count > 0 {
-            let position = active.active.get();
-            active.active.set(if request.forward {
-                position % count + 1
-            } else if position <= 1 {
-                count
-            } else {
-                position - 1
-            });
-        }
         if request.forward {
             active.controller.search_next();
         } else {
@@ -113,8 +79,10 @@ pub(crate) fn find(
         }
     } else {
         *active.query.borrow_mut() = request.query.clone();
-        active.active.set(1);
-        let options = FindOptions::CASE_INSENSITIVE | FindOptions::WRAP_AROUND;
+        let mut options = FindOptions::CASE_INSENSITIVE | FindOptions::WRAP_AROUND;
+        if !request.forward {
+            options |= FindOptions::BACKWARDS;
+        }
         active
             .controller
             .search(&request.query, options.bits(), MAX_FIND_MATCHES);

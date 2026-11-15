@@ -1,0 +1,93 @@
+{
+  "caseId": "navigation-history",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "pushState:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "pushState:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "state": {
+                "marker": "pushState"
+              },
+              "url": "<origin:a>/page.html?history=pushState"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "pushState event",
+      "value": {
+        "documentId": "<document:1>",
+        "documentLifecycle": "active",
+        "event": "onHistoryStateUpdated",
+        "frameId": 0,
+        "frameType": "outermost_frame",
+        "parentFrameId": -1,
+        "tabId": "<tab:1>",
+        "transitionQualifiers": [],
+        "transitionType": "link",
+        "url": "<origin:a>/page.html?history=pushState"
+      }
+    },
+    {
+      "label": "replaceState:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "replaceState:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "state": {
+                "marker": "replaceState"
+              },
+              "url": "<origin:a>/page.html?history=replaceState"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "replaceState event",
+      "value": {
+        "documentId": "<document:1>",
+        "documentLifecycle": "active",
+        "event": "onHistoryStateUpdated",
+        "frameId": 0,
+        "frameType": "outermost_frame",
+        "parentFrameId": -1,
+        "tabId": "<tab:1>",
+        "transitionQualifiers": [],
+        "transitionType": "link",
+        "url": "<origin:a>/page.html?history=replaceState"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

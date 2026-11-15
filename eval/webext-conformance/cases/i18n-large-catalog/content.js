@@ -1,0 +1,1 @@
+globalThis.largeCatalog={first:chrome.i18n.getMessage("message0"),last:chrome.i18n.getMessage("message3999"),literal:chrome.i18n.getMessage("literal"),dataOnly:typeof globalThis.catalogExecuted==="undefined"};

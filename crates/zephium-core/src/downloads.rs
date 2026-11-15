@@ -172,12 +172,33 @@ impl DownloadRecord {
             total: self.total.map(|value| value.to_string()),
             error: self.error,
             insecure: self.insecure,
+            capabilities: DownloadCapabilities::native(),
+        }
+    }
+}
+
+/// Operations supported by the native transfer adapter, independent of UI state.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, Type)]
+pub struct DownloadCapabilities {
+    pub pause: bool,
+    pub resume: bool,
+    pub restart: bool,
+}
+impl DownloadCapabilities {
+    pub const fn native() -> Self {
+        Self {
+            pause: cfg!(any(target_os = "macos", target_os = "windows")),
+            resume: cfg!(any(target_os = "macos", target_os = "windows")),
+            // Stored records deliberately retain only an origin, not replay authority.
+            restart: false,
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct DownloadView {
+    #[serde(default)]
+    pub capabilities: DownloadCapabilities,
     pub id: String,
     pub revision: String,
     pub created_at: String,

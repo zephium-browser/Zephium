@@ -1,0 +1,6 @@
+{
+  "id": "navigation-history",
+  "title": "pushState and replaceState emit history-state navigation events",
+  "apis": ["webNavigation.onHistoryStateUpdated", "scripting.executeScript"],
+  "permissions": ["webNavigation", "scripting"]
+}

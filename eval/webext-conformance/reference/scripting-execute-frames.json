@@ -1,0 +1,96 @@
+{
+  "caseId": "scripting-execute-frames",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "all frame results:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "all frame results:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "name": "",
+              "top": true,
+              "url": "<origin:a>/frames.html"
+            }
+          },
+          {
+            "documentId": "<document:2>",
+            "frameId": "<frame:1>",
+            "result": {
+              "name": "blank",
+              "top": false,
+              "url": "about:blank"
+            }
+          },
+          {
+            "documentId": "<document:3>",
+            "frameId": "<frame:2>",
+            "result": {
+              "name": "srcdoc",
+              "top": false,
+              "url": "about:srcdoc"
+            }
+          },
+          {
+            "documentId": "<document:4>",
+            "frameId": "<frame:3>",
+            "result": {
+              "name": "same",
+              "top": false,
+              "url": "<origin:a>/frame.html?kind=same"
+            }
+          },
+          {
+            "documentId": "<document:5>",
+            "frameId": "<frame:4>",
+            "result": {
+              "name": "cross",
+              "top": false,
+              "url": "<origin:b>/frame.html?kind=cross"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "explicit cross-origin frame:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "explicit cross-origin frame:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:5>",
+            "frameId": "<frame:4>",
+            "result": {
+              "top": false,
+              "url": "<origin:b>/frame.html?kind=cross"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

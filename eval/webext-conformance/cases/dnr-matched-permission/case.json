@@ -1,0 +1,6 @@
+{
+  "id": "dnr-matched-permission",
+  "title": "Matched rule history requires feedback or an activeTab grant",
+  "apis": ["declarativeNetRequest.getMatchedRules"],
+  "permissions": ["declarativeNetRequest"]
+}

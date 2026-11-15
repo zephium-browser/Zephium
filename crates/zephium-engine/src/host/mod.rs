@@ -6,13 +6,13 @@ mod agent_cookie_source;
 mod automatic_pip;
 #[cfg(all(
     feature = "blocker-bench",
-    any(target_os = "macos", target_os = "windows")
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
 ))]
 mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;
@@ -21,12 +21,12 @@ mod content_rules;
 mod content_styles;
 mod discard;
 mod dispatch;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) mod download_files;
 #[cfg(target_os = "windows")]
 #[path = "download_files_windows.rs"]
 mod download_files;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) mod downloads;
 mod element_picker;
 #[cfg(target_os = "macos")]
@@ -35,36 +35,46 @@ mod extension_browser_surface;
 mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
+#[cfg(target_os = "linux")]
+#[path = "file_uploads_linux.rs"]
+mod file_uploads;
 mod focus;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod fullscreen;
 mod generic_styles;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod http_auth;
 mod lifecycle;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod media;
 mod navigation;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod page_open;
 mod page_ops;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod page_permissions;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
 ))]
 pub(crate) mod page_reader;
+#[cfg(target_os = "linux")]
+mod page_save_linux;
 mod permits;
 mod popup_sites;
 mod profiles;
 mod resources;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(target_os = "linux")]
+mod script_dialogs;
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod scriptlet_source;
 #[cfg(target_os = "macos")]
 mod scriptlets;
 #[cfg(target_os = "windows")]
 #[path = "scriptlets_windows.rs"]
+mod scriptlets;
+#[cfg(target_os = "linux")]
+#[path = "scriptlets_linux.rs"]
 mod scriptlets;
 mod scripts;
 mod site_permissions;
@@ -76,6 +86,8 @@ mod style_worker;
 mod webext;
 #[cfg(target_os = "macos")]
 mod webext_downloads;
+#[cfg(target_os = "linux")]
+mod webext_linux;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(
@@ -115,13 +127,15 @@ pub(crate) use dispatch::try_with_agent_context_terminal;
 pub(crate) use dispatch::try_with_discard_state_erasure;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) use dispatch::with_page_permission_terminal;
 #[cfg(feature = "agentic-browser")]
 pub(crate) use dispatch::{agent_context_terminal_depth_for_audit, try_with_agent_context};
 pub(crate) use dispatch::{
     best_effort_with, install, shutdown, try_with, try_with_close, try_with_profile_erasure,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use dispatch::{reserve_extension_commands, try_perform_linux_extension_command};
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) use profiles::release_linux_erasure_obligations;
 #[cfg(target_os = "macos")]
@@ -196,12 +210,12 @@ struct ObservedView {
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
     _audio_observer: Option<objc2::rc::Retained<crate::platform::macos::audio::AudioObserver>>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     audio_observer: Option<crate::platform::imp::AudioObserver>,
     #[cfg(target_os = "macos")]
     _fullscreen_observer:
         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
     #[cfg(target_os = "windows")]
     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
@@ -224,7 +238,7 @@ struct ObservedView {
     discard_settle_timer: std::cell::RefCell<Option<crate::platform::imp::ContentPolicyTimeout>>,
     #[cfg(target_os = "windows")]
     request_witness: Option<crate::platform::imp::RequestWitness>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     scriptlet: scriptlets::ViewScriptlet,
     // The DevTools window id of this exact controller, which never changes:
     // asked once instead of on every extension toolbar refresh.
@@ -241,19 +255,27 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     http_auth: Rc<http_auth::HttpAuthBroker>,
+    #[cfg(target_os = "linux")]
+    script_dialogs: Rc<script_dialogs::ScriptDialogs>,
+    #[cfg(target_os = "linux")]
+    page_save: Rc<page_save_linux::PageSave>,
+    #[cfg(target_os = "linux")]
+    permission_requests: Rc<page_permissions::LinuxRequests>,
+    #[cfg(target_os = "linux")]
+    _capture_observer: page_permissions::CaptureObserver,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     download_surface_intent: Arc<AtomicBool>,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -398,10 +420,14 @@ impl Drop for ObservedView {
         self.navigation.revoke();
         #[cfg(target_os = "linux")]
         crate::platform::cosmetic_pull::cancel(&self.view);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         self.file_uploads.cancel();
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.http_auth.cancel();
+        #[cfg(target_os = "linux")]
+        self.script_dialogs.cancel();
+        #[cfg(target_os = "linux")]
+        self.page_save.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -583,11 +609,11 @@ pub(crate) struct EngineHost {
     // Allocates only after an explicit Shell publication. Ordinary inert
     // startup retains the empty map and creates no native delegate graph.
     extension_browser_surfaces: HashMap<ProfileId, ExtensionBrowserSurface>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     page_permissions: page_permissions::PagePermissionBroker,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     native_open_authority: Arc<crate::NativeOpenAuthority>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
@@ -677,7 +703,7 @@ pub(crate) struct EngineHost {
     /// open pages without rebuilding them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fullscreen: crate::fullscreen::FullscreenLedger,
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
@@ -717,10 +743,12 @@ pub(crate) struct EngineHost {
     work_site_loads: HashMap<(ProfileId, String), u64>,
     #[cfg(target_os = "macos")]
     webext: webext::WebextHost,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
+    #[cfg(target_os = "linux")]
+    webext_linux: webext_linux::LinuxExtensions,
     // Off-screen views, and the subset the shell's idle policy asked WebView2
     // to suspend.
     #[cfg(target_os = "windows")]

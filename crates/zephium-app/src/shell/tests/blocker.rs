@@ -1806,7 +1806,7 @@ fn restored_enabled_profile_holds_views_for_its_enabled_policy() {
 }
 
 #[test]
-fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
+fn startup_deadline_preserves_platform_admission_until_enabled_settlement() {
     let (mut shell, engine, compiler, store, screen) = controlled_shell();
     store.saved.lock().unwrap().take();
     store.blocker_configs.lock().unwrap().take();
@@ -1847,16 +1847,18 @@ fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
         profile,
         token: provisional.get(),
     });
-    assert_eq!(created(&engine), 1, "{:?}", engine.calls());
-    assert_eq!(shell.blocker.startup_unprotected_views, 1);
+    let released = usize::from(!cfg!(target_os = "linux"));
+    assert_eq!(created(&engine), released, "{:?}", engine.calls());
+    assert_eq!(shell.blocker.startup_unprotected_views, released as u64);
     shell.handle(Command::OpenUrl {
         input: "https://late-protection.example/second".into(),
         new_tab: true,
     });
-    assert_eq!(created(&engine), 2, "{:?}", engine.calls());
+    assert_eq!(created(&engine), 2 * released, "{:?}", engine.calls());
     assert_eq!(
-        shell.blocker.startup_unprotected_views, 2,
-        "a view opened after the deadline is counted too"
+        shell.blocker.startup_unprotected_views,
+        2 * released as u64,
+        "Linux keeps both pages held until the enabled generation settles"
     );
 
     let generation = compiler.complete_next(enabled_rules());
@@ -1871,13 +1873,13 @@ fn startup_deadline_opens_held_views_unprotected_and_counts_them() {
         BlockerProtection::Active
     );
     assert_eq!(created(&engine), 2);
-    assert_eq!(shell.blocker.startup_unprotected_views, 2);
+    assert_eq!(shell.blocker.startup_unprotected_views, 2 * released as u64);
     shell.handle(Command::OpenUrl {
         input: "https://late-protection.example/third".into(),
         new_tab: true,
     });
     assert_eq!(created(&engine), 3);
-    assert_eq!(shell.blocker.startup_unprotected_views, 2);
+    assert_eq!(shell.blocker.startup_unprotected_views, 2 * released as u64);
 }
 
 #[test]

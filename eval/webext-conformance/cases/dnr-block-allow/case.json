@@ -1,0 +1,9 @@
+{
+  "id": "dnr-block-allow",
+  "title": "Higher priority allow overrides a blocking network rule",
+  "apis": [
+    "declarativeNetRequest.updateDynamicRules",
+    "declarativeNetRequest.getDynamicRules"
+  ],
+  "permissions": ["declarativeNetRequest"]
+}

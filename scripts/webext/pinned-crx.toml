@@ -1,0 +1,240 @@
+[[extension]]
+id = "eimadpbcbfnmbkopoojfekhnkhdbieeh"
+name = "Dark Reader"
+version = "4.9.135"
+sha256 = "0b7857ae92fd3aeab4292bb755aa0f108de6b68bc12f18d0c87fe757cdd40a9d"
+license = "MIT"
+source = "https://github.com/darkreader/darkreader"
+
+[[extension]]
+id = "dbepggeogbaibhgnhhndojpepiihcmeb"
+name = "Vimium"
+version = "2.4.2"
+sha256 = "3198c26aa719be462dea585050fbed9b8b80628d57ea88a113babf5334c5517c"
+license = "MIT"
+source = "https://github.com/philc/vimium"
+
+[[extension]]
+id = "ddkjiahejlhfcafbddmgiahcphecmpfh"
+name = "uBlock Origin Lite"
+version = "2026.1110.1816"
+sha256 = "f830f9b2ac6c40dce7f193717fd286a4c966e8999018d5a3e75998d81751bb8a"
+license = "GPL-3.0"
+source = "https://github.com/uBlockOrigin/uBOL-home"
+
+# Password-manager packages verified by fetch-pinned.sh and the native harness.
+[[extension]]
+id = "nngceckbapebfimnlniiiahkandclblb"
+name = "Bitwarden"
+version = "2026.10.2"
+sha256 = "1c995179f75863104c8a6e389e1050568a82c0d2c07d6acf6b62703d249430c9"
+license = "LicenseRef-Bitwarden"
+source = "https://github.com/bitwarden/clients"
+
+[[extension]]
+id = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
+name = "1Password"
+version = "8.12.44.33"
+sha256 = "1cdc5bfbe2d13f38bbceeeb6fb41ff08477939c42567bf7cbcd0016ac00b09cb"
+license = "LicenseRef-Proprietary"
+source = "https://1password.com/downloads/browser-extension/"
+
+[[extension]]
+id = "ghmbeldphafepmbegfdlkpapadhbakde"
+name = "Proton Pass"
+version = "1.43.0"
+sha256 = "9f52c73fb98f9a53ab62d273b659e28e42a488ffaeae18436776080c6e485b9a"
+license = "GPL-3.0"
+source = "https://github.com/ProtonMail/WebClients"
+
+[[extension]]
+id = "mnjggcdmjocbbbhaepdhchncahnbgone"
+name = "SponsorBlock"
+version = "6.1.6"
+sha256 = "5587fe2b6a9946101ca0dde7c6efe76a755c5ee5b6d6e63dfc48c7f736cdb4ff"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/mnjggcdmjocbbbhaepdhchncahnbgone"
+
+[[extension]]
+id = "gebbhagfogifgggkldgodflihgfeippi"
+name = "Return YouTube Dislike"
+version = "4.1.7"
+sha256 = "ed8a2ce0dfb6188a4066dc907dbac46f4356130df4502fc3bbdcc7a965b11383"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/gebbhagfogifgggkldgodflihgfeippi"
+
+[[extension]]
+id = "ponfpcnoihfmfllpaingbgckeeldkhle"
+name = "Enhancer for YouTube"
+version = "3.0.19"
+sha256 = "d2fc37882abf1799ae3f09fb372e20f0b0642ab992b29682b41a36013c542de4"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/ponfpcnoihfmfllpaingbgckeeldkhle"
+
+[[extension]]
+id = "nffaoalbilbmmfgbnbgppjihopabppdk"
+name = "Video Speed Controller"
+version = "0.11.1"
+sha256 = "00160ae686117e82d512b53094851d4a9d4161c529dd29b904ef30496011a9ba"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/nffaoalbilbmmfgbnbgppjihopabppdk"
+
+[[extension]]
+id = "clngdbkpkpeebahjckkjfobafhncgmne"
+name = "Stylus"
+version = "2.4.17"
+sha256 = "d727cfbdba5f5461ebe7f05ee57562584bd6c5fa278132f7bdef4083e9a7f78a"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/clngdbkpkpeebahjckkjfobafhncgmne"
+
+[[extension]]
+id = "dhdgffkkebhmkfjojejmpbldmpobfkfo"
+name = "Tampermonkey"
+version = "5.5.1"
+sha256 = "b5167937817e636adeba462ed9bf9b32ff01c2888f78a9afc6aa4f8e655fe872"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/dhdgffkkebhmkfjojejmpbldmpobfkfo"
+
+[[extension]]
+id = "jinjaccalgkegednnccohejagnlnfdag"
+name = "Violentmonkey"
+version = "2.50.0"
+sha256 = "4344181e4ec3f3495763e5dadcd57fd733a6c099589adc2cdf69d2cda0e7d653"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/jinjaccalgkegednnccohejagnlnfdag"
+
+[[extension]]
+id = "hlepfoohegkhhmjieoechaddaejaokhf"
+name = "Refined GitHub"
+version = "26.11.6"
+sha256 = "d364b7f472797d2995ec38a15f0bf553b5b1b454ed71eaf1235e517aaff00a9a"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/hlepfoohegkhhmjieoechaddaejaokhf"
+
+[[extension]]
+id = "pkehgijcmpdhfbdbbnkijodmdjhbjlgp"
+name = "Privacy Badger"
+version = "2026.9.15.2"
+sha256 = "8b9903bc23c13b7861590116390142a0cd09b2a32fcf7364ab4c9500241669a7"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/pkehgijcmpdhfbdbbnkijodmdjhbjlgp"
+
+[[extension]]
+id = "edibdbjcniadpccecjdfdjjppcpchdlm"
+name = "I still don't care about cookies"
+version = "1.1.9"
+sha256 = "46b6cdc30343dd297c6d34d9179c5e1cc1ee404c8e63b154def158e13010c37d"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/edibdbjcniadpccecjdfdjjppcpchdlm"
+
+[[extension]]
+id = "kbfnbcaeplbcioakkpcpgfkobkghlhen"
+name = "Grammarly"
+version = "14.1347.0"
+sha256 = "8e06c850bf5006e0b2cdd96250dbd2b2367645cd030d6a4983341e3d37cb33f4"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/kbfnbcaeplbcioakkpcpgfkobkghlhen"
+
+[[extension]]
+id = "oldceeleldhonbafppcapldpdifcinji"
+name = "LanguageTool"
+version = "11.5.0"
+sha256 = "dbb3cef4cb9594f54caa103fb86c5426295c56164081f65cb29864e3cd25a917"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/oldceeleldhonbafppcapldpdifcinji"
+
+[[extension]]
+id = "aapbdbdomjkkjkaonfhkkikfgjllcleb"
+name = "Google Translate"
+version = "2.0.18"
+sha256 = "f2717e06e01c458959f5935c45eb2bff9286ca66cff0fc51980803f3a3dbd1fd"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/aapbdbdomjkkjkaonfhkkikfgjllcleb"
+
+[[extension]]
+id = "nkbihfbeogaeaoehlefnkodbefgpgknn"
+name = "MetaMask"
+version = "13.56.0.0"
+sha256 = "de601078476facf7c697524bedec327ba6b051900132199aa0f5b8c140e80b42"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/nkbihfbeogaeaoehlefnkodbefgpgknn"
+
+[[extension]]
+id = "ldgfbffkinooeloadekpmfoklnobpien"
+name = "Raindrop.io"
+version = "6.8.2"
+sha256 = "1a5cd1aa9585458deb535757826f5c722dcf29af7d1791cff2ac649eae205055"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/ldgfbffkinooeloadekpmfoklnobpien"
+
+[[extension]]
+id = "bcjindcccaagfpapjjmafapmmgkkhgoa"
+name = "JSON Formatter"
+version = "0.10.2"
+sha256 = "5e0ebde71ee60f997a9f5fc0850e6ae4a9f67006dbf662f00507f99e957c2b21"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/bcjindcccaagfpapjjmafapmmgkkhgoa"
+
+[[extension]]
+id = "gppongmhjkpfnbhagpmjfkannfbllamg"
+name = "Wappalyzer"
+version = "6.12.8"
+sha256 = "c4d96eabcda242bb9e84dd0fc06c38f614046184a4741d769875b22a18174c64"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/gppongmhjkpfnbhagpmjfkannfbllamg"
+
+[[extension]]
+id = "fmkadmapgofadopljbjfkapdkoienihi"
+name = "React Developer Tools"
+version = "8.0.0"
+sha256 = "d92e1122a16362cc5510927068a5b1a8d50b43e1f3be25c3117f7c005807b302"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/fmkadmapgofadopljbjfkapdkoienihi"
+
+[[extension]]
+id = "laookkfknpbbblfpciffpaejjkokdgca"
+name = "Momentum"
+version = "2.27.11"
+sha256 = "5f46c49fb51890c99329c9d7f758a68921c5a38125ba6d17ab491599d0478ea6"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/laookkfknpbbblfpciffpaejjkokdgca"
+
+[[extension]]
+id = "bmnlcjabgnpnenekpadlanbbkooimhnj"
+name = "Honey"
+version = "19.8.0"
+sha256 = "1ebb4e21c987c7aec9a30e8254f34a9afd77853b82d09f53683982f066a233a4"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/bmnlcjabgnpnenekpadlanbbkooimhnj"
+
+[[extension]]
+id = "jldhpllghnbhlbpcmnajkpdmadaolakh"
+name = "Todoist"
+version = "12.21.10"
+sha256 = "9ddba5f47c7c41d2096211327e3800288ca7925d40135e115e28e600eaf5b275"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/jldhpllghnbhlbpcmnajkpdmadaolakh"
+
+[[extension]]
+id = "liecbddmkiiihnedobmlmillhodjkdmb"
+name = "Loom"
+version = "5.5.216"
+sha256 = "1f16612ca878e74ab99573554d1eea5f17359ea257e31e03792d79af3ad1f9e7"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/liecbddmkiiihnedobmlmillhodjkdmb"
+
+[[extension]]
+id = "chphlpgkkbolifaimnlloiipkdnihall"
+name = "OneTab"
+version = "2.24"
+sha256 = "7bdb60b8b795ca35c1020645143aeb8db08b75a0156b958ecf00c35dfb4e5551"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/chphlpgkkbolifaimnlloiipkdnihall"
+
+[[extension]]
+id = "icpgjfneehieebagbmdbhnlpiopdcmna"
+name = "New Tab Redirect"
+version = "3.1.6"
+sha256 = "669846885c35e94806c9304fdeb2ceab3e2c4ed6ca0ed612ef982dafa5f111f6"
+license = "LicenseRef-Package-Notices"
+source = "https://chromewebstore.google.com/detail/icpgjfneehieebagbmdbhnlpiopdcmna"

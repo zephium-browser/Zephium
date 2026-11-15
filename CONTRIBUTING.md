@@ -210,6 +210,18 @@ sandbox/process tests require an admitted WebKitGTK runtime and a separate
 isolated native run. A foundation job passing on older distro libraries does
 not establish those runtime guarantees or Linux release support.
 
+Extensions on Linux need the WebKitGTK web-process module, a separate
+`cdylib`. Build it with `cargo build -p zephium-webkit-web-process --locked`.
+The browser loads it from `$libdir/zephium/web-process/` relative to its
+executable (`/app/lib/zephium/web-process/` in Flatpak), or from
+`ZEPHIUM_WEBEXT_MODULE_DIR`, a directory holding only
+`libzephium_webkit_web_process.so`. A development build finds the module
+beside the executable and runs it from a private read-only copy. Without the
+module, extensions report that they are unavailable. Native extension tests
+take the built library through `ZEPHIUM_WEBEXT_MODULE_PATH`; the pinned
+public packages used by the real-extension smokes are fetched with
+`scripts/webext/fetch-pinned.sh --extract` and never committed.
+
 ### Local aggregate and specialized gates
 
 `cargo xtask ci` is a larger local aggregate implemented in

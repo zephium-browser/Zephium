@@ -1,0 +1,6 @@
+{
+  "id": "ports-navigation",
+  "title": "Navigating a tab disconnects its content-script port",
+  "apis": ["tabs.connect", "tabs.update", "runtime.Port"],
+  "permissions": ["tabs"]
+}

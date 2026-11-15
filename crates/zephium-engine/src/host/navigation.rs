@@ -153,7 +153,7 @@ impl EngineHost {
             view.presentation_permit.store(false, Ordering::Release);
             view.title_ready = None;
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.fullscreen_document_committed(id);
         let mut stages_pending = true;
         for stage in self.stages.values() {
@@ -726,6 +726,11 @@ impl EngineHost {
             // download save panel before the user can choose its destination.
             return;
         }
+        if cfg!(target_os = "linux") {
+            // The shared shell covers the failed address; keep the native tab
+            // hidden and reusable even when its first load never committed.
+            return;
+        }
         eprintln!("view-create: provisional first-load navigation failed before commit");
         self.close(id);
         if let Some(token) = token {
@@ -781,6 +786,14 @@ impl EngineHost {
             self.sink
                 .emit_for(event_token, EngineEvent::NavigationFailed { id, request });
             return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(profile) = self
+            .partitions
+            .get(&id)
+            .map(|partition| partition.profile())
+        {
+            self.webext_linux.authorize_navigation(profile, id, url);
         }
         let Some(view) = self.views.get(&id) else {
             // Core believed this id had a live controller. A missing native

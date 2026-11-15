@@ -1,0 +1,227 @@
+{
+  "caseId": "action-tab-state",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "set global title:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set global title:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "set global badge:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set global badge:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "set global color:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set global color:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "global inherited state:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "global inherited state:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "badge": "G",
+          "color": [
+            18,
+            52,
+            86,
+            255
+          ],
+          "enabled": true,
+          "title": "Global title"
+        }
+      }
+    },
+    {
+      "label": "set tab title:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set tab title:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "set tab badge:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set tab badge:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "set tab color:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "set tab color:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "disable tab action:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "disable tab action:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "tab override state:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "tab override state:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "badge": "T",
+          "color": [
+            1,
+            2,
+            3,
+            255
+          ],
+          "enabled": false,
+          "title": "Tab title"
+        }
+      }
+    },
+    {
+      "label": "state after navigation:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "state after navigation:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "badge": "G",
+          "color": [
+            18,
+            52,
+            86,
+            255
+          ],
+          "enabled": true,
+          "title": "Global title"
+        }
+      }
+    },
+    {
+      "label": "enable tab action:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "enable tab action:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "enabled state:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "enabled state:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

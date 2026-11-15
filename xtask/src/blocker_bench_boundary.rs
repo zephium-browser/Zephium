@@ -21,8 +21,8 @@ const TOKENS: [&str; 2] = ["blocker_bench", "blocker-bench"];
 const SKIPPED: [&str; 6] = ["target", "node_modules", ".git", "vendor", "dist", "gen"];
 const DESKTOP_RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"adblock-qa\",any(not(any(debug_assertions,zephium_protection_qa_profile)),",
-    "not(any(target_os=\"macos\",target_os=\"windows\")))))]",
-    "compile_error!(\"protectionQArequiresamacOSorWindowsdebugorprotection-qabuild\");"
+    "not(any(target_os=\"macos\",target_os=\"windows\",target_os=\"linux\")))))]",
+    "compile_error!(\"protectionQArequiresamacOS,WindowsorLinuxdebugorprotection-qabuild\");"
 );
 const ENGINE_RELEASE_REFUSAL: &str = concat!(
     "#[cfg(all(feature=\"blocker-bench\",not(any(debug_assertions,zephium_protection_qa_profile))))]",
@@ -30,7 +30,7 @@ const ENGINE_RELEASE_REFUSAL: &str = concat!(
 );
 const ENGINE_DRIVER_MODULE: &str = concat!(
     "#[cfg(all(feature=\"blocker-bench\",",
-    "any(target_os=\"macos\",target_os=\"windows\")))]modblocker_bench;"
+    "any(target_os=\"macos\",target_os=\"windows\",target_os=\"linux\")))]modblocker_bench;"
 );
 
 pub(crate) fn check(repository: &Path) -> Result<(), String> {

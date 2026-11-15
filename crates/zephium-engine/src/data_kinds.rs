@@ -5,7 +5,7 @@ use zephium_core::browsing_data::{EngineDataKinds, EngineSite, MAX_ENGINE_SITES}
 
 /// The WebKit website data types Zephium removes, named after the
 /// `WKWebsiteDataType` constants.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WebKitDataType {
     Cookies,
@@ -21,7 +21,7 @@ pub(crate) enum WebKitDataType {
 }
 
 /// Cookies, and the storage a page keeps for itself.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) const WEBKIT_SITE_DATA: [WebKitDataType; 8] = [
     WebKitDataType::Cookies,
     WebKitDataType::LocalStorage,
@@ -34,12 +34,12 @@ pub(crate) const WEBKIT_SITE_DATA: [WebKitDataType; 8] = [
 ];
 
 /// The HTTP cache.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) const WEBKIT_CACHE: [WebKitDataType; 2] =
     [WebKitDataType::DiskCache, WebKitDataType::MemoryCache];
 
 /// One removal WebKit performs.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WebKitStep {
     /// Everything of these types modified at or after `since` (unix seconds),
@@ -56,7 +56,7 @@ pub(crate) enum WebKitStep {
 
 /// The removals that clear `kinds` back to `since`. WebKit has no visited
 /// link store to clear, so history is Zephium's own and adds no step.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 pub(crate) fn webkit_plan(kinds: EngineDataKinds, since: Option<i64>) -> Vec<WebKitStep> {
     let mut types = Vec::new();
     if kinds.site_data {

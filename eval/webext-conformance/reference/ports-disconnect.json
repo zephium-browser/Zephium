@@ -1,0 +1,85 @@
+{
+  "caseId": "ports-disconnect",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "client.ready",
+      "value": {
+        "name": "client-close",
+        "ready": true
+      }
+    },
+    {
+      "label": "client.echo",
+      "value": {
+        "echo": {
+          "payload": [
+            "hello",
+            null
+          ],
+          "sequence": 1
+        },
+        "name": "client-close"
+      }
+    },
+    {
+      "label": "client.disconnect.remoteEvent",
+      "value": {
+        "lastError": null,
+        "name": "client-close",
+        "probe": "remote-disconnect"
+      }
+    },
+    {
+      "label": "client.disconnect.localEventCount",
+      "value": 0
+    },
+    {
+      "label": "client.postAfterDisconnect:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "client.postAfterDisconnect:error",
+      "value": {
+        "lastError": null,
+        "message": "Attempting to use a disconnected port object"
+      }
+    },
+    {
+      "label": "peer.ready",
+      "value": {
+        "name": "peer-close",
+        "ready": true
+      }
+    },
+    {
+      "label": "peer.disconnect",
+      "value": {
+        "lastError": null,
+        "samePort": true
+      }
+    },
+    {
+      "label": "peer.postAfterDisconnect:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "peer.postAfterDisconnect:error",
+      "value": {
+        "lastError": null,
+        "message": "Attempting to use a disconnected port object"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

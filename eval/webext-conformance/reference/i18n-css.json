@@ -1,0 +1,195 @@
+{
+  "caseId": "i18n-css",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "long message name",
+      "value": "loaded"
+    },
+    {
+      "label": "manifest CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "manifest CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "after-malformed": "\"localized\"",
+            "after-missing": "\"__MSG_marker__\"",
+            "direction": "\"ltr\"",
+            "dollars": "\"named/$1/$$\"",
+            "file": "",
+            "literal": "",
+            "malformed": "\"__MSG_not-a-name__\"",
+            "marker": "\"localized\"",
+            "missing": "\"__MSG_unknown__\"",
+            "nested": "\"__MSG_marker__\"",
+            "ownerMatches": true
+          }
+        ]
+      }
+    },
+    {
+      "label": "file insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "file insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "file CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "file CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "after-malformed": "\"localized\"",
+            "after-missing": "\"__MSG_marker__\"",
+            "direction": "\"ltr\"",
+            "dollars": "\"named/$1/$$\"",
+            "file": "\"localized\"",
+            "literal": "",
+            "malformed": "\"__MSG_not-a-name__\"",
+            "marker": "\"localized\"",
+            "missing": "\"__MSG_unknown__\"",
+            "nested": "\"__MSG_marker__\"",
+            "ownerMatches": true
+          }
+        ]
+      }
+    },
+    {
+      "label": "literal insertion:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "literal insertion:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "literal CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "literal CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "after-malformed": "\"localized\"",
+            "after-missing": "\"__MSG_marker__\"",
+            "direction": "\"ltr\"",
+            "dollars": "\"named/$1/$$\"",
+            "file": "\"localized\"",
+            "literal": "\"__MSG_marker__\"",
+            "malformed": "\"__MSG_not-a-name__\"",
+            "marker": "\"localized\"",
+            "missing": "\"__MSG_unknown__\"",
+            "nested": "\"__MSG_marker__\"",
+            "ownerMatches": true
+          }
+        ]
+      }
+    },
+    {
+      "label": "file removal:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "file removal:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "removed CSS:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "removed CSS:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "after-malformed": "\"localized\"",
+            "after-missing": "\"__MSG_marker__\"",
+            "direction": "\"ltr\"",
+            "dollars": "\"named/$1/$$\"",
+            "file": "",
+            "literal": "\"__MSG_marker__\"",
+            "malformed": "\"__MSG_not-a-name__\"",
+            "marker": "\"localized\"",
+            "missing": "\"__MSG_unknown__\"",
+            "nested": "\"__MSG_marker__\"",
+            "ownerMatches": true
+          }
+        ]
+      }
+    },
+    {
+      "label": "extension linked CSS",
+      "value": [
+        {
+          "after-malformed": "\"localized\"",
+          "after-missing": "\"__MSG_marker__\"",
+          "direction": "\"ltr\"",
+          "dollars": "\"named/$1/$$\"",
+          "file": "",
+          "literal": "",
+          "malformed": "\"__MSG_not-a-name__\"",
+          "marker": "\"localized\"",
+          "missing": "\"__MSG_unknown__\"",
+          "nested": "\"__MSG_marker__\"",
+          "ownerMatches": true
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -1,14 +1,42 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
 //! composition root; the stage positions them and draws the drop indicator.
 
+mod audio;
+pub(crate) use audio::{install_audio_observer, AudioObserver};
+pub(crate) mod browsing_data;
+mod network;
+pub(crate) mod spelling;
+pub(crate) use network::apply_proxy;
 mod content_filter;
+pub(crate) mod file_selection;
 mod find;
+mod fullscreen;
+pub(crate) use fullscreen::{
+    exit_fullscreen, fullscreen_state, install_fullscreen_observer, FullscreenObserver,
+};
 mod guide;
+mod history;
+pub(crate) use history::{go_to_history_entry, history_session};
 mod stage;
 pub(crate) mod tab_preview;
 
-pub(crate) fn open_external_app(_url: &str) -> bool {
-    false
+pub(crate) fn external_app_name(url: &str) -> Option<String> {
+    use gtk::gio::prelude::AppInfoExt;
+    let link = zephium_core::navigation::external_app_link(url)?;
+    let app = gtk::gio::AppInfo::default_for_uri_scheme(link.scheme())?;
+    let name = app.display_name();
+    (!name.is_empty() && name.len() <= 1024).then(|| name.to_string())
+}
+
+pub(crate) fn open_external_app(url: &str) -> bool {
+    use gtk::gio::prelude::AppInfoExt;
+    let Some(link) = zephium_core::navigation::external_app_link(url) else {
+        return false;
+    };
+    gtk::gio::AppInfo::default_for_uri_scheme(link.scheme()).is_some_and(|app| {
+        app.launch_uris(&[url], None::<&gtk::gio::AppLaunchContext>)
+            .is_ok()
+    })
 }
 
 pub(crate) use content_filter::{
@@ -37,8 +65,8 @@ use gtk::prelude::WidgetExt as _;
 #[cfg(any(test, feature = "native-isolation-probes"))]
 use webkit2gtk::UserContentManager;
 use webkit2gtk::{
-    DownloadExt, UserContentInjectedFrames, UserContentManagerExt, UserScript,
-    UserScriptInjectionTime, WebContextExt, WebViewExt, WebsiteDataManagerExt,
+    UserContentInjectedFrames, UserContentManagerExt, UserScript, UserScriptInjectionTime,
+    WebContextExt, WebViewExt, WebsiteDataManagerExt,
 };
 use wry::WebViewExtUnix;
 use zephium_core::ports::engine::{Partition, ScriptPrincipal};
@@ -419,19 +447,12 @@ pub fn configure(
     }
     attest_website_data_manager(&view, &context, partition, expected_data_directory)?;
 
-    // `download-started` belongs to WebContext, not WebView. Persistent tabs
-    // share a context, so registering Wry's per-builder callback on every tab
-    // would retain one more closure for the lifetime of the profile. Mark the
-    // GLib object and install one fail-closed handler before the first load.
-    const DOWNLOAD_DENY_MARKER: &str = "zephium-download-deny-installed";
-    // SAFETY: this private key is written and read only as `bool` here, and
-    // the marker lives exactly as long as the context GLib object.
-    let installed = unsafe { context.data::<bool>(DOWNLOAD_DENY_MARKER).is_some() };
-    if !installed {
-        context.connect_download_started(|_, download| download.cancel());
-        // SAFETY: see the typed private-key invariant above.
-        unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
-    }
+    let manager = view
+        .website_data_manager()
+        .ok_or("missing attested data manager")?;
+    network::configure(&manager)?;
+    file_selection::disable_directories(&view)?;
+    file_selection::filter_dropped_files(&view);
 
     Ok(())
 }
@@ -694,17 +715,6 @@ fn validate_storage_postcondition(
 pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
     view.webview().reload_bypass_cache();
     true
-}
-
-pub fn history_session(
-    _view: &wry::WebView,
-    _done: impl FnOnce(Option<(Vec<(String, String)>, usize)>),
-) -> bool {
-    false
-}
-
-pub fn go_to_history_entry(_view: &wry::WebView, _offset: i32, _url: &str) -> bool {
-    false
 }
 
 pub fn stop_loading(view: &wry::WebView) {

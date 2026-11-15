@@ -1,0 +1,61 @@
+{
+  "caseId": "webrequest-handler-cache",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "clear handler cache:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "clear handler cache:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "coalesced calls:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "coalesced calls:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          null,
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    {
+      "label": "invalid arguments:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invalid arguments:error",
+      "value": {
+        "lastError": null,
+        "message": "Error in invocation of webRequest.handlerBehaviorChanged(optional function callback): No matching signature."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

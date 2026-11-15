@@ -1,0 +1,6 @@
+{
+  "id": "worker-classic-environment",
+  "title": "Classic service worker environment and importScripts",
+  "apis": ["runtime.sendMessage"],
+  "permissions": []
+}

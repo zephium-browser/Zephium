@@ -1,0 +1,47 @@
+{
+  "caseId": "tabs-capture-visible",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "capture png:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "capture png:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "encoded": true,
+          "mime": "data:image/png"
+        }
+      }
+    },
+    {
+      "label": "capture jpeg:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "capture jpeg:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "encoded": true,
+          "mime": "data:image/jpeg"
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

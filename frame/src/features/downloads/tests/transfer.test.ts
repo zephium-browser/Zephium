@@ -14,6 +14,7 @@ const entry = (received: number, total: number | null): DownloadView => ({
   total: total === null ? null : String(total),
   error: null,
   insecure: false,
+  capabilities: { pause: true, resume: true, restart: false },
 });
 
 test("the rate settles across readings and starts over when a transfer restarts", () => {

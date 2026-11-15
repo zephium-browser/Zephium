@@ -1,0 +1,1 @@
+{"id": "extension-isolation", "title": "Native extension isolation and explicit WebAssembly CSP", "apis": ["runtime.getURL"], "permissions": []}

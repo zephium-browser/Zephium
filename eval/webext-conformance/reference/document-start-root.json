@@ -1,0 +1,69 @@
+{
+  "caseId": "document-start-root",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "MAIN:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "MAIN:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "firstInline": "true",
+              "root": "present",
+              "start": {
+                "beforePage": true,
+                "root": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "ISOLATED:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "ISOLATED:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "firstInline": "true",
+              "root": "present",
+              "start": {
+                "beforePage": true,
+                "isolated": true,
+                "root": true,
+                "sharedLexical": true
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

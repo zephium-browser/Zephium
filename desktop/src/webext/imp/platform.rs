@@ -46,10 +46,32 @@ pub(super) fn compat_revision(access: &super::Access) -> String {
     })
 }
 
+/// Linux injects its runtime at run time, so a package's revision is the
+/// runtime bundle it was last started with.
+#[cfg(target_os = "linux")]
+pub(super) fn compat_revision(_access: &super::Access) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in zephium_webext_runtime::js::BUNDLE
+        .bytes()
+        .chain(zephium_webext_runtime::js::surface().bytes())
+        .chain(zephium_webext::store::CHROME_VERSION.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")[..12].to_owned()
+}
+
 pub(super) fn prepare_package(
     dir: &Path,
     access: &super::Access,
 ) -> Result<prepare::PrepareReport, String> {
+    // Packages stay byte-for-byte as published; nothing is written into them.
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (dir, access);
+        Ok(prepare::PrepareReport::default())
+    }
     #[cfg(target_os = "macos")]
     {
         let _ = access;

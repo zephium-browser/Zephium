@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "permissions": [],
+  "action": {
+    "default_title": "Manifest title"
+  }
+}

@@ -497,6 +497,33 @@ impl Shell {
                 )
             });
         }
+        #[cfg(target_os = "linux")]
+        if decision != Some(RememberedPagePermission::Allow)
+            && matches!(
+                kind,
+                SitePermissionKind::Camera | SitePermissionKind::Microphone
+            )
+        {
+            for item in self.items.view_ids() {
+                if self.profile_of_item(item) != Some(profile) {
+                    continue;
+                }
+                if let Some(tab) = self.items.tab(item).filter(|tab| {
+                    tab.url
+                        .as_ref()
+                        .and_then(|url| PageOrigin::from_url(url).ok())
+                        .as_ref()
+                        == Some(&origin)
+                }) {
+                    if let Some((navigation, state)) =
+                        tab.capture.filter(|(_, state)| state.is_capturing())
+                    {
+                        let _ = state;
+                        let _ = self.engine.stop_media_capture(item, navigation);
+                    }
+                }
+            }
+        }
         if let Some(page_kind) = kind.page() {
             self.page_permissions
                 .forget_site(profile, &origin, page_kind);
