@@ -215,16 +215,17 @@ pub(crate) struct InstallFacts {
     pub extension_id: String,
     pub root: PathBuf,
     pub manifest: Value,
+    pub messages: std::sync::Arc<zephium_webext_runtime::i18n::Messages>,
 }
 
 #[derive(Clone, Debug)]
 enum Reply {
     Null,
-    Created,
+    Created(Option<String>),
     Tab(i32),
+    Navigated(i32, String),
     Tabs(Vec<i32>, bool),
     Window(i32),
-    PopulatedWindow(i32),
 }
 
 struct FrameJob {
@@ -821,8 +822,10 @@ impl Shared {
                     ExtensionBrowserRequestSettlement::Applied(result) => {
                         if let ExtensionBrowserRequestResult::CreatedTab(item) = result {
                             let id = state.tabs.assign(item);
-                            if matches!(reply, Reply::Created) {
-                                *reply = Reply::Tab(id);
+                            if let Reply::Created(url) = reply {
+                                *reply = url
+                                    .take()
+                                    .map_or(Reply::Tab(id), |url| Reply::Navigated(id, url));
                             }
                         }
                         if let Some(action) = remaining.pop_front() {
@@ -1156,7 +1159,20 @@ impl BrowserState {
         };
         match reply {
             Reply::Null => Value::Null,
-            Reply::Created => Value::Null,
+            Reply::Created(_) => Value::Null,
+            Reply::Navigated(id, url) => snapshot
+                .tab(*id)
+                .ok()
+                .map(|tab| {
+                    let mut tab = tab.clone();
+                    // Engine settlement confirms the target was accepted. The
+                    // committed surface may still describe the previous document.
+                    if tab.tab.loading() || tab.committed_url() != Some(url.as_str()) {
+                        tab.pending_url = Some(url.clone());
+                    }
+                    tabs::project_for(&tab, &pending.sender, &pending.permissions)
+                })
+                .unwrap_or(Value::Null),
             Reply::Tab(id) => project(*id).unwrap_or_else(|| {
                 json!({"id": id, "index": 0, "windowId": snapshot.current_window.unwrap_or(-1),
                     "active": true, "highlighted": true, "selected": true, "pinned": false,
@@ -1181,20 +1197,6 @@ impl BrowserState {
                         &snapshot,
                         window,
                         false,
-                        &pending.sender,
-                        &pending.permissions,
-                    )
-                })
-                .unwrap_or(Value::Null),
-            Reply::PopulatedWindow(id) => snapshot
-                .windows
-                .iter()
-                .find(|window| window.id == *id)
-                .map(|window| {
-                    windows::project_for(
-                        &snapshot,
-                        window,
-                        true,
                         &pending.sender,
                         &pending.permissions,
                     )
@@ -1249,7 +1251,7 @@ impl BrowserState {
             .collect()
     }
 
-    /// Chrome's unsupported-function error; the host counts these.
+    /// Explicit unsupported-host refusal; the host counts these.
     fn refuse(&mut self, invocation: Invocation<'_>) -> Handled {
         invocation.reply(Err(unsupported()))
     }
@@ -1387,6 +1389,7 @@ impl BrowserState {
                 mut action,
                 properties,
             } => {
+                let target = properties.url.clone();
                 if matches!(action, CoreAction::OpenExtensionPage) {
                     let window = self.snapshot().ok().and_then(|snapshot| {
                         snapshot
@@ -1400,7 +1403,7 @@ impl BrowserState {
                         active: properties.active.or(properties.selected).unwrap_or(true),
                     };
                 }
-                self.mutate(invocation, VecDeque::from([action]), Reply::Created)
+                self.mutate(invocation, VecDeque::from([action]), Reply::Created(target))
             }
             Request::Update {
                 tab_id,
@@ -1421,7 +1424,10 @@ impl BrowserState {
                         };
                     }
                 }
-                self.mutate(invocation, actions.into(), Reply::Tab(tab_id))
+                let reply = properties
+                    .url
+                    .map_or(Reply::Tab(tab_id), |url| Reply::Navigated(tab_id, url));
+                self.mutate(invocation, actions.into(), reply)
             }
             Request::Remove { actions, .. } => self.mutate(invocation, actions.into(), Reply::Null),
             Request::Reload { action, .. }
@@ -1437,7 +1443,7 @@ impl BrowserState {
                 Reply::Window(window_id),
             ),
             Request::Duplicate { action, .. } => {
-                self.mutate(invocation, VecDeque::from([action]), Reply::Created)
+                self.mutate(invocation, VecDeque::from([action]), Reply::Created(None))
             }
             Request::Move {
                 tab_ids,
@@ -1480,45 +1486,10 @@ impl BrowserState {
 
     fn windows_request(
         &mut self,
-        request: windows::Request,
+        _request: windows::Request,
         invocation: Invocation<'_>,
     ) -> Handled {
-        match request {
-            windows::Request::Update { window_id, .. } => {
-                let sender = invocation.sender().clone();
-                let permissions = invocation.permissions().clone();
-                let value = self.snapshot().ok().and_then(|snapshot| {
-                    snapshot
-                        .windows
-                        .iter()
-                        .find(|window| window.id == window_id)
-                        .map(|window| {
-                            windows::project_for(&snapshot, window, false, &sender, &permissions)
-                        })
-                });
-                match value {
-                    Some(value) => invocation.reply(Ok(value)),
-                    None => invocation.reply(Err(ApiError::other(format!(
-                        "No window with id: {window_id}."
-                    )))),
-                }
-            }
-            windows::Request::Create { properties } => {
-                let result = self.snapshot().and_then(|snapshot| {
-                    windows::tab_fallback(&snapshot, invocation.sender(), &properties)
-                });
-                match result {
-                    Ok((window, actions)) => {
-                        self.mutate(invocation, actions.into(), Reply::PopulatedWindow(window))
-                    }
-                    Err(error) if error.message() == unsupported().message() => {
-                        self.refuse(invocation)
-                    }
-                    Err(error) => invocation.reply(Err(error)),
-                }
-            }
-            windows::Request::Remove { .. } => self.refuse(invocation),
-        }
+        self.refuse(invocation)
     }
 
     fn action_request(&mut self, request: action::Request, invocation: Invocation<'_>) -> Handled {
@@ -1756,6 +1727,7 @@ impl Browser {
                         let mut text = String::new();
                         for file in files {
                             let (source, _) = read_package_file(facts, file)?;
+                            let source = facts.messages.localize_css(&source)?;
                             if text.len() + source.len() + 1 > scripting::MAX_SOURCE_BYTES {
                                 return Err(ApiError::message_too_large());
                             }

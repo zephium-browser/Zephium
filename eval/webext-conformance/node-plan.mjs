@@ -10,11 +10,13 @@ export const fullCases = [
   "i18n-fallback",
   "i18n-placeholders",
   "i18n-predefined",
+  "identity-redirect-url",
   "navigation-document",
   "permissions-inventory",
   "permissions-request-gesture",
   "ports-disconnect",
   "runtime-callback-promise",
+  "runtime-burst",
   "runtime-last-error-unchecked",
   "runtime-response-styles",
   "storage-bytes",
@@ -39,6 +41,15 @@ export const omittedCalls = {
 };
 
 const missing = {
+  "action-image-data": "Native canvas ImageData and packaged icon decoding.",
+  "content-fragment-pattern": "Real fragment/query document matching and content injection.",
+  "document-start-root": "Real HTML parser root creation and MAIN/ISOLATED document-start ordering.",
+  "i18n-css": "Native stylesheet resource localization and computed styles.",
+  "i18n-large-catalog": "Sealed catalog data transfer into a native document-start isolated world.",
+  "tabs-relative-url": "Nested native background worker and committed extension-page navigation.",
+  "user-scripts-unavailable": "Real browser feature-access revocation and held API references.",
+  "webrequest-filter-schemes": "Real resource filter registration and delivery for an empty filter.",
+  "worker-self-state": "Real worker install/activate lifecycle and ServiceWorker state transitions.",
   "notifications-lifecycle":
     "Real desktop notification service and native create/update/clear settlement.",
   "injection-css-inherited":

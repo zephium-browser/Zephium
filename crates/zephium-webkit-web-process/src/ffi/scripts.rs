@@ -63,6 +63,61 @@ fn evaluate(context: &Owned, source: &str, url: &str) -> (Option<Owned>, bool) {
     }
 }
 
+fn content_catalog(page: u64, frame: u64, install: &str) -> Option<Arc<str>> {
+    with_runtime(|runtime| {
+        runtime
+            .pages
+            .get(&page)?
+            .frames
+            .get(&frame)?
+            .scripts
+            .as_ref()?
+            .catalogs
+            .get(install)
+            .cloned()
+    })
+    .flatten()
+}
+
+fn evaluate_content_bootstrap(context: &Owned, source: &str, catalog: Option<&str>) -> bool {
+    let (function, success) = evaluate(context, source, "zephium://native/content-bootstrap");
+    let Some(catalog) = catalog else {
+        // A deferred bootstrap requires its separately validated catalog.
+        // Never report an uninvoked function as an initialized binding.
+        return success
+            && !function.is_some_and(|value| unsafe { raw::jsc_value_is_function(value.0) != 0 });
+    };
+    let Some(function) =
+        function.filter(|value| unsafe { raw::jsc_value_is_function(value.0) != 0 })
+    else {
+        return false;
+    };
+    if !success {
+        return false;
+    }
+    let Ok(catalog) = CString::new(catalog) else {
+        return false;
+    };
+    unsafe {
+        let Some(value) = Owned::full(raw::jsc_value_new_from_json(context.0, catalog.as_ptr()))
+        else {
+            raw::jsc_context_clear_exception(context.0);
+            return false;
+        };
+        let mut argument = value.0;
+        drop(Owned::full(raw::jsc_value_function_callv(
+            function.0,
+            1,
+            &mut argument,
+        )));
+        let success = raw::jsc_context_get_exception(context.0).is_null();
+        #[cfg(feature = "native-tests")]
+        super::diagnostics::evaluation(context, c"zephium://native/content-bootstrap", success);
+        raw::jsc_context_clear_exception(context.0);
+        success
+    }
+}
+
 fn live(document: &Document) -> bool {
     with_runtime(|runtime| {
         runtime
@@ -183,12 +238,14 @@ pub(super) fn install_bridge(binding: Binding, install_id: &str, bootstrap: &str
             protocol::POST_FUNCTION,
             post_bytes as *const (),
             binding.clone(),
+            G_TYPE_INT,
         );
         install_function(
             &context,
             protocol::REGISTER_FUNCTION,
             register_receiver as *const (),
             binding.clone(),
+            G_TYPE_BOOLEAN,
         );
     }
     if bootstrap.is_empty() {
@@ -389,6 +446,9 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                 continue;
             }
             if outcome.is_none() && !entry.bootstrap.is_empty() {
+                let catalog = content_catalog(page, frame, &entry.install_id);
+                let bootstrap_bytes =
+                    entry.bootstrap.len() + catalog.as_ref().map_or(0, |catalog| catalog.len());
                 with_runtime(|runtime| {
                     if let Some(frame) = runtime
                         .pages
@@ -401,17 +461,12 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
                 let charged = with_runtime(|runtime| {
                     runtime
                         .state
-                        .charge_script_bytes(page, frame, sequence, entry.bootstrap.len())
+                        .charge_script_bytes(page, frame, sequence, bootstrap_bytes)
                         .is_ok()
                 })
                 .unwrap_or(false);
                 let success = charged
-                    && evaluate(
-                        &context,
-                        &entry.bootstrap,
-                        "zephium://native/content-bootstrap",
-                    )
-                    .1;
+                    && evaluate_content_bootstrap(&context, &entry.bootstrap, catalog.as_deref());
                 with_runtime(|runtime| {
                     if let Some(frame) = runtime
                         .pages
@@ -476,6 +531,115 @@ pub(super) fn run_scripts(page: u64, frame: u64, sequence: u64, phase: RunAt) {
             }
         }
     }
+}
+
+struct StartDocument {
+    document: Document,
+    generation: u64,
+}
+
+/// Schedule in the parser's document-start hook, after its root exists. The
+/// callback carries native identity only; JavaScript cannot choose a target.
+pub(super) fn install_document_start(page: u64, frame: u64, sequence: u64, generation: u64) {
+    let document = Document {
+        page,
+        frame,
+        sequence,
+    };
+    let entries = with_runtime(|runtime| {
+        runtime
+            .pages
+            .get(&page)?
+            .frames
+            .get(&frame)?
+            .scripts
+            .clone()
+    })
+    .flatten();
+    if !entries.is_some_and(|table| {
+        table
+            .entries
+            .iter()
+            .any(|entry| entry.run_at == RunAt::DocumentStart && entry_admitted(&document, entry))
+    }) {
+        return;
+    }
+    let Some(context) = context(page, frame, FACT_WORLD) else {
+        return;
+    };
+    // Initial empty documents can acquire their JavaScript world after their
+    // root is complete, without passing through WebKit's UserScript hook.
+    let initial_blank = with_runtime(|runtime| {
+        runtime
+            .state
+            .frame(page, frame)
+            .is_some_and(|info| info.uri == "about:blank")
+    })
+    .unwrap_or(false);
+    if initial_blank {
+        let (root, success) = evaluate(
+            &context,
+            "document.documentElement !== null",
+            "zephium://native/document-start-root",
+        );
+        if success && root.is_some_and(|root| unsafe { raw::jsc_value_to_boolean(root.0) != 0 }) {
+            run_scripts(page, frame, sequence, RunAt::DocumentStart);
+            return;
+        }
+    }
+    let name = CString::new(protocol::DOCUMENT_START_FUNCTION).expect("static callback name");
+    unsafe {
+        let data = Box::into_raw(Box::new(StartDocument {
+            document,
+            generation,
+        }));
+        let Some(value) = Owned::full(raw::jsc_value_new_functionv(
+            context.0,
+            name.as_ptr(),
+            callback(document_start as *const ()),
+            data.cast(),
+            Some(start_document_destroyed),
+            G_TYPE_BOOLEAN,
+            0,
+            ptr::null_mut(),
+        )) else {
+            drop(Box::from_raw(data));
+            return;
+        };
+        raw::jsc_context_set_value(context.0, name.as_ptr(), value.0);
+    }
+}
+
+unsafe extern "C" fn start_document_destroyed(data: *mut c_void) {
+    boundary(|| unsafe {
+        drop(Box::from_raw(data.cast::<StartDocument>()));
+    });
+}
+
+unsafe extern "C" fn document_start(data: *mut c_void) -> c_int {
+    boundary(|| unsafe {
+        let start = &*data.cast::<StartDocument>();
+        let document = start.document.clone();
+        let generation = start.generation;
+        if !live(&document)
+            || !with_runtime(|runtime| {
+                runtime
+                    .state
+                    .attachment(document.page)
+                    .is_some_and(|attach| attach.generation == generation)
+            })
+            .unwrap_or(false)
+        {
+            return 0;
+        }
+        run_scripts(
+            document.page,
+            document.frame,
+            document.sequence,
+            RunAt::DocumentStart,
+        );
+        1
+    })
 }
 
 pub(super) fn install_lifecycle(page: u64, frame: u64, sequence: u64) {
@@ -818,10 +982,13 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
     let Some(context) = context(page, frame, &request.world) else {
         return false;
     };
+    let catalog = content_catalog(page, frame, &entry.install_id);
+    let bootstrap_bytes =
+        entry.bootstrap.len() + catalog.as_ref().map_or(0, |catalog| catalog.len());
     let charged = with_runtime(|runtime| {
         let charged = runtime
             .state
-            .charge_script_bytes(page, frame, sequence, entry.bootstrap.len())
+            .charge_script_bytes(page, frame, sequence, bootstrap_bytes)
             .is_ok();
         if let Some(frame) = runtime
             .pages
@@ -833,13 +1000,8 @@ fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &Injec
         charged
     })
     .unwrap_or(false);
-    let success = charged
-        && evaluate(
-            &context,
-            &entry.bootstrap,
-            "zephium://native/content-bootstrap",
-        )
-        .1;
+    let success =
+        charged && evaluate_content_bootstrap(&context, &entry.bootstrap, catalog.as_deref());
     with_runtime(|runtime| {
         if let Some(frame) = runtime
             .pages

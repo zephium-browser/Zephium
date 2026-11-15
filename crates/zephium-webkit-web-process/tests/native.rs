@@ -167,7 +167,7 @@ fn native_web_process_module() {
             "return nativeTestSend(new Uint8Array([9]));",
             Some(WORLD)
         ),
-        "false"
+        "0"
     );
     pump_for(Duration::from_millis(100));
     assert_eq!(posts(&events).len(), before);
@@ -283,7 +283,7 @@ fn assert_extension_owned_default_world(module: &ModuleDirectory, fixture: &Fixt
     )));
     assert_eq!(
         evaluate(&page, "return nativeTestSend(new Uint8Array([9]));", None),
-        "false"
+        "0"
     );
     assert!(!send(
         &page,
@@ -459,12 +459,9 @@ fn assert_hostile_posts(page: &webkit2gtk::WebView, events: &Rc<RefCell<Vec<Even
         return JSON.stringify({results, coerced, boundary,
             globalsDeleted:typeof __zephiumPost === 'undefined' && typeof __zephiumRegisterReceiver === 'undefined'});
     "#, Some(WORLD))).unwrap();
-    assert_eq!(
-        result["results"],
-        json!([false, false, false, false, false])
-    );
+    assert_eq!(result["results"], json!([0, 0, 0, 0, 0]));
     assert_eq!(result["coerced"], false);
-    assert_eq!(result["boundary"], true);
+    assert_eq!(result["boundary"], 1);
     assert_eq!(result["globalsDeleted"], true);
     pump_until(|| posts(events).len() > before);
     pump_for(Duration::from_millis(100));
@@ -838,7 +835,7 @@ fn assert_repeated_lifecycle(
             "return nativeTestSend(new Uint8Array([9]));",
             Some(WORLD)
         ),
-        "false"
+        "0"
     );
     let mut third = attach(fixture);
     third.generation = 3;
@@ -867,7 +864,7 @@ fn assert_repeated_lifecycle(
             "return nativeTestSend(new Uint8Array([9]));",
             Some(WORLD)
         ),
-        "false"
+        "0"
     );
     pump_for(Duration::from_millis(100));
     assert_eq!(posts(events).len(), before);
@@ -895,13 +892,9 @@ fn assert_inflight_lifecycle(
             &format!("{}/frame?inflight-{generation}", fixture.origin),
         );
         pump_for(Duration::from_millis(50));
-        assert_eq!(post(), "true");
+        assert_eq!(post(), "1");
         pump_until(|| held.borrow().len() == usize::try_from(generation - 3).unwrap());
-        assert_eq!(
-            post(),
-            "false",
-            "held reply must consume the frame reservation"
-        );
+        assert_eq!(post(), "2", "held reply must consume the frame reservation");
         if generation == 4 {
             assert!(send(
                 page,
@@ -922,7 +915,7 @@ fn assert_inflight_lifecycle(
     pump_for(Duration::from_millis(50));
     assert_eq!(
         post(),
-        "false",
+        "2",
         "old completion released a new-generation reservation"
     );
     held.borrow_mut()
@@ -933,7 +926,7 @@ fn assert_inflight_lifecycle(
             None,
         ));
     pump_for(Duration::from_millis(50));
-    assert_eq!(post(), "true");
+    assert_eq!(post(), "1");
     pump_until(|| held.borrow().len() == 1);
     held.borrow_mut()
         .pop()

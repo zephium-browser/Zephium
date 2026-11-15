@@ -3,6 +3,14 @@ import { test } from 'node:test';
 
 import { EXTENSION_ID, FakeHost, bootstrap, createRealm, flush, plain, surface } from './test/harness.mjs';
 
+async function until(predicate) {
+  const deadline = Date.now() + 1000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, 'worker lifecycle did not settle');
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+}
+
 const SCRIPT_URL = `chrome-extension://${EXTENSION_ID}/background.js`;
 
 // A dedicated worker's global as WebKit shapes it: WorkerGlobalScope and
@@ -137,7 +145,7 @@ test('message listeners run after the first pass while installation is still pen
   assert.deepEqual(lifecycle(host), [['scriptReady', null]]);
   assert.deepEqual(heard, ['message']);
   finishInstall();
-  await flush();
+  await until(() => heard.includes('startup'));
   assert.deepEqual(heard, ['message', 'startup']);
 });
 
@@ -148,7 +156,7 @@ test('activation waits for host acceptance of the delivered onInstalled event', 
   chrome.runtime.onInstalled.addListener(() => order.push('onInstalled'));
   host.handlers['zephium.workerLifecycle'] = ([state]) => state === 'installed' ? host.LATER : null;
   inWorker('self.addEventListener("activate", () => self.order.push("activate"))');
-  await flush();
+  await until(() => lifecycle(host).some(([state]) => state === 'installed'));
   assert.deepEqual(order, []);
   assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null]]);
   const call = host.callsTo('zephium.workerLifecycle').find((call) => call.args[0] === 'installed');
@@ -157,7 +165,7 @@ test('activation waits for host acceptance of the delivered onInstalled event', 
   assert.ok(host.acks.includes(sequence));
   assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null]]);
   host.reply(call.id, null);
-  await flush();
+  await until(() => lifecycle(host).some(([state]) => state === 'activated'));
   assert.deepEqual(order, ['onInstalled', 'activate']);
   assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['activated', null]]);
 });
@@ -172,7 +180,7 @@ test('host refusal of installation prevents activation and keeps ordinary events
   chrome.runtime.onStartup.addListener(() => self.fired.push('startup'));
   inWorker('self.addEventListener("activate", () => self.fired.push("activate"))');
   host.event('runtime.onStartup', []);
-  await flush();
+  await until(() => lifecycle(host).some(([state]) => state === 'failed'));
   assert.deepEqual(plain(self.fired), []);
   assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['failed', 'Installation context expired.']]);
   assert.deepEqual(host.acks, []);
@@ -210,16 +218,16 @@ test('a failing install or a startup error is reported to the host', async () =>
   assert.deepEqual(lifecycle(broken.host), [['failed', 'Uncaught SyntaxError']]);
 });
 
-test('activation failure retains queued events and reports failure', async () => {
+test('rejected activation waitUntil still activates and releases queued events', async () => {
   const { chrome, host, inWorker } = workerRealm();
   let called = 0;
   chrome.runtime.onStartup.addListener(() => called++);
   host.event('runtime.onStartup', []);
   inWorker('self.addEventListener("activate", (event) => event.waitUntil(Promise.reject(new Error("no"))))');
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['failed', 'activate']]);
-  assert.equal(called, 0);
-  assert.deepEqual(host.acks, []);
+  assert.deepEqual(lifecycle(host), [['scriptReady', null], ['installed', null], ['activated', null]]);
+  assert.equal(called, 1);
+  assert.equal(host.acks.length, 1);
 });
 
 test('event release waits for host acceptance of worker activation', async () => {
@@ -275,7 +283,7 @@ test('classic imports close before activate handlers run', async () => {
   inWorker(`self.addEventListener('activate', () => {
     try { importScripts('new.js'); } catch (error) { self.activationImportError = error.name; }
   })`);
-  await flush();
+  await until(() => self.serviceWorker.state === 'activated');
   assert.equal(self.activationImportError, 'NetworkError');
   assert.deepEqual(plain(self.imported), []);
 });
@@ -301,7 +309,7 @@ test('restarted classic workers only load imports from the installed graph', asy
 test('classic prototype imports and deletion of the global wrapper retain installation checks', async () => {
   const { inWorker, self } = workerRealm();
   inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "installed.js")');
-  await flush();
+  await until(() => self.serviceWorker.state === 'activated');
   assert.throws(
     () => inWorker('WorkerGlobalScope.prototype.importScripts.call(self, "fresh.js")'),
     { name: 'NetworkError' },
@@ -319,7 +327,7 @@ test('failed installation imports do not authorize later native loads', async ()
   const { inWorker, self } = workerRealm();
   self.failImport = `chrome-extension://${EXTENSION_ID}/failed.js`;
   assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
-  await flush();
+  await until(() => self.serviceWorker.state === 'activated');
   self.failImport = undefined;
   assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
   assert.deepEqual(plain(self.imported), []);
@@ -333,7 +341,7 @@ test('successful imports before a later failure remain installed and inputs conv
   inWorker(`importScripts({ toString() { self.converted.push(self.imported.length); return 'converted.js'; } },
     { toString() { self.converted.push(self.imported.length); return 'last.js'; } })`);
   assert.deepEqual(plain(self.converted), [1, 1]);
-  await flush();
+  await until(() => self.serviceWorker.state === 'activated');
   self.failImport = undefined;
   inWorker('importScripts("loaded.js")');
   assert.throws(() => inWorker('importScripts("failed.js")'), { name: 'NetworkError' });
@@ -500,7 +508,7 @@ test('worker diagnostics obey host UTF8 byte limits, including startup failures'
   channel.port2.close();
 });
 
-test('owner relay retries refused submissions and settles every call once', async () => {
+test('owner relay retries busy pre-admission submissions and settles every call once', async () => {
   const {Z} = createRealm();
   const host = new FakeHost(Z, 'background');
   host.handlers['zephium.addListener'] = () => null;
@@ -510,7 +518,7 @@ test('owner relay retries refused submissions and settles every call once', asyn
     if (!capacity) {
       refused++;
       if (!refill) refill = setTimeout(() => { capacity = 8; refill = null; }, 1);
-      return false;
+      return 2;
     }
     capacity--;
     return host.link.send(bytes);
@@ -562,4 +570,44 @@ test('owner relay permanent refusal and queue overflow reject instead of hanging
   } finally {
     owner.close(); channel.port1.close(); channel.port2.close();
   }
+});
+
+
+test('serviceWorker exposes native lifecycle state and a stable read-only identity', async () => {
+  const { self, inWorker } = workerRealm();
+  const worker = self.serviceWorker;
+  assert.equal(worker.state, 'parsed');
+  assert.equal(worker.scriptURL, SCRIPT_URL);
+  assert.equal(Object.prototype.toString.call(worker), '[object ServiceWorker]');
+  assert.throws(() => new self.ServiceWorker(), /Illegal constructor/);
+  const states = [];
+  self.addEventListener('install', () => states.push(worker.state));
+  self.addEventListener('activate', () => states.push(worker.state));
+  const changes = [];
+  worker.onstatechange = () => changes.push(worker.state);
+  inWorker('self.serviceWorker.state = "forged"');
+  assert.equal(worker.state, 'parsed');
+  await until(() => worker.state === 'activated');
+  assert.deepEqual(states, ['installing', 'activating']);
+  assert.equal(worker.state, 'activated');
+  assert.equal(self.serviceWorker, worker);
+  assert.deepEqual(changes, ['installing', 'installed', 'activating', 'activated']);
+  assert.throws(() => worker.postMessage('test'), error => error.name === 'NotSupportedError');
+  assert.equal(workerRealm({install:false}).self.serviceWorker.state, 'activated');
+});
+
+test('onstatechange occupies its assignment position and null removes that position', async () => {
+  const { self } = workerRealm();
+  const worker = self.serviceWorker, order=[];
+  worker.addEventListener('statechange', () => order.push('first'));
+  worker.onstatechange = () => order.push('handler');
+  worker.addEventListener('statechange', () => order.push('last'));
+  worker.dispatchEvent(new Event('statechange'));
+  assert.deepEqual(order, ['first','handler','last']);
+  order.length=0;
+  worker.onstatechange=null;
+  worker.onstatechange=()=>order.push('reassigned');
+  worker.dispatchEvent(new Event('statechange'));
+  assert.deepEqual(order, ['first','last','reassigned']);
+  await until(() => worker.state === 'activated');
 });

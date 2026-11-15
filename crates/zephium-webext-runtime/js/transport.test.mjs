@@ -117,7 +117,7 @@ test("oversize calls are refused before sending with Chrome's text", async () =>
   assert.equal(Z.transport.messageLimit('extensionFrame'), 8 * 1024 * 1024);
 });
 
-test('the outstanding-call limit refuses API calls but queues internal ones', async () => {
+test('the outstanding-call limit queues application and internal calls without dispatching over 256', async () => {
   const { Z } = createRealm();
   const host = new FakeHost(Z);
   host.handlers['test.slow'] = () => host.LATER;
@@ -127,15 +127,19 @@ test('the outstanding-call limit refuses API calls but queues internal ones', as
     handlers: { event() {}, portMessage() {}, portDisconnect() {} },
   });
   for (let i = 0; i < 256; i++) client.call('test.slow', '[]');
-  await assert.rejects(
-    client.call('test.slow', '[]'),
-    (error) => error === 'Too many extension API calls are pending.',
-  );
+  const waiting = client.call('test.slow', '[]');
+  assert.equal(host.callsTo('test.slow').length, 256);
   const internal = client.call('zephium.respond', '["1",null]', true);
   await flush();
   assert.equal(host.callsTo('zephium.respond').length, 0);
   assert.equal(client.outstanding, 256);
   host.reply(host.calls[0].id, null);
+  await flush();
+  assert.equal(host.callsTo('test.slow').length, 257);
+  assert.equal(client.outstanding, 256);
+  assert.equal(host.callsTo('zephium.respond').length, 0);
+  host.reply(host.calls[256].id, 'queued');
+  assert.equal(await waiting, 'queued');
   await flush();
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(host.callsTo('zephium.respond').length, 1);
@@ -245,10 +249,108 @@ test('internal listener traffic preserves application slots without raising the 
   assert.equal(client.outstanding, 128);
   const application = Array.from({length:128}, ()=>client.call('tabs.query', '[{}]'));
   assert.equal(client.outstanding, 256);
-  await assert.rejects(client.call('tabs.query', '[{}]'), e=>e===Z.transport.ERRORS.tooManyPending);
+  application.push(client.call('tabs.query', '[{}]'));
+  assert.equal(client.outstanding, 256);
+  assert.equal(host.callsTo('tabs.query').length, 128);
   let index=0;
   while (index<host.calls.length) host.reply(host.calls[index++].id, null);
   await Promise.all([...internal, ...application]);
   assert.equal(client.outstanding, 0);
   assert.deepEqual(host.callsTo('zephium.addListener').map(c=>c.args[0]), Array.from({length:300},(_,i)=>i));
+});
+
+
+test('backpressure refuses queue overflow and drains all promises on invalidation', async () => {
+  const { Z } = createRealm();
+  const host = new FakeHost(Z);
+  host.handlers['test.slow'] = () => host.LATER;
+  const client = Z.transport.createClient(host.link, { maxMessageBytes: 1 << 20,
+    handlers: { event() {}, portMessage() {}, portDisconnect() {} } });
+  const waiting=[];
+  for(let i=0;i<256+4096;i++) waiting.push(client.call('test.slow','[]').catch(error=>error));
+  assert.equal(client.outstanding,256);
+  assert.equal(host.calls.length,256);
+  await assert.rejects(client.call('test.slow','[]'),error=>error==='Too many extension API calls are pending.');
+  client.invalidate();
+  assert.equal(client.outstanding,0);
+  assert.ok((await Promise.all(waiting)).every(error=>error==='Extension context invalidated.'));
+});
+
+test('queued and dispatched bytes share the unchanged 64MiB aggregate budget', async () => {
+  const { Z } = createRealm();
+  const host = new FakeHost(Z);
+  host.handlers['test.slow'] = () => host.LATER;
+  const client = Z.transport.createClient(host.link, { maxMessageBytes: 32 * 1024 * 1024,
+    handlers: { event() {}, portMessage() {}, portDisconnect() {} } });
+  const waiting=[];
+  for(let i=0;i<256;i++) waiting.push(client.call('test.slow','[]').catch(error=>error));
+  const payload=JSON.stringify(['x'.repeat(16*1024*1024)]);
+  for(let i=0;i<3;i++) waiting.push(client.call('test.slow',payload).catch(error=>error));
+  await assert.rejects(client.call('test.slow',payload),error=>error==='Too many extension API calls are pending.');
+  assert.equal(host.calls.length,256);
+  client.invalidate();
+  await Promise.all(waiting);
+});
+
+test('busy native posts retry only unaccepted bytes, in FIFO order, without duplicate calls', async () => {
+  const { Z } = createRealm();
+  const host = new FakeHost(Z);
+  host.handlers['test.call'] = args => args[0];
+  let busy=3, attempts=0;
+  const client=Z.transport.createClient({listen:host.link.listen,send(bytes){
+    attempts++; if(busy-->0)return 2;return host.link.send(bytes);
+  }},{maxMessageBytes:1<<20,handlers:{event(){},portMessage(){},portDisconnect(){}}});
+  assert.deepEqual(await Promise.all([client.call('test.call','[1]'),client.call('test.call','[2]')]),[1,2]);
+  assert.equal(attempts,5);assert.equal(host.calls.length,2);
+  assert.deepEqual(host.calls.map(call=>call.args[0]),[1,2]);
+});
+
+test('a persistently busy native post has a bounded deadline and invalidation drains it', async () => {
+  let now=0, tick;
+  const { Z }=createRealm({performance:{now:()=>now},setTimeout:fn=>(tick=fn,1),clearTimeout:()=>{tick=null;}});
+  const client=Z.transport.createClient({send:()=>2,listen(){}},{maxMessageBytes:1<<20,handlers:{event(){},portMessage(){},portDisconnect(){}}});
+  const promise=client.call('test.call','[]');
+  const rejected=assert.rejects(promise,error=>error===Z.transport.ERRORS.tooManyPending);
+  now=30001;tick();await rejected;
+  const second=client.call('test.call','[]');
+  const invalid=assert.rejects(second,error=>error===Z.transport.ERRORS.invalidated);
+  client.invalidate();await invalid;assert.equal(tick,null);
+});
+
+test('expired non-call frames invalidate the client and settle pending operations', async () => {
+ for(const kind of ['ack','postPort','closePort']) {
+  let now=0,tick,notified=0;
+  const {Z}=createRealm({performance:{now:()=>now},setTimeout:fn=>(tick=fn,1),clearTimeout:()=>{tick=null;}});
+  const client=Z.transport.createClient({send:()=>2,listen(){}},{maxMessageBytes:1<<20,handlers:{invalidated(){notified++;}}});
+  client[kind](1n,new Uint8Array([1]));
+  const rejected=assert.rejects(client.call('test.call','[]'),error=>error===Z.transport.ERRORS.tooManyPending);
+  now=30001;tick();await rejected;
+  assert.equal(client.invalidated,Z.transport.ERRORS.tooManyPending);assert.equal(notified,1);assert.equal(client.outstanding,0);
+ }
+});
+
+test('private owner closure invalidates a worker link without accepting more frames', async () => {
+ const {Z}=createRealm();const channel=new MessageChannel();const link=Z.transport.portLink(1<<20);link.attach(channel.port2);
+ const client=Z.transport.createClient(link,{maxMessageBytes:1<<20,handlers:{}});
+ const rejected=assert.rejects(client.call('test.call','[]'),error=>error===Z.transport.ERRORS.invalidated);
+ channel.port1.postMessage(Z.transport.PORT_CLOSED);await rejected;
+ assert.equal(link.send(new Uint8Array([1])),false);
+ channel.port1.close();channel.port2.close();
+});
+
+test('expired queued tails never execute when native capacity returns', async () => {
+ let now=0,tick,available=false,attempts=0;
+ const {Z}=createRealm({performance:{now:()=>now},setTimeout:fn=>(tick=fn,1),clearTimeout:()=>{tick=null;}});
+ const client=Z.transport.createClient({send(){attempts++;return available?true:2;},listen(){}},{maxMessageBytes:1<<20,handlers:{}});
+ const promises=[client.call('test.call','[1]'),client.call('test.call','[2]')];
+ const done=promises.map(p=>assert.rejects(p,e=>e===Z.transport.ERRORS.tooManyPending));
+ now=30000;available=true;tick();await Promise.all(done);assert.equal(attempts,1);
+});
+
+test('an ACK refused by queue capacity terminates delivery instead of silently dropping it', () => {
+ const {Z}=createRealm({setTimeout:()=>1,clearTimeout:()=>{}});let notified=0;
+ const client=Z.transport.createClient({send:()=>2,listen(){}},{maxMessageBytes:1<<20,handlers:{invalidated(){notified++;}}});
+ for(let i=1;i<=16384;i++)assert.equal(client.ack(BigInt(i)),null);
+ assert.equal(client.ack(16385n),Z.transport.ERRORS.tooManyPending);
+ assert.equal(client.invalidated,Z.transport.ERRORS.tooManyPending);assert.equal(notified,1);
 });

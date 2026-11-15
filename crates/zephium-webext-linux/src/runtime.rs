@@ -269,6 +269,7 @@ struct Inner {
 #[derive(Default)]
 struct TabContent {
     plan: AttachPlan,
+    document_start: bool,
     scripts: Vec<PageScript>,
     styles: Vec<content::TabStyle>,
 }
@@ -1488,6 +1489,24 @@ impl Inner {
             return Err(InstallError::Retired);
         }
         self.check_script_writes(spec.install)?;
+        let manifest_scripts =
+            zephium_webext_runtime::scripting_registry::ScriptRegistry::from_manifest(
+                &spec.manifest,
+                |path, _| {
+                    zephium_webext::manifest::normalize_resource(path)
+                        .filter(|path| spec.directory.join(path).is_file())
+                        .map(|_| ())
+                        .ok_or_else(|| {
+                            zephium_webext_runtime::ApiError::other(format!(
+                                "Could not load file: '{path}'."
+                            ))
+                        })
+                },
+            )
+            .map_err(|error| {
+                InstallError::Admission(format!("Invalid content scripts: {error}"))
+            })?;
+
         let background =
             check_background(&spec.manifest, &spec.directory).map_err(InstallError::Refused)?;
         if self.records.borrow().contains_key(&spec.install) {
@@ -1495,13 +1514,15 @@ impl Inner {
         }
         let catalogs = read_locales(&spec.directory, &spec.manifest, &self.config.locale)
             .map_err(InstallError::Locales)?;
-        let messages = Messages::new(
-            spec.extension_id.clone(),
-            self.config.locale.clone(),
-            spec.manifest.default_locale(),
-            &catalogs,
-        )
-        .map_err(|error| InstallError::Locales(error.message().to_owned()))?;
+        let messages = Arc::new(
+            Messages::new(
+                spec.extension_id.clone(),
+                self.config.locale.clone(),
+                spec.manifest.default_locale(),
+                &catalogs,
+            )
+            .map_err(|error| InstallError::Locales(error.message().to_owned()))?,
+        );
         self.scheme
             .add_install(
                 spec.install,
@@ -1510,6 +1531,7 @@ impl Inner {
                 &spec.manifest,
             )
             .map_err(InstallError::Scheme)?;
+        self.scheme.set_messages(spec.install, messages.clone());
         let admitted = self.bridge.admit(InstallAdmission {
             install: spec.install,
             extension_id: spec.extension_id.clone(),
@@ -1559,6 +1581,7 @@ impl Inner {
             root: spec.directory,
             background,
             messages,
+            manifest_scripts,
             permissions: spec.permissions,
             unpacked: spec.unpacked,
             state_directory,
@@ -1801,6 +1824,9 @@ impl Inner {
                 .grants
                 .truncate(zephium_webkit_web_process_protocol::protocol::MAX_WORLDS);
         }
+        let document_start = built.table.entries.iter().any(|entry| {
+            entry.run_at == zephium_webkit_web_process_protocol::protocol::RunAt::DocumentStart
+        });
         if let Err(error) = self.bridge.publish_scripts(built.table) {
             eprintln!("extensions: content-script table refused: {error:?}");
         }
@@ -1827,6 +1853,7 @@ impl Inner {
         };
         *self.content.borrow_mut() = TabContent {
             plan: plan.clone(),
+            document_start,
             scripts,
             styles: built.styles,
         };
@@ -1861,6 +1888,19 @@ impl Inner {
             manager.remove_style_sheet(&style);
         }
         let content = self.content.borrow();
+        if content.document_start {
+            use zephium_webkit_web_process_protocol::protocol;
+            let script = webkit2gtk::UserScript::for_world(
+                protocol::DOCUMENT_START_SCRIPT,
+                webkit2gtk::UserContentInjectedFrames::AllFrames,
+                webkit2gtk::UserScriptInjectionTime::Start,
+                protocol::FACT_WORLD,
+                &[],
+                &[],
+            );
+            manager.add_script(&script);
+            entry.scripts.push(script);
+        }
         for script in &content.scripts {
             let script = script.user_script_in(webkit2gtk::UserContentInjectedFrames::AllFrames);
             manager.add_script(&script);

@@ -11,7 +11,7 @@ import {
 test("every oracle case has explicit Node coverage or an unavailability reason", async () => {
   const ids = await readdir(new URL("./cases", import.meta.url));
   const rows = inventory(ids);
-  assert.equal(rows.length, 62);
+  assert.equal(rows.length, 73);
   assert.equal(new Set(supportedCases).size, supportedCases.length);
   assert.deepEqual(
     rows

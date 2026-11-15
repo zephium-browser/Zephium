@@ -1,0 +1,1 @@
+{"id": "worker-self-state", "title": "Worker self identity follows installation and activates after rejected activation waitUntil", "apis": ["runtime.sendMessage"], "permissions": []}

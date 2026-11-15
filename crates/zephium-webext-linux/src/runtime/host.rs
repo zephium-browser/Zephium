@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
@@ -147,7 +148,8 @@ pub(crate) struct Admitted {
     pub manifest: Manifest,
     pub root: PathBuf,
     pub background: Option<BackgroundScript>,
-    pub messages: Messages,
+    pub messages: Arc<Messages>,
+    pub manifest_scripts: ScriptRegistry,
     pub permissions: InstallPermissions,
     pub unpacked: bool,
     pub state_directory: Option<PathBuf>,
@@ -212,7 +214,7 @@ pub(crate) struct InstallState {
     root: PathBuf,
     background: Option<BackgroundScript>,
     worker_surface: String,
-    messages: Messages,
+    messages: Arc<Messages>,
     catalog: Value,
     granted: Vec<String>,
     unlimited: bool,
@@ -600,7 +602,7 @@ impl I18nHost for State {
         self.installs
             .get(&sender.install())
             .filter(|install| &install.extension_id == sender.extension_id())
-            .map(|install| &install.messages)
+            .map(|install| install.messages.as_ref())
             .ok_or_else(ApiError::context_invalidated)
     }
 }
@@ -1846,13 +1848,7 @@ impl RuntimeHost {
             .as_ref()
             .map(|_| zephium_webext_runtime::js::background_surface(&admitted.manifest))
             .unwrap_or_default();
-        let scripts = ScriptRegistry::from_manifest(&admitted.manifest, |path, _| {
-            zephium_webext::manifest::normalize_resource(path)
-                .filter(|path| admitted.root.join(path).is_file())
-                .map(|_| ())
-                .ok_or_else(|| ApiError::other(format!("Could not load file: '{path}'.")))
-        })
-        .unwrap_or_default();
+        let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
             dnr: DnrState::default(),
             network_status: NetworkStatus {
@@ -1972,6 +1968,7 @@ impl RuntimeHost {
                 extension_id: state.extension_id.as_str().to_owned(),
                 root: state.root.clone(),
                 manifest: state.manifest.clone(),
+                messages: state.messages.clone(),
             },
         );
         self.state.installs.insert(install, state);

@@ -1733,7 +1733,7 @@ fn platform_capabilities() {
     std::fs::write(package.path().join("worker.js"), r#"
 const seen=[]; let clicks=0, matchingWindow=0, foreignWindow=0, iconResult=null;
 (async()=>{
- await chrome.action.setIcon({path:'./icon.png'});
+ await chrome.action.setIcon({path:{32:'./icon.png',512:'./icon.png',1024:'./icon.png'}});
  let missing=false, foreign=false;
  try{await chrome.action.setIcon({path:'./missing.png'});}catch{missing=true;}
  try{await chrome.action.setIcon({path:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/icon.png'});}catch{foreign=true;}
@@ -1836,7 +1836,13 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
  const created=await chrome.tabs.create({url:'popup.html#created'});
  await chrome.tabs.update(created.id,{url:'popup.html#updated'});
- const window=await chrome.windows.create({url:'popup.html#window',type:'popup'});
+ const tabCount=(await chrome.tabs.query({})).length;
+ const current=await chrome.windows.getCurrent();
+ const windowErrors=[];
+ for(const run of [()=>chrome.windows.create({url:'popup.html#window',type:'popup'}),()=>chrome.windows.update(current.id,{width:333}),()=>chrome.windows.remove(current.id)]){
+   try{await run();windowErrors.push('unexpected success')}catch(error){windowErrors.push(error.message)}
+ }
+ const windowsUnchanged=(await chrome.tabs.query({})).length===tabCount;
  let cancelledIdle=false;
  const cancelled=requestIdleCallback(()=>cancelledIdle=true);
  cancelIdleCallback(cancelled);
@@ -1845,7 +1851,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
  const inlineImage=new Promise(resolve=>{image.onload=()=>resolve(image.naturalWidth===1);image.onerror=()=>resolve(false);});
  image.src='data:image/svg+xml;base64,'+btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><!--'+'x'.repeat(20000)+'--><rect width="1" height="1"/></svg>');
  let foreign=false;try{await chrome.tabs.create({url:'chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html'});}catch{foreign=true;}
- globalThis.result={created,window,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
+ globalThis.result={created,windowErrors,windowsUnchanged,foreign,idle,nativeIdle,inlineImage:await inlineImage,clear:await chrome.notifications.clear('missing'),all:await chrome.notifications.getAll(),report:await chrome.runtime.sendMessage({report:true})};
 })().catch(e=>globalThis.result={error:e.message});return 'started';"#
         ),
         "started"
@@ -1870,7 +1876,15 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
     assert!(result["idle"]["remaining"]
         .as_f64()
         .is_some_and(|value| (0.0..=50.0).contains(&value)));
-    assert_eq!(result["window"]["type"], "normal");
+    assert_eq!(
+        result["windowErrors"],
+        json!([
+            "This function is not supported.",
+            "This function is not supported.",
+            "This function is not supported."
+        ])
+    );
+    assert_eq!(result["windowsUnchanged"], true);
     assert_eq!(result["clear"], false);
     assert_eq!(result["all"], json!({}));
     assert_eq!(result["report"]["clicks"], 1);

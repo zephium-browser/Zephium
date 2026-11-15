@@ -15,6 +15,7 @@ use url::Url;
 use webkit2gtk::{SecurityManagerExt, URISchemeRequestExt, URISchemeResponseExt, WebContextExt};
 use zephium_core::ids::ExtensionInstallId;
 use zephium_webext::manifest::Manifest;
+use zephium_webext_runtime::i18n::{Messages, MAX_LOCALE_BYTES};
 use zephium_webext_runtime::pattern::HostPattern;
 
 use crate::csp::{PolicyError, ResponsePolicy};
@@ -122,6 +123,7 @@ struct Install {
     active: Arc<AtomicBool>,
     runtime: BTreeMap<String, MemoryResource>,
     workers: BTreeMap<String, MemoryResource>,
+    messages: Option<Arc<Messages>>,
 }
 
 thread_local! {
@@ -236,9 +238,16 @@ impl Scheme {
                 active: Arc::new(AtomicBool::new(true)),
                 runtime: BTreeMap::new(),
                 workers: BTreeMap::new(),
+                messages: None,
             },
         );
         Ok(alias)
+    }
+
+    pub(crate) fn set_messages(&self, install: ExtensionInstallId, messages: Arc<Messages>) {
+        if let Some(entry) = self.installs.borrow_mut().get_mut(&install) {
+            entry.messages = Some(messages);
+        }
     }
 
     /// Call on disable, uninstall, or replacement, before deleting package files.
@@ -421,13 +430,39 @@ impl Scheme {
                     })
                     .ok_or(PackageError::NotFound)
             } else {
-                entry.package.open_resource(uri.resource()).map(|resource| {
-                    (
-                        Box::new(resource.file.take(resource.length)) as Box<dyn Read + Send>,
-                        resource.length,
-                        resource.mime_type.to_owned(),
-                    )
-                })
+                entry
+                    .package
+                    .open_resource(uri.resource())
+                    .and_then(|resource| {
+                        if resource.mime_type == "text/css" {
+                            if let Some(messages) = &entry.messages {
+                                if resource.length > MAX_LOCALE_BYTES as u64 {
+                                    return Err(PackageError::Forbidden);
+                                }
+                                let mut source = String::new();
+                                resource
+                                    .file
+                                    .take(MAX_LOCALE_BYTES as u64 + 1)
+                                    .read_to_string(&mut source)
+                                    .map_err(PackageError::Io)?;
+                                let localized = messages
+                                    .localize_css(&source)
+                                    .map_err(|_| PackageError::Forbidden)?;
+                                let length = localized.len() as u64;
+                                return Ok((
+                                    Box::new(io::Cursor::new(localized.into_bytes()))
+                                        as Box<dyn Read + Send>,
+                                    length,
+                                    resource.mime_type.to_owned(),
+                                ));
+                            }
+                        }
+                        Ok((
+                            Box::new(resource.file.take(resource.length)) as Box<dyn Read + Send>,
+                            resource.length,
+                            resource.mime_type.to_owned(),
+                        ))
+                    })
             };
         let (body, length, mime) = match body {
             Ok(body) => body,

@@ -1,0 +1,1 @@
+{"id":"tabs-relative-url","title":"Tab navigation resolves relative package paths from the extension root","apis":["tabs.create","tabs.update"],"permissions":["tabs"]}

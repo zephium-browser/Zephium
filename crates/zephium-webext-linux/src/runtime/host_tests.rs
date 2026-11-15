@@ -65,7 +65,9 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
             None,
             &BTreeMap::new(),
         )
-        .unwrap(),
+        .unwrap()
+        .into(),
+        manifest_scripts: ScriptRegistry::from_manifest(&manifest, |_, _| Ok(())).unwrap(),
         manifest,
         root: PathBuf::from("/nonexistent"),
         background: Some(BackgroundScript {

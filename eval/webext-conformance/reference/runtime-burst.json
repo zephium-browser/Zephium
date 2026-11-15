@@ -1,0 +1,47 @@
+{
+  "caseId": "runtime-burst",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "storage burst:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "storage burst:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "count": 400,
+          "ordered": true
+        }
+      }
+    },
+    {
+      "label": "regex burst:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "regex burst:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "count": 400,
+          "supported": true
+        }
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

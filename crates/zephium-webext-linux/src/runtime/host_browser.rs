@@ -28,6 +28,7 @@ pub(crate) struct ContentInstall {
     pub install: ExtensionInstallId,
     pub extension_id: String,
     pub root: PathBuf,
+    pub messages: std::sync::Arc<zephium_webext_runtime::i18n::Messages>,
     pub scripts: Vec<(RegisteredScript, ContentScriptMatcher)>,
     pub site_access: SiteAccess,
     pub origins: Vec<String>,
@@ -313,6 +314,7 @@ impl RuntimeHost {
                     install: *install,
                     extension_id: state.extension_id.as_str().to_owned(),
                     root: state.root.clone(),
+                    messages: state.messages.clone(),
                     scripts: state
                         .scripts
                         .declarations()

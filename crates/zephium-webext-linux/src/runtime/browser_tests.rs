@@ -103,6 +103,7 @@ fn manifest_action_defaults_name_the_popup_by_extension_url() {
     let facts = InstallFacts {
         extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
         root: PathBuf::from("/nonexistent"),
+        messages: test_messages(),
         manifest: json!({"name": "Fixture", "action": {"default_popup": "ui/popup.html"}}),
     };
     let store = action_defaults(&facts);
@@ -127,6 +128,7 @@ fn package_files_outside_the_package_are_never_read() {
     let facts = InstallFacts {
         extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
         root: directory.path().to_path_buf(),
+        messages: test_messages(),
         manifest: json!({}),
     };
     assert_eq!(
@@ -143,6 +145,7 @@ fn action_icons_use_the_worker_or_calling_page_directory() {
     let facts = InstallFacts {
         extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
         root: PathBuf::from("/nonexistent"),
+        messages: test_messages(),
         manifest: json!({"background":{"service_worker":"scripts/worker.js"}}),
     };
     let owner =
@@ -168,4 +171,21 @@ fn action_icons_use_the_worker_or_calling_page_directory() {
     ] {
         assert!(action_icon_path(&facts, ContextKind::Background, &owner, path).is_none());
     }
+}
+
+fn test_messages() -> std::sync::Arc<zephium_webext_runtime::i18n::Messages> {
+    use zephium_webext_runtime::i18n::{LocaleEnvironment, Messages};
+    Messages::new(
+        zephium_webext_runtime::context::ExtensionId::parse("abcdefghijklmnopabcdefghijklmnop")
+            .unwrap(),
+        LocaleEnvironment {
+            ui_language: "en".into(),
+            accept_languages: vec![],
+            right_to_left: false,
+        },
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap()
+    .into()
 }

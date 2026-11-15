@@ -19,6 +19,40 @@ pub(super) fn scope(page: u64, frame: u64, document: u64, world: &str, trigger: 
 
 static RECORDS: AtomicUsize = AtomicUsize::new(0);
 
+pub(super) fn background_process(page: u64, uri: &str) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_none() {
+        return;
+    }
+    let Some(extension) = uri
+        .strip_prefix("chrome-extension://")
+        .and_then(|uri| uri.strip_suffix("/_zephium/background.html"))
+    else {
+        return;
+    };
+    if extension.len() != 32 || !extension.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
+        return;
+    }
+    let sequence = RECORDS.fetch_add(1, Ordering::Relaxed);
+    if sequence >= 4096 {
+        return;
+    }
+    let started = std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")?
+                .1
+                .split_whitespace()
+                .nth(19)?
+                .parse::<u64>()
+                .ok()
+        });
+    let namespace = std::fs::read_link("/proc/self/ns/pid")
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    let row = serde_json::json!({"extension":extension,"context":"Background","process":std::process::id(),"sequence":sequence,"event":{"kind":"native-background-process","page":page,"startTicks":started,"pidNamespace":namespace}});
+    let _ = writeln!(std::io::stderr().lock(), "ZPD {row}");
+}
+
 pub(super) fn request(id: u64) {
     SCOPE.with_borrow_mut(|scope| {
         if let Some(scope) = scope {

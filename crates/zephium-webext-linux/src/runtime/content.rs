@@ -59,26 +59,37 @@ fn read(root: &std::path::Path, extension: &str, path: &str) -> Result<ScriptFil
     })
 }
 
-fn bootstrap(data: &serde_json::Value) -> Result<String, String> {
+fn bootstrap(data: &serde_json::Value) -> Result<(String, Option<Arc<str>>), String> {
+    let mut data = data.clone();
+    let catalog = data["messages"]
+        .as_object()
+        .filter(|messages| !messages.is_empty())
+        .map(|messages| Arc::<str>::from(serde_json::to_string(messages).expect("JSON messages")));
+    if catalog.is_some() {
+        data.as_object_mut()
+            .expect("bootstrap object")
+            .remove("messages");
+    }
     #[cfg(feature = "native-tests")]
     let bundle =
         crate::diagnostics::bundle(zephium_webext_runtime::js::NATIVE_CONTENT_BUNDLE, false);
     #[cfg(not(feature = "native-tests"))]
     let bundle = zephium_webext_runtime::js::NATIVE_CONTENT_BUNDLE;
     let source = format!(
-        "(function(){{'use strict';{};({})('native-content',{},{});}})();",
+        "(function(messages){{'use strict';{};const bootstrap={};if(messages)bootstrap.messages=messages;({})('native-content',{},bootstrap);}}){}",
         include_str!("idle_callback.js"),
+        data,
         bundle,
         zephium_webext_runtime::js::context_surface(
             &zephium_webext::manifest::Manifest::from_value(data["manifest"].clone()),
             "contentScript",
         ),
-        data
+        if catalog.is_some() { "" } else { "();" }
     );
     if source.len() > MAX_BOOTSTRAP_BYTES || source.contains('\0') {
         return Err("its content-script bootstrap exceeds the module limit".into());
     }
-    Ok(source)
+    Ok((source, catalog))
 }
 
 fn rule(matcher: ContentScriptMatcher, all_frames: bool, file_access: bool) -> MatchRule {
@@ -122,6 +133,7 @@ fn webkit_patterns(patterns: &[String]) -> Option<Vec<String>> {
 
 pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
     let mut entries = Vec::new();
+    let mut catalogs = std::collections::BTreeMap::new();
     let mut grants = Vec::new();
     let mut styles = Vec::new();
     let mut problems = Vec::new();
@@ -134,7 +146,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
             SiteAccess::OnClick => Some(Vec::new()),
         };
         let isolated = world_name(install.install, &InjectedWorld::Isolated);
-        let content_bootstrap = match bootstrap(&install.bootstrap) {
+        let (content_bootstrap, catalog) = match bootstrap(&install.bootstrap) {
             Ok(source) => source,
             Err(problem) => {
                 problems.push((install.install, problem));
@@ -190,7 +202,17 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
                 for path in &script.css {
                     match read(&install.root, &install.extension_id, path) {
                         Ok(file) => {
-                            source.push_str(&file.source);
+                            match install.messages.localize_css(&file.source) {
+                                Ok(localized) if localized.len() <= MAX_SCRIPT_SOURCE_BYTES => {
+                                    source.push_str(&localized)
+                                }
+                                _ => {
+                                    failed = Some(format!(
+                                        "localized CSS exceeds its source limit: {path}"
+                                    ));
+                                    break;
+                                }
+                            }
                             source.push('\n');
                         }
                         Err(problem) => failed = Some(problem),
@@ -223,6 +245,11 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
         if grant_rules.is_empty() {
             continue;
         }
+        if own.iter().any(|entry| !entry.bootstrap.is_empty()) {
+            if let Some(catalog) = catalog {
+                catalogs.insert(hex(install.install), catalog);
+            }
+        }
         entries.extend(own);
         grants.push(WorldGrant {
             install: install.install,
@@ -234,6 +261,7 @@ pub(crate) fn build(installs: &[ContentInstall], generation: u64) -> Content {
     Content {
         table: ScriptTable {
             generation,
+            catalogs,
             entries,
         },
         grants,
@@ -259,12 +287,17 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         #[cfg(feature = "native-tests")]
         crate::diagnostics::begin(directory.path(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
-        let source = super::bootstrap(&data).unwrap();
+        let (source, catalog) = super::bootstrap(&data).unwrap();
         #[cfg(feature = "native-tests")]
         crate::diagnostics::end("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
         assert!(source.len() <= zephium_webkit_web_process_protocol::protocol::MAX_BOOTSTRAP_BYTES);
-        assert!(source.contains("message2499"));
+        assert!(!source.contains("message2499"));
+        assert!(catalog.unwrap().contains("message2499"));
         assert!(!source.contains("function workerScope"));
         assert!(!source.contains("sidePanel"));
+        assert_eq!(
+            zephium_webext_runtime::i18n::MAX_LOCALE_MESSAGES,
+            zephium_webkit_web_process_protocol::scripts::MAX_CATALOG_MESSAGES
+        );
     }
 }
