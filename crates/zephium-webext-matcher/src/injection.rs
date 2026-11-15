@@ -741,9 +741,8 @@ impl MatchPattern {
         let raw_path = &remainder[path_start..];
 
         let (host, port) = if scheme == PatternScheme::File {
-            if !authority.is_empty() {
-                return Err(MatchPatternError::InvalidHost);
-            }
+            // Chromium URLPattern ignores a file pattern's authority. This is
+            // content selection only; host grants and file access are separate.
             (None, PortPattern::Any)
         } else {
             let (raw_host, raw_port) = split_host_and_port(authority)?;
@@ -1240,7 +1239,9 @@ fn canonicalize_path(path: &str) -> Result<String, MatchPatternError> {
         return Err(MatchPatternError::MissingPath);
     }
     if path.contains('#') {
-        return Err(MatchPatternError::FragmentNotAllowed);
+        // Chrome keeps this literal; request paths exclude URL fragments, so
+        // it cannot match. Stripping it would broaden content admission.
+        return Ok(path.to_owned());
     }
 
     // Canonicalize Unicode, spaces, backslashes, and dot segments exactly once
@@ -1462,6 +1463,33 @@ mod tests {
     }
 
     #[test]
+    fn literal_fragment_patterns_are_accepted_without_broadening_matches() {
+        let pattern = MatchPattern::parse("https://example.com/page#*").unwrap();
+        assert_eq!(pattern.as_str(), "https://example.com/page#*");
+        for target in [
+            "https://example.com/page#value",
+            "https://example.com/page%23value",
+            "https://example.com/page",
+        ] {
+            assert!(!pattern.matches_url(&url(target)), "{target}");
+        }
+        assert!(crate::HostPattern::parse("https://example.com/page#*").is_err());
+    }
+
+    #[test]
+    fn file_authorities_are_ignored_only_for_content_selection() {
+        for source in ["file://*/tmp/*", "file://localhost/tmp/*", "file:///tmp/*"] {
+            let parsed = pattern(source);
+            assert_eq!(parsed.as_str(), "file:///tmp/*");
+            assert!(parsed.matches_url(&url("file:///tmp/a")));
+            assert!(!parsed.matches_url(&url("file:///other/a")));
+            assert!(!parsed.matches_url(&url("https://localhost/tmp/a")));
+        }
+        assert!(crate::HostPattern::parse("file://*/tmp/*").is_err());
+        assert!(crate::HostPattern::parse("file://localhost/tmp/*").is_err());
+    }
+
+    #[test]
     fn invalid_patterns_are_rejected() {
         let cases = [
             "",
@@ -1475,8 +1503,6 @@ mod tests {
             "https://example.com:notaport/*",
             "https://example.com:65536/*",
             "https://user@example.com/*",
-            "file://localhost/foo",
-            "https://example.com/path#fragment",
             "https://example.com/\n",
             "https://*.127.0.0.1/*",
         ];

@@ -28,9 +28,10 @@ const MAX_PENDING_EVENTS: usize = 64;
 const MAX_PENDING_EVENT_BYTES: usize = 1024 * 1024;
 const MAX_PROCESS_SCRIPT_BYTES: usize = 64 * 1024 * 1024;
 const FORM_WORLD: &str = "zephium-web-process-form-v1";
-const FACT_WORLD: &str = "zephium-web-process-facts-v2";
+use protocol::FACT_WORLD;
 const UINT8_ARRAY: c_int = 5;
 const G_TYPE_BOOLEAN: usize = 5 << 2;
+const G_TYPE_INT: usize = 6 << 2;
 
 thread_local! {
     static RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
@@ -272,6 +273,9 @@ pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
         if !initialized {
             return;
         }
+        // Register before the UI process supplies its named-world UserScript.
+        // WebKit reuses the native facts context for the parser trampoline.
+        let _ = ensure_world(FACT_WORLD);
         let default_world = raw::webkit_script_world_get_default();
         with_runtime(|runtime| {
             runtime.worlds.insert(String::new(), default_world);
@@ -323,6 +327,15 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
         .unwrap_or(false);
         if !added {
             return;
+        }
+        #[cfg(feature = "native-tests")]
+        if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_some() {
+            connect(
+                page,
+                c"console-message-sent",
+                diagnostics::console_message as *const (),
+                ptr::null_mut(),
+            );
         }
         raw::g_object_weak_ref(
             page,
@@ -1033,6 +1046,10 @@ unsafe extern "C" fn window_cleared(
             return;
         };
         let is_main = raw::webkit_frame_is_main_frame(frame) != 0;
+        #[cfg(feature = "native-tests")]
+        if is_main {
+            diagnostics::background_process(page_id, &uri);
+        }
         let update = with_runtime(|runtime| {
             let generation = runtime.state.attachment(page_id)?.generation;
             runtime
@@ -1134,17 +1151,18 @@ unsafe extern "C" fn window_cleared(
                 );
             }
         }
-        scripts::run_scripts(
-            page_id,
-            frame_id,
-            document_seq,
-            protocol::RunAt::DocumentStart,
-        );
+        scripts::install_document_start(page_id, frame_id, document_seq, generation);
         scripts::install_external(page_id, frame_id, document_seq, generation);
     });
 }
 
-fn install_function(context: &Owned, name: &str, function: *const (), binding: Binding) {
+fn install_function(
+    context: &Owned,
+    name: &str,
+    function: *const (),
+    binding: Binding,
+    return_type: usize,
+) {
     let Ok(name) = CString::new(name) else {
         return;
     };
@@ -1157,7 +1175,7 @@ fn install_function(context: &Owned, name: &str, function: *const (), binding: B
             callback(function),
             data.cast(),
             Some(binding_destroyed),
-            G_TYPE_BOOLEAN,
+            return_type,
             1,
             &mut parameter_type,
         )) else {
@@ -1262,6 +1280,7 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
             return 0;
         }
         let length = raw::jsc_value_typed_array_get_size(value);
+        let mut busy = false;
         let reservation = with_runtime(|runtime| {
             if !binding_valid(runtime, binding) {
                 return None;
@@ -1292,12 +1311,19 @@ unsafe extern "C" fn post_bytes(value: *mut Object, data: *mut c_void) -> c_int 
             if let Err(error) = &reserved {
                 diagnostics::post_refused(binding.page, binding.frame, &binding.world, error);
             }
+            busy = matches!(
+                reserved,
+                Err(crate::state::StateError::RateLimited
+                    | crate::state::StateError::InflightLimited)
+            );
             let post_id = reserved.ok()?;
             Some((post_id, generation, frame, pointer, frame_pointer))
         })
         .flatten();
         let Some((post_id, generation, mut frame, pointer, frame_pointer)) = reservation else {
-            return 0;
+            // Retry is safe only before reservation/copy/send. Accepted frames
+            // always return 1 and are never replayed by the JS scheduler.
+            return if busy { 2 } else { 0 };
         };
         let Some(page) = Owned::borrowed(pointer) else {
             with_runtime(|runtime| runtime.state.settle_post(post_id));

@@ -1,6 +1,7 @@
 //! Immutable sealed-memfd script tables and bounded programmatic evaluation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::protocol::{
     MatchRule, Reader, WireError, Writer, MAX_BOOTSTRAP_BYTES, MAX_URI_BYTES, MAX_WORLD_BYTES,
@@ -10,6 +11,16 @@ pub const MAX_INSTALL_ID_BYTES: usize = 32;
 pub const MAX_SCRIPT_ID_BYTES: usize = 256;
 pub const MAX_SCRIPT_TABLE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_SCRIPT_ENTRIES: usize = 4096;
+/// Matches the runtime's locale record ceiling without a reverse dependency.
+pub const MAX_CATALOG_MESSAGES: usize = 16_384;
+
+fn catalog_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'@'))
+}
+
 pub const MAX_SCRIPT_FILES: usize = 256;
 pub const MAX_SCRIPT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_FRAME_SCRIPT_BYTES: usize = 8 * 1024 * 1024;
@@ -61,6 +72,9 @@ pub struct ScriptEntry {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScriptTable {
     pub generation: u64,
+    /// JSON catalogs passed as data to content bootstraps, shared per install.
+    /// They count against the existing table and per-document byte budgets.
+    pub catalogs: BTreeMap<String, Arc<str>>,
     pub entries: Vec<ScriptEntry>,
 }
 
@@ -298,7 +312,58 @@ impl ScriptTable {
         }
         let mut ids = BTreeSet::new();
         let mut worlds = std::collections::BTreeMap::new();
+        if self.catalogs.len() > MAX_SCRIPT_ENTRIES {
+            return Err(WireError::Oversized);
+        }
         let mut bytes = 0usize;
+        for (install, catalog) in &self.catalogs {
+            if !valid_install_id(install)
+                || !self.entries.iter().any(|entry| {
+                    entry.install_id == *install
+                        && !entry.world.is_empty()
+                        && !entry.bootstrap.is_empty()
+                })
+            {
+                return Err(WireError::Invalid);
+            }
+            json(catalog, MAX_FRAME_SCRIPT_BYTES, false)?;
+            let value: serde_json::Value =
+                serde_json::from_str(catalog).map_err(|_| WireError::Invalid)?;
+            let messages = value.as_object().ok_or(WireError::Invalid)?;
+            if messages.len() > MAX_CATALOG_MESSAGES {
+                return Err(WireError::Oversized);
+            }
+            for (name, value) in messages {
+                if !catalog_name(name)
+                    || name.starts_with("@@")
+                    || (!value.is_string()
+                        && value
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .is_none())
+                {
+                    return Err(WireError::Invalid);
+                }
+                if let Some(placeholders) = value.get("placeholders") {
+                    for (name, value) in placeholders.as_object().ok_or(WireError::Invalid)? {
+                        if !catalog_name(name)
+                            || value
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .is_none()
+                        {
+                            return Err(WireError::Invalid);
+                        }
+                    }
+                }
+            }
+            bytes = bytes
+                .saturating_add(install.len())
+                .saturating_add(catalog.len());
+            if bytes > MAX_SCRIPT_TABLE_BYTES {
+                return Err(WireError::Oversized);
+            }
+        }
         for entry in &self.entries {
             if !valid_install_id(&entry.install_id)
                 || entry.script_id.is_empty()
@@ -349,6 +414,11 @@ impl ScriptTable {
         self.validate()?;
         let mut w = Writer::new(48);
         w.u64(self.generation);
+        w.count(self.catalogs.len(), MAX_SCRIPT_ENTRIES)?;
+        for (install, catalog) in &self.catalogs {
+            w.string(install, MAX_INSTALL_ID_BYTES)?;
+            w.string(catalog, MAX_FRAME_SCRIPT_BYTES)?;
+        }
         w.count(self.entries.len(), MAX_SCRIPT_ENTRIES)?;
         for entry in &self.entries {
             w.string(&entry.install_id, MAX_INSTALL_ID_BYTES)?;
@@ -370,6 +440,15 @@ impl ScriptTable {
         let mut r = Reader::new(bytes, MAX_SCRIPT_TABLE_BYTES)?;
         r.header(48)?;
         let generation = r.u64()?;
+        let count = r.count(MAX_SCRIPT_ENTRIES)?;
+        let mut catalogs = BTreeMap::new();
+        for _ in 0..count {
+            let install = r.string(MAX_INSTALL_ID_BYTES)?;
+            let catalog = Arc::from(r.string(MAX_FRAME_SCRIPT_BYTES)?);
+            if catalogs.insert(install, catalog).is_some() {
+                return Err(WireError::Invalid);
+            }
+        }
         let n = r.count(MAX_SCRIPT_ENTRIES)?;
         let mut entries = Vec::new();
         for _ in 0..n {
@@ -387,6 +466,7 @@ impl ScriptTable {
         r.end()?;
         let table = Self {
             generation,
+            catalogs,
             entries,
         };
         table.validate()?;
@@ -546,6 +626,7 @@ mod tests {
 
     fn table() -> ScriptTable {
         ScriptTable {
+            catalogs: Default::default(),
             generation: 9,
             entries: vec![ScriptEntry {
                 install_id: "a".repeat(32),
@@ -597,6 +678,54 @@ mod tests {
             args_json: "[41]".into(),
             timeout_ms: 1000,
         }
+    }
+
+    #[test]
+    fn catalogs_are_owned_data_with_unchanged_source_and_table_budgets() {
+        let mut table = table();
+        let catalog: Arc<str> =
+            serde_json::json!({"large":{"message":"x".repeat(MAX_BOOTSTRAP_BYTES + 1)}})
+                .to_string()
+                .into();
+        table.catalogs.insert("a".repeat(32), catalog);
+        assert_eq!(
+            ScriptTable::decode(&table.encode().unwrap()).unwrap(),
+            table
+        );
+        table
+            .catalogs
+            .insert("a".repeat(32), r#"{"compact":"translated string"}"#.into());
+        assert!(table.validate().is_ok());
+        table.catalogs.insert("b".repeat(32), "{}".into());
+        assert_eq!(table.validate(), Err(WireError::Invalid));
+        table.catalogs.remove(&"b".repeat(32));
+        table.catalogs.insert("a".repeat(32), "[]".into());
+        assert_eq!(table.validate(), Err(WireError::Invalid));
+        table.catalogs.insert(
+            "a".repeat(32),
+            " ".repeat(MAX_FRAME_SCRIPT_BYTES + 1).into(),
+        );
+        assert_eq!(table.validate(), Err(WireError::Oversized));
+        table
+            .catalogs
+            .insert("a".repeat(32), r#"{"bad":{"message":17}}"#.into());
+        assert_eq!(table.validate(), Err(WireError::Invalid));
+        table.catalogs.insert(
+            "a".repeat(32),
+            r#"{"bad":{"message":"text","placeholders":{"x":{"content":17}}}}"#.into(),
+        );
+        assert_eq!(table.validate(), Err(WireError::Invalid));
+        let too_many: serde_json::Map<String, serde_json::Value> = (0..=MAX_CATALOG_MESSAGES)
+            .map(|i| (format!("m{i}"), serde_json::json!({"message":"x"})))
+            .collect();
+        table.catalogs.insert(
+            "a".repeat(32),
+            serde_json::Value::Object(too_many).to_string().into(),
+        );
+        assert_eq!(table.validate(), Err(WireError::Oversized));
+        table.catalogs.clear();
+        table.entries[0].bootstrap = "x".repeat(MAX_BOOTSTRAP_BYTES + 1);
+        assert_eq!(table.validate(), Err(WireError::Oversized));
     }
 
     #[test]
@@ -737,7 +866,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]

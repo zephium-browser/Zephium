@@ -1,0 +1,1 @@
+{"id": "content-file-authority", "title": "File pattern authorities are accepted without selecting HTTP pages", "apis": ["scripting.executeScript"], "permissions": ["scripting"]}

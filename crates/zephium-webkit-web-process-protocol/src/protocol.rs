@@ -7,7 +7,7 @@ pub use crate::scripts::*;
 use zephium_webext_matcher::injection::{MAX_MATCH_PATTERNS_PER_SET, MAX_MATCH_PATTERN_BYTES};
 use zephium_webext_matcher::{MAX_GLOBS_PER_SCRIPT, MAX_GLOB_BYTES};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const ATTACH_MESSAGE: &str = "zephium-webext-attach";
 pub const DELIVER_MESSAGE: &str = "zephium-webext-deliver";
 pub const POLICY_MESSAGE: &str = "zephium-webext-policy";
@@ -15,6 +15,12 @@ pub const DETACH_MESSAGE: &str = "zephium-webext-detach";
 pub const SCRIPTS_MESSAGE: &str = "zephium-webext-scripts";
 pub const INJECT_MESSAGE: &str = "zephium-webext-inject";
 pub const EVENT_MESSAGE: &str = "zephium-webext-event";
+/// Private native facts world; never exposed as an extension execution world.
+pub const FACT_WORLD: &str = "zephium-web-process-facts-v2";
+/// Parser-start callback installed only for admitted document_start scripts.
+pub const DOCUMENT_START_FUNCTION: &str = "__zephiumDocumentStart";
+/// WebKit runs this after inserting the document root and before page scripts.
+pub const DOCUMENT_START_SCRIPT: &str = "(() => { const run = globalThis.__zephiumDocumentStart; delete globalThis.__zephiumDocumentStart; if (typeof run === 'function') run(); })();";
 pub const POST_FUNCTION: &str = "__zephiumPost";
 pub const REGISTER_FUNCTION: &str = "__zephiumRegisterReceiver";
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;

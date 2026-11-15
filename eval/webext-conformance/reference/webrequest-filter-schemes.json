@@ -1,0 +1,41 @@
+{
+  "caseId": "webrequest-filter-schemes",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "own extension",
+      "value": {
+        "registered": true
+      }
+    },
+    {
+      "label": "file authority",
+      "value": {
+        "registered": true
+      }
+    },
+    {
+      "label": "socket schemes",
+      "value": {
+        "registered": true
+      }
+    },
+    {
+      "label": "empty lists",
+      "value": {
+        "registered": true
+      }
+    },
+    {
+      "label": "unrestricted request",
+      "value": true
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

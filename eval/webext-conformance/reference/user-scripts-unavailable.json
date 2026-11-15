@@ -1,0 +1,85 @@
+{
+  "caseId": "user-scripts-unavailable",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "getScripts",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.getScripts' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "register",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.register' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "configureWorld",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.configureWorld' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "execute",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.execute' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "getWorldConfigurations",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.getWorldConfigurations' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "resetWorldConfiguration",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.resetWorldConfiguration' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "unregister",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.unregister' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    },
+    {
+      "label": "update",
+      "value": {
+        "callback": false,
+        "message": "'userScripts.update' is not available in this context.",
+        "name": "Error",
+        "sync": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

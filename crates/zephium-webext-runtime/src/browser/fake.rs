@@ -1329,6 +1329,7 @@ impl BrowserPort for FakeBrowser {
         self.requests.push(request.clone());
         self.caller = Some(invocation.sender().clone());
         let result = match request {
+            BrowserRequest::Unavailable { .. } => Err(unsupported()),
             BrowserRequest::Tabs(request) => self.tabs(request, invocation.permissions()),
             BrowserRequest::Windows(request) => self.windows(request, invocation.permissions()),
             BrowserRequest::Core(action) => self.core(action, invocation.permissions()),

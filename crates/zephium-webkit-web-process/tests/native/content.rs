@@ -1,5 +1,6 @@
 use super::*;
 use std::time::Instant;
+use webkit2gtk::UserContentManagerExt;
 use zephium_webkit_web_process::protocol::{
     InjectRequest, InjectionKind, InjectionStatus, InjectionTarget, MatchRule, ScriptUpdate,
 };
@@ -47,6 +48,20 @@ fn entry(id: &str, run_at: RunAt, world: &str, source: &str) -> ScriptEntry {
         css: vec![],
         bootstrap: String::new(),
     }
+}
+
+fn install_start_scheduler(page: &webkit2gtk::WebView) {
+    use zephium_webkit_web_process::protocol::{DOCUMENT_START_SCRIPT, FACT_WORLD};
+    page.user_content_manager()
+        .unwrap()
+        .add_script(&webkit2gtk::UserScript::for_world(
+            DOCUMENT_START_SCRIPT,
+            webkit2gtk::UserContentInjectedFrames::AllFrames,
+            webkit2gtk::UserScriptInjectionTime::Start,
+            FACT_WORLD,
+            &[],
+            &[],
+        ));
 }
 
 fn publish(page: &webkit2gtk::WebView, table: &ScriptTable, sealed: bool) -> bool {
@@ -109,6 +124,7 @@ fn inject(
 pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
     let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
     let events = Rc::new(RefCell::new(Vec::new()));
     let observed = events.clone();
     page.connect_user_message_received(move |_, message| {
@@ -156,13 +172,14 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         MatchOptions::default(),
     )
     .unwrap();
-    let mut table=ScriptTable {generation:1,entries:vec![
+    let mut table=ScriptTable {catalogs: Default::default(),
+        generation:1,entries:vec![
         entry("first",RunAt::DocumentStart,WORLD,"\"use strict\"; let sharedLexical=40; const sharedConstant=2; order.push('start'); globalThis.strictThis=(function(){return this;})()===undefined; globalThis.bootBefore=bootCount===1;"),
         entry("second",RunAt::DocumentStart,WORLD,"\"use strict\"; globalThis.sharedAnswer=sharedLexical+sharedConstant;"),
-        entry("main",RunAt::DocumentStart,"","globalThis.mainOverride='native';"),
+        entry("main",RunAt::DocumentStart,"","globalThis.mainOverride='native';document.documentElement.dataset.startRoot='present';"),
         top_only,excluded,
         entry("end",RunAt::DocumentEnd,WORLD,"order.push('end');document.documentElement.dataset.nativeEnd='yes';globalThis.endState=document.readyState;"),
-        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
+        entry("idle",RunAt::DocumentIdle,WORLD,"order.push('idle');globalThis.idleState=document.readyState;nativeSend(new TextEncoder().encode(JSON.stringify({phase:'content',href:location.href,order,sharedAnswer,strictThis,bootBefore,topOnly:globalThis.topOnly===true,excludedRan:globalThis.excludedRan===true,startRoot:document.documentElement.dataset.startRoot,pageSaw:document.documentElement.dataset.main,apiHidden:document.documentElement.dataset.hidden,earlyEnd:document.documentElement.dataset.earlyEnd})));"),
     ]};
     for script in &mut table.entries {
         if !script.world.is_empty() {
@@ -201,6 +218,10 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         assert_eq!(value["sharedAnswer"], 42, "{value}");
         assert_eq!(value["strictThis"], true, "{value}");
         assert_eq!(value["bootBefore"], true, "{value}");
+        assert_eq!(
+            value["startRoot"], "present",
+            "document root exists before MAIN file: {value}"
+        );
         assert_eq!(
             value["topOnly"],
             post.uri.ends_with("/content-frames"),
@@ -318,6 +339,52 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(
         evaluate(&page, "return laterRegistered;", Some(WORLD)),
         "true"
+    );
+    // The catalog is data, available synchronously before the script. A
+    // missing catalog must fail the deferred bootstrap, not skip invocation.
+    let mut catalog_entry = entry(
+        "catalog",
+        RunAt::DocumentStart,
+        WORLD,
+        "globalThis.catalogScriptRan=true;",
+    );
+    catalog_entry.bootstrap =
+        "(function(messages){globalThis.catalogText=messages.probe.message;})".into();
+    let mut catalog_table = ScriptTable {
+        generation: 3,
+        catalogs: Default::default(),
+        entries: vec![catalog_entry],
+    };
+    assert!(publish(&page, &catalog_table, true));
+    events.borrow_mut().clear();
+    load(&page, &format!("{}/frame?missing-catalog", fixture.origin));
+    pump_until(|| {
+        events.borrow().iter().any(|event| matches!(event, Event::Frames { events, .. } if events.iter().any(|event| matches!(event, FrameEvent::Evaluated(result) if result.file_index == u16::MAX && !result.success))))
+    });
+    assert_eq!(
+        evaluate(&page, "return typeof catalogScriptRan;", Some(WORLD)),
+        "undefined"
+    );
+    catalog_table.generation = 4;
+    catalog_table.catalogs.insert(
+        INSTALL.into(),
+        json!({"probe":{"message":"literal ; globalThis.forged=true;"}})
+            .to_string()
+            .into(),
+    );
+    assert!(publish(&page, &catalog_table, true));
+    load(&page, &format!("{}/frame?owned-catalog", fixture.origin));
+    assert_eq!(
+        evaluate(&page, "return catalogText;", Some(WORLD)),
+        "literal ; globalThis.forged=true;"
+    );
+    assert_eq!(
+        evaluate(&page, "return catalogScriptRan;", Some(WORLD)),
+        "true"
+    );
+    assert_eq!(
+        evaluate(&page, "return typeof forged;", Some(WORLD)),
+        "undefined"
     );
     binding(&page, &events, fixture);
     page.stop_loading();
@@ -494,6 +561,7 @@ pub(super) fn external(module: &ModuleDirectory, fixture: &Fixture) {
 pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
     let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
     let events = Rc::new(RefCell::new(Vec::new()));
     let captured = events.clone();
     page.connect_user_message_received(move |_, message| {
@@ -521,6 +589,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     }],..Attach::default()};
     assert!(send(&page, &UiMessage::Attach(attachment.clone()), None));
     let table = ScriptTable {
+        catalogs: Default::default(),
         generation: 1,
         entries: vec![
             entry(
@@ -552,7 +621,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(evaluate(&page, "return tableRan;", Some(WORLD)), "true");
     assert_eq!(
         evaluate(&page, "return livePost(new Uint8Array([3]));", Some(WORLD)),
-        "true"
+        "1"
     );
     pump_until(|| posts(&events).iter().any(|p| p.bytes == [3]));
     let original = posts(&events).into_iter().find(|p| p.bytes == [3]).unwrap();
@@ -568,7 +637,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(evaluate(&page, "return bootCount;", Some(WORLD)), "1");
     assert_eq!(
         evaluate(&page, "return livePost(new Uint8Array([4]));", Some(WORLD)),
-        "true"
+        "1"
     );
     pump_until(|| posts(&events).iter().any(|p| p.bytes == [4]));
     let fresh = posts(&events).into_iter().find(|p| p.bytes == [4]).unwrap();

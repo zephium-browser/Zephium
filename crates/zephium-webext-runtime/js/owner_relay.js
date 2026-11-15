@@ -44,14 +44,14 @@
     let port = null;
     const queue = new I.Map();
     let head = 0, tail = 0, queuedBytes = 0, timer = null, pumping = false, closed = false;
-    const refused = (bytes) => {
+    const refused = (bytes, error = T.ERRORS.invalidated) => {
       const decoded = T.decode(bytes, T.FROM_CONTEXT, max);
       if (decoded.error !== undefined) return;
       const frame = decoded.frame;
       let reply;
-      if (frame.kind === 'call') reply = T.encode({kind:'reply', id:frame.id, ok:false, error:T.ERRORS.invalidated}, T.TO_CONTEXT, max);
-      else if (frame.kind === 'portMessage') reply = T.encode({kind:'portDisconnect', port:frame.port, error:T.ERRORS.invalidated}, T.TO_CONTEXT, max);
-      if (!reply || typeof reply === 'string') return;
+      if (frame.kind === 'call') reply = T.encode({kind:'reply', id:frame.id, ok:false, error}, T.TO_CONTEXT, max);
+      else if (frame.kind === 'portMessage') reply = T.encode({kind:'portDisconnect', port:frame.port, error}, T.TO_CONTEXT, max);
+      if (!reply || typeof reply === 'string') { close(); return; }
       if (isOwnerCall(bytes)) {
         if (ownerReceiver) ownerReceiver(reply);
       } else if (port) {
@@ -61,17 +61,17 @@
     const pump = () => {
       if (pumping || closed) return;
       pumping = true;
-      while (head < tail) {
+      while (head < tail && !closed) {
         const entry = I.MapGet(queue, head);
         let sent = false;
-        try { sent = link.send(entry.bytes); } catch {}
-        if (!sent && I.now() < entry.deadline) {
+        try { sent = I.now() >= entry.deadline ? 2 : link.send(entry.bytes); } catch {}
+        if (sent === 2 && I.now() < entry.deadline) {
           if (timer === null) timer = I.setTimeout(() => { timer = null; pump(); }, 10);
           break;
         }
         I.MapDelete(queue, head++);
         queuedBytes -= I.TypedArrayLength(entry.bytes);
-        if (!sent) refused(entry.bytes);
+        if (sent !== true) refused(entry.bytes, sent === 2 ? T.ERRORS.tooManyPending : T.ERRORS.invalidated);
       }
       pumping = false;
     };
@@ -148,15 +148,17 @@
     );
     I.addEventListener(worker, 'messageerror', () => reportError({ message: 'messageerror' }));
     worker.postMessage(PORT_MARKER, [channel.port2]);
-    const close = () => {
+    function close() {
+      if (closed) return;
       closed = true;
+      if (port) { try { I.MessagePortPostMessage(port, T.PORT_CLOSED); } catch {} }
       if (timer !== null) I.clearTimeout(timer);
       timer = null;
       I.MapForEach(queue, entry => refused(entry.bytes));
       I.MapClear(queue);
       queuedBytes = 0;
       client.invalidate();
-    };
+    }
     return { __proto__: null, worker, client, reportError, close };
   }
 

@@ -1,0 +1,1 @@
+{"manifest_version":3,"permissions":["tabs"],"background":{"service_worker":"nested/worker.js"}}

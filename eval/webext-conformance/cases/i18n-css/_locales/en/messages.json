@@ -1,0 +1,19 @@
+{
+  "marker": {
+    "message": "localized"
+  },
+  "dollars": {
+    "message": "$word$/$1/$$",
+    "placeholders": {
+      "word": {
+        "content": "named"
+      }
+    }
+  },
+  "nested": {
+    "message": "__MSG_marker__"
+  },
+  "long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_long_message_": {
+    "message": "loaded"
+  }
+}

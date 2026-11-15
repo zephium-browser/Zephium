@@ -3,12 +3,17 @@
 //! when its background stops for any reason other than idling (which it
 //! prevents). The per-view clipboard setting is enabled only for a document
 //! created with the `CLIPBOARD` reason by an extension holding
-//! `clipboardRead` or `clipboardWrite`.
+//! both `clipboardRead` and `clipboardWrite`: WebKit cannot separate them.
 
 use serde_json::Value;
 use url::Url;
 use zephium_webext_runtime::context::ExtensionId;
 use zephium_webext_runtime::errors::ApiError;
+use zephium_webext_runtime::permissions::InstallPermissions;
+
+pub(crate) fn clipboard_authorized(permissions: &InstallPermissions) -> bool {
+    permissions.has_api("clipboardRead") && permissions.has_api("clipboardWrite")
+}
 
 /// `offscreen.Reason`.
 pub const REASONS: [&str; 15] = [
@@ -89,6 +94,31 @@ mod tests {
 
     fn id() -> ExtensionId {
         ExtensionId::parse("abcdefghijklmnopabcdefghijklmnop").unwrap()
+    }
+
+    #[test]
+    fn combined_webkit_switch_requires_both_clipboard_grants() {
+        use zephium_webext::manifest::Manifest;
+        use zephium_webext_runtime::permissions::{
+            PermissionDeclaration, PermissionRequest, SiteAccess,
+        };
+        for (names, expected) in [
+            (vec![], false),
+            (vec!["clipboardRead"], false),
+            (vec!["clipboardWrite"], false),
+            (vec!["clipboardRead", "clipboardWrite"], true),
+        ] {
+            let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(
+                json!({"permissions":names}),
+            ));
+            let permissions = InstallPermissions::new(
+                declaration,
+                &PermissionRequest::default(),
+                SiteAccess::OnAllSites,
+                false,
+            );
+            assert_eq!(clipboard_authorized(&permissions), expected);
+        }
     }
 
     #[test]

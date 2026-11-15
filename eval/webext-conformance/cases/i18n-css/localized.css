@@ -1,0 +1,1 @@
+html { --marker: "__MSG_MaRkEr__"; --direction: "__MSG_@@bidi_dir__"; --owner: "__MSG_@@extension_id__"; --dollars: "__MSG_dollars__"; --nested: "__MSG_nested__"; --malformed: "__MSG_not-a-name__"; --after-malformed: "__MSG_marker__"; --missing: "__MSG_unknown__"; --after-missing: "__MSG_marker__"; }

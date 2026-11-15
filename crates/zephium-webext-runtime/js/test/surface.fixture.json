@@ -180,6 +180,25 @@
         "contextMenus"
       ]
     },
+    "declarativeContent": {
+      "constructors": {
+        "PageStateMatcher": "declarativeContent.PageStateMatcher",
+        "RequestContentScript": "declarativeContent.RequestContentScript",
+        "SetIcon": "declarativeContent.SetIcon",
+        "ShowAction": "declarativeContent.ShowAction",
+        "ShowPageAction": "declarativeContent.ShowAction"
+      },
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "permissions": [
+        "declarativeContent"
+      ]
+    },
     "declarativeNetRequest": {
       "contexts": [
         "background",
@@ -227,6 +246,43 @@
       "permissions": [
         "declarativeNetRequest",
         "declarativeNetRequestWithHostAccess"
+      ]
+    },
+    "desktopCapture": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "chooseDesktopMedia": {
+          "callback": true,
+          "callbackRequired": true,
+          "parameters": [
+            {
+              "name": "sources",
+              "type": "array"
+            },
+            {
+              "name": "targetTab",
+              "optional": true,
+              "type": "object"
+            },
+            {
+              "name": "options",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "promise": false,
+          "returns": "sync",
+          "signature": "array sources, optional tabs.Tab targetTab, optional object options, function callback"
+        }
+      },
+      "permissions": [
+        "desktopCapture"
       ]
     },
     "dom": {
@@ -340,6 +396,30 @@
           "returns": "sync"
         }
       }
+    },
+    "identity": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "getRedirectURL": {
+          "parameters": [
+            {
+              "name": "path",
+              "optional": true,
+              "type": "string"
+            }
+          ],
+          "returns": "sync"
+        }
+      },
+      "permissions": [
+        "identity"
+      ]
     },
     "permissions": {
       "contexts": [
@@ -1333,6 +1413,89 @@
       "properties": {
         "TAB_ID_NONE": -1
       }
+    },
+    "userScripts": {
+      "contexts": [
+        "background",
+        "popup",
+        "options",
+        "extensionTab",
+        "extensionFrame"
+      ],
+      "functions": {
+        "configureWorld": {
+          "parameters": [
+            {
+              "name": "properties",
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "userScripts.WorldProperties properties, optional function callback"
+        },
+        "execute": {
+          "parameters": [
+            {
+              "name": "injection",
+              "type": "object"
+            }
+          ],
+          "signature": "userScripts.UserScriptInjection injection, optional function callback"
+        },
+        "getScripts": {
+          "parameters": [
+            {
+              "name": "filter",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "signature": "optional userScripts.UserScriptFilter filter, optional function callback"
+        },
+        "getWorldConfigurations": {},
+        "register": {
+          "parameters": [
+            {
+              "name": "scripts",
+              "type": "array"
+            }
+          ],
+          "result": false
+        },
+        "resetWorldConfiguration": {
+          "parameters": [
+            {
+              "name": "worldId",
+              "optional": true,
+              "type": "string"
+            }
+          ],
+          "result": false
+        },
+        "unregister": {
+          "parameters": [
+            {
+              "name": "filter",
+              "optional": true,
+              "type": "object"
+            }
+          ],
+          "result": false,
+          "signature": "optional userScripts.UserScriptFilter filter, optional function callback"
+        },
+        "update": {
+          "parameters": [
+            {
+              "name": "scripts",
+              "type": "array"
+            }
+          ],
+          "result": false
+        }
+      },
+      "permissions": [
+        "userScripts"
+      ]
     },
     "webNavigation": {
       "contexts": [

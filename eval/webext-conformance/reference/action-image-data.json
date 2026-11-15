@@ -1,0 +1,105 @@
+{
+  "caseId": "action-image-data",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "path scale selectors:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "path scale selectors:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "canvas ImageData:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "canvas ImageData:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "ImageData dictionary:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "ImageData dictionary:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "array-like pixels:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "array-like pixels:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "empty dictionary",
+      "value": {
+        "message": "The imageData property must contain an ImageData object or dictionary of ImageData objects.",
+        "sync": true
+      }
+    },
+    {
+      "label": "missing pixels",
+      "value": {
+        "message": "The imageData property must contain an ImageData object or dictionary of ImageData objects.",
+        "sync": true
+      }
+    },
+    {
+      "label": "invalid dimensions",
+      "value": {
+        "message": "ImageData has invalid dimensions.",
+        "sync": true
+      }
+    },
+    {
+      "label": "invalid data length",
+      "value": {
+        "message": "ImageData data length does not match dimensions.",
+        "sync": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

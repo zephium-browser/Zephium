@@ -1,9 +1,9 @@
 use std::net::IpAddr;
 
+use super::request_pattern::RequestPattern;
 use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
 use url::Url;
-use zephium_core::injection::MatchPattern;
 
 use crate::envelope::ApiName;
 use crate::errors::ApiError;
@@ -44,7 +44,7 @@ enum Filter {
     Any,
     Navigation(Vec<UrlFilter>),
     Request {
-        urls: Vec<MatchPattern>,
+        urls: Vec<RequestPattern>,
         types: Option<Vec<String>>,
         tab: Option<i64>,
         window: Option<i64>,
@@ -96,9 +96,13 @@ impl ListenerFilter {
         } else if event.starts_with("webRequest.") {
             let urls = strings(object.get("urls").ok_or_else(invalid_filter)?)?
                 .into_iter()
-                .map(|s| MatchPattern::parse(&s).map_err(|_| invalid_filter()))
+                .map(|s| RequestPattern::parse(&s))
                 .collect::<Result<_, _>>()?;
-            let types = object.get("types").map(strings).transpose()?;
+            let types = object
+                .get("types")
+                .map(strings)
+                .transpose()?
+                .filter(|types| !types.is_empty());
             let integer = |name| {
                 object
                     .get(name)
@@ -112,8 +116,8 @@ impl ListenerFilter {
             Filter::Request {
                 urls,
                 types,
-                tab: integer("tabId")?,
-                window: integer("windowId")?,
+                tab: integer("tabId")?.filter(|id| *id != -1),
+                window: integer("windowId")?.filter(|id| *id != -1),
             }
         } else if matches!(
             event,
@@ -175,9 +179,10 @@ impl ListenerFilter {
                 tab,
                 window,
             } => {
-                facts
-                    .url
-                    .is_some_and(|url| urls.iter().any(|p| p.matches_url(url)))
+                (urls.is_empty()
+                    || facts
+                        .url
+                        .is_some_and(|url| urls.iter().any(|p| p.matches_url(url))))
                     && types.as_ref().is_none_or(|types| {
                         facts
                             .resource_type

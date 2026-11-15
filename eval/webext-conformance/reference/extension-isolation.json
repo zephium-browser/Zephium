@@ -1,0 +1,37 @@
+{
+  "caseId": "extension-isolation",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "extension page isolation",
+      "value": {
+        "isolated": true,
+        "protocol": "chrome-extension:",
+        "secure": true,
+        "sharedArrayBuffer": "function",
+        "sharedBytes": 8
+      }
+    },
+    {
+      "label": "explicit Wasm policy:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "explicit Wasm policy:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": true
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

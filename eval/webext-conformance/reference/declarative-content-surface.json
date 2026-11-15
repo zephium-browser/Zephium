@@ -1,0 +1,33 @@
+{
+  "caseId": "declarative-content-surface",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "PageStateMatcher",
+      "value": "function"
+    },
+    {
+      "label": "ShowAction",
+      "value": "function"
+    },
+    {
+      "label": "ShowPageAction",
+      "value": "function"
+    },
+    {
+      "label": "SetIcon",
+      "value": "function"
+    },
+    {
+      "label": "RequestContentScript",
+      "value": "function"
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

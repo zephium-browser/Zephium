@@ -514,9 +514,6 @@ fn prepare(snapshot: &BrowserSnapshot, call: &Invocation<'_>) -> Result<Prepared
         }
         "tabs.detectLanguage" => {
             let tab = target_tab(snapshot, sender, args.first().and_then(as_integer))?;
-            if !readable_for(tab, sender, permissions) {
-                return Err(ApiError::cannot_access_page());
-            }
             if tab.tab.discarded() {
                 return Err(ApiError::other("Cannot determine language: tab not loaded"));
             }
@@ -759,10 +756,13 @@ fn require_same_window(
 pub(crate) fn navigation_url(sender: &Sender, input: &str) -> Result<String, ApiError> {
     let url = match Url::parse(input) {
         Ok(url) => url,
-        Err(url::ParseError::RelativeUrlWithoutBase) => sender
-            .url()
-            .join(input)
-            .map_err(|_| ApiError::other("Invalid URL."))?,
+        Err(url::ParseError::RelativeUrlWithoutBase) => Url::parse(&format!(
+            "{}://{}/",
+            sender.scheme().as_str(),
+            sender.extension_id().as_str()
+        ))
+        .and_then(|base| base.join(input))
+        .map_err(|_| ApiError::other("Invalid URL."))?,
         Err(_) => return Err(ApiError::other("Invalid URL.")),
     };
     if sender
@@ -983,6 +983,39 @@ mod tests {
         browser.add_tab(window, "https://example.com/one", true);
         browser.add_tab(window, "https://other.test/two", false);
         (browser, FakeBrowser::dispatcher(), background_sender())
+    }
+
+    #[test]
+    fn relative_navigation_uses_package_root_from_nested_views() {
+        use crate::context::{
+            tests::{authority, committed, install, EXTENSION},
+            ViewKind,
+        };
+        for kind in [ViewKind::Background, ViewKind::Popup] {
+            let mut authority = authority();
+            let view = authority.open_view(install(), kind).unwrap();
+            let sender = authority
+                .bind_view(
+                    &view,
+                    &committed(
+                        &format!("chrome-extension://{EXTENSION}/nested/page.html"),
+                        1,
+                    ),
+                )
+                .unwrap();
+            assert_eq!(
+                navigation_url(&sender, "welcome.html").unwrap(),
+                format!("chrome-extension://{EXTENSION}/welcome.html")
+            );
+            assert_eq!(
+                navigation_url(&sender, "../welcome.html").unwrap(),
+                format!("chrome-extension://{EXTENSION}/welcome.html")
+            );
+            assert!(
+                navigation_url(&sender, "//bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/private.html").is_err()
+            );
+            assert!(navigation_url(&sender, "javascript:alert(1)").is_err());
+        }
     }
 
     #[test]
@@ -1474,6 +1507,33 @@ mod tests {
                 &granted,
                 "tabs.detectLanguage",
                 json!([2])
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn language_detection_does_not_require_tab_or_host_access() {
+        let (mut browser, mut dispatcher, sender) = browser();
+        browser.languages.insert(1, "pl".into());
+        assert_eq!(
+            browser
+                .call(
+                    &mut dispatcher,
+                    &sender,
+                    &permissions(&[], &[]),
+                    "tabs.detectLanguage",
+                    json!([1])
+                )
+                .unwrap(),
+            json!("pl")
+        );
+        assert!(browser
+            .call(
+                &mut dispatcher,
+                &sender,
+                &permissions(&[], &[]),
+                "tabs.detectLanguage",
+                json!([999])
             )
             .is_err());
     }

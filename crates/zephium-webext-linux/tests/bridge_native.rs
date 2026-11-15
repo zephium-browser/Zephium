@@ -254,7 +254,8 @@ fn native_bridge() {
         .expect("attach");
 
     pump_until(|| bridge.transport(view) == Some(Transport::Module));
-    let table = ScriptTable { generation: 1, entries: vec![ScriptEntry {
+    let table = ScriptTable { catalogs: Default::default(),
+        generation: 1, entries: vec![ScriptEntry {
         install_id: format!("{:032x}", 0x5a), script_id: "native-bridge".into(), world: world_name(install(), &InjectedWorld::Isolated),
         run_at: RunAt::DocumentStart, rule: MatchRule { matcher: zephium_webext_runtime::pattern::ContentScriptMatcher::new(
             &["<all_urls>"], &[], &[], &[], Default::default()).expect("matcher"), all_frames: true, file_access: false },

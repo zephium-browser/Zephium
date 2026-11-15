@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId};
@@ -35,7 +36,7 @@ use zephium_webext_runtime::lifecycle::{
     BackgroundState, Blockers, Command, Lifecycle, Observation, StartReason, StopReason,
 };
 use zephium_webext_runtime::limits::{Clock, Limiter};
-use zephium_webext_runtime::permissions::{Gate, InstallPermissions};
+use zephium_webext_runtime::permissions::{Gate, InstallPermissions, PermissionRequest};
 use zephium_webext_runtime::ports::{
     no_receiver, ListenerOutcome, MessageId, MessageListener, MessageRequest, MessageRoute,
     MessageService, MessageSettlement, MessageTarget, MessagingHost, OneShotDelivery, PortAction,
@@ -68,6 +69,15 @@ const MAX_INSTALLED_SCRIPTS: usize = 256;
 
 /// GTK-side work the host asks for, in order.
 pub(crate) enum NativeOp {
+    GrantPermissions {
+        install: ExtensionInstallId,
+        request: PermissionRequest,
+        responder: Responder,
+    },
+    HandlerCache {
+        sender: Box<Sender>,
+        responder: Responder,
+    },
     Notifications {
         sender: Box<Sender>,
         root: PathBuf,
@@ -95,17 +105,45 @@ pub(crate) enum NativeOp {
     /// Create the offscreen document view.
     CreateOffscreen {
         install: ExtensionInstallId,
+        generation: u64,
         url: String,
         clipboard: bool,
     },
     /// The offscreen document loaded and its earlier posts were handled.
-    OffscreenReady { install: ExtensionInstallId },
+    OffscreenReady {
+        install: ExtensionInstallId,
+        generation: u64,
+        document: zephium_webext_runtime::context::DocumentGeneration,
+    },
     /// Destroy the offscreen document view.
-    CloseOffscreen { install: ExtensionInstallId },
+    CloseOffscreen {
+        install: ExtensionInstallId,
+    },
+    /// Revoke WebKit's combined clipboard switch before another native turn.
+    RevokeOffscreenClipboard {
+        install: ExtensionInstallId,
+    },
+    RefreshPermissions {
+        install: ExtensionInstallId,
+    },
+    PermissionsSettled {
+        completion: PermissionCompletion,
+        result: Result<(), String>,
+    },
     /// For the engine.
     Notify(Notice),
     /// Content-script registrations changed: republish the script table.
     ScriptsChanged,
+}
+
+pub(crate) enum PermissionCompletion {
+    Host(PermissionUpdate),
+    Grant {
+        install: ExtensionInstallId,
+        epoch: u64,
+        request: PermissionRequest,
+        responder: Responder,
+    },
 }
 
 /// What the engine host hears about.
@@ -147,7 +185,8 @@ pub(crate) struct Admitted {
     pub manifest: Manifest,
     pub root: PathBuf,
     pub background: Option<BackgroundScript>,
-    pub messages: Messages,
+    pub messages: Arc<Messages>,
+    pub manifest_scripts: ScriptRegistry,
     pub permissions: InstallPermissions,
     pub unpacked: bool,
     pub state_directory: Option<PathBuf>,
@@ -202,17 +241,23 @@ struct PendingScripts {
 }
 
 pub(crate) struct InstallState {
+    #[cfg(feature = "native-tests")]
+    last_worker_activity: Option<(u64, String)>,
     dnr: DnrState,
     network_status: NetworkStatus,
     network_epoch: u64,
     network_ready: bool,
+    network_managed: bool,
+    permission_pending: bool,
+    initial_fresh: bool,
+    initial_updated: bool,
     pending_network_start: Option<u64>,
     extension_id: ExtensionId,
     manifest: Value,
     root: PathBuf,
     background: Option<BackgroundScript>,
     worker_surface: String,
-    messages: Messages,
+    messages: Arc<Messages>,
     catalog: Value,
     granted: Vec<String>,
     unlimited: bool,
@@ -227,6 +272,10 @@ pub(crate) struct InstallState {
     live: Option<Live>,
     parked: Vec<Parked>,
     offscreen: Option<Offscreen>,
+    offscreen_generation: u64,
+    offscreen_view: Option<crate::bridge::BridgeViewId>,
+    offscreen_document: Option<(zephium_webext_runtime::context::DocumentGeneration, bool)>,
+    offscreen_binding_ready: Option<zephium_webext_runtime::context::DocumentGeneration>,
     errors: ErrorLog,
     unhandled: BTreeMap<String, u64>,
     state_directory: Option<PathBuf>,
@@ -265,6 +314,13 @@ impl InstallState {
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    OffscreenReady {
+        sender: Box<Sender>,
+    },
+    HandlerCache {
+        sender: Box<Sender>,
+        responder: Responder,
+    },
     RequestInterest,
     Notifications {
         sender: Box<Sender>,
@@ -600,7 +656,7 @@ impl I18nHost for State {
         self.installs
             .get(&sender.install())
             .filter(|install| &install.extension_id == sender.extension_id())
-            .map(|install| &install.messages)
+            .map(|install| install.messages.as_ref())
             .ok_or_else(ApiError::context_invalidated)
     }
 }
@@ -812,6 +868,18 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        if matches!(
+            request,
+            BrowserRequest::Service(
+                zephium_webext_runtime::browser::ServiceRequest::HandlerBehaviorChanged
+            )
+        ) {
+            let sender = Box::new(invocation.sender().clone());
+            return self.defer(invocation, |responder| Work::HandlerCache {
+                sender,
+                responder,
+            });
+        }
         if let BrowserRequest::Notifications(request) = request {
             let sender = Box::new(invocation.sender().clone());
             return self.defer(invocation, |responder| Work::Notifications {
@@ -1122,7 +1190,7 @@ pub struct RuntimeHost {
     storage: StorageExecutor,
     network: NetworkExecutor,
     network_tickets: HashMap<u64, (ExtensionInstallId, Responder, DnrRequest)>,
-    network_permission_tickets: HashMap<u64, (InstallPermissions, PermissionUpdate)>,
+    network_permission_tickets: HashMap<u64, (InstallPermissions, PermissionCompletion)>,
     network_orders: HashMap<ExtensionInstallId, u64>,
     network_retiring: HashMap<ExtensionInstallId, Option<PathBuf>>,
     next_network_epoch: u64,
@@ -1309,6 +1377,19 @@ fn has_offscreen(state: &mut State, invocation: Invocation<'_>) -> Handled {
     invocation.reply(result)
 }
 
+fn offscreen_ready(state: &mut State, invocation: Invocation<'_>) -> Handled {
+    if !invocation.args().is_empty() {
+        return invocation.reply(Err(ApiError::malformed_arguments()));
+    }
+    if let Err(error) = state.install(invocation.sender()) {
+        return invocation.reply(Err(error));
+    }
+    state.work.push(Work::OffscreenReady {
+        sender: Box::new(invocation.sender().clone()),
+    });
+    invocation.reply(Ok(Value::Null))
+}
+
 fn table() -> Result<ApiTable<State>, RegistrationError> {
     use zephium_webext_runtime::api;
     use zephium_webext_runtime::{alarms, events, i18n, ports, scripting_registry};
@@ -1336,18 +1417,24 @@ fn table() -> Result<ApiTable<State>, RegistrationError> {
     api::notifications::register(&mut table)?;
     api::scripting::register(&mut table)?;
     api::web_navigation::register(&mut table)?;
+    api::web_request::register(&mut table)?;
     api::history::register(&mut table)?;
     api::bookmarks::register(&mut table)?;
     api::sessions::register(&mut table)?;
     api::top_sites::register(&mut table)?;
     api::search::register(&mut table)?;
     api::declarative_net_request::register(&mut table)?;
+    api::unavailable::register(&mut table)?;
     for name in STORAGE_METHODS {
         table.register_generated(name, storage_call)?;
     }
     table.register_generated("offscreen.createDocument", create_offscreen)?;
     table.register_generated("offscreen.closeDocument", close_offscreen)?;
     table.register_generated("offscreen.hasDocument", has_offscreen)?;
+    table.register(
+        "zephium.offscreenReady",
+        internal(ContextMask::of(ContextKind::Offscreen), offscreen_ready),
+    )?;
     let contexts = ContextMask::ALL.without(ContextKind::ExternalPage);
     for name in [
         "zephium.addRules",
@@ -1425,6 +1512,12 @@ pub struct BackgroundStatus {
     pub ready: bool,
     /// Milliseconds from start to listeners registered, last start.
     pub startup_ms: Option<f64>,
+    /// Last authoritative idle blockers, for native diagnostic captures only.
+    #[cfg(feature = "native-tests")]
+    pub blockers: Blockers,
+    /// Most recent worker traffic and its age; no arguments are retained.
+    #[cfg(feature = "native-tests")]
+    pub last_activity: Option<(String, f64)>,
 }
 
 impl RuntimeHost {
@@ -1500,6 +1593,21 @@ impl RuntimeHost {
         self.settle(responder, result, out);
     }
 
+    pub(crate) fn handler_cache_allowed(&self, sender: &Sender) -> bool {
+        sender.profile() == self.state.profile
+            && sender.incognito() == self.state.incognito
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .state
+                .installs
+                .get(&sender.install())
+                .is_some_and(|state| state.extension_id == *sender.extension_id())
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| permissions.has_api("webRequest"))
+    }
+
     pub(crate) fn set_kick(&mut self, kick: Rc<dyn Fn()>) {
         self.browser.set_kick(kick.clone());
         self.kick = Some(kick);
@@ -1533,24 +1641,67 @@ impl RuntimeHost {
         &mut self,
         install: ExtensionInstallId,
         permissions: InstallPermissions,
-        completion: PermissionUpdate,
-    ) -> Result<(), String> {
-        let state = self
+        manifest: Manifest,
+        completion: PermissionCompletion,
+    ) -> Result<(), (String, Box<PermissionCompletion>)> {
+        let Some(state) = self
             .state
             .installs
             .get(&install)
-            .filter(|state| state.network_ready)
-            .ok_or("The extension's network rules are unavailable.")?;
+            .filter(|state| state.network_ready && !self.shutting_down)
+        else {
+            return Err((
+                "The extension's network rules are unavailable.".into(),
+                Box::new(completion),
+            ));
+        };
+        if state.permission_pending {
+            return Err((
+                "A permission update is already pending.".into(),
+                Box::new(completion),
+            ));
+        }
         self.next_ticket += 1;
         let ticket = self.next_ticket;
-        if !self.network.submit(network::Job::Permissions {
-            install,
-            epoch: state.network_epoch,
-            ticket,
-            permissions: permissions.clone(),
-        }) {
-            return Err("The network worker is unavailable.".into());
+        let job = if state.network_managed {
+            network::Job::Permissions {
+                install,
+                epoch: state.network_epoch,
+                ticket,
+                permissions: permissions.clone(),
+            }
+        } else {
+            network::Job::InstallPermissions {
+                ticket,
+                install: network::Install {
+                    install,
+                    epoch: state.network_epoch,
+                    extension_id: state.extension_id.as_str().to_owned(),
+                    install_order: self
+                        .network_orders
+                        .get(&install)
+                        .copied()
+                        .unwrap_or(state.network_epoch),
+                    root: state.root.clone(),
+                    manifest,
+                    permissions: permissions.clone(),
+                    state_directory: state.state_directory.clone(),
+                    fresh: state.initial_fresh,
+                    updated: state.initial_updated,
+                },
+            }
+        };
+        if !self.network.submit(job) {
+            return Err((
+                "The network worker is unavailable.".into(),
+                Box::new(completion),
+            ));
         }
+        self.state
+            .installs
+            .get_mut(&install)
+            .expect("validated install")
+            .permission_pending = true;
         self.network_permission_tickets
             .insert(ticket, (permissions, completion));
         Ok(())
@@ -1622,7 +1773,10 @@ impl RuntimeHost {
                 self.settle(responder, Err(ApiError::context_invalidated()), out);
             }
             if let Some((_, completion)) = permissions {
-                completion.settle(Err("Extension context invalidated.".into()));
+                self.op(NativeOp::PermissionsSettled {
+                    completion,
+                    result: Err("Extension context invalidated.".into()),
+                });
             }
             return;
         }
@@ -1638,17 +1792,31 @@ impl RuntimeHost {
             return;
         }
         let install = done.install;
+        if permissions.is_some() {
+            self.state
+                .installs
+                .get_mut(&install)
+                .expect("accepted install")
+                .permission_pending = false;
+        }
         let mut start = None;
         let result = match done.result {
             Ok(mut update) => {
                 if let Some((permissions, _)) = &permissions {
                     self.permissions.insert(install, permissions.clone());
+                    let mut revoke_clipboard = false;
                     if let Some(state) = self.state.installs.get_mut(&install) {
+                        state.network_managed = true;
                         state.granted = permissions.snapshot().permissions;
                         state.unlimited = permissions.has_api("unlimitedStorage");
-                        state.clipboard = permissions.has_api("clipboardRead")
-                            || permissions.has_api("clipboardWrite");
+                        let clipboard = crate::offscreen::clipboard_authorized(permissions);
+                        revoke_clipboard = state.clipboard && !clipboard;
+                        state.clipboard = clipboard;
                     }
+                    if revoke_clipboard {
+                        self.op(NativeOp::RevokeOffscreenClipboard { install });
+                    }
+                    self.op(NativeOp::RefreshPermissions { install });
                 }
                 if let Some(state) = self.state.installs.get_mut(&install) {
                     // Request observations may arrive while the worker prepares an update.
@@ -1690,12 +1858,11 @@ impl RuntimeHost {
             self.op(NativeOp::Notify(Notice::NetworkStatus { install, status }));
         }
         if let Some((_, completion)) = permissions {
-            completion.settle(
-                result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| error.message().to_owned()),
-            );
+            let result = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| error.message().to_owned());
+            self.op(NativeOp::PermissionsSettled { completion, result });
         }
         if let Some((_, responder, _)) = pending {
             self.settle(responder, result, out);
@@ -1812,8 +1979,7 @@ impl RuntimeHost {
         let install = admitted.install;
         let granted = admitted.permissions.snapshot().permissions;
         let unlimited = admitted.permissions.has_api("unlimitedStorage");
-        let clipboard = admitted.permissions.has_api("clipboardRead")
-            || admitted.permissions.has_api("clipboardWrite");
+        let clipboard = crate::offscreen::clipboard_authorized(&admitted.permissions);
         self.next_network_epoch += 1;
         let network_epoch = self.next_network_epoch;
         let needs_network = admitted.permissions.has_api("declarativeNetRequest")
@@ -1846,14 +2012,10 @@ impl RuntimeHost {
             .as_ref()
             .map(|_| zephium_webext_runtime::js::background_surface(&admitted.manifest))
             .unwrap_or_default();
-        let scripts = ScriptRegistry::from_manifest(&admitted.manifest, |path, _| {
-            zephium_webext::manifest::normalize_resource(path)
-                .filter(|path| admitted.root.join(path).is_file())
-                .map(|_| ())
-                .ok_or_else(|| ApiError::other(format!("Could not load file: '{path}'.")))
-        })
-        .unwrap_or_default();
+        let scripts = admitted.manifest_scripts;
         let mut state = InstallState {
+            #[cfg(feature = "native-tests")]
+            last_worker_activity: None,
             dnr: DnrState::default(),
             network_status: NetworkStatus {
                 loading: needs_network,
@@ -1861,6 +2023,10 @@ impl RuntimeHost {
             },
             network_epoch,
             network_ready: !needs_network,
+            network_managed: needs_network,
+            permission_pending: false,
+            initial_fresh: matches!(activation, Activation::Installed),
+            initial_updated: matches!(activation, Activation::Updated { .. }),
             pending_network_start: None,
             extension_id: admitted.extension_id,
             catalog: binding_catalog(&admitted.messages),
@@ -1885,6 +2051,10 @@ impl RuntimeHost {
             live: None,
             parked: Vec::new(),
             offscreen: None,
+            offscreen_generation: 0,
+            offscreen_view: None,
+            offscreen_document: None,
+            offscreen_binding_ready: None,
             errors: ErrorLog::new(),
             unhandled: BTreeMap::new(),
             state_directory: admitted.state_directory.clone(),
@@ -1972,6 +2142,7 @@ impl RuntimeHost {
                 extension_id: state.extension_id.as_str().to_owned(),
                 root: state.root.clone(),
                 manifest: state.manifest.clone(),
+                messages: state.messages.clone(),
             },
         );
         self.state.installs.insert(install, state);
@@ -2121,6 +2292,14 @@ impl RuntimeHost {
     pub(crate) fn shutdown(&mut self, out: &mut Outbox) {
         self.tick_clock();
         self.shutting_down = true;
+        let pending = std::mem::take(&mut self.network_permission_tickets);
+        for (_, (_, completion)) in pending {
+            self.complete_permissions(
+                completion,
+                Err(ApiError::context_invalidated().message().into()),
+                out,
+            );
+        }
         let installs: Vec<_> = self.state.installs.keys().copied().collect();
         for install in installs {
             self.fail_parked(install, &ApiError::context_invalidated(), out);
@@ -2484,6 +2663,15 @@ impl RuntimeHost {
             generation: self.lifecycle.generation(install)?,
             ready: state.live.as_ref().is_some_and(|live| live.activated),
             startup_ms: state.startup_ms,
+            #[cfg(feature = "native-tests")]
+            blockers: state.blockers,
+            #[cfg(feature = "native-tests")]
+            last_activity: state.last_worker_activity.as_ref().map(|(at, label)| {
+                (
+                    label.clone(),
+                    (self.clock)().saturating_sub(*at) as f64 / 1_000_000.0,
+                )
+            }),
         })
     }
 
@@ -2503,6 +2691,65 @@ impl RuntimeHost {
             .installs
             .get(&install)
             .is_some_and(|state| matches!(state.offscreen, Some(Offscreen::Open)))
+    }
+
+    pub(crate) fn clipboard_authorized(&self, install: ExtensionInstallId) -> bool {
+        self.state
+            .installs
+            .get(&install)
+            .is_some_and(|state| state.clipboard)
+    }
+
+    pub(crate) fn offscreen_document_live(
+        &self,
+        install: ExtensionInstallId,
+        document: zephium_webext_runtime::context::DocumentGeneration,
+    ) -> bool {
+        self.state.installs.get(&install).is_some_and(|state| {
+            matches!(state.offscreen, Some(Offscreen::Creating(_)))
+                && state.offscreen_document == Some((document, true))
+                && state.offscreen_binding_ready == Some(document)
+        })
+    }
+
+    pub(crate) fn offscreen_current(&self, install: ExtensionInstallId, generation: u64) -> bool {
+        self.state.installs.get(&install).is_some_and(|state| {
+            state.offscreen.is_some() && state.offscreen_generation == generation
+        })
+    }
+
+    pub(crate) fn offscreen_attached(
+        &mut self,
+        install: ExtensionInstallId,
+        generation: u64,
+        view: crate::bridge::BridgeViewId,
+    ) -> bool {
+        if !self.offscreen_current(install, generation) {
+            return false;
+        }
+        self.state
+            .installs
+            .get_mut(&install)
+            .expect("current install")
+            .offscreen_view = Some(view);
+        true
+    }
+
+    fn queue_offscreen_ready(&mut self, install: ExtensionInstallId) {
+        let Some(state) = self.state.installs.get(&install) else {
+            return;
+        };
+        let Some((document, true)) = state.offscreen_document else {
+            return;
+        };
+        let generation = state.offscreen_generation;
+        if self.offscreen_document_live(install, document) {
+            self.op(NativeOp::OffscreenReady {
+                install,
+                generation,
+                document,
+            });
+        }
     }
 
     pub(crate) fn uninstall_url(&self, install: ExtensionInstallId) -> Option<String> {
@@ -2556,7 +2803,7 @@ impl RuntimeHost {
                     generation,
                     reason,
                 } => {
-                    if reason != StopReason::Shutdown
+                    if !matches!(reason, StopReason::Shutdown | StopReason::Idle)
                         && self
                             .state
                             .installs
@@ -2873,7 +3120,7 @@ impl RuntimeHost {
                     .unwrap_or(u32::MAX),
                 pending_events: u32::try_from(state.queue.len() + live.direct.len())
                     .unwrap_or(u32::MAX),
-                offscreen_document: state.offscreen.is_some(),
+                offscreen_document: false,
                 native_ports: 0,
             };
             if blockers != state.blockers {
@@ -3407,6 +3654,13 @@ impl RuntimeHost {
                 }
             }
             Work::RequestInterest => self.kick(),
+            Work::HandlerCache { sender, responder } => {
+                if self.handler_cache_allowed(&sender) {
+                    self.op(NativeOp::HandlerCache { sender, responder });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
             Work::Notifications {
                 sender,
                 request,
@@ -3453,6 +3707,17 @@ impl RuntimeHost {
                 };
                 self.settle(responder, result, out);
             }
+            Work::OffscreenReady { sender } => {
+                let install = sender.install();
+                if let Some(state) = self.state.installs.get_mut(&install).filter(|state| {
+                    state
+                        .offscreen_document
+                        .is_some_and(|(document, _)| document == sender.document())
+                }) {
+                    state.offscreen_binding_ready = Some(sender.document());
+                }
+                self.queue_offscreen_ready(install);
+            }
             Work::CreateOffscreen {
                 responder,
                 sender,
@@ -3462,9 +3727,17 @@ impl RuntimeHost {
                 let install = sender.install();
                 match self.state.installs.get_mut(&install) {
                     Some(state) if state.offscreen.is_none() => {
+                        self.next_ticket += 1;
+                        let generation = self.next_ticket;
+                        state.offscreen_generation = generation;
+                        state.offscreen_view = None;
+                        state.offscreen_document = None;
+                        state.offscreen_binding_ready = None;
+                        let clipboard = clipboard && state.clipboard;
                         state.offscreen = Some(Offscreen::Creating(responder));
                         self.op(NativeOp::CreateOffscreen {
                             install,
+                            generation,
                             url,
                             clipboard,
                         });
@@ -3994,6 +4267,17 @@ impl Runtime for RuntimeHost {
         }
         if sender.kind() == ContextKind::Background {
             if let Some(generation) = self.live_generation(sender.install()) {
+                #[cfg(feature = "native-tests")]
+                if crate::diagnostics::enabled() {
+                    if let Some(state) = self.state.installs.get_mut(&sender.install()) {
+                        let label = match &decoded {
+                            Ok(Envelope::Call { name, .. }) => name.as_str(),
+                            Ok(Envelope::EventAck { .. }) => "event acknowledgment",
+                            _ => "other worker traffic",
+                        };
+                        state.last_worker_activity = Some((now, label.to_owned()));
+                    }
+                }
                 self.observe(
                     Observation::Activity {
                         install: sender.install(),
@@ -4109,6 +4393,75 @@ impl Runtime for RuntimeHost {
     }
 
     fn frame_lifecycle(&mut self, event: &FrameLifecycle, out: &mut Outbox) {
+        match event {
+            FrameLifecycle::DocumentRemoved {
+                view,
+                owner:
+                    ViewRef::Extension {
+                        install,
+                        kind: ViewKind::Offscreen,
+                    },
+                frame,
+                document,
+            } if frame.is_main() => {
+                if let Some(state) = self.state.installs.get_mut(install).filter(|state| {
+                    state.offscreen_view == Some(*view)
+                        && state
+                            .offscreen_document
+                            .is_some_and(|(current, _)| current == *document)
+                }) {
+                    state.offscreen_document = None;
+                    state.offscreen_binding_ready = None;
+                }
+            }
+            FrameLifecycle::ViewReset {
+                view,
+                owner:
+                    ViewRef::Extension {
+                        install,
+                        kind: ViewKind::Offscreen,
+                    },
+                ..
+            } => {
+                if let Some(state) = self
+                    .state
+                    .installs
+                    .get_mut(install)
+                    .filter(|state| state.offscreen_view == Some(*view))
+                {
+                    state.offscreen_document = None;
+                    state.offscreen_binding_ready = None;
+                }
+            }
+            _ => {}
+        }
+        if let FrameLifecycle::DocumentCreated {
+            view,
+            owner:
+                ViewRef::Extension {
+                    install,
+                    kind: ViewKind::Offscreen,
+                },
+            frame,
+            document,
+            url,
+            ..
+        } = event
+        {
+            if frame.is_main() {
+                if let Some(state) = self
+                    .state
+                    .installs
+                    .get_mut(install)
+                    .filter(|state| state.offscreen_view == Some(*view))
+                {
+                    state.offscreen_document = (url.scheme() == "chrome-extension"
+                        && url.host_str() == Some(state.extension_id.as_str()))
+                    .then_some((*document, false));
+                    state.offscreen_binding_ready = None;
+                }
+            }
+        }
         let renavigated = matches!(event, FrameLifecycle::DocumentCreated { owner: ViewRef::Tab(tab), frame, .. }
             if !frame.is_main() && self.browser.navigation_frame_exists(*tab, *frame));
         self.browser.frame_event(event);
@@ -4170,22 +4523,29 @@ impl Runtime for RuntimeHost {
         // Resolve createDocument once the bridge saw the load: posts the
         // document made before it are handled by the next idle.
         if let FrameLifecycle::DocumentLoaded {
+            view,
             owner:
                 ViewRef::Extension {
                     install,
                     kind: ViewKind::Offscreen,
                 },
             frame,
+            document,
             ..
         } = event
         {
-            let creating = self
-                .state
-                .installs
-                .get(install)
-                .is_some_and(|state| matches!(state.offscreen, Some(Offscreen::Creating(_))));
-            if frame.is_main() && creating {
-                self.op(NativeOp::OffscreenReady { install: *install });
+            if frame.is_main() {
+                if let Some(state) = self
+                    .state
+                    .installs
+                    .get_mut(install)
+                    .filter(|state| state.offscreen_view == Some(*view))
+                {
+                    if state.offscreen_document == Some((*document, false)) {
+                        state.offscreen_document = Some((*document, true));
+                    }
+                }
+                self.queue_offscreen_ready(*install);
             }
         }
     }

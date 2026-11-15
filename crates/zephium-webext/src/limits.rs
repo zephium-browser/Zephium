@@ -23,13 +23,52 @@ enum Uses {
     Permission(&'static str),
     /// A dotted path into the manifest.
     Key(&'static str),
+    /// A boolean capability on an entry in a manifest array.
+    ArrayFlag(&'static str, &'static str),
+    /// An exact string capability in a manifest array.
+    ArrayValue(&'static str, &'static str),
 }
-use Uses::{Key, Permission};
+use Uses::{ArrayFlag, ArrayValue, Key, Permission};
 
 /// What each platform's runtime lacks today, in the order shown. A platform
 /// is left out of a row's mask when it supports the feature or has not been
 /// verified; unverified features stay silent rather than guess.
 const GAPS: &[(&[Uses], &str, u8)] = &[
+    (
+        &[Key("cross_origin_embedder_policy")],
+        "SharedArrayBuffer isn't exposed in extension pages, even when cross-origin isolation is enabled",
+        LIN,
+    ),
+    (
+        &[ArrayFlag("content_scripts", "match_origin_as_fallback")],
+        "Content scripts can't use origin fallback in opaque data documents because their initiating origin is unavailable",
+        LIN,
+    ),
+    (
+        &[ArrayFlag("web_accessible_resources", "use_dynamic_url")],
+        "Dynamic public resource URLs aren't returned by runtime.getURL, and rule redirects to those resources aren't available",
+        LIN,
+    ),
+    (
+        &[Permission("offscreen")],
+        "Offscreen clipboard access requires both clipboardRead and clipboardWrite; separate read-only or write-only access isn't available",
+        LIN,
+    ),
+    (
+        &[Permission("offscreen")],
+        "Offscreen audio documents don't close automatically after silence",
+        LIN,
+    ),
+    (
+        &[Permission("sessions")],
+        "Can list closed tabs but can't restore sessions",
+        LIN,
+    ),
+    (
+        &[Permission("history"), Permission("bookmarks"), Permission("sessions")],
+        "History, bookmark and session change events aren't delivered",
+        LIN,
+    ),
     (
         // Linux stores options; presentation, action-click opening and layout are unavailable.
         &[Permission("sidePanel"), Key("side_panel")],
@@ -172,12 +211,27 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("tabs")],
-        "Opens separate extension windows as browser tabs",
+        "Can read browser windows but can't create, resize, focus or close them through the extension API",
+        LIN,
+    ),
+    (
+        &[Permission("tabs")],
+        "Can't detect the language of a tab",
+        LIN,
+    ),
+    (
+        &[Permission("activeTab"), ArrayValue("host_permissions", "<all_urls>")],
+        "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
         LIN,
     ),
     (
         &[Permission("webRequest")],
         "Request observation is nonblocking, with WebKit-provided headers and generic net::ERR_FAILED errors; it omits workers, WebSockets, service-worker fetches, authentication, unreported redirects and requests outside initially matching filters",
+        LIN,
+    ),
+    (
+        &[Permission("webRequest")],
+        "Handler changes clear profile memory, back-forward and preflight caches immediately and wait for completion, instead of deferring memory-cache clearing until navigation; at most 128 clears can wait",
         LIN,
     ),
     (
@@ -206,10 +260,45 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
         "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
         LIN,
     ),
+    (
+        &[Key("omnibox")],
+        "Can't add address-bar commands or suggestions",
+        LIN,
+    ),
+    (
+        &[Permission("tabCapture")],
+        "Can't capture tab audio or video",
+        LIN,
+    ),
+    (
+        &[Permission("declarativeContent")],
+        "Can't evaluate declarative page-content rules",
+        LIN,
+    ),
+    (
+        &[Key("background.service_worker")],
+        "Background workers lack service-worker registrations, push, extension fetch interception and static routes",
+        LIN,
+    ),
+    (
+        &[Key("action"), Key("browser_action")],
+        "Action ImageData is limited to 256 pixels per dimension and 16 representations; packaged icons to 1 MiB and 1024 pixels per dimension",
+        LIN,
+    ),
+    (
+        &[Key("content_scripts"), Permission("scripting")],
+        "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
+        LIN,
+    ),
+    (
+        &[Key("default_locale")],
+        "Translation catalogs are limited to 8 MiB and 16384 messages",
+        LIN,
+    ),
     (&[Key("incognito")], "Can't run in private windows", LIN),
     (
         &[Permission("cookies")],
-        "Can't read or change cookies",
+        "Can't read or change cookies or report cookie changes",
         LIN,
     ),
     (&[Permission("downloads")], "Can't manage downloads", LIN),
@@ -256,6 +345,22 @@ pub fn limitations(manifest: &Manifest, permissions: &[String], platform: Platfo
                         permission == name || (name.ends_with('.') && permission.starts_with(name))
                     }),
                     Key(path) => declares(manifest.raw(), path),
+                    ArrayValue(path, value) => manifest
+                        .raw()
+                        .get(path)
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| {
+                            entries.iter().any(|entry| entry.as_str() == Some(value))
+                        }),
+                    ArrayFlag(path, flag) => manifest
+                        .raw()
+                        .get(path)
+                        .and_then(Value::as_array)
+                        .is_some_and(|entries| {
+                            entries
+                                .iter()
+                                .any(|entry| entry.get(flag).and_then(Value::as_bool) == Some(true))
+                        }),
                 })
         })
         .map(|(_, text, _)| (*text).to_owned())
@@ -285,6 +390,31 @@ mod tests {
     }
 
     #[test]
+    fn capture_warning_requires_a_declared_capture_capability() {
+        let partial = json!({"manifest_version":3,"host_permissions":["https://example.test/*"]});
+        assert!(assess(partial, Platform::Linux).is_empty());
+        for raw in [
+            json!({"manifest_version":3,"host_permissions":["<all_urls>"]}),
+            json!({"manifest_version":3,"permissions":["activeTab"]}),
+        ] {
+            assert_eq!(assess(raw.clone(), Platform::Linux), ["Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available"]);
+            assert!(assess(raw.clone(), Platform::Macos).is_empty());
+            assert!(assess(raw, Platform::Windows).is_empty());
+        }
+    }
+
+    #[test]
+    fn dynamic_resource_warning_requires_a_declared_dynamic_entry() {
+        let dynamic = json!({"manifest_version":3,"web_accessible_resources":[{"resources":["public.js"],"matches":["https://example.test/*"],"use_dynamic_url":true}]});
+        assert_eq!(assess(dynamic.clone(), Platform::Linux), ["Dynamic public resource URLs aren't returned by runtime.getURL, and rule redirects to those resources aren't available"]);
+        assert!(assess(dynamic.clone(), Platform::Macos).is_empty());
+        assert!(assess(dynamic.clone(), Platform::Windows).is_empty());
+        let mut fixed = dynamic;
+        fixed["web_accessible_resources"][0]["use_dynamic_url"] = false.into();
+        assert!(assess(fixed, Platform::Linux).is_empty());
+    }
+
+    #[test]
     fn a_content_blocker_on_declarative_rules_is_unaffected() {
         let raw = json!({
             "manifest_version": 3,
@@ -297,11 +427,11 @@ mod tests {
     }
 
     #[test]
-    fn window_tab_fallback_limitation_is_linux_only() {
+    fn window_mutation_limitation_is_linux_only() {
         let raw = json!({"manifest_version":3,"permissions":["tabs"]});
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
-            ["Opens separate extension windows as browser tabs"]
+            ["Can read browser windows but can't create, resize, focus or close them through the extension API", "Can't detect the language of a tab"]
         );
         assert!(assess(raw.clone(), Platform::Macos).is_empty());
         assert!(assess(raw, Platform::Windows).is_empty());
@@ -388,6 +518,20 @@ mod tests {
     }
 
     #[test]
+    fn linux_names_session_restore_and_data_event_limits() {
+        assert_eq!(
+            assess(
+                json!({"manifest_version": 3, "permissions": ["sessions", "history", "bookmarks"]}),
+                Platform::Linux
+            ),
+            [
+                "Can list closed tabs but can't restore sessions",
+                "History, bookmark and session change events aren't delivered",
+            ]
+        );
+    }
+
+    #[test]
     fn google_sign_in_is_flagged_by_its_manifest_key() {
         let raw = json!({"manifest_version": 3, "permissions": ["identity"], "oauth2": {"client_id": "x"}});
         assert_eq!(
@@ -412,9 +556,12 @@ mod tests {
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",
-                "Opens separate extension windows as browser tabs",
+                "Can read browser windows but can't create, resize, focus or close them through the extension API",
+                "Can't detect the language of a tab",
+                "Can't capture visible tabs; document-bound full-resolution capture and requested image formats aren't available",
                 "Notifications need a running desktop notification service; only basic/list templates and packaged raster main icons are supported (no auxiliary icons)",
                 "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
+                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns",
             ]
         );
         assert_eq!(
@@ -426,7 +573,8 @@ mod tests {
             assess(reader, Platform::Linux),
             [
                 "Can't change font settings",
-                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)"
+                "CSS can't target non-main frame/document IDs; all-frame CSS excludes inherited-origin documents and requires host grants covering every port (not activeTab-only grants)",
+                "Injected JavaScript files are limited to 2 MiB; code and translation data share an 8 MiB document budget; each content match-pattern set is limited to 128 patterns"
             ]
         );
     }

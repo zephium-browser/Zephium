@@ -43,6 +43,7 @@ pub struct Shell {
     next: u128,
     work: Vec<BrowserCall>,
     pub action_shortcuts: Vec<(ExtensionInstallId, ItemId)>,
+    pub permission_prompt_allowed: bool,
 }
 
 pub struct Engine {
@@ -306,13 +307,11 @@ impl Host {
                         request,
                         BrowserSettlement::Data(ExtensionDataReply::Unavailable),
                     ),
-                    BrowserCall::Prompt { request, .. } => self
-                        .runtime
-                        .settle_browser(request, BrowserSettlement::Prompt(false)),
-                    BrowserCall::Capture { request, .. } => self.runtime.settle_browser(
-                        request,
-                        BrowserSettlement::Capture(Err("Capture is not available.".into())),
-                    ),
+                    BrowserCall::Prompt { request, .. } => {
+                        let allowed = self.shell.borrow().permission_prompt_allowed;
+                        self.runtime
+                            .settle_browser(request, BrowserSettlement::Prompt(allowed));
+                    }
                     _ => {}
                 }
             }

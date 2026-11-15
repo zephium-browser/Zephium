@@ -1,0 +1,62 @@
+{
+  "caseId": "identity-redirect-url",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "default",
+      "value": "https://<extension>.chromiumapp.org/"
+    },
+    {
+      "label": "",
+      "value": "https://<extension>.chromiumapp.org/"
+    },
+    {
+      "label": "callback",
+      "value": "https://<extension>.chromiumapp.org/callback"
+    },
+    {
+      "label": "/callback",
+      "value": "https://<extension>.chromiumapp.org/callback"
+    },
+    {
+      "label": "//callback",
+      "value": "https://<extension>.chromiumapp.org//callback"
+    },
+    {
+      "label": "../callback",
+      "value": "https://<extension>.chromiumapp.org/../callback"
+    },
+    {
+      "label": "callback?x=1#fragment",
+      "value": "https://<extension>.chromiumapp.org/callback?x=1#fragment"
+    },
+    {
+      "label": "https://elsewhere.test/",
+      "value": "https://<extension>.chromiumapp.org/https://elsewhere.test/"
+    },
+    {
+      "label": "sp ace/ą",
+      "value": "https://<extension>.chromiumapp.org/sp ace/ą"
+    },
+    {
+      "label": "invalid path:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invalid path:error",
+      "value": {
+        "lastError": null,
+        "message": "Error in invocation of identity.getRedirectURL(optional string path): No matching signature."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -1,0 +1,1 @@
+{"id": "document-start-root", "title": "Document-start MAIN and isolated files see the root before the first page script", "apis": ["scripting.executeScript"], "permissions": ["scripting"]}

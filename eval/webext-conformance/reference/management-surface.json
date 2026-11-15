@@ -1,0 +1,57 @@
+{
+  "caseId": "management-surface",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "get",
+      "value": "function"
+    },
+    {
+      "label": "getAll",
+      "value": "function"
+    },
+    {
+      "label": "setEnabled",
+      "value": "function"
+    },
+    {
+      "label": "uninstall",
+      "value": "function"
+    },
+    {
+      "label": "getSelf",
+      "value": "function"
+    },
+    {
+      "label": "uninstallSelf",
+      "value": "function"
+    },
+    {
+      "label": "getPermissionWarningsByManifest",
+      "value": "function"
+    },
+    {
+      "label": "onInstalled",
+      "value": "function"
+    },
+    {
+      "label": "onUninstalled",
+      "value": "function"
+    },
+    {
+      "label": "onEnabled",
+      "value": "function"
+    },
+    {
+      "label": "onDisabled",
+      "value": "function"
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -216,7 +216,7 @@ fn projected_members_match_host_access_and_invocation_signatures() {
             }
         }
     }
-    assert_eq!(checked, 420, "302 public callables and 118 events");
+    assert_eq!(checked, 493, "348 public callables and 145 events");
     assert!(surface["namespaces"]["runtime"]["functions"]
         .get("markListenerRegistrationComplete")
         .is_none());

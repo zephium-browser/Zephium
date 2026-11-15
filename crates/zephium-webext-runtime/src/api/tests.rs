@@ -267,6 +267,8 @@ fn methods() -> Vec<String> {
             .map(|name| (*name).to_owned()),
     );
     methods.extend(super::search::METHODS.iter().map(|name| (*name).to_owned()));
+    methods.push("webRequest.handlerBehaviorChanged".into());
+    methods.extend(super::unavailable::methods().map(str::to_owned));
     methods.extend(
         super::declarative_net_request::METHODS
             .iter()
@@ -422,6 +424,11 @@ fn external_pages_reach_only_the_two_explicit_messaging_entry_points() {
         .into_iter()
         .filter(|method| !matches!(method.as_str(), "runtime.sendMessage" | "runtime.connect"))
     {
+        // This test isolates context admission; the expanded schema exceeds one
+        // sender's burst allowance, which has separate dispatcher coverage.
+        let mut table = ApiTable::<Host>::new();
+        register(&mut table).unwrap();
+        dispatcher = Dispatcher::new(table);
         assert_eq!(
             call(
                 &mut dispatcher,
@@ -598,12 +605,69 @@ fn normalized_optional_arguments_reach_services_and_invalid_shapes_do_not() {
 }
 
 #[test]
+fn management_optional_web_store_alternatives_do_not_erase_permission_checks() {
+    let mut table = ApiTable::<Host>::new();
+    register(&mut table).unwrap();
+    let mut dispatcher = Dispatcher::new(table);
+    let mut host = Host::default();
+    let background = background_sender();
+    let content = content_sender("https://example.com/");
+    let granted = permissions(&["management"]);
+    for (name, args) in [
+        ("management.getAll", json!([])),
+        ("management.get", json!([EXTENSION])),
+        ("management.setEnabled", json!([EXTENSION, false])),
+    ] {
+        assert_eq!(
+            call(
+                &mut dispatcher,
+                &mut host,
+                &background,
+                &permissions(&[]),
+                name,
+                args.clone()
+            ),
+            Err(ApiError::missing_permission().message().to_owned())
+        );
+        assert_eq!(
+            call(
+                &mut dispatcher,
+                &mut host,
+                &content,
+                &granted,
+                name,
+                args.clone()
+            ),
+            Err(ApiError::not_available_in_context(name)
+                .message()
+                .to_owned())
+        );
+        assert_eq!(
+            call(
+                &mut dispatcher,
+                &mut host,
+                &background,
+                &granted,
+                name,
+                args
+            ),
+            Err(HOST_REACHED.into())
+        );
+    }
+    assert_eq!(host.calls.get(), 3);
+}
+
+#[test]
 fn generated_methods_without_handlers_are_an_explicit_backlog() {
     let mut table = ApiTable::<Host>::new();
     register(&mut table).unwrap();
-    let implemented: std::collections::BTreeSet<_> = table.names().collect();
-    let mut namespaces: std::collections::BTreeSet<_> = table
+    let refused: std::collections::BTreeSet<_> = super::unavailable::methods().collect();
+    let implemented: std::collections::BTreeSet<_> = table
         .names()
+        .filter(|name| !refused.contains(name))
+        .collect();
+    let mut namespaces: std::collections::BTreeSet<_> = implemented
+        .iter()
         .filter_map(|name| {
             crate::schema::source_method(name)
                 .split_once('.')
@@ -653,7 +717,6 @@ fn generated_methods_without_handlers_are_an_explicit_backlog() {
             "tabs.insertCSS",
             "tabs.removeCSS",
             "tabs.sendRequest",
-            "webRequest.handlerBehaviorChanged",
         ]
     );
 }

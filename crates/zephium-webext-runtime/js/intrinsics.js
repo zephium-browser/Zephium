@@ -41,6 +41,7 @@
   const EventProto = typeof Event === 'function' ? Event.prototype : undefined;
   const MessageEventProto = typeof MessageEvent === 'function' ? MessageEvent.prototype : undefined;
   const MessagePortProto = typeof MessagePort === 'function' ? MessagePort.prototype : undefined;
+  const ImageDataProto = typeof ImageData === 'function' ? ImageData.prototype : undefined;
   const ElementProto = typeof Element === 'function' ? Element.prototype : undefined;
   const DocumentProto = typeof Document === 'function' ? Document.prototype : undefined;
   const hasOwnProperty = uncurry(ObjectCtor.prototype.hasOwnProperty);
@@ -74,6 +75,9 @@
     keys: ObjectCtor.keys,
     hasOwn: ObjectCtor.hasOwn || ((object, key) => hasOwnProperty(object, key)),
     ObjectPrototype: ObjectCtor.prototype,
+    ImageDataWidth: ImageDataProto && getter(ImageDataProto, 'width'),
+    ImageDataHeight: ImageDataProto && getter(ImageDataProto, 'height'),
+    ImageDataData: ImageDataProto && getter(ImageDataProto, 'data'),
     isArray: ArrayCtor.isArray,
     ArrayPush: uncurry(ArrayCtor.prototype.push),
     ArraySlice: uncurry(ArrayCtor.prototype.slice),

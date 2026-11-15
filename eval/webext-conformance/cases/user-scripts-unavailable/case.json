@@ -1,0 +1,1 @@
+{"id":"user-scripts-unavailable","title":"Held userScripts methods synchronously refuse unavailable capability","apis":["userScripts.getScripts","userScripts.register","userScripts.configureWorld","userScripts.execute"],"permissions":["userScripts"],"userScriptsAvailableInitially":true}

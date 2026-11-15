@@ -1,0 +1,59 @@
+{
+  "caseId": "content-fragment-pattern",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "/page.html#fragment:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "/page.html#fragment:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "fragment": false,
+              "valid": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "/page.html%23fragment.html:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "/page.html%23fragment.html:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:2>",
+            "frameId": 0,
+            "result": {
+              "fragment": false,
+              "valid": true
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

@@ -65,7 +65,9 @@ fn admitted(install: ExtensionInstallId) -> Admitted {
             None,
             &BTreeMap::new(),
         )
-        .unwrap(),
+        .unwrap()
+        .into(),
+        manifest_scripts: ScriptRegistry::from_manifest(&manifest, |_, _| Ok(())).unwrap(),
         manifest,
         root: PathBuf::from("/nonexistent"),
         background: Some(BackgroundScript {
@@ -274,6 +276,118 @@ fn management_reports_the_admitted_install_provenance() {
     }
     h.host.state.installs.remove(&h.install);
     assert!(h.host.state.extension_info(&sender).is_err());
+}
+
+#[test]
+fn sessions_restore_refuses_before_queuing_a_browser_mutation() {
+    let mut h = Harness::new();
+    let mut install = admitted(h.install);
+    let manifest = Manifest::from_value(json!({
+        "manifest_version": 3, "name": "sessions", "version": "1.0",
+        "permissions": ["sessions"], "background": {"service_worker": "sw.js"}
+    }));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    install.manifest = manifest;
+    install.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::default(),
+        false,
+    );
+    h.host
+        .admit(install, &Activation::Installed, &mut Outbox::default());
+    let (sender, _, _) = h.boot(&[]);
+    h.host.browser.take_outgoing();
+    for args in [json!([]), json!(["closed-tab"])] {
+        let out = h.call(&sender, "sessions.restore", args);
+        assert_eq!(
+            replies(&out),
+            vec![Err("This function is not supported.".into())]
+        );
+        assert!(h.host.browser.take_outgoing().is_empty());
+    }
+}
+
+#[test]
+fn visible_capture_refuses_without_queuing_engine_work() {
+    use crate::bridge::BridgeViewId;
+    use zephium_core::extensions::{
+        ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+        ExtensionBrowserWindow,
+    };
+    use zephium_webext_runtime::context::FrameId;
+    let mut h = Harness::new();
+    let mut install = admitted(h.install);
+    let manifest = Manifest::from_value(json!({
+        "manifest_version": 3, "name": "capture", "version": "1.0",
+        "host_permissions": ["<all_urls>"], "background": {"service_worker": "sw.js"}
+    }));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&manifest);
+    install.manifest = manifest;
+    install.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(install, &Activation::Installed, &mut Outbox::default());
+    let (sender, _, _) = h.boot(&[]);
+    let url = Url::parse("https://capture.test/").unwrap();
+    let item = ItemId::from(10);
+    let tab =
+        ExtensionBrowserTab::from_snapshot(None, item, true, "capture", Some(&url), false, false)
+            .unwrap();
+    let window = ExtensionBrowserWindow::new(7, false, Some(item), vec![tab]).unwrap();
+    h.host.browser.publish_surface(
+        ExtensionBrowserSurface::new(
+            ProfileId::from(1),
+            ExtensionBrowserSurfaceGeneration::new(1).unwrap(),
+            Some(7),
+            vec![window],
+        )
+        .unwrap(),
+    );
+    h.host.frame_lifecycle(
+        &FrameLifecycle::DocumentCreated {
+            view: BridgeViewId(99),
+            owner: ViewRef::Tab(item),
+            frame: FrameId::MAIN,
+            parent: None,
+            opaque: false,
+            creator: None,
+            document: DocumentGeneration::new(42).unwrap(),
+            url,
+        },
+        &mut Outbox::default(),
+    );
+    h.host.browser.take_outgoing();
+    let window_id = replies(&h.call(&sender, "windows.getCurrent", json!([])))[0]
+        .as_ref()
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    for args in [
+        json!([]),
+        json!([window_id, {"format":"png"}]),
+        json!([window_id, {"format":"jpeg","quality":80}]),
+    ] {
+        let out = h.call(&sender, "tabs.captureVisibleTab", args);
+        assert_eq!(
+            replies(&out),
+            vec![Err("This function is not supported.".into())]
+        );
+        assert!(h.host.browser.take_outgoing().is_empty());
+    }
+    let out = h.call(
+        &sender,
+        "tabs.captureVisibleTab",
+        json!([window_id, {"format":"invalid"}]),
+    );
+    let values = replies(&out);
+    assert!(values[0].is_err());
+    assert_ne!(values[0], Err("This function is not supported.".into()));
+    assert!(h.host.browser.take_outgoing().is_empty());
 }
 
 fn events(out: &Outbox) -> Vec<(EventSeq, String, Value)> {
@@ -534,7 +648,7 @@ fn failed_first_pass_settles_parked_self_message_and_drops_its_authority() {
 }
 
 #[test]
-fn blockers_keep_a_background_running_past_the_idle_timeout() {
+fn pending_events_and_calls_block_idling_but_loaded_offscreen_documents_do_not() {
     let mut harness = Harness::new();
     let (background, _, out) = harness.running(&["runtime.onInstalled"]);
     let (seq, ..) = events(&out)[0].clone();
@@ -557,8 +671,14 @@ fn blockers_keep_a_background_running_past_the_idle_timeout() {
     let ops = harness.ops();
     assert!(ops.iter().any(|op| matches!(
         op,
-        NativeOp::CreateOffscreen { clipboard: true, url, .. } if url.ends_with("/off.html")
+        NativeOp::CreateOffscreen { clipboard: false, url, .. } if url.ends_with("/off.html")
     )));
+    harness.advance(IDLE_TIMEOUT_NANOS * 2);
+    harness.tick();
+    assert!(
+        stops(&harness.ops()).is_empty(),
+        "pending creation blocks idling"
+    );
     let mut out = Outbox::default();
     harness
         .host
@@ -566,19 +686,19 @@ fn blockers_keep_a_background_running_past_the_idle_timeout() {
     assert_eq!(replies(&out), vec![Ok(Value::Null)]);
     harness.advance(IDLE_TIMEOUT_NANOS * 2);
     harness.tick();
-    assert!(
-        stops(&harness.ops()).is_empty(),
-        "an offscreen document blocks idling"
-    );
-    let out = harness.call(&background, "offscreen.closeDocument", json!([]));
+    let ops = harness.ops();
+    assert_eq!(stops(&ops).len(), 1);
+    assert!(!ops
+        .iter()
+        .any(|op| matches!(op, NativeOp::CloseOffscreen { .. })));
+    assert!(harness.host.has_offscreen(harness.install));
+    let (_, popup) = harness.sender(ViewKind::Popup, "popup.html");
+    let out = harness.call(&popup, "offscreen.closeDocument", json!([]));
     assert_eq!(replies(&out), vec![Ok(Value::Null)]);
     assert!(harness
         .ops()
         .iter()
         .any(|op| matches!(op, NativeOp::CloseOffscreen { .. })));
-    harness.advance(IDLE_TIMEOUT_NANOS);
-    harness.tick();
-    assert_eq!(stops(&harness.ops()).len(), 1);
 }
 
 #[test]
@@ -1436,4 +1556,175 @@ fn queued_request_facts_reproject_current_listener_ids_filters_and_permissions()
         project(&registry, &second, Some(&permissions)),
         json!([{}, []])
     );
+}
+
+#[test]
+fn native_table_registers_validated_unavailable_capabilities() {
+    let table = table().unwrap();
+    for method in [
+        "cookies.getAll",
+        "downloads.search",
+        "identity.launchWebAuthFlow",
+        "readingList.query",
+        "tabGroups.query",
+        "tts.speak",
+        "desktopCapture.chooseDesktopMedia",
+        "tabCapture.capture",
+        "omnibox.setDefaultSuggestion",
+        "userScripts.getScripts",
+        "management.getAll",
+    ] {
+        assert!(table.names().any(|name| name == method), "{method}");
+        let access = zephium_webext_runtime::schema::access(method).unwrap();
+        assert_eq!(table.gate(method), Some(access.gate), "{method}");
+    }
+}
+
+#[test]
+fn shutdown_settles_pending_permission_publication() {
+    let mut harness = Harness::new();
+    let _ = harness.running(&[]);
+    let update = PermissionUpdate {
+        completion: Rc::new(std::cell::RefCell::new(None)),
+    };
+    harness.host.network_permission_tickets.insert(
+        7,
+        (
+            harness.host.permissions[&harness.install].clone(),
+            PermissionCompletion::Host(update.clone()),
+        ),
+    );
+    harness.host.shutdown(&mut Outbox::default());
+    assert_eq!(
+        update.poll(),
+        Some(Err(ApiError::context_invalidated().message().into()))
+    );
+    assert!(harness.host.network_permission_tickets.is_empty());
+}
+
+#[test]
+fn offscreen_ready_requires_loaded_owned_current_document_and_binding_barrier() {
+    use crate::bridge::{BridgeViewId, FrameLifecycle, ViewRef};
+    use zephium_webext_runtime::context::FrameId;
+    for authenticate_first in [false, true] {
+        let mut harness = Harness::new();
+        let (background, _, _) = harness.running(&[]);
+        assert_eq!(
+            replies(&harness.call(&background, "zephium.offscreenReady", json!([]))),
+            vec![Err(ApiError::not_available_in_context(
+                "zephium.offscreenReady"
+            )
+            .message()
+            .into())]
+        );
+        harness.call(
+            &background,
+            "offscreen.createDocument",
+            json!([{"url":"off.html","reasons":["DOM_PARSER"],"justification":"parse"}]),
+        );
+        let generation = harness
+            .ops()
+            .into_iter()
+            .find_map(|op| match op {
+                NativeOp::CreateOffscreen { generation, .. } => Some(generation),
+                _ => None,
+            })
+            .unwrap();
+        let view = BridgeViewId(99);
+        assert!(harness
+            .host
+            .offscreen_attached(harness.install, generation, view));
+        let (_, offscreen) = harness.sender(ViewKind::Offscreen, "off.html");
+        let document = offscreen.document();
+        let owner = ViewRef::Extension {
+            install: harness.install,
+            kind: ViewKind::Offscreen,
+        };
+        let created = |url| FrameLifecycle::DocumentCreated {
+            view,
+            owner,
+            frame: FrameId::MAIN,
+            parent: None,
+            opaque: false,
+            creator: None,
+            document,
+            url,
+        };
+        let loaded = FrameLifecycle::DocumentLoaded {
+            view,
+            owner,
+            frame: FrameId::MAIN,
+            document,
+        };
+        let mut out = Outbox::default();
+        harness
+            .host
+            .frame_lifecycle(&created(Url::parse("about:blank").unwrap()), &mut out);
+        harness.host.frame_lifecycle(&loaded, &mut out);
+        assert!(!harness
+            .ops()
+            .iter()
+            .any(|op| matches!(op, NativeOp::OffscreenReady { .. })));
+        harness
+            .host
+            .frame_lifecycle(&created(offscreen.url().clone()), &mut out);
+        if authenticate_first {
+            assert_eq!(
+                replies(&harness.call(&offscreen, "zephium.offscreenReady", json!([]))),
+                vec![Ok(Value::Null)]
+            );
+        }
+        harness.host.frame_lifecycle(&loaded, &mut out);
+        if !authenticate_first {
+            assert!(!harness
+                .ops()
+                .iter()
+                .any(|op| matches!(op, NativeOp::OffscreenReady { .. })));
+            assert_eq!(
+                replies(&harness.call(&offscreen, "zephium.offscreenReady", json!([]))),
+                vec![Ok(Value::Null)]
+            );
+        }
+        assert!(harness.ops().iter().any(|op| matches!(op, NativeOp::OffscreenReady { generation: current, document: current_document, .. } if *current == generation && *current_document == document)));
+        let removed = if authenticate_first {
+            FrameLifecycle::DocumentRemoved {
+                view,
+                owner,
+                frame: FrameId::MAIN,
+                document,
+            }
+        } else {
+            FrameLifecycle::ViewReset {
+                view,
+                owner,
+                reason: CloseReason::Reattached,
+            }
+        };
+        harness.host.frame_lifecycle(&removed, &mut out);
+        assert!(!harness
+            .host
+            .offscreen_document_live(harness.install, document));
+        harness.host.offscreen_gone(harness.install, &mut out);
+        assert!(!harness.host.offscreen_current(harness.install, generation));
+        harness.call(
+            &background,
+            "offscreen.createDocument",
+            json!([{"url":"off.html","reasons":["DOM_PARSER"],"justification":"parse again"}]),
+        );
+        let next = harness
+            .ops()
+            .into_iter()
+            .find_map(|op| match op {
+                NativeOp::CreateOffscreen { generation, .. } => Some(generation),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(generation, next);
+        assert!(!harness
+            .host
+            .offscreen_attached(harness.install, generation, view));
+        assert!(!harness
+            .host
+            .offscreen_document_live(harness.install, document));
+    }
 }

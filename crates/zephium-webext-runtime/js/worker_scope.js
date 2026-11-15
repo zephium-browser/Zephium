@@ -3,10 +3,8 @@
 // owner over a MessagePort; the owner relays frames to the native bridge and
 // reports worker errors to the host.
 //
-// `registration` is left undefined: Bitwarden only builds its Web Push
-// service when `self.registration` is non-null and otherwise takes its
-// "unsupported" path, which is the only one that can work without a real
-// push subscription; no other target reads it.
+// Registration, push subscriptions and fetch routing require native engine
+// support; the lifecycle object below does not imply those capabilities.
 (function workerScope(Z) {
   'use strict';
   const I = Z.I;
@@ -246,6 +244,51 @@
 
   // Runs in the worker before the extension's script. `options.global` and
   // `options.link` are for tests.
+  function defineServiceWorker(global, config) {
+    const key = {};
+    let state = own(config, 'install') === true ? 'parsed' : 'activated';
+    let changed = null;
+    let handlerAttached = false;
+    let worker;
+    const dispatchChanged = event => { if (typeof changed === 'function') I.apply(changed, worker, [event]); };
+    const check = value => { if (value !== worker) throw new I.TypeError('Illegal invocation'); };
+    class ServiceWorker extends I.EventTarget {
+      constructor(token) { super(); if (token !== key) illegal(); }
+      get state() { check(this); return state; }
+      get scriptURL() { check(this); return own(config, 'scriptURL') || ''; }
+      get onstatechange() { check(this); return changed; }
+      set onstatechange(value) {
+        check(this);
+        changed = typeof value === 'function' || (value !== null && typeof value === 'object') ? value : null;
+        if (changed !== null && !handlerAttached) {
+          I.addEventListener(worker, 'statechange', dispatchChanged);
+          handlerAttached = true;
+        } else if (changed === null && handlerAttached) {
+          I.removeEventListener(worker, 'statechange', dispatchChanged);
+          handlerAttached = false;
+        }
+      }
+      postMessage() {
+        check(this);
+        throw new I.DOMException('ServiceWorker messaging is not supported.', 'NotSupportedError');
+      }
+    }
+    I.defineProperty(ServiceWorker.prototype, I.toStringTag, { value: 'ServiceWorker', configurable: true });
+    worker = new ServiceWorker(key);
+    hidden(global, 'ServiceWorker', ServiceWorker);
+    return {
+      __proto__: null, worker,
+      set(next) {
+        if (next === state) return I.PromiseResolve();
+        return new I.Promise(resolve => I.setTimeout(() => {
+          state = next;
+          I.dispatchEvent(worker, new I.Event('statechange'));
+          resolve();
+        }, 0));
+      },
+    };
+  }
+
   function worker(surface, bootstrap, options) {
     options = options || {};
     const global = options.global || I.global;
@@ -311,6 +354,8 @@
     }
     I.deleteProperty(global, 'DedicatedWorkerGlobalScope');
 
+    const serviceWorker = defineServiceWorker(global, config);
+    I.defineProperty(members, 'serviceWorker', { get: () => serviceWorker.worker, configurable: true, enumerable: true });
     const classes = defineEventClasses(global);
     hidden(global, 'ExtendableEvent', classes.ExtendableEvent);
     hidden(global, 'InstallEvent', classes.InstallEvent);
@@ -359,37 +404,44 @@
       if (finished) return;
       finished = true;
       finishImports();
+      if (state !== 'activated' && own(config, 'install') === true) serviceWorker.set('redundant');
       I.PromiseThen(report(state, detail), () => {
-        if (state === 'activated') context.hub.release();
-      }, () => {});
+        if (state === 'activated') {
+          return I.PromiseThen(serviceWorker.set('activated'), () => context.hub.release());
+        }
+      }, () => { if (own(config, 'install') === true) serviceWorker.set('redundant'); });
     };
     const lifecycle = () => {
       if (own(config, 'install') !== true) return finish('activated', null);
       const timer = I.setTimeout(() => finish('timedOut', null), LIFECYCLE_TIMEOUT_MS);
-      I.PromiseThen(classes.run(global, new classes.InstallEvent('install')), (installed) => {
+      return I.PromiseThen(serviceWorker.set('installing'), () => {
         if (finished) return;
-        finishImports();
-        if (!installed) {
-          I.clearTimeout(timer);
-          return finish('failed', 'install');
-        }
-        context.hub.release('runtime.onInstalled');
-        return I.PromiseThen(
-          report('installed', null),
-          () => {
-            if (finished) return;
-            return I.PromiseThen(classes.run(global, new classes.ExtendableEvent('activate')), (activated) => {
-              I.clearTimeout(timer);
-              finish(activated ? 'activated' : 'failed', activated ? null : 'activate');
-            });
-          },
-          (error) => {
+        return I.PromiseThen(classes.run(global, new classes.InstallEvent('install')), installed => {
+          if (finished) return;
+          finishImports();
+          if (!installed) {
             I.clearTimeout(timer);
-            finish('failed', Z.errors.messageOf(error));
-          },
-        );
+            return finish('failed', 'install');
+          }
+          return I.PromiseThen(serviceWorker.set('installed'), () => {
+            if (finished) return;
+            context.hub.release('runtime.onInstalled');
+            return I.PromiseThen(report('installed', null), () => {
+              if (finished) return;
+              return I.PromiseThen(serviceWorker.set('activating'), () => {
+                if (finished) return;
+                return I.PromiseThen(classes.run(global, new classes.ExtendableEvent('activate')), () => {
+                  I.clearTimeout(timer);
+                  finish('activated', null);
+                });
+              });
+            }, error => {
+              I.clearTimeout(timer);
+              finish('failed', Z.errors.messageOf(error));
+            });
+          });
+        });
       });
-      return undefined;
     };
     I.setTimeout(() => {
       I.removeEventListener(global, 'error', onStartupError);

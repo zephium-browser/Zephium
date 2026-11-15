@@ -346,6 +346,12 @@ impl BrowserSnapshot {
 /// Typed requests crossing the browser adapter boundary.
 #[derive(Clone, Debug)]
 pub enum BrowserRequest {
+    /// An admitted schema method lacking a native capability. Never succeeds
+    /// through admission alone; adapters must return an explicit refusal.
+    Unavailable {
+        /// Generated callable name, not supplied by the extension as authority.
+        api: &'static str,
+    },
     /// Shell-compatible logical tab mutations.
     Core(zephium_core::extensions::ExtensionBrowserRequestAction),
     /// Existing durable data-call contract.
@@ -371,6 +377,8 @@ pub enum BrowserRequest {
 /// Small native desktop services with no Shell mutation counterpart.
 #[derive(Clone, Debug)]
 pub enum ServiceRequest {
+    /// Invalidate native memory caches after webRequest handler changes.
+    HandlerBehaviorChanged,
     /// Query active/idle/locked using the supplied threshold in seconds.
     QueryIdle(u32),
     /// Change the install's idle observation interval in seconds.

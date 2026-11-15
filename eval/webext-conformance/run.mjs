@@ -140,6 +140,14 @@ for (const id of cases) {
           if (url.pathname === `/${token}/control`) {
             let result;
             if (data.operation === "consoleMessages") result = consoles;
+            else if (data.operation === "disableUserScripts") {
+              const settings = await context.newPage();
+              try {
+                await settings.goto("chrome://extensions/");
+                await settings.evaluate((extensionId) => chrome.developerPrivate.updateExtensionConfiguration({extensionId, userScriptsAccess: false}), extensionId);
+              } finally { await settings.close(); }
+              result = { enabled: false };
+            }
             else if (data.operation === "stopBackground") {
               const session = await context.newCDPSession(
                 context
@@ -329,6 +337,13 @@ for (const id of cases) {
         context.serviceWorkers()[0] ||
         (await context.waitForEvent("serviceworker", { timeout: 10000 }));
       extensionId = new URL(worker.url()).host;
+      if (metadata.userScriptsAvailableInitially === true) {
+        const settings = await context.newPage();
+        try {
+          await settings.goto("chrome://extensions/");
+          await settings.evaluate((extensionId) => chrome.developerPrivate.updateExtensionConfiguration({extensionId, userScriptsAccess: true}), extensionId);
+        } finally { await settings.close(); }
+      }
       const page = await context.newPage();
       cdp = await context.newCDPSession(page);
       await cdp.send("Log.enable");

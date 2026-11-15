@@ -1,0 +1,1 @@
+{"manifest_version": 3, "permissions": ["scripting"], "host_permissions": ["http://127.0.0.1/*"], "content_scripts": [{"matches": ["file://*/*", "file://localhost/*"], "js": ["file.js"]}, {"matches": ["http://127.0.0.1/*"], "js": ["valid.js"]}]}

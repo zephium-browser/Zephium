@@ -6,6 +6,7 @@
   const I = Z.I;
 
   const VERSION = 1;
+  const PORT_CLOSED = 'zephium.worker.closed.v1';
   const HEADER_BYTES = 6;
   const MAX_ERROR_MESSAGE_BYTES = 16 * 1024;
   const MAX_API_NAME_BYTES = 128;
@@ -340,6 +341,7 @@
     let refilledAt = I.now();
     let timer = null;
     let closed = false;
+    let pumping = false;
     const refill = () => {
       const current = I.now();
       const earned = I.MathFloor((current - refilledAt) * rate);
@@ -349,19 +351,27 @@
       }
     };
     const pump = () => {
+      if (pumping) return;
+      pumping = true;
       timer = null;
-      refill();
-      while (head < tail && tokens > 0 && !closed) {
-        const entry = I.MapGet(queue, head);
-        I.MapDelete(queue, head);
-        head++;
-        queuedBytes -= I.TypedArrayLength(entry.bytes);
-        tokens--;
-        const sent = send(entry.bytes);
-        if (entry.done) entry.done(sent);
-      }
+      try {
+        refill();
+        while (head < tail && tokens > 0 && !closed) {
+          const entry = I.MapGet(queue, head);
+          const sent = I.now() >= entry.deadline ? 2 : send(entry.bytes);
+          // Native 2 means no reservation, bytes copied or side effect. Keep
+          // FIFO order while the process drains its transport acknowledgments.
+          if (sent === 2) {
+            if (I.now() < entry.deadline) break;
+          }
+          I.MapDelete(queue, head++);
+          queuedBytes -= I.TypedArrayLength(entry.bytes);
+          if (sent === true) tokens--;
+          if (entry.done) entry.done(sent);
+        }
+      } finally { pumping = false; }
       if (head < tail && !closed && timer === null) {
-        timer = I.setTimeout(pump, I.MathMax(1, I.MathFloor(1 / rate)));
+        timer = I.setTimeout(pump, 4);
       }
     };
     return {
@@ -370,7 +380,7 @@
       push(bytes, done) {
         if (closed) return false;
         if (I.MapSize(queue) >= maxQueued || queuedBytes + I.TypedArrayLength(bytes) > maxQueuedBytes) return false;
-        I.MapSet(queue, tail++, { __proto__: null, bytes, done });
+        I.MapSet(queue, tail++, { __proto__: null, bytes, done, deadline: I.now() + 30000 });
         queuedBytes += I.TypedArrayLength(bytes);
         if (timer === null) pump();
         return true;
@@ -398,9 +408,14 @@
     const idLimit = options.idLimit || 0x7fffffff;
     const handlers = options.handlers;
     const pending = new I.Map();
-    const waiting = new I.Map();
-    let waitingHead = 0;
-    let waitingTail = 0;
+    const waiting = [
+      { entries: new I.Map(), head: 0, tail: 0 },
+      { entries: new I.Map(), head: 0, tail: 0 },
+    ];
+    let waitingCount = 0;
+    let waitingOrder = 0;
+    let waitingBytes = 0;
+    let draining = false;
     let nextId = idBase;
     let inFlightBytes = 0;
     let internalPending = 0;
@@ -434,35 +449,38 @@
       drainWaiting();
     };
 
-    const dispatchCall = (name, argsText, resolve, reject, internal = false) => {
+    const dispatchCall = (bytes, resolve, reject, internal = false) => {
       const id = allocate();
       if (id === 0) return reject(ERRORS.tooManyPending);
-      const bytes = encode(
-        { __proto__: null, kind: 'call', id, name, args: I.encodeUtf8(argsText) },
-        FROM_CONTEXT,
-        maxBytes,
-      );
-      if (typeof bytes === 'string') return reject(bytes === 'TooLarge' ? ERRORS.tooLarge : ERRORS.malformedReply);
+      I.DataViewSetUint32(new I.DataView(I.TypedArrayBuffer(bytes)), HEADER_BYTES, id, true);
       const size = I.TypedArrayLength(bytes);
       I.MapSet(pending, id, { __proto__: null, resolve, reject, bytes: size, internal });
       inFlightBytes += size;
       if (internal) internalPending++;
       const queued = scheduler.push(bytes, (sent) => {
-        if (!sent) settle(id, false, invalidated || ERRORS.invalidated);
+        if (sent !== true) settle(id, false, invalidated || (sent === 2 ? ERRORS.tooManyPending : ERRORS.invalidated));
       });
       if (!queued) settle(id, false, invalidated || ERRORS.tooManyPending);
     };
 
-    const hasRoom = (bytes) =>
-      I.MapSize(pending) < LIMITS.outstandingCalls && inFlightBytes + bytes <= LIMITS.inFlightBytes;
+    const hasRoom = () => I.MapSize(pending) < LIMITS.outstandingCalls;
 
     function drainWaiting() {
-      while (waitingHead < waitingTail && internalPending < internalLimit && hasRoom(0)) {
-        const entry = I.MapGet(waiting, waitingHead);
-        I.MapDelete(waiting, waitingHead);
-        waitingHead++;
-        dispatchCall(entry.name, entry.argsText, entry.resolve, entry.reject, true);
-      }
+      if (draining) return;
+      draining = true;
+      try {
+        while (waitingCount > 0 && hasRoom()) {
+          const application = I.MapGet(waiting[0].entries, waiting[0].head);
+          const internal = internalPending < internalLimit ? I.MapGet(waiting[1].entries, waiting[1].head) : undefined;
+          if (!application && !internal) break;
+          const queue = !internal || (application && application.order < internal.order) ? waiting[0] : waiting[1];
+          const entry = I.MapGet(queue.entries, queue.head);
+          I.MapDelete(queue.entries, queue.head++);
+          waitingCount--;
+          waitingBytes -= I.TypedArrayLength(entry.bytes);
+          dispatchCall(entry.bytes, entry.resolve, entry.reject, entry.internal);
+        }
+      } finally { draining = false; }
     }
 
     const receive = (bytes) => {
@@ -501,33 +519,67 @@
       }
       return undefined;
     };
-    link.listen(receive);
+    function invalidate(message) {
+        if (invalidated !== null) return;
+        invalidated = message || ERRORS.invalidated;
+        scheduler.close();
+        const entries = [];
+        I.MapForEach(pending, (entry) => I.ArrayPush(entries, entry));
+        for (let i = 0; i < waiting.length; i++) {
+          I.MapForEach(waiting[i].entries, (entry) => I.ArrayPush(entries, entry));
+          I.MapClear(waiting[i].entries);
+        }
+        I.MapClear(pending);
+        waitingCount = 0;
+        waitingBytes = 0;
+        inFlightBytes = 0;
+        internalPending = 0;
+        for (let i = 0; i < entries.length; i++) entries[i].reject(invalidated);
+    }
+    const failTransport = message => {
+      if (invalidated !== null) return;
+      invalidate(message);
+      if (typeof handlers.invalidated === 'function') handlers.invalidated(message);
+    };
+    link.listen(receive, () => failTransport(ERRORS.invalidated));
 
     const sendFrame = (frame) => {
       if (invalidated !== null) return ERRORS.invalidated;
       const bytes = encode(frame, FROM_CONTEXT, maxBytes);
       if (typeof bytes === 'string') return bytes === 'TooLarge' ? ERRORS.tooLarge : ERRORS.malformedReply;
-      return scheduler.push(bytes, null) ? null : ERRORS.tooManyPending;
+      const queued = scheduler.push(bytes, sent => {
+        if (sent !== true) failTransport(sent === 2 ? ERRORS.tooManyPending : ERRORS.invalidated);
+      });
+      if (!queued) failTransport(ERRORS.tooManyPending);
+      return queued ? null : ERRORS.tooManyPending;
     };
 
     return {
       __proto__: null,
       maxMessageBytes: maxBytes,
-      // Sends an API call; settles with the parsed JSON result or rejects
-      // with the error text. Internal calls wait for a free slot instead of
-      // failing when the context is at its outstanding-call limit.
+      // Bounded backpressure preserves the native in-flight and rate limits.
       call(name, argsText, internal) {
         return new I.Promise((resolve, reject) => {
           if (invalidated !== null) return reject(invalidated);
-          const bytes = argsText.length;
-          // Internal bookkeeping must not occupy every application call slot.
-          if (!hasRoom(bytes) || (internal && (internalPending >= internalLimit || waitingTail > waitingHead))) {
-            if (!internal) return reject(ERRORS.tooManyPending);
-            if (I.MapSize(waiting) >= 4096) return reject(ERRORS.tooManyPending);
-            I.MapSet(waiting, waitingTail++, { __proto__: null, name, argsText, resolve, reject });
+          if (argsText.length > maxBytes) return reject(ERRORS.tooLarge);
+          const bytes = encode(
+            { __proto__: null, kind: 'call', id: 1, name, args: I.encodeUtf8(argsText) },
+            FROM_CONTEXT,
+            maxBytes,
+          );
+          if (typeof bytes === 'string') return reject(bytes === 'TooLarge' ? ERRORS.tooLarge : ERRORS.malformedReply);
+          const size = I.TypedArrayLength(bytes);
+          if (inFlightBytes + waitingBytes + size > LIMITS.inFlightBytes) return reject(ERRORS.tooManyPending);
+          const queue = waiting[internal ? 1 : 0];
+          if (!hasRoom() || queue.tail > queue.head || (internal && internalPending >= internalLimit)) {
+            if (waitingCount >= 4096) return reject(ERRORS.tooManyPending);
+            I.MapSet(queue.entries, queue.tail++, { __proto__: null, bytes, resolve, reject, internal: !!internal, order: waitingOrder++ });
+            waitingCount++;
+            waitingBytes += size;
+            drainWaiting();
             return undefined;
           }
-          return dispatchCall(name, argsText, resolve, reject, internal);
+          return dispatchCall(bytes, resolve, reject, internal);
         });
       },
       ack(seq) {
@@ -539,17 +591,7 @@
       closePort(port) {
         return sendFrame({ __proto__: null, kind: 'portDisconnect', port, error: null });
       },
-      invalidate(message) {
-        if (invalidated !== null) return;
-        invalidated = message || ERRORS.invalidated;
-        scheduler.close();
-        const entries = [];
-        I.MapForEach(pending, (entry) => I.ArrayPush(entries, entry));
-        I.MapForEach(waiting, (entry) => I.ArrayPush(entries, entry));
-        I.MapClear(pending);
-        I.MapClear(waiting);
-        for (let i = 0; i < entries.length; i++) entries[i].reject(invalidated);
-      },
+      invalidate,
       get invalidated() {
         return invalidated;
       },
@@ -574,7 +616,8 @@
       __proto__: null,
       send(bytes) {
         try {
-          return !!I.apply(post, undefined, [bytes]);
+          const result = I.apply(post, undefined, [bytes]);
+          return result === 2 ? 2 : result === 1 || result === true;
         } catch {
           return false;
         }
@@ -602,6 +645,8 @@
   function portLink(maxBytes) {
     let port = null;
     let receiver = null;
+    let disconnected = null;
+    let closed = false;
     const early = new I.Map();
     let earlyCount = 0;
     let earlyBytes = 0;
@@ -620,6 +665,14 @@
     };
     const onMessage = (event) => {
       const data = I.MessageEventData(event);
+      if (data === PORT_CLOSED) {
+        closed = true;
+        I.MapClear(early);
+        earlyCount = earlyBytes = 0;
+        if (disconnected) disconnected();
+        return;
+      }
+      if (closed) return;
       const length = arrayBufferLength(data);
       if (length < 0 || length > maxBytes || receiver === null) return;
       receiver(new I.Uint8Array(data));
@@ -627,14 +680,16 @@
     return {
       __proto__: null,
       send(bytes) {
+        if (closed) return false;
         if (port !== null) return post(bytes);
         if (earlyCount >= 4096 || earlyBytes + I.TypedArrayLength(bytes) > LIMITS.inFlightBytes) return false;
         I.MapSet(early, earlyCount++, bytes);
         earlyBytes += I.TypedArrayLength(bytes);
         return true;
       },
-      listen(fn) {
+      listen(fn, onDisconnect) {
         receiver = fn;
+        disconnected = onDisconnect;
       },
       attach(value) {
         if (port !== null) return false;
@@ -650,6 +705,7 @@
   }
 
   return I.freeze({
+    PORT_CLOSED,
     __proto__: null,
     VERSION,
     LIMITS,

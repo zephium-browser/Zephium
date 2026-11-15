@@ -1150,6 +1150,7 @@ fn script_table(generation: u64) -> zephium_webkit_web_process_protocol::protoco
     };
     ScriptTable {
         generation,
+        catalogs: Default::default(),
         entries: vec![ScriptEntry {
             install_id: format!("{:032x}", 10),
             script_id: "manifest-0".into(),

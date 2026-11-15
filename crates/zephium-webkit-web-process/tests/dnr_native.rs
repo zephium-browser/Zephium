@@ -186,6 +186,10 @@ fn native_empty_policy_skips_metadata_and_keeps_enforcement() {
         .borrow()
         .iter()
         .any(|event| matches!(event, Event::Requests { .. })));
+    publish(&page, 2, &[extension(EXTENSION, 1, vec![])]);
+    let oversized = format!("/dnr-empty-install?{}", "x".repeat(8192));
+    assert!(fetch(&page, &oversized)["body"].is_string());
+    assert!(hit(&fixture, "/dnr-empty-install"));
     let blocking = extension(
         EXTENSION,
         1,
@@ -195,7 +199,7 @@ fn native_empty_policy_skips_metadata_and_keeps_enforcement() {
             json!([{"id":1,"action":{"type":"block"},"condition":{"urlFilter":"/dnr-empty-control"}}]),
         )],
     );
-    publish(&page, 2, &[blocking]);
+    publish(&page, 3, &[blocking]);
     let oversized = format!("/dnr-policy-oversized?{}", "x".repeat(8192));
     assert!(fetch(&page, &oversized)["error"].is_string());
     assert!(!hit(&fixture, "/dnr-policy-oversized"));
@@ -204,7 +208,7 @@ fn native_empty_policy_skips_metadata_and_keeps_enforcement() {
     pump_until(|| {
         events.borrow().iter().any(|event| matches!(event, Event::Requests { observations, .. } if observations.iter().any(|row| row.matched)))
     });
-    publish(&page, 3, &[]);
+    publish(&page, 4, &[]);
     assert!(fetch(&page, "/dnr-empty-control?removed")["body"].is_string());
     filter::install(
         &page,
@@ -587,7 +591,7 @@ fn resource_coverage(
     );
 }
 
-fn corpus_smoke(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events, root: &Path) {
+fn corpus_cost(page: &webkit2gtk::WebView, events: &Events, root: &Path) -> DnrExtensionPolicy {
     let manifest: Value =
         serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
     let started = Instant::now();
@@ -683,6 +687,34 @@ fn corpus_smoke(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events, 
             );
         }
     }
+    policy
+}
+
+#[test]
+#[ignore = "isolated reserved-domain DNR cost fixture; no real-site host mapping"]
+fn native_dnr_module_cost() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let root = std::env::var_os("ZEPHIUM_DNR_UBOL_ROOT").expect("pinned uBOL corpus");
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let mut proxy = webkit2gtk::NetworkProxySettings::new(Some(&fixture.origin), &[]);
+    context
+        .website_data_manager()
+        .unwrap()
+        .set_network_proxy_settings(webkit2gtk::NetworkProxyMode::Custom, Some(&mut proxy));
+    let page = webkit2gtk::WebView::with_context(&context);
+    let events = observe(&page);
+    load(&page, &format!("{}/frame?cost-inert", fixture.origin));
+    attach(&page, 41);
+    corpus_cost(&page, &events, Path::new(&root));
+    support::assert_sandbox(&module);
+    load(&page, "about:blank");
+    page.stop_loading();
+}
+
+fn corpus_smoke(page: &webkit2gtk::WebView, fixture: &Fixture, events: &Events, root: &Path) {
+    let policy = corpus_cost(page, events, root);
     for (generation, enabled) in (11..).zip([false, true]) {
         publish(
             page,
