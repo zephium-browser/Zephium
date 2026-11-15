@@ -111,6 +111,10 @@ fn capacity20() {
                                         install,
                                         &zephium_webext_runtime::context::InjectedWorld::Isolated,
                                     ),
+                                    admission_world: zephium_webext_linux::bridge::world_name(
+                                        install,
+                                        &zephium_webext_runtime::context::InjectedWorld::Isolated,
+                                    ),
                                     kind: InjectionKind::Script,
                                     source: source.clone(),
                                     source_fd: None,

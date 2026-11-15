@@ -1480,6 +1480,7 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
             document_seq: 1,
         },
         world: world(),
+        admission_world: world(),
         kind: InjectionKind::Function,
         source: "() => Promise.resolve(7)".into(),
         source_fd: None,
@@ -1487,6 +1488,21 @@ fn pending_programmatic_injections_verify_scope_and_settle_timeout() {
         args_json: "[]".into(),
         timeout_ms: 10,
     };
+    let mut main = request.clone();
+    main.world.clear();
+    main.admission_world = world_name(
+        install(),
+        &InjectedWorld::UserScript(
+            zephium_webext_runtime::context::UserScriptWorldId::parse("").unwrap(),
+        ),
+    );
+    assert_eq!(
+        h.core.inject(id, install(), main, h.now),
+        Err(super::core::InjectionError::Denied)
+    );
+    let mut mismatched = request.clone();
+    mismatched.admission_world = "zephium-webext-isolated-missing".into();
+    assert!(h.core.inject(id, install(), mismatched, h.now).is_err());
     let id_request = h
         .core
         .inject(id, install(), request.clone(), h.now)
@@ -1611,6 +1627,7 @@ fn large_injections_send_only_metadata_and_reuse_one_sealed_file() {
             document_seq: 1,
         },
         world: world(),
+        admission_world: world(),
         kind: InjectionKind::Script,
         source: " ".repeat(128 * 1024).into(),
         source_fd: None,
@@ -1715,6 +1732,7 @@ fn programmatic_bootstrap_receipts_require_the_exact_live_request_on_old_documen
                         document_seq: 1,
                     },
                     world: world(),
+                    admission_world: world(),
                     kind: InjectionKind::Script,
                     source: "void 0;".into(),
                     source_fd: None,

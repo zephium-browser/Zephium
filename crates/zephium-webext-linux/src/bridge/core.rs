@@ -1622,6 +1622,8 @@ impl Core {
                         && Some(pending.generation) == view.generation()
                         && install_hex(pending.install) == evaluation.install_id
                         && pending.world == evaluation.world
+                        && pending.admission_world == evaluation.world
+                        && pending.install_generation == *epoch
                         && pending.targets.get(&evaluation.frame_id)
                             == Some(&evaluation.document_seq)
                 });
@@ -2249,6 +2251,8 @@ struct Execution {
     generation: u64,
     install: ExtensionInstallId,
     world: String,
+    admission_world: String,
+    install_generation: u64,
     targets: BTreeMap<u64, u64>,
     bytes: usize,
     deadline: u64,
@@ -2333,18 +2337,12 @@ impl Core {
         for frame_id in targets.keys() {
             let frame = view.frames.get(*frame_id).ok_or(InjectionError::Stale)?;
             let admitted = |plan: &ResolvedPlan| {
-                if request.world.is_empty() {
-                    plan.worlds.iter().any(|(name, grant)| {
-                        grant.install == install
-                            && grant.install_generation == *epoch
-                            && plan.admits_world(name, &frame.document.facts).is_some()
-                    })
-                } else {
-                    plan.admits_world(&request.world, &frame.document.facts)
+                (request.world.is_empty() || request.world == request.admission_world)
+                    && plan
+                        .admits_world(&request.admission_world, &frame.document.facts)
                         .is_some_and(|grant| {
                             grant.install == install && grant.install_generation == *epoch
                         })
-                }
             };
             if !admitted(&view.plan) || !admitted(attached) {
                 return Err(InjectionError::Denied);
@@ -2377,7 +2375,18 @@ impl Core {
             request.kind,
             zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
                 | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
         );
+        if matches!(
+            request.kind,
+            zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
+        ) {
+            request
+                .batch_sources(Some(&request.source))
+                .map_err(|_| InjectionError::Invalid)?;
+        }
         let mut validation = request.clone();
         if packaged && request.source.len() > 64 * 1024 {
             validation.source_fd = Some(zephium_webkit_web_process_protocol::protocol::SourceFd {
@@ -2392,6 +2401,8 @@ impl Core {
                 request.kind,
                 zephium_webkit_web_process_protocol::protocol::InjectionKind::Script
                     | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptAtIdle
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatch
+                | zephium_webkit_web_process_protocol::protocol::InjectionKind::ScriptBatchAtIdle
             ) {
             let source = self
                 .sources
@@ -2462,6 +2473,8 @@ impl Core {
                 generation,
                 install,
                 world: request.world.clone(),
+                admission_world: request.admission_world.clone(),
+                install_generation: *epoch,
                 targets,
                 bytes,
                 deadline: now_ms
@@ -2515,22 +2528,23 @@ impl Core {
         };
         if result.status == InjectionStatus::Success {
             let admitted = |plan: &ResolvedPlan| {
-                if result.world.is_empty() {
-                    plan.worlds.iter().any(|(name, grant)| {
-                        grant.install == pending.install
-                            && plan.admits_world(name, &frame.document.facts).is_some()
-                    })
-                } else {
-                    plan.admits_world(&result.world, &frame.document.facts)
-                        .is_some_and(|grant| grant.install == pending.install)
-                }
+                self.install_generations.get(&pending.install) == Some(&pending.install_generation)
+                    && plan
+                        .admits_world(&pending.admission_world, &frame.document.facts)
+                        .is_some_and(|grant| {
+                            grant.install == pending.install
+                                && grant.install_generation == pending.install_generation
+                        })
             };
             if !admitted(&view.plan) || !view.attached_plan().is_some_and(admitted) {
                 result.status = InjectionStatus::Denied;
                 result.result_json = "null".into();
             }
         }
-        if result.status == InjectionStatus::Success && !result.world.is_empty() {
+        if result.status == InjectionStatus::Success
+            && !result.world.is_empty()
+            && !result.world.starts_with("zephium-webext-us-")
+        {
             let Some(grant) = view
                 .plan
                 .admits_world(&result.world, &frame.document.facts)

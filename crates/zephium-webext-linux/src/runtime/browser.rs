@@ -140,6 +140,7 @@ pub(crate) enum Outgoing {
 #[derive(Clone, Debug)]
 pub(crate) struct Step {
     pub world: String,
+    pub admission_world: String,
     pub kind: InjectionKind,
     pub source: std::sync::Arc<str>,
     pub source_url: String,
@@ -1601,11 +1602,12 @@ impl BrowserState {
                 ..
             } => {
                 let world = match world {
-                    ExecutionWorld::Isolated => isolated,
+                    ExecutionWorld::Isolated => isolated.clone(),
                     ExecutionWorld::Main => String::new(),
                 };
                 match source {
                     ScriptSource::Function { source, args } => Ok(vec![Step {
+                        admission_world: isolated.clone(),
                         world,
                         kind: if *inject_immediately {
                             InjectionKind::Function
@@ -1621,6 +1623,7 @@ impl BrowserState {
                         .map(|file| {
                             let (source, url) = read_package_file(&facts, file)?;
                             Ok(Step {
+                                admission_world: isolated.clone(),
                                 world: world.clone(),
                                 kind: if *inject_immediately {
                                     InjectionKind::Script

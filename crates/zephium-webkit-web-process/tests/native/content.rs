@@ -283,9 +283,18 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         .unwrap();
     let request=InjectRequest {install_id:INSTALL.into(),token:TOKEN.into(),generation:1,request_id:100,
         target:InjectionTarget::Frame{frame_id:target.frame_id,document_seq:target.document_seq},
-        world:WORLD.into(),kind:InjectionKind::Function,
+        world:WORLD.into(),admission_world:WORLD.into(),kind:InjectionKind::Function,
         source:"async (a,b)=>{await Promise.resolve();return {answer:a+b,lexical:sharedLexical,href:location.href};}".into(),
         source_fd: None, source_url:format!("chrome-extension://{ID}/execute.js"),args_json:"[20,22]".into(),timeout_ms:1000};
+    let mut denied_main = request.clone();
+    denied_main.world.clear();
+    denied_main.admission_world = "zephium-webext-us-missing".into();
+    denied_main.request_id = 99;
+    denied_main.source = "()=>{globalThis.unauthorizedUserMain=true}".into();
+    assert_eq!(
+        inject(&page, &events, denied_main)[0].status,
+        InjectionStatus::Denied
+    );
     let results = inject(&page, &events, request.clone());
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].status, InjectionStatus::Success);
@@ -293,6 +302,76 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert_eq!(value["answer"], 42);
     assert_eq!(value["lexical"], 40);
     assert_eq!(value["href"], target.uri);
+    for (index, sources, expected, timed_out) in [
+        (
+            0,
+            vec![
+                "new Promise(resolve=>{globalThis.batchResolve=resolve})",
+                "batchResolve(1);42",
+            ],
+            "42",
+            false,
+        ),
+        (1, vec!["throw new Error('earlier')", "43"], "43", false),
+        (
+            2,
+            vec!["Promise.reject(new Error('earlier'))", "44"],
+            "44",
+            false,
+        ),
+        (3, vec!["45", "throw new Error('last')"], "null", false),
+        (
+            4,
+            vec!["46", "Promise.reject(new Error('last'))"],
+            "null",
+            false,
+        ),
+        (
+            5,
+            vec!["let batchLexical=20", "batchLexical+22"],
+            "42",
+            false,
+        ),
+        (6, vec!["new Promise(()=>{})", "47"], "null", true),
+        (
+            7,
+            vec!["new Error().stack.includes('batch-0.js')"],
+            "true",
+            false,
+        ),
+        (8, vec!["({then(resolve){const g=resolve.constructor('return globalThis')();resolve(g===globalThis)}})"], "true", false),
+        (9, vec!["(()=>{let n=0;const o={};Object.defineProperty(o,'then',{get(){return ++n===1?undefined:()=>{throw 1}},enumerable:false});return o})()"], "{}", false),
+    ] {
+        let mut batch = request.clone();
+        batch.request_id = 400 + index;
+        batch.kind = InjectionKind::ScriptBatch;
+        batch.timeout_ms = if timed_out { 30 } else { 1000 };
+        let mut joined = String::new();
+        let mut rows = Vec::new();
+        for (part, source) in sources.iter().enumerate() {
+            let start = joined.len();
+            joined.push_str(source);
+            rows.push(serde_json::json!([
+                start,
+                joined.len(),
+                format!("chrome-extension://{ID}/batch-{part}.js")
+            ]));
+        }
+        batch.source = joined.into();
+        batch.args_json = serde_json::Value::Array(rows).to_string();
+        let result = inject(&page, &events, batch);
+        assert_eq!(
+            result[0].status,
+            if timed_out {
+                InjectionStatus::TimedOut
+            } else {
+                InjectionStatus::Success
+            },
+            "batch {index}"
+        );
+        assert_eq!(result[0].result_json, expected, "batch {index}");
+    }
+    println!("WEBEXT native_batch separate_lexicals=true ordered_promises=true earlier_failures_preserve_last=true source_urls=true timeout=true");
     let mut stale = request.clone();
     stale.request_id = 101;
     stale.target = InjectionTarget::Frame {
@@ -342,6 +421,17 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
         refused.source = source.into();
         assert_eq!(inject(&page, &events, refused)[0].status, status);
     }
+    let mut realm = request.clone();
+    realm.request_id = 500;
+    realm.source =
+        "()=>({then(resolve){resolve(resolve.constructor('return globalThis')()===globalThis)}})"
+            .into();
+    assert_eq!(inject(&page, &events, realm)[0].result_json, "true");
+    let mut poison = request.clone();
+    poison.request_id = 501;
+    poison.source = "()=>{const old=Promise.resolve;Promise.resolve=()=>{throw new Error('poisoned')};return {then(resolve){Promise.resolve=old;resolve(42)}}}".into();
+    assert_eq!(inject(&page, &events, poison)[0].result_json, "42");
+    let mut removed = request.clone();
     let mut all = request;
     all.request_id = 103;
     all.target = InjectionTarget::AllFrames;
@@ -351,6 +441,37 @@ pub(super) fn run(module: &ModuleDirectory, fixture: &Fixture) {
     assert!(results
         .iter()
         .all(|r| r.status == InjectionStatus::Success && r.result_json == "42"));
+    let same = reports
+        .iter()
+        .find(|post| post.uri.ends_with("?same"))
+        .unwrap();
+    removed.request_id = 502;
+    removed.kind = InjectionKind::ScriptBatch;
+    removed.target = InjectionTarget::Frame {
+        frame_id: same.frame_id,
+        document_seq: same.document_seq,
+    };
+    let first = "globalThis.savedParentDocument=parent.document;frameElement.remove();";
+    let second = "savedParentDocument.documentElement.dataset.detachedBatchExecuted='yes';";
+    removed.source = format!("{first}{second}").into();
+    removed.args_json = serde_json::json!([
+        [0, first.len(), removed.source_url],
+        [first.len(), first.len() + second.len(), removed.source_url]
+    ])
+    .to_string();
+    let removed_results = inject(&page, &events, removed);
+    assert!(removed_results
+        .iter()
+        .all(|result| result.status != InjectionStatus::Success));
+    assert_eq!(
+        evaluate(
+            &page,
+            "return document.documentElement.dataset.detachedBatchExecuted || 'absent';",
+            None
+        ),
+        "absent"
+    );
+    println!("WEBEXT native_await_target_realm single=true batch=true private_realm_absent=true captured_resolve=true detached_batch_stopped=true");
     let mut later = table.clone();
     later.generation = 2;
     later.entries.push(entry(
@@ -701,6 +822,7 @@ pub(super) fn view_grants(module: &ModuleDirectory, fixture: &Fixture) {
                 document_seq: original.document_seq,
             },
             world: added_world.into(),
+            admission_world: added_world.into(),
             kind: InjectionKind::Function,
             source: "()=>globalThis.newWorldReady===true".into(),
             source_fd: None,

@@ -130,6 +130,8 @@ pub enum InjectionKind {
     RemoveCss = 3,
     ScriptAtIdle = 4,
     FunctionAtIdle = 5,
+    ScriptBatch = 6,
+    ScriptBatchAtIdle = 7,
 }
 
 impl InjectionKind {
@@ -141,6 +143,8 @@ impl InjectionKind {
             3 => Ok(Self::RemoveCss),
             4 => Ok(Self::ScriptAtIdle),
             5 => Ok(Self::FunctionAtIdle),
+            6 => Ok(Self::ScriptBatch),
+            7 => Ok(Self::ScriptBatchAtIdle),
             _ => Err(WireError::Invalid),
         }
     }
@@ -160,6 +164,7 @@ pub struct InjectRequest {
     pub request_id: u64,
     pub target: InjectionTarget,
     pub world: String,
+    pub admission_world: String,
     pub kind: InjectionKind,
     pub source: Arc<str>,
     pub source_fd: Option<SourceFd>,
@@ -307,7 +312,79 @@ fn json(value: &str, max: usize, array: bool) -> Result<(), WireError> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchSource {
+    pub range: std::ops::Range<usize>,
+    pub url: String,
+}
+
 impl InjectRequest {
+    pub fn batch_sources(&self, source: Option<&str>) -> Result<Vec<BatchSource>, WireError> {
+        if !matches!(
+            self.kind,
+            InjectionKind::ScriptBatch | InjectionKind::ScriptBatchAtIdle
+        ) {
+            return Err(WireError::Invalid);
+        }
+        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)?;
+        let rows: serde_json::Value =
+            serde_json::from_str(&self.args_json).map_err(|_| WireError::Invalid)?;
+        let rows = rows.as_array().ok_or(WireError::Invalid)?;
+        if rows.is_empty() || rows.len() > MAX_SCRIPT_FILES {
+            return Err(WireError::Oversized);
+        }
+        let expected = self
+            .source_fd
+            .as_ref()
+            .map_or(self.source.len(), |fd| fd.length as usize);
+        if source.is_some_and(|source| source.len() != expected) {
+            return Err(WireError::Invalid);
+        }
+        let owner = url::Url::parse(&self.source_url).map_err(|_| WireError::Invalid)?;
+        let mut offset = 0;
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let row = row
+                .as_array()
+                .filter(|row| row.len() == 3)
+                .ok_or(WireError::Invalid)?;
+            let start = row[0]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(WireError::Invalid)?;
+            let end = row[1]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(WireError::Invalid)?;
+            let url = row[2]
+                .as_str()
+                .filter(|url| valid_source_url(url))
+                .ok_or(WireError::Invalid)?;
+            if start != offset
+                || end < start
+                || end > expected
+                || source.is_some_and(|source| {
+                    !source.is_char_boundary(start) || !source.is_char_boundary(end)
+                })
+                || url::Url::parse(url)
+                    .map_err(|_| WireError::Invalid)?
+                    .host_str()
+                    != owner.host_str()
+            {
+                return Err(WireError::Invalid);
+            }
+            result.push(BatchSource {
+                range: start..end,
+                url: url.to_owned(),
+            });
+            offset = end;
+        }
+        if offset != expected {
+            return Err(WireError::Invalid);
+        }
+        Ok(result)
+    }
+
     pub fn validate(&self) -> Result<(), WireError> {
         if self.source.len() > MAX_INLINE_SCRIPT_SOURCE_BYTES
             || self
@@ -322,20 +399,31 @@ impl InjectRequest {
                 || !self.source.is_empty()
                 || !matches!(
                     self.kind,
-                    InjectionKind::Script | InjectionKind::ScriptAtIdle
+                    InjectionKind::Script
+                        | InjectionKind::ScriptAtIdle
+                        | InjectionKind::ScriptBatch
+                        | InjectionKind::ScriptBatchAtIdle
                 )
         }) {
             return Err(WireError::Invalid);
         }
         if !valid_install_id(&self.install_id)
             || !(1..=MAX_INJECT_TIMEOUT_MS).contains(&self.timeout_ms)
-            || (!self.world.is_empty() && !valid_world_name(&self.world))
+            || !valid_world_name(&self.admission_world)
+            || (!self.world.is_empty() && self.world != self.admission_world)
             || !valid_source_url(&self.source_url)
             || self.source.contains('\0')
         {
             return Err(WireError::Invalid);
         }
-        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)
+        json(&self.args_json, MAX_ARGS_JSON_BYTES, true)?;
+        if matches!(
+            self.kind,
+            InjectionKind::ScriptBatch | InjectionKind::ScriptBatchAtIdle
+        ) {
+            self.batch_sources(self.source_fd.is_none().then_some(self.source.as_ref()))?;
+        }
+        Ok(())
     }
 }
 
@@ -674,6 +762,7 @@ impl Writer {
             InjectionTarget::AllFrames => self.u8(1),
         }
         self.string(&value.world, MAX_WORLD_BYTES)?;
+        self.string(&value.admission_world, MAX_WORLD_BYTES)?;
         self.u8(value.kind as u8);
         self.string(&value.source, MAX_INLINE_SCRIPT_SOURCE_BYTES)?;
         self.boolean(value.source_fd.is_some());
@@ -754,6 +843,7 @@ impl<'a> Reader<'a> {
             request_id,
             target,
             world: self.string(MAX_WORLD_BYTES)?,
+            admission_world: self.string(MAX_WORLD_BYTES)?,
             kind: InjectionKind::decode(self.u8()?)?,
             source: self.string(MAX_INLINE_SCRIPT_SOURCE_BYTES)?.into(),
             source_fd: if self.boolean()? {
@@ -850,6 +940,7 @@ mod tests {
                 document_seq: 3,
             },
             world: "zephium-webext-isolated".into(),
+            admission_world: "zephium-webext-isolated".into(),
             kind: InjectionKind::Function,
             source: "async value => value + 1".into(),
             source_fd: None,
@@ -857,6 +948,49 @@ mod tests {
             args_json: "[41]".into(),
             timeout_ms: 1000,
         }
+    }
+
+    #[test]
+    fn batches_bound_slices_utf8_owner_and_exact_admission() {
+        let mut value = request();
+        value.kind = InjectionKind::ScriptBatch;
+        value.source = "é42".into();
+        let url = value.source_url.clone();
+        value.args_json = serde_json::json!([[0, 2, url], [2, 4, url]]).to_string();
+        for kind in [InjectionKind::ScriptBatch, InjectionKind::ScriptBatchAtIdle] {
+            value.kind = kind;
+            let message = UiMessage::Inject(value.clone());
+            assert_eq!(
+                decode_ui(INJECT_MESSAGE, &encode_ui(&message).unwrap()),
+                Ok(message)
+            );
+        }
+        for rows in [
+            serde_json::json!([]),
+            serde_json::json!([[0, 1, url], [1, 4, url]]),
+            serde_json::json!([[0, 2, url], [1, 4, url]]),
+            serde_json::json!([[0, 5, url]]),
+            serde_json::json!([[0, 3, url]]),
+            serde_json::json!([[0, 4, format!("chrome-extension://{}/x.js", "b".repeat(32))]]),
+        ] {
+            value.args_json = rows.to_string();
+            assert!(value.validate().is_err());
+        }
+        value.args_json = serde_json::json!([[0, 4, url]]).to_string();
+        value.admission_world.clear();
+        assert!(value.validate().is_err());
+        value.admission_world = "zephium-webext-us-other".into();
+        assert!(value.validate().is_err());
+        value.world.clear();
+        assert!(value.validate().is_ok());
+        value.source_fd = Some(SourceFd {
+            index: 0,
+            length: 4,
+        });
+        value.source = "".into();
+        assert!(value.validate().is_ok());
+        assert!(value.batch_sources(Some("é42")).is_ok());
+        assert!(value.batch_sources(Some("bad")).is_err());
     }
 
     #[test]
@@ -1147,7 +1281,7 @@ mod tests {
             encode_ui(&UiMessage::Inject(value)),
             Err(WireError::Oversized)
         );
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     #[test]

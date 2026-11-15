@@ -994,56 +994,111 @@ unsafe extern "C" fn injection_timeout(data: *mut c_void) -> c_int {
 unsafe extern "C" fn injection_complete(value: *mut Object, data: *mut c_void) -> c_int {
     boundary(|| unsafe {
         let id = *data.cast::<u64>();
-        if value.is_null()
-            || raw::jsc_value_is_typed_array(value) == 0
-            || raw::jsc_value_typed_array_get_type(value) != UINT8_ARRAY
-        {
+        if value.is_null() || raw::jsc_value_is_string(value) == 0 {
             finish(id, InjectionStatus::EvaluationFailed, "null".into());
             return 0;
         }
-        let length = raw::jsc_value_typed_array_get_size(value);
-        if length == 0 || length > MAX_RESULT_BYTES + 1 {
+        let Some((page, frame)) = with_runtime(|runtime| {
+            runtime
+                .injections
+                .get(&id)
+                .map(|pending| (pending.page, pending.frame_id))
+        })
+        .flatten() else {
+            return 0;
+        };
+        let Some(facts) = context(page, frame, FACT_WORLD) else {
+            finish(id, InjectionStatus::StaleTarget, "null".into());
+            return 0;
+        };
+        // Only an immutable primitive enters this private helper, never a callback or thenable.
+        let (length, success) = evaluate(
+            &facts,
+            "(value=>value.length)",
+            "zephium://native/result-length",
+        );
+        let Some(length) = length.filter(|_| success) else {
+            finish(id, InjectionStatus::EvaluationFailed, "null".into());
+            return 0;
+        };
+        let mut arguments = [value];
+        let Some(size) = Owned::full(raw::jsc_value_function_callv(
+            length.0,
+            1,
+            arguments.as_mut_ptr(),
+        )) else {
+            finish(id, InjectionStatus::EvaluationFailed, "null".into());
+            return 0;
+        };
+        let size = raw::jsc_value_to_int32(size.0);
+        if size <= 0 || size as usize > MAX_RESULT_BYTES + 1 {
             finish(id, InjectionStatus::Oversized, "null".into());
             return 0;
         }
-        let mut actual = 0;
-        let pointer = raw::jsc_value_typed_array_get_data(value, &mut actual);
-        if pointer.is_null() || actual != length {
+        let pointer = raw::jsc_value_to_string(value);
+        if pointer.is_null() {
             finish(id, InjectionStatus::EvaluationFailed, "null".into());
             return 0;
         }
-        let bytes = std::slice::from_raw_parts(pointer.cast::<u8>(), length);
-        let status = match bytes[0] {
-            0 => InjectionStatus::Success,
-            1 => InjectionStatus::EvaluationFailed,
-            2 => InjectionStatus::Oversized,
+        let bytes = std::ffi::CStr::from_ptr(pointer).to_bytes();
+        let text = (bytes.len() <= MAX_RESULT_BYTES + 1)
+            .then(|| std::str::from_utf8(bytes).ok().map(str::to_owned))
+            .flatten();
+        raw::g_free(pointer.cast());
+        let Some(text) = text else {
+            finish(id, InjectionStatus::Oversized, "null".into());
+            return 0;
+        };
+        if text.encode_utf16().count() != size as usize {
+            finish(id, InjectionStatus::EvaluationFailed, "null".into());
+            return 0;
+        }
+        let status = match text.as_bytes()[0] {
+            b'0' => InjectionStatus::Success,
+            b'1' => InjectionStatus::EvaluationFailed,
+            b'2' => InjectionStatus::Oversized,
             _ => InjectionStatus::EvaluationFailed,
         };
-        let result = std::str::from_utf8(&bytes[1..])
-            .unwrap_or("null")
-            .to_owned();
+        let result = text.get(1..).unwrap_or("null").to_owned();
         finish(id, status, result);
         1
     })
 }
 
-// Capture serialization primitives in the private native world before invoking
-// extension code. Only a capped typed array crosses into the native callback.
-const AWAIT_RESULT: &str = r#"((value, done) => {
+// Promise assimilation must never give untrusted thenables a function from the
+// private facts world. Capture primitives in the target realm; native checks all output.
+const AWAIT_RESULT: &str = r#"(() => {
+    'use strict';
     const resolve = Promise.resolve.bind(Promise), stringify = JSON.stringify;
-    const Encoder = TextEncoder, Array = Uint8Array;
-    const fail = code => done(new Array([code,110,117,108,108]));
-    resolve(value).then(result => {
-        try {
-            let json = stringify(result);
-            if (json === undefined) json = 'null';
-            if (json.length > 1048576) { fail(2); return; }
-            const bytes = new Encoder().encode(json);
-            if (bytes.length > 1048576) { fail(2); return; }
-            const output = new Array(bytes.length + 1); output.set(bytes, 1); done(output);
-        } catch (_) { fail(1); }
-    }, () => fail(1));
-})"#;
+    const then = Function.call.bind(Promise.prototype.then);
+    return (value, done, batch) => {
+        const fail = code => done(code + 'null');
+        then(resolve(value), result => {
+            try {
+                if (batch) result = result.value;
+                let json = stringify(result);
+                if (json === undefined) json = 'null';
+                if (json.length > 1048576) { fail(2); return; }
+                done('0' + json);
+            } catch (_) { fail(1); }
+        }, () => fail(1));
+    };
+})()"#;
+
+const BATCH_RESULT: &str = r#"(() => {
+    'use strict';
+    const P = Promise, resolve = P.resolve.bind(P), then = Function.call.bind(P.prototype.then);
+    return (...values) => new P(done => {
+        let remaining = values.length, last;
+        const settle = (index, value) => {
+            if (index === values.length - 1) last = value;
+            if (--remaining === 0) done({__proto__: null, value: last});
+        };
+        for (let i = 0; i < values.length; i++) {
+            then(resolve(values[i]), value => settle(i, value), () => settle(i, null));
+        }
+    });
+})()"#;
 
 fn injection_document_live(
     runtime: &Runtime,
@@ -1055,10 +1110,18 @@ fn injection_document_live(
     runtime
         .state
         .validate_message(page, &request.token, request.generation)
-        && runtime
-            .state
-            .frame(page, frame)
-            .is_some_and(|info| info.document_seq == sequence)
+        && runtime.state.frame(page, frame).is_some_and(|info| {
+            info.document_seq == sequence
+                && runtime.state.attachment(page).is_some_and(|attachment| {
+                    attachment.worlds.iter().any(|grant| {
+                        grant.install_id == request.install_id
+                            && grant.name == request.admission_world
+                            && (request.world.is_empty()
+                                || request.world == request.admission_world)
+                            && grant.matches.iter().any(|rule| rule.matches(info))
+                    })
+                })
+        })
 }
 
 fn prepare_injection_world(page: u64, frame: u64, sequence: u64, request: &InjectRequest) -> bool {
@@ -1355,10 +1418,10 @@ unsafe extern "C" fn idle_injection(data: *mut c_void) -> c_int {
         }
         if state == Some(true) && now < waiting.deadline {
             let mut request = waiting.request.clone();
-            request.kind = if request.kind == InjectionKind::FunctionAtIdle {
-                InjectionKind::Function
-            } else {
-                InjectionKind::Script
+            request.kind = match request.kind {
+                InjectionKind::FunctionAtIdle => InjectionKind::Function,
+                InjectionKind::ScriptBatchAtIdle => InjectionKind::ScriptBatch,
+                _ => InjectionKind::Script,
             };
             request.timeout_ms =
                 u32::try_from(waiting.deadline.saturating_duration_since(now).as_millis())
@@ -1407,6 +1470,17 @@ pub(super) fn inject(
     if request.source_fd.is_some() != mapped.is_some() {
         return false;
     }
+    let batch = if matches!(
+        request.kind,
+        InjectionKind::ScriptBatch | InjectionKind::ScriptBatchAtIdle
+    ) {
+        match request.batch_sources(Some(source)) {
+            Ok(batch) => Some(batch),
+            Err(_) => return false,
+        }
+    } else {
+        None
+    };
     if !with_runtime(|runtime| {
         runtime
             .state
@@ -1478,7 +1552,8 @@ pub(super) fn inject(
                 .ok_or(InjectionStatus::StaleTarget)?;
             let grant = attach.worlds.iter().any(|world| {
                 world.install_id == request.install_id
-                    && (request.world.is_empty() || request.world == world.name)
+                    && request.admission_world == world.name
+                    && (request.world.is_empty() || request.world == request.admission_world)
                     && world.matches.iter().any(|rule| rule.matches(info))
             });
             if !grant {
@@ -1489,7 +1564,9 @@ pub(super) fn inject(
             }
             if !matches!(
                 request.kind,
-                InjectionKind::ScriptAtIdle | InjectionKind::FunctionAtIdle
+                InjectionKind::ScriptAtIdle
+                    | InjectionKind::FunctionAtIdle
+                    | InjectionKind::ScriptBatchAtIdle
             ) {
                 runtime
                     .state
@@ -1510,7 +1587,9 @@ pub(super) fn inject(
         }
         if matches!(
             request.kind,
-            InjectionKind::ScriptAtIdle | InjectionKind::FunctionAtIdle
+            InjectionKind::ScriptAtIdle
+                | InjectionKind::FunctionAtIdle
+                | InjectionKind::ScriptBatchAtIdle
         ) {
             let mut request = request.clone();
             request.target = InjectionTarget::Frame {
@@ -1593,12 +1672,8 @@ pub(super) fn inject(
             publish_result(pending, InjectionStatus::StaleTarget, "null".into());
             continue;
         };
-        let Some(private_context) = context(page, frame_id, FACT_WORLD) else {
-            publish_result(pending, InjectionStatus::StaleTarget, "null".into());
-            continue;
-        };
         let (awaiter, success) = evaluate(
-            &private_context,
+            &target_context,
             AWAIT_RESULT,
             "zephium://native/injection-result",
         );
@@ -1620,7 +1695,7 @@ pub(super) fn inject(
             let mut value_type = raw::jsc_value_get_type();
             let callback_data = Box::into_raw(Box::new(id));
             let Some(done) = Owned::full(raw::jsc_value_new_functionv(
-                private_context.0,
+                target_context.0,
                 c"injectionComplete".as_ptr(),
                 callback(injection_complete as *const ()),
                 callback_data.cast(),
@@ -1676,27 +1751,77 @@ pub(super) fn inject(
                     finish(id, InjectionStatus::EvaluationFailed, "null".into());
                     continue;
                 };
-                let (invoke, success) = evaluate(
-                    &private_context,
-                    "((functionValue, args) => Reflect.apply(functionValue, undefined, args))",
-                    "zephium://native/invoke",
-                );
-                let Some(invoke) = invoke.filter(|_| success) else {
-                    finish(id, InjectionStatus::EvaluationFailed, "null".into());
+                let Some(length) = Owned::full(raw::jsc_value_object_get_property(
+                    args.0,
+                    c"length".as_ptr(),
+                )) else {
+                    finish(id, InjectionStatus::InvalidArguments, "null".into());
                     continue;
                 };
-                let mut arguments = [function.0, args.0];
+                let count = raw::jsc_value_to_int32(length.0);
+                if count < 0 || count as usize > protocol::MAX_ARGS_JSON_BYTES {
+                    finish(id, InjectionStatus::InvalidArguments, "null".into());
+                    continue;
+                }
+                let values: Option<Vec<_>> = (0..count as u32)
+                    .map(|index| {
+                        Owned::full(raw::jsc_value_object_get_property_at_index(args.0, index))
+                    })
+                    .collect();
+                let Some(values) = values else {
+                    finish(id, InjectionStatus::InvalidArguments, "null".into());
+                    continue;
+                };
+                let mut arguments: Vec<_> = values.iter().map(|value| value.0).collect();
                 let value = Owned::full(raw::jsc_value_function_callv(
-                    invoke.0,
-                    2,
+                    function.0,
+                    arguments.len() as u32,
                     arguments.as_mut_ptr(),
                 ));
-                if !raw::jsc_context_get_exception(private_context.0).is_null() {
-                    raw::jsc_context_clear_exception(private_context.0);
+                if !raw::jsc_context_get_exception(target_context.0).is_null() {
+                    raw::jsc_context_clear_exception(target_context.0);
                     finish(id, InjectionStatus::EvaluationFailed, "null".into());
                     continue;
                 }
                 value
+            } else if let Some(batch) = &batch {
+                let (aggregate, success) = evaluate(
+                    &target_context,
+                    BATCH_RESULT,
+                    "zephium://native/batch-result",
+                );
+                let Some(aggregate) = aggregate.filter(|_| success) else {
+                    finish(id, InjectionStatus::EvaluationFailed, "null".into());
+                    continue;
+                };
+                let mut values = Vec::with_capacity(batch.len());
+                for item in batch {
+                    if !with_runtime(|runtime| {
+                        injection_document_live(runtime, page, frame_id, sequence, &request)
+                    })
+                    .unwrap_or(false)
+                    {
+                        break;
+                    }
+                    let (value, success) =
+                        evaluate(&target_context, &source[item.range.clone()], &item.url);
+                    let value = value.filter(|_| success).or_else(|| {
+                        evaluate(&target_context, "void 0", "zephium://native/undefined").0
+                    });
+                    if let Some(value) = value {
+                        values.push(value);
+                    }
+                }
+                if values.len() != batch.len() {
+                    finish(id, InjectionStatus::StaleTarget, "null".into());
+                    continue;
+                }
+                let mut arguments: Vec<_> = values.iter().map(|value| value.0).collect();
+                Owned::full(raw::jsc_value_function_callv(
+                    aggregate.0,
+                    arguments.len() as u32,
+                    arguments.as_mut_ptr(),
+                ))
             } else {
                 let (value, success) = evaluate(&target_context, source, &request.source_url);
                 if !success {
@@ -1709,14 +1834,25 @@ pub(super) fn inject(
                 finish(id, InjectionStatus::EvaluationFailed, "null".into());
                 continue;
             };
-            let mut arguments = [value.0, done.0];
+            let Some(batch_flag) = Owned::full(raw::jsc_value_new_from_json(
+                target_context.0,
+                if batch.is_some() {
+                    c"true".as_ptr()
+                } else {
+                    c"false".as_ptr()
+                },
+            )) else {
+                finish(id, InjectionStatus::EvaluationFailed, "null".into());
+                continue;
+            };
+            let mut arguments = [value.0, done.0, batch_flag.0];
             drop(Owned::full(raw::jsc_value_function_callv(
                 awaiter.0,
-                2,
+                3,
                 arguments.as_mut_ptr(),
             )));
-            if !raw::jsc_context_get_exception(private_context.0).is_null() {
-                raw::jsc_context_clear_exception(private_context.0);
+            if !raw::jsc_context_get_exception(target_context.0).is_null() {
+                raw::jsc_context_clear_exception(target_context.0);
                 finish(id, InjectionStatus::EvaluationFailed, "null".into());
             }
         }
