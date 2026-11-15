@@ -469,19 +469,36 @@ impl EngineHost {
                     // operations against the same native view.
                     self.suspend_failed.remove(id);
                     self.suspend_retries.remove(id);
-                    let restore_normal = self.refuse_memory_low.remove(id);
-                    woken.push((*id, restore_normal));
+                    woken.push(*id);
                 }
             }
-            for (id, restore_normal) in woken {
-                if restore_normal {
-                    if let Some(view) = self.views.get(&id) {
-                        let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
-                    }
-                }
+            for id in woken {
                 self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);
                 self.resume_store_button_poll(id);
+            }
+            // Clear refuse-path Low only after Normal succeeds. Retry on later
+            // layouts even when visibility is unchanged (failed setter).
+            let pending: Vec<_> = self
+                .refuse_memory_low
+                .iter()
+                .copied()
+                .filter(|id| !self.hidden.contains(id))
+                .collect();
+            for id in pending {
+                match self.views.get(&id) {
+                    Some(view)
+                        if view
+                            .set_memory_usage_level(MemoryUsageLevel::Normal)
+                            .is_ok() =>
+                    {
+                        self.refuse_memory_low.remove(&id);
+                    }
+                    None => {
+                        self.refuse_memory_low.remove(&id);
+                    }
+                    Some(_) => {}
+                }
             }
         }
         self.refresh_visible_generic_styles();

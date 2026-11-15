@@ -142,6 +142,19 @@ fn self_budget_tier(
     }
 }
 
+/// Apply a family sample: `None` keeps `previous` so undercount cannot clear Warning.
+#[cfg(any(test, target_os = "windows"))]
+fn self_tier_after_sample(
+    sample: Option<u64>,
+    previous: zephium_core::ports::engine::MemoryPressure,
+    soft: u64,
+) -> zephium_core::ports::engine::MemoryPressure {
+    match sample {
+        Some(bytes) => self_budget_tier(bytes, previous, soft),
+        None => previous,
+    }
+}
+
 /// The notifications that can end `tier`, as (low, high, recheck). Only an
 /// unsignaled notification can be waited for, so a signaled one is never in
 /// the set. Leaving the low state cannot be waited for at all: while
@@ -219,6 +232,14 @@ mod tests {
             MemoryPressure::Critical.max(MemoryPressure::Warning),
             MemoryPressure::Critical
         );
+        assert_eq!(
+            self_tier_after_sample(None, MemoryPressure::Warning, SOFT),
+            MemoryPressure::Warning
+        );
+        assert_eq!(
+            self_tier_after_sample(Some(SOFT - (1 << 30) - 1), MemoryPressure::Warning, SOFT),
+            MemoryPressure::Normal
+        );
     }
 }
 
@@ -227,7 +248,10 @@ mod native {
     use std::collections::{HashMap, HashSet};
     use std::sync::{Arc, Mutex};
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::core::HRESULT;
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_NO_MORE_FILES, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
@@ -304,13 +328,33 @@ mod native {
         };
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         // SAFETY: Toolhelp enumeration against the live snapshot.
-        let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
-        while more {
+        // ERROR_NO_MORE_FILES is normal exhaustion; any other error rejects the
+        // sample so a partial tree cannot clear Warning.
+        let no_more = HRESULT::from_win32(ERROR_NO_MORE_FILES.0);
+        match unsafe { Process32FirstW(snapshot, &mut entry) } {
+            Ok(()) => {}
+            Err(err) if err.code() == no_more => {
+                let _ = unsafe { CloseHandle(snapshot) };
+                return None;
+            }
+            Err(_) => {
+                let _ = unsafe { CloseHandle(snapshot) };
+                return None;
+            }
+        }
+        loop {
             children
                 .entry(entry.th32ParentProcessID)
                 .or_default()
                 .push(entry.th32ProcessID);
-            more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
+            match unsafe { Process32NextW(snapshot, &mut entry) } {
+                Ok(()) => {}
+                Err(err) if err.code() == no_more => break,
+                Err(_) => {
+                    let _ = unsafe { CloseHandle(snapshot) };
+                    return None;
+                }
+            }
         }
         let _ = unsafe { CloseHandle(snapshot) };
 
@@ -433,10 +477,11 @@ mod native {
                         os_tier = next_os;
                         // A failed family sample keeps the prior self tier so
                         // a denied OpenProcess cannot clear Warning to Normal.
-                        if let Some(bytes) = family_private_bytes(root) {
-                            self_tier =
-                                super::self_budget_tier(bytes, self_tier, SELF_SOFT_PRIVATE);
-                        }
+                        self_tier = super::self_tier_after_sample(
+                            family_private_bytes(root),
+                            self_tier,
+                            SELF_SOFT_PRIVATE,
+                        );
                         let next = os_tier.max(self_tier);
                         if next != effective {
                             effective = next;

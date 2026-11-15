@@ -304,15 +304,41 @@ fn windows_content_tabs_do_not_mix_low_memory_with_try_suspend() {
         "hide must not set Low; TrySuspend owns that transition"
     );
     assert!(
-        windows.contains("refuse_memory_low.remove(id)"),
-        "Normal restore must gate on refuse-path Low only"
-    );
-    assert!(
-        windows.contains("if restore_normal")
-            && windows.contains("MemoryUsageLevel::Normal"),
-        "show must not poke Normal after a successful TrySuspend"
+        windows.contains("refuse_memory_low")
+            && windows.contains("!self.hidden.contains(id)")
+            && windows.contains("MemoryUsageLevel::Normal")
+            && windows.contains(".is_ok()"),
+        "Normal restore retries visible refuse-path Lows only after setter success"
     );
     let discard = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/discard.rs"));
+    let pump = discard
+        .split("fn pump_suspends(")
+        .nth(1)
+        .expect("pump_suspends")
+        .split("fn ")
+        .next()
+        .expect("bounded pump_suspends");
+    assert!(
+        pump.contains("!self.refuse_memory_low.contains(id)"),
+        "pump must not admit TrySuspend while refuse-path Low is set"
+    );
+    let timeout = discard
+        .split("fn on_suspend_timeout(")
+        .nth(1)
+        .expect("on_suspend_timeout")
+        .split("fn on_suspend_preflight(")
+        .next()
+        .expect("bounded on_suspend_timeout");
+    let uncertain = timeout
+        .find("suspend_uncertain.insert")
+        .expect("timeout marks uncertain");
+    let refused = timeout
+        .find("suspend_refused")
+        .expect("timeout may refuse");
+    assert!(
+        uncertain < refused,
+        "timeout must mark uncertain before refusal handling"
+    );
     let refuse = discard
         .split("fn suspend_refused(")
         .nth(1)
@@ -320,11 +346,23 @@ fn windows_content_tabs_do_not_mix_low_memory_with_try_suspend() {
         .split("fn retry_suspend(")
         .next()
         .expect("bounded suspend refusal");
-    assert!(refuse.contains("MemoryUsageLevel::Low"));
-    assert!(refuse.contains("refused after its retry"));
+    let defer = refuse
+        .find("suspend_uncertain.contains")
+        .expect("final refuse defers while uncertain");
+    let low = refuse
+        .find("MemoryUsageLevel::Low")
+        .expect("final refuse sets Low");
+    assert!(
+        defer < low,
+        "first/uncertain refusal must not apply Low before the exact negative settle"
+    );
     assert!(
         refuse.contains("refuse_memory_low.insert"),
         "final refuse must record Low for show-time Normal restore"
+    );
+    assert!(
+        refuse.contains("refused after its retry"),
+        "Low belongs to the post-retry refuse path only"
     );
 }
 

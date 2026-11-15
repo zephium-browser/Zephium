@@ -1388,6 +1388,9 @@ impl EngineHost {
             return;
         }
         self.suspending.remove(&id);
+        // Mark uncertain before refusal handling so a timed-out attempt cannot
+        // set Low / emit DormancyRefused while TrySuspend may still settle.
+        self.suspend_uncertain.insert(id);
         if self.attempt_is_current(id, &attempt) {
             self.suspend_refused(id);
         }
@@ -1396,10 +1399,6 @@ impl EngineHost {
             .get_mut(&id)
             .and_then(|view| view.suspend_deadline.take());
         drop(timer);
-        // Keep one uncertain operation per native generation until its exact
-        // callback arrives or the view closes. A timeout releases a batch slot
-        // but cannot authorize overlapping TrySuspend/evaluation requests.
-        self.suspend_uncertain.insert(id);
         self.refresh_missed_styles(id);
         self.pump_suspends();
     }
@@ -1541,6 +1540,11 @@ impl EngineHost {
             }
             Some(true) => {}
             Some(false) => {
+                // A timed-out attempt may still settle with TrySuspend. Keep Low
+                // for its exact negative callback, which clears uncertainty first.
+                if self.suspend_uncertain.contains(&id) {
+                    return;
+                }
                 eprintln!("suspend: refused after its retry; the page stays awake");
                 // TrySuspend cannot run: Low is the Microsoft-supported path
                 // when scripts must keep going. Do not set Low on ordinary hide
@@ -1604,6 +1608,7 @@ impl EngineHost {
                         && !self.suspending.contains(id)
                         && !self.suspend_failed.contains(id)
                         && !self.suspend_uncertain.contains(id)
+                        && !self.refuse_memory_low.contains(id)
                 })
                 .copied()
                 .min();
