@@ -19,6 +19,48 @@ pub(super) fn scope(page: u64, frame: u64, document: u64, world: &str, trigger: 
 
 static RECORDS: AtomicUsize = AtomicUsize::new(0);
 
+pub(super) unsafe extern "C" fn console_message(
+    page: *mut raw::Object,
+    message: *mut raw::Object,
+    _: *mut std::ffi::c_void,
+) {
+    super::boundary(|| unsafe {
+        if message.is_null() || page.is_null() {
+            return;
+        }
+        let level = raw::webkit_console_message_get_level(message);
+        if !matches!(level, 2 | 3) {
+            return;
+        }
+        let Ok(extension) = std::env::var("ZEPHIUM_WEBEXT_DIAGNOSTIC_EXTENSION") else {
+            return;
+        };
+        if extension.len() != 32 || !extension.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
+            return;
+        }
+        let sequence = RECORDS.fetch_add(1, Ordering::Relaxed);
+        if sequence >= 4096 {
+            return;
+        }
+        let row = serde_json::json!({
+            "extension":extension, "context":"NativeConsole", "process":std::process::id(),
+            "sequence":sequence, "event":{
+                "kind":"native-console", "page":raw::webkit_web_page_get_id(page),
+                "level":level, "message":bounded(raw::webkit_console_message_get_text(message)),
+                "source":bounded(raw::webkit_console_message_get_source_id(message)),
+                "line":raw::webkit_console_message_get_line(message)
+            }
+        });
+        let text = row.to_string();
+        if text.len() <= 16 * 1024 {
+            let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
+        } else {
+            let row = serde_json::json!({"extension":extension,"context":"NativeConsole","event":{"kind":"native-record-too-large"}});
+            let _ = writeln!(std::io::stderr().lock(), "ZPD {row}");
+        }
+    });
+}
+
 pub(super) fn background_process(page: u64, uri: &str) {
     if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_none() {
         return;
@@ -74,7 +116,9 @@ fn bounded(pointer: *const c_char) -> String {
 fn redact(text: &str) -> String {
     text.split_whitespace()
         .map(|word| {
-            if word.contains("://") && !word.contains("chrome-extension://") {
+            if word.contains("://")
+                && (!word.contains("chrome-extension://") || word.matches("://").count() != 1)
+            {
                 "[network-url]".to_owned()
             } else {
                 word.split(['?', '#']).next().unwrap_or("").to_owned()
@@ -128,6 +172,32 @@ pub(super) fn evaluation(context: &Owned, source: &CStr, success: bool) {
     let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
 }
 
+pub(super) fn evaluation_begin(source: &CStr) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_none() {
+        return;
+    }
+    let source = source.to_string_lossy();
+    let Some((extension, _)) = source
+        .strip_prefix("chrome-extension://")
+        .and_then(|path| path.split_once('/'))
+    else {
+        return;
+    };
+    if extension.len() != 32 || !extension.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
+        return;
+    }
+    let sequence = RECORDS.fetch_add(1, Ordering::Relaxed);
+    if sequence >= 4096 {
+        return;
+    }
+    let scope = SCOPE.with_borrow(Clone::clone);
+    let row = serde_json::json!({"extension":extension,"context":"ContentScript","process":std::process::id(),"sequence":sequence,"event":{"kind":"native-evaluation-begin","source":redact(&source),"scope":scope}});
+    let text = row.to_string();
+    if text.len() <= 16 * 1024 {
+        let _ = writeln!(std::io::stderr().lock(), "ZPD {text}");
+    }
+}
+
 pub(super) fn post_refused(page: u64, frame: u64, world: &str, error: &crate::state::StateError) {
     if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_none() {
         return;
@@ -161,6 +231,10 @@ mod tests {
                 "at https://user:secret@host/path?q=s chrome-extension://id/file.js?secret#x"
             ),
             "at [network-url] chrome-extension://id/file.js"
+        );
+        assert_eq!(
+            super::redact("https://host/chrome-extension://id/path"),
+            "[network-url]"
         );
     }
 }

@@ -1,0 +1,1 @@
+return JSON.stringify({count:document.querySelectorAll('#vimium-hint-marker-container .vimiumHintMarker').length,labels:[...document.querySelectorAll('#vimium-hint-marker-container .vimiumHintMarker')].map(node=>node.textContent)});

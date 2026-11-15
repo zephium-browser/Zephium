@@ -13,6 +13,9 @@ mod shell;
 #[path = "runtime_support/mod.rs"]
 mod support;
 
+#[path = "breadth_support/mod.rs"]
+mod breadth;
+
 use std::cell::{Cell, RefCell};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -87,12 +90,29 @@ impl Fixture {
                     .unwrap_or("/")
                     .to_owned();
                 let light = "style=\"background:#ffffff;color:#000000\"";
+                if matches!(
+                    path.as_str(),
+                    "/analytics.analytics/analytics.min.js" | "/run3-control.json"
+                ) {
+                    collected
+                        .lock()
+                        .unwrap()
+                        .push(json!({"filterHit": path.clone()}));
+                    let body = "{\"ownedFilteringFixture\":true}";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    continue;
+                }
                 // Requests for tracker hosts arrive here through the test proxy.
                 if path.contains("ubol-") {
                     collected.lock().unwrap().push(json!({"hit": path.clone()}));
                 }
                 if path == "/request-redirect" {
                     let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: /request-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
+                if path == "/cache-image.svg" {
+                    let body = "<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><rect width='64' height='64' fill='blue'/></svg>";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nCache-Control: public,max-age=3600\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                     continue;
                 }
                 if path.starts_with("/request-error") {
@@ -104,7 +124,23 @@ impl Fixture {
                     let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
                     continue;
                 }
-                let body = if path == "/delayed-form" {
+                if path == "/video.webm" {
+                    let body = include_bytes!(
+                        "../../../eval/webext-conformance/fixtures/breadth/video.webm"
+                    );
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: video/webm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = stream.write_all(body);
+                    continue;
+                }
+                if path == "/breadth.json" {
+                    let body = r#"{"fixture":true,"items":[1,2,3]}"#;
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    continue;
+                }
+                let body = if path == "/breadth" {
+                    include_str!("../../../eval/webext-conformance/fixtures/breadth/index.html")
+                        .to_owned()
+                } else if path == "/delayed-form" {
                     let user_agent = text.lines().find_map(|line| {
                         let (name, value) = line.split_once(':')?;
                         name.eq_ignore_ascii_case("user-agent")

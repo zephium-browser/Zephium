@@ -21,6 +21,14 @@ unsafe extern "C" {
     ) -> *mut Object;
     pub fn webkit_web_page_get_id(page: *mut Object) -> u64;
     pub fn webkit_web_page_get_uri(page: *mut Object) -> *const c_char;
+    #[cfg(feature = "native-tests")]
+    pub fn webkit_console_message_get_level(message: *mut Object) -> c_int;
+    #[cfg(feature = "native-tests")]
+    pub fn webkit_console_message_get_text(message: *mut Object) -> *const c_char;
+    #[cfg(feature = "native-tests")]
+    pub fn webkit_console_message_get_source_id(message: *mut Object) -> *const c_char;
+    #[cfg(feature = "native-tests")]
+    pub fn webkit_console_message_get_line(message: *mut Object) -> c_uint;
     pub fn webkit_web_page_get_dom_document(page: *mut Object) -> *mut Object;
     pub fn webkit_dom_document_query_selector_all(
         document: *mut Object,

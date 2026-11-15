@@ -328,6 +328,15 @@ unsafe extern "C" fn page_created(_: *mut Object, page: *mut Object, _: *mut c_v
         if !added {
             return;
         }
+        #[cfg(feature = "native-tests")]
+        if std::env::var_os("ZEPHIUM_WEBEXT_DIAGNOSTICS_DIR").is_some() {
+            connect(
+                page,
+                c"console-message-sent",
+                diagnostics::console_message as *const (),
+                ptr::null_mut(),
+            );
+        }
         raw::g_object_weak_ref(
             page,
             Some(page_destroyed),

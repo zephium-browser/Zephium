@@ -47,6 +47,8 @@ fn evaluate(context: &Owned, source: &str, url: &str) -> (Option<Owned>, bool) {
     let Ok(url) = CString::new(url) else {
         return (None, false);
     };
+    #[cfg(feature = "native-tests")]
+    super::diagnostics::evaluation_begin(&url);
     unsafe {
         let value = Owned::full(raw::jsc_context_evaluate_with_source_uri(
             context.0,
