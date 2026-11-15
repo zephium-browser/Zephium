@@ -94,14 +94,13 @@ impl RuntimeHost {
         self.state.registry.has_web_request_listeners()
     }
 
-    pub(crate) fn request_observed(
-        &mut self,
+    pub(crate) fn request_matches(
+        &self,
         tab: ItemId,
         observation: &zephium_webext_runtime::api::web_request::Observation,
-        out: &mut Outbox,
-    ) {
+    ) -> bool {
         let Some(tab_id) = self.browser.tab_id(tab) else {
-            return;
+            return false;
         };
         let facts = EventFacts {
             url: Some(&observation.url),
@@ -113,11 +112,48 @@ impl RuntimeHost {
                 .and_then(|tab| tab["windowId"].as_i64()),
             ..Default::default()
         };
+        self.permissions.iter().any(|(install, permissions)| {
+            observation.project(permissions, &[]).is_some()
+                && zephium_webext_runtime::api::web_request::OBSERVED_EVENTS
+                    .iter()
+                    .any(|event| {
+                        !self
+                            .state
+                            .registry
+                            .request_groups(*install, event, &facts)
+                            .is_empty()
+                    })
+        })
+    }
+
+    pub(crate) fn request_observed(
+        &mut self,
+        tab: ItemId,
+        observation: &zephium_webext_runtime::api::web_request::Observation,
+        out: &mut Outbox,
+    ) {
+        let Some(tab_id) = self.browser.tab_id(tab) else {
+            return;
+        };
+        let window_id = self
+            .browser
+            .sender_tab(tab)
+            .and_then(|tab| tab["windowId"].as_i64());
+        let facts = EventFacts {
+            url: Some(&observation.url),
+            resource_type: observation.details["type"].as_str(),
+            tab_id: Some(i64::from(tab_id)),
+            window_id,
+            ..Default::default()
+        };
         let installs: Vec<_> = self.state.installs.keys().copied().collect();
         for install in installs {
             let Some(permissions) = self.permissions.get(&install) else {
                 continue;
             };
+            if observation.project(permissions, &[]).is_none() {
+                continue;
+            }
             for key in self
                 .state
                 .registry
@@ -126,6 +162,9 @@ impl RuntimeHost {
                 let Some(sender) = self.router.contexts.get(&key) else {
                     continue;
                 };
+                if sender.kind() == ContextKind::Background {
+                    continue;
+                }
                 for listener in self
                     .state
                     .registry
@@ -145,15 +184,59 @@ impl RuntimeHost {
                         continue;
                     };
                     details["tabId"] = tab_id.into();
-                    let args = json!([details, [listener.get()]]);
                     if let Some(frame) = super::event_frame(
                         sender.kind(),
                         super::direct_sequence(),
                         observation.event,
-                        &args,
+                        &json!([details, [listener.get()]]),
                     ) {
                         out.deliver(key.clone(), frame);
                     }
+                }
+            }
+            if self
+                .state
+                .installs
+                .get(&install)
+                .is_none_or(|state| state.background.is_none())
+            {
+                continue;
+            }
+            let listening = self
+                .state
+                .registry
+                .should_wake(install, observation.event, &facts)
+                || self.router.contexts.values().any(|sender| {
+                    sender.install() == install
+                        && sender.kind() == ContextKind::Background
+                        && !self
+                            .state
+                            .registry
+                            .listeners(sender, observation.event, &facts)
+                            .is_empty()
+                });
+            if !listening {
+                continue;
+            }
+            for extra in self
+                .state
+                .registry
+                .request_groups(install, observation.event, &facts)
+            {
+                let args = json!({"requestObservation":true,"tabId":tab_id,"windowId":window_id,"url":observation.url.as_str(),"top":observation.top_level.as_ref().map(url::Url::as_str),"initiator":observation.initiator.as_ref().map(url::Url::as_str),"details":observation.details,"headers":observation.headers,"extra":extra});
+                if self.enqueue(
+                    install,
+                    observation.event,
+                    &args,
+                    EventImportance::Droppable,
+                ) {
+                    self.observe(
+                        super::Observation::Wake {
+                            install,
+                            reason: StartReason::Event,
+                        },
+                        out,
+                    );
                 }
             }
         }
@@ -628,4 +711,66 @@ impl RuntimeHost {
         };
         self.router.port_actions(actions, limiter, out);
     }
+}
+
+/// Reprojects raw queued facts after every wake/retry; listener ids never survive a context.
+pub(super) fn request_arguments(
+    registry: &zephium_webext_runtime::events::EventRegistry,
+    permissions: Option<&zephium_webext_runtime::permissions::InstallPermissions>,
+    sender: &Sender,
+    name: &str,
+    bytes: &[u8],
+    browser: &Shared,
+) -> Option<Vec<u8>> {
+    let event = *zephium_webext_runtime::api::web_request::OBSERVED_EVENTS
+        .iter()
+        .find(|event| **event == name)?;
+    let empty = || Some(b"[{},[]]".to_vec());
+    let raw: Value = serde_json::from_slice(bytes).ok()?;
+    let Some(permissions) = permissions else {
+        return empty();
+    };
+    let tab_id = raw["tabId"].as_i64()? as i32;
+    if browser.tab_item(i64::from(tab_id)).is_none() {
+        return empty();
+    }
+    let observation = zephium_webext_runtime::api::web_request::Observation {
+        event,
+        url: url::Url::parse(raw["url"].as_str()?).ok()?,
+        top_level: raw["top"]
+            .as_str()
+            .and_then(|url| url::Url::parse(url).ok()),
+        initiator: raw["initiator"]
+            .as_str()
+            .and_then(|url| url::Url::parse(url).ok()),
+        details: raw["details"].clone(),
+        headers: serde_json::from_value(raw["headers"].clone()).ok()?,
+    };
+    let extra: Vec<String> = serde_json::from_value(raw["extra"].clone()).ok()?;
+    let facts = EventFacts {
+        url: Some(&observation.url),
+        resource_type: observation.details["type"].as_str(),
+        tab_id: Some(i64::from(tab_id)),
+        window_id: raw["windowId"].as_i64(),
+        ..Default::default()
+    };
+    let listeners: Vec<u64> = registry
+        .listeners(sender, event, &facts)
+        .into_iter()
+        .filter(|listener| {
+            let mut current = registry.extra_info(sender, event, *listener).to_vec();
+            current.sort();
+            current.dedup();
+            current == extra
+        })
+        .map(|listener| listener.get())
+        .collect();
+    if listeners.is_empty() {
+        return empty();
+    }
+    let Some(mut details) = observation.project(permissions, &extra) else {
+        return empty();
+    };
+    details["tabId"] = tab_id.into();
+    serde_json::to_vec(&json!([details, listeners])).ok()
 }

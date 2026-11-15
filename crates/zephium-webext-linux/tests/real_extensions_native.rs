@@ -91,6 +91,10 @@ impl Fixture {
                 if path.contains("ubol-") {
                     collected.lock().unwrap().push(json!({"hit": path.clone()}));
                 }
+                if path == "/request-redirect" {
+                    let _ = write!(stream, "HTTP/1.1 302 Found\r\nLocation: /request-final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    continue;
+                }
                 if path.starts_with("/request-error") {
                     continue;
                 }
@@ -2056,6 +2060,108 @@ fn window_commands_wake_and_effective_inventory() {
     assert_eq!(after, result, "_execute_action must not emit onCommand");
     println!("COMMANDS native wake, inventory and action route {result}");
     drop(popup);
+    host.close(tab);
+    assert!(host.runtime.retire().run(Duration::from_secs(10)));
+}
+
+#[test]
+#[ignore = "private native runtime session"]
+fn subresource_observation_disconnects_and_wakes() {
+    let _session = support::init();
+    let module = ModuleDirectory::new();
+    let fixture = Fixture::new();
+    let state = tempfile::tempdir().unwrap();
+    let package = tempfile::tempdir().unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    std::fs::write(package.path().join("manifest.json"),json!({"manifest_version":3,"name":"Requests fixture","version":"1","permissions":["storage","webRequest"],"host_permissions":["http://127.0.0.1/*"],"background":{"service_worker":"worker.js"},"action":{"default_popup":"popup.html"}}).to_string()).unwrap();
+    std::fs::write(package.path().join("worker.js"),r#"
+const listeners=[]; let saving=Promise.resolve();
+for(const name of ['onBeforeRequest','onHeadersReceived','onBeforeRedirect','onCompleted','onErrorOccurred']) {
+ const listener = details => {saving=saving.then(async()=>{const {seen=[]}=await chrome.storage.local.get('seen');seen.push({event:name,...details});await chrome.storage.local.set({seen});});};
+ chrome.webRequest[name].addListener(listener,{urls:['http://127.0.0.1/*']});listeners.push([name,listener]);
+}
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{if(message.remove){for(const [name,listener] of listeners)chrome.webRequest[name].removeListener(listener);respond(true);}});
+"#).unwrap();
+    std::fs::write(
+        package.path().join("popup.html"),
+        "<!doctype html><button>Request fixture</button>",
+    )
+    .unwrap();
+    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let tab = host.open(&fixture.url("/password-form"), true);
+    assert_eq!(host.runtime.request_observer_handlers(), 0);
+    let install = ExtensionInstallId::from(INSTALL);
+    host.runtime
+        .install_admitted(spec(package.path(), id, 1))
+        .unwrap();
+    pump(&mut host, Duration::from_secs(2));
+    assert!(host.runtime.request_observer_handlers() > 0);
+    host.runtime
+        .memory_pressure(zephium_webext_linux::runtime::MemoryPressure::Critical);
+    pump(&mut host, Duration::from_secs(2));
+    assert_eq!(
+        host.runtime.background(install).unwrap().state,
+        zephium_webext_runtime::lifecycle::BackgroundState::Stopped
+    );
+    let view = host.shell.borrow().tabs[&tab].view.clone();
+    evaluate(
+        &view,
+        "await fetch('/request-redirect');try{await fetch('/request-error')}catch{};return 'done';",
+    );
+    pump(&mut host, Duration::from_secs(2));
+    let popup = host
+        .runtime
+        .open_page(install, PageKind::Popup, None)
+        .unwrap();
+    pump(&mut host, Duration::from_secs(1));
+    let result: Value = serde_json::from_str(&evaluate(
+        popup.view(),
+        "return JSON.stringify(await chrome.storage.local.get('seen'));",
+    ))
+    .unwrap();
+    println!("REQUESTS native {result}");
+    let rows = result["seen"].as_array().unwrap();
+    for event in [
+        "onBeforeRequest",
+        "onHeadersReceived",
+        "onBeforeRedirect",
+        "onCompleted",
+        "onErrorOccurred",
+    ] {
+        assert!(
+            rows.iter().any(|row| row["event"] == event),
+            "missing {event}: {rows:?}"
+        );
+    }
+    for row in rows {
+        assert_eq!(row["frameId"], -1);
+        assert_eq!(row["parentFrameId"], -1);
+        assert_eq!(row["type"], "other");
+        assert!(row.get("initiator").is_none());
+    }
+    let redirect = rows
+        .iter()
+        .find(|row| row["event"] == "onBeforeRedirect")
+        .unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| row["event"] == "onCompleted" && row["requestId"] == redirect["requestId"]));
+    evaluate(&view, "void fetch('/delayed.js');return 'started';");
+    pump(&mut host, Duration::from_millis(100));
+    assert!(host.runtime.request_observer_handlers() > 1);
+    assert_eq!(
+        evaluate(
+            popup.view(),
+            "return await chrome.runtime.sendMessage({remove:true});"
+        ),
+        "true"
+    );
+    pump(&mut host, Duration::from_millis(100));
+    assert_eq!(host.runtime.request_observer_handlers(), 0);
+    pump(&mut host, Duration::from_secs(3));
+    assert_eq!(host.runtime.request_observer_handlers(), 0);
+    drop(popup);
+    drop(view);
     host.close(tab);
     assert!(host.runtime.retire().run(Duration::from_secs(10)));
 }

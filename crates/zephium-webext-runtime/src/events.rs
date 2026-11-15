@@ -110,14 +110,58 @@ impl EventRegistry {
 
     fn refresh_request_interest(&mut self) {
         self.request_interest = self.live.values().any(|items| {
-            items
-                .values()
-                .any(|item| item.spec.event.starts_with("webRequest."))
+            items.values().any(|item| {
+                crate::api::web_request::OBSERVED_EVENTS.contains(&item.spec.event.as_str())
+                    && !item
+                        .spec
+                        .extra
+                        .iter()
+                        .any(|option| matches!(option.as_str(), "blocking" | "asyncBlocking"))
+            })
         }) || self.durable.values().any(|items| {
-            items
-                .iter()
-                .any(|item| item.spec.event.starts_with("webRequest."))
+            items.iter().any(|item| {
+                crate::api::web_request::OBSERVED_EVENTS.contains(&item.spec.event.as_str())
+                    && !item
+                        .spec
+                        .extra
+                        .iter()
+                        .any(|option| matches!(option.as_str(), "blocking" | "asyncBlocking"))
+            })
         });
+    }
+
+    /// Nonblocking option groups whose current or saved filter can observe this request.
+    pub fn request_groups(
+        &self,
+        install: ExtensionInstallId,
+        event: &str,
+        facts: &EventFacts<'_>,
+    ) -> Vec<Vec<String>> {
+        let mut groups: Vec<Vec<String>> = self
+            .live
+            .iter()
+            .filter(|(key, _)| key.install() == install)
+            .flat_map(|(_, items)| items.values())
+            .chain(self.durable.get(&install).into_iter().flatten())
+            .filter(|item| {
+                item.spec.event == event
+                    && item.filter.matches(facts)
+                    && !item
+                        .spec
+                        .extra
+                        .iter()
+                        .any(|option| matches!(option.as_str(), "blocking" | "asyncBlocking"))
+            })
+            .map(|item| {
+                let mut extra = item.spec.extra.clone();
+                extra.sort();
+                extra.dedup();
+                extra
+            })
+            .collect();
+        groups.sort();
+        groups.dedup();
+        groups
     }
 
     /// Extra information admitted for one exact registered callback.

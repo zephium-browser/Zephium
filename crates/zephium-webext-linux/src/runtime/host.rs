@@ -265,6 +265,7 @@ impl InstallState {
 
 /// What handlers leave for the host to finish once the dispatcher returns.
 enum Work {
+    RequestInterest,
     Notifications {
         sender: Box<Sender>,
         request: zephium_webext_runtime::api::notifications::Request,
@@ -467,6 +468,7 @@ impl EventsHost for State {
         invocation: Invocation<'_>,
     ) -> Handled {
         let sender = invocation.sender().clone();
+        let previous_interest = self.registry.has_web_request_listeners();
         let result = match request {
             ListenerRequest::Add {
                 event,
@@ -492,6 +494,9 @@ impl EventsHost for State {
                 .finish_registration(&sender)
                 .map(|()| Value::Null),
         };
+        if previous_interest != self.registry.has_web_request_listeners() {
+            self.work.push(Work::RequestInterest);
+        }
         invocation.reply(result)
     }
 }
@@ -2686,13 +2691,26 @@ impl RuntimeHost {
         let Ok(Some(event)) = state.queue.deliver(&sender) else {
             return;
         };
+        let arguments = if event.name.starts_with("webRequest.") {
+            glue::request_arguments(
+                &self.state.registry,
+                self.permissions.get(&install),
+                &sender,
+                &event.name,
+                &event.arguments,
+                &self.browser,
+            )
+            .unwrap_or_else(|| b"[{},[]]".to_vec())
+        } else {
+            event.arguments.clone()
+        };
         let Some(frame) = (|| {
             frame(
                 ContextKind::Background,
                 &Envelope::Event {
                     seq: event.sequence,
                     name: ApiName::parse(&event.name)?,
-                    args: &event.arguments,
+                    args: &arguments,
                 },
             )
         })() else {
@@ -3388,6 +3406,7 @@ impl RuntimeHost {
                     self.record_error(install, kind, sender.kind(), message, detail);
                 }
             }
+            Work::RequestInterest => self.kick(),
             Work::Notifications {
                 sender,
                 request,
@@ -4069,6 +4088,7 @@ impl Runtime for RuntimeHost {
         self.tick_clock();
         self.close_context(context, out);
         self.router.context_closed(context, out);
+        self.kick();
         self.settle_blockers(out);
         self.check_timer();
     }

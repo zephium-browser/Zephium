@@ -3,6 +3,16 @@ use crate::permissions::InstallPermissions;
 use serde_json::Value;
 use url::Url;
 
+/// Lifecycle events the UI-process observer can establish from native resource signals.
+pub const OBSERVED_EVENTS: &[&str] = &[
+    "webRequest.onBeforeRequest",
+    "webRequest.onBeforeSendHeaders",
+    "webRequest.onHeadersReceived",
+    "webRequest.onBeforeRedirect",
+    "webRequest.onCompleted",
+    "webRequest.onErrorOccurred",
+];
+
 /// One native lifecycle event with an adapter-owned stable request identity.
 #[derive(Clone, Debug)]
 pub struct Observation {
@@ -12,6 +22,8 @@ pub struct Observation {
     pub url: Url,
     /// Initiator, when the engine establishes it.
     pub initiator: Option<Url>,
+    /// Known top-level URL for authorization, never reported as an initiator.
+    pub top_level: Option<Url>,
     /// Native details without listener-specific optional headers.
     pub details: Value,
     /// Observed headers, never speculative headers that may be added later.
@@ -24,7 +36,13 @@ impl Observation {
         if !permissions.has_api("webRequest")
             || !matches!(self.url.scheme(), "http" | "https")
             || !permissions.has_host_access(&self.url)
+            || (self.details["frameId"] == -1 && self.top_level.is_none())
+            || self
+                .top_level
+                .as_ref()
+                .is_some_and(|url| !permissions.has_host_access(url))
             || (self.initiator.is_none()
+                && self.top_level.is_none()
                 && !permissions
                     .snapshot()
                     .origins
@@ -139,6 +157,7 @@ mod tests {
             event: "webRequest.onBeforeRequest",
             url: Url::parse("https://example.com/").unwrap(),
             initiator: None,
+            top_level: None,
             details: json!({"requestId":"1"}),
             headers: Vec::new(),
         };
@@ -168,6 +187,7 @@ mod tests {
             event: "webRequest.onHeadersReceived",
             url: Url::parse("https://example.com/").unwrap(),
             initiator: Some(Url::parse("https://example.com/").unwrap()),
+            top_level: None,
             details: json!({"requestId":"1"}),
             headers: vec![
                 ("Content-Type".into(), "text/html".into()),
@@ -201,6 +221,48 @@ mod tests {
             2
         );
         observation.initiator = Some(Url::parse("https://foreign.test/").unwrap());
+        assert!(observation.project(&permissions, &[]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod top_origin_tests {
+    use super::*;
+    use crate::permissions::{PermissionDeclaration, PermissionRequest, SiteAccess};
+    use serde_json::json;
+    #[test]
+    fn unknown_frames_require_request_and_known_top_origin_access() {
+        let (declaration, _) = PermissionDeclaration::from_manifest(
+            &zephium_webext::manifest::Manifest::from_value(
+                json!({"permissions":["webRequest"],"host_permissions":["https://request.test/*","https://top.test/*"]}),
+            ),
+        );
+        let mut permissions = InstallPermissions::new(
+            declaration,
+            &PermissionRequest::default(),
+            SiteAccess::OnAllSites,
+            false,
+        );
+        let mut observation = Observation {
+            event: "webRequest.onCompleted",
+            url: Url::parse("https://request.test/path").unwrap(),
+            initiator: None,
+            top_level: Some(Url::parse("https://top.test/").unwrap()),
+            details: json!({"frameId":-1}),
+            headers: Vec::new(),
+        };
+        assert!(observation.project(&permissions, &[]).is_some());
+        assert!(observation
+            .project(&permissions, &[])
+            .unwrap()
+            .get("initiator")
+            .is_none());
+        observation.top_level = None;
+        assert!(observation.project(&permissions, &[]).is_none());
+        observation.top_level = Some(Url::parse("https://foreign.test/").unwrap());
+        assert!(observation.project(&permissions, &[]).is_none());
+        observation.top_level = Some(Url::parse("https://top.test/").unwrap());
+        let _ = permissions.set_site_access(SiteAccess::OnClick);
         assert!(observation.project(&permissions, &[]).is_none());
     }
 }

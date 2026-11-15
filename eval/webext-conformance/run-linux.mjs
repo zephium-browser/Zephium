@@ -103,6 +103,10 @@ for (const id of cases) {
         } else if (url.pathname === "/resource.txt") {
           response.setHeader("Content-Type", "text/plain");
           response.end("fixture resource");
+        } else if (url.pathname === "/request-redirect") {
+          response.writeHead(302, { Location: "/resource.txt" }).end();
+        } else if (url.pathname === "/request-fail") {
+          request.socket.destroy();
         } else if (url.pathname === "/web-frames.html") {
           response.setHeader("Content-Type", "text/html");
           response.end(

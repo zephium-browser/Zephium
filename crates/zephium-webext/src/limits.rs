@@ -167,7 +167,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("webRequest")],
-        "Request observation covers main documents with all-host access and active listeners only",
+        "UI request observations use frameId 0 only for main resources, otherwise frameId/parentFrameId -1 and type other; unknown initiators are omitted; request and top-level host access are required",
         LIN,
     ),
     (
@@ -177,7 +177,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("webRequest")],
-        "Request observation omits subresources, workers, WebSockets, redirects and authentication",
+        "Request observation is nonblocking, with WebKit-provided headers and generic net::ERR_FAILED errors; it omits workers, WebSockets, service-worker fetches, authentication, unreported redirects and requests outside initially matching filters",
         LIN,
     ),
     (

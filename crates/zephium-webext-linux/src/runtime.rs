@@ -279,7 +279,7 @@ struct TabEntry {
     styles: Vec<webkit2gtk::UserStyleSheet>,
     loads: Option<glib::SignalHandlerId>,
     uris: Option<glib::SignalHandlerId>,
-    requests: Option<glib::SignalHandlerId>,
+    requests: Option<requests::Watch>,
 }
 
 /// One profile's extension runtime. GTK thread only; clones share it.
@@ -701,6 +701,18 @@ impl ProfileRuntime {
             .and_then(|result| result.map_err(|error| error.message().to_owned()));
         self.inner.run();
         result
+    }
+
+    /// Actual live observer connections, exposed only in native qualification builds.
+    #[cfg(feature = "native-tests")]
+    pub fn request_observer_handlers(&self) -> usize {
+        self.inner
+            .tabs
+            .borrow()
+            .values()
+            .filter_map(|entry| entry.requests.as_ref())
+            .map(requests::Watch::handlers)
+            .sum()
     }
 
     /// Reserve the effective browser-window shortcuts before extension suggestions.
@@ -1682,6 +1694,9 @@ impl Inner {
             let _ = self.bridge.with_runtime(|host, out| host.shutdown(out));
             self.run();
             self.retired.set(true);
+            for entry in self.tabs.borrow_mut().values_mut() {
+                entry.requests.take();
+            }
         }
         if let Some(timer) = self.timer.borrow_mut().take() {
             timer.remove();
@@ -1979,9 +1994,7 @@ impl Inner {
             if let (Some(webview), Some(uris)) = (entry.view.upgrade(), entry.uris.take()) {
                 webview.disconnect(uris);
             }
-            if let (Some(webview), Some(requests)) = (entry.view.upgrade(), entry.requests.take()) {
-                webview.disconnect(requests);
-            }
+            entry.requests.take();
             if let Some(manager) = entry
                 .view
                 .upgrade()

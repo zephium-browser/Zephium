@@ -43,6 +43,8 @@ const missing = {
     "Real desktop notification service and native create/update/clear settlement.",
   "injection-css-inherited":
     "Native CSS matching for inherited-origin frame documents.",
+  "webrequest-lifecycle":
+    "Native resource redirects, completion and network failure signals.",
   "runtime-self-message":
     "Real worker startup and native sender-context exclusion; checked by both browser runners.",
   "scripting-repeat-file":

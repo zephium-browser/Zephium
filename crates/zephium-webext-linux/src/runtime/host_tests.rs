@@ -1338,3 +1338,102 @@ fn context_menu_registration_survives_background_stop_and_restart() {
     let out = harness.call(&background, "contextMenus.remove", json!(["retained"]));
     assert_eq!(replies(&out), vec![Ok(Value::Null)]);
 }
+
+#[test]
+fn queued_request_facts_reproject_current_listener_ids_filters_and_permissions() {
+    use zephium_core::extensions::{
+        ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration, ExtensionBrowserTab,
+        ExtensionBrowserWindow,
+    };
+    let mut h = Harness::new();
+    let (first_view, first) = h.sender(ViewKind::Background, "_zephium/background.html");
+    h.authority.close_view(first_view);
+    let (_, second) = h.sender(ViewKind::Background, "_zephium/background.html");
+    let browser = &h.host.browser;
+    let url = Url::parse("https://example.com/").unwrap();
+    let tab = ExtensionBrowserTab::from_snapshot(
+        None,
+        ItemId::from(9),
+        true,
+        "fixture",
+        Some(&url),
+        false,
+        false,
+    )
+    .unwrap();
+    let window = ExtensionBrowserWindow::new(7, false, Some(ItemId::from(9)), vec![tab]).unwrap();
+    browser.publish_surface(
+        ExtensionBrowserSurface::new(
+            ProfileId::from(1),
+            ExtensionBrowserSurfaceGeneration::new(1).unwrap(),
+            Some(7),
+            vec![window],
+        )
+        .unwrap(),
+    );
+    let tab_id = browser.tab_id(ItemId::from(9)).unwrap();
+    let (declaration, _) = PermissionDeclaration::from_manifest(&Manifest::from_value(
+        json!({"permissions":["webRequest"],"host_permissions":["https://example.com/*"]}),
+    ));
+    let permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    let name = "webRequest.onHeadersReceived";
+    let filter = json!({"urls":["https://example.com/*"]});
+    let mut registry = zephium_webext_runtime::events::EventRegistry::default();
+    let raw = serde_json::to_vec(&json!({"tabId":tab_id,"windowId":1,"url":"https://example.com/resource","top":"https://example.com/","initiator":null,"details":{"frameId":-1,"type":"other"},"headers":[["Content-Type","text/plain"],["Set-Cookie","private"]],"extra":["responseHeaders"]})).unwrap();
+    registry
+        .add_with_options(
+            &first,
+            ListenerId::new(1).unwrap(),
+            name,
+            Some(&filter),
+            &["responseHeaders".into()],
+        )
+        .unwrap();
+    let project = |registry: &zephium_webext_runtime::events::EventRegistry,
+                   sender: &Sender,
+                   permissions: Option<&InstallPermissions>|
+     -> Value {
+        serde_json::from_slice(
+            &super::glue::request_arguments(registry, permissions, sender, name, &raw, browser)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let before = project(&registry, &first, Some(&permissions));
+    assert_eq!(before[1], json!([1]));
+    assert_eq!(before[0]["responseHeaders"].as_array().unwrap().len(), 1);
+    registry.cancel_context(&first.context_key());
+    registry
+        .add_with_options(
+            &second,
+            ListenerId::new(99).unwrap(),
+            name,
+            Some(&filter),
+            &["responseHeaders".into()],
+        )
+        .unwrap();
+    assert_eq!(
+        project(&registry, &second, Some(&permissions))[1],
+        json!([99])
+    );
+    assert_eq!(project(&registry, &second, None), json!([{}, []]));
+    registry.remove(&second, name, ListenerId::new(99).unwrap());
+    registry
+        .add_with_options(
+            &second,
+            ListenerId::new(100).unwrap(),
+            name,
+            Some(&json!({"urls":["https://foreign.test/*"]})),
+            &["responseHeaders".into()],
+        )
+        .unwrap();
+    assert_eq!(
+        project(&registry, &second, Some(&permissions)),
+        json!([{}, []])
+    );
+}
