@@ -772,3 +772,72 @@ pub(super) fn frame_facts(module: &ModuleDirectory, fixture: &Fixture) {
     page.stop_loading();
     println!("WEBEXT native_frame_facts parent=true cross_parent=true sandbox_attribute=true sandbox_csp=true data_opaque=true");
 }
+
+pub(super) fn world_csp(module: &ModuleDirectory, fixture: &Fixture) {
+    let context = module.context(&(PROTOCOL_VERSION, TOKEN).to_variant());
+    let page = webkit2gtk::WebView::with_context(&context);
+    install_start_scheduler(&page);
+    page.connect_user_message_received(|_, message| {
+        if message.name().as_deref() != Some(EVENT_MESSAGE) {
+            return false;
+        }
+        message.send_reply(&webkit2gtk::UserMessage::new("observed", None));
+        true
+    });
+    load(&page, &format!("{}/frame?csp-inert", fixture.origin));
+    assert!(send(
+        &page,
+        &UiMessage::Attach(Attach {
+            token: TOKEN.into(),
+            generation: 1,
+            worlds: vec![WorldRule {
+                install_id: INSTALL.into(),
+                name: WORLD.into(),
+                matches: vec![rule(false)],
+                bootstrap: String::new()
+            }],
+            ..Attach::default()
+        }),
+        None
+    ));
+    let source = r#"
+        globalThis.worldProbe={evaluated:eval('40+2'),constructed:new Function('return 42')(),workerImports:typeof importScripts};
+        const injectedScript=document.createElement('script');
+        injectedScript.textContent="document.documentElement.dataset.inlineRan='yes'";
+        document.head.append(injectedScript);
+        const injectedStyle=document.createElement('style');
+        injectedStyle.textContent='#target{color:rgb(1,2,3)}';
+        document.head.append(injectedStyle);
+        worldProbe.inlineRan=document.documentElement.dataset.inlineRan==='yes';
+        worldProbe.styleApplied=getComputedStyle(document.getElementById('target')).color==='rgb(1, 2, 3)';
+    "#;
+    assert!(publish(
+        &page,
+        &ScriptTable {
+            generation: 1,
+            bootstraps: Default::default(),
+            catalogs: Default::default(),
+            entries: vec![entry("world-csp", RunAt::DocumentEnd, WORLD, source)]
+        },
+        true
+    ));
+    for (route, allowed) in [("user-world-csp", false), ("user-world-open", true)] {
+        load(&page, &format!("{}/{route}", fixture.origin));
+        let value: Value = serde_json::from_str(&evaluate(
+            &page,
+            "return JSON.stringify(worldProbe);",
+            Some(WORLD),
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"evaluated":42,"constructed":42,"workerImports":"undefined","inlineRan":allowed,"styleApplied":allowed}),
+            "{route}"
+        );
+        assert_eq!(
+            evaluate(&page, "return typeof worldProbe;", None),
+            "undefined"
+        );
+    }
+    println!("WEBEXT native_world_csp eval_unrestricted=true function_unrestricted=true dom_inline_obeys_page_csp=true dom_style_obeys_page_csp=true import_scripts_absent=true");
+}

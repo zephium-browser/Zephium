@@ -179,6 +179,7 @@ fn native_web_process_module() {
     content::external(&module, &fixture);
     content::view_grants(&module, &fixture);
     content::frame_facts(&module, &fixture);
+    content::world_csp(&module, &fixture);
     page.stop_loading();
     println!("WEBEXT native_module inert=true hostile_posts=true frame_roundtrip=true stale_drop=true request_policy=true");
 }

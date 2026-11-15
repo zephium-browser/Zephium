@@ -364,6 +364,8 @@ fn serve(mut socket: std::net::TcpStream, recorded: &Mutex<Vec<Request>>, port: 
     let (mime, body) = response(path, header, port);
     let csp = if path.starts_with("/dnr-csp") {
         "Content-Security-Policy: script-src 'none'; report-uri /dnr-resource?probe=csp_report\r\n"
+    } else if path.starts_with("/user-world-csp") {
+        "Content-Security-Policy: script-src 'none'; style-src 'none'\r\n"
     } else if path.starts_with("/csp-sandbox") {
         "Content-Security-Policy: sandbox allow-scripts\r\n"
     } else {
@@ -491,6 +493,7 @@ fn response(path: &str, header: &str, port: u16) -> (&'static str, String) {
     }
     let inline = "<script>document.documentElement.dataset.main=String(globalThis.mainOverride);document.documentElement.dataset.hidden=String(typeof nativeSend==='undefined');document.dispatchEvent(new Event('DOMContentLoaded',{bubbles:true}));window.dispatchEvent(new Event('load'));document.documentElement.dataset.earlyEnd=String(document.documentElement.dataset.nativeEnd==='yes');window.addEventListener('DOMContentLoaded',e=>e.stopImmediatePropagation(),true);window.addEventListener('load',e=>e.stopImmediatePropagation(),true);</script>";
     match route {
+        "/user-world-csp" | "/user-world-open" => ("text/html", "<!doctype html><html><head></head><body><p id=target>CSP fixture</p></body></html>".into()),
         "/facts" => ("text/html", format!("<!doctype html><iframe src='/frame?ordinary'></iframe><iframe src='http://localhost:{port}/frame?cross-facts'></iframe><iframe sandbox='allow-scripts' src='/frame?sandbox'></iframe><iframe src='/csp-sandbox'></iframe><iframe src='data:text/html,opaque'></iframe>")),
         "/content-frames" => ("text/html", format!(
             "<!doctype html>{inline}<iframe src='/content-frame?same'></iframe><iframe src='http://localhost:{port}/content-frame?cross'></iframe><iframe id='blank' src='about:blank'></iframe><iframe srcdoc=\"{inline}\"></iframe><iframe src='/excluded'></iframe><script>const blankDocument=document.getElementById('blank').contentDocument;const firstInline=blankDocument.createElement('script');firstInline.textContent=\"globalThis.blankInlineSawMain=globalThis.mainOverride==='native'\";blankDocument.documentElement.append(firstInline);</script>"
