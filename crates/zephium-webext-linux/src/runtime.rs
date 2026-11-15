@@ -268,6 +268,8 @@ struct Inner {
     tabs: RefCell<HashMap<BridgeViewId, TabEntry>>,
     content: RefCell<TabContent>,
     script_generation: Cell<u64>,
+    prepared_content: RefCell<Option<PreparedContent>>,
+    content_dirty: Cell<bool>,
     observing_requests: Cell<bool>,
     next_request: Cell<u64>,
     notifications: Rc<notifications::Backend>,
@@ -282,6 +284,12 @@ struct TabContent {
     document_start: bool,
     scripts: Vec<PageScript>,
     styles: Vec<content::TabStyle>,
+}
+
+struct PreparedContent {
+    ticket: u64,
+    reservation: crate::bridge::PreparedScriptsId,
+    content: TabContent,
 }
 
 struct TabEntry {
@@ -443,6 +451,8 @@ impl ProfileRuntime {
             tabs: RefCell::new(HashMap::new()),
             content: RefCell::new(TabContent::default()),
             script_generation: Cell::new(0),
+            prepared_content: RefCell::new(None),
+            content_dirty: Cell::new(false),
             observing_requests: Cell::new(false),
             next_request: Cell::new(0),
             notifications: Rc::default(),
@@ -1356,6 +1366,7 @@ impl Inner {
                 });
             }
             NativeOp::RefreshPermissions { install } => {
+                self.revoke_content_grants(install);
                 self.refresh_content(crate::bridge::Reattach::Now);
                 let mut views: Vec<_> = self
                     .views
@@ -1395,6 +1406,49 @@ impl Inner {
                 }
             }
             NativeOp::ScriptsChanged => self.refresh_content(crate::bridge::Reattach::WidenNow),
+            NativeOp::PrepareScripts(ticket) => {
+                let installs = self
+                    .bridge
+                    .with_runtime(|host, _| host.pending_script_installs(ticket))
+                    .ok()
+                    .flatten();
+                let result = installs
+                    .ok_or_else(zephium_webext_runtime::ApiError::context_invalidated)
+                    .and_then(|installs| self.stage_content(&installs, ticket));
+                let result = match result {
+                    Ok(prepared) => {
+                        *self.prepared_content.borrow_mut() = Some(prepared);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.script_prepared(ticket, result, out));
+            }
+            NativeOp::CommitScripts(ticket) => self.commit_content(ticket),
+            NativeOp::AbortScripts(ticket) => {
+                let prepared = {
+                    let mut pending = self.prepared_content.borrow_mut();
+                    if pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.ticket == ticket)
+                    {
+                        pending.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(prepared) = prepared {
+                    self.bridge.abort_prepared_scripts(prepared.reservation);
+                }
+                if self.content_dirty.get() {
+                    self.refresh_content(crate::bridge::Reattach::Now);
+                }
+                let _ = self
+                    .bridge
+                    .with_runtime(|host, out| host.script_reservation_released(ticket, out));
+            }
         }
     }
 
@@ -2090,37 +2144,60 @@ impl Inner {
         }
     }
 
-    /// Republishes the content-script table and every tab's plan, page
-    /// scripts and style sheets. New documents see the change.
-    fn refresh_content(self: &Rc<Self>, when: crate::bridge::Reattach) {
-        if self.retired.get() {
-            return;
+    fn revoke_content_grants(&self, install: ExtensionInstallId) {
+        let plan = {
+            let mut content = self.content.borrow_mut();
+            content.plan.worlds.retain(|grant| grant.install != install);
+            let owner = install
+                .bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            content
+                .plan
+                .external
+                .retain(|rule| rule.install_id != owner);
+            content.styles.retain(|style| style.install != install);
+            content.plan.clone()
+        };
+        let views: Vec<_> = self.tabs.borrow().keys().copied().collect();
+        for view in views {
+            if let Err(error) = self
+                .bridge
+                .update_plan(view, &plan, crate::bridge::Reattach::Now)
+            {
+                eprintln!("extensions: restrictive content plan refused: {error:?}");
+                self.bridge.detach(view);
+            }
+            self.apply_tab_content(view);
         }
-        let installs = self
-            .bridge
-            .with_runtime(|host, _| host.content_installs())
-            .unwrap_or_default();
-        let generation = self.script_generation.get() + 1;
-        self.script_generation.set(generation);
-        let mut built = content::build(&installs, generation);
-        for (install, problem) in &built.problems {
-            eprintln!("extensions: {install} content scripts withheld: {problem}");
+    }
+
+    fn stage_content(
+        &self,
+        installs: &[host::glue::ContentInstall],
+        ticket: u64,
+    ) -> Result<PreparedContent, zephium_webext_runtime::ApiError> {
+        use zephium_webext_runtime::ApiError;
+        if self.retired.get() || self.prepared_content.borrow().is_some() {
+            return Err(ApiError::context_invalidated());
         }
-        if built.grants.len() > zephium_webkit_web_process_protocol::protocol::MAX_WORLDS {
-            eprintln!("extensions: content scripts limited to the first 16 extensions");
-            built
-                .grants
-                .truncate(zephium_webkit_web_process_protocol::protocol::MAX_WORLDS);
+        let generation = self
+            .script_generation
+            .get()
+            .checked_add(1)
+            .ok_or_else(ApiError::too_many_pending)?;
+        let built = content::build(installs, generation);
+        if let Some((_, problem)) = built.problems.first() {
+            return Err(ApiError::other(format!(
+                "Content-script publication refused: {problem}"
+            )));
         }
         let document_start = built.table.entries.iter().any(|entry| {
             entry.run_at == zephium_webkit_web_process_protocol::protocol::RunAt::DocumentStart
         });
-        if let Err(error) = self.bridge.publish_scripts(built.table) {
-            eprintln!("extensions: content-script table refused: {error:?}");
-            return;
-        }
-        let installs: Vec<ExtensionInstallId> = self.records.borrow().keys().copied().collect();
-        let scripts: Vec<PageScript> = installs
+        let ids: Vec<_> = self.records.borrow().keys().copied().collect();
+        let scripts: Vec<_> = ids
             .into_iter()
             .filter_map(|install| self.page_script(install, ContextKind::ExtensionTab))
             .collect();
@@ -2140,18 +2217,123 @@ impl Inner {
             observe_requests: measure_requests(),
             ..AttachPlan::default()
         };
-        *self.content.borrow_mut() = TabContent {
-            plan: plan.clone(),
-            document_start,
-            scripts,
-            styles: built.styles,
-        };
-        let views: Vec<BridgeViewId> = self.tabs.borrow().keys().copied().collect();
-        for view in views {
-            if let Err(error) = self.bridge.update_plan(view, &plan, when) {
-                eprintln!("extensions: a tab kept its previous plan: {error:?}");
+        let reservation = self
+            .bridge
+            .prepare_scripts(built.table, &plan)
+            .map_err(|error| {
+                ApiError::other(format!("Content-script publication refused: {error:?}"))
+            })?;
+        self.script_generation.set(generation);
+        Ok(PreparedContent {
+            ticket,
+            reservation,
+            content: TabContent {
+                plan,
+                document_start,
+                scripts,
+                styles: built.styles,
+            },
+        })
+    }
+
+    fn commit_content(self: &Rc<Self>, ticket: u64) {
+        let reservation = self
+            .prepared_content
+            .borrow()
+            .as_ref()
+            .filter(|p| p.ticket == ticket)
+            .map(|p| p.reservation);
+        let Some(reservation) = reservation else {
+            if ticket != 0 {
+                let _ = self.bridge.with_runtime(|host, out| {
+                    host.abort_script_publication(
+                        ticket,
+                        zephium_webext_runtime::ApiError::context_invalidated(),
+                        out,
+                    )
+                });
             }
-            self.apply_tab_content(view);
+            return;
+        };
+        let result = self
+            .bridge
+            .commit_prepared_scripts(reservation, |host, out, plan| {
+                let mut prepared = self
+                    .prepared_content
+                    .borrow_mut()
+                    .take()
+                    .expect("reserved content");
+                prepared.content.plan = plan.clone();
+                prepared
+                    .content
+                    .styles
+                    .retain(|style| self.records.borrow().contains_key(&style.install));
+                prepared.content.scripts.retain(|script| {
+                    script.allow.iter().all(|allow| {
+                        plan.extension_pages.iter().any(|page| {
+                            *allow == format!("chrome-extension://{}/*", page.extension.as_str())
+                        })
+                    })
+                });
+                *self.content.borrow_mut() = prepared.content;
+                let views: Vec<_> = self.tabs.borrow().keys().copied().collect();
+                for view in views {
+                    self.apply_tab_content(view);
+                }
+                if ticket != 0 {
+                    host.script_published(ticket, out);
+                }
+            });
+        match result {
+            Ok(Some(())) => {
+                if self.content_dirty.get() {
+                    self.refresh_content(crate::bridge::Reattach::Now);
+                }
+            }
+            Ok(None) => {
+                self.prepared_content.borrow_mut().take();
+                if ticket != 0 {
+                    let _ = self.bridge.with_runtime(|host, out| {
+                        host.abort_script_publication(
+                            ticket,
+                            zephium_webext_runtime::ApiError::context_invalidated(),
+                            out,
+                        )
+                    });
+                }
+            }
+            Err(_) => {
+                let weak = Rc::downgrade(self);
+                glib::idle_add_local_once(move || {
+                    if let Some(inner) = weak.upgrade() {
+                        inner.commit_content(ticket);
+                        inner.run();
+                    }
+                });
+            }
+        }
+    }
+
+    /// New documents use one preflighted snapshot and its matching grants.
+    fn refresh_content(self: &Rc<Self>, _when: crate::bridge::Reattach) {
+        if self.retired.get() {
+            return;
+        }
+        self.content_dirty.set(true);
+        if self.prepared_content.borrow().is_some() {
+            return;
+        }
+        let installs = self
+            .bridge
+            .with_runtime(|host, _| host.content_installs())
+            .unwrap_or_default();
+        match self.stage_content(&installs, 0) {
+            Ok(prepared) => {
+                *self.prepared_content.borrow_mut() = Some(prepared);
+                self.content_dirty.set(false);
+                self.commit_content(0);
+            }
+            Err(error) => eprintln!("extensions: {}", error.message()),
         }
     }
 

@@ -1887,7 +1887,16 @@ impl Core {
             .collect();
         for id in tabs {
             // All failure-prone resolution happened before the durable write.
-            let _ = self.apply_resolved_plan(id, prepared.resolved.clone(), true);
+            let _ = self.apply_resolved_plan(id, prepared.resolved.clone(), false);
+            let widening = self.views.get(&id).is_some_and(|view| {
+                view.reattach_on_navigation
+                    && view
+                        .attached_plan()
+                        .is_some_and(|old| view.plan.widens(old))
+            });
+            if widening {
+                self.attach_widening(id);
+            }
         }
         self.current_scripts = prepared.table.table.generation;
         self.scripts.insert(self.current_scripts, prepared.table);

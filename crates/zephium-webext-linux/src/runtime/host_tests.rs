@@ -1065,6 +1065,20 @@ fn script_snapshot_read_errors_surface_without_filesystem_details() {
     }
 }
 
+fn accept_script_publications(host: &mut RuntimeHost, out: &mut Outbox) {
+    for op in host.take_ops() {
+        match op {
+            NativeOp::PrepareScripts(ticket) => {
+                assert!(host.pending_script_installs(ticket).is_some());
+                host.script_prepared(ticket, Ok(()), out);
+            }
+            NativeOp::CommitScripts(ticket) => host.script_published(ticket, out),
+            NativeOp::AbortScripts(ticket) => host.script_reservation_released(ticket, out),
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
     let root = tempfile::tempdir().unwrap();
@@ -1099,24 +1113,16 @@ fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
         json!([[request("second", true)]]),
     );
     assert!(replies(&second).is_empty());
-    let _ = harness.host.take_ops();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut out = Outbox::default();
     while replies(&out).len() < 2 {
         assert!(std::time::Instant::now() < deadline);
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert_eq!(replies(&out), vec![Ok(Value::Null), Ok(Value::Null)]);
-    assert!(
-        harness
-            .host
-            .take_ops()
-            .iter()
-            .any(|op| matches!(op, NativeOp::ScriptsChanged)),
-        "committed registrations reach future documents"
-    );
     let bytes = std::fs::read(durable.path().join("scripts.json")).unwrap();
     let snapshot: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(snapshot.as_array().unwrap().len(), 2);
@@ -1177,6 +1183,7 @@ fn dynamic_scripts_commit_before_reply_and_restore_only_persistent_entries() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while replies(&out).len() < 2 {
         assert!(std::time::Instant::now() < deadline);
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1244,6 +1251,7 @@ fn dynamic_scripts_failed_write_keeps_registry_and_malformed_restore_is_atomic()
     let mut out = Outbox::default();
     while replies(&out).is_empty() {
         assert!(std::time::Instant::now() < deadline);
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1299,6 +1307,7 @@ fn closed_context_releases_queued_script_calls_before_the_durable_write_finishes
     let state = &harness.host.state.installs[&harness.install];
     assert!(state.script_pending.is_some());
     assert_eq!(state.script_calls.len(), 1);
+    accept_script_publications(&mut harness.host, &mut Outbox::default());
     harness
         .host
         .close_context(&sender.context_key(), &mut Outbox::default());
@@ -1315,6 +1324,7 @@ fn closed_context_releases_queued_script_calls_before_the_durable_write_finishes
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while harness.host.has_pending_script_writes(harness.install) {
         assert!(std::time::Instant::now() < deadline);
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1363,6 +1373,7 @@ fn script_write_failure_before_rename_preserves_the_existing_snapshot() {
     let mut out = Outbox::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while replies(&out).is_empty() && std::time::Instant::now() < deadline {
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1401,11 +1412,13 @@ fn retired_installs_keep_the_script_write_barrier_until_io_completion() {
     assert!(replies(&out).is_empty());
     assert!(harness.host.has_pending_script_writes(harness.install));
     let mut out = Outbox::default();
+    accept_script_publications(&mut harness.host, &mut out);
     harness.host.forget(harness.install, false, &mut out);
     assert!(harness.host.has_pending_script_writes(harness.install));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while harness.host.has_pending_script_writes(harness.install) {
         assert!(std::time::Instant::now() < deadline);
+        accept_script_publications(&mut harness.host, &mut out);
         let done = harness.host.storage_take();
         harness.host.storage_done(done, &mut out);
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1872,4 +1885,59 @@ fn offscreen_ready_requires_loaded_owned_current_document_and_binding_barrier() 
             .host
             .offscreen_document_live(harness.install, document));
     }
+}
+
+#[test]
+fn native_preparation_refusal_cannot_write_or_adopt_script_registrations() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("content.js"), "void 0;").unwrap();
+    let durable = tempfile::tempdir().unwrap();
+    let mut h = Harness::new();
+    let sender = admit_scripting(&mut h, root.path());
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .state_directory = Some(durable.path().to_owned());
+    let out = h.call(
+        &sender,
+        "scripting.registerContentScripts",
+        json!([[{"id":"refused","matches":["https://example.com/*"],"js":["content.js"]}]]),
+    );
+    assert!(replies(&out).is_empty());
+    let ticket = h
+        .host
+        .take_ops()
+        .into_iter()
+        .find_map(|op| {
+            if let NativeOp::PrepareScripts(ticket) = op {
+                Some(ticket)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert!(!durable.path().join("scripts.json").exists());
+    assert!(h.host.state.installs[&h.install]
+        .scripts
+        .get_registered(None)
+        .is_empty());
+    let mut out = Outbox::default();
+    h.host.script_prepared(
+        ticket,
+        Err(ApiError::other("native capacity refused")),
+        &mut out,
+    );
+    assert_eq!(replies(&out), vec![Err("native capacity refused".into())]);
+    assert!(!durable.path().join("scripts.json").exists());
+    assert!(h.host.state.installs[&h.install]
+        .scripts
+        .get_registered(None)
+        .is_empty());
+    assert!(h
+        .host
+        .take_ops()
+        .iter()
+        .any(|op| matches!(op, NativeOp::AbortScripts(id) if *id == ticket)));
 }

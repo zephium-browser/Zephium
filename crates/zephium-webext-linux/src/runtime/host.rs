@@ -145,6 +145,9 @@ pub(crate) enum NativeOp {
     Notify(Notice),
     /// Content-script registrations changed: republish the script table.
     ScriptsChanged,
+    PrepareScripts(u64),
+    CommitScripts(u64),
+    AbortScripts(u64),
 }
 
 pub(crate) enum PermissionCompletion {
@@ -252,6 +255,10 @@ struct PendingScripts {
     ticket: u64,
     responder: Responder,
     candidate: ScriptRegistry,
+    write: Option<(PathBuf, Vec<u8>)>,
+    writing: bool,
+    saved: bool,
+    value: Value,
 }
 
 pub(crate) struct InstallState {
@@ -438,7 +445,6 @@ enum Work {
         name: String,
         route: TabRoute,
     },
-    ScriptsChanged,
 }
 
 /// A `tabs.sendMessage`/`tabs.connect` destination.
@@ -734,9 +740,10 @@ impl ScriptingHost for State {
         sender: &Sender,
         candidate: ScriptRegistry,
     ) -> Result<(), ApiError> {
-        self.install(sender)?.scripts = candidate;
-        self.work.push(Work::ScriptsChanged);
-        Ok(())
+        let _ = (sender, candidate);
+        Err(ApiError::other(
+            "Script publication requires prepared native admission.",
+        ))
     }
 }
 
@@ -1274,6 +1281,7 @@ pub struct RuntimeHost {
     tickets: HashMap<u64, (Responder, Box<Sender>)>,
     next_ticket: u64,
     retired_script_writes: HashMap<ExtensionInstallId, u64>,
+    script_releasing: Option<u64>,
     sends: HashMap<u64, (MessageId, Responder)>,
     awaiting: HashMap<u64, ContextKey>,
     ops: VecDeque<NativeOp>,
@@ -1644,6 +1652,7 @@ impl RuntimeHost {
             tickets: HashMap::new(),
             next_ticket: 0,
             retired_script_writes: HashMap::new(),
+            script_releasing: None,
             sends: HashMap::new(),
             awaiting: HashMap::new(),
             ops: VecDeque::new(),
@@ -1778,6 +1787,12 @@ impl RuntimeHost {
         manifest: Manifest,
         completion: PermissionCompletion,
     ) -> Result<(), (String, Box<PermissionCompletion>)> {
+        if self.script_publication_pending() {
+            return Err((
+                "Script publication is pending; retry the permission change.".into(),
+                Box::new(completion),
+            ));
+        }
         let Some(state) = self
             .state
             .installs
@@ -2104,13 +2119,17 @@ impl RuntimeHost {
     }
 
     pub(crate) fn has_pending_script_writes(&self, install: ExtensionInstallId) -> bool {
-        self.network_retiring(install)
-            || self.retired_script_writes.contains_key(&install)
+        self.network_retiring(install) || self.script_publication_pending()
+    }
+
+    fn script_publication_pending(&self) -> bool {
+        self.script_releasing.is_some()
+            || !self.retired_script_writes.is_empty()
             || self
                 .state
                 .installs
-                .get(&install)
-                .is_some_and(|state| state.script_pending.is_some())
+                .values()
+                .any(|state| state.script_pending.is_some())
     }
 
     pub(crate) fn admit(&mut self, admitted: Admitted, activation: &Activation, out: &mut Outbox) {
@@ -2367,8 +2386,12 @@ impl RuntimeHost {
         };
         // Removal is a FIFO barrier even when installation preparation failed.
         self.network.submit(network::Job::Remove { install });
-        if let Some(pending) = &state.script_pending {
-            self.retired_script_writes.insert(install, pending.ticket);
+        if let Some(pending) = state.script_pending {
+            if pending.writing {
+                self.retired_script_writes.insert(install, pending.ticket);
+            }
+            self.script_releasing = Some(pending.ticket);
+            self.op(NativeOp::AbortScripts(pending.ticket));
         }
         let contexts: Vec<ContextKey> = self
             .router
@@ -2653,24 +2676,23 @@ impl RuntimeHost {
                 Done::Scripts { ticket, result } => {
                     self.retired_script_writes
                         .retain(|_, pending| *pending != ticket);
-                    let install = self.state.installs.iter().find_map(|(id, state)| {
+                    if let Some(state) = self.state.installs.values_mut().find(|state| {
                         state
                             .script_pending
                             .as_ref()
-                            .filter(|pending| pending.ticket == ticket)
-                            .map(|_| *id)
-                    });
-                    if let Some(install) = install {
-                        if let Some(state) = self.state.installs.get_mut(&install) {
-                            if let Some(pending) = state.script_pending.take() {
-                                if result.is_ok() {
-                                    state.scripts = pending.candidate;
-                                    self.op(NativeOp::ScriptsChanged);
-                                }
-                                self.settle(pending.responder, result.map(|()| Value::Null), out);
+                            .is_some_and(|pending| pending.ticket == ticket && pending.writing)
+                    }) {
+                        let pending = state.script_pending.as_mut().expect("pending publication");
+                        pending.writing = false;
+                        match result {
+                            Ok(()) => {
+                                pending.saved = true;
+                                self.op(NativeOp::CommitScripts(ticket));
                             }
+                            Err(error) => self.abort_script_publication(ticket, error, out),
                         }
-                        self.process_script_calls(install, out);
+                    } else {
+                        self.resume_script_calls(out);
                     }
                 }
                 Done::Call {
@@ -2702,17 +2724,140 @@ impl RuntimeHost {
         self.settle_blockers(out);
     }
 
+    fn resume_script_calls(&mut self, out: &mut Outbox) {
+        let installs: Vec<_> = self.state.installs.keys().copied().collect();
+        for install in installs {
+            self.process_script_calls(install, out);
+        }
+    }
+
+    pub(crate) fn pending_script_installs(&self, ticket: u64) -> Option<Vec<glue::ContentInstall>> {
+        let (install, pending) = self.state.installs.iter().find_map(|(install, state)| {
+            state
+                .script_pending
+                .as_ref()
+                .filter(|pending| pending.ticket == ticket)
+                .map(|pending| (*install, pending))
+        })?;
+        let mut installs = self.content_installs();
+        let projection = installs.iter_mut().find(|entry| entry.install == install)?;
+        projection.scripts = pending
+            .candidate
+            .declarations()
+            .map(|injection| (injection.script.clone(), injection.matcher.clone()))
+            .collect();
+        Some(installs)
+    }
+
+    pub(crate) fn script_prepared(
+        &mut self,
+        ticket: u64,
+        result: Result<(), ApiError>,
+        out: &mut Outbox,
+    ) {
+        if let Err(error) = result {
+            self.abort_script_publication(ticket, error, out);
+            return;
+        }
+        let Some(pending) = self.state.installs.values_mut().find_map(|state| {
+            state
+                .script_pending
+                .as_mut()
+                .filter(|pending| pending.ticket == ticket)
+        }) else {
+            self.op(NativeOp::AbortScripts(ticket));
+            return;
+        };
+        if pending.writing || pending.saved {
+            return;
+        }
+        if let Some((path, bytes)) = pending.write.take() {
+            if self.storage.submit(Job::CommitScripts {
+                ticket,
+                path,
+                bytes,
+            }) {
+                pending.writing = true;
+            } else {
+                self.abort_script_publication(
+                    ticket,
+                    ApiError::other("Extension script registrations could not be saved."),
+                    out,
+                );
+            }
+        } else {
+            pending.saved = true;
+            self.op(NativeOp::CommitScripts(ticket));
+        }
+    }
+
+    pub(crate) fn script_published(&mut self, ticket: u64, out: &mut Outbox) {
+        let Some(state) = self.state.installs.values_mut().find(|state| {
+            state
+                .script_pending
+                .as_ref()
+                .is_some_and(|pending| pending.ticket == ticket && pending.saved)
+        }) else {
+            return;
+        };
+        let pending = state.script_pending.take().expect("saved publication");
+        state.scripts = pending.candidate;
+        self.settle(pending.responder, Ok(pending.value), out);
+        self.resume_script_calls(out);
+    }
+
+    pub(crate) fn abort_script_publication(
+        &mut self,
+        ticket: u64,
+        error: ApiError,
+        out: &mut Outbox,
+    ) {
+        if let Some(state) = self.state.installs.values_mut().find(|state| {
+            state
+                .script_pending
+                .as_ref()
+                .is_some_and(|pending| pending.ticket == ticket)
+        }) {
+            let pending = state.script_pending.take().expect("pending publication");
+            self.settle(pending.responder, Err(error), out);
+        }
+        self.script_releasing = Some(ticket);
+        self.op(NativeOp::AbortScripts(ticket));
+    }
+
+    pub(crate) fn script_reservation_released(&mut self, ticket: u64, out: &mut Outbox) {
+        if self.script_releasing == Some(ticket) {
+            self.script_releasing = None;
+        }
+        self.resume_script_calls(out);
+    }
+
     fn process_script_calls(&mut self, install: ExtensionInstallId, out: &mut Outbox) {
         loop {
+            if self.script_publication_pending() {
+                return;
+            }
             let Some(state) = self.state.installs.get_mut(&install) else {
                 return;
             };
-            if state.script_pending.is_some() {
-                return;
-            }
             let Some(call) = state.script_calls.pop_front() else {
                 return;
             };
+            if self
+                .state
+                .installs
+                .values()
+                .any(|state| state.permission_pending)
+            {
+                self.settle(
+                    call.responder,
+                    Err(ApiError::other(
+                        "Permission publication is pending; retry script registration.",
+                    )),
+                    out,
+                );
+                continue;
+            }
             let prepared = zephium_webext_runtime::scripting_registry::prepare_registration(
                 &self.state,
                 &call.sender,
@@ -2735,7 +2880,7 @@ impl RuntimeHost {
                 .installs
                 .get_mut(&install)
                 .expect("admitted install");
-            if let Some(directory) = &state.state_directory {
+            let write = if let Some(directory) = &state.state_directory {
                 let bytes = match serde_json::to_vec(&candidate.snapshot()) {
                     Ok(bytes) if bytes.len() as u64 <= super::storage::MAX_STATE_FILE_BYTES => {
                         bytes
@@ -2745,32 +2890,26 @@ impl RuntimeHost {
                         continue;
                     }
                 };
-                self.next_ticket += 1;
-                let ticket = self.next_ticket;
-                if self.storage.submit(Job::CommitScripts {
-                    ticket,
-                    path: directory.join("scripts.json"),
-                    bytes,
-                }) {
-                    state.script_pending = Some(PendingScripts {
-                        ticket,
-                        responder: call.responder,
-                        candidate,
-                    });
-                    return;
-                }
-                self.settle(
-                    call.responder,
-                    Err(ApiError::other(
-                        "Extension script registrations could not be saved.",
-                    )),
-                    out,
-                );
+                Some((directory.join("scripts.json"), bytes))
             } else {
-                state.scripts = candidate;
-                self.op(NativeOp::ScriptsChanged);
-                self.settle(call.responder, Ok(value), out);
-            }
+                None
+            };
+            let Some(ticket) = self.next_ticket.checked_add(1) else {
+                self.settle(call.responder, Err(ApiError::too_many_pending()), out);
+                continue;
+            };
+            self.next_ticket = ticket;
+            state.script_pending = Some(PendingScripts {
+                ticket,
+                responder: call.responder,
+                candidate,
+                write,
+                writing: false,
+                saved: false,
+                value,
+            });
+            self.op(NativeOp::PrepareScripts(ticket));
+            return;
         }
     }
 
@@ -3946,7 +4085,6 @@ impl RuntimeHost {
                 }
             }
             Work::PersistAlarms(install) => self.persist_alarms(install),
-            Work::ScriptsChanged => self.op(NativeOp::ScriptsChanged),
             Work::SendTab {
                 responder,
                 sender,
