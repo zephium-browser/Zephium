@@ -558,6 +558,21 @@ impl Core {
         Ok(())
     }
 
+    pub fn update_script_plan(&mut self, id: u64, plan: &AttachPlan) -> Result<(), RegisterError> {
+        self.update_plan(id, plan, false)?;
+        let widening = self.views.get(&id).is_some_and(|view| {
+            view.reattach_on_navigation
+                && matches!(view.phase, Phase::Live(_) | Phase::InFlight(_))
+                && view
+                    .attached_plan()
+                    .is_some_and(|old| view.plan.widens(old))
+        });
+        if widening {
+            self.attach_widening(id);
+        }
+        Ok(())
+    }
+
     fn still_granted(view: &View, target: &Target) -> bool {
         let Some(frame) = view
             .frames
@@ -727,6 +742,7 @@ impl Core {
                         self.send_policy(id, policy_generation, policy);
                     }
                 }
+                self.flush(id);
             }
             AttachOutcome::Refused | AttachOutcome::Unhandled => {
                 self.stats.attach_refused += 1;
@@ -1625,8 +1641,9 @@ impl Core {
         let Some(view) = self.views.get(&target.view) else {
             return Err(DeliverError::Stale);
         };
-        let current =
-            matches!(view.phase, Phase::Live(generation) if target.generation == generation);
+        let current = matches!(view.phase,
+            Phase::Live(generation) | Phase::InFlight(generation)
+                if target.generation == generation);
         if !current {
             self.close_context(key, CloseReason::Reattached);
             return Err(DeliverError::Stale);
@@ -1661,13 +1678,16 @@ impl Core {
         let Some(view) = self.views.get(&id) else {
             return;
         };
+        if !matches!(view.phase, Phase::Live(_)) {
+            return;
+        }
         let keys: Vec<ContextKey> = view.contexts.iter().cloned().collect();
         for key in keys {
             loop {
                 let Some(view) = self.views.get(&id) else {
                     return;
                 };
-                if view.inflight >= MAX_INFLIGHT_PER_VIEW {
+                if !matches!(view.phase, Phase::Live(_)) || view.inflight >= MAX_INFLIGHT_PER_VIEW {
                     return;
                 }
                 let Some(target) = self.contexts.get_mut(&key) else {

@@ -1073,15 +1073,26 @@ fn immediate_structural_widening_keeps_the_live_context_and_generation() {
     let effects = h.core.take_effects();
     assert!(closed(&effects).is_empty());
     assert!(effects.iter().any(|effect| matches!(effect, Effect::Send { outgoing: Outgoing::Attach { generation: next }, .. } if *next == generation)));
+    h.core.deliver(&sender.context_key(), vec![1, 2]).unwrap();
+    assert!(
+        h.core.take_effects().is_empty(),
+        "reply waits for attachment"
+    );
     h.core
         .attach_settled(id, generation, AttachOutcome::Accepted);
-    assert!(!h.core.take_effects().iter().any(|effect| matches!(
+    let effects = h.core.take_effects();
+    assert!(!effects.iter().any(|effect| matches!(
         effect,
         Effect::Send {
             outgoing: Outgoing::Scripts { .. },
             ..
         }
     )));
+    assert!(effects.iter().any(|effect| match effect {
+        Effect::Send { bytes, outgoing: Outgoing::Deliver { .. }, .. } =>
+            matches!(decode_ui(DELIVER_MESSAGE, bytes), Ok(UiMessage::Deliver(deliver)) if deliver.bytes == [1, 2]),
+        _ => false,
+    }));
     assert_eq!(h.core.context_view(&sender.context_key()), Some(id));
     assert_eq!(
         senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/"))).len(),
@@ -1660,4 +1671,77 @@ fn retired_script_tables_wait_for_every_native_release_and_transport_lease() {
     h.core
         .scripts_settled(second, second_generation, 8, Some(true));
     assert!(retired.upgrade().is_none());
+}
+
+#[test]
+fn refused_widening_discards_queued_replies_and_closes_the_context() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE]));
+    h.page(id, generation, "https://a.test/");
+    let key = senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+        .pop()
+        .unwrap()
+        .context_key();
+    h.core
+        .update_script_plan(id, &tab_plan(&[SITE, "https://b.test"]))
+        .unwrap();
+    h.core.take_effects();
+    h.core.deliver(&key, vec![1]).unwrap();
+    assert!(h.core.take_effects().is_empty());
+    h.core
+        .attach_settled(id, generation, AttachOutcome::Refused);
+    let effects = h.core.take_effects();
+    assert_eq!(
+        closed(&effects),
+        vec![(key.clone(), CloseReason::Reattached)]
+    );
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Send {
+            outgoing: Outgoing::Deliver { .. },
+            ..
+        }
+    )));
+    assert_eq!(h.core.deliver(&key, vec![2]), Err(DeliverError::Stale));
+}
+
+#[test]
+fn registration_narrowing_keeps_unaffected_contexts_and_revokes_removed_grants() {
+    let mut h = Harness::new();
+    let (id, generation) = h.tab(5, &tab_plan(&[SITE, "https://b.test"]));
+    h.page(id, generation, "https://a.test/");
+    h.frames(
+        id,
+        generation,
+        vec![FrameEvent::Created(info(2, 1, "https://b.test/", false))],
+    );
+    let kept = senders(&h.post(id, post(generation, 1, 1, &world(), "https://a.test/")))
+        .pop()
+        .unwrap()
+        .context_key();
+    let revoked = senders(&h.post(id, post(generation, 2, 1, &world(), "https://b.test/")))
+        .pop()
+        .unwrap()
+        .context_key();
+    h.core.update_script_plan(id, &tab_plan(&[SITE])).unwrap();
+    let effects = h.core.take_effects();
+    assert_eq!(
+        closed(&effects),
+        vec![(revoked.clone(), CloseReason::Revoked)]
+    );
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Effect::Send {
+            outgoing: Outgoing::Attach { .. },
+            ..
+        }
+    )));
+    assert_eq!(h.core.context_view(&kept), Some(id));
+    assert_eq!(h.core.deliver(&revoked, vec![1]), Err(DeliverError::Stale));
+    assert!(senders(&h.post(id, post(generation, 2, 1, &world(), "https://b.test/"))).is_empty());
+    h.core.deliver(&kept, vec![2]).unwrap();
+    h.core.take_effects();
+    h.core.load_started(id);
+    assert!(closed(&h.core.take_effects()).contains(&(kept.clone(), CloseReason::Reattached)));
+    assert_eq!(h.core.deliver(&kept, vec![3]), Err(DeliverError::Stale));
 }

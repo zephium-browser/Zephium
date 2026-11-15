@@ -74,6 +74,9 @@ pub enum Reattach {
     /// Now. A structural widening preserves live contexts; other changes
     /// end contexts until the documents are recreated.
     Now,
+    /// Widen immediately; retain unaffected documents when registrations shrink.
+    /// The host still revokes removed grants immediately.
+    WidenNow,
     /// When the main frame next navigates. The host applies the new plan
     /// to claims at once, so narrowing takes effect immediately.
     AtNextNavigation,
@@ -372,11 +375,14 @@ impl<R: Runtime + 'static> ProfileBridge<R> {
         plan: &AttachPlan,
         when: Reattach,
     ) -> Result<(), RegisterError> {
-        let result = self
-            .shared
-            .core
-            .borrow_mut()
-            .update_plan(view.0, plan, when == Reattach::Now);
+        let result = {
+            let mut core = self.shared.core.borrow_mut();
+            if when == Reattach::WidenNow {
+                core.update_script_plan(view.0, plan)
+            } else {
+                core.update_plan(view.0, plan, when == Reattach::Now)
+            }
+        };
         self.shared.collect();
         result
     }

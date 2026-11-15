@@ -1347,7 +1347,7 @@ impl Inner {
                 });
             }
             NativeOp::RefreshPermissions { install } => {
-                self.refresh_content();
+                self.refresh_content(crate::bridge::Reattach::Now);
                 let mut views: Vec<_> = self
                     .views
                     .owned
@@ -1385,7 +1385,7 @@ impl Inner {
                     engine.notice(&notice);
                 }
             }
-            NativeOp::ScriptsChanged => self.refresh_content(),
+            NativeOp::ScriptsChanged => self.refresh_content(crate::bridge::Reattach::WidenNow),
         }
     }
 
@@ -2043,7 +2043,7 @@ impl Inner {
 
     /// Republishes the content-script table and every tab's plan, page
     /// scripts and style sheets. New documents see the change.
-    fn refresh_content(self: &Rc<Self>) {
+    fn refresh_content(self: &Rc<Self>, when: crate::bridge::Reattach) {
         if self.retired.get() {
             return;
         }
@@ -2099,10 +2099,7 @@ impl Inner {
         };
         let views: Vec<BridgeViewId> = self.tabs.borrow().keys().copied().collect();
         for view in views {
-            if let Err(error) = self
-                .bridge
-                .update_plan(view, &plan, crate::bridge::Reattach::Now)
-            {
+            if let Err(error) = self.bridge.update_plan(view, &plan, when) {
                 eprintln!("extensions: a tab kept its previous plan: {error:?}");
             }
             self.apply_tab_content(view);
