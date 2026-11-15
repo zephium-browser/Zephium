@@ -1922,3 +1922,55 @@ fn native_certificate_failure_is_classified_without_a_host_wide_exception() {
     );
     assert_eq!(page.title().as_deref(), Some("ready"));
 }
+
+#[test]
+#[ignore = "isolated GTK; native timed-cookie limitation and non-destructive refusal"]
+fn native_timed_cookie_clear_is_unsupported_and_preserves_records() {
+    use webkit2gtk::WebsiteDataManagerExtManual;
+    use zephium_core::browsing_data::{
+        EngineDataCall, EngineDataFailure, EngineDataKinds, EngineDataReply,
+    };
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let partition = Partition::Persistent(host.profile);
+    let (_, page) = host.show_partition(partition, &format!("{}/page", fixture.origin));
+    script(
+        &page,
+        "document.cookie='timed=retained; SameSite=Lax';document.title='cookie-set'",
+    );
+    until(|| page.title().as_deref() == Some("cookie-set"));
+    let manager = page.website_data_manager().unwrap();
+    let (send, response) = mpsc::channel();
+    manager.clear(
+        webkit2gtk::WebsiteDataTypes::COOKIES,
+        gtk::glib::TimeSpan::from_seconds(3600),
+        None::<&gtk::gio::Cancellable>,
+        move |result| {
+            send.send(result).unwrap();
+        },
+    );
+    let mut result = None;
+    until(|| {
+        result = response.try_recv().ok();
+        result.is_some()
+    });
+    assert!(result.unwrap().is_ok());
+    script(&page, "document.title=document.cookie.includes('timed=retained')?'native-kept-cookie':'unexpectedly-removed'");
+    until(|| page.title().as_deref() == Some("native-kept-cookie"));
+    assert_eq!(
+        data_call(
+            &host,
+            partition,
+            EngineDataCall::Clear {
+                kinds: EngineDataKinds {
+                    site_data: true,
+                    ..Default::default()
+                },
+                since: Some(1),
+            }
+        ),
+        EngineDataReply::Failed(EngineDataFailure::Unsupported)
+    );
+    script(&page, "document.title=document.cookie.includes('timed=retained')?'broker-kept-cookie':'unexpectedly-removed'");
+    until(|| page.title().as_deref() == Some("broker-kept-cookie"));
+}
