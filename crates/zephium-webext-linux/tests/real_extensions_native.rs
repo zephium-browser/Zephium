@@ -1835,7 +1835,12 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         "update this probe when WebKit enables idle callbacks by default"
     );
     drop(plain);
-    let (mut host, _engine) = host(context(), &module, state.path(), id);
+    let profile_context = context();
+    webkit2gtk::WebsiteDataManagerExt::set_itp_enabled(
+        &profile_context.website_data_manager().unwrap(),
+        true,
+    );
+    let (mut host, _engine) = host(profile_context, &module, state.path(), id);
     let _initial_tab = host.open("about:blank", true);
     let install = ExtensionInstallId::from(INSTALL);
     host.runtime
@@ -1910,9 +1915,11 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
             r#"globalThis.result=null;(async()=>{
  const nativeIdle=Function.prototype.toString.call(requestIdleCallback).includes('[native code]');
  const privacy={};
- for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled']){
+ for(const name of ['passwordSavingEnabled','autofillEnabled','autofillAddressEnabled','autofillCreditCardEnabled','alternateErrorPagesEnabled']){
    privacy[name]=await chrome.privacy.services[name].get({});
  }
+ privacy.networkPredictionEnabled=await chrome.privacy.network.networkPredictionEnabled.get({});
+ for(const name of ['hyperlinkAuditingEnabled','topicsEnabled','adMeasurementEnabled','fledgeEnabled','thirdPartyCookiesAllowed']) privacy[name]=await chrome.privacy.websites[name].get({});
  const privacyErrors=[];
  for(const run of [()=>chrome.privacy.services.passwordSavingEnabled.set({value:true}),()=>chrome.privacy.services.passwordSavingEnabled.clear({}),()=>chrome.privacy.services.passwordSavingEnabled.get({incognito:true})]){
    try{await run();privacyErrors.push('unexpected success')}catch(error){privacyErrors.push(error.message)}
@@ -1979,12 +1986,22 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{ if(message.repo
         "autofillEnabled",
         "autofillAddressEnabled",
         "autofillCreditCardEnabled",
+        "alternateErrorPagesEnabled",
+        "topicsEnabled",
+        "adMeasurementEnabled",
+        "fledgeEnabled",
+        "networkPredictionEnabled",
+        "thirdPartyCookiesAllowed",
     ] {
         assert_eq!(
             result["privacy"][name],
             json!({"value":false,"levelOfControl":"not_controllable"})
         );
     }
+    assert_eq!(
+        result["privacy"]["hyperlinkAuditingEnabled"],
+        json!({"value":true,"levelOfControl":"not_controllable"})
+    );
     assert_eq!(
         result["privacyErrors"],
         json!([

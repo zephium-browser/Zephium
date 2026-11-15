@@ -28,6 +28,54 @@ const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 const SECOND: u64 = 1_000_000_000;
 
 #[test]
+fn native_privacy_reads_require_current_live_profile_and_permission() {
+    let mut h = Harness::new();
+    let mut admission = admitted(h.install);
+    admission.manifest =
+        Manifest::from_value(json!({"manifest_version":3,"permissions":["privacy"]}));
+    let (declaration, _) = PermissionDeclaration::from_manifest(&admission.manifest);
+    admission.permissions = InstallPermissions::new(
+        declaration,
+        &PermissionRequest::default(),
+        SiteAccess::OnAllSites,
+        false,
+    );
+    h.host
+        .admit(admission, &Activation::Enabled, &mut Outbox::default());
+    let (_, sender) = h.sender(ViewKind::Options, "options.html");
+    assert!(!h.host.privacy_allowed(&sender));
+    h.call(
+        &sender,
+        "privacy.network.networkPredictionEnabled.get",
+        json!([{}]),
+    );
+    assert!(h.host.privacy_allowed(&sender));
+    assert!(h.ops().iter().any(|op| matches!(
+        op,
+        NativeOp::Privacy {
+            setting: zephium_webext_runtime::api::privacy::FormSetting::NetworkPrediction,
+            ..
+        }
+    )));
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .permission_pending = true;
+    assert!(!h.host.privacy_allowed(&sender));
+    h.host
+        .state
+        .installs
+        .get_mut(&h.install)
+        .unwrap()
+        .permission_pending = false;
+    h.host
+        .close_context(&sender.context_key(), &mut Outbox::default());
+    assert!(!h.host.privacy_allowed(&sender));
+}
+
+#[test]
 fn user_script_permission_is_browser_owned_and_default_off() {
     let mut h = Harness::new();
     let mut admission = admitted(h.install);

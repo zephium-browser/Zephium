@@ -16,6 +16,7 @@ mod errors;
 mod handler_cache;
 pub(crate) mod host;
 mod icons;
+mod native_privacy;
 mod notifications;
 mod requests;
 mod storage;
@@ -1233,6 +1234,11 @@ impl Inner {
                 request,
                 responder,
             } => cookies::submit(self, sender, revision, request, responder),
+            NativeOp::Privacy {
+                sender,
+                setting,
+                responder,
+            } => native_privacy::submit(self, sender, setting, responder),
             NativeOp::HandlerCache { sender, responder } => {
                 handler_cache::submit(self, sender, responder)
             }

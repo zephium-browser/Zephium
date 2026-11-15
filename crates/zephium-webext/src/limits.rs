@@ -177,7 +177,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     ),
     (
         &[Permission("privacy")],
-        "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
+        "Privacy getters are read-only: absent form, remote-error and Chrome advertising services report inactive; hyperlink auditing reads live settings, network prediction requires disabled native prefetch, and third-party cookies require verified ITP",
         LIN,
     ),
     (
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(
             assess(raw.clone(), Platform::Linux),
             [
-                "Password saving and address/card autofill report inactive and not controllable; privacy mutations are unsupported",
+                "Privacy getters are read-only: absent form, remote-error and Chrome advertising services report inactive; hyperlink auditing reads live settings, network prediction requires disabled native prefetch, and third-party cookies require verified ITP",
                 "Can't change response headers with rules",
                 "Rules don't apply to WebSockets or service-worker requests",
                 "Rules tell some request types apart less precisely on non-HTTPS sites",

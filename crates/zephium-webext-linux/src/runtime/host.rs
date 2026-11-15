@@ -80,6 +80,11 @@ pub(crate) enum NativeOp {
         request: zephium_webext_runtime::api::cookies::Request,
         responder: Responder,
     },
+    Privacy {
+        sender: Box<Sender>,
+        setting: zephium_webext_runtime::api::privacy::FormSetting,
+        responder: Responder,
+    },
     HandlerCache {
         sender: Box<Sender>,
         responder: Responder,
@@ -335,6 +340,11 @@ enum Work {
         sender: Box<Sender>,
         revision: u64,
         request: zephium_webext_runtime::api::cookies::Request,
+        responder: Responder,
+    },
+    Privacy {
+        sender: Box<Sender>,
+        setting: zephium_webext_runtime::api::privacy::FormSetting,
         responder: Responder,
     },
     HandlerCache {
@@ -900,6 +910,22 @@ impl BrowserPort for State {
     }
 
     fn request(&mut self, request: BrowserRequest, invocation: Invocation<'_>) -> Handled {
+        use zephium_webext_runtime::api::privacy::FormSetting;
+        if let BrowserRequest::Service(
+            zephium_webext_runtime::browser::ServiceRequest::FormPrivacy(
+                setting @ (FormSetting::NetworkPrediction
+                | FormSetting::ThirdPartyCookies
+                | FormSetting::HyperlinkAuditing),
+            ),
+        ) = request
+        {
+            let sender = Box::new(invocation.sender().clone());
+            return self.defer(invocation, |responder| Work::Privacy {
+                sender,
+                setting,
+                responder,
+            });
+        }
         if let BrowserRequest::Service(zephium_webext_runtime::browser::ServiceRequest::Cookies(
             request,
         )) = request
@@ -1663,6 +1689,25 @@ impl RuntimeHost {
                     permissions.has_api("cookies")
                         && url.is_none_or(|url| permissions.has_host_access(url))
                 })
+    }
+
+    pub(crate) fn privacy_allowed(&self, sender: &Sender) -> bool {
+        !self.shutting_down
+            && !sender.incognito()
+            && !self.state.incognito
+            && sender.profile() == self.state.profile
+            && self.router.contexts.contains_key(&sender.context_key())
+            && self
+                .state
+                .installs
+                .get(&sender.install())
+                .is_some_and(|state| {
+                    !state.permission_pending && state.extension_id == *sender.extension_id()
+                })
+            && self
+                .permissions
+                .get(&sender.install())
+                .is_some_and(|permissions| permissions.has_api("privacy"))
     }
 
     pub(crate) fn cookie_revision(&self, sender: &Sender) -> Option<u64> {
@@ -3761,6 +3806,21 @@ impl RuntimeHost {
                         revision,
                         sender,
                         request,
+                        responder,
+                    });
+                } else {
+                    self.settle(responder, Err(ApiError::context_invalidated()), out);
+                }
+            }
+            Work::Privacy {
+                sender,
+                setting,
+                responder,
+            } => {
+                if self.privacy_allowed(&sender) {
+                    self.op(NativeOp::Privacy {
+                        sender,
+                        setting,
                         responder,
                     });
                 } else {

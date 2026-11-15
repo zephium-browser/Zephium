@@ -1764,9 +1764,27 @@ impl Browser {
                 )
             }
             BrowserRequest::Permissions(_) => state.refuse(invocation),
-            BrowserRequest::Service(ServiceRequest::FormPrivacy(_)) => invocation.reply(Ok(
-                json!({"value":false,"levelOfControl":"not_controllable"}),
-            )),
+            BrowserRequest::Service(ServiceRequest::FormPrivacy(setting)) => {
+                use zephium_webext_runtime::api::privacy::FormSetting;
+                let value = match setting {
+                    FormSetting::NetworkPrediction
+                    | FormSetting::ThirdPartyCookies
+                    | FormSetting::HyperlinkAuditing => {
+                        return invocation.reply(Err(unsupported()))
+                    }
+                    FormSetting::PasswordSaving
+                    | FormSetting::AutofillAddress
+                    | FormSetting::Autofill
+                    | FormSetting::AutofillCreditCard
+                    | FormSetting::AlternateErrorPages
+                    | FormSetting::Topics
+                    | FormSetting::AdMeasurement
+                    | FormSetting::Fledge => false,
+                };
+                invocation.reply(Ok(
+                    json!({"value":value,"levelOfControl":"not_controllable"}),
+                ))
+            }
             BrowserRequest::Service(ServiceRequest::QueryIdle(_)) => {
                 invocation.reply(Ok(json!("active")))
             }
