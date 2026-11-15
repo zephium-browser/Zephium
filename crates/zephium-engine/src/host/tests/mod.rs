@@ -286,7 +286,7 @@ fn collapsed_split_leaves_hide_without_invalid_native_bounds_and_reappear_on_res
 }
 
 #[test]
-fn windows_hidden_content_tabs_take_the_low_memory_target() {
+fn windows_content_tabs_do_not_mix_low_memory_with_try_suspend() {
     let stages = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/stages.rs"));
     let windows = stages
         .split("#[cfg(not(target_os = \"macos\"))]\n    fn apply_content(")
@@ -295,15 +295,15 @@ fn windows_hidden_content_tabs_take_the_low_memory_target() {
         .split("#[cfg(not(target_os = \"macos\"))]\n    pub(crate) fn set_drop_indicator")
         .next()
         .expect("bounded Windows/Linux host layout");
-    let hide = windows
-        .find("MemoryUsageLevel::Low")
-        .expect("hidden content tabs request Low");
-    let show = windows
-        .find("MemoryUsageLevel::Normal")
-        .expect("shown content tabs restore Normal");
-    assert!(hide < show);
-    assert!(windows.contains("hidden_now"));
-    assert!(!windows.contains("Off-screen views keep their memory"));
+    assert!(
+        windows.contains("not mixing MemoryUsageTargetLevel with TrySuspend"),
+        "hide path must document the Microsoft contract"
+    );
+    assert!(
+        !windows.contains("MemoryUsageLevel::Low"),
+        "hide must not set Low; TrySuspend owns that transition"
+    );
+    assert!(windows.contains("MemoryUsageLevel::Normal"));
 
     let discard = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/host/discard.rs"));
     let refuse = discard

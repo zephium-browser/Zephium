@@ -16,9 +16,10 @@ use crate::permissions::{
 use crate::runtime_security::RuntimeSecurityAdvisories;
 use crate::split::Pane;
 
-/// Residency urgency. OS notifications set this; on Windows the browser
-/// process-family private-bytes budget may raise it further. Tab count alone
-/// does not.
+/// Residency urgency. OS notifications set this, including Critical. On
+/// Windows the browser process-family private-bytes budget may raise Warning
+/// only — never Critical — so a fat session tightens grace without urgent
+/// discard. Tab count alone does not.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MemoryPressure {
     #[default]

@@ -1,7 +1,7 @@
-//! OS and process-family residency input. Windows combines system memory
-//! notifications with the browser process tree's private bytes so a large
-//! session can raise Warning/Critical without waiting for the machine to run
-//! out of free physical RAM.
+//! OS and process-family residency input. Windows may raise Warning from the
+//! browser process tree's private bytes so grace/watermarks tighten before the
+//! machine runs out of free physical RAM. Critical stays OS-only: a fat
+//! session must not drive urgent discard the way a true low-memory signal does.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
@@ -125,20 +125,24 @@ fn windows_tier(low: bool, high: bool) -> zephium_core::ports::engine::MemoryPre
     }
 }
 
-/// Private bytes of this process family → residency tier. Soft matches OS
-/// Warning policy; hard matches Critical. Tuned for multi-tab WebView2 sessions
-/// that stay Normal on free-physical-RAM notifications alone.
+/// Enter Warning at soft; leave only below soft−gap. Never emits Critical:
+/// that tier is reserved for OS low-memory notifications.
 #[cfg(any(test, target_os = "windows"))]
-fn self_budget_tier(private_bytes: u64) -> zephium_core::ports::engine::MemoryPressure {
+fn self_budget_tier(
+    private_bytes: u64,
+    previous: zephium_core::ports::engine::MemoryPressure,
+) -> zephium_core::ports::engine::MemoryPressure {
     use zephium_core::ports::engine::MemoryPressure;
     const SOFT: u64 = 2 << 30;
-    const HARD: u64 = 4 << 30;
-    if private_bytes >= HARD {
-        MemoryPressure::Critical
-    } else if private_bytes >= SOFT {
-        MemoryPressure::Warning
-    } else {
-        MemoryPressure::Normal
+    const EXIT: u64 = SOFT - (512 << 20);
+    match previous {
+        MemoryPressure::Warning | MemoryPressure::Critical
+            if private_bytes >= EXIT =>
+        {
+            MemoryPressure::Warning
+        }
+        _ if private_bytes >= SOFT => MemoryPressure::Warning,
+        _ => MemoryPressure::Normal,
     }
 }
 
@@ -185,17 +189,34 @@ mod tests {
     }
 
     #[test]
-    fn self_budget_raises_before_the_machine_is_out_of_ram() {
-        assert_eq!(self_budget_tier(0), MemoryPressure::Normal);
-        assert_eq!(self_budget_tier((2 << 30) - 1), MemoryPressure::Normal);
-        assert_eq!(self_budget_tier(2 << 30), MemoryPressure::Warning);
-        assert_eq!(self_budget_tier((4 << 30) - 1), MemoryPressure::Warning);
-        assert_eq!(self_budget_tier(4 << 30), MemoryPressure::Critical);
-        assert!(MemoryPressure::Critical > MemoryPressure::Warning);
-        assert!(MemoryPressure::Warning > MemoryPressure::Normal);
+    fn self_budget_raises_warning_with_hysteresis_never_critical() {
         assert_eq!(
-            MemoryPressure::Normal.max(MemoryPressure::Warning),
+            self_budget_tier(0, MemoryPressure::Normal),
+            MemoryPressure::Normal
+        );
+        assert_eq!(
+            self_budget_tier((2 << 30) - 1, MemoryPressure::Normal),
+            MemoryPressure::Normal
+        );
+        assert_eq!(
+            self_budget_tier(2 << 30, MemoryPressure::Normal),
             MemoryPressure::Warning
+        );
+        assert_eq!(
+            self_budget_tier(4 << 30, MemoryPressure::Normal),
+            MemoryPressure::Warning
+        );
+        assert_eq!(
+            self_budget_tier((2 << 30) - (256 << 20), MemoryPressure::Warning),
+            MemoryPressure::Warning
+        );
+        assert_eq!(
+            self_budget_tier((2 << 30) - (512 << 20) - 1, MemoryPressure::Warning),
+            MemoryPressure::Normal
+        );
+        assert_ne!(
+            self_budget_tier(8 << 30, MemoryPressure::Normal),
+            MemoryPressure::Critical
         );
         assert_eq!(
             MemoryPressure::Critical.max(MemoryPressure::Warning),
@@ -230,9 +251,10 @@ mod native {
 
     /// How often a critical OS state is read again to notice it easing.
     const CRITICAL_RECHECK_MS: u32 = 10_000;
-    /// Process-family sample interval. A long Normal interval would miss a
-    /// burst that crosses soft/hard before the first elevated wait.
-    const SELF_SAMPLE_MS: u32 = 5_000;
+    /// Self-budget sample while residency is still Normal.
+    const SELF_SAMPLE_NORMAL_MS: u32 = 30_000;
+    /// Faster sample once Warning (self or OS) is elevated.
+    const SELF_SAMPLE_ELEVATED_MS: u32 = 5_000;
 
     fn signaled(event: &Event) -> Option<bool> {
         let mut state = windows::core::BOOL::default();
@@ -241,23 +263,37 @@ mod native {
         Some(state.as_bool())
     }
 
-    fn private_bytes(pid: u32) -> Option<u64> {
+    fn process_private_and_start(pid: u32) -> Option<(u64, u64)> {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::GetProcessTimes;
         // SAFETY: query-only handle closed before return.
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+            let (mut created, mut exited, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            let times = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
             let mut memory = PROCESS_MEMORY_COUNTERS_EX::default();
-            let ok = GetProcessMemoryInfo(
+            let counted = GetProcessMemoryInfo(
                 handle,
                 &mut memory as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS,
                 std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
             );
             let _ = CloseHandle(handle);
-            ok.ok()?;
-            Some(memory.PrivateUsage as u64)
+            times.ok()?;
+            counted.ok()?;
+            let start = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            Some((memory.PrivateUsage as u64, start))
         }
     }
 
-    /// Root process and every descendant, matching the soak sampler's tree.
+    /// Root plus descendants. Parent edges where the parent started after the
+    /// child are dropped (PID reuse), matching the blocker-bench soak tree.
+    /// `None` if the root or any retained member cannot be queried — callers
+    /// must keep the previous self tier instead of treating that as zero.
     fn family_private_bytes(root: u32) -> Option<u64> {
         // SAFETY: snapshot handle is owned and closed below.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
@@ -265,14 +301,37 @@ mod native {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        let mut parents: HashMap<u32, u32> = HashMap::new();
+        let mut rows: Vec<(u32, u32)> = Vec::new();
         // SAFETY: Toolhelp enumeration against the live snapshot.
         let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
         while more {
-            parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+            rows.push((entry.th32ProcessID, entry.th32ParentProcessID));
             more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
         }
         let _ = unsafe { CloseHandle(snapshot) };
+
+        let mut starts = HashMap::new();
+        let mut private = HashMap::new();
+        for &(pid, _) in &rows {
+            let Some((bytes, start)) = process_private_and_start(pid) else {
+                continue;
+            };
+            starts.insert(pid, start);
+            private.insert(pid, bytes);
+        }
+        if !starts.contains_key(&root) {
+            return None;
+        }
+        let mut parents: HashMap<u32, u32> = HashMap::new();
+        for &(pid, ppid) in &rows {
+            let Some(&child_start) = starts.get(&pid) else {
+                continue;
+            };
+            if starts.get(&ppid).is_some_and(|parent| *parent > child_start) {
+                continue;
+            }
+            parents.insert(pid, ppid);
+        }
 
         let mut ids = HashSet::new();
         ids.insert(root);
@@ -287,7 +346,7 @@ mod native {
         }
         let mut total = 0_u64;
         for pid in ids {
-            total = total.saturating_add(private_bytes(pid).unwrap_or(0));
+            total = total.saturating_add(*private.get(&pid)?);
         }
         Some(total)
     }
@@ -332,15 +391,13 @@ mod native {
                 .name("memory-pressure".into())
                 .spawn(move || {
                     let read_os = || Some(super::windows_tier(signaled(&low)?, signaled(&high)?));
-                    let read_self = || {
-                        family_private_bytes(root).map_or(MemoryPressure::Normal, |bytes| {
-                            super::self_budget_tier(bytes)
-                        })
-                    };
                     let Some(mut os_tier) = read_os() else {
                         return;
                     };
-                    let mut effective = os_tier.max(read_self());
+                    let mut self_tier = family_private_bytes(root)
+                        .map(|bytes| super::self_budget_tier(bytes, MemoryPressure::Normal))
+                        .unwrap_or(MemoryPressure::Normal);
+                    let mut effective = os_tier.max(self_tier);
                     // Launching under pressure is not a normal machine.
                     if effective != MemoryPressure::Normal {
                         let _ = shell.dispatch(Command::SetMemoryPressure(effective));
@@ -351,10 +408,15 @@ mod native {
                         // Self-budget sampling always needs a finite timeout:
                         // Normal OS pressure previously waited forever.
                         let (watch_low, watch_high, os_recheck) = super::windows_watch(os_tier);
-                        let timeout = if os_recheck {
-                            CRITICAL_RECHECK_MS.min(SELF_SAMPLE_MS)
+                        let self_ms = if effective == MemoryPressure::Normal {
+                            SELF_SAMPLE_NORMAL_MS
                         } else {
-                            SELF_SAMPLE_MS
+                            SELF_SAMPLE_ELEVATED_MS
+                        };
+                        let timeout = if os_recheck {
+                            CRITICAL_RECHECK_MS.min(self_ms)
+                        } else {
+                            self_ms
                         };
                         let mut handles = vec![stopped.handle()];
                         if watch_low {
@@ -376,7 +438,12 @@ mod native {
                             break;
                         };
                         os_tier = next_os;
-                        let next = os_tier.max(read_self());
+                        // A failed family sample keeps the prior self tier so
+                        // a denied OpenProcess cannot clear Warning to Normal.
+                        if let Some(bytes) = family_private_bytes(root) {
+                            self_tier = super::self_budget_tier(bytes, self_tier);
+                        }
+                        let next = os_tier.max(self_tier);
                         if next != effective {
                             effective = next;
                             let _ = shell.dispatch(Command::SetMemoryPressure(effective));

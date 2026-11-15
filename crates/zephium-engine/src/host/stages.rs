@@ -440,17 +440,15 @@ impl EngineHost {
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
-        // Hidden content tabs take WebView2's low memory target immediately so
-        // caches can shrink before the shell's idle verdict asks TrySuspend.
-        // Successful suspension also sets Low; refused suspension must not stay
-        // at Normal. Becoming visible restores Normal; WebView2 resumes a
-        // suspended view when it is shown again.
+        // Hidden content tabs sleep through TrySuspend alone. Microsoft advises
+        // not mixing MemoryUsageTargetLevel with TrySuspend/Resume; TrySuspend
+        // sets Low itself. Low is reserved for tabs that refuse suspension
+        // (see discard). Showing restores Normal after a refuse-path Low.
         #[cfg(target_os = "windows")]
         {
             use wry::{MemoryUsageLevel, WebViewExtWindows as _};
 
             let mut woken = Vec::new();
-            let mut hidden_now = Vec::new();
             for id in self.views.keys() {
                 // A layout belongs to one window; resource policy belongs to
                 // the whole host. Updating window A must not mark a visible
@@ -461,7 +459,6 @@ impl EngineHost {
                 }
                 if off {
                     self.hidden.insert(*id);
-                    hidden_now.push(*id);
                 } else {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
@@ -472,11 +469,6 @@ impl EngineHost {
                     self.suspend_failed.remove(id);
                     self.suspend_retries.remove(id);
                     woken.push(*id);
-                }
-            }
-            for id in hidden_now {
-                if let Some(view) = self.views.get(&id) {
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
                 }
             }
             for id in woken {

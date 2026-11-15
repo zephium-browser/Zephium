@@ -1542,8 +1542,9 @@ impl EngineHost {
             Some(true) => {}
             Some(false) => {
                 eprintln!("suspend: refused after its retry; the page stays awake");
-                // Still hidden: keep the low memory target so a refused
-                // TrySuspend does not leave the renderer at Normal until shown.
+                // TrySuspend cannot run: Low is the Microsoft-supported path
+                // when scripts must keep going. Do not set Low on ordinary hide
+                // (that would mix with TrySuspend). Show restores Normal.
                 if let Some(view) = self.views.get(&id) {
                     use wry::{MemoryUsageLevel, WebViewExtWindows as _};
                     let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
