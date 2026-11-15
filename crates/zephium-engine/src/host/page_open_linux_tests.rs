@@ -9,7 +9,9 @@ use std::sync::{
     mpsc, Arc,
 };
 use std::time::{Duration, Instant};
-use webkit2gtk::{ContextMenuExt, ContextMenuItemExt, SettingsExt, WebContextExt, WebViewExt};
+use webkit2gtk::{
+    ContextMenuExt, ContextMenuItemExt, FindControllerExt, SettingsExt, WebContextExt, WebViewExt,
+};
 use wry::WebViewExtUnix;
 use zephium_core::blocker::{ContentPolicyGeneration, ContentRuleDigest, ContentRules};
 use zephium_core::geometry::Rect;
@@ -19,6 +21,40 @@ use zephium_core::ports::engine::{
     Engine, EngineEvent, NativeDispatch, Partition, UserContent, UserContentGeneration,
 };
 use zephium_core::split::Pane;
+
+const LOCAL_PDF: &str = r#"%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 48 >>
+stream
+BT /F1 18 Tf 20 100 Td (Local PDF fixture) Tj ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+409
+%%EOF
+"#;
 
 struct Fixture {
     origin: String,
@@ -126,6 +162,12 @@ impl Fixture {
                         }
                         std::thread::sleep(Duration::from_millis(50));
                     }
+                    continue;
+                }
+                if line.contains(" /sample.pdf ") {
+                    let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", LOCAL_PDF.len());
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(LOCAL_PDF.as_bytes());
                     continue;
                 }
                 let page = line.contains(" /page ");
@@ -2519,3 +2561,46 @@ fn native_download_edges_settle_through_shared_coordinator() {
         b"chosen data"
     );
 }
+
+#[test]
+#[ignore = "isolated GTK; local inline PDF text rendering"]
+fn native_inline_pdf_renders_local_document_text() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    page.load_uri(&format!("{}/sample.pdf", fixture.origin));
+    let matches = Rc::new(std::cell::Cell::new(0));
+    let found = matches.clone();
+    let controller = page.find_controller().unwrap();
+    controller.connect_found_text(move |_, count| found.set(count));
+    // PDF.js creates its text layer asynchronously after the load commits.
+    let mut next = Instant::now();
+    until(|| {
+        host.drain();
+        if Instant::now() >= next {
+            controller.search(
+                "Local PDF fixture",
+                webkit2gtk::FindOptions::CASE_INSENSITIVE.bits(),
+                10,
+            );
+            next = Instant::now() + Duration::from_millis(250);
+        }
+        matches.get() == 1
+    });
+    assert!(page.context().unwrap().is_sandbox_enabled());
+}
+
+#[test]
+#[ignore = "isolated GTK; page print requests must never show native UI"]
+fn native_page_print_is_refused_without_overriding_page_builtins() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    let windows = gtk::Window::list_toplevels().len();
+    script(&page, "const original=window.print;window.print=()=>original();window.print();document.execCommand('print');document.title='print-refused'");
+    until(|| page.title().as_deref() == Some("print-refused"));
+    assert_eq!(gtk::Window::list_toplevels().len(), windows);
+}
+
+#[path = "page_open_linux_handoff_tests.rs"]
+mod handoff_tests;
