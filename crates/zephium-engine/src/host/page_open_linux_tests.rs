@@ -2083,3 +2083,71 @@ fn native_uploads_return_only_chosen_regular_files_for_both_input_kinds() {
         upload_panel(id).is_none() && page.title().as_deref() == Some("child")
     });
 }
+
+#[test]
+#[ignore = "isolated Xvfb; native file-manager URI transfer onto input with special-file refusal"]
+fn native_file_drops_refuse_directories_and_recover_for_regular_files() {
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    host.window.move_(0, 0);
+    let (_, page) = host.show(&format!("{}/page", fixture.origin));
+    script(&page, "document.body.innerHTML='<input type=file multiple style=\"position:absolute;left:0;top:0;width:800px;height:500px\">';document.querySelector('input').onchange=async e=>{let f=e.target.files[0];document.title=f?JSON.stringify([f.name,await f.text()]):'empty'};document.title='drop-ready'");
+    until(|| page.title().as_deref() == Some("drop-ready"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("drop%20 name.txt");
+    std::fs::write(&file, "chosen drop").unwrap();
+    let source = gtk::Window::new(gtk::WindowType::Toplevel);
+    source.set_default_size(200, 120);
+    source.move_(900, 0);
+    let label = gtk::EventBox::new();
+    label.add(&gtk::Label::new(Some("File-manager URI source")));
+    source.add(&label);
+    label.drag_source_set(
+        gtk::gdk::ModifierType::BUTTON1_MASK,
+        &[gtk::TargetEntry::new(
+            "text/uri-list",
+            gtk::TargetFlags::empty(),
+            0,
+        )],
+        gtk::gdk::DragAction::COPY,
+    );
+    let selected = Rc::new(RefCell::new(dir.path().to_path_buf()));
+    let selected_uri = selected.clone();
+    label.connect_drag_data_get(move |_, _, data, _, _| {
+        data.set_uris(&[gtk::gio::File::for_path(&*selected_uri.borrow())
+            .uri()
+            .as_str()]);
+    });
+    source.show_all();
+    let deliveries = Rc::new(std::cell::Cell::new(0));
+    let observed = deliveries.clone();
+    page.connect_drag_data_received(move |_, _, _, _, _, _, _| observed.set(observed.get() + 1));
+    for valid in [false, true] {
+        if valid {
+            *selected.borrow_mut() = file.clone();
+        }
+        let before = deliveries.get();
+        let mut driver=std::process::Command::new("python3").args(["-c",r#"
+import ctypes as c,ctypes.util,os,time
+assert os.environ['DISPLAY'] not in (':0',':0.0')
+l=c.CDLL(ctypes.util.find_library('xdo'));l.xdo_new.argtypes=[c.c_char_p];l.xdo_new.restype=c.c_void_p;x=l.xdo_new(None)
+for n,a in [('xdo_move_mouse',[c.c_void_p,c.c_int,c.c_int,c.c_int]),('xdo_mouse_down',[c.c_void_p,c.c_ulong,c.c_int]),('xdo_mouse_up',[c.c_void_p,c.c_ulong,c.c_int])]:getattr(l,n).argtypes=a
+assert l.xdo_move_mouse(x,950,50,0)==0;time.sleep(.2);assert l.xdo_mouse_down(x,0,1)==0
+for px in range(940,300,-40):time.sleep(.08);assert l.xdo_move_mouse(x,px,100,0)==0
+time.sleep(.2);assert l.xdo_mouse_up(x,0,1)==0
+"#]).spawn().unwrap();
+        until(|| {
+            gtk::main_iteration_do(false);
+            driver.try_wait().unwrap().is_some()
+        });
+        until(|| deliveries.get() > before);
+        if valid {
+            let expected = serde_json::json!(["drop%20 name.txt", "chosen drop"]).to_string();
+            until(|| page.title().as_deref() == Some(expected.as_str()));
+        } else {
+            script(&page,"document.title=document.querySelector('input').files.length===0?'directory-refused':'directory-leaked'");
+            until(|| page.title().as_deref() == Some("directory-refused"));
+        }
+    }
+    source.close();
+}

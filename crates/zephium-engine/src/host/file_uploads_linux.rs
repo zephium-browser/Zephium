@@ -1,11 +1,9 @@
 //! Tab-owned GTK file selection; native consent supplies the only disclosed paths.
 use super::permits::EventPermit;
 use crate::navigation_epoch::{NavigationActivity, NavigationEpochTracker};
+use crate::platform::imp::file_selection::CheckedFile;
 use gtk::{glib, prelude::*};
 use std::cell::{Cell, RefCell};
-use std::fs::{File, OpenOptions};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -181,87 +179,5 @@ impl FileUploadBroker {
 impl Drop for FileUploadBroker {
     fn drop(&mut self) {
         drop(self.pending.get_mut().take());
-    }
-}
-
-struct CheckedFile {
-    path: PathBuf,
-    file: File,
-    encoded: String,
-}
-impl CheckedFile {
-    fn open(selected: &Path) -> Option<Self> {
-        if !selected.is_absolute() || selected.as_os_str().len() > 4096 {
-            return None;
-        }
-        let path = selected.canonicalize().ok()?;
-        let text = path.to_str()?;
-        if text.len() > 4096 || text.contains('\0') {
-            return None;
-        }
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&path)
-            .ok()?;
-        if !file.metadata().ok()?.is_file() {
-            return None;
-        }
-        // select_files decodes URI escapes even though its argument is a filename.
-        let encoded = text.replace('%', "%25");
-        Some(Self {
-            path,
-            file,
-            encoded,
-        })
-    }
-    fn still_matches(&self) -> bool {
-        use std::os::unix::fs::MetadataExt;
-        let Ok(held) = self.file.metadata() else {
-            return false;
-        };
-        let Ok(named) = self.path.symlink_metadata() else {
-            return false;
-        };
-        named.is_file() && held.is_file() && held.dev() == named.dev() && held.ino() == named.ino()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::os::unix::{ffi::OsStringExt, fs::symlink, net::UnixListener};
-    #[test]
-    fn only_regular_files_and_resolved_regular_symlinks_are_accepted() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("100%20 space\n.txt");
-        std::fs::write(&file, "chosen").unwrap();
-        let checked = CheckedFile::open(&file).unwrap();
-        assert!(checked.encoded.ends_with("100%2520 space\n.txt"));
-        assert!(checked.still_matches());
-        let link = dir.path().join("link");
-        symlink(&file, &link).unwrap();
-        assert!(CheckedFile::open(&link).unwrap().still_matches());
-        assert!(CheckedFile::open(dir.path()).is_none());
-        let directory_link = dir.path().join("directory-link");
-        symlink(dir.path(), &directory_link).unwrap();
-        assert!(CheckedFile::open(&directory_link).is_none());
-        assert!(CheckedFile::open(Path::new("/dev/null")).is_none());
-        let socket = dir.path().join("socket");
-        let _listener = UnixListener::bind(&socket).unwrap();
-        assert!(CheckedFile::open(&socket).is_none());
-        let fifo = dir.path().join("fifo");
-        let status = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        assert!(CheckedFile::open(&fifo).is_none());
-        let non_utf8 = dir.path().join(std::ffi::OsString::from_vec(vec![0xff]));
-        std::fs::write(&non_utf8, "invalid path").unwrap();
-        assert!(CheckedFile::open(&non_utf8).is_none());
-        std::fs::remove_file(&file).unwrap();
-        symlink(dir.path(), &file).unwrap();
-        assert!(!checked.still_matches());
     }
 }
