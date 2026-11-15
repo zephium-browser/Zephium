@@ -543,6 +543,8 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
+            refuse_memory_low: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
             suspend_retries: HashMap::new(),
             #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),

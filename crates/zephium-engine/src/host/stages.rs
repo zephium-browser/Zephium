@@ -467,13 +467,14 @@ impl EngineHost {
                     // Keep the in-flight slot until its exact callback settles.
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
-                    let refused = self.suspend_failed.remove(id);
+                    self.suspend_failed.remove(id);
                     self.suspend_retries.remove(id);
-                    woken.push((*id, refused));
+                    let restore_normal = self.refuse_memory_low.remove(id);
+                    woken.push((*id, restore_normal));
                 }
             }
-            for (id, refused) in woken {
-                if refused {
+            for (id, restore_normal) in woken {
+                if restore_normal {
                     if let Some(view) = self.views.get(&id) {
                         let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
                     }

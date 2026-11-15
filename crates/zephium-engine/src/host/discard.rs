@@ -1548,6 +1548,7 @@ impl EngineHost {
                 if let Some(view) = self.views.get(&id) {
                     use wry::{MemoryUsageLevel, WebViewExtWindows as _};
                     let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
+                    self.refuse_memory_low.insert(id);
                 }
                 // The shell then stops asking, so its desired set says what
                 // is really suspended.
