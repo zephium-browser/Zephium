@@ -163,6 +163,7 @@ impl ScriptDialogs {
             &[("OK", gtk::ResponseType::Ok)],
         );
         panel.set_default_size(360, -1);
+        panel.set_default_response(gtk::ResponseType::Ok);
         if kind != ScriptDialogType::Alert {
             panel.add_button("Cancel", gtk::ResponseType::Cancel);
         }
@@ -176,6 +177,7 @@ impl ScriptDialogs {
         let entry = default.map(|default| {
             let field = gtk::Entry::new();
             field.set_max_length(1024);
+            field.set_activates_default(true);
             field.set_text(&default);
             content.add(&field);
             field

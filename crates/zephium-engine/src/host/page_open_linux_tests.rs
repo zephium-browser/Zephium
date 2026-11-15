@@ -1767,7 +1767,7 @@ fn native_prompt_returns_chosen_text_and_null_on_cancel() {
         .unwrap();
     assert_eq!(entry.text(), "initial");
     entry.set_text("chosen <literal>");
-    panel.response(gtk::ResponseType::Ok);
+    entry.emit_activate();
     until(|| page.title().as_deref() == Some("chosen <literal>"));
     host.window.window().unwrap().focus(0);
     until(|| host.window.is_active());
@@ -1777,6 +1777,61 @@ fn native_prompt_returns_chosen_text_and_null_on_cancel() {
     );
     visible_dialog().response(gtk::ResponseType::Cancel);
     until(|| page.title().as_deref() == Some("null"));
+}
+
+#[test]
+#[ignore = "isolated GTK; native find direction/count and unavailable Save As"]
+fn native_find_honors_direction_without_inventing_match_position() {
+    use webkit2gtk::FindControllerExt;
+    use zephium_core::ports::engine::FindRequest;
+    let fixture = Fixture::new();
+    let host = NativeHarness::new();
+    let (id, page) = host.show(&format!("{}/page", fixture.origin));
+    script(
+        &page,
+        "document.body.textContent='needle needle needle';document.title='find-ready'",
+    );
+    until(|| page.title().as_deref() == Some("find-ready"));
+    host.drain();
+    for forward in [false, true, false] {
+        assert_eq!(
+            host.engine.find(
+                id,
+                Some(FindRequest {
+                    query: "needle".into(),
+                    forward,
+                })
+            ),
+            NativeDispatch::Scheduled
+        );
+        let mut result = None;
+        until(|| {
+            for event in host.drain() {
+                if let EngineEvent::FindResult {
+                    query,
+                    matches,
+                    active,
+                    ..
+                } = event
+                {
+                    assert_eq!(query, "needle");
+                    result = Some((matches, active));
+                }
+            }
+            result.is_some()
+        });
+        assert_eq!(result, Some((3, None)));
+        assert_eq!(
+            page.find_controller().unwrap().options() & webkit2gtk::FindOptions::BACKWARDS.bits(),
+            if forward {
+                0
+            } else {
+                webkit2gtk::FindOptions::BACKWARDS.bits()
+            }
+        );
+    }
+    assert_eq!(host.engine.find(id, None), NativeDispatch::Scheduled);
+    assert_eq!(host.engine.save_page(id), NativeDispatch::Unsupported);
 }
 
 #[test]

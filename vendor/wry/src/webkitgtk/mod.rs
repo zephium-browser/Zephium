@@ -1536,8 +1536,13 @@ impl InnerWebView {
   }
 
   pub fn print(&self) -> Result<()> {
+    let owner = self
+      .webview
+      .toplevel()
+      .and_then(|widget| widget.downcast::<gtk::Window>().ok())
+      .ok_or_else(|| gtk::glib::bool_error!("print parent window is unavailable"))?;
     let print = webkit2gtk::PrintOperation::new(&self.webview);
-    print.run_dialog(None::<&gtk::Window>);
+    print.run_dialog(Some(&owner));
     Ok(())
   }
 

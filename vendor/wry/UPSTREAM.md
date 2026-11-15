@@ -403,3 +403,5 @@ GTK script-created windows may emit native Started before exposing a URI.
 Retain that start identity until the same navigation supplies a bounded URI;
 then deliver Started before its redirect, commit or failure. Commit remains the
 only document-attribution boundary; no URL request is replayed.
+GTK print dialogs are transient for the content view's actual owning window;
+printing without an owner is refused rather than creating an unowned dialog.
