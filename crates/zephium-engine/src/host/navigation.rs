@@ -153,7 +153,7 @@ impl EngineHost {
             view.presentation_permit.store(false, Ordering::Release);
             view.title_ready = None;
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.fullscreen_document_committed(id);
         let mut stages_pending = true;
         for stage in self.stages.values() {
@@ -724,6 +724,11 @@ impl EngineHost {
             // not fail controller construction. Keep its uncommitted view
             // hidden and reusable. Closing here would revoke a pending native
             // download save panel before the user can choose its destination.
+            return;
+        }
+        if cfg!(target_os = "linux") {
+            // The shared shell covers the failed address; keep the native tab
+            // hidden and reusable even when its first load never committed.
             return;
         }
         eprintln!("view-create: provisional first-load navigation failed before commit");

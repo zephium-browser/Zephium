@@ -3,7 +3,23 @@
 set -euo pipefail
 
 sandbox="$(mktemp -d)"
-trap 'rm -rf "${sandbox}"' EXIT
+cleanup() {
+    local result=$?
+    trap - EXIT
+    # The extracted web-process library is deliberately read-only. Only our
+    # disposable directories need write permission to unlink their children.
+    for attempt in 1 2 3; do
+        find "${sandbox}" -type d -exec chmod u+w -- {} +
+        if rm -rf -- "${sandbox}"; then
+            exit "${result}"
+        fi
+        # A terminating native process can finish a cache write after the
+        # test exits. Bound the cleanup retry and still report final failure.
+        sleep 0.1
+    done
+    exit 1
+}
+trap cleanup EXIT
 # Keep the pinned toolchains and downloaded dependencies available after HOME changes.
 export CARGO_HOME="${CARGO_HOME:-${HOME}/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-${HOME}/.rustup}"

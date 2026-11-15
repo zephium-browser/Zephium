@@ -20,7 +20,9 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT},
+  native_bounds::{
+    bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT,
+  },
   AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
   NavigationFailure, NavigationId, PageLoadEvent,
 };

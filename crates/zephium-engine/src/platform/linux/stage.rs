@@ -112,6 +112,7 @@ fn animations_enabled(state: &Rc<RefCell<State>>) -> bool {
     state
         .try_borrow()
         .ok()
+        .filter(|state| state.fullscreen.is_none())
         .map(|state| state.fixed.clone())
         .and_then(|fixed| fixed.settings())
         .is_some_and(|settings| settings.is_gtk_enable_animations())
@@ -130,6 +131,7 @@ struct State {
     size: (f64, f64),
     root_size: (i32, i32),
     pending_motion: Option<StageMotion>,
+    fullscreen: Option<ItemId>,
     slide: Option<Slide>,
     hidden: bool,
     tree: Option<Pane>,
@@ -151,6 +153,20 @@ pub struct Stage {
 }
 
 impl Stage {
+    pub fn set_fullscreen(&self, owner: Option<ItemId>) {
+        let mut state = self.state.borrow_mut();
+        if state.fullscreen == owner {
+            return;
+        }
+        state.fullscreen = owner;
+        state.slide = None;
+        state.card_motion = None;
+        state.pending_motion = None;
+        state.revision = state.revision.wrapping_add(1);
+        drop(state);
+        sync(&self.state, &self.sync_scheduled);
+    }
+
     pub fn new(fixed: gtk::Fixed, gap: f64) -> Self {
         let root = fixed.allocation();
         let stage = Self {
@@ -161,6 +177,7 @@ impl Stage {
                 size: (0.0, 0.0),
                 root_size: (root.width(), root.height()),
                 pending_motion: None,
+                fullscreen: None,
                 slide: None,
                 hidden: true,
                 tree: None,

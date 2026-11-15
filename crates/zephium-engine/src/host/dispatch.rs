@@ -239,7 +239,7 @@ enum HostTaskKey {
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     Fullscreen(ItemId),
     Discard(ItemId),
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -335,9 +335,8 @@ pub(crate) fn install(
     main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
     initial_user_content: UserContent,
-    #[cfg(any(target_os = "macos", target_os = "windows"))] native_open_authority: Arc<
-        crate::NativeOpenAuthority,
-    >,
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    native_open_authority: Arc<crate::NativeOpenAuthority>,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
 ) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
@@ -442,7 +441,7 @@ pub(crate) fn install(
             page_permissions: super::page_permissions::PagePermissionBroker::default(),
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             downloads: None,
-            #[cfg(any(target_os="macos",target_os="windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             native_open_authority,
             native_resource_accounting_failed: false,
             navigation_snapshots: HashMap::new(),
@@ -500,7 +499,7 @@ pub(crate) fn install(
             discarded_state_revision: 0,
             user_content,
             shortcuts: Arc::default(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             fullscreen: crate::fullscreen::FullscreenLedger::default(),
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
@@ -618,7 +617,7 @@ where
     with_priority(HostTaskPriority::Normal, None, f)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn try_open_native_tab(
     source: zephium_core::ids::ItemId,
     permit: &super::permits::EventPermit,
@@ -1087,7 +1086,7 @@ where
 
 /// Each callback re-reads the view's native state when it runs, so only the
 /// newest of adjacent callbacks for one view needs to survive.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn with_fullscreen_observation<F>(id: ItemId, f: F)
 where
     F: FnOnce(&mut EngineHost) + 'static,

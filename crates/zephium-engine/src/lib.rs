@@ -13,12 +13,12 @@ pub use agent_context_port::{work_browser_monotonic_deadline, work_browser_monot
 mod caption_keys;
 #[cfg(any(target_os = "windows", target_os = "linux", test))]
 mod card_geometry;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod fullscreen;
 mod haptics;
 #[cfg(any(target_os = "windows", test))]
@@ -1490,13 +1490,13 @@ fn retirement_filtering_sink(
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) struct NativeOpenAuthority {
     retirement: Arc<Mutex<RetirementGate>>,
     dispatch: MainThreadDispatch,
     fatal: Arc<dyn Fn(&'static str) + Send + Sync>,
 }
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl NativeOpenAuthority {
     pub(crate) fn reserve(
         &self,
@@ -1781,7 +1781,7 @@ pub fn install(
         dispatch.clone(),
         initial_user_content.generation,
         initial_user_content.content,
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         Arc::new(NativeOpenAuthority {
             retirement: retirement.clone(),
             dispatch: dispatch.clone(),
@@ -2367,11 +2367,11 @@ pub fn page_mute_supported() -> bool {
     {
         platform::macos::audio::mute_supported()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         true
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         false
     }
@@ -2531,7 +2531,7 @@ impl Engine for WebviewEngine {
         call: zephium_core::browsing_data::EngineDataCall,
         completion: zephium_core::browsing_data::EngineDataCompletion,
     ) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if !lock_retirement_gate(&self.retirement).profile_is_active(partition.profile()) {
                 completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -2547,7 +2547,7 @@ impl Engine for WebviewEngine {
                 });
             });
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (partition, call);
             completion.finish(zephium_core::browsing_data::EngineDataReply::Failed(
@@ -3076,14 +3076,14 @@ impl Engine for WebviewEngine {
         request: u32,
         credentials: Option<zephium_core::http_auth::HttpCredentials>,
     ) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             // A retiring view cancels its own native request as it drops.
             self.run_for_active_item(item, move |host| {
                 host.answer_http_auth(item, request, credentials)
             })
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (item, request, credentials);
             NativeDispatch::Unsupported
@@ -3110,7 +3110,7 @@ impl Engine for WebviewEngine {
     }
 
     fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
-        if cfg!(target_os = "windows") {
+        if cfg!(any(target_os = "windows", target_os = "linux")) {
             zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
         } else {
             zephium_core::ports::engine::FullscreenPresentation::OwnWindow
@@ -3137,11 +3137,11 @@ impl Engine for WebviewEngine {
     }
 
     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = id;
             NativeDispatch::Unsupported
@@ -3410,11 +3410,11 @@ impl Engine for WebviewEngine {
         if !page_mute_supported() {
             return NativeDispatch::Unsupported;
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             self.run_for_active_item(id, move |h| h.set_muted(id, muted))
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         {
             let _ = (id, muted);
             NativeDispatch::Unsupported
@@ -3746,6 +3746,10 @@ impl Engine for WebviewEngine {
 
     fn set_proxy(&self, proxy: Option<zephium_core::proxy::ProxyServer>) {
         network::set(proxy);
+        #[cfg(target_os = "linux")]
+        let _ = self.run(|| {
+            let _ = host::try_with(|host| host.refresh_linux_proxy());
+        });
     }
 
     fn set_shortcuts(&self, shortcuts: Vec<Shortcut>) {

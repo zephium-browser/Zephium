@@ -1,4 +1,4 @@
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use super::dispatch::with_fullscreen_observation;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
@@ -31,7 +31,7 @@ use wry::{DownloadPolicy, WebViewBuilder};
 use crate::navigation_epoch::{NavigationEpochTracker, NavigationTransition};
 use zephium_core::geometry::Rect;
 use zephium_core::ids::ItemId;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use zephium_core::ports::engine::NavigationFailureReason;
 use zephium_core::ports::engine::{EngineEvent, Partition, RunAt, UserScript, World};
 
@@ -41,7 +41,7 @@ use objc2::rc::Retained;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Environment;
 
 pub(super) enum NativeViewPurpose {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     NativeTab(wry::NewWindowOpener),
     Tab,
     #[cfg(not(all(unix, not(target_os = "macos"))))]
@@ -52,7 +52,7 @@ impl NativeViewPurpose {
     const fn resource_class(&self) -> NativeResourceClass {
         match self {
             Self::Tab => NativeResourceClass::Tab,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             Self::NativeTab(_) => NativeResourceClass::Tab,
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             Self::WarmSpare => NativeResourceClass::WarmSpare,
@@ -635,7 +635,7 @@ impl EngineHost {
     ) -> Option<ObservedView> {
         let report_failure = purpose.reports_failure();
         let popup_opener = match purpose {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             NativeViewPurpose::NativeTab(opener) => Some(opener),
             _ => None::<wry::NewWindowOpener>,
         };
@@ -722,7 +722,7 @@ impl EngineHost {
             .clone();
         let site_scope =
             super::content_styles::ViewSiteScope::new(site_preferences, navigation, url);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
             self.popup_sites_for(partition.profile()),
         ));
@@ -785,13 +785,13 @@ impl EngineHost {
         );
         #[cfg(target_os = "macos")]
         let load_file_uploads = Rc::downgrade(&file_uploads);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let http_auth = super::http_auth::HttpAuthBroker::new(
             id.clone(),
             event_permit.clone(),
             self.sink.clone(),
         );
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let load_http_auth = Rc::downgrade(&http_auth);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let certificates = Rc::new(super::certificates::CertificateWatch::default());
@@ -799,8 +799,16 @@ impl EngineHost {
         let load_certificates = Rc::downgrade(&certificates);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let certificate_exceptions = self.certificate_exceptions_for(partition.profile());
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let download_surface_intent = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "linux")]
+        let script_dialogs = super::script_dialogs::ScriptDialogs::new(
+            event_permit.clone(),
+            navigation.clone(),
+            presentation_permit.clone(),
+        );
+        #[cfg(target_os = "linux")]
+        let load_script_dialogs = Rc::downgrade(&script_dialogs);
         let guard_presentation_permit = presentation_permit.clone();
         let load_presentation_permit = presentation_permit.clone();
         let crash_permit = event_permit.clone();
@@ -812,11 +820,11 @@ impl EngineHost {
         // A page's link for another application never loads; it becomes a
         // request the person answers in chrome. One per second per view, so
         // a page cannot flood it.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let page_asked = Rc::new(std::cell::RefCell::new(
             std::collections::HashSet::<String>::new(),
         ));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let app_link = {
             let permit = event_permit.clone();
             let sink = self.sink.clone();
@@ -1199,6 +1207,14 @@ impl EngineHost {
             builder
         };
 
+        #[cfg(target_os = "linux")]
+        let builder = if let Some(opener) = popup_opener.as_ref() {
+            use wry::WebViewBuilderExtUnix;
+            builder.with_related_view(opener.webview.clone())
+        } else {
+            builder
+        };
+
         #[cfg(target_os = "windows")]
         let permission_presentation = presentation_permit.clone();
         #[cfg(target_os = "windows")]
@@ -1325,6 +1341,36 @@ impl EngineHost {
                 }
             });
 
+        #[cfg(target_os = "linux")]
+        {
+            let dialogs = Rc::downgrade(&script_dialogs);
+            builder = builder.with_linux_script_dialog_handler(move |view, dialog| {
+                dialogs
+                    .upgrade()
+                    .is_some_and(|broker| broker.present(view, dialog))
+            });
+            let action_app_link = app_link.clone();
+            builder = builder.with_linux_navigation_action_handler(move |target, gesture| {
+                action_app_link(
+                    target,
+                    gesture,
+                    zephium_core::navigation::AppLinkSource::Unknown,
+                )
+            });
+            let auth_broker = Rc::downgrade(&http_auth);
+            builder = builder.with_linux_auth_handler(move |view, request| {
+                use webkit2gtk::WebViewExt;
+                let responder = super::http_auth::NativeResponder::new(request);
+                if let (Some(broker), Some(challenge)) = (
+                    auth_broker.upgrade(),
+                    super::http_auth::native_challenge(request),
+                ) {
+                    broker.challenge(challenge, view.uri().as_deref(), responder);
+                }
+                true
+            });
+        }
+
         // WebKit consults this in place of the plain handler above and says
         // which frame is loading, so focus shuts only top-level documents.
         #[cfg(target_os = "macos")]
@@ -1412,7 +1458,7 @@ impl EngineHost {
         #[cfg(all(unix, not(target_os = "macos")))]
         let _ = focus_shuts;
 
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             if native_popup || cfg!(target_os = "windows") {
                 let closing_item = id.clone();
@@ -1442,9 +1488,10 @@ impl EngineHost {
             let source = id.clone();
             let permit = event_permit.clone();
             let tracker = navigation.clone();
-            let burst = Cell::new((std::time::Instant::now(), 0u8));
+            let burst = super::popup_sites::PopupBurst::new();
             let last_blocked = Cell::new(None::<std::time::Instant>);
             let popup_sink = self.sink.clone();
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             let popup_app_link = app_link.clone();
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
@@ -1458,6 +1505,7 @@ impl EngineHost {
                 );
                 // A new window does not say which frame asked, so no kept
                 // answer opens it.
+                #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                 if features.user_initiated
                     && popup_app_link(&url, true, zephium_core::navigation::AppLinkSource::Unknown)
                 {
@@ -1480,18 +1528,10 @@ impl EngineHost {
                         );
                     }
                 };
-                let (started, count) = burst.get();
-                let (started, count) =
-                    if now.duration_since(started) >= std::time::Duration::from_secs(1) {
-                        (now, 0)
-                    } else {
-                        (started, count)
-                    };
-                if !features.user_initiated || count >= 8 {
+                if !burst.admit(features.user_initiated, now) {
                     report_blocked();
                     return wry::NewWindowResponse::Deny;
                 }
-                burst.set((started, count + 1));
                 let Some(activity) = tracker.activity_snapshot() else {
                     report_blocked();
                     return wry::NewWindowResponse::Deny;
@@ -1879,11 +1919,12 @@ impl EngineHost {
         // WebView2 can put its error document in place of the shown page;
         // the failure handler names that navigation for its Failed event.
         let replaced_navigation = Rc::new(Cell::new(None::<wry::NavigationId>));
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let failure_permit = load_permit.clone();
             let failure_sink = on_load.clone();
             let failure_id = load_id.clone();
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let failure_certificates = Rc::downgrade(&certificates);
             let failure_replaced = replaced_navigation.clone();
             let failure_navigation = navigation.clone();
@@ -1926,6 +1967,9 @@ impl EngineHost {
                     };
                     failure_replaced.set(replaced.is_some().then_some(navigation));
                     let replaced_page = replaced.is_some();
+                    #[cfg(target_os = "linux")]
+                    let url = replaced;
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     let url = matches!(reason, NavigationFailureReason::Certificate(_))
                         .then(|| failure_certificates.upgrade()?.refused_url())
                         .flatten()
@@ -1960,11 +2004,15 @@ impl EngineHost {
             };
             match transition {
                 NavigationTransition::Started(epoch) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(dialogs) = load_script_dialogs.upgrade() {
+                        dialogs.navigation_started();
+                    }
                     #[cfg(target_os = "macos")]
                     if let Some(broker) = load_file_uploads.upgrade() {
                         broker.cancel();
                     }
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_started(&event.url);
                     }
@@ -1991,7 +2039,7 @@ impl EngineHost {
                 }
                 NavigationTransition::Redirected(_) => {
                     load_site_scope.navigating(&event.url);
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_redirected(&event.url);
                     }
@@ -2003,7 +2051,7 @@ impl EngineHost {
                 NavigationTransition::Committed(epoch) => {
                     #[cfg(target_os = "macos")]
                     load_replay.commit();
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_committed(&event.url);
                     }
@@ -2048,7 +2096,7 @@ impl EngineHost {
                 } => {
                     #[cfg(target_os = "macos")]
                     load_replay.abandon();
-                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
                     if let Some(broker) = load_http_auth.upgrade() {
                         broker.navigation_failed();
                     }
@@ -2499,6 +2547,14 @@ impl EngineHost {
         // before the first load, which the browser itself asked for.
         #[cfg(target_os = "linux")]
         {
+            // Filter stock actions before our extension runtime appends its owned actions.
+            super::page_open::install_linux_menu(
+                &wry::WebViewExtUnix::webview(&view),
+                id.clone(),
+                event_permit.clone(),
+                navigation.clone(),
+                presentation_permit.clone(),
+            );
             self.webext_linux.attach_tab(partition, id.get(), &view);
             self.webext_linux
                 .authorize_navigation(partition.profile(), id.get(), url);
@@ -2577,6 +2633,13 @@ impl EngineHost {
         {
             use webkit2gtk::WebViewExt;
             use wry::WebViewExtUnix;
+            let dialogs = Rc::downgrade(&script_dialogs);
+            use gtk::prelude::WidgetExt;
+            view.webview().connect_unmap(move |_| {
+                if let Some(dialogs) = dialogs.upgrade() {
+                    dialogs.cancel();
+                }
+            });
             let permit = crash_permit.clone();
             view.webview()
                 .connect_web_process_terminated(move |_, reason| {
@@ -2670,7 +2733,7 @@ impl EngineHost {
                 }
             })
         };
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let fullscreen_observer = {
             let fullscreen_id = id.clone();
             let fullscreen_permit = event_permit.clone();
@@ -2687,6 +2750,21 @@ impl EngineHost {
             #[cfg(target_os = "macos")]
             {
                 crate::platform::macos::fullscreen::FullscreenObserver::install(&view, changed)
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let permit = event_permit.clone();
+                let presented = presentation_permit.clone();
+                let tracker = navigation.clone();
+                crate::platform::imp::install_fullscreen_observer(
+                    &view,
+                    move || {
+                        permit.active_token().is_some()
+                            && presented.load(Ordering::Acquire)
+                            && tracker.current_committed().is_some()
+                    },
+                    changed,
+                )?
             }
             #[cfg(target_os = "windows")]
             match crate::platform::imp::install_fullscreen_observer(&view, changed) {
@@ -2724,7 +2802,7 @@ impl EngineHost {
             })
         };
         // Whether the page makes sound, from the engine's own notification.
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         let audio_observer = {
             let audio_id = id.clone();
             let audio_permit = event_permit.clone();
@@ -2744,7 +2822,7 @@ impl EngineHost {
             {
                 crate::platform::macos::audio::AudioObserver::install(&view, changed)
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             {
                 crate::platform::imp::install_audio_observer(&view, changed)
             }
@@ -2856,9 +2934,9 @@ impl EngineHost {
             _capture_observer: capture_observer,
             #[cfg(target_os = "macos")]
             _audio_observer: audio_observer,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             audio_observer,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             _fullscreen_observer: fullscreen_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
@@ -2881,16 +2959,18 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             suspend_attempt: None,
             site_scope,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             popup_policy,
             content_styles: Arc::new(super::content_styles::DocumentStyleState::default()),
             #[cfg(target_os = "macos")]
             file_uploads,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             http_auth,
+            #[cfg(target_os = "linux")]
+            script_dialogs,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             certificates,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             download_surface_intent,
             event_permit,
             navigation,
@@ -3332,7 +3412,7 @@ fn download_ask(
 /// What the shell hears about an app link's source, or None when it is not
 /// heard at all: a frame from another site, such as an ad, only when the
 /// person clicked in it. A frame of the tab's own site speaks for the tab.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn heard_app_link_source(
     source: zephium_core::navigation::AppLinkSource,
     committed: Option<&zephium_core::permissions::PageOrigin>,
@@ -3381,7 +3461,7 @@ fn webview2_app_link_source(origin: Option<&str>) -> zephium_core::navigation::A
 }
 
 /// The origin of the document the view has committed, if any.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(super) fn committed_origin(
     navigation: &crate::navigation_epoch::NavigationEpochTracker,
 ) -> Option<zephium_core::permissions::PageOrigin> {
@@ -3423,7 +3503,7 @@ pub(super) fn raw_content_permission_on(
 #[cfg(test)]
 mod tests;
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn failure_reason(failure: wry::NavigationFailure) -> NavigationFailureReason {
     match failure {
         wry::NavigationFailure::Offline => NavigationFailureReason::Offline,

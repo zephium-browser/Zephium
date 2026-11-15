@@ -12,7 +12,7 @@ mod blocker_bench;
 mod blocker_statistics;
 #[cfg(all(test, target_os = "windows"))]
 mod browser_windows_qualification;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;
@@ -36,16 +36,16 @@ mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod fullscreen;
 mod generic_styles;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod http_auth;
 mod lifecycle;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod media;
 mod navigation;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod page_open;
 mod page_ops;
 #[cfg(target_os = "macos")]
@@ -59,6 +59,8 @@ mod permits;
 mod popup_sites;
 mod profiles;
 mod resources;
+#[cfg(target_os = "linux")]
+mod script_dialogs;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod scriptlet_source;
 #[cfg(target_os = "macos")]
@@ -200,12 +202,12 @@ struct ObservedView {
     _capture_observer: objc2::rc::Retained<crate::platform::macos::capture::CaptureObserver>,
     #[cfg(target_os = "macos")]
     _audio_observer: Option<objc2::rc::Retained<crate::platform::macos::audio::AudioObserver>>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     audio_observer: Option<crate::platform::imp::AudioObserver>,
     #[cfg(target_os = "macos")]
     _fullscreen_observer:
         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
     #[cfg(target_os = "windows")]
     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
@@ -245,19 +247,21 @@ struct ObservedView {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     paint_cover: Option<crate::platform::imp::PaintCover>,
     site_scope: Rc<content_styles::ViewSiteScope>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     popup_policy: Rc<popup_sites::ViewPopupPolicy>,
     content_styles: Arc<content_styles::DocumentStyleState>,
     #[cfg(target_os = "macos")]
     file_uploads: Rc<file_uploads::FileUploadBroker>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     http_auth: Rc<http_auth::HttpAuthBroker>,
+    #[cfg(target_os = "linux")]
+    script_dialogs: Rc<script_dialogs::ScriptDialogs>,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     certificates: Rc<certificates::CertificateWatch>,
     // A current layout may request a view before its first document commits
     // (for example a download URL entered in a new tab). This permits only a
     // native download decision, never document presentation or file access.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     download_surface_intent: Arc<AtomicBool>,
     event_permit: EventPermit,
     navigation: NavigationEpochTracker,
@@ -404,8 +408,10 @@ impl Drop for ObservedView {
         crate::platform::cosmetic_pull::cancel(&self.view);
         #[cfg(target_os = "macos")]
         self.file_uploads.cancel();
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         self.http_auth.cancel();
+        #[cfg(target_os = "linux")]
+        self.script_dialogs.cancel();
         let policy_cleanup_failed = self
             .content_policy_registration
             .take()
@@ -591,7 +597,7 @@ pub(crate) struct EngineHost {
     page_permissions: page_permissions::PagePermissionBroker,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) downloads: Option<Rc<downloads::Downloads>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     native_open_authority: Arc<crate::NativeOpenAuthority>,
     native_resource_accounting_failed: bool,
     navigation_snapshots: HashMap<ItemId, NavigationSnapshot>,
@@ -681,7 +687,7 @@ pub(crate) struct EngineHost {
     /// open pages without rebuilding them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     fullscreen: crate::fullscreen::FullscreenLedger,
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,

@@ -406,12 +406,12 @@ use objc2_app_kit::NSWindow;
 use objc2_web_kit::WKUserContentController;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) mod wkwebview;
+#[cfg(target_os = "macos")]
+pub use wkwebview::context_menu_download_in_progress;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use wkwebview::*;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub use wkwebview::{PrintMargin, PrintOptions, WryWebView};
-#[cfg(target_os = "macos")]
-pub use wkwebview::context_menu_download_in_progress;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod webview2;
@@ -628,6 +628,20 @@ pub struct NewWindowFeatures {
   pub opener: NewWindowOpener,
 }
 
+#[cfg(target_os = "linux")]
+impl NewWindowFeatures {
+  /// Host-owned menu selection, independent of any page navigation request.
+  pub fn for_user_tab(webview: webkit2gtk::WebView) -> Self {
+    Self {
+      user_initiated: true,
+      foreground: true,
+      size: None,
+      position: None,
+      opener: NewWindowOpener { webview },
+    }
+  }
+}
+
 /// An id for a webview
 pub type WebViewId<'a> = &'a str;
 
@@ -766,6 +780,12 @@ struct WebViewAttributes<'a> {
   /// The closure take a `String` parameter as url and returns a `bool` to determine whether the navigation should happen.
   /// `true` allows to navigate and `false` does not.
   pub navigation_handler: Option<Box<dyn Fn(String) -> bool>>,
+  #[cfg(target_os = "linux")]
+  pub linux_navigation_action_handler: Option<Box<dyn Fn(&str, bool) -> bool>>,
+  #[cfg(target_os = "linux")]
+  pub linux_auth_handler: Option<LinuxAuthHandler>,
+  #[cfg(target_os = "linux")]
+  pub linux_script_dialog_handler: Option<LinuxScriptDialogHandler>,
 
   /// Apple-only navigation policy callback with native action provenance.
   ///
@@ -824,7 +844,7 @@ struct WebViewAttributes<'a> {
   /// Policy for page-driven native close requests. The secure default keeps
   /// lifecycle ownership with the embedder.
   pub page_close_policy: PageClosePolicy,
-  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
   pub page_close_handler: Option<Box<dyn Fn()>>,
 
   /// Enables clipboard access for the page rendered on **Linux** and **Windows**.
@@ -1035,6 +1055,12 @@ impl Default for WebViewAttributes<'_> {
       ipc_handler: None,
       drag_drop_handler: None,
       navigation_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_navigation_action_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_auth_handler: None,
+      #[cfg(target_os = "linux")]
+      linux_script_dialog_handler: None,
       #[cfg(any(target_os = "macos", target_os = "ios"))]
       apple_navigation_action_handler: None,
       #[cfg(target_os = "macos")]
@@ -1046,7 +1072,7 @@ impl Default for WebViewAttributes<'_> {
       download_policy: DownloadPolicy::UseHandlers,
       new_window_req_handler: None,
       page_close_policy: PageClosePolicy::Ignore,
-      #[cfg(any(target_os = "macos", target_os = "windows"))]
+      #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
       page_close_handler: None,
       clipboard: false,
       #[cfg(debug_assertions)]
@@ -1113,7 +1139,45 @@ pub struct WebViewBuilder<'a> {
   error: crate::Result<()>,
 }
 
+#[cfg(target_os = "linux")]
+type LinuxAuthHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::AuthenticationRequest) -> bool>;
+
+#[cfg(target_os = "linux")]
+type LinuxScriptDialogHandler =
+  Box<dyn Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool>;
+
 impl<'a> WebViewBuilder<'a> {
+  /// Route a retained GTK script dialog to the ordinary-page host.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_script_dialog_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::ScriptDialog) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_script_dialog_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Route password challenges to an owned host responder. Unhandled requests cancel.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_auth_handler(
+    mut self,
+    handler: impl Fn(&webkit2gtk::WebView, &webkit2gtk::AuthenticationRequest) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_auth_handler = Some(Box::new(handler));
+    self
+  }
+
+  /// Intercept a GTK navigation action using native user-gesture evidence.
+  /// Returning true consumes the request; the native navigation is denied.
+  #[cfg(target_os = "linux")]
+  pub fn with_linux_navigation_action_handler(
+    mut self,
+    handler: impl Fn(&str, bool) -> bool + 'static,
+  ) -> Self {
+    self.attrs.linux_navigation_action_handler = Some(Box::new(handler));
+    self
+  }
   /// Create a new [`WebViewBuilder`].
   pub fn new() -> Self {
     Self {
@@ -1701,7 +1765,7 @@ impl<'a> WebViewBuilder<'a> {
 
   /// Route native page-close requests to the host without destroying its
   /// controller behind the logical tab lifecycle.
-  #[cfg(any(target_os = "macos", target_os = "windows"))]
+  #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
   pub fn with_page_close_handler(mut self, handler: impl Fn() + 'static) -> Self {
     self.attrs.page_close_handler = Some(Box::new(handler));
     self
