@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface } from './test/harness.mjs';
+import { EXTENSION_ID, FakeHost, bootstrap, createRealm, extensionContext, flush, plain, surface, generatedSurface } from './test/harness.mjs';
 
 const keys = (object) => Object.keys(object).sort();
 
@@ -572,7 +572,9 @@ test('unavailable declarative constructors are defined, gated and never inspect 
 
 
 test('cookies get preserves null while an empty set result is absent', async () => {
-  const {chrome, host} = extensionContext('background', {permissions:['cookies']});
+  const realm = createRealm();
+  const host = new FakeHost(realm.Z, 'background');
+  const {chrome} = realm.Z.api.create(generatedSurface, bootstrap({contextKind:'background',permissions:['cookies']}), host.link, {});
   host.handlers['cookies.get'] = () => null;
   host.handlers['cookies.set'] = () => null;
   assert.equal(await chrome.cookies.get({url:'https://example.com/',name:'missing'}), null);

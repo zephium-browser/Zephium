@@ -287,6 +287,70 @@ test('ports: remote disconnect fires onDisconnect with lastError; local disconne
   assert.throws(() => postMessage.call({}, 1), run('TypeError'));
 });
 
+test('connect binds before same-batch messages and preserves queued send order', async () => {
+  for (const queued of [false, true]) {
+    const { chrome, host } = extensionContext('popup');
+    host.handlers['runtime.getPlatformInfo'] = () => host.LATER;
+    if (queued) for (let i = 0; i < 256; i++) chrome.runtime.getPlatformInfo();
+    host.handlers['runtime.connect'] = () => host.LATER;
+    const port = chrome.runtime.connect({ name: 'liveness' });
+    const received = [];
+    port.postMessage('before');
+    port.onMessage.addListener(message => {
+      received.push(plain(message));
+      port.postMessage('after');
+    });
+    if (queued) {
+      assert.equal(host.callsTo('runtime.connect').length, 0);
+      host.reply(host.callsTo('runtime.getPlatformInfo')[0].id, {});
+    }
+    const call = host.callsTo('runtime.connect')[0];
+    host.reply(call.id, '7');
+    host.portMessage(7n, { method: 'ALIVE' });
+    host.reply(call.id, '8'); // A duplicate reply cannot rebind the port.
+    host.portMessage(8n, 'wrong');
+    assert.deepEqual(received, [{ method: 'ALIVE' }]);
+    assert.deepEqual(host.portMessages, []);
+    await flush();
+    assert.deepEqual(host.portMessages, [
+      { port: 7n, message: 'before' }, { port: 7n, message: 'after' },
+    ]);
+  }
+});
+
+test('connect observes same-batch disconnect without resurrecting or sending queued messages', async () => {
+  const { chrome, host } = extensionContext('popup');
+  host.handlers['runtime.connect'] = () => host.LATER;
+  const port = chrome.runtime.connect();
+  port.postMessage('queued');
+  const errors = [];
+  port.onDisconnect.addListener(() => errors.push(chrome.runtime.lastError?.message));
+  host.reply(host.callsTo('runtime.connect')[0].id, '7');
+  host.portDisconnect(7n, 'gone');
+  await flush();
+  assert.deepEqual(errors, ['gone']);
+  assert.deepEqual(host.portMessages, []);
+  assert.deepEqual(host.disconnects, []);
+  assert.throws(() => port.postMessage('late'), { message: 'Attempting to use a disconnected port object' });
+});
+
+test('invalid or retired connect replies never admit incoming port messages', async () => {
+  for (const mode of ['malformed', 'closed', 'invalidated']) {
+    const { chrome, host } = extensionContext('popup');
+    host.handlers['runtime.connect'] = () => host.LATER;
+    const port = chrome.runtime.connect();
+    const received = [];
+    port.onMessage.addListener(message => received.push(message));
+    port.onDisconnect.addListener(() => void chrome.runtime.lastError);
+    if (mode === 'closed') port.disconnect();
+    if (mode === 'invalidated') host.event('zephium.onInvalidated', ['Extension context invalidated.']);
+    host.reply(host.callsTo('runtime.connect')[0].id, mode === 'malformed' ? 7 : '7');
+    host.portMessage(7n, 'not admitted');
+    await flush();
+    assert.deepEqual(received, []);
+  }
+});
+
 test('ports: a refused connection reports why through onDisconnect', async () => {
   const { chrome, host, logs } = extensionContext('contentScript');
   host.handlers['runtime.connect'] = () => {

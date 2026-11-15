@@ -106,7 +106,7 @@
       post(state, message) {
         if (!state.open) throw new I.Error(DISCONNECTED);
         const encoded = serialize(message, limit);
-        if (state.id === null) {
+        if (!state.ready) {
           if (
             I.MapSize(state.queue) >= QUEUE_LIMIT ||
             state.queuedBytes + I.TypedArrayLength(encoded.bytes) > T.LIMITS.inFlightBytes
@@ -137,6 +137,7 @@
         owner,
         port,
         id: null,
+        ready: false,
         key: null,
         open: true,
         queue: new I.Map(),
@@ -186,15 +187,18 @@
     function connect(apiName, args, name) {
       const state = makePort(name, undefined);
       I.PromiseThen(
-        client.call(apiName, I.JSONStringify(args), true),
+        client.call(apiName, I.JSONStringify(args), true, value => {
+          const id = parsePortId(value);
+          if (id !== null && state.open) bind(state, id);
+        }),
         (value) => {
           const id = parsePortId(value);
           if (id === null) return closed(state, T.ERRORS.malformedReply);
           if (!state.open) {
-            client.closePort(id);
+            if (state.id === null) client.closePort(id);
             return undefined;
           }
-          bind(state, id);
+          state.ready = true;
           const count = I.MapSize(state.queue);
           for (let i = 0; i < count; i++) {
             const failure = client.postPort(id, I.MapGet(state.queue, i));
@@ -325,6 +329,7 @@
       const sender = args[2] !== null && typeof args[2] === 'object' ? args[2] : {};
       const state = makePort(name, sender);
       bind(state, id);
+      state.ready = true;
       EV.fire(event, [state.port]);
     }
 
