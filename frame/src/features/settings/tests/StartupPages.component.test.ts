@@ -101,3 +101,27 @@ test("the home page is saved as typed and cleared by saving it empty", async () 
   await screen.getByRole("button", { name: "Save" }).click();
   expect(preferences.set).toHaveBeenCalledWith("tabs.home", "");
 });
+
+test.each([false, true])(
+  "a pending home page save preserves newer edits (failed: %s)",
+  async (failed) => {
+    state.values["tabs.home"] = "https://home.example/";
+    let finish!: () => void;
+    vi.mocked(preferences.set).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const screen = await render(HomePageRow);
+    const field = screen.getByRole("textbox");
+    await field.fill("https://first.example/");
+    await screen.getByRole("button", { name: "Save" }).click();
+    try {
+      await field.fill("https://second.example/");
+      state.failed = failed;
+      if (!failed) state.values["tabs.home"] = "https://first.example/";
+    } finally {
+      finish();
+    }
+    await expect.element(field).toHaveValue("https://second.example/");
+    await expect.element(field).not.toHaveAttribute("aria-invalid", "true");
+  },
+);

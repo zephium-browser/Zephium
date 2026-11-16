@@ -4,16 +4,18 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSCursor,
-    NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWorkspace,
+    NSAccessibility, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -48,6 +50,129 @@ const DROP_DWELL: Duration = Duration::from_millis(450);
 type RatioCallback = Rc<dyn Fn(Pane)>;
 type StageFailureCallback = Rc<dyn Fn(usize)>;
 const MAX_ASYNC_STAGE_RETRIES: u8 = 4;
+/// How long a concealed page stays in the window. While it is in a window,
+/// animations a hidden page already committed keep the window server
+/// compositing, so a page left hidden longer than this leaves the window;
+/// a page switched back to sooner returns without re-attaching.
+const DETACH_AFTER: Duration = Duration::from_secs(10);
+/// The longest a returning page's last frame stays over it if WebKit never
+/// reports the page presented again.
+const RETURN_COVER_BOUND: Duration = Duration::from_millis(800);
+/// When a shown page's frame is refreshed: soon after it is revealed, then
+/// rarely while it stays shown.
+const FRAME_SETTLE: Duration = Duration::from_millis(1500);
+const FRAME_REFRESH: Duration = Duration::from_secs(30);
+const FRAME_GAP: Duration = Duration::from_secs(5);
+/// Cover tokens the stage hands itself, apart from the host's.
+const RETURN_COVER_TOKENS: u64 = 1 << 62;
+
+thread_local! {
+    /// The window each page kept off stage belongs to, by view address.
+    static HOMES: RefCell<HashMap<usize, Weak<NSWindow>>> = RefCell::new(HashMap::new());
+}
+
+/// The window `view` is shown in, or the one it returns to while a stage
+/// keeps it off stage.
+pub fn home_window(view: &NSView) -> Option<Retained<NSWindow>> {
+    HOMES
+        .with(|homes| {
+            homes
+                .try_borrow()
+                .ok()
+                .and_then(|homes| homes.get(&view_key(view)).and_then(Weak::load))
+        })
+        .or_else(|| view.window())
+}
+
+fn view_key(view: &NSView) -> usize {
+    view as *const NSView as usize
+}
+
+fn set_home(view: &NSView, window: Option<&NSWindow>) {
+    HOMES.with(|homes| {
+        if let Ok(mut homes) = homes.try_borrow_mut() {
+            let key = view_key(view);
+            match window {
+                Some(window) => homes.insert(key, Weak::from(window)),
+                None => homes.remove(&key),
+            };
+        }
+    });
+}
+
+/// Pages whose work needs the stage: capture of any kind and audible playback.
+fn needs_window(view: &NSView) -> bool {
+    let Some(page) = view.downcast_ref::<objc2_web_kit::WKWebView>() else {
+        return true;
+    };
+    use objc2_web_kit::WKMediaCaptureState;
+    // SAFETY: main-thread WebKit state reads; the SPI only when present.
+    unsafe {
+        if page.cameraCaptureState() != WKMediaCaptureState::None
+            || page.microphoneCaptureState() != WKMediaCaptureState::None
+        {
+            return true;
+        }
+        let answers = |selector| -> bool { msg_send![page, respondsToSelector: selector] };
+        if answers(objc2::sel!(_displayCaptureState)) {
+            let display: isize = msg_send![page, _displayCaptureState];
+            if display != 0 {
+                return true;
+            }
+        }
+        if answers(objc2::sel!(_systemAudioCaptureState)) {
+            let system_audio: isize = msg_send![page, _systemAudioCaptureState];
+            if system_audio != 0 {
+                return true;
+            }
+        }
+        let answers: bool = msg_send![page, respondsToSelector: objc2::sel!(_isPlayingAudio)];
+        answers && msg_send![page, _isPlayingAudio]
+    }
+}
+
+/// The window a stage keeps concealed pages in. WebKit still counts them in
+/// a window, so their media can start, but it is never ordered in: nothing
+/// composites it and nothing else lists, cycles to or focuses it.
+fn offstage_window(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSWindow> {
+    // SAFETY: `mtm` proves AppKit affinity. Deferred: no window device is
+    // made until the window is ordered in, which it never is.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            true,
+        )
+    };
+    // SAFETY: the stage owns the window and closes it on retire.
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setRestorable(false);
+    window.setExcludedFromWindowsMenu(true);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient
+            | NSWindowCollectionBehavior::IgnoresCycle
+            | NSWindowCollectionBehavior::FullScreenNone,
+    );
+    window.setAnimationBehavior(NSWindowAnimationBehavior::None);
+    window.setHasShadow(false);
+    window.setIgnoresMouseEvents(true);
+    window.setSharingType(NSWindowSharingType::None);
+    window.setAccessibilityElement(false);
+    window
+}
+
+/// Concealed pages whose grace has run out at `now`, oldest first.
+fn due_for_detach(since: &HashMap<ItemId, Instant>, now: Instant, grace: Duration) -> Vec<ItemId> {
+    let mut due = since
+        .iter()
+        .filter(|(_, at)| now.saturating_duration_since(**at) >= grace)
+        .map(|(id, at)| (*at, *id))
+        .collect::<Vec<_>>();
+    due.sort();
+    due.into_iter().map(|(_, id)| id).collect()
+}
 
 #[derive(Clone)]
 struct HostView {
@@ -211,6 +336,23 @@ pub struct StageIvars {
     /// a newer layout has already settled.
     held_frame: Cell<Option<NSRect>>,
     motion_generation: Cell<u64>,
+    /// When each attached page was first seen concealed, by itself or by
+    /// the hidden stage, and whether a detach pass is queued.
+    concealed_since: RefCell<HashMap<ItemId, Instant>>,
+    detach_scheduled: Cell<bool>,
+    /// The last frame of each page taken before it left the window, shown
+    /// over it on return until WebKit presents it again. None: no frame.
+    /// Memory only, keyed by the exact view and document it was taken from.
+    parked: RefCell<HashMap<ItemId, (usize, u64, super::PageSnapshot)>>,
+    /// The main-frame document each page last committed, by a stage-wide serial.
+    documents: RefCell<HashMap<ItemId, u64>>,
+    document_serial: Cell<u64>,
+    parking: RefCell<HashSet<ItemId>>,
+    offstage: RefCell<Option<Retained<NSWindow>>>,
+    return_covers: Cell<u64>,
+    frame_refresh: Cell<u64>,
+    frame_due: Cell<Option<Instant>>,
+    frame_taken: Cell<Option<Instant>>,
 }
 
 define_class!(
@@ -225,6 +367,7 @@ define_class!(
         fn resize_subviews(&self, _old: NSSize) {
             self.cancel_split_drag(false);
             self.bump_layout_epoch();
+            self.fit_offstage();
             if self.position_panes() && self.ivars().paintable_changed.replace(false) {
                 let _ = self.sync_visibility();
             }
@@ -626,6 +769,7 @@ impl ContentStage {
             return true;
         }
         let _ = self.sync_container_visibility();
+        self.track_concealed();
         // A retained main-queue retry is an accepted native obligation, not a
         // terminal application failure. Only exhaustion/panic makes the host
         // seal the engine; the stage remains hidden while a retry is pending.
@@ -647,6 +791,7 @@ impl ContentStage {
             self.cancel_split_drag(false);
         }
         let _ = self.sync_container_visibility();
+        self.track_concealed();
     }
 
     pub fn set_tree(&self, tree: Option<Pane>) -> bool {
@@ -718,6 +863,9 @@ impl ContentStage {
         else {
             return false;
         };
+        if self.reattach(&host.view).is_none() || !self.layout_epoch_is_current(epoch) {
+            return false;
+        }
         // SAFETY: retained parent access on the AppKit main thread.
         if !unsafe { host.view.superview() }
             .as_deref()
@@ -948,6 +1096,14 @@ impl ContentStage {
 
     pub fn retire(&self) {
         self.ivars().pointer_cover.take();
+        if let Some(window) = self.ivars().offstage.take() {
+            if let Some(content) = window.contentView() {
+                for view in content.subviews().iter() {
+                    view.removeFromSuperview();
+                }
+            }
+            window.close();
+        }
         self.ivars().stage_retry_terminal.set(true);
         self.cancel_split_drag(false);
         self.ivars().stage_retry_scheduled.set(false);
@@ -978,6 +1134,16 @@ impl ContentStage {
         };
         ready.remove(&id);
         drop(ready);
+        if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
+            parked.remove(&id);
+        }
+        if let Ok(mut documents) = self.ivars().documents.try_borrow_mut() {
+            documents.remove(&id);
+        }
+        if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
+            since.remove(&id);
+        }
+        set_home(&view, None);
         let Ok(mut views) = self.ivars().views.try_borrow_mut() else {
             return false;
         };
@@ -1023,11 +1189,21 @@ impl ContentStage {
             .try_borrow_mut()
             .ok()
             .and_then(|mut views| views.remove(&id));
+        if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
+            since.remove(&id);
+        }
+        if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
+            parked.remove(&id);
+        }
+        if let Ok(mut documents) = self.ivars().documents.try_borrow_mut() {
+            documents.remove(&id);
+        }
         if let Some(view) = view {
             self.bump_layout_epoch();
+            set_home(&view.view, None);
             // Pulling a page out of WebKit's fullscreen window would strand
             // that window; the host lets WebKit hand it back before teardown.
-            if !super::fullscreen::webkit_owns(&view.view, self) {
+            if !self.webkit_owns(&view.view) {
                 view.view.removeFromSuperview();
             }
         }
@@ -1115,6 +1291,7 @@ impl ContentStage {
         // Run even for an identical logical value: a prior AppKit re-entry
         // may have forced a fail-closed hide before the newest state settled.
         let _ = self.sync_visibility();
+        self.track_concealed();
         !self.ivars().stage_retry_terminal.get()
     }
 
@@ -1134,6 +1311,7 @@ impl ContentStage {
         }
         self.bump_layout_epoch();
         let _ = self.sync_visibility();
+        self.track_concealed();
         !self.ivars().stage_retry_terminal.get()
     }
 
@@ -1161,6 +1339,16 @@ impl ContentStage {
                 view.presentation_permit.store(false, Ordering::Release);
             }
         }
+        let serial = self.ivars().document_serial.get().wrapping_add(1);
+        self.ivars().document_serial.set(serial);
+        let Ok(mut documents) = self.ivars().documents.try_borrow_mut() else {
+            return false;
+        };
+        documents.insert(id, serial);
+        drop(documents);
+        if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
+            parked.remove(&id);
+        }
         let removed = match self.ivars().ready.try_borrow_mut() {
             Ok(mut ready) => ready.remove(&id),
             Err(_) => return false,
@@ -1171,6 +1359,7 @@ impl ContentStage {
         // Run even when an identical pending value was already retained: a
         // prior AppKit re-entry may have interrupted the fail-closed hide.
         let _ = self.sync_visibility();
+        self.track_concealed();
         !self.ivars().stage_retry_terminal.get()
     }
 
@@ -1869,7 +2058,7 @@ impl ContentStage {
                     if rounded_native_size(backing.width, backing.height, 1.0).is_some() {
                         paintable.insert(id);
                     }
-                    if super::fullscreen::webkit_owns(&view.view, self) {
+                    if self.webkit_owns(&view.view) {
                         continue;
                     }
                     let current = view.view.frame();
@@ -1964,7 +2153,7 @@ impl ContentStage {
                     || !paintable.contains(id)
                     || !view.presentation_permit.load(Ordering::Acquire)
             }) {
-                if super::fullscreen::webkit_owns(&view.view, self) {
+                if self.webkit_owns(&view.view) {
                     continue;
                 }
                 if !view.view.isHidden() {
@@ -2005,10 +2194,26 @@ impl ContentStage {
                     superseded = true;
                     break;
                 }
-                if super::fullscreen::webkit_owns(&view.view, self) {
+                if self.webkit_owns(&view.view) {
                     continue;
                 }
                 let hidden = view.view.isHidden();
+                if !self.layout_epoch_is_current(epoch)
+                    || !view.presentation_permit.load(Ordering::Acquire)
+                {
+                    superseded = true;
+                    break;
+                }
+                // A page that left the window while concealed comes back
+                // still hidden; `addSubview:` can pump AppKit, so the reveal
+                // below revalidates against anything that ran meanwhile.
+                let Some(returned) = self.reattach(&view.view) else {
+                    superseded = true;
+                    break;
+                };
+                if returned {
+                    self.cover_return(*id, &view.view);
+                }
                 if !self.layout_epoch_is_current(epoch)
                     || !view.presentation_permit.load(Ordering::Acquire)
                 {
@@ -2063,7 +2268,7 @@ impl ContentStage {
         if let Ok(views) = self.ivars().views.try_borrow() {
             for (id, view) in views.iter() {
                 if !view.view.isHidden()
-                    && !super::fullscreen::webkit_owns(&view.view, self)
+                    && !self.webkit_owns(&view.view)
                     && (!visible.contains(id)
                         || !ready.contains(id)
                         || !paintable.contains(id)
@@ -2238,6 +2443,468 @@ impl ContentStage {
         }
         self.defer_stage_retry(false);
         false
+    }
+
+    /// Returns a page this stage took out of the window, still hidden, below
+    /// every cover and divider: Some(true) when it came back now, Some(false)
+    /// when it was here, None when it belongs to another parent.
+    fn reattach(&self, view: &NSView) -> Option<bool> {
+        // SAFETY: retained parent access on the AppKit main thread.
+        match unsafe { view.superview() } {
+            Some(parent) if std::ptr::eq(&*parent, self as &NSView) => Some(false),
+            Some(parent) if !self.is_offstage(&parent) => None,
+            _ => {
+                view.setHidden(true);
+                self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None);
+                set_home(view, None);
+                // SAFETY: as above.
+                unsafe { view.superview() }
+                    .is_some_and(|parent| std::ptr::eq(&*parent, self as &NSView))
+                    .then_some(true)
+            }
+        }
+    }
+
+    /// The off-stage window's content, sized and placed like the stage so a
+    /// page keeps its screen, scale, viewport and media queries there.
+    fn offstage(&self, home: &NSWindow) -> Option<Retained<NSView>> {
+        let mtm = MainThreadMarker::new()?;
+        let frame = NSRect::new(home.frame().origin, self.bounds().size);
+        let window = {
+            let mut slot = self.ivars().offstage.try_borrow_mut().ok()?;
+            slot.get_or_insert_with(|| offstage_window(mtm, frame))
+                .clone()
+        };
+        window.setFrame_display(frame, false);
+        window.contentView()
+    }
+
+    fn fit_offstage(&self) {
+        let window = self
+            .ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(window) = window {
+            let origin = window.frame().origin;
+            window.setFrame_display(NSRect::new(origin, self.bounds().size), false);
+        }
+    }
+
+    fn webkit_owns(&self, view: &NSView) -> bool {
+        let parking = self
+            .ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|window| window.contentView()));
+        super::fullscreen::webkit_owns(view, self, parking.as_deref())
+    }
+
+    fn is_offstage(&self, parent: &NSView) -> bool {
+        self.ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|window| window.contentView()))
+            .is_some_and(|content| std::ptr::eq(&*content, parent))
+    }
+
+    /// WebKit repaints a page that re-enters the window a few frames after it
+    /// is shown. Its last frame covers it meanwhile, never another page's.
+    fn cover_return(&self, id: ItemId, view: &NSView) {
+        let image = self
+            .ivars()
+            .parked
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut parked| parked.remove(&id))
+            .filter(|(owner, document, _)| {
+                *owner == view_key(view) && Some(*document) == self.document(id)
+            })
+            .and_then(|(_, _, snapshot)| snapshot.image());
+        let Some(image) = image else {
+            return;
+        };
+        let serial = self.ivars().return_covers.get().wrapping_add(1);
+        self.ivars().return_covers.set(serial);
+        let token = RETURN_COVER_TOKENS | (serial & (RETURN_COVER_TOKENS - 1));
+        if !self.cover(id, token, Some(&image)) {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let owner = view_key(view);
+        let lifted = Cell::new(false);
+        let lift: Rc<dyn Fn()> = Rc::new(move || {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let Some(stage) = stage.get(mtm).load() else {
+                return;
+            };
+            stage.uncover(id, token);
+            if lifted.replace(true) {
+                return;
+            }
+            // The frame went to this cover; a page hidden again before the
+            // next refresh would otherwise leave the window without one.
+            let view = stage.ivars().views.try_borrow().ok().and_then(|views| {
+                views
+                    .get(&id)
+                    .filter(|host| view_key(&host.view) == owner)
+                    .map(|host| host.view.clone())
+            });
+            if let Some(view) = view {
+                stage.capture_shown(id, &view);
+            }
+        });
+        let bounded = MainThreadBound::new(lift.clone(), mtm);
+        if let Ok(when) = DispatchTime::try_from(RETURN_COVER_BOUND) {
+            let _ = DispatchQueue::main().after(when, move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        (bounded.get(mtm))();
+                    }
+                }));
+            });
+        }
+        // SAFETY: main-thread WebKit call; the SPI only when present. WebKit
+        // copies the block and runs it once on the main thread.
+        let answers: bool = unsafe {
+            msg_send![view, respondsToSelector: objc2::sel!(_doAfterNextPresentationUpdate:)]
+        };
+        if answers {
+            let presented = MainThreadBound::new(lift, mtm);
+            let block = block2::RcBlock::new(move || {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let lift = presented.get(mtm).clone();
+                let next = MainThreadBound::new(lift, mtm);
+                // One more frame, so the presented commit is on screen.
+                if let Ok(when) = DispatchTime::try_from(Duration::from_millis(16)) {
+                    let _ = DispatchQueue::main().after(when, move || {
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if let Some(mtm) = MainThreadMarker::new() {
+                                (next.get(mtm))();
+                            }
+                        }));
+                    });
+                }
+            });
+            let _: () = unsafe { msg_send![view, _doAfterNextPresentationUpdate: &*block] };
+        }
+    }
+
+    /// The page's current document; zero before its first commit.
+    fn document(&self, id: ItemId) -> Option<u64> {
+        self.ivars()
+            .documents
+            .try_borrow()
+            .ok()
+            .map(|documents| documents.get(&id).copied().unwrap_or(0))
+    }
+
+    /// Takes the frame of a page while it is shown: WebKit can leave its
+    /// display link running after snapshotting a page that is already hidden.
+    fn capture_shown(&self, id: ItemId, view: &NSView) {
+        if view.window().is_none() || view.isHiddenOrHasHiddenAncestor() {
+            return;
+        }
+        let Some(page) = view.downcast_ref::<objc2_web_kit::WKWebView>() else {
+            return;
+        };
+        let Ok(mut parking) = self.ivars().parking.try_borrow_mut() else {
+            return;
+        };
+        if !parking.insert(id) {
+            return;
+        }
+        drop(parking);
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let owner = view_key(view);
+        let Some(document) = self.document(id) else {
+            if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
+                parking.remove(&id);
+            }
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let started = super::PageSnapshot::capture_page(page, move |snapshot| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let Some(stage) = stage.get(mtm).load() else {
+                return;
+            };
+            if let Ok(mut parking) = stage.ivars().parking.try_borrow_mut() {
+                parking.remove(&id);
+            }
+            let current = stage.ivars().views.try_borrow().is_ok_and(|views| {
+                views
+                    .get(&id)
+                    .is_some_and(|host| view_key(&host.view) == owner)
+            });
+            // A navigation that committed while WebKit was drawing makes
+            // this frame another document's.
+            if !current || stage.document(id) != Some(document) {
+                return;
+            }
+            let (Some(snapshot), Ok(mut parked)) =
+                (snapshot, stage.ivars().parked.try_borrow_mut())
+            else {
+                return;
+            };
+            parked.insert(id, (owner, document, snapshot));
+        });
+        if !started {
+            if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
+                parking.remove(&id);
+            }
+        }
+    }
+
+    /// Arms the frame refresh `after` from now, never sooner than `FRAME_GAP`
+    /// after the last one and never later than one already armed, so a page
+    /// that keeps changing is still captured.
+    fn refresh_frames_in(&self, after: Duration) {
+        let now = Instant::now();
+        let mut due = now + after;
+        if let Some(taken) = self.ivars().frame_taken.get() {
+            due = due.max(taken + FRAME_GAP);
+        }
+        if self
+            .ivars()
+            .frame_due
+            .get()
+            .is_some_and(|armed| armed <= due)
+        {
+            return;
+        }
+        self.ivars().frame_due.set(Some(due));
+        let generation = self.ivars().frame_refresh.get().wrapping_add(1);
+        self.ivars().frame_refresh.set(generation);
+        let (Some(mtm), Ok(when)) = (MainThreadMarker::new(), DispatchTime::try_from(due - now))
+        else {
+            self.ivars().frame_due.set(None);
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let Some(stage) = stage.get(mtm).load() else {
+                    return;
+                };
+                if stage.ivars().frame_refresh.get() != generation {
+                    return;
+                }
+                stage.ivars().frame_due.set(None);
+                if stage.capture_all_shown() {
+                    stage.ivars().frame_taken.set(Some(Instant::now()));
+                    stage.refresh_frames_in(FRAME_REFRESH);
+                }
+            }));
+        });
+    }
+
+    /// Returns whether any page was shown.
+    fn capture_all_shown(&self) -> bool {
+        let (Ok(ready), Ok(paintable)) = (
+            self.ivars().ready.try_borrow(),
+            self.ivars().paintable.try_borrow(),
+        ) else {
+            return false;
+        };
+        let Some(views) = self.ivars().views.try_borrow().ok().map(|views| {
+            views
+                .iter()
+                .filter(|(id, view)| {
+                    ready.contains(id)
+                        && paintable.contains(id)
+                        && view.presentation_permit.load(Ordering::Acquire)
+                })
+                .map(|(id, view)| (*id, view.view.clone()))
+                .collect::<Vec<_>>()
+        }) else {
+            return false;
+        };
+        drop((ready, paintable));
+        let mut shown = false;
+        for (id, view) in views {
+            if view.window().is_some_and(|window| window.isVisible())
+                && !view.isHiddenOrHasHiddenAncestor()
+            {
+                shown = true;
+                self.capture_shown(id, &view);
+            }
+        }
+        shown
+    }
+
+    /// Records which attached pages are concealed and queues a detach pass
+    /// for when the oldest one's grace runs out, but no sooner than `floor`.
+    fn track_concealed(&self) {
+        self.track_concealed_after(Instant::now());
+        self.refresh_frames_in(FRAME_SETTLE);
+    }
+
+    fn track_concealed_after(&self, floor: Instant) {
+        if self.ivars().stage_retry_terminal.get() {
+            return;
+        }
+        let now = Instant::now();
+        let Some(concealed) = self.ivars().views.try_borrow().ok().map(|views| {
+            views
+                .iter()
+                .filter(|(_, view)| {
+                    // SAFETY: retained parent access on the AppKit main thread.
+                    unsafe { view.view.superview() }
+                        .is_some_and(|parent| std::ptr::eq(&*parent, self as &NSView))
+                        && view.view.isHiddenOrHasHiddenAncestor()
+                })
+                .map(|(id, _)| *id)
+                .collect::<HashSet<_>>()
+        }) else {
+            return;
+        };
+        let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() else {
+            return;
+        };
+        since.retain(|id, _| concealed.contains(id));
+        for id in concealed {
+            since.entry(id).or_insert(now);
+        }
+        let first = since.values().min().copied();
+        drop(since);
+        if let Some(first) = first {
+            self.schedule_detach((first + DETACH_AFTER).max(floor));
+        }
+    }
+
+    fn schedule_detach(&self, at: Instant) {
+        if self.ivars().detach_scheduled.replace(true) {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            self.ivars().detach_scheduled.set(false);
+            return;
+        };
+        let wait = at.saturating_duration_since(Instant::now());
+        let Ok(when) = DispatchTime::try_from(wait) else {
+            self.ivars().detach_scheduled.set(false);
+            return;
+        };
+        let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let _ = DispatchQueue::main().after(when, move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                if let Some(stage) = stage.get(mtm).load() {
+                    stage.ivars().detach_scheduled.set(false);
+                    stage.detach_concealed();
+                }
+            }));
+        });
+    }
+
+    /// Takes pages concealed past their grace out of the window. Each one is
+    /// hidden first, so a later reveal always re-attaches before showing.
+    fn detach_concealed(&self) {
+        if self.ivars().stage_retry_terminal.get() {
+            return;
+        }
+        let epoch = self.ivars().layout_epoch.get();
+        let Some(due) = self
+            .ivars()
+            .concealed_since
+            .try_borrow()
+            .ok()
+            .map(|since| due_for_detach(&since, Instant::now(), DETACH_AFTER))
+        else {
+            return;
+        };
+        let busy = self
+            .ivars()
+            .displaced
+            .try_borrow()
+            .map_or(true, |d| d.is_some())
+            || self
+                .ivars()
+                .armed
+                .try_borrow()
+                .map_or(true, |a| a.is_some());
+        for id in due {
+            if busy || !self.layout_epoch_is_current(epoch) {
+                break;
+            }
+            let Some(view) = self
+                .ivars()
+                .views
+                .try_borrow()
+                .ok()
+                .and_then(|views| views.get(&id).cloned())
+            else {
+                continue;
+            };
+            let covered = self
+                .ivars()
+                .covers
+                .try_borrow()
+                .map_or(true, |covers| covers.contains_key(&id));
+            // SAFETY: retained parent access on the AppKit main thread.
+            let here = unsafe { view.view.superview() }
+                .is_some_and(|parent| std::ptr::eq(&*parent, self as &NSView));
+            if covered
+                || !here
+                || !view.view.isHiddenOrHasHiddenAncestor()
+                || self.webkit_owns(&view.view)
+                || super::fullscreen::in_transition(&view.view)
+                || needs_window(&view.view)
+            {
+                continue;
+            }
+            if self
+                .ivars()
+                .parking
+                .try_borrow()
+                .map_or(true, |parking| parking.contains(&id))
+            {
+                continue;
+            }
+            let Some(window) = view.view.window() else {
+                continue;
+            };
+            let Some(offstage) = self.offstage(&window) else {
+                continue;
+            };
+            if !view.view.isHidden() {
+                view.view.setHidden(true);
+            }
+            if !self.layout_epoch_is_current(epoch) {
+                break;
+            }
+            set_home(&view.view, Some(&window));
+            offstage.addSubview(&view.view);
+            if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
+                since.remove(&id);
+            }
+            if !self.layout_epoch_is_current(epoch) {
+                break;
+            }
+        }
+        // Pages kept in the window, or left by an interrupted pass, are
+        // looked at again after another grace, never in a tight loop.
+        self.track_concealed_after(Instant::now() + DETACH_AFTER);
     }
 
     fn bump_layout_epoch(&self) {
@@ -2442,6 +3109,23 @@ mod tests {
     #[test]
     fn stage_class_registers() {
         let _ = <ContentStage as objc2::ClassType>::class();
+    }
+
+    #[test]
+    fn only_pages_concealed_past_their_grace_are_due_oldest_first() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(10);
+        let since = HashMap::from([
+            (ItemId::from(1), now - Duration::from_secs(12)),
+            (ItemId::from(2), now - Duration::from_secs(9)),
+            (ItemId::from(3), now - Duration::from_secs(30)),
+            (ItemId::from(4), now - grace),
+        ]);
+        assert_eq!(
+            due_for_detach(&since, now, grace),
+            [ItemId::from(3), ItemId::from(1), ItemId::from(4)]
+        );
+        assert!(due_for_detach(&HashMap::new(), now, grace).is_empty());
     }
 
     #[test]
