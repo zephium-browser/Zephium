@@ -1106,8 +1106,8 @@ fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 }
 
 /// Measurement only: hides the window's backdrop layers (the material's and
-/// the titlebar's) and/or paints the window opaque, to see what each costs
-/// the window server.
+/// the titlebar's), paints the window opaque, or takes hidden content views
+/// out of the window, to see what each costs the window server.
 #[cfg(target_os = "macos")]
 fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
     use objc2_app_kit::{NSColor, NSView, NSWindow};
@@ -1125,7 +1125,7 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
         }
     }
     let flag = |key: &str| command.get(key).and_then(Value::as_bool);
-    let (backdrops, opaque) = (flag("backdrops"), flag("opaque"));
+    let (backdrops, opaque, detach) = (flag("backdrops"), flag("opaque"), flag("detachHidden"));
     let window = app
         .get_webview_window(crate::MAIN_LABEL)
         .ok_or("no main window")?;
@@ -1147,6 +1147,16 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
                 }
             }
         }
+        if detach == Some(true) {
+            if let Some(content) = ns_window.contentView() {
+                for view in content.subviews().iter() {
+                    if view.isHidden() {
+                        view.removeFromSuperview();
+                        count += 1;
+                    }
+                }
+            }
+        }
         if let Some(opaque) = opaque {
             ns_window.setOpaque(opaque);
             let color = if opaque {
@@ -1162,7 +1172,7 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
     let count = answer
         .recv_timeout(Duration::from_secs(5))
         .map_err(|_| "the window change did not finish".to_owned())?;
-    Ok(json!({ "backdrops": count }))
+    Ok(json!({ "changed": count }))
 }
 
 #[cfg(not(target_os = "macos"))]
