@@ -66,7 +66,6 @@ struct State {
     /// placed on.
     switcher_columns: usize,
     pending_document: Option<tauri::Url>,
-    focus_revision: u64,
     focus_timer: bool,
     closed: bool,
     suspending: bool,
@@ -142,7 +141,6 @@ impl Overlay {
                 placed_for: None,
                 switcher_columns: geometry::SWITCHER_COLUMNS,
                 pending_document,
-                focus_revision: 0,
                 focus_timer: false,
                 closed: false,
                 suspending: false,
@@ -617,17 +615,17 @@ impl Overlay {
         });
     }
     pub fn focus_changed(&self) {
-        {
+        let mut observed = {
             let mut state = self.state();
-            state.focus_revision = state.focus_revision.saturating_add(1);
+            let observed = state.model.record_focus_change();
             if state.focus_timer {
                 return;
             }
             state.focus_timer = true;
-        }
+            observed
+        };
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let mut observed = this.state().focus_revision;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(35)).await;
                 let settled = {
@@ -635,11 +633,11 @@ impl Overlay {
                     if state.closed {
                         return;
                     }
-                    if state.focus_revision == observed {
+                    if state.model.latest_focus_change() == observed {
                         state.focus_timer = false;
                         true
                     } else {
-                        observed = state.focus_revision;
+                        observed = state.model.latest_focus_change();
                         false
                     }
                 };
@@ -647,7 +645,7 @@ impl Overlay {
                     break;
                 }
             }
-            this.on_main(|this| {
+            this.on_main(move |this| {
                 if !this.state().model.ready {
                     return;
                 }
@@ -662,7 +660,7 @@ impl Overlay {
                 let old_session = this.state().model.session();
                 this.state()
                     .model
-                    .focus(panel_focused, main_focused, app_active);
+                    .focus(observed, panel_focused, main_focused, app_active);
                 if this.snapshot() != old {
                     crate::tab_switcher::cancel(this.window_app());
                     #[cfg(target_os = "macos")]
@@ -1166,7 +1164,6 @@ mod action_barrier_tests {
             placed_for: None,
             switcher_columns: geometry::SWITCHER_COLUMNS,
             pending_document: None,
-            focus_revision: 0,
             focus_timer: false,
             closed: false,
             suspending: false,
