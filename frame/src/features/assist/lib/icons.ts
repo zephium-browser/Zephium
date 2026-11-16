@@ -28,7 +28,6 @@ export { default as PaintBrush02Icon } from "@hugeicons/core-free-icons/PaintBru
 export { default as Message01Icon } from "@hugeicons/core-free-icons/Message01Icon";
 export { default as Mic01Icon } from "@hugeicons/core-free-icons/Mic01Icon";
 export { default as Moon02Icon } from "@hugeicons/core-free-icons/Moon02Icon";
-export { default as MoreHorizontalIcon } from "@hugeicons/core-free-icons/MoreHorizontalIcon";
 export { default as Note01Icon } from "@hugeicons/core-free-icons/Note01Icon";
 export { default as PaintBoardIcon } from "@hugeicons/core-free-icons/PaintBoardIcon";
 export { default as PencilEdit02Icon } from "@hugeicons/core-free-icons/PencilEdit02Icon";

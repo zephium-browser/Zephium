@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutPrefix, emptyShortcutBackspace } from "$shared/lib/search-shortcuts";
   import * as attention from "$session/attention.svelte";
   import * as m from "$shared/i18n/messages";
   import {
@@ -68,6 +69,9 @@
   let fieldWidth = $state(0);
   let composing = false;
   let draft = $state("");
+  let activeShortcut = $derived(
+    editing ? (shortcutPrefix(draft, preferences.searchShortcuts())?.shortcut ?? null) : null,
+  );
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
   // A failure that fills the pane (a refused or unopened page) names its own
   // address; the page behind it, if any, is not what the person sees. The
@@ -300,6 +304,7 @@
     appearing under the address bar would push the whole chrome down.
   -->
   <div
+    data-shortcut={activeShortcut?.id}
     class:sr-only={compact}
     class:flex={!compact}
     bind:clientWidth={fieldWidth}
@@ -337,7 +342,9 @@
         aria-hidden={finding || undefined}
         data-zephium-address
         type="text"
-        aria-label={m.ui_address_and_search()}
+        aria-label={activeShortcut
+          ? m.search_shortcut_label({ name: activeShortcut.name })
+          : m.ui_address_and_search()}
         autocomplete="off"
         autocapitalize="off"
         enterkeyhint="go"
@@ -348,6 +355,16 @@
         oncompositionstart={() => (composing = true)}
         oncompositionend={() => (composing = false)}
         onkeydown={(event) => {
+          if (
+            event.key === "Backspace" &&
+            !composing &&
+            !event.isComposing &&
+            event.keyCode !== 229 &&
+            emptyShortcutBackspace(draft, preferences.searchShortcuts()) !== null
+          ) {
+            event.preventDefault();
+            draft = "";
+          }
           if (event.key === "Escape" && !event.isComposing) {
             event.preventDefault();
             failed = false;

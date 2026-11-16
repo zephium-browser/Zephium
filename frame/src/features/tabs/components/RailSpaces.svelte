@@ -10,7 +10,7 @@
   import { spaceKeys } from "../lib/space-keys";
   import * as requests from "../lib/space-requests.svelte";
 
-  let { active }: { active: SpaceView } = $props();
+  let { active, roomy = false }: { active: SpaceView; roomy?: boolean } = $props();
   const spaces = $derived(tabs.spaces());
 
   // Holding Control names the key of every row in place of its mark.
@@ -31,16 +31,16 @@
 </script>
 
 <!--
-  The rail's spaces, as the profile menu is: a short stack under the button,
-  each space a mark named by its tooltip. The rail is too narrow to read names
-  in, so switching happens here and anything larger opens the column in place.
+  The rail's spaces, as the profile menu is: a short stack under the button.
+  Alone at rail width each space is a mark named by its tooltip; with a tool or
+  Work beside the rail there is room, and the stack names them.
 -->
 <Disclosure
   label={m.space_open_switcher({ name: active.name })}
   triggerTitle={active.name}
   menu
   triggerClass="rail-item rail-spaces"
-  panelClass="rail-space-stack sidebar-softens"
+  panelClass={`rail-space-stack sidebar-softens${roomy ? " rail-space-stack-roomy" : ""}`}
   onopen={listen}
   onclose={unlisten}
 >
@@ -62,13 +62,17 @@
       aria-keyshortcuts={keys ?? undefined}
       onclick={() => space.id !== active.id && void tabs.switchSpace(space.id)}
     >
-      {#if ctrl && keys}<span class="rail-space-keys">{keys}</span>{:else if space.icon}<SpaceGlyph
+      {#if ctrl && keys && !roomy}<span class="rail-space-keys">{keys}</span
+        >{:else if space.icon}<SpaceGlyph
           icon={space.icon}
           color={space.color}
           size={18}
         />{:else}<span class="rail-space-initial" data-space-hue={space.color} aria-hidden="true"
           >{[...space.name][0] ?? ""}</span
         >{/if}
+      {#if roomy}<span class="rail-space-name">{space.name}</span>{#if keys}<span
+            class="rail-space-keys">{keys}</span
+          >{/if}{/if}
     </button>
   {/each}
   <div class="rail-space-rule" role="separator"></div>
@@ -82,6 +86,7 @@
     onclick={() => requests.openInColumn("new")}
   >
     <Icon icon={Add01Icon} size={16} strokeWidth={1.8} />
+    {#if roomy}<span class="rail-space-name">{m.space_new()}</span>{/if}
   </button>
   <button
     type="button"
@@ -93,6 +98,7 @@
     onclick={() => requests.openInColumn("edit")}
   >
     <Icon icon={PencilEdit02Icon} size={15} />
+    {#if roomy}<span class="rail-space-name">{m.space_edit_label({ name: active.name })}</span>{/if}
   </button>
 </Disclosure>
 
@@ -109,6 +115,13 @@
     overscroll-behavior: contain;
     background: color-mix(in srgb, var(--color-float) 96%, transparent);
     transform-origin: top center;
+  }
+
+  /* Named, the stack is wider than the rail and spills past it, over the
+     panel or page beside it. */
+  :global(.ui-disclosure-panel.rail-space-stack.rail-space-stack-roomy[data-align]) {
+    width: 224px;
+    max-width: none;
   }
 
   :global(.ui-disclosure-panel.rail-space-stack[data-align]:not([data-open="true"])) {
@@ -140,6 +153,22 @@
     background: var(--row-active);
     box-shadow: var(--shine-top);
     color: var(--color-text);
+  }
+
+  :global(.rail-space-stack-roomy) .rail-space {
+    justify-content: flex-start;
+    gap: 10px;
+    padding-inline: 9px;
+  }
+
+  .rail-space-name {
+    flex: 1;
+    overflow: hidden;
+    color: var(--color-text);
+    font-size: var(--text-body);
+    text-align: start;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .rail-space-initial {

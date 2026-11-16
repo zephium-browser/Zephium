@@ -177,6 +177,6 @@ test("a card can change status through its accessible actions", async () => {
   const screen = await render(BoardHost, { profile });
   await expect.element(screen.getByText("Review the delivery")).toBeVisible();
   await screen.getByRole("button", { name: "More actions", exact: true }).click();
-  await screen.getByRole("menuitem", { name: "In progress", exact: true }).click();
+  await screen.getByRole("menuitemcheckbox", { name: "In progress", exact: true }).click();
   await expect.poll(() => stateOf(server.records, id)?.status).toBe("active");
 });

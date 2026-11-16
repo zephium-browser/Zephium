@@ -5,24 +5,14 @@
 use image::{ImageEncoder, ImageFormat, ImageReader};
 use std::io::{self, Cursor, Write};
 
-pub(super) const RAW_PNG_BYTES: usize = 16 * 1024 * 1024;
-const INPUT_SIDE: u32 = 4096;
-const INPUT_PIXELS: u64 = 3840 * 2400;
-const DECODE_BYTES: u64 = 48 * 1024 * 1024;
+pub(super) use crate::platform::preview_image::{input_dimensions, RAW_BYTES as RAW_PNG_BYTES};
+use crate::platform::preview_image::{DECODE_BYTES, INPUT_SIDE};
 const OUTPUT_SIDE: u32 = 640;
 pub(super) const OUTPUT_PNG_BYTES: usize = 1024 * 1024;
 pub(super) type FrameImage = Option<(u32, u32, Vec<u8>)>;
 
 /// The source is the actual physical controller bounds, including DPI.
 /// A larger native viewport is refused before allocating its capture stream.
-pub(super) fn input_dimensions(width: u32, height: u32) -> bool {
-    width > 0
-        && height > 0
-        && width <= INPUT_SIDE
-        && height <= INPUT_SIDE
-        && u64::from(width) * u64::from(height) <= INPUT_PIXELS
-}
-
 fn output_dimensions(width: u32, height: u32) -> Option<(u32, u32)> {
     if !input_dimensions(width, height) {
         return None;

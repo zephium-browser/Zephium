@@ -1530,6 +1530,11 @@ impl EngineHost {
                 // enabled in the WebView2 runtime.
                 .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
+                // A page's bars are Windows 11's own thin overlay ones, as in
+                // Edge with them on, not the classic gutter and arrows. Every
+                // environment of a profile asks for the same: WebView2 refuses
+                // a second one with other options on that data directory.
+                .with_scroll_bar_style(wry::ScrollBarStyle::FluentOverlay)
                 // Ctrl and the wheel zoom a person's page; the zoom listener
                 // brings what they do into the site's remembered level. Keys
                 // stay Zephium's own: browser accelerators are off above.
@@ -3109,6 +3114,8 @@ impl EngineHost {
             let builder = builder
                 .with_additional_browser_args(crate::network::browser_arguments())
                 .with_browser_accelerator_keys(false)
+                // The same as a page's, or this profile's pages are refused.
+                .with_scroll_bar_style(wry::ScrollBarStyle::FluentOverlay)
                 .with_environment_created_handler(move |environment| {
                     let Ok(mut slot) = observed.try_borrow_mut() else {
                         capture_failed.set(true);

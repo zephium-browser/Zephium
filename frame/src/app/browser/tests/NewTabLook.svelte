@@ -29,7 +29,10 @@
                 loadingLabel=""
                 failureLabel="failed"
                 retryLabel="retry"
-                >{#snippet children(Search)}<Search tabId="tab" />{/snippet}</LazyView
+                >{#snippet children(Search)}<Search
+                    tabId="tab"
+                    loadMenu={() => import("$shared/ui/Menu")}
+                  />{/snippet}</LazyView
               >{/snippet}</NewTab
           >{/snippet}</LazyView
       >

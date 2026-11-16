@@ -2,7 +2,13 @@
 use crate::navigation;
 use url::Url;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+mod shortcuts;
+pub use shortcuts::*;
+
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum SearchEngine {
     Google,
     #[default]
@@ -101,9 +107,6 @@ impl SearchEngine {
     }
 
     pub fn configured_classify(self, input: &str, template: &str) -> Option<Url> {
-        if let Some((engine, query)) = engine_shortcut(input) {
-            return engine.configured_search(query, template);
-        }
         if navigation::is_query(input) {
             self.configured_search(input, template)
         } else {
@@ -137,18 +140,6 @@ pub fn valid_template(template: &str) -> bool {
             .is_some_and(|host| host.contains("zephium-query"))
 }
 
-pub fn engine_shortcut(input: &str) -> Option<(SearchEngine, &str)> {
-    let (prefix, query) = input.trim().split_once(char::is_whitespace)?;
-    let engine = match prefix {
-        "!g" => SearchEngine::Google,
-        "!d" => SearchEngine::DuckDuckGo,
-        "!b" => SearchEngine::Bing,
-        "!br" => SearchEngine::Brave,
-        _ => return None,
-    };
-    Some((engine, query.trim()))
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchScope {
     All,
@@ -179,7 +170,7 @@ pub fn scoped_query(input: &str) -> (SearchScope, &str) {
 pub fn remote_query_allowed(input: &str) -> bool {
     let (scope, query) = scoped_query(input);
     scope == SearchScope::All
-        && engine_shortcut(input).is_none()
+        && !query.split_whitespace().any(|token| token.starts_with('!'))
         && (2..=256).contains(&query.chars().count())
         && query.len() <= 1024
         && navigation::is_query(query)
@@ -512,15 +503,15 @@ mod policy_tests {
         assert_eq!(url.query_pairs().count(), 1);
         assert_eq!(url.query_pairs().next().unwrap().1, "a&admin=true");
         assert_eq!(
-            SearchEngine::DuckDuckGo
-                .configured_classify("!d example.com", "")
+            ShortcutRegistry::default()
+                .resolve("!d example.com", SearchEngine::DuckDuckGo, "")
                 .unwrap()
                 .host_str(),
             Some("duckduckgo.com")
         );
         assert_eq!(
-            SearchEngine::DuckDuckGo
-                .configured_classify("!g example.com", "")
+            ShortcutRegistry::default()
+                .resolve("!g example.com", SearchEngine::DuckDuckGo, "")
                 .unwrap()
                 .host_str(),
             Some("www.google.com")
