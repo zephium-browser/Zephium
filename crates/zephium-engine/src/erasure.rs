@@ -579,10 +579,12 @@ mod tests {
         };
         use ::windows::Win32::Security::{
             EqualSid, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
-            IsWellKnownSid, WinLocalSystemSid, ACCESS_ALLOWED_ACE, ACL, DACL_SECURITY_INFORMATION,
-            OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-            PSID, SE_DACL_PROTECTED,
+            GetTokenInformation, IsWellKnownSid, TokenUser, WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+            ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
         };
+        use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
         use ::windows::Win32::Storage::FileSystem::{
             FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL, WRITE_DAC,
         };
@@ -596,17 +598,41 @@ mod tests {
                 .open(path)
                 .unwrap()
         }
+        // The DACL grants the current user, who is not the owner when the
+        // process runs elevated (objects are then owned by Administrators).
+        fn current_user() -> Vec<usize> {
+            let mut token = HANDLE::default();
+            let mut user = vec![0usize; 65536 / std::mem::size_of::<usize>()];
+            let mut length = 0;
+            // SAFETY: current process pseudo-handle, owned token handle and an
+            // aligned writable buffer with the advertised capacity.
+            unsafe {
+                OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).unwrap();
+                let token = OwnedHandle::from_raw_handle(token.0);
+                GetTokenInformation(
+                    HANDLE(token.as_raw_handle()),
+                    TokenUser,
+                    Some(user.as_mut_ptr().cast()),
+                    65536,
+                    &mut length,
+                )
+                .unwrap();
+            }
+            user
+        }
         fn assert_acl(file: &fs::File, protected: bool, flags: u8) {
             let mut sd = PSECURITY_DESCRIPTOR::default();
             let mut acl = std::ptr::null_mut::<ACL>();
-            let mut owner = PSID::default();
+            let user = current_user();
+            // SAFETY: the TokenUser query initialized TOKEN_USER in `user`.
+            let owner = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
             // SAFETY: fixture-owned handle and initialized descriptor outputs.
             unsafe {
                 GetSecurityInfo(
                     HANDLE(file.as_raw_handle()),
                     SE_FILE_OBJECT,
-                    DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
-                    Some(&mut owner),
+                    DACL_SECURITY_INFORMATION,
+                    None,
                     None,
                     Some(&mut acl),
                     None,

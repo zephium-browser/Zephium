@@ -13,9 +13,9 @@ use windows::Win32::Security::Authorization::{
 };
 use windows::Win32::Security::{
     EqualSid, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetTokenInformation,
-    IsValidSid, TokenUser, ACL, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-    TOKEN_QUERY, TOKEN_USER,
+    IsValidSid, TokenOwner, TokenUser, ACL, DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SE_DACL_PROTECTED, TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -99,6 +99,32 @@ fn matches(
     }
 }
 
+/// Reads one token information class into an aligned, bounded buffer that
+/// keeps the SIDs it points to alive.
+fn token_information(
+    token: &OwnedHandle,
+    class: TOKEN_INFORMATION_CLASS,
+    minimum: usize,
+) -> io::Result<Vec<usize>> {
+    let mut buffer = vec![0usize; 65536 / std::mem::size_of::<usize>()];
+    let mut length = 0;
+    // SAFETY: live token and aligned writable buffer with the advertised capacity.
+    unsafe {
+        GetTokenInformation(
+            HANDLE(token.as_raw_handle()),
+            class,
+            Some(buffer.as_mut_ptr().cast()),
+            65536,
+            &mut length,
+        )
+    }
+    .map_err(|_| refused())?;
+    if (length as usize) < minimum || length > 65536 {
+        return Err(refused());
+    }
+    Ok(buffer)
+}
+
 pub(super) fn restrict_directory(path: &Path) -> io::Result<()> {
     // Pin ancestors without delete sharing before opening the target. Do not
     // follow junctions or change ownership to make an unfamiliar tree usable.
@@ -118,32 +144,24 @@ pub(super) fn restrict_directory(path: &Path) -> io::Result<()> {
         .map_err(|_| refused())?;
     // SAFETY: OpenProcessToken transferred unique ownership of this handle.
     let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
-    // TOKEN_USER contains pointers; keep the output aligned and bounded.
-    let mut user = vec![0usize; 65536 / std::mem::size_of::<usize>()];
-    let mut length = 0;
-    // SAFETY: live token and aligned writable buffer with the advertised capacity.
-    unsafe {
-        GetTokenInformation(
-            HANDLE(token.as_raw_handle()),
-            TokenUser,
-            Some(user.as_mut_ptr().cast()),
-            65536,
-            &mut length,
-        )
-    }
-    .map_err(|_| refused())?;
-    if length < std::mem::size_of::<TOKEN_USER>() as u32 || length > 65536 {
-        return Err(refused());
-    }
+    let user = token_information(&token, TokenUser, std::mem::size_of::<TOKEN_USER>())?;
     // SAFETY: successful TokenUser query initialized TOKEN_USER in the retained buffer.
     let sid = unsafe { (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    // Elevated administrators create objects owned by their default owner
+    // (often BUILTIN\Administrators), not by their user SID.
+    let default = token_information(&token, TokenOwner, std::mem::size_of::<TOKEN_OWNER>())?;
+    // SAFETY: successful TokenOwner query initialized TOKEN_OWNER in the retained buffer.
+    let default_owner = unsafe { (*default.as_ptr().cast::<TOKEN_OWNER>()).Owner };
     let (_old, descriptor, owner, acl) = security(&file)?;
-    if owner.0.is_null()
-        || sid.0.is_null()
-        // SAFETY: Windows supplied both nonnull SIDs; their allocations remain live.
-        || !unsafe { IsValidSid(owner).as_bool() && IsValidSid(sid).as_bool() }
-        // SAFETY: both retained SIDs passed the validation above.
-        || unsafe { EqualSid(owner, sid) }.is_err()
+    let valid = |candidate: PSID| {
+        // SAFETY: Windows supplied the candidate SID; its allocation remains live.
+        !candidate.0.is_null() && unsafe { IsValidSid(candidate).as_bool() }
+    };
+    if !valid(owner)
+        || !valid(sid)
+        || !valid(default_owner)
+        // SAFETY: all three retained SIDs passed the validation above.
+        || unsafe { EqualSid(owner, sid).is_err() && EqualSid(owner, default_owner).is_err() }
     {
         return Err(refused());
     }
