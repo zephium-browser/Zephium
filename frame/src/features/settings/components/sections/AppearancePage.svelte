@@ -45,14 +45,13 @@
     return () => observer.disconnect();
   });
 
-  // What the person may choose here: the sky on a new tab with the system's
-  // glass beyond it, or the system's glass alone. Windows has one system
-  // material worth having; a Mac offers the glass or the older vibrancy.
   const materialOptions = IS_WINDOWS
     ? [
         { value: "auto", label: m.settings_material_automatic() },
         { value: "mica", label: m.settings_material_mica() },
-        { value: "none", label: m.settings_material_solid() },
+        { value: "mica_alt", label: m.settings_material_mica_alt() },
+        { value: "acrylic", label: m.settings_material_acrylic() },
+        { value: "none", label: m.settings_material_none() },
       ]
     : [
         { value: "auto", label: m.settings_material_automatic() },
@@ -71,6 +70,7 @@
     vibrancy: m.settings_material_vibrancy,
     acrylic: m.settings_material_acrylic,
     mica: m.settings_material_mica,
+    mica_alt: m.settings_material_mica_alt,
     none: m.settings_material_solid,
   };
 

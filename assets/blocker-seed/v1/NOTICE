@@ -20,35 +20,35 @@ Upstream terms: https://github.com/uBlockOrigin/uAssets/blob/master/LICENSE
 
 EasyList
 Source: https://easylist.to/easylist/easylist.txt
-Version: 202611041052
-Commit: fe19e45cb877dc8db09a23062e1cfb0fccb2a3dc
-Raw SHA-256: 6021a051477fa01ca38ab32494b9ae05035130d188054bf912500ec1a5f7a351
+Version: 202611071631
+Commit: 546c4e8792263caae6d6cee6cbdb7904044c171e
+Raw SHA-256: 6bf3bd2c640618469cff8c2ae850baf85b4140ca306bfbd193fde29c3972bfca
 
 EasyPrivacy
 Source: https://easylist.to/easylist/easyprivacy.txt
-Version: 202611041012
-Commit: 9064ceed70c2d6a517c9eff5d8dfaa75b0288208
-Raw SHA-256: 8bc6991ad3177a1e347fe72fe06b5afe567891879267db66aac49d01547c5f1a
+Version: 202611071631
+Commit: 546c4e8792263caae6d6cee6cbdb7904044c171e
+Raw SHA-256: 49ebd22b2696ef247b5c70112560253083917e5d7784cfe83e51c98f2a4fe20b
 
 uBlock filters
 Source: https://ublockorigin.github.io/uAssets/filters/filters.min.txt
-Version: 202611040630
-Raw SHA-256: 112950326a15991549487bb5e1f25fdca46e857aab1287711f732eb40e51cdb6
+Version: 202611071553
+Raw SHA-256: 7cfc6586129e1bc4c235807d7bf317f646e13fe1420d4c73f1bf586aaacc7895
 
 uBlock₀ filters – Quick fixes
 Source: https://ublockorigin.github.io/uAssets/filters/quick-fixes.txt
-Version: 202611040447
-Raw SHA-256: 16737f89a8f265338d4dca109ae9576495d42cd42fcb04fee9f6b8d03b0ae864
+Version: 202611071158
+Raw SHA-256: e41a304d95d916c83699a5ff3b763db23e90c44ff95e4cc4864bdc241e749d00
 
 uBlock filters – Link shorteners
 Source: https://ublockorigin.github.io/uAssets/filters/ubo-link-shorteners.txt
-Version: 202611040352
-Raw SHA-256: ac04349363aafe39e56645dae080ebecd1985ec2bd6468d88bf3c4f357a06351
+Version: 202611061911
+Raw SHA-256: efaf6daea3d03b89b5041eb40292e4e17c6c93e2ae48d0e36c95fb9d47d3dc42
 
 uBlock filters – Privacy
 Source: https://ublockorigin.github.io/uAssets/filters/privacy.min.txt
-Version: 202611031430
-Raw SHA-256: a09fe478e501df23fc7c624250402f14369856ae24b6f480f40430ca82dd3b46
+Version: 202611061011
+Raw SHA-256: f4c1d4fcaecde6a87db53c145a31147315c629886a1952af5c34afb26dfab593
 
 uBlock filters – Resource abuse
 Source: https://ublockorigin.github.io/uAssets/filters/resource-abuse.txt
@@ -57,13 +57,13 @@ Raw SHA-256: e77991b337dad1ef43ea181b36504fc9ff9bfa549eb2b9a9aec47181339e8584
 
 uBlock filters – Unbreak
 Source: https://ublockorigin.github.io/uAssets/filters/unbreak.min.txt
-Version: 202611020541
-Raw SHA-256: 3b3d92ac90e978788626542b0bd3679309fbbbdbfc7adec91787a9b7ea5ed980
+Version: 202611060239
+Raw SHA-256: d54ee7a92982d18b4f94d32038eef714967c9a2454ef55185638f953313c30c4
 
 uBlock filters – Badware risks
 Source: https://ublockorigin.github.io/uAssets/filters/badware.min.txt
-Version: 202611040514
-Raw SHA-256: 817cf844e57ce900b1d178069ccdb24e1d30b23d8ba814585055e05782baef70
+Version: 202611071200
+Raw SHA-256: 66af90a4b386024e1f2585d45d2cec5368096cd04bb61cef6999cc812814513b
 
 The upstream authors do not endorse Zephium. Release engineering must regenerate
 and verify this record with `cargo xtask update-blocker-seed` whenever a

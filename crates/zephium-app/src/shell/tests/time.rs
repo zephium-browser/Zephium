@@ -209,7 +209,7 @@ fn refused_focus_record_is_retained_retried_once_and_blocks_false_clean_shutdown
         result
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap(),
-        crate::api::ShutdownOutcome::RetryableFailure
+        crate::api::ShutdownOutcome::Unclean
     );
     store
         .reject_focus_records

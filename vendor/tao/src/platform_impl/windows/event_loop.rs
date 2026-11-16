@@ -2443,15 +2443,62 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
       DefSubclassProc(window, msg, wparam, lparam)
     }
 
-    // We don't process `WM_QUERYENDSESSION` yet until we introduce the same mechanism as Tauri's `ExitRequested` event
-    // win32wm::WM_QUERYENDSESSION => {}
-    win32wm::WM_ENDSESSION => {
-      // `wParam` is `FALSE` is for if the shutdown gets canceled,
-      // and we don't need to handle that case since we didn't do anything prior in response to `WM_QUERYENDSESSION`
-      if wparam.0 == TRUE.0 as usize {
-        subclass_input.event_loop_runner.loop_destroyed();
+    win32wm::WM_QUERYENDSESSION => {
+      if let Some(termination) = crate::event_loop::SYSTEM_TERMINATION.get() {
+        let reason: Vec<u16> = termination.reason.encode_utf16().chain(Some(0)).collect();
+        let _ = windows::Win32::System::Shutdown::ShutdownBlockReasonCreate(
+          window,
+          windows::core::PCWSTR(reason.as_ptr()),
+        );
+        termination.request();
       }
-      // Note: after we return 0 here, Windows will shut us down
+      LRESULT(1)
+    }
+    win32wm::WM_ENDSESSION => {
+      if wparam.0 == TRUE.0 as usize {
+        if let Some(termination) = crate::event_loop::SYSTEM_TERMINATION.get() {
+          let deadline = termination.request();
+          crate::event_loop::SystemTermination::wait_until(
+            deadline,
+            || {
+              matches!(
+                subclass_input.event_loop_runner.control_flow(),
+                ControlFlow::ExitWithCode(_)
+              )
+            },
+            |deadline| {
+              let remaining = deadline.saturating_duration_since(Instant::now());
+              let _ = win32wm::MsgWaitForMultipleObjectsEx(
+                None,
+                remaining.as_millis().clamp(1, 25) as u32,
+                win32wm::QS_ALLINPUT,
+                win32wm::MWMO_INPUTAVAILABLE,
+              );
+              for _ in 0..256 {
+                if Instant::now() >= deadline {
+                  break;
+                }
+                let mut message = win32wm::MSG::default();
+                if !win32wm::PeekMessageW(&mut message, None, 0, 0, win32wm::PM_REMOVE).as_bool() {
+                  break;
+                }
+                if message.message == win32wm::WM_QUIT {
+                  win32wm::PostQuitMessage(message.wParam.0 as i32);
+                  break;
+                }
+                let _ = win32wm::TranslateMessage(&message);
+                win32wm::DispatchMessageW(&message);
+              }
+            },
+          );
+          let _ = windows::Win32::System::Shutdown::ShutdownBlockReasonDestroy(window);
+          subclass_input.event_loop_runner.end_session();
+        } else {
+          subclass_input.event_loop_runner.loop_destroyed();
+        }
+      } else {
+        let _ = windows::Win32::System::Shutdown::ShutdownBlockReasonDestroy(window);
+      }
       LRESULT(0)
     }
 

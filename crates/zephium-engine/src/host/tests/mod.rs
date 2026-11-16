@@ -1152,3 +1152,132 @@ fn a_closed_fullscreen_page_is_handed_back_before_teardown() {
     assert!(exit.contains("WKContentWorld::defaultClientWorld"));
     assert!(!exit.contains("closeAllMediaPresentations"));
 }
+
+#[test]
+fn background_download_admission_preserves_live_source_and_site_checks_on_both_platforms() {
+    for adapter in [
+        include_str!("../downloads/platform_macos.rs"),
+        include_str!("../downloads/platform_windows.rs"),
+    ] {
+        let admission = adapter
+            .split("fn admit(")
+            .nth(1)
+            .unwrap()
+            .split("let id = DownloadId::generate()")
+            .next()
+            .unwrap();
+        assert!(admission.contains("if !source.live() {"));
+        assert!(!admission.contains("source.key()"));
+        assert!(!admission.contains("source.in_front()"));
+        assert!(admission.contains("self.site_admission("));
+        assert!(admission.contains("SiteAdmission::Refuse"));
+        let live = adapter
+            .split("fn live(&self)")
+            .nth(1)
+            .unwrap()
+            .split("impl Downloads")
+            .next()
+            .unwrap();
+        assert!(live.contains("self.permit.active_token().is_some()"));
+        assert!(live.contains("self.navigation.matches_activity(self.activity)"));
+    }
+}
+
+#[test]
+fn background_download_automatic_save_precedes_picker_focus_on_both_platforms() {
+    for adapter in [
+        include_str!("../downloads/platform_macos.rs"),
+        include_str!("../downloads/platform_windows.rs"),
+    ] {
+        let choose = adapter
+            .split("fn choose_destination(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn cancel(")
+            .next()
+            .unwrap();
+        assert!(choose.contains("source.live(),"));
+        assert!(choose.contains("Some((true, in_front,"));
+        let prepare = choose.find("self.prepare(").unwrap();
+        let defer = choose
+            .find("self.defer_destination(id, preferences)")
+            .unwrap();
+        assert!(prepare < defer);
+        // Only the picker branch depends on focus; automatic preparation keeps
+        // its directory-identity and explicit ask-destination guards.
+        assert!(choose[..prepare].contains("!preferences.ask_destination"));
+        assert!(choose[..prepare].contains("preferences.directory_identity.is_some()"));
+        assert!(!choose[..prepare].contains("!in_front"));
+        let focus = choose[..defer].rfind("if ").unwrap();
+        assert!(choose[focus..defer].contains("!in_front"));
+        assert!(!choose[focus..defer].contains("self.cancel("));
+    }
+}
+
+#[test]
+fn background_download_picker_retries_after_revocation_checks_without_reentrant_duplicates() {
+    let source = include_str!("../downloads.rs");
+    let tick = source
+        .split("fn tick(self: &Rc<Self>)")
+        .nth(1)
+        .unwrap()
+        .split("fn cleanup(")
+        .next()
+        .unwrap();
+    let cancel = tick.find("for (id, error) in cancel").unwrap();
+    let dequeue = tick.find(".picker_preferences").unwrap();
+    let show = tick
+        .find("self.choose_destination(id, preferences)")
+        .unwrap();
+    assert!(cancel < dequeue && dequeue < show);
+    assert!(tick[..cancel].contains("Source::live"));
+    assert!(tick[cancel..dequeue].contains("DownloadState::Pending && !transfer.cancelling"));
+    assert!(tick[dequeue..show].contains(".take()"));
+    let defer = source
+        .split("fn defer_destination(")
+        .nth(1)
+        .unwrap()
+        .split("fn persist(")
+        .next()
+        .unwrap();
+    assert!(defer.contains("transfer.picker_preferences = Some(preferences)"));
+    assert!(defer.contains("transfer.deadline.waiting_for_picker(Instant::now())"));
+    assert!(!defer.contains("destination_reply.take()"));
+}
+
+#[test]
+fn background_download_picker_rechecks_focus_before_native_presentation_on_both_platforms() {
+    for (adapter, presentation, focus_check) in [
+        (
+            include_str!("../downloads/platform_macos.rs"),
+            "panel.beginSheetModalForWindow_completionHandler",
+            "Source::in_front",
+        ),
+        (
+            include_str!("../downloads/platform_windows.rs"),
+            "dialog.Show(Some(window))",
+            "Some((true, false))",
+        ),
+    ] {
+        let choose = adapter
+            .split("fn choose_destination(")
+            .nth(1)
+            .unwrap()
+            .split("pub(super) fn cancel(")
+            .next()
+            .unwrap();
+        let present = choose.find(presentation).unwrap();
+        let recheck = choose[..present].rfind(focus_check).unwrap();
+        let defer = choose[recheck..present]
+            .find("self.defer_destination(id, preferences);")
+            .unwrap()
+            + recheck;
+        assert!(choose[defer..present].contains("return;"));
+        assert!(choose[defer..present].contains("transfer.panel = Some("));
+        assert!(
+            choose[defer..present].contains("transfer.deadline.waiting_for_picker(Instant::now())")
+        );
+        assert!(choose[..recheck].contains("source.live()"));
+        assert!(choose[..recheck].contains("transfer.panel.is_none()"));
+    }
+}

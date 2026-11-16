@@ -310,6 +310,93 @@ fn exact_lock_rejects_a_second_owner_until_drop() {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
+fn final_child_drop_releases_lock_while_spawn_waits_before_exec() {
+    use std::net::Shutdown;
+    use std::os::unix::{net::UnixStream, process::CommandExt};
+    use std::process::{Child, Command};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    struct PausedSpawn {
+        gate: UnixStream,
+        spawning: Option<JoinHandle<std::io::Result<Child>>>,
+    }
+
+    impl Drop for PausedSpawn {
+        fn drop(&mut self) {
+            // Shutdown also affects the socket copy inherited by the child,
+            // so assertion failure cannot leave pre_exec waiting for EOF.
+            let _ = self.gate.shutdown(Shutdown::Both);
+            if let Some(spawning) = self.spawning.take() {
+                if let Ok(Ok(mut child)) = spawning.join() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let child = namespace
+        .directory()
+        .create_private_child(&component("objects"))
+        .unwrap();
+    let (gate, child_gate) = UnixStream::pair().unwrap();
+    for socket in [&gate, &child_gate] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+    let spawning = std::thread::spawn(move || {
+        let mut command = Command::new("/bin/true");
+        // SAFETY: the child only invokes read/write syscalls on an already
+        // allocated socket and creates allocation-free OS errors before exec.
+        unsafe {
+            command.pre_exec(move || {
+                let fail = |error: rustix::io::Errno| {
+                    std::io::Error::from_raw_os_error(error.raw_os_error())
+                };
+                if rustix::io::write(&child_gate, &[1]).map_err(fail)? != 1
+                    || rustix::io::read(&child_gate, &mut [0]).map_err(fail)? != 1
+                {
+                    return Err(fail(rustix::io::Errno::PIPE));
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
+    let mut paused = PausedSpawn {
+        gate,
+        spawning: Some(spawning),
+    };
+    paused.gate.read_exact(&mut [0]).unwrap();
+
+    drop(namespace);
+    assert_eq!(
+        LockedPrivateNamespace::open_or_create(&root).err(),
+        Some(PrivateFsError::LockUnavailable),
+    );
+    drop(child);
+    let released = LockedPrivateNamespace::open_or_create(&root);
+    assert!(
+        !paused.spawning.as_ref().unwrap().is_finished(),
+        "spawn escaped the pre-exec gate"
+    );
+    assert!(
+        released.is_ok(),
+        "final capability did not release its lock: {:?}",
+        released.err()
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
 fn concurrent_initialization_has_one_authoritative_owner() {
     use std::sync::{Arc, Barrier};
 
@@ -517,6 +604,7 @@ fn canonical_admission_refuses_busy_staging_then_recovers_after_release() {
         PrivateFsError::LockUnavailable
     );
     assert_eq!(fs::read(&staging).unwrap(), LOCK_MARKER);
+    rustix::fs::flock(&staging_owner, rustix::fs::FlockOperation::Unlock).unwrap();
     drop(staging_owner);
 
     let namespace = LockedPrivateNamespace::open_or_create(&root).unwrap();
@@ -2279,9 +2367,14 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
         .unwrap();
     let source = staging
         .create_new_private_child(&component("source"))
+        .unwrap();
+    let child = source
+        .create_new_private_child(&component("child"))
         .unwrap()
         .seal()
         .unwrap();
+    drop(child);
+    let source = source.seal().unwrap();
     let identity = source.identity();
     let installed = source
         .publish_noreplace(&objects, &component("installed"))
@@ -2289,6 +2382,22 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
     assert_eq!(installed.identity(), identity);
     assert!(!root.join("staging/source").exists());
     assert_eq!(unix_mode(&root.join("objects/installed")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
+
+    let source = staging
+        .create_new_private_child(&component("refused"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let error = source
+        .publish_noreplace(&objects, &component("installed"))
+        .err()
+        .unwrap();
+    let (error, source) = error.into_parts();
+    assert_eq!(error, PrivateFsError::AlreadyExists);
+    source.unwrap().with_verified_path(|_| ()).unwrap();
+    assert_eq!(unix_mode(&root.join("staging/refused")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
 }
 
 #[cfg(target_os = "macos")]

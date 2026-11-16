@@ -49,6 +49,8 @@ const TITLES: Record<string, () => string> = {
   "browser.history": m.command_browser_history,
   "tab.next": m.command_tab_next,
   "tab.previous": m.command_tab_previous,
+  "tab.recent.next": m.command_tab_recent_next,
+  "tab.recent.previous": m.command_tab_recent_previous,
   "tab.above": m.command_tab_above,
   "tab.below": m.command_tab_below,
   "space.next": m.command_space_next,

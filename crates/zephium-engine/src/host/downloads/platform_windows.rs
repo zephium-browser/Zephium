@@ -432,7 +432,7 @@ impl Downloads {
             initial_open,
             ask_destination,
         };
-        if !source.key() {
+        if !source.live() {
             return;
         }
         let Ok(operation) = (unsafe { args.DownloadOperation() }) else {
@@ -594,6 +594,7 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                picker_preferences: None,
                 on_started: initial
                     .as_mut()
                     .and_then(|context| context.on_started.take()),
@@ -645,18 +646,29 @@ impl Downloads {
         id: DownloadId,
         preferences: DownloadPreferences,
     ) {
-        let context = self.active.borrow().get(&id).and_then(|transfer| {
-            transfer.source.as_ref().map(|source| {
-                (
-                    source.key(),
-                    source.root,
-                    transfer.record.filename.clone(),
-                    transfer.record.source.clone(),
-                    source.ask_destination,
-                )
+        let context = self
+            .active
+            .borrow()
+            .get(&id)
+            .filter(|transfer| {
+                transfer.record.state == DownloadState::Pending
+                    && !transfer.cancelling
+                    && !transfer.authorized
+                    && transfer.panel.is_none()
             })
-        });
-        let Some((true, window, filename, source, ask_destination)) = context else {
+            .and_then(|transfer| {
+                transfer.source.as_ref().map(|source| {
+                    (
+                        source.live(),
+                        source.key(),
+                        source.root,
+                        transfer.record.filename.clone(),
+                        transfer.record.source.clone(),
+                        source.ask_destination,
+                    )
+                })
+            });
+        let Some((true, in_front, window, filename, source, ask_destination)) = context else {
             self.cancel(id, None);
             return;
         };
@@ -665,7 +677,7 @@ impl Downloads {
             .clone()
             .map(PathBuf::from)
             .or_else(dirs::download_dir);
-        // Admission pins the foreground document; a page's further automatic
+        // Admission pins the live document; a page's further automatic
         // downloads ask through WebView2's own prompt first.
         if !ask_destination
             && !preferences.ask_destination
@@ -678,8 +690,12 @@ impl Downloads {
             self.prepare(id, directory.join(filename), preferences.directory_identity);
             return;
         }
+        if !in_front {
+            self.defer_destination(id, preferences);
+            return;
+        }
         let Some(lease) = DialogLease::acquire() else {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         };
         let dialog = match dialog(
@@ -694,10 +710,27 @@ impl Downloads {
                 return;
             }
         };
+        let context = self.active.borrow().get(&id).and_then(|transfer| {
+            transfer
+                .source
+                .as_ref()
+                .map(|source| (!transfer.cancelling && source.live(), source.key()))
+        });
+        match context {
+            Some((true, true)) => {}
+            Some((true, false)) => {
+                self.defer_destination(id, preferences);
+                return;
+            }
+            _ => {
+                self.cancel(id, None);
+                return;
+            }
+        }
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
             transfer.panel = Some(dialog.clone());
             transfer.panel_lease = Some(lease);
-            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
+            transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
         }
         self.ensure_timer();
         let result = unsafe { dialog.Show(Some(window)) };

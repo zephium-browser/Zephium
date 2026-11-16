@@ -60,6 +60,10 @@ pub static APP_DELEGATE_CLASS: Lazy<AppDelegateClass> = Lazy::new(|| unsafe {
     did_finish_launching as extern "C" fn(_, _, _),
   );
   decl.add_method(
+    sel!(applicationShouldTerminate:),
+    application_should_terminate as extern "C" fn(_, _, _) -> usize,
+  );
+  decl.add_method(
     sel!(applicationWillTerminate:),
     application_will_terminate as extern "C" fn(_, _, _),
   );
@@ -126,6 +130,16 @@ extern "C" fn did_finish_launching(this: &Object, _: Sel, _: id) {
   trace!("Triggered `applicationDidFinishLaunching`");
   AppState::launched(this);
   trace!("Completed `applicationDidFinishLaunching`");
+}
+
+extern "C" fn application_should_terminate(_: &Object, _: Sel, _: id) -> usize {
+  if let Some(termination) = crate::event_loop::SYSTEM_TERMINATION.get() {
+    // NSTerminateLater keeps AppKit dispatching main-thread cleanup callbacks.
+    AppState::defer_system_termination(termination.request());
+    2
+  } else {
+    1 // NSTerminateNow for hosts without an orderly shutdown handler.
+  }
 }
 
 extern "C" fn application_will_terminate(_: &Object, _: Sel, _: id) {

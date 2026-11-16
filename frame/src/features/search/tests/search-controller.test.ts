@@ -258,3 +258,60 @@ describe("search request lifecycle", () => {
     controller.dispose();
   });
 });
+
+it("activates a shortcut synchronously and re-reads enabled settings", () => {
+  vi.useFakeTimers();
+  let enabled = true;
+  const controller = createSearchController({
+    owner,
+    send: async () => true,
+    update: () => {},
+    shortcuts: () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+  });
+  controller.change("yt");
+  expect(controller.activeShortcut()).toBeNull();
+  controller.change("yt ");
+  expect(controller.activeShortcut()?.id).toBe("youtube");
+  enabled = false;
+  expect(controller.activeShortcut()).toBeNull();
+  controller.dispose();
+  expect(vi.getTimerCount()).toBe(0);
+  vi.useRealTimers();
+});
+
+it("leaves no timers or repeated requests after a shortcut answer settles", async () => {
+  vi.useFakeTimers();
+  const send = vi.fn(async () => true);
+  const controller = createSearchController({
+    owner,
+    send,
+    update: () => {},
+    id: () => "shortcut",
+  });
+  controller.change("yt cats");
+  await vi.advanceTimersByTimeAsync(0);
+  controller.receive({
+    context: { ...owner, request_id: "shortcut" },
+    query: "yt cats",
+    shortcut: "youtube",
+    completion: null,
+    pending: false,
+    results: [row("cats")],
+  });
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(send).toHaveBeenCalledOnce();
+  controller.dispose();
+  vi.useRealTimers();
+});

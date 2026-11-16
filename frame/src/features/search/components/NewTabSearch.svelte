@@ -7,14 +7,19 @@
   import SearchField from "$shared/ui/SearchField";
   import IconButton from "$shared/ui/IconButton";
   import ResultList from "./ResultList.svelte";
+  import EngineMenu from "./EngineMenu.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
   import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     tabId,
+    loadMenu,
+    onsettings,
     onactive,
   }: {
+    onsettings?: () => void;
     tabId: string | null;
+    loadMenu?: () => Promise<typeof import("$shared/ui/Menu")>;
     /** Whether a query is in the field, so the page can make room for it. */
     onactive?: (active: boolean) => void;
   } = $props();
@@ -40,6 +45,20 @@
   let available = $state(420);
 
   let active = $derived(surface.query.trim().length > 0);
+  let focused = $state(false);
+  // A parked caret stands in for the focus, so the field keeps its awake look.
+  let parked = $state(false);
+
+  function picked(next: string | null) {
+    if (next !== null) surface.changed(next);
+    const field = input;
+    if (!field) return;
+    field.focus();
+    if (next !== null) {
+      field.value = next;
+      field.setSelectionRange(next.length, next.length);
+    }
+  }
   let visible = $derived(
     surface.open &&
       active &&
@@ -88,7 +107,9 @@
   function keydown(event: KeyboardEvent) {
     // See LauncherPanel: WebKit's committing keydown arrives after compositionend.
     if (surface.composing || event.isComposing || event.keyCode === 229) return;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (event.key === "Backspace" && surface.backspace()) {
+      event.preventDefault();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
     } else if (event.key === "Escape") {
@@ -104,7 +125,7 @@
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
-    const unpark = input ? parkCaret(input) : () => {};
+    const unpark = input ? parkCaret(input, (value) => (parked = value)) : () => {};
     return () => {
       window.removeEventListener("resize", measure);
       unpark();
@@ -116,6 +137,7 @@
 <div
   bind:this={root}
   class="dock"
+  data-shortcut={surface.activeShortcut?.id}
   data-active={active}
   data-open={visible}
   style:--available={`${available}px`}
@@ -127,7 +149,9 @@
   <div class="bar" data-glass-text>
     <SearchField
       size="page"
-      label={m.search_web()}
+      label={surface.activeShortcut
+        ? m.search_shortcut_label({ name: surface.activeShortcut.name })
+        : m.search_web()}
       placeholder={m.search_web_short()}
       value={surface.query}
       bind:ref={input}
@@ -151,13 +175,23 @@
         style: surface.query ? "padding-inline-end: 40px" : undefined,
         onkeydown: keydown,
         onfocus: () => {
+          focused = true;
           measure();
           surface.focused();
         },
+        onblur: () => (focused = false),
         oncompositionstart: surface.compositionStart,
         oncompositionend: (event) => surface.compositionEnd(event.currentTarget.value),
       }}
-    />
+    >
+      {#snippet lead()}<EngineMenu
+          query={surface.query}
+          awake={focused || parked || active}
+          {loadMenu}
+          {onsettings}
+          onpick={picked}
+        />{/snippet}
+    </SearchField>
     {#if surface.query}
       <span class="clear">
         <IconButton
@@ -235,7 +269,7 @@
     box-shadow: none;
   }
 
-  .dock .bar :global(.ui-search[data-size] svg) {
+  .dock .bar :global(.ui-search[data-size] > svg) {
     inline-size: 16px;
     block-size: 16px;
   }

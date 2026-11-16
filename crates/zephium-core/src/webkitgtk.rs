@@ -35,11 +35,13 @@ pub const LATEST_REVIEWED_SOURCE_URL: &str =
 /// newest stable security boundary. 2.54.1 is a bug-fix release; 2.53.92 is an
 /// odd-minor development release. Re-reviewed on 2026-11-02: no advisory after
 /// WSA-2026-0006, and 2.54.2 (October 23) is another bug-fix release.
+/// Re-reviewed on 2026-11-10: https://webkitgtk.org/security/ and
+/// https://webkitgtk.org/ still list those as the newest advisory and release.
 ///
 /// The last UTC date on which CI may accept this review without an update.
-pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-09";
-/// 2026-11-10T00:00:00Z. The human-readable review date above is inclusive.
-pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_268_800;
+pub const SECURITY_FLOOR_REVIEW_BY: &str = "2026-11-17";
+/// 2026-11-18T00:00:00Z. The human-readable review date above is inclusive.
+pub const SECURITY_FLOOR_REVIEW_DEADLINE_EXCLUSIVE_UNIX_SECONDS: u64 = 1_794_960_000;
 
 /// Environment switches that can disable/replace renderer confinement,
 /// expose a remote inspector, pause a child for a debugger, or turn off
@@ -232,6 +234,13 @@ mod tests {
         );
         assert!(combined.contains(RuntimeSecurityAdvisory::review_overdue()));
         assert!(combined.contains(RuntimeSecurityAdvisory::unreviewed_runtime()));
+    }
+
+    #[test]
+    fn november_security_review_covers_release_and_expires_after_one_week() {
+        assert!(security_floor_review_is_current(1_794_268_800)); // 2026-11-10.
+        assert!(security_floor_review_is_current(1_794_959_999));
+        assert!(!security_floor_review_is_current(1_794_960_000)); // 2026-11-18.
     }
 
     #[test]

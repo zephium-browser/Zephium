@@ -396,6 +396,7 @@
 
   /* The hidden sidebar's card's own edge, out over the page. */
   --sidebar-card-edge: rgb(255 255 255 / 0.14);
+  --sidebar-card: var(--color-chrome);
 
   /* A rim and one wide soft drop, and nothing else. Stacked or tight shadows
      read as weight pressing down rather than as height, which is what makes a
@@ -606,6 +607,17 @@
   /* A page that runs on past its sheet fades out at its foot. */
   --mask-fade-bottom: linear-gradient(to bottom, #000 78%, transparent);
 
+  /* A grid that scrolls fades at whichever edge has more of it. */
+  --mask-fade-below: linear-gradient(to bottom, #000 calc(100% - 40px), transparent);
+  --mask-fade-above: linear-gradient(to top, #000 calc(100% - 40px), transparent);
+  --mask-fade-ends: linear-gradient(
+    to bottom,
+    transparent,
+    #000 40px,
+    #000 calc(100% - 40px),
+    transparent
+  );
+
   /* Favicon plate. Inactive rows desaturate so mixed-brightness site icons
      stop competing with each other and with the surface. */
   --favicon-plate: color-mix(in srgb, var(--color-text) 88%, transparent);
@@ -775,6 +787,7 @@
   --shadow-float: 0 6px 22px rgb(24 24 27 / 0.16), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --shadow-overlay: 0 12px 36px rgb(24 24 27 / 0.14), 0 0 0 0.5px rgb(24 24 27 / 0.1);
   --sidebar-card-edge: rgb(24 24 27 / 0.12);
+  --sidebar-card: var(--color-chrome);
   --shadow-popover: var(--shadow-float);
   --shadow-menu: 0 0 0 1px rgb(24 24 27 / 0.09), 0 14px 44px -10px rgb(24 24 27 / 0.16);
   --shine: inset 0 1px 0 0 rgb(255 255 255 / 0.3);

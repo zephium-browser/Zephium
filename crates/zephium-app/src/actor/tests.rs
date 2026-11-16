@@ -430,7 +430,7 @@ fn focused_content_policy_query_has_no_profile_selector_and_fails_with_revision_
 }
 
 #[test]
-fn failed_shutdown_replays_only_late_critical_callbacks() {
+fn terminal_shutdown_discards_late_critical_callbacks() {
     let id = ItemId::from(7);
     let queue = CommandQueue::new();
     let handle = Handle::new(queue.clone());
@@ -449,22 +449,9 @@ fn failed_shutdown_replays_only_late_critical_callbacks() {
     assert!(matches!(queue.try_recv(), Some(Command::Shutdown { .. })));
     assert!(queue.try_recv().is_none());
 
-    let recovered = queue.reopen_after_failed_shutdown();
-    assert_eq!(recovered.len(), 2);
-    assert!(matches!(
-        &recovered[0],
-        Command::Engine(EngineEvent::Crashed { id: recovered }) if *recovered == id
-    ));
-    assert!(matches!(
-        &recovered[1],
-        Command::Engine(EngineEvent::UrlChanged { id: recovered, url })
-            if *recovered == id && url == "https://latest.example/"
-    ));
-    assert!(
-        queue.try_recv().is_none(),
-        "ordinary late work stays rejected"
-    );
-    assert!(handle.dispatch(Command::Open));
+    queue.close_and_drain();
+    assert!(queue.try_recv().is_none());
+    assert!(!handle.dispatch(Command::Open));
 }
 
 #[test]

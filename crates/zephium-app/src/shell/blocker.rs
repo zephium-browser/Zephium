@@ -2767,20 +2767,6 @@ impl Shell {
         }
     }
 
-    /// A shutdown barrier drops every timer; views still held for startup
-    /// protection get a fresh deadline when the browser resumes.
-    pub(super) fn rearm_blocker_startup_deadlines(&mut self) {
-        let Some(queue) = &self.self_queue else {
-            return;
-        };
-        let deadline = std::time::Instant::now() + STARTUP_PROTECTION_DEADLINE;
-        for (profile, entry) in &self.blocker.profiles {
-            if let Some(token) = entry.startup_hold {
-                queue.schedule_blocker_startup_deadline(*profile, token, deadline);
-            }
-        }
-    }
-
     fn release_held_blocker_effects(&mut self, profile: ProfileId) {
         let effects = self.blocker.take_held_effects(profile);
         if !effects.is_empty() {
