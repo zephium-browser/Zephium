@@ -9,15 +9,18 @@ const IDLE_MS = 4000;
  * caret takes its place. On macOS it animates opacity unless reduced motion
  * is enabled; elsewhere it remains still.
  *
- * After modifier filtering, `wake` accepts keys of one UTF-16 code unit,
- * keys in `STARTS_TEXT`, or events with `isComposing`. Other multi-unit text
- * keys do not restore focus. Ctrl shortcuts without AltGraph are ignored,
- * including Ctrl+V; Windows paste therefore does not wake a parked field
- * through this handler.
+ * A parked field still takes every key it would have taken focused. Text
+ * and Tab land natively once focus is back; other keys, such as Escape,
+ * Enter or the arrows, are handed to the field so its own handlers run.
+ * Ctrl shortcuts without AltGraph and Cmd shortcuts other than Cmd+V are
+ * left alone, so Windows paste (Ctrl+V) does not wake a parked field.
  * Focus and pointer interaction release the parked caret. Actual idle
  * rendering behavior depends on the native engine and needs measurement.
  */
-export function parkCaret(input: HTMLInputElement, onpark?: (parked: boolean) => void): () => void {
+export function parkCaret(
+  input: HTMLInputElement | HTMLTextAreaElement,
+  onpark?: (parked: boolean) => void,
+): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let caret: HTMLElement | null = null;
 
@@ -32,19 +35,28 @@ export function parkCaret(input: HTMLInputElement, onpark?: (parked: boolean) =>
     if (!quiet() || !document.hasFocus()) return;
     const field = input.parentElement;
     if (!field) return;
+    // Offsets are measured against the field, so it must be positioned first.
+    if (getComputedStyle(field).position === "static") field.style.position = "relative";
     const style = getComputedStyle(input);
     const height = parseFloat(style.fontSize) * 1.2;
+    // A text area's caret sits on its first line, not in its middle.
+    const top =
+      input instanceof HTMLTextAreaElement
+        ? input.offsetTop +
+          parseFloat(style.borderTopWidth || "0") +
+          parseFloat(style.paddingTop || "0") +
+          ((parseFloat(style.lineHeight) || height) - height) / 2
+        : input.offsetTop + (input.offsetHeight - height) / 2;
     const start =
       style.textAlign === "center"
         ? input.offsetLeft + input.offsetWidth / 2
         : input.offsetLeft + parseFloat(style.paddingInlineStart || "0");
-    if (getComputedStyle(field).position === "static") field.style.position = "relative";
     caret = document.createElement("span");
     caret.setAttribute("aria-hidden", "true");
     Object.assign(caret.style, {
       position: "absolute",
       left: `${start}px`,
-      top: `${input.offsetTop + (input.offsetHeight - height) / 2}px`,
+      top: `${top}px`,
       width: "2px",
       height: `${height}px`,
       borderRadius: "1px",
@@ -73,15 +85,33 @@ export function parkCaret(input: HTMLInputElement, onpark?: (parked: boolean) =>
     input.blur();
   }
 
-  // After modifier filtering, accept one-code-unit keys, this explicit set,
-  // or active composition. Other multi-unit text keys do not wake the field.
   const STARTS_TEXT = new Set(["Backspace", "Delete", "Dead", "Process", "Unidentified"]);
+  const MODIFIERS = new Set(["Alt", "AltGraph", "CapsLock", "Control", "Fn", "Meta", "Shift"]);
   function wake(event: KeyboardEvent) {
     const altGraph = event.getModifierState("AltGraph");
     if (event.ctrlKey && !altGraph) return;
     if (event.metaKey && event.key.toLowerCase() !== "v") return;
-    if (event.key.length !== 1 && !STARTS_TEXT.has(event.key) && !event.isComposing) return;
+    if (MODIFIERS.has(event.key)) return;
     input.focus({ preventScroll: true });
+    const text = event.key.length === 1 || STARTS_TEXT.has(event.key) || event.isComposing;
+    if (text || event.key === "Tab" || event.target === input) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: event.key,
+        code: event.code,
+        location: event.location,
+        repeat: event.repeat,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        ctrlKey: event.ctrlKey,
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      }),
+    );
   }
 
   function release(event: Event) {
