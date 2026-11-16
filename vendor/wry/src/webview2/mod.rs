@@ -41,8 +41,8 @@ use super::Theme;
 use crate::{
   custom_protocol_workaround,
   native_admission::{
-    InFlightAdmission, InFlightPermit, CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
-    CUSTOM_PROTOCOL_OVERFLOW_STATUS,
+    InFlightAdmission, InFlightPermit, WaitList, CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
+    CUSTOM_PROTOCOL_OVERFLOW_STATUS, CUSTOM_PROTOCOL_WAITING_LIMIT,
   },
   native_bounds::{
     bounded_utf16, CustomProtocolRequestBudget, NativeStringLimit,
@@ -127,6 +127,13 @@ thread_local! {
   // asynchronous protocol workers receive only a numeric lookup token.
   static PENDING_WEB_RESOURCE_RESPONSES:
     RefCell<HashMap<usize, PendingWebResourceResponse>> = RefCell::new(HashMap::new());
+  // Requests past their scheme's in-flight bound wait here, deferred, in
+  // arrival order within each scheme, and start as permits are released.
+  static WAITING_WEB_RESOURCE_REQUESTS: RefCell<WaitList<WebResourcePool, WaitingWebResourceRequest>> =
+    const { RefCell::new(WaitList::new(CUSTOM_PROTOCOL_WAITING_LIMIT)) };
+  // Set while waiters are being started, so a response completed inside a
+  // started handler does not start another drain beneath this one.
+  static DRAINING_WEB_RESOURCE_REQUESTS: Cell<bool> = const { Cell::new(false) };
   // Generic Drop cannot report a native close failure to its caller. Retain
   // such debts on the creating apartment until the embedder drains them.
   // Overflow is an invariant failure: intentionally leak the owned native
@@ -662,7 +669,7 @@ pub(crate) struct InnerWebView {
   pub controller: ICoreWebView2Controller,
   pub webview: ICoreWebView2,
   pub env: ICoreWebView2Environment,
-  custom_protocol_admission: InFlightAdmission,
+  custom_protocol_admission: SchemeAdmissions,
   cleanup: RefCell<Option<NativeCleanupDebt>>,
   /// Present only for a page a person reads. It is set while a Save As the
   /// browser asked for is in flight, and is the only thing that lets
@@ -830,6 +837,153 @@ fn web_resource_failure_response(status: StatusCode) -> HttpResponse<Cow<'static
   response
 }
 
+/// One in-flight bound per custom scheme of a WebView, sealed together at
+/// teardown, so a burst on one scheme (a page's settings reads over IPC)
+/// never holds back another (the bundled modules a lazy view imports).
+#[derive(Clone, Default)]
+struct SchemeAdmissions(Rc<RefCell<Vec<InFlightAdmission>>>);
+
+impl SchemeAdmissions {
+  fn add(&self) -> InFlightAdmission {
+    let admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    match self.0.try_borrow_mut() {
+      Ok(mut admissions) => admissions.push(admission.clone()),
+      // A scope teardown cannot reach is never opened.
+      Err(_) => admission.seal_and_drain(),
+    }
+    admission
+  }
+
+  fn seal_and_drain(&self) {
+    let admissions = match self.0.try_borrow() {
+      Ok(admissions) => admissions.clone(),
+      Err(_) => return,
+    };
+    for admission in admissions {
+      admission.seal_and_drain();
+    }
+  }
+}
+
+/// One scheme of one WebView. Equal by identity, not by the counter it carries.
+struct WebResourcePool {
+  hwnd: isize,
+  protocol: usize,
+  admission: InFlightAdmission,
+}
+
+impl PartialEq for WebResourcePool {
+  fn eq(&self, other: &Self) -> bool {
+    self.hwnd == other.hwnd && self.protocol == other.protocol
+  }
+}
+
+/// Hands an admitted request to its scheme's handler. A waiting request
+/// passes itself so its deferral is reused, and fails closed if starting stops
+/// before the response is owned.
+type StartWebResourceRequest = Rc<
+  dyn Fn(
+    &ICoreWebView2WebResourceRequestedEventArgs,
+    &str,
+    Option<WaitingWebResourceRequest>,
+    usize,
+    InFlightPermit,
+  ) -> windows::core::Result<()>,
+>;
+
+/// A deferred request waiting for its scheme's in-flight slot. It owns the
+/// native deferral until it starts; dropped instead, it completes with an
+/// empty 503 exactly once.
+struct WaitingWebResourceRequest {
+  args: ICoreWebView2WebResourceRequestedEventArgs,
+  env: ICoreWebView2Environment,
+  deferral: Option<ICoreWebView2Deferral>,
+  uri: String,
+  protocol: usize,
+  start: StartWebResourceRequest,
+}
+
+impl WaitingWebResourceRequest {
+  fn take_deferral(&mut self) -> Option<ICoreWebView2Deferral> {
+    self.deferral.take()
+  }
+
+  /// Completes with `response` in place of the scheme's own.
+  fn complete_with(mut self, response: &ICoreWebView2WebResourceResponse) {
+    if let Some(deferral) = self.deferral.take() {
+      unsafe {
+        let _ = self.args.SetResponse(response);
+        let _ = deferral.Complete();
+      }
+    }
+  }
+
+  fn start(mut self, permit: InFlightPermit) {
+    let start = self.start.clone();
+    let args = self.args.clone();
+    let uri = std::mem::take(&mut self.uri);
+    let protocol = self.protocol;
+    let _ = start(&args, &uri, Some(self), protocol, permit);
+  }
+}
+
+impl Drop for WaitingWebResourceRequest {
+  fn drop(&mut self) {
+    let Some(deferral) = self.deferral.take() else {
+      return;
+    };
+    unsafe {
+      let failure = web_resource_failure_response(CUSTOM_PROTOCOL_OVERFLOW_STATUS);
+      if let Ok(response) = InnerWebView::prepare_web_request_response(&self.env, &failure) {
+        let _ = self.args.SetResponse(&response);
+      }
+      let _ = deferral.Complete();
+    }
+  }
+}
+
+/// Starts waiting requests while their schemes have room. Called after
+/// anything that can free a slot; a release inside a started handler leaves
+/// the loop already running to pick it up.
+fn drain_waiting_web_resource_requests() {
+  if DRAINING_WEB_RESOURCE_REQUESTS
+    .try_with(|draining| draining.replace(true))
+    .unwrap_or(true)
+  {
+    return;
+  }
+  loop {
+    let ready = WAITING_WEB_RESOURCE_REQUESTS
+      .try_with(|waiting| {
+        let mut waiting = waiting.try_borrow_mut().ok()?;
+        if waiting.is_empty() {
+          return None;
+        }
+        waiting.take_ready(|pool| pool.admission.try_acquire())
+      })
+      .ok()
+      .flatten();
+    let Some((waiting, permit)) = ready else {
+      break;
+    };
+    waiting.start(permit);
+  }
+  let _ = DRAINING_WEB_RESOURCE_REQUESTS.try_with(|draining| draining.set(false));
+}
+
+/// A WebView going away fails its waiting requests closed, outside the borrow.
+fn cancel_waiting_web_resource_requests(hwnd: isize) {
+  let taken = WAITING_WEB_RESOURCE_REQUESTS
+    .try_with(|waiting| {
+      waiting
+        .try_borrow_mut()
+        .map(|mut waiting| waiting.take_where(|pool| pool.hwnd == hwnd))
+        .unwrap_or_default()
+    })
+    .unwrap_or_default();
+  drop(taken);
+}
+
 fn pending_response_hwnd(hwnd: isize) -> HWND {
   HWND(hwnd as *mut core::ffi::c_void)
 }
@@ -893,9 +1047,11 @@ fn finish_pending_web_resource_response(token: usize, response: HttpResponse<Cow
     let _ = unsafe { KillTimer(Some(pending_response_hwnd(pending.hwnd)), token) };
     pending.finish(response);
   }
+  drain_waiting_web_resource_requests();
 }
 
 fn cancel_pending_web_resource_responses(hwnd: isize) {
+  cancel_waiting_web_resource_requests(hwnd);
   let pending = PENDING_WEB_RESOURCE_RESPONSES.with(|responses| {
     if let Ok(mut responses) = responses.try_borrow_mut() {
       let tokens: Vec<_> = responses
@@ -929,6 +1085,7 @@ unsafe extern "system" fn web_resource_response_timeout(
       Ok(Some(pending)) => {
         let _ = unsafe { KillTimer(Some(hwnd), token) };
         pending.finish(web_resource_failure_response(StatusCode::GATEWAY_TIMEOUT));
+        drain_waiting_web_resource_requests();
       }
       Ok(None) => {
         // A late timer notification after normal completion must not leave a
@@ -1153,7 +1310,7 @@ impl InnerWebView {
         )));
       }
     }
-    let custom_protocol_admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    let custom_protocol_admission = SchemeAdmissions::default();
     let save_as = pl_attrs
       .native_context_menu_handler
       .is_some()
@@ -1492,7 +1649,7 @@ impl InnerWebView {
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
     construction: &mut ControllerConstructionGuard,
-    custom_protocol_admission: &InFlightAdmission,
+    custom_protocol_admission: &SchemeAdmissions,
     save_as: Option<Rc<Cell<bool>>>,
   ) -> Result<ICoreWebView2> {
     let webview = unsafe { controller.CoreWebView2()? };
@@ -2430,7 +2587,7 @@ impl InnerWebView {
     http_or_https: &'static str,
     attributes: &mut WebViewAttributes,
     token: &mut EventRegistrationToken,
-    protocol_admission: &InFlightAdmission,
+    protocol_admissions: &SchemeAdmissions,
   ) -> Result<()> {
     for name in attributes.custom_protocols.keys() {
       // WebView2 supports non-standard protocols only on Windows 10+, so we have to use this workaround
@@ -2454,9 +2611,91 @@ impl InnerWebView {
     }
 
     let env = env.clone();
-    let custom_protocols = std::mem::take(&mut attributes.custom_protocols);
+    // Each scheme keeps its own in-flight bound, in a fixed order the waiting
+    // list can name by index.
+    let protocols: Rc<Vec<_>> = Rc::new(
+      std::mem::take(&mut attributes.custom_protocols)
+        .into_iter()
+        .map(|(name, handler)| (name, handler, protocol_admissions.add()))
+        .collect(),
+    );
     let main_thread_id = std::thread::current().id();
-    let protocol_admission = protocol_admission.clone();
+    let pending_hwnd = hwnd.0 as isize;
+
+    // Hands one admitted request to its scheme's handler. The permit moves into
+    // the pending response; a waiting request's deferral is reused, and if
+    // starting stops before the response owns it, the waiter fails it closed.
+    let start: StartWebResourceRequest = {
+      let env = env.clone();
+      let protocols = protocols.clone();
+      Rc::new(
+        move |args: &ICoreWebView2WebResourceRequestedEventArgs,
+              uri: &str,
+              mut waiting: Option<WaitingWebResourceRequest>,
+              protocol: usize,
+              permit: InFlightPermit| {
+          let Some((custom_protocol, custom_protocol_handler, _)) = protocols.get(protocol) else {
+            return Ok(());
+          };
+          let webview_request = args.Request()?;
+          let request =
+            match Self::prepare_request(http_or_https, custom_protocol, &webview_request, uri) {
+              Ok(req) => req,
+              Err(e) => {
+                let err_response = Self::prepare_web_request_err(&env, e)?;
+                match waiting {
+                  Some(waiting) => waiting.complete_with(&err_response),
+                  None => args.SetResponse(&err_response)?,
+                }
+                return Ok(());
+              }
+            };
+
+          let deferral = match waiting
+            .as_mut()
+            .and_then(WaitingWebResourceRequest::take_deferral)
+          {
+            Some(deferral) => deferral,
+            None => args.GetDeferral()?,
+          };
+          let Some(pending_token) =
+            insert_pending_web_resource_response(PendingWebResourceResponse {
+              args: args.clone(),
+              env: env.clone(),
+              deferral,
+              hwnd: pending_hwnd,
+              completed: false,
+              _permit: permit,
+            })
+          else {
+            return Ok(());
+          };
+
+          let async_responder = Box::new(move |sent_response| {
+            let handler = move || {
+              finish_pending_web_resource_response(pending_token, sent_response);
+            };
+
+            if std::thread::current().id() == main_thread_id {
+              handler();
+            } else {
+              Self::dispatch_handler(pending_hwnd, handler);
+            }
+          });
+
+          #[cfg(feature = "tracing")]
+          let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
+          custom_protocol_handler(
+            &webview_id,
+            request,
+            RequestAsyncResponder {
+              responder: Some(async_responder),
+            },
+          );
+          Ok(())
+        },
+      )
+    };
 
     webview.add_WebResourceRequested(
       &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
@@ -2488,66 +2727,53 @@ impl InnerWebView {
         #[cfg(feature = "tracing")]
         span.record("uri", &uri);
 
-        if let Some((custom_protocol, custom_protocol_handler)) = custom_protocols
-          .iter()
-          .find(|(protocol, _)| custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol))
-        {
-          let Some(permit) = protocol_admission.try_acquire() else {
-            // Do not acquire a native deferral for rejected work. Installing
-            // the empty failure response synchronously completes this event
-            // and leaves no pending object or accounting obligation behind.
-            let failure = web_resource_failure_response(CUSTOM_PROTOCOL_OVERFLOW_STATUS);
-            let response = Self::prepare_web_request_response(&env, &failure)?;
-            args.SetResponse(&response)?;
+        let Some(protocol) = protocols.iter().position(|(protocol, _, _)| {
+          custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol)
+        }) else {
+          return Ok(());
+        };
+        let pool = WebResourcePool {
+          hwnd: pending_hwnd,
+          protocol,
+          admission: protocols[protocol].2.clone(),
+        };
+        // Within a scheme nothing overtakes an earlier arrival.
+        let queued_ahead = WAITING_WEB_RESOURCE_REQUESTS
+          .try_with(|waiting| {
+            waiting
+              .try_borrow()
+              .map(|waiting| waiting.has_waiting(&pool))
+              .unwrap_or(true)
+          })
+          .unwrap_or(true);
+        if !queued_ahead {
+          if let Some(permit) = pool.admission.try_acquire() {
+            start(&args, &uri, None, protocol, permit)?;
+            drain_waiting_web_resource_requests();
             return Ok(());
-          };
-          let request = match Self::prepare_request(http_or_https, custom_protocol, &webview_request, &uri)
-          {
-            Ok(req) => req,
-            Err(e) => {
-              let err_response = Self::prepare_web_request_err(&env, e)?;
-              args.SetResponse(&err_response)?;
-              return Ok(());
-            }
-          };
-
-          let deferral = args.GetDeferral()?;
-          let Some(pending_token) =
-            insert_pending_web_resource_response(PendingWebResourceResponse {
-              args: args.clone(),
-              env: env.clone(),
-              deferral,
-              hwnd: hwnd.0 as isize,
-              completed: false,
-              _permit: permit,
-            })
-          else {
-            return Ok(());
-          };
-          let dispatcher_hwnd = hwnd.0 as isize;
-
-          let async_responder = Box::new(move |sent_response| {
-            let handler = move || {
-              finish_pending_web_resource_response(pending_token, sent_response);
-            };
-
-            if std::thread::current().id() == main_thread_id {
-              handler();
-            } else {
-              Self::dispatch_handler(dispatcher_hwnd, handler);
-            }
-          });
-
-          #[cfg(feature = "tracing")]
-          let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
-          custom_protocol_handler(
-            &webview_id,
-            request,
-            RequestAsyncResponder {
-              responder: Some(async_responder),
-            },
-          );
+          }
         }
+
+        // Past the bound the request waits its turn rather than fail: a refused
+        // module import stays failed until its document reloads. Only a flood
+        // past the wait list too is refused, with an empty 503.
+        let waiting = WaitingWebResourceRequest {
+          args: args.clone(),
+          env: env.clone(),
+          deferral: Some(args.GetDeferral()?),
+          uri,
+          protocol,
+          start: start.clone(),
+        };
+        let refused = WAITING_WEB_RESOURCE_REQUESTS
+          .try_with(move |list| match list.try_borrow_mut() {
+            Ok(mut list) => list.push(pool, waiting).err(),
+            Err(_) => Some(waiting),
+          })
+          .ok()
+          .flatten();
+        drop(refused);
+        drain_waiting_web_resource_requests();
 
         Ok(())
       })),

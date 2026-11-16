@@ -6,6 +6,7 @@
     sites,
     above,
     compact = false,
+    roomy = false,
     tools = true,
     foot,
   }: {
@@ -13,6 +14,8 @@
     /** Kept sites that did not fit beside the shelf, in rows over it. */
     above?: Snippet;
     compact?: boolean;
+    /** At rail width with a tool beside it, the profile's stack has room. */
+    roomy?: boolean;
     /** The profile and its tools; Work keeps its own on the canvas. */
     tools?: boolean;
     /** What closes the rail at its very foot, below the kept sites. */
@@ -44,6 +47,7 @@
       </div>{/if}
     {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
         compact
+        {roomy}
       />{/if}
     {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>

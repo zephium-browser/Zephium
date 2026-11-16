@@ -1,10 +1,12 @@
 import { observe, pause } from "$shared/lib/observe";
+import type { SearchShortcut } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { settle } from "$domain/operations";
 
 const defaults = {
   appearance: "system",
+  "search.shortcuts": "",
   "search.engine": "duckduckgo",
   "search.custom-url": "",
   "search.suggestions": "true",
@@ -69,6 +71,9 @@ const defaults = {
   "privacy.smartscreen": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
+const STARTUP_CONCURRENCY = 8;
+const STARTUP_TIMEOUT_MS = 2000;
+let shortcutDefaults = $state.raw<SearchShortcut[]>([]);
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
 let pending = $state<PreferenceKey | null>(null);
 let failed = $state(false);
@@ -78,6 +83,16 @@ let initialized = false;
 let initializing: Promise<void> | null = null;
 let lifetime: AbortController | null = null;
 const versions: Partial<Record<PreferenceKey, number>> = {};
+const shortcuts = $derived.by(() => {
+  const stored = values["search.shortcuts"];
+  if (!stored) return shortcutDefaults;
+  try {
+    return JSON.parse(stored) as SearchShortcut[];
+  } catch {
+    return shortcutDefaults;
+  }
+});
+export const searchShortcuts = () => shortcuts;
 export const value = (key: PreferenceKey) => values[key];
 export const saving = () => pending !== null;
 export const saveFailed = () => failed;
@@ -118,7 +133,10 @@ async function initialize(generation: number, signal: AbortSignal) {
       apply("appearance", payload.slice(6));
     }
     if (!payload.startsWith("preference.")) return;
-    const [key, next] = payload.slice(11).split("=");
+    const separator = payload.indexOf("=", 11);
+    if (separator < 0) return;
+    const key = payload.slice(11, separator);
+    const next = payload.slice(separator + 1);
     if (key === undefined || !Object.hasOwn(defaults, key) || next === undefined) return;
     updated[key as PreferenceKey] = true;
     apply(key as PreferenceKey, next);
@@ -128,17 +146,34 @@ async function initialize(generation: number, signal: AbortSignal) {
     return;
   }
   stop = unsubscribe;
-  await Promise.all(
-    (Object.keys(defaults) as PreferenceKey[]).map(async (key) => {
+  const reads = ["shortcutCatalogue", ...(Object.keys(defaults) as PreferenceKey[])] as const;
+  // An observation timeout leaves its native request in flight. Every worker
+  // shares the same deadline and stops after a timeout.
+  const deadline = performance.now() + STARTUP_TIMEOUT_MS;
+  let next = 0;
+  async function read() {
+    while (generation === epoch && !signal.aborted) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return;
+      const key = reads[next++];
+      if (key === undefined) return;
       try {
-        const stored = await observe(commands.settingGet(key), 2000, signal);
-        if (generation === epoch && !updated[key] && stored.state === "received")
-          apply(key, stored.value ?? defaults[key]);
+        if (key === "shortcutCatalogue") {
+          const result = await observe(commands.searchShortcutDefaults(), remaining, signal);
+          if (result.state === "timeout") return;
+          if (generation === epoch && result.state === "received") shortcutDefaults = result.value;
+        } else if (!updated[key]) {
+          const stored = await observe(commands.settingGet(key), remaining, signal);
+          if (stored.state === "timeout") return;
+          if (generation === epoch && !updated[key] && stored.state === "received")
+            apply(key, stored.value ?? defaults[key]);
+        }
       } catch {
         /* Retain safe defaults if a read is unavailable. */
       }
-    }),
-  );
+    }
+  }
+  await Promise.all(Array.from({ length: STARTUP_CONCURRENCY }, read));
   if (generation === epoch) initialized = true;
 }
 
@@ -173,6 +208,7 @@ export function dispose() {
   stop?.();
   stop = null;
   pending = null;
+  shortcutDefaults = [];
   failed = false;
   for (const key of Object.keys(defaults) as PreferenceKey[]) {
     values[key] = defaults[key];

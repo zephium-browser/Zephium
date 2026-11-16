@@ -92,7 +92,7 @@ test("choosing from a composer picker keeps the composer open", async () => {
   const field = screen.getByRole("textbox", { name: "New task", exact: true });
   await field.click();
   await screen.getByRole("button", { name: "List", exact: true }).click();
-  await screen.getByRole("menuitem", { name: "Work", exact: true }).click();
+  await screen.getByRole("menuitemcheckbox", { name: "Work", exact: true }).click();
   await expect
     .element(screen.getByRole("button", { name: "List", exact: true }))
     .toHaveTextContent("Work");

@@ -2,6 +2,7 @@
 pub const KEYS: &[&str] = &[
     "appearance",
     "search.engine",
+    "search.shortcuts",
     "search.custom-url",
     "search.suggestions",
     "sidebar.mode",
@@ -130,6 +131,15 @@ pub const CODE_FONTS: &[&str] = &[
 /// carried, so a second run finds nothing to do.
 pub fn migrations(stored: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
     let mut writes = Vec::new();
+    if let Some(value) = stored("search.shortcuts").filter(|value| !value.is_empty()) {
+        if let Some(registry) = crate::search::ShortcutRegistry::from_setting(&value) {
+            if let Some(filtered) = registry.to_setting() {
+                if filtered != value {
+                    writes.push(("search.shortcuts", filtered));
+                }
+            }
+        }
+    }
     match stored("ui.text-size").as_deref() {
         Some("large") => {
             if stored("ui.font-size").is_none() {
@@ -187,6 +197,7 @@ pub fn feature_enabled(stored: impl Fn(&str) -> Option<String>, feature: &str) -
 
 pub fn value_allowed(key: &str, value: &str) -> bool {
     match key {
+        "search.shortcuts" => crate::search::ShortcutRegistry::from_setting(value).is_some(),
         "search.custom-url" => value.is_empty() || crate::search::valid_template(value),
         "search.engine" => crate::search::SearchEngine::from_id(value).is_some(),
         "appearance" => matches!(value, "system" | "light" | "dark"),
@@ -202,7 +213,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         // system material the system cannot install falls back on its own.
         "ui.material" => matches!(
             value,
-            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "none"
+            "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "mica_alt" | "none"
         ),
         "ui.newtab-background" => matches!(value, "sky" | "image"),
         // An admitted local blob, never a URL or a filesystem path. The media
@@ -484,6 +495,10 @@ mod tests {
         assert!(!value_allowed("ui.accent", "purple"));
         assert!(value_allowed("ui.material", "vibrancy"));
         assert!(value_allowed("ui.material", "mica"));
+        assert!(value_allowed("ui.material", "mica_alt"));
+        for value in ["MicaAlt", "mica-alt", " mica_alt", "mica_alt "] {
+            assert!(!value_allowed("ui.material", value));
+        }
         assert!(!value_allowed("ui.material", "sky"));
         assert!(value_allowed("ui.newtab-clock-format", "24h"));
         assert!(value_allowed("ui.newtab-tasks", "false"));
@@ -623,6 +638,59 @@ mod tests {
             );
         }
         writes
+    }
+
+    #[test]
+    fn saved_shortcuts_migrate_without_retired_entries_once() {
+        let mut entries = crate::search::ShortcutRegistry::default()
+            .entries()
+            .to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        assert_eq!(writes, vec![("search.shortcuts", expected.clone())]);
+        for value in [expected.as_str(), "", "not json", "null"] {
+            assert!(migrations(|key| (key == "search.shortcuts").then(|| value.into())).is_empty());
+        }
+    }
+
+    #[test]
+    fn near_limit_shortcut_migration_remains_readable() {
+        use crate::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let writes = migrations(|key| (key == "search.shortcuts").then(|| raw.clone()));
+        let saved = writes.first().map_or(raw.as_str(), |(_, value)| value);
+        assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(saved).unwrap().entries(),
+            registry.entries()
+        );
     }
 
     #[test]

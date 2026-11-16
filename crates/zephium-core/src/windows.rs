@@ -24,6 +24,8 @@ pub struct Window {
     pub mode: Mode,
     pub size: Size,
     pub metrics: Metrics,
+    /// An admitted request to keep the hidden card raised, not native completion.
+    pub sidebar_peek: bool,
     pub active: Option<ItemId>,
     pub splits: Option<Pane>,
 }
@@ -56,6 +58,7 @@ impl Windows {
                 mode: Mode::Sidebar,
                 size,
                 metrics: Metrics::default(),
+                sidebar_peek: false,
                 active: None,
                 splits: None,
             },
@@ -84,5 +87,9 @@ impl Windows {
     /// Iterates logical windows in stable creation order.
     pub fn iter(&self) -> impl Iterator<Item = &Window> {
         self.order.iter().filter_map(|id| self.map.get(id))
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Window> {
+        self.map.values_mut()
     }
 }

@@ -9,17 +9,27 @@
   let {
     account,
     onaccount,
+    named = false,
     signInWidth = $bindable(0),
+    nameWidth = $bindable(0),
   }: {
     account: ReturnType<typeof accountFoot>;
     onaccount: (intent: "account" | "credits") => void;
+    /** Whether there is room for the account's name beside its picture. */
+    named?: boolean;
     /** How wide the words of the signed-out button are, for the pane around them. */
     signInWidth?: number;
+    /** How wide the name beside the picture is, 0 while it is not shown. */
+    nameWidth?: number;
   } = $props();
 
   // The ring is a warning, not decoration: it is drawn only once the
   // allowance is nearly spent.
   const ringed = $derived(account.tone !== "calm" && account.used != null);
+  const name = $derived(named ? account.name : null);
+  $effect(() => {
+    if (!name) nameWidth = 0;
+  });
   const fill = $derived(Math.min(100, Math.max(0, account.used ?? 0)));
   let broken = $state<string | null>(null);
   const photo = $derived(account.avatar && account.avatar !== broken ? account.avatar : null);
@@ -50,7 +60,7 @@
     triggerTitle={tip}
     menu
     align="end"
-    triggerClass="ntp-account"
+    triggerClass={name ? "ntp-account ntp-account-named" : "ntp-account"}
     panelClass="ntp-account-panel"
   >
     {#snippet trigger()}<span class="disc" aria-hidden="true"
@@ -74,7 +84,7 @@
             pathLength="100"
             transform="rotate(-90 16 16)"
           /></svg
-        >{/if}{/snippet}
+        >{/if}{#if name}<span class="who" bind:offsetWidth={nameWidth}>{name}</span>{/if}{/snippet}
     <div class="body" role="presentation" onkeydown={keep}>
       <div class="summary">
         <AccountSummary
@@ -132,6 +142,23 @@
     outline: none;
     place-items: center;
     transition: scale var(--motion-slow) var(--ease-spring);
+  }
+
+  /* With room, the name stands beside the picture inside the same capsule. */
+  :global(.ntp-account.ntp-account-named) {
+    display: flex;
+    gap: 7px;
+    inline-size: auto;
+    padding-inline: 3px 12px;
+  }
+
+  .who {
+    max-inline-size: 140px;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   :global(.ntp-account:active) {

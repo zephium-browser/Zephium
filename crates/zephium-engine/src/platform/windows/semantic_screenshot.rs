@@ -51,18 +51,18 @@ type NativeCompletion = Box<
 type PanicCallback = Rc<dyn Fn() + 'static>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StreamFailure {
+pub(super) enum StreamFailure {
     ResourceExhausted,
     Transport,
 }
 
-struct SharedCaptureStream {
-    buffer: RefCell<BoundedScreenshotBuffer>,
-    failure: Cell<Option<StreamFailure>>,
+pub(super) struct SharedCaptureStream {
+    pub(super) buffer: RefCell<BoundedScreenshotBuffer>,
+    pub(super) failure: Cell<Option<StreamFailure>>,
 }
 
 impl SharedCaptureStream {
-    fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize) -> Self {
         Self {
             buffer: RefCell::new(BoundedScreenshotBuffer::new(limit)),
             failure: Cell::new(None),
@@ -83,21 +83,9 @@ impl SharedCaptureStream {
     }
 }
 
-struct PendingCapture {
-    request: SemanticScreenshotNativeRequest,
-    completion: NativeCompletion,
-    admitted_at: Instant,
-    started_at: SemanticCaptureInstant,
-    cancelled: Arc<AtomicBool>,
-    shared: Rc<SharedCaptureStream>,
-    // Retain the exact COM stream until the native completion callback even if
-    // a WebView2 build releases its call-site reference early.
-    _stream: IStream,
-}
-
 #[windows_core::implement(IStream)]
-struct BoundedCaptureStream {
-    shared: Rc<SharedCaptureStream>,
+pub(super) struct BoundedCaptureStream {
+    pub(super) shared: Rc<SharedCaptureStream>,
 }
 
 impl ISequentialStream_Impl for BoundedCaptureStream_Impl {
@@ -309,6 +297,27 @@ impl BoundedCaptureStream_Impl {
     }
 }
 
+fn map_buffer_failure(failure: ScreenshotBufferFailure) -> StreamFailure {
+    match failure {
+        ScreenshotBufferFailure::Limit | ScreenshotBufferFailure::Allocation => {
+            StreamFailure::ResourceExhausted
+        }
+        ScreenshotBufferFailure::Invalid => StreamFailure::Transport,
+    }
+}
+
+struct PendingCapture {
+    request: SemanticScreenshotNativeRequest,
+    completion: NativeCompletion,
+    admitted_at: Instant,
+    started_at: SemanticCaptureInstant,
+    cancelled: Arc<AtomicBool>,
+    shared: Rc<SharedCaptureStream>,
+    // Retain the exact COM stream until the native completion callback even if
+    // a WebView2 build releases its call-site reference early.
+    _stream: IStream,
+}
+
 #[windows_core::implement(ICoreWebView2CapturePreviewCompletedHandler)]
 struct CaptureCompletion {
     pending: Rc<RefCell<Option<PendingCapture>>>,
@@ -461,15 +470,6 @@ fn finish_capture(
         height,
         png,
     ))
-}
-
-fn map_buffer_failure(failure: ScreenshotBufferFailure) -> StreamFailure {
-    match failure {
-        ScreenshotBufferFailure::Limit | ScreenshotBufferFailure::Allocation => {
-            StreamFailure::ResourceExhausted
-        }
-        ScreenshotBufferFailure::Invalid => StreamFailure::Transport,
-    }
 }
 
 fn map_stream_terminal(failure: Option<StreamFailure>) -> SemanticScreenshotNativeFailure {
@@ -774,7 +774,11 @@ fn capture_person_frame_native(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::System::Com::STATFLAG_NONAME;
+    use std::cell::Cell;
+    use windows::Win32::Foundation::STG_E_MEDIUMFULL;
+    use windows::Win32::System::Com::{
+        STATFLAG_NONAME, STATSTG, STGM_WRITE, STGTY_STREAM, STREAM_SEEK_SET,
+    };
 
     #[test]
     fn frame_delivery_disconnect_finishes_once_on_the_originating_thread() {

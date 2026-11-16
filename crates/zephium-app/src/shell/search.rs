@@ -24,6 +24,7 @@ pub(super) struct SearchState {
     pub(super) query: String,
     pub(super) custom_url: String,
     pub(super) engine: zephium_core::search::SearchEngine,
+    pub(super) shortcuts: zephium_core::search::ShortcutRegistry,
     /// Pages visited before are offered as places to go. An explicit
     /// history search still reads them.
     pub(super) include_history: bool,
@@ -35,6 +36,15 @@ pub(super) struct SearchState {
 
 impl Shell {
     fn publish_search(&mut self, mut results: SearchResults) {
+        results.shortcut = (scoped_query(&results.query).0 == SearchScope::All)
+            .then(|| {
+                self.search
+                    .shortcuts
+                    .parse(&results.query)
+                    .shortcut
+                    .map(str::to_owned)
+            })
+            .flatten();
         let mut identities = std::collections::HashSet::new();
         results.results.retain(|result| {
             identities.insert(match &result.action {
@@ -102,6 +112,7 @@ impl Shell {
         }
         self.search.supplementary_pending = false;
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: Some(context),
@@ -146,6 +157,7 @@ impl Shell {
         let mut combined = self.search.results.clone();
         combined.extend(results);
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: Some(context),
@@ -242,13 +254,11 @@ impl Shell {
                 .iter()
                 .find(|result| result.action == action)
             {
+                let parsed = self.search.shortcuts.parse(&self.search.query);
                 let query = if result.kind == "suggestion" {
                     Some(result.title.as_str())
                 } else if result.kind == "search" {
-                    Some(
-                        zephium_core::search::engine_shortcut(&self.search.query)
-                            .map_or(self.search.query.as_str(), |(_, query)| query),
-                    )
+                    Some(parsed.query.as_ref())
                 } else {
                     None
                 };
@@ -325,7 +335,21 @@ impl Shell {
         else {
             return;
         };
-        let (scope, q) = scoped_query(query);
+        let (scope, scoped) = scoped_query(query);
+        let parsed = self.search.shortcuts.parse(query);
+        let shortcut = if scope == SearchScope::All {
+            parsed
+                .shortcut
+                .and_then(|id| self.search.shortcuts.get(id))
+                .cloned()
+        } else {
+            None
+        };
+        let q = if shortcut.is_some() {
+            parsed.query.as_ref()
+        } else {
+            scoped
+        };
         let needle = q.to_lowercase();
         let mut stack = Vec::new();
         for placement in [
@@ -360,7 +384,7 @@ impl Shell {
         let generation = self.search.generation;
         self.search.pending = None;
 
-        if q.is_empty() {
+        if q.is_empty() && shortcut.is_none() {
             results.extend(
                 tabs.iter()
                     .filter_map(|id| {
@@ -397,21 +421,26 @@ impl Shell {
 
             if let Some(url) = (scope == SearchScope::All)
                 .then(|| {
-                    self.search
-                        .engine
-                        .configured_classify(q, &self.search.custom_url)
+                    self.search.shortcuts.resolve(
+                        query,
+                        self.search.engine,
+                        &self.search.custom_url,
+                    )
                 })
                 .flatten()
             {
-                if navigation::is_query(q) {
+                if shortcut.is_some() || navigation::is_query(q) {
                     results.push(SearchResult {
                         kind: "search".into(),
-                        title: zephium_core::search::engine_shortcut(q)
-                            .map_or(q, |(_, query)| query)
-                            .into(),
-                        detail: zephium_core::search::engine_shortcut(q)
-                            .map_or(self.search.engine, |(engine, _)| engine)
-                            .name()
+                        title: if q.is_empty() {
+                            shortcut.as_ref().map_or("", |item| item.name.as_str())
+                        } else {
+                            q
+                        }
+                        .into(),
+                        detail: shortcut
+                            .as_ref()
+                            .map_or(self.search.engine.name(), |item| item.name.as_str())
                             .into(),
                         icon: None,
                         action: SearchAction::OpenUrl {
@@ -467,6 +496,7 @@ impl Shell {
             // presentation-only and arrives asynchronously; the exact query
             // generation below prevents a slow old result replacing newer UI.
             self.publish_search(SearchResults {
+                shortcut: None,
                 pending: false,
                 completion: None,
                 context: self.search.context.clone(),
@@ -526,6 +556,7 @@ impl Shell {
         }
 
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: self.search.context.clone(),
@@ -639,6 +670,7 @@ impl Shell {
                 .map(|result| result.detail.as_str()),
         );
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: self.search.context.clone(),

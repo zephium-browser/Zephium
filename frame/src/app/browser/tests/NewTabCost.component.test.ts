@@ -28,9 +28,7 @@ vi.mock("$shared/sky", async (original) => {
   if (import.meta.env.VITE_NEWTAB_COST !== "bare") return real;
   return {
     ...real,
-    SCENES: { day: "", night: "" },
-    skyImage: () => "",
-    decode: () => new Promise<void>(() => {}),
+    SkyPrint: (await import("./StageStub.svelte")).default,
   };
 });
 vi.mock("$shared/ipc/bindings", async () => {

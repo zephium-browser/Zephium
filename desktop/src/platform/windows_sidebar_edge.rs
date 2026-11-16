@@ -2,9 +2,11 @@
 //! belong to another process, so this thread never sees a pointer move over
 //! them. While a window's sidebar is hidden its moves are followed through
 //! the shared pointer watch instead, and the chrome is told the moment the
-//! pointer reaches the window's left edge, or is plainly about to.
+//! pointer reaches the window's left edge, or is plainly about to, and
+//! whether it is over the card the column comes out as.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use tauri::{Manager, WebviewWindow};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -17,16 +19,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::pointer;
 use crate::edge_reach::at_edge;
+use zephium_core::layout::HIDDEN_CARD_INSET;
 
 struct Edge {
     window: WebviewWindow,
     hwnd: HWND,
     near: bool,
+    over: bool,
     last: Option<f64>,
 }
 
 thread_local! {
     static EDGES: RefCell<Vec<Edge>> = const { RefCell::new(Vec::new()) };
+    /// Each window's column width, which the card stands round.
+    static WIDTHS: RefCell<HashMap<String, f64>> = RefCell::new(HashMap::new());
+}
+
+/// The column is this wide, wherever it stands. Runs on the UI thread.
+pub fn column_width(window: &WebviewWindow, width: f64) {
+    WIDTHS.with(|widths| widths.borrow_mut().insert(window.label().to_owned(), width));
 }
 
 /// Starts or stops watching `window`'s left edge. Runs on the UI thread.
@@ -43,6 +54,7 @@ pub fn watch(window: &WebviewWindow, on: bool) {
                 window: window.clone(),
                 hwnd,
                 near: false,
+                over: false,
                 last: None,
             });
         }
@@ -71,29 +83,33 @@ fn moved(_: HWND) {
             let x = cursor
                 .filter(|_| is_front(edge.hwnd, front))
                 .and_then(|cursor| local_x(edge.hwnd, cursor));
-            let near = match x {
+            let (near, over) = match x {
                 Some(x) => {
                     let step = edge.last.map_or(0.0, |last| x - last);
                     edge.last = Some(x);
-                    at_edge(x, step, edge.near)
+                    let card = WIDTHS
+                        .with(|widths| widths.borrow().get(edge.window.label()).copied())
+                        .map_or(0.0, |width| width + 3.0 * HIDDEN_CARD_INSET);
+                    (at_edge(x, step, edge.near), x <= card)
                 }
                 None => {
                     edge.last = None;
-                    false
+                    (false, false)
                 }
             };
-            if near != edge.near {
+            if near != edge.near || over != edge.over {
                 edge.near = near;
-                changes.push((edge.window.clone(), near));
+                edge.over = over;
+                changes.push((edge.window.clone(), near, over));
             }
         }
     });
-    for (window, near) in changes {
+    for (window, near, over) in changes {
         crate::emit_to_privileged(
             window.app_handle(),
             window.label(),
             "zephium:sidebar-edge",
-            &serde_json::json!({ "near": near }),
+            &serde_json::json!({ "near": near, "over": over }),
         );
     }
 }

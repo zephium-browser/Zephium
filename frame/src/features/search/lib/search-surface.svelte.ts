@@ -1,4 +1,6 @@
-import { tick } from "svelte";
+import { preferences } from "$domain/preferences";
+import { shortcutPrefix, emptyShortcutBackspace } from "$shared/lib/search-shortcuts";
+import { tick, untrack } from "svelte";
 import type { IconSvgElement } from "@hugeicons/svelte";
 import { CheckListIcon } from "@hugeicons/core-free-icons";
 import * as m from "$shared/i18n/messages";
@@ -101,6 +103,13 @@ export function createSearchSurface(options: {
   let disposed = false;
   let list: HTMLElement | undefined;
   let controller: ReturnType<typeof createSearchController> | undefined;
+
+  $effect(() => {
+    void preferences.searchShortcuts();
+    untrack(() => {
+      if (controller && query && (!anchored || open)) controller.change(query);
+    });
+  });
 
   // At rest the host offers destinations on their own; typing their name
   // brings them into the list.
@@ -490,6 +499,7 @@ export function createSearchSurface(options: {
     controller?.dispose();
     controller = createSearchController({
       owner,
+      shortcuts: preferences.searchShortcuts,
       emptyQuery: anchored ? "skip" : "search",
       shown: { results, answered },
       send: (value, requestId) =>
@@ -537,6 +547,21 @@ export function createSearchSurface(options: {
 
   return {
     mount,
+    backspace() {
+      if (composing) return false;
+      const next = emptyShortcutBackspace(query, preferences.searchShortcuts());
+      if (next === null) return false;
+      changed(next);
+      return true;
+    },
+    get activeShortcut() {
+      void query;
+      return (
+        controller?.activeShortcut() ??
+        shortcutPrefix(query, preferences.searchShortcuts())?.shortcut ??
+        null
+      );
+    },
     begin,
     end,
     changed,
