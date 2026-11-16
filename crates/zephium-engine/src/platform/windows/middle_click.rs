@@ -3,13 +3,12 @@
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetAncestor, GetForegroundWindow, IsChild, SetWindowsHookExW,
-    UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    GetAncestor, GetCursorPos, GetForegroundWindow, IsChild, WindowFromPoint, GA_ROOT,
+    RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_LEFT_BUTTON_DOWN,
+    RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
 };
 
 const MAX_AGE: Duration = Duration::from_millis(250);
@@ -21,7 +20,6 @@ struct Click {
 }
 
 thread_local! {
-    static HOOK: Cell<Option<HHOOK>> = const { Cell::new(None) };
     static OWNER: Cell<Option<HWND>> = const { Cell::new(None) };
     static PRESSED: Cell<Option<HWND>> = const { Cell::new(None) };
     static CLICK: Cell<Option<Click>> = const { Cell::new(None) };
@@ -35,75 +33,78 @@ pub fn watch_middle_clicks(owner: Option<HWND>) {
     }
     PRESSED.set(None);
     CLICK.set(None);
-    if owner.is_some() {
-        if HOOK.get().is_none() {
-            // SAFETY: the callback runs on this UI thread, which pumps messages.
-            let hook = unsafe {
-                GetModuleHandleW(None).and_then(|module| {
-                    SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), Some(HINSTANCE(module.0)), 0)
-                })
-            };
-            HOOK.set(hook.ok());
-        }
-    } else if let Some(hook) = HOOK.get() {
-        // SAFETY: this thread owns the registered hook. Keep its handle if
-        // removal fails so a later focus change never installs a duplicate.
-        if unsafe { UnhookWindowsHookEx(hook) }.is_ok() {
-            HOOK.set(None);
-        }
-    }
 }
 
-unsafe extern "system" fn mouse(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
-    if let Some(owner) = OWNER
-        .try_with(Cell::get)
-        .ok()
-        .flatten()
-        .filter(|_| code >= 0 && data.0 != 0)
+/// Receives mouse button flags from the desktop's existing raw-input sink.
+/// This notification runs after input delivery and cannot block the pointer.
+pub fn record_middle_click(buttons: u16) {
+    let Some(owner) = OWNER.get() else {
+        return;
+    };
+    let mut point = POINT::default();
+    // SAFETY: queries on this UI thread, with an initialized cursor out value.
+    let (target, root, front, shift) = unsafe {
+        let target = GetCursorPos(&mut point)
+            .map(|()| WindowFromPoint(point))
+            .unwrap_or_default();
+        (
+            target,
+            GetAncestor(target, GA_ROOT),
+            GetForegroundWindow(),
+            GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0,
+        )
+    };
+    capture(buttons, eligible_target(owner, target, root, front), shift);
+}
+
+fn eligible_target(owner: HWND, target: HWND, root: HWND, front: HWND) -> Option<HWND> {
+    (!target.0.is_null() && root == owner && front == owner).then_some(target)
+}
+
+fn capture(buttons: u16, target: Option<HWND>, shift: bool) {
+    let buttons = u32::from(buttons);
+    if buttons
+        & (RI_MOUSE_LEFT_BUTTON_DOWN
+            | RI_MOUSE_RIGHT_BUTTON_DOWN
+            | RI_MOUSE_BUTTON_4_DOWN
+            | RI_MOUSE_BUTTON_5_DOWN)
+        != 0
     {
-        match message.0 as u32 {
-            WM_MBUTTONDOWN | WM_MBUTTONUP => {
-                // SAFETY: for these messages the hook supplies this struct
-                // for the duration of the callback.
-                let event = unsafe { &*(data.0 as *const MSLLHOOKSTRUCT) };
-                let target = unsafe { WindowFromPoint(event.pt) };
-                let target = (!target.0.is_null()
-                    && unsafe {
-                        GetAncestor(target, GA_ROOT) == owner && GetForegroundWindow() == owner
-                    })
-                .then_some(target);
-                if message.0 as u32 == WM_MBUTTONDOWN {
-                    CLICK.set(None);
-                    PRESSED.set(target);
-                } else {
-                    let pressed = PRESSED.take();
-                    CLICK.set(
-                        target
-                            .filter(|target| Some(*target) == pressed)
-                            .map(|target| Click {
-                                target,
-                                released: Instant::now(),
-                                shift: unsafe { GetAsyncKeyState(i32::from(VK_SHIFT.0)) } < 0,
-                            }),
-                    );
-                }
-            }
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_XBUTTONDOWN => {
-                PRESSED.set(None);
-                CLICK.set(None);
-            }
-            _ => {}
-        }
+        PRESSED.set(None);
+        CLICK.set(None);
+        return;
     }
-    // SAFETY: forward the original event without handling or changing it.
-    unsafe { CallNextHookEx(None, code, message, data) }
+    if buttons & RI_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
+        CLICK.set(None);
+        PRESSED.set(target);
+    }
+    if buttons & RI_MOUSE_MIDDLE_BUTTON_UP != 0 {
+        let pressed = PRESSED.take();
+        CLICK.set(
+            target
+                .filter(|target| Some(*target) == pressed)
+                .map(|target| Click {
+                    target,
+                    released: Instant::now(),
+                    shift,
+                }),
+        );
+    }
 }
 
 pub(crate) fn take_foreground(opener: HWND, fallback: bool) -> bool {
     // A receipt can only affect selection for the physical view that received
     // the click. It does not grant popup or navigation admission.
-    let click = CLICK.take().filter(|click| {
-        click.target == opener || unsafe { IsChild(opener, click.target) }.as_bool()
+    let click = CLICK.take().and_then(|click| {
+        if click.released.elapsed() >= MAX_AGE {
+            return None;
+        }
+        if click.target == opener || unsafe { IsChild(opener, click.target) }.as_bool() {
+            Some(click)
+        } else {
+            CLICK.set(Some(click));
+            None
+        }
     });
     foreground(fallback, click, Instant::now())
 }
@@ -120,6 +121,56 @@ fn foreground(fallback: bool, click: Option<Click>, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_button_capture_requires_a_matching_press_and_release() {
+        let target = HWND(std::ptr::dangling_mut());
+        for shift in [false, true] {
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(target), shift);
+            assert!(CLICK.take().is_none());
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(target), shift);
+            assert_eq!(take_foreground(target, !shift), shift);
+            assert_eq!(take_foreground(target, !shift), !shift);
+        }
+    }
+
+    #[test]
+    fn capture_rejects_other_owners_and_mismatched_targets() {
+        let owner = HWND(std::ptr::dangling_mut());
+        let other = HWND(2_usize as *mut _);
+        assert_eq!(eligible_target(owner, other, owner, owner), Some(other));
+        assert_eq!(eligible_target(owner, other, owner, other), None);
+        assert_eq!(eligible_target(owner, other, other, owner), None);
+        assert_eq!(eligible_target(owner, HWND::default(), owner, owner), None);
+        for rejected in [None, Some(other)] {
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), false);
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, rejected, false);
+            assert!(take_foreground(owner, true));
+        }
+        capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, None, false);
+        capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), false);
+        assert!(take_foreground(owner, true));
+    }
+
+    #[test]
+    fn another_button_cancels_pressed_and_released_middle_clicks() {
+        let target = HWND(std::ptr::dangling_mut());
+        for cancel in [
+            RI_MOUSE_LEFT_BUTTON_DOWN,
+            RI_MOUSE_RIGHT_BUTTON_DOWN,
+            RI_MOUSE_BUTTON_4_DOWN,
+            RI_MOUSE_BUTTON_5_DOWN,
+        ] {
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(target), false);
+            capture(cancel as u16, Some(target), false);
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(target), false);
+            assert!(take_foreground(target, true));
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(target), false);
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(target), false);
+            capture(cancel as u16, Some(target), false);
+            assert!(take_foreground(target, true));
+        }
+    }
 
     #[test]
     fn released_middle_click_still_opens_in_background() {
@@ -176,7 +227,7 @@ mod tests {
         }));
         let other = HWND(std::ptr::dangling_mut());
         assert!(take_foreground(other, true));
-        assert!(CLICK.take().is_none());
+        assert!(!take_foreground(HWND::default(), true));
     }
 
     #[test]

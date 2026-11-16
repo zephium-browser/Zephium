@@ -166,6 +166,7 @@ pub fn init(
         if let Ok(hwnd) = window.hwnd() {
             pointer::listen(hwnd, middle_click_foreground_changed);
             middle_click_foreground_changed(hwnd);
+            pointer::listen_buttons(hwnd, zephium_engine::record_middle_click);
         }
     }
     apply_material(window, true);
@@ -182,6 +183,7 @@ fn middle_click_foreground_changed(hwnd: windows::Win32::Foundation::HWND) {
 pub fn unwatch_middle_clicks(window: &WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
         pointer::forget(hwnd, middle_click_foreground_changed);
+        pointer::forget_buttons(hwnd, zephium_engine::record_middle_click);
     }
     zephium_engine::watch_middle_clicks(None);
 }

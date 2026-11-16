@@ -34,7 +34,7 @@ pub(crate) mod middle_click;
 pub use leftover_processes::{
     browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
 };
-pub use middle_click::watch_middle_clicks;
+pub use middle_click::{record_middle_click, watch_middle_clicks};
 mod http_auth;
 pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
