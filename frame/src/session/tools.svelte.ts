@@ -35,8 +35,11 @@ async function initialize(owner: number) {
     if (
       payload.startsWith("tool.") &&
       ["notes", "tasks", "ai", "time", "history", "downloads", "bookmarks"].includes(kind)
-    )
-      open(kind as ToolKind);
+    ) {
+      // A tool's own shortcut closes it again.
+      if (tool === kind && browser.currentPage() === null) close();
+      else open(kind as ToolKind);
+    }
     if (payload === "browser.return" && queued) {
       const next = queued;
       queued = null;

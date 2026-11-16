@@ -31,8 +31,8 @@ fn renderer_crash_target(spare: Option<ItemId>, live: bool, id: ItemId) -> Rende
 }
 
 /// One call's use of a page `reach_durable_profile` opened to reach a
-/// profile. Dropped once the call has answered; the last use closes the page,
-/// unless a page of the profile is open by then.
+/// profile. Dropped once the call has answered; the last use defers closing
+/// the page to a later native loop turn, unless a profile page is open by then.
 #[cfg(target_os = "windows")]
 pub(super) struct TemporaryPage {
     profile: ProfileId,
@@ -44,9 +44,25 @@ impl Drop for TemporaryPage {
     fn drop(&mut self) {
         if self.users.fetch_sub(1, std::sync::atomic::Ordering::AcqRel) == 1 {
             let profile = self.profile;
-            let _ = super::dispatch::with_temporary_spare_release(profile, move |host| {
-                host.release_temporary_page(profile)
-            });
+            super::dispatch::with_temporary_spare_release(
+                profile,
+                move |host| host.release_temporary_page(profile),
+                |release| {
+                    let timer = crate::platform::imp::schedule_browser_timeout(
+                        std::time::Duration::from_millis(1),
+                        release,
+                    );
+                    let Some(timer) = timer else {
+                        return false;
+                    };
+                    // The one-shot timer owns its callback until it fires.
+                    // Detach the cancellation guard (only numeric IDs); the
+                    // timer removes its slot and kills itself before calling
+                    // release. Shutdown owns the spare if it wins this race.
+                    std::mem::forget(timer);
+                    true
+                },
+            );
         }
     }
 }

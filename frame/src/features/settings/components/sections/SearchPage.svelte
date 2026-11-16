@@ -4,10 +4,12 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Select from "$shared/ui/Select";
+  import EngineMark from "$shared/ui/EngineMark";
   import Field from "$shared/ui/Field";
   import Button from "$shared/ui/Button";
   import Switch from "$shared/ui/Switch";
   import { untrack } from "svelte";
+  import SearchShortcuts from "../SearchShortcuts.svelte";
   import PreferenceSwitch from "../PreferenceSwitch.svelte";
 
   let customUrl = $state(untrack(() => preferences.value("search.custom-url")));
@@ -57,7 +59,9 @@
         { value: "custom", label: m.search_custom(), disabled: !saved },
       ]}
       onchange={(value) => void preferences.set("search.engine", value)}
-    />
+    >
+      {#snippet lead(value)}<EngineMark engine={value} />{/snippet}
+    </Select>
   </SettingsRow>
 
   <SettingsRow
@@ -109,6 +113,8 @@
     </form>
   </SettingsRow>
 </SettingsGroup>
+
+<SearchShortcuts />
 
 <style>
   form {

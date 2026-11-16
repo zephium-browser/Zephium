@@ -109,7 +109,7 @@
     // Only open tabs reorder in place; native places anything dropped in
     // this list among them.
     reorder: () => (variant === "list" && section === "today" ? { essential: false } : null),
-    drop: ({ id, x, y, over, before }) => {
+    drop: ({ id, x, y, over, before, page }) => {
       // A split's tabs share one row, so they never reorder in place; let go
       // anywhere in the sidebar and the tab leaves its split for there.
       // A tab that cannot be kept goes back where it was.
@@ -130,7 +130,7 @@
         void tabDrag.move(id, false, before);
         return;
       }
-      tabs.dropTab(id, x, y);
+      if (page) tabs.dropTab(id, x, y);
     },
   });
   const handlePointerDown = (event: PointerEvent, tab: TabView) => {
@@ -218,6 +218,7 @@
   aria-label={label}
   hidden={entries.length === 0}
   data-close-buttons={preferences.value("tabs.close-button")}
+  data-tab-list-background={variant === "list" || undefined}
 >
   <ul
     bind:this={list}
@@ -227,6 +228,7 @@
     style:--dock-columns={columns}
     class:flex-col={variant === "list"}
     class:tab-list-rows={variant === "list"}
+    data-tab-list-background={variant === "list" || undefined}
     role="list"
   >
     {#each displayUnits as unit, index (unit.key)}

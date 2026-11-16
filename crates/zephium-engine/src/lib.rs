@@ -1367,6 +1367,15 @@ fn dispatch_layout_turn(
             let application_delivery = event_delivery.clone();
             let application_fatal = fatal.clone();
             let admitted = host::try_with(move |host| {
+                // A coalesced layout can occupy a queue position before capture.
+                let preview = update
+                    .tab_preview
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(preview) = preview {
+                    preview.capture(host);
+                }
                 if host_item_tokens
                     .iter()
                     .all(|(_, token)| token.load(Ordering::Acquire))
@@ -1532,6 +1541,7 @@ pub struct WebviewEngine {
     fatal_security_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
     runtime_security_advisories: RuntimeSecurityAdvisories,
     layout_updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
+    tab_preview: TabPreviewSlot,
     stage_motion: StageMotionHints,
     user_content_dispatch: Arc<UserContentDispatchGate>,
     #[cfg(feature = "agentic-browser")]
@@ -1664,11 +1674,42 @@ fn valid_page_zoom(scale: f64) -> bool {
 /// Motion requested for the next applied layout of each window.
 type StageMotionHints = Arc<Mutex<HashMap<WindowId, StageMotion>>>;
 
+type TabPreviewCompletion = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
+type TabPreviewCapture = (ItemId, String, TabPreviewCompletion);
+type TabPreviewSlot = Arc<Mutex<Option<Arc<TabPreviewRequest>>>>;
+
+struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>);
+
+impl TabPreviewRequest {
+    fn take(&self) -> Option<TabPreviewCapture> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    fn capture(&self, host: &mut host::EngineHost) {
+        if let Some((id, url, done)) = self.take() {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            host.capture_tab_preview(id, url, done);
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                let _ = (host, id, url);
+                done(None);
+            }
+        }
+    }
+
+    fn refuse(&self) {
+        if let Some((_, _, done)) = self.take() {
+            done(None);
+        }
+    }
+}
+
 struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
     region: Option<Rect>,
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
+    tab_preview: TabPreviewSlot,
 }
 
 /// Install on the main thread at startup. macOS and Windows attach child
@@ -1740,6 +1781,7 @@ pub fn install(
         fatal_security_failure,
         runtime_security_advisories: runtime_security_advisories.with_optional(cleanup_advisory),
         layout_updates: Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS)),
+        tab_preview: TabPreviewSlot::default(),
         stage_motion: StageMotionHints::default(),
         user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
         #[cfg(feature = "agentic-browser")]
@@ -2319,6 +2361,21 @@ pub fn page_mute_supported() -> bool {
 }
 
 impl Engine for WebviewEngine {
+    fn capture_tab_preview(
+        &self,
+        id: ItemId,
+        url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done)))));
+        *self.tab_preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
+        self.answer_on_host(
+            request,
+            |request| request.refuse(),
+            |host, request| request.capture(host),
+        );
+    }
+
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
         let _ = self.run(move || {
             let _ = host::try_with(move |host| host.set_focus_gate(gate));
@@ -2708,7 +2765,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     fn open_web_extension_options(
         &self,
         profile: ProfileId,
@@ -3196,6 +3253,7 @@ impl Engine for WebviewEngine {
             tree,
             region,
             item_tokens,
+            tab_preview: self.tab_preview.clone(),
         };
         match self.layout_updates.submit(window, update) {
             layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
@@ -3951,6 +4009,50 @@ mod tests {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
     }
 
+    #[test]
+    fn coalesced_layout_observes_capture_submitted_after_its_queue_position() {
+        let updates = test_layout_updates();
+        let preview = TabPreviewSlot::default();
+        let layout = |id| PendingLayout {
+            window: 1,
+            tree: Some(Pane::leaf(id)),
+            region: Some(Rect::new(0., 0., 800., 600.)),
+            item_tokens: Vec::new(),
+            tab_preview: preview.clone(),
+        };
+        let outgoing = ItemId::from(1);
+        let incoming = ItemId::from(2);
+        assert_eq!(
+            updates.submit(1, layout(outgoing)),
+            layout_queue::Submit::Schedule
+        );
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let completed = completions.clone();
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((
+            outgoing,
+            "https://example.test/".into(),
+            Box::new(move |_| {
+                completed.fetch_add(1, Ordering::SeqCst);
+            }),
+        )))));
+        *preview.lock().unwrap() = Some(request.clone());
+        assert_eq!(
+            updates.submit(1, layout(incoming)),
+            layout_queue::Submit::Coalesced
+        );
+        let update = updates.take_batch().pop().unwrap();
+        let pending = update.tab_preview.lock().unwrap().take().unwrap();
+        let (id, _, done) = pending.take().unwrap();
+        assert_eq!(id, outgoing);
+        assert_eq!(update.tree.unwrap().tabs(), vec![incoming]);
+        request.refuse();
+        assert_eq!(completions.load(Ordering::SeqCst), 0);
+        done(None);
+        assert_eq!(completions.load(Ordering::SeqCst), 1);
+        assert!(request.take().is_none());
+        assert!(!updates.finish_batch());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn extension_guest_admission_reserves_layout_identity_and_rolls_back_rejected_dispatch() {
@@ -4000,6 +4102,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4109,6 +4212,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: gate.clone(),
             #[cfg(feature = "agentic-browser")]
@@ -4155,6 +4259,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4239,6 +4344,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4275,6 +4381,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4360,6 +4467,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -4746,6 +4854,7 @@ mod tests {
             fatal_security_failure: Arc::new(|_| {}),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5093,6 +5202,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5127,6 +5237,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5196,6 +5307,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5246,6 +5358,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]
@@ -5311,6 +5424,7 @@ mod tests {
             }),
             runtime_security_advisories: RuntimeSecurityAdvisories::new(),
             layout_updates: test_layout_updates(),
+            tab_preview: TabPreviewSlot::default(),
             stage_motion: StageMotionHints::default(),
             user_content_dispatch: Arc::new(UserContentDispatchGate::default()),
             #[cfg(feature = "agentic-browser")]

@@ -30,3 +30,22 @@ test('observer reports per-tab icons only after a native per-tab setIcon succeed
   assert.equal(snapshot(2).icon.path, 'global.png');
   assert.equal(snapshot(1, 'foreign'), undefined);
 });
+
+test('observer never throws into the extension after the worker replaces its chrome global', async () => {
+  // Proton Pass swaps `chrome` for a locked Proxy once its worker starts.
+  const sent = [];
+  const chrome = {
+    action: {setTitle: async () => {}, setBadgeText: () => undefined, setIcon: async () => {},
+      setPopup: async () => {}, enable: async () => {}, disable: async () => {}},
+    runtime: {id: 'own', sendMessage: async message => { sent.push(message); }, onMessage: {addListener: () => {}}}
+  };
+  const context = vm.createContext({chrome});
+  vm.runInContext(source, context);
+  context.chrome = new Proxy({}, {get: () => undefined});
+  // A callback-style call returns no promise, so the report runs synchronously.
+  assert.doesNotThrow(() => chrome.action.setBadgeText({text: '1'}));
+  await chrome.action.setTitle({title: 'x'});
+  await Promise.resolve();
+  assert.equal(sent.length, 2);
+  assert.equal(sent.every(message => message.__zephiumActionChanged === true), true);
+});

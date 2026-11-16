@@ -216,20 +216,19 @@ fn shutdown_deadline_includes_time_spent_waiting_before_actor_processing() {
         ack,
     });
 
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
-    assert!(shell.shutdown_result.is_none());
-    assert!(store.events.lock().unwrap().is_empty());
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+    assert_eq!(shell.shutdown_result, Some(ShutdownOutcome::Unclean));
 
     let (ack, done) = sync_channel(1);
     shell.handle(Command::Shutdown {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
 }
 
 #[test]
-fn store_read_quiescence_failure_keeps_shutdown_retryable() {
+fn store_read_quiescence_failure_still_terminates() {
     let store = Arc::new(FakeStore::default());
     store
         .history_delay_ms
@@ -278,7 +277,7 @@ fn store_read_quiescence_failure_keeps_shutdown_retryable() {
         deadline: std::time::Instant::now() + std::time::Duration::from_millis(1),
         ack,
     });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
 
     assert!(reads.quiesce_until(std::time::Instant::now() + std::time::Duration::from_secs(2)));
     let (ack, done) = sync_channel(1);
@@ -286,7 +285,7 @@ fn store_read_quiescence_failure_keeps_shutdown_retryable() {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
     reader
         .join()
         .expect("real Store reader exits after shutdown");
@@ -294,7 +293,7 @@ fn store_read_quiescence_failure_keeps_shutdown_retryable() {
 }
 
 #[test]
-fn failed_shutdown_barrier_keeps_state_live_for_retry() {
+fn failed_shutdown_barrier_seals_state() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
     let (mut shell, _engine, screen) = setup_with(store.clone());
@@ -305,11 +304,11 @@ fn failed_shutdown_barrier_keeps_state_live_for_retry() {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
 
     let before = last(&screen).tabs.len();
     shell.handle(Command::Open);
-    assert_eq!(last(&screen).tabs.len(), before + 1);
+    assert_eq!(last(&screen).tabs.len(), before);
 
     *store.flush_result.lock().unwrap() = Some(true);
     let (ack, done) = sync_channel(1);
@@ -317,7 +316,26 @@ fn failed_shutdown_barrier_keeps_state_live_for_retry() {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
+}
+
+#[test]
+fn failed_store_flush_still_reaches_native_teardown() {
+    let store = Arc::new(FakeStore::default());
+    *store.flush_result.lock().unwrap() = Some(false);
+    let (mut shell, engine, _) = setup_with(store);
+    let (ack, done) = sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: test_shutdown_deadline(),
+        ack,
+    });
+    assert_eq!(
+        engine
+            .shutdown_calls
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
 }
 
 #[test]
@@ -374,10 +392,13 @@ fn clean_agent_lifecycle_proof_precedes_every_terminal_owner() {
         order.lock().unwrap().as_slice(),
         &["agent", "store", "engine", "blocker"]
     );
-    assert_eq!(
-        agent_state.deadlines.lock().unwrap().as_slice(),
-        &[deadline]
+    let deadlines = agent_state.deadlines.lock().unwrap();
+    assert_eq!(deadlines.len(), 1);
+    assert!(
+        deadlines[0] < deadline,
+        "native teardown retains part of the same budget"
     );
+    drop(deadlines);
     assert_eq!(
         agent_state
             .shutdown_calls
@@ -433,7 +454,7 @@ fn unclean_agent_lifecycle_is_terminal_but_does_not_skip_cleanup() {
 
 #[cfg(feature = "agentic-browser")]
 #[test]
-fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
+fn failed_preflight_consumes_agent_lifecycle_once() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
     let (agent_lifecycle, agent_state) = agent_lifecycle_with_clean(true);
@@ -451,12 +472,12 @@ fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(first.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert_eq!(first.recv().unwrap(), ShutdownOutcome::Unclean);
     assert_eq!(
         agent_state
             .shutdown_calls
             .load(std::sync::atomic::Ordering::Acquire),
-        0
+        1
     );
 
     *store.flush_result.lock().unwrap() = Some(true);
@@ -465,7 +486,7 @@ fn retryable_preflight_preserves_agent_lifecycle_for_one_later_consumption() {
         deadline: test_shutdown_deadline(),
         ack,
     });
-    assert_eq!(second.recv().unwrap(), ShutdownOutcome::Clean);
+    assert_eq!(second.recv().unwrap(), ShutdownOutcome::Unclean);
     assert_eq!(
         agent_state
             .shutdown_calls
@@ -585,7 +606,7 @@ fn every_panicking_terminal_barrier_runs_and_acknowledges_unclean_once() {
 }
 
 #[test]
-fn failed_shutdown_folds_racing_native_failure_before_resuming() {
+fn failed_shutdown_does_not_resume_racing_native_work() {
     let store = Arc::new(FakeStore::default());
     *store.flush_result.lock().unwrap() = Some(false);
     let (mut shell, engine, screen) = setup_with(store);
@@ -608,7 +629,7 @@ fn failed_shutdown_folds_racing_native_failure_before_resuming() {
     assert!(!handle.dispatch(Command::Engine(EngineEvent::Crashed { id })));
 
     shell.handle(shutdown);
-    assert_eq!(done.recv().unwrap(), ShutdownOutcome::RetryableFailure);
+    assert_eq!(done.recv().unwrap(), ShutdownOutcome::Unclean);
     assert!(!engine
         .calls()
         .iter()
@@ -619,9 +640,9 @@ fn failed_shutdown_folds_racing_native_failure_before_resuming() {
             .iter()
             .filter(|call| call.starts_with(&format!("create {id} ")))
             .count(),
-        2
+        1
     );
-    assert!(handle.dispatch(Command::Open));
+    assert!(!handle.dispatch(Command::Open));
 }
 
 #[test]

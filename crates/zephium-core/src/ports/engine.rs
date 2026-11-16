@@ -69,6 +69,8 @@ pub struct WebExtensionLoad {
 pub struct WebExtensionLoaded {
     pub name: String,
     pub version: String,
+    #[cfg(target_os = "windows")]
+    pub options: Option<Box<url::Url>>,
 }
 
 /// Which engine data partition a view lives in. Every persistent profile gets
@@ -920,6 +922,14 @@ pub trait Engine {
     /// that navigated since the list was read is never sent somewhere else.
     fn go_to_history_entry(&self, _id: ItemId, _offset: i32, _url: &str) -> NativeDispatch {
         NativeDispatch::Unsupported
+    }
+    fn capture_tab_preview(
+        &self,
+        _id: ItemId,
+        _url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        done(None);
     }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's

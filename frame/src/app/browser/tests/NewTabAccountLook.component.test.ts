@@ -34,7 +34,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 // Rust serves the account picture by revision; a picture stands in for it here.
 vi.mock("$domain/account/account-model", async (original) => ({
-  ...(await original<typeof import("$domain/account/account-model")>()),
+  ...(await original<typeof import("$domain/account")>()),
   avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
 }));
 vi.mock("$domain/tabs", () => ({

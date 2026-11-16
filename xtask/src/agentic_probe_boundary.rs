@@ -879,7 +879,7 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         .get("dependencies")
         .and_then(|dependencies| dependencies.get("zeroize"))
         .and_then(toml::Value::as_str)
-        != Some("=1.9.0")
+        != Some("=1.9.1")
     {
         return Err(
             "engine secret-wiping zeroize dependency must remain exactly pinned".to_owned(),
@@ -9076,20 +9076,20 @@ fn validate_agent_app_lifecycle(
         .ok_or_else(|| "application native shutdown boundary is missing".to_owned())?;
     let ordered = &shell[shutdown_start..shutdown_end];
     let flush = ordered
-        .find("self.store.flush_until(deadline)")
+        .find("self.store.flush_until(storage_deadline)")
         .ok_or_else(|| "application Store preflight is missing".to_owned())?;
     let agent = ordered
-        .find("self.shutdown_agent_lifecycle_until(deadline)")
+        .find("self.shutdown_agent_lifecycle_until(storage_deadline)")
         .ok_or_else(|| "application agent lifecycle shutdown is missing".to_owned())?;
     let store = ordered
-        .find("self.store.shutdown_until(deadline)")
+        .find("self.store.shutdown_until(storage_deadline)")
         .ok_or_else(|| "application terminal Store shutdown is missing".to_owned())?;
     let engine = ordered
         .rfind("self.shutdown_native_and_blocker_until(deadline)")
         .ok_or_else(|| "application terminal engine shutdown is missing".to_owned())?;
     if !(flush < agent && agent < store && store < engine) {
         return Err(
-            "agent lifecycle must follow retryable durability preflight and precede Store and engine teardown"
+            "agent lifecycle must follow durability preflight and precede Store and engine teardown"
                 .to_owned(),
         );
     }
@@ -10244,14 +10244,56 @@ mod tests {
                 .is_err()
         );
         let invalid_shell = shell.replacen(
-            "self.shutdown_agent_lifecycle_until(deadline)",
-            "self.shutdown_agent_lifecycle_after_store(deadline)",
+            "self.shutdown_agent_lifecycle_until(storage_deadline)",
+            "self.shutdown_agent_lifecycle_after_store(storage_deadline)",
             1,
         );
         assert!(
             validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
                 .is_err()
         );
+
+        for call in [
+            "self.store.flush_until(storage_deadline)",
+            "self.store.shutdown_until(storage_deadline)",
+            "self.shutdown_native_and_blocker_until(deadline)",
+        ] {
+            let invalid_shell = shell.replacen(call, "true", 1);
+            assert_ne!(invalid_shell, shell, "mutation must remove {call}");
+            assert!(
+                validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                    .is_err(),
+                "application shutdown accepted missing barrier {call}"
+            );
+        }
+        for (first, second) in [
+            (
+                "self.store.flush_until(storage_deadline)",
+                "self.shutdown_agent_lifecycle_until(storage_deadline)",
+            ),
+            (
+                "self.shutdown_agent_lifecycle_until(storage_deadline)",
+                "self.store.shutdown_until(storage_deadline)",
+            ),
+            (
+                "self.store.shutdown_until(storage_deadline)",
+                "self.shutdown_native_and_blocker_until(deadline)",
+            ),
+        ] {
+            let invalid_shell = shell
+                .replacen(first, "SWAPPED_SHUTDOWN_BARRIER", 1)
+                .replacen(second, first, 1)
+                .replacen("SWAPPED_SHUTDOWN_BARRIER", second, 1);
+            assert_ne!(
+                invalid_shell, shell,
+                "mutation must swap {first} and {second}"
+            );
+            assert!(
+                validate_agent_app_lifecycle(manifest, root, api, actor, &invalid_shell, desktop)
+                    .is_err(),
+                "application shutdown accepted {second} before {first}"
+            );
+        }
 
         let invalid_desktop = desktop.replace(
             "macos-page-permission-prompts = [",
@@ -13058,7 +13100,7 @@ mod tests {
             futures-util = { version = "=0.3.32", optional = true }
             reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
             tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
-            zeroize = { version = "=1.9.0", optional = true }
+            zeroize = { version = "=1.9.1", optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "=3.7.0", optional = true }
             security-framework-sys = { version = "=2.17.0", optional = true }
@@ -13759,7 +13801,7 @@ mod tests {
             required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
-            zeroize = "=1.9.0"
+            zeroize = "=1.9.1"
             image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
             windows = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
@@ -13783,10 +13825,10 @@ mod tests {
             "agentic-browser = [\"zephium-agentic/probe-harness\"]",
         ))
         .is_err());
-        assert!(validate_engine_manifest(&valid.replace("=1.9.0", "=1.9.1")).is_err());
+        assert!(validate_engine_manifest(&valid.replace("=1.9.1", "=1.9.2")).is_err());
         assert!(validate_engine_manifest(&valid.replace(
-            "zeroize = \"=1.9.0\"",
-            "zeroize = { version = \"=1.9.0\", optional = true }",
+            "zeroize = \"=1.9.1\"",
+            "zeroize = { version = \"=1.9.1\", optional = true }",
         ))
         .is_err());
         assert!(validate_engine_manifest(&valid.replace("=0.25.10", "=0.25.11")).is_err());

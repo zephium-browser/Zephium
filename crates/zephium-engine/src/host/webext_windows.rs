@@ -200,7 +200,6 @@ struct Install {
     native: ICoreWebView2BrowserExtension,
     bridge: ExtensionView,
     action: Rc<RefCell<Action>>,
-    options: Option<String>,
 }
 
 impl super::EngineHost {
@@ -466,10 +465,6 @@ impl super::EngineHost {
             .ok_or("Invalid extension identity.")?;
         let manifest =
             zephium_webext::manifest::Manifest::load(&load.root).map_err(|e| e.to_string())?;
-        let loaded = WebExtensionLoaded {
-            name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
-            version: manifest.version().unwrap_or_default().to_owned(),
-        };
         let next = self
             .windows_extensions
             .generation
@@ -575,7 +570,14 @@ impl super::EngineHost {
                     &format!("chrome-extension://{}/", load.extension_id),
                     path,
                 )
-            });
+            })
+            .and_then(|url| url::Url::parse(&url).ok())
+            .map(Box::new);
+        let loaded = WebExtensionLoaded {
+            name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
+            version: manifest.version().unwrap_or_default().to_owned(),
+            options,
+        };
         self.windows_extensions.installs.insert(
             (profile, load.install),
             Install {
@@ -584,7 +586,6 @@ impl super::EngineHost {
                 native: item,
                 bridge,
                 action,
-                options,
             },
         );
         Ok(loaded)
@@ -1032,38 +1033,6 @@ impl super::EngineHost {
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
     }
 
-    pub(crate) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: &str) {
-        let Some(install) = self
-            .windows_extensions
-            .installs
-            .values()
-            .find(|install| install.runtime.profile() == profile && install.id == extension_id)
-        else {
-            return;
-        };
-        let Some(url) = install.options.as_ref() else {
-            return;
-        };
-        let Some(tab) = self
-            .extension_browser_surfaces
-            .get(&profile)
-            .and_then(|surface| surface.windows().iter().find_map(|window| window.active()))
-        else {
-            return;
-        };
-        install.action.borrow_mut().open_request = Some((
-            tab,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-            8,
-        ));
-        // The existing native adoption path retains Chromium's extension origin
-        // and web_accessible_resources enforcement; this does not serve HTML.
-        let _ = install.bridge.view.evaluate_script(&format!(
-            "chrome.tabs.create({{url:{},active:true}})",
-            json!(url)
-        ));
-    }
-
     pub(super) fn open_windows_extension_tab(
         &mut self,
         runtime: ExtensionRuntimeInstance,
@@ -1087,8 +1056,8 @@ impl super::EngineHost {
         {
             return wry::NewWindowResponse::Deny;
         }
-        // A manager may open a child only during a bounded, explicit toolbar /
-        // options command. Unsolicited hidden-worker opens remain denied here.
+        // A manager may open a child only during a bounded, explicit toolbar
+        // command. Unsolicited hidden-worker opens remain denied here.
         let popup = self.windows_extensions.popup.as_ref().filter(|popup| {
             popup.runtime == runtime
                 && popup.view.alive.get()

@@ -1279,9 +1279,9 @@ fn parse_status(text: &str) -> Option<WorkProjectGitV1> {
 mod tests {
     use super::*;
 
-    fn project() -> PathBuf {
-        let root = std::env::temp_dir().join(format!("zephium-project-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+    fn project() -> (tempfile::TempDir, PathBuf) {
+        let scratch = crate::work_files::test_tempdir();
+        let root = scratch.path().join("project");
         for dir in [
             "src/routes",
             "src/lib",
@@ -1322,12 +1322,12 @@ mod tests {
         ] {
             std::fs::write(root.join(file), "").unwrap();
         }
-        root.canonicalize().unwrap()
+        (scratch, root.canonicalize().unwrap())
     }
 
     #[test]
     fn a_folder_reads_as_its_stack_structure_and_scripts() {
-        let root = project();
+        let (_scratch, root) = project();
         let scanned = scan(&root);
         let data = scanned.into_data(&root.to_string_lossy(), None);
         assert_eq!(data.lead_fault(1), None);

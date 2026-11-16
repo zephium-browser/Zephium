@@ -128,6 +128,8 @@ mod startup_alert;
 mod startup_styles;
 mod swipe;
 mod system_time;
+mod tab_previews;
+mod tab_switcher;
 #[cfg(all(target_os = "windows", feature = "work-product"))]
 mod taskbar_badge;
 mod updates;
@@ -399,11 +401,20 @@ impl ClaimedTerminalStartupResources {
     }
 }
 
+/// Outlasts the shell's end-to-end shutdown budget on each platform.
+const HARD_EXIT_TIMEOUT: std::time::Duration = if cfg!(target_os = "windows") {
+    std::time::Duration::from_secs(30)
+} else {
+    std::time::Duration::from_secs(12)
+};
+
 #[derive(Default)]
 struct HardExitWatchdog {
     prepared: AtomicBool,
     deadline: Mutex<Option<std::time::Instant>>,
     changed: std::sync::Condvar,
+    #[cfg(any(target_os = "macos", test))]
+    installing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -862,7 +873,38 @@ fn cleanup_supplemental_startup_resources(
     });
 }
 
+#[cfg(target_os = "windows")]
+fn terminate_windows_process(exit_code: i32) -> ! {
+    use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+    let logs_flushed = platform::imp::flush_stderr_until(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    let code = if logs_flushed { exit_code } else { 1 };
+    // The coordinator has settled or exhausted its deadline. Do not enter
+    // arbitrary DLL detach handlers via ExitProcess while holding the profile.
+    unsafe {
+        let _ = TerminateProcess(GetCurrentProcess(), code as u32);
+    }
+    std::process::abort();
+}
+
 impl HardExitWatchdog {
+    #[cfg(any(target_os = "macos", test))]
+    fn begin_install(&self) -> bool {
+        let mut deadline = self
+            .deadline
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let now = std::time::Instant::now();
+        if deadline.is_none_or(|deadline| deadline <= now) {
+            return false;
+        }
+        if !self.installing.swap(true, Ordering::AcqRel) {
+            *deadline = Some(now + std::time::Duration::from_secs(60));
+            self.changed.notify_one();
+        }
+        true
+    }
     fn prepare(self: &Arc<Self>) -> std::io::Result<()> {
         if self
             .prepared
@@ -880,23 +922,31 @@ impl HardExitWatchdog {
                     .deadline
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                while deadline.is_none() {
-                    deadline = watchdog
-                        .changed
-                        .wait(deadline)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                loop {
+                    if let Some(armed) = *deadline {
+                        let remaining = armed.saturating_duration_since(std::time::Instant::now());
+                        if remaining.is_zero() {
+                            break;
+                        }
+                        (deadline, _) = watchdog
+                            .changed
+                            .wait_timeout(deadline, remaining)
+                            .unwrap_or_else(|error| error.into_inner());
+                    } else {
+                        deadline = watchdog
+                            .changed
+                            .wait(deadline)
+                            .unwrap_or_else(|error| error.into_inner());
+                    }
                 }
-                let armed_deadline = (*deadline).unwrap_or_else(std::time::Instant::now);
                 drop(deadline);
-
-                let remaining =
-                    armed_deadline.saturating_duration_since(std::time::Instant::now());
-                if !remaining.is_zero() {
-                    std::thread::sleep(remaining);
-                }
+                #[cfg(not(target_os = "windows"))]
                 write_diagnostic(format_args!(
                     "shutdown: process exit did not complete within the hard deadline; forcing unsuccessful termination"
                 ));
+                #[cfg(target_os = "windows")]
+                terminate_windows_process(1);
+                #[cfg(not(target_os = "windows"))]
                 std::process::exit(1);
             });
         if let Err(error) = spawned {
@@ -915,7 +965,7 @@ impl HardExitWatchdog {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if deadline.is_none() {
-            *deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(12));
+            *deadline = Some(std::time::Instant::now() + HARD_EXIT_TIMEOUT);
             self.changed.notify_one();
         }
         true
@@ -999,6 +1049,11 @@ impl ShutdownCoordinator {
             self.schedule_authorized_exit(app, 1);
             return;
         }
+        hide_windows_for_shutdown(&app);
+        let deadline = shell.shutdown_deadline();
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let deadline = tao::event_loop::system_termination_deadline()
+            .map_or(deadline, |system| system.min(deadline));
         #[cfg(feature = "work-product")]
         if let Some(work) = app.try_state::<work_product::WorkProductState>() {
             let operations = work.operations.clone();
@@ -1008,15 +1063,20 @@ impl ShutdownCoordinator {
                     coordinator.terminal_failure.store(true, Ordering::Release);
                     diagnostic!("shutdown: Work operation cleanup was not proven");
                 }
-                coordinator.request_after_work(app, shell);
+                coordinator.request_after_work(app, shell, deadline);
             });
             return;
         }
-        self.request_after_work(app, shell);
+        self.request_after_work(app, shell, deadline);
     }
 
-    fn request_after_work(&self, app: tauri::AppHandle, shell: Handle) {
-        let completion = shell.shutdown();
+    fn request_after_work(
+        &self,
+        app: tauri::AppHandle,
+        shell: Handle,
+        deadline: std::time::Instant,
+    ) {
+        let completion = shell.shutdown_with_deadline(deadline);
         let coordinator = self.clone();
         // SQLite and the shell actor are blocking by design. Wait away from
         // the event loop, then schedule a permitted exit back onto it.
@@ -1029,9 +1089,7 @@ impl ShutdownCoordinator {
     fn finish_requested_shutdown(&self, app: tauri::AppHandle, outcome: ShutdownOutcome) {
         match outcome {
             ShutdownOutcome::RetryableFailure => {
-                // The shell has not started native teardown, so an embedding
-                // host could safely retry. A desktop close is terminal: exit
-                // non-zero instead of leaving an unclosable process.
+                // An unproven storage barrier must remain an unsuccessful exit.
                 diagnostic!(
                     "shutdown: final session durability was not proven before the deadline; exiting unsuccessfully"
                 );
@@ -1176,6 +1234,19 @@ impl ShutdownCoordinator {
 
     fn arm_hard_exit_watchdog(&self) -> bool {
         self.watchdog.arm()
+    }
+}
+
+/// A closed browser leaves the screen at once; the windows themselves stay
+/// alive until native teardown destroys them in order.
+fn hide_windows_for_shutdown(app: &tauri::AppHandle) {
+    for window in app.webview_windows().into_values() {
+        if let Err(error) = window.hide() {
+            write_diagnostic(format_args!(
+                "shutdown: window {} could not be hidden: {error}",
+                window.label()
+            ));
+        }
     }
 }
 
@@ -1866,6 +1937,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             run_command,
             panel_hide,
             panel_ready,
+            tab_switcher::tab_switcher_open,
+            tab_switcher::tab_switcher_action,
             panel_intent,
             panel_layout,
             launcher_edit,
@@ -1875,11 +1948,13 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             launcher_set_double_tap,
             launcher_open_accessibility,
             setting_get,
+            search_shortcut_defaults,
             setting_set,
             windows_privacy::windows_diagnostics_settings,
             windows_privacy::windows_reputation_managed,
             ui_info,
             ui_ready,
+            caption_replay,
             menu_popup,
             add_menu_popup,
             tab_menu_popup,
@@ -2342,18 +2417,21 @@ const LAUNCHER_THEME_KEYS: &[&str] = &[
     "ui.font-size=",
 ];
 
-fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
-    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
-    // The launcher follows appearance, motion and language only; anything else would
-    // wake its hidden WebView for a command it ignores.
-    if id.starts_with("theme.")
+fn launcher_follows_ui_command(id: &str) -> bool {
+    id.starts_with("theme.")
+        || id.starts_with("preference.search.shortcuts=")
         || id.starts_with("preference.ui.reduce-motion=")
         || id.starts_with("preference.ui.language=")
         || LAUNCHER_THEME_KEYS.iter().any(|key| {
             id.strip_prefix("preference.")
                 .is_some_and(|rest| rest.starts_with(key))
         })
-    {
+}
+
+fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
+    emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id);
+    // Only consumed settings wake the hidden launcher WebView.
+    if launcher_follows_ui_command(id) {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
     }
 }
@@ -3847,7 +3925,7 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
     if enter {
         platform::imp::set_caption_window_fullscreen(window, true);
     }
-    let changed = window.set_fullscreen(enter).is_ok();
+    let changed = platform::set_window_fullscreen(window, enter).is_ok();
     #[cfg(target_os = "windows")]
     platform::imp::set_caption_window_fullscreen(window, enter == changed);
     #[cfg(not(target_os = "windows"))]
@@ -3877,6 +3955,16 @@ fn execute_command_or(
         return rejected_operation();
     }
     let id = zephium_core::commands::runs_as(id);
+    if id == "tab.close" && tab_switcher::close_selected(app) {
+        return accepted_ui_operation();
+    }
+    if matches!(id, "tab.recent.next" | "tab.recent.previous") {
+        return if tab_switcher::step(app, id == "tab.recent.previous", true) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
+    }
     // A feature switched off has no way in, from any menu, key or launcher.
     if !app
         .try_state::<keymap::Keymap>()
@@ -4525,6 +4613,15 @@ fn ui_ready(caller: WebviewWindow, gate: State<'_, UiStartupGate>) -> bool {
     gate.mark_frontend_ready(&caller)
 }
 
+#[tauri::command]
+#[specta::specta]
+fn caption_replay(caller: WebviewWindow) {
+    if authorize(&caller, CallerPolicy::Main, "caption_replay") {
+        #[cfg(target_os = "windows")]
+        platform::imp::replay_caption(&caller);
+    }
+}
+
 fn menu_popup_anchor(x: f64, y: f64, width: f64, height: f64) -> Option<LogicalPosition<f64>> {
     if !x.is_finite()
         || !y.is_finite()
@@ -5098,6 +5195,33 @@ fn focus_control(
 
 #[tauri::command]
 #[specta::specta]
+fn search_shortcut_defaults(caller: WebviewWindow) -> Vec<zephium_core::search::SearchShortcut> {
+    if !authorize(&caller, CallerPolicy::Both, "search_shortcut_defaults") {
+        return Vec::new();
+    }
+    zephium_core::search::ShortcutRegistry::default()
+        .entries()
+        .to_vec()
+}
+
+fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> {
+    if key == "search.shortcuts" {
+        return stored.map(|value| {
+            if value.is_empty() {
+                return value;
+            }
+            let Some(registry) = zephium_core::search::ShortcutRegistry::from_setting(&value)
+            else {
+                return String::new();
+            };
+            registry.to_setting().unwrap_or(value)
+        });
+    }
+    stored
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     if !authorize(&caller, CallerPolicy::Both, "setting_get") {
         return None;
@@ -5112,7 +5236,8 @@ async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
     // A synchronous command runs on the main thread, and the store may be
     // busy for seconds (an import, a deletion); the read waits off it.
     tauri::async_runtime::spawn_blocking(move || {
-        APP_STORE.get().and_then(|store| store.app_setting(&key))
+        let stored = APP_STORE.get().and_then(|store| store.app_setting(&key));
+        setting_value_for_frame(&key, stored)
     })
     .await
     .ok()
@@ -5662,7 +5787,7 @@ fn sidebar_set_width(
     if !platform::imp::publish_sidebar_resize_revision(revision) {
         return;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     platform::imp::sidebar_column_width(&caller, width);
     #[cfg(not(target_os = "macos"))]
     let _ = revision;
@@ -6528,6 +6653,16 @@ fn build_profile_menu(
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if matches!(event, tauri::RunEvent::Exit)
+        && tao::event_loop::system_termination_deadline()
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        if let Some(shutdown) = app.try_state::<ShutdownCoordinator>() {
+            shutdown.terminal_failure.store(true, Ordering::Release);
+            shutdown.authorized_exit_code.store(1, Ordering::Release);
+        }
+    }
     #[cfg(feature = "macos-work-public-inspection")]
     work_development::on_run_event(app, &event);
     #[cfg(all(
@@ -6705,7 +6840,7 @@ pub fn run() {
             // remain hard failures; an outdated one is an advisory.
             diagnostic!("security: {failure}");
             startup_alert::show_blocking(failure.problem(), failure.detail());
-            std::process::exit(78);
+            terminate_windows_process(78);
         }
     };
 
@@ -6718,6 +6853,8 @@ pub fn run() {
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
+        .manage(tab_switcher::Switcher::default())
+        .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -6780,6 +6917,30 @@ pub fn run() {
                 // callback or persistent actor exists. Later callbacks only
                 // signal it and can never fail while spawning a watchdog.
                 shutdown.prepare_hard_exit_watchdog()?;
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_app = app.handle().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                let termination_owner = shutdown.inner().clone();
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                tao::event_loop::set_system_termination_handler(
+                    PRE_SHELL_CLEANUP_TIMEOUT,
+                    menu_text::shutdown_reason(),
+                    move || {
+                        if let Some(shell) = termination_app.try_state::<Handle>() {
+                            termination_owner.request(termination_app.clone(), shell.inner().clone());
+                        } else {
+                            termination_owner.request_terminal_startup_failure(
+                                termination_app.clone(),
+                                TerminalStartupResources {
+                                    engine_owner: termination_app.try_state::<StartupEngine>().map(|owner| owner.inner().clone()),
+                                    blocker_owner: termination_app.try_state::<StartupBlocker>().map(|owner| owner.inner().clone()),
+                                    store_owner: termination_app.try_state::<StartupStore>().map(|owner| owner.inner().clone()),
+                                    ..TerminalStartupResources::default()
+                                },
+                            );
+                        }
+                    },
+                );
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
@@ -7001,12 +7162,18 @@ pub fn run() {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         page_gate.mark_document_loaded(&window, payload.url());
                     }
-                    // A replaced document has no dialog open yet; it reports
-                    // its own when it opens one.
+                    // A replaced document owns neither a sidebar peek nor an
+                    // open dialog; reset both even if its cleanup never ran.
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                         && window.label() == MAIN_LABEL
                     {
+                        #[cfg(target_os = "macos")]
+                        platform::imp::sidebar_card_lights(&window, false);
                         if let Some(shell) = window.app_handle().try_state::<Handle>() {
+                            shell.dispatch(Command::PeekSidebar {
+                                peek: false,
+                                slide: false,
+                            });
                             shell.dispatch(Command::SetChromeModal(false));
                         }
                     }
@@ -7268,6 +7435,7 @@ pub fn run() {
                     "zephium:work-changed",
                     &change,
                 ),
+                Projection::TabSwitcher { session, state } => tab_switcher::project(&emit_handle, session, state),
                 Projection::PanelOwner(owner) => overlay::update_context(&emit_handle, &owner),
                 Projection::Items(state) => {
                     #[cfg(feature = "adblock-qa")]
@@ -8014,6 +8182,9 @@ pub fn run() {
                     &error,
                 );
             }
+            #[cfg(target_os = "windows")]
+            terminate_windows_process(1);
+            #[cfg(not(target_os = "windows"))]
             std::process::exit(1);
         });
 
@@ -8025,31 +8196,45 @@ pub fn run() {
         // exact process HANDLE authorize deletion of these private UDFs. A
         // failure remains visible in the process status and quarantines the
         // generation for a later verified cleanup pass.
-        let handle = app.handle().clone();
-        let exit_code = app.run_return(handle_run_event);
-        // Setup can fail after zero or one privileged environment exists.
-        // Every attempted build may have created native state before returning
-        // an error. Require an exact observer/PID/HANDLE proof for that
-        // conservative set; a partial registration therefore mismatches and
-        // keeps the runtime generation quarantined.
-        let expected_environments = expected_privileged_environment_labels(
-            attempted_privileged_environments.load(Ordering::Acquire),
-        );
-        let process_exit_proven =
-            platform::imp::finalize_privileged_environment_observers(&expected_environments);
-        let cleanup_succeeded = process_exit_proven && cleanup_privileged_runtime_after_exit();
-        if !process_exit_proven {
-            diagnostic!(
-                "privacy: privileged WebView2 Environment5/PID/HANDLE exit was not proven; leaving this run's UDF generation quarantined"
-            );
-        }
-        updates::finish_after_exit(cleanup_succeeded && exit_code == 0);
-        relaunch::finish_after_cleanup(&handle, cleanup_succeeded && exit_code == 0);
-        std::process::exit(if cleanup_succeeded || exit_code != 0 {
-            exit_code
-        } else {
-            1
+        app.run_return(move |app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                handle_run_event(app, event);
+                // The runtime drains its window registry before delivering Exit,
+                // including when WM_ENDSESSION is still on the native stack.
+                let expected_environments = expected_privileged_environment_labels(
+                    attempted_privileged_environments.load(Ordering::Acquire),
+                );
+                let tail_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let tail_deadline = tao::event_loop::system_termination_deadline()
+                    .map_or(tail_deadline, |system| system.min(tail_deadline));
+                let (process_exit_proven, process_exit_clean) =
+                    platform::imp::finalize_privileged_environment_observers(
+                        &expected_environments,
+                        tail_deadline,
+                    );
+                let cleanup_succeeded =
+                    process_exit_proven && cleanup_privileged_runtime_after_exit();
+                let exit_code = app
+                    .try_state::<ShutdownCoordinator>()
+                    .map_or(1, |shutdown| {
+                        let code = shutdown.authorized_exit_code.load(Ordering::Acquire);
+                        if code == NO_AUTHORIZED_EXIT_CODE
+                            || shutdown.terminal_failure.load(Ordering::Acquire)
+                        {
+                            1
+                        } else {
+                            code
+                        }
+                    });
+                let clean = cleanup_succeeded && process_exit_clean && exit_code == 0;
+                updates::finish_after_exit(clean);
+                relaunch::finish_after_cleanup(app, clean);
+                app.cleanup_before_exit();
+                terminate_windows_process(if clean { 0 } else { 1 });
+            }
+            handle_run_event(app, event);
         });
+        terminate_windows_process(1);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -8061,6 +8246,72 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn shortcut_ipc_reads_omit_retired_entries() {
+        use zephium_core::search::ShortcutRegistry;
+        let mut entries = ShortcutRegistry::default().entries().to_vec();
+        entries[0].enabled = false;
+        let expected = serde_json::to_string(&entries).unwrap();
+        let mut retired = entries[0].clone();
+        retired.id = "npm".into();
+        entries.push(retired);
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", Some(raw)),
+            Some(expected)
+        );
+        for value in ["", "not json", "null"] {
+            assert_eq!(
+                super::setting_value_for_frame("search.shortcuts", Some(value.into())),
+                Some(String::new())
+            );
+        }
+        assert_eq!(
+            super::setting_value_for_frame("search.shortcuts", None),
+            None
+        );
+        assert_eq!(
+            super::setting_value_for_frame("search.engine", Some("google".into())),
+            Some("google".into())
+        );
+    }
+
+    #[test]
+    fn near_limit_shortcut_projection_remains_readable() {
+        use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+        let mut entries: Vec<_> = (0..8)
+            .map(|index| {
+                serde_json::json!({
+                    "id": format!("custom:near-limit-{index}"),
+                    "name": "Near limit",
+                    "keywords": [format!("near{index}")],
+                    "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                    "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                    "domain": "example.com",
+                    "enabled": false
+                })
+            })
+            .collect();
+        let excess =
+            serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let home = entries.last_mut().unwrap()["home_url"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+        let raw = serde_json::to_string(&entries).unwrap();
+        assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+        let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+        let projected = super::setting_value_for_frame("search.shortcuts", Some(raw)).unwrap();
+        assert!(projected.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+        assert_eq!(
+            ShortcutRegistry::from_setting(&projected)
+                .unwrap()
+                .entries(),
+            registry.entries()
+        );
+    }
 
     #[test]
     fn only_an_app_link_grant_names_a_scheme() {
@@ -8120,6 +8371,142 @@ mod tests {
     }
 
     #[test]
+    fn windows_session_end_enters_coordinator_and_pumps_until_settled() {
+        let tao = include_str!("../../vendor/tao/src/platform_impl/windows/event_loop.rs");
+        let query = tao
+            .split("win32wm::WM_QUERYENDSESSION => {")
+            .nth(1)
+            .unwrap()
+            .split("win32wm::WM_ENDSESSION => {")
+            .next()
+            .unwrap();
+        assert!(query.contains("termination.request()"));
+        assert!(query.contains("ShutdownBlockReasonCreate"));
+        let end = tao
+            .split("win32wm::WM_ENDSESSION => {")
+            .nth(1)
+            .unwrap()
+            .split("_ if msg == *USER_EVENT_MSG_ID")
+            .next()
+            .unwrap();
+        assert!(end.contains("SystemTermination::wait_until"));
+        assert!(end.contains("DispatchMessageW"));
+        assert!(end.contains("ShutdownBlockReasonDestroy"));
+        let setup = include_str!("lib.rs")
+            .split(".setup(move |app|")
+            .nth(1)
+            .unwrap()
+            .split("let data_dir =")
+            .next()
+            .unwrap();
+        assert!(setup.contains("set_system_termination_handler"));
+        assert!(setup.contains("termination_owner.request("));
+    }
+
+    #[test]
+    fn macos_system_termination_defers_and_replies_after_cleanup() {
+        let delegate = include_str!("../../vendor/tao/src/platform_impl/macos/app_delegate.rs");
+        assert!(delegate.contains("sel!(applicationShouldTerminate:)"));
+        let should = delegate
+            .split("extern \"C\" fn application_should_terminate")
+            .nth(1)
+            .unwrap()
+            .split("extern \"C\" fn application_will_terminate")
+            .next()
+            .unwrap();
+        assert!(should.contains("defer_system_termination(termination.request())"));
+        assert!(should.contains("2"));
+        let state = include_str!("../../vendor/tao/src/platform_impl/macos/app_state.rs");
+        let exit = state
+            .split("pub fn exit() -> i32")
+            .nth(1)
+            .unwrap()
+            .split("pub fn launched")
+            .next()
+            .unwrap();
+        assert!(
+            exit.find("Event::LoopDestroyed").unwrap()
+                < exit
+                    .find("replyToApplicationShouldTerminate(true)")
+                    .unwrap()
+        );
+        assert!(state.contains("ControlFlow::ExitWithCode(1)"));
+    }
+
+    #[test]
+    fn windows_final_exit_flushes_logs_then_bypasses_dll_detach() {
+        let source = include_str!("lib.rs");
+        let exit = source
+            .split("fn terminate_windows_process(")
+            .nth(1)
+            .unwrap()
+            .split("impl HardExitWatchdog")
+            .next()
+            .unwrap();
+        assert!(
+            exit.find("flush_stderr_until").unwrap()
+                < exit.find("TerminateProcess(GetCurrentProcess()").unwrap()
+        );
+        assert!(!exit.contains("std::process::exit"));
+        let run = source
+            .split("app.run_return(move |app, event|")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(not(target_os = \"windows\"))]")
+            .next()
+            .unwrap();
+        assert!(
+            run.find("finalize_privileged_environment_observers")
+                .unwrap()
+                < run.find("terminate_windows_process").unwrap()
+        );
+        assert!(
+            run.find("updates::finish_after_exit(clean)").unwrap()
+                < run.find("terminate_windows_process").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_lowers_sidebar_before_resetting_modal() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains("shell.dispatch(Command::PeekSidebar {\n                                peek: false,\n                                slide: false,"));
+        assert!(
+            reset.find("Command::PeekSidebar").unwrap()
+                < reset.find("Command::SetChromeModal").unwrap()
+        );
+    }
+
+    #[test]
+    fn chrome_document_replacement_resets_macos_sidebar_controls() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let load = source
+            .split(".on_page_load(move |window, payload| {")
+            .nth(1)
+            .unwrap()
+            .split(".build()?")
+            .next()
+            .unwrap();
+        let reset = load.split("PageLoadEvent::Started)").nth(1).unwrap();
+        assert!(reset.contains("window.label() == MAIN_LABEL"));
+        assert!(reset.contains(
+            "#[cfg(target_os = \"macos\")]\n                        platform::imp::sidebar_card_lights(&window, false);"
+        ));
+        assert!(
+            reset.find("sidebar_card_lights(&window, false)").unwrap()
+                < reset.find("try_state::<Handle>()").unwrap()
+        );
+    }
+
+    #[test]
     fn quit_menus_use_the_coordinated_exit_request() {
         let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!source.contains(".quit()"));
@@ -8165,6 +8552,23 @@ mod tests {
         assert!(source.contains("help::url(id)"));
         assert!(source.contains("id == help::MENU"));
         assert!(source.contains("id == help::DIAGNOSTICS"));
+    }
+
+    #[test]
+    fn launcher_follows_shortcut_changes_without_unrelated_preferences() {
+        assert!(super::launcher_follows_ui_command(
+            "preference.search.shortcuts=[]"
+        ));
+        assert!(super::launcher_follows_ui_command("theme.dark"));
+        assert!(super::launcher_follows_ui_command(
+            "preference.ui.font=system"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.history=false"
+        ));
+        assert!(!super::launcher_follows_ui_command(
+            "preference.search.shortcuts-extra=[]"
+        ));
     }
 
     #[test]
@@ -8706,6 +9110,25 @@ mod tests {
         assert!(active_shutdown
             .terminal_failure
             .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn clean_shutdown_hands_watchdog_to_a_bounded_install_phase_once() {
+        let watchdog = super::HardExitWatchdog::default();
+        watchdog
+            .prepared
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(watchdog.arm());
+        let shutdown_deadline = watchdog.deadline.lock().unwrap().unwrap();
+        watchdog.begin_install();
+        let install_deadline = watchdog.deadline.lock().unwrap().unwrap();
+        let install_phase_duration = std::time::Duration::from_secs(60);
+        let minimum_extension =
+            install_phase_duration - super::HARD_EXIT_TIMEOUT - std::time::Duration::from_secs(1);
+        assert!(install_deadline > shutdown_deadline + minimum_extension);
+        assert!(install_deadline <= std::time::Instant::now() + install_phase_duration);
+        watchdog.begin_install();
+        assert_eq!(watchdog.deadline.lock().unwrap().unwrap(), install_deadline);
     }
 
     #[test]
@@ -9559,7 +9982,7 @@ mod tests {
 
         let desktop = include_str!("lib.rs");
         let run_return = desktop
-            .find("app.run_return(handle_run_event)")
+            .find("app.run_return(move |app, event|")
             .expect("returning Windows event loop");
         let process_proof = desktop
             .find("platform::imp::finalize_privileged_environment_observers")
@@ -9838,7 +10261,7 @@ mod tests {
         assert_eq!(directive("style-src"), "'self' 'unsafe-inline'");
         assert_eq!(
             directive("img-src"),
-            "'self' data: zephium-media: http://zephium-media.localhost"
+            "'self' data: zephium-media: http://zephium-media.localhost zephium-preview: http://zephium-preview.localhost"
         );
         assert_eq!(directive("font-src"), "'self' data:");
         // Same-origin workers only: the diagram layout engine runs off the page thread.
