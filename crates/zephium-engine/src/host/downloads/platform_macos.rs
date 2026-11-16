@@ -370,7 +370,7 @@ impl Downloads {
         let Some(window) = initial
             .as_ref()
             .map(|context| context.window.clone())
-            .or_else(|| view.window())
+            .or_else(|| crate::platform::imp::home_window(&view))
         else {
             unsafe { native.cancel(None) };
             return None;
