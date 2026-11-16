@@ -532,6 +532,10 @@ fn handle(
         "open" => open(app, bench, &command),
         "navigate" => navigate(app, bench, &command),
         "eval" => eval(engine, &command),
+        "frame" => frame(app, &command),
+        "layers" => layers(app),
+        "glass" => glass(app, &command),
+        "window" => window_parts(app, &command),
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
@@ -933,6 +937,252 @@ fn setting(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Val
         })),
         None => Ok(json!({ "admitted": true, "timedOut": true })),
     }
+}
+
+/// Runs `js` in the main window's own interface document, for measuring
+/// what the interface holds (animations, nodes). macOS only.
+#[cfg(target_os = "macos")]
+fn frame(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{msg_send, ClassType};
+    use objc2_foundation::{MainThreadMarker, NSError, NSString};
+    use objc2_web_kit::{WKContentWorld, WKWebView};
+    let (body, timeout) = (text(command, "js")?.to_owned(), timeout(command));
+    let window = app
+        .get_webview_window(crate::MAIN_LABEL)
+        .ok_or("no main window")?;
+    let (done, answer) = std::sync::mpsc::channel::<Option<String>>();
+    window
+        .with_webview(move |webview| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                let _ = done.send(None);
+                return;
+            };
+            let pending = std::cell::RefCell::new(Some(done));
+            let callback =
+                block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                    let Some(done) = pending.borrow_mut().take() else {
+                        return;
+                    };
+                    // SAFETY: WebKit owns the callback-scoped result; the class is
+                    // checked before the cast.
+                    let text = unsafe {
+                        (!value.is_null()
+                            && error.is_null()
+                            && msg_send![value, isKindOfClass: NSString::class()])
+                        .then(|| (*value.cast::<NSString>()).to_string())
+                    };
+                    let _ = done.send(text);
+                });
+            // SAFETY: Tauri supplies the live WKWebView for this main-thread call.
+            let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+            unsafe {
+                webkit.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+                    &NSString::from_str(&format!("return await ({});", script(&body))),
+                    None,
+                    None,
+                    &WKContentWorld::pageWorld(mtm),
+                    Some(&callback),
+                );
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    let result = answer
+        .recv_timeout(timeout)
+        .map_err(|_| "the interface gave no result in time".to_owned())?
+        .ok_or("the interface gave no result")?;
+    let envelope: Value = serde_json::from_str(&result).map_err(|_| "unreadable result")?;
+    if envelope.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(json!({ "value": envelope.get("value").cloned().unwrap_or(Value::Null) }))
+    } else {
+        Err(envelope
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the interface script failed")
+            .to_owned())
+    }
+}
+
+/// The main window's view and layer tree with any animations still attached,
+/// to find what keeps the window server drawing. macOS only.
+#[cfg(target_os = "macos")]
+fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_quartz_core::CALayer;
+    fn layer_tree(layer: &CALayer, depth: usize, out: &mut Vec<Value>) {
+        if out.len() >= 2000 || depth > 40 {
+            return;
+        }
+        let keys: Vec<String> = layer
+            .animationKeys()
+            .map(|keys| keys.iter().map(|key| key.to_string()).collect())
+            .unwrap_or_default();
+        let frame = layer.frame();
+        let class: &AnyObject = layer.as_ref();
+        out.push(json!({
+            "depth": depth,
+            "class": class.class().name().to_string_lossy(),
+            "name": layer.name().map(|name| name.to_string()),
+            "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+            "hidden": layer.isHidden(),
+            "opacity": layer.opacity(),
+            "animations": keys,
+        }));
+        if let Some(sublayers) = unsafe { layer.sublayers() } {
+            for sublayer in sublayers.iter() {
+                layer_tree(&sublayer, depth + 1, out);
+            }
+        }
+    }
+    let window = app
+        .get_webview_window(crate::MAIN_LABEL)
+        .ok_or("no main window")?;
+    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
+    let (done, answer) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        // SAFETY: Tao's live NSWindow, on the main thread for this call.
+        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+        let mut out = Vec::new();
+        // The frame view holds the content view and the titlebar's own views.
+        let root: Option<objc2::rc::Retained<NSView>> = ns_window
+            .contentView()
+            .and_then(|view| unsafe { view.superview() });
+        if let Some(layer) = root.and_then(|view| view.layer()) {
+            layer_tree(&layer, 0, &mut out);
+        }
+        let _ = done.send(out);
+    })
+    .map_err(|error| error.to_string())?;
+    let out = answer
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "the layer walk did not finish".to_owned())?;
+    Ok(json!({ "layers": out }))
+}
+
+/// Measurement only: sets the window material view's frame (AppKit points,
+/// bottom-left origin) to see what its size costs the window server.
+#[cfg(target_os = "macos")]
+fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    const EFFECT_VIEW_TAGS: [isize; 2] = [91_376_254, 96_945_937];
+    let number = |key: &str| {
+        command
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or(format!("{key} is required"))
+    };
+    let rect = NSRect::new(
+        NSPoint::new(number("x")?, number("y")?),
+        NSSize::new(number("w")?, number("h")?),
+    );
+    let window = app
+        .get_webview_window(crate::MAIN_LABEL)
+        .ok_or("no main window")?;
+    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
+    let (done, answer) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        // SAFETY: Tao's live NSWindow, on the main thread for this call.
+        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+        let mut found = Vec::new();
+        if let Some(content) = ns_window.contentView() {
+            for tag in EFFECT_VIEW_TAGS {
+                let view: Option<objc2::rc::Retained<NSView>> = content.viewWithTag(tag);
+                if let Some(view) = view {
+                    view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::empty());
+                    view.setFrame(rect);
+                    found.push(tag);
+                }
+            }
+        }
+        let _ = done.send(found);
+    })
+    .map_err(|error| error.to_string())?;
+    let found = answer
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "the glass change did not finish".to_owned())?;
+    Ok(json!({ "tags": found }))
+}
+
+/// Measurement only: hides the window's backdrop layers (the material's and
+/// the titlebar's) and/or paints the window opaque, to see what each costs
+/// the window server.
+#[cfg(target_os = "macos")]
+fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2_app_kit::{NSColor, NSView, NSWindow};
+    use objc2_quartz_core::CALayer;
+    fn hide_backdrops(layer: &CALayer, hidden: bool, count: &mut usize) {
+        let class: &objc2::runtime::AnyObject = layer.as_ref();
+        if class.class().name().to_bytes() == b"CABackdropLayer" {
+            layer.setHidden(hidden);
+            *count += 1;
+        }
+        if let Some(sublayers) = unsafe { layer.sublayers() } {
+            for sublayer in sublayers.iter() {
+                hide_backdrops(&sublayer, hidden, count);
+            }
+        }
+    }
+    let flag = |key: &str| command.get(key).and_then(Value::as_bool);
+    let (backdrops, opaque) = (flag("backdrops"), flag("opaque"));
+    let window = app
+        .get_webview_window(crate::MAIN_LABEL)
+        .ok_or("no main window")?;
+    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
+    let (done, answer) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        // SAFETY: Tao's live NSWindow, on the main thread for this call.
+        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+        let mut count = 0;
+        if let Some(shown) = backdrops {
+            let frame: Option<objc2::rc::Retained<NSView>> = ns_window
+                .contentView()
+                .and_then(|view| unsafe { view.superview() });
+            if let Some(layer) = frame.and_then(|view| view.layer()) {
+                if let Some(sublayers) = unsafe { layer.sublayers() } {
+                    for sublayer in sublayers.iter().skip(1) {
+                        hide_backdrops(&sublayer, !shown, &mut count);
+                    }
+                }
+            }
+        }
+        if let Some(opaque) = opaque {
+            ns_window.setOpaque(opaque);
+            let color = if opaque {
+                NSColor::windowBackgroundColor()
+            } else {
+                NSColor::clearColor()
+            };
+            ns_window.setBackgroundColor(Some(&color));
+        }
+        let _ = done.send(count);
+    })
+    .map_err(|error| error.to_string())?;
+    let count = answer
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "the window change did not finish".to_owned())?;
+    Ok(json!({ "backdrops": count }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_parts(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("window is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn glass(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("glass is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn layers(_: &tauri::AppHandle) -> Result<Value, String> {
+    Err("layers is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frame(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("frame is macOS only".into())
 }
 
 /// The main window as a PNG at `path`, for page screenshots.
