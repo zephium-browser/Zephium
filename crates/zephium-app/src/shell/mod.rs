@@ -865,6 +865,9 @@ impl Shell {
                 profile,
                 extension_id,
             } => {
+                #[cfg(target_os = "windows")]
+                self.open_web_extension_options(profile, extension_id);
+                #[cfg(not(target_os = "windows"))]
                 let _ = self
                     .engine
                     .open_web_extension_options(profile, extension_id);

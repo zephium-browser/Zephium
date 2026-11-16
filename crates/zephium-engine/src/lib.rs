@@ -2764,7 +2764,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     fn open_web_extension_options(
         &self,
         profile: ProfileId,
