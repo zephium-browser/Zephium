@@ -342,8 +342,11 @@ pub struct StageIvars {
     detach_scheduled: Cell<bool>,
     /// The last frame of each page taken before it left the window, shown
     /// over it on return until WebKit presents it again. None: no frame.
-    /// Memory only, keyed by the exact view it was taken from.
-    parked: RefCell<HashMap<ItemId, (usize, super::PageSnapshot)>>,
+    /// Memory only, keyed by the exact view and document it was taken from.
+    parked: RefCell<HashMap<ItemId, (usize, u64, super::PageSnapshot)>>,
+    /// The main-frame document each page last committed, by a stage-wide serial.
+    documents: RefCell<HashMap<ItemId, u64>>,
+    document_serial: Cell<u64>,
     parking: RefCell<HashSet<ItemId>>,
     offstage: RefCell<Option<Retained<NSWindow>>>,
     return_covers: Cell<u64>,
@@ -1134,6 +1137,9 @@ impl ContentStage {
         if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
             parked.remove(&id);
         }
+        if let Ok(mut documents) = self.ivars().documents.try_borrow_mut() {
+            documents.remove(&id);
+        }
         if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
             since.remove(&id);
         }
@@ -1189,12 +1195,15 @@ impl ContentStage {
         if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
             parked.remove(&id);
         }
+        if let Ok(mut documents) = self.ivars().documents.try_borrow_mut() {
+            documents.remove(&id);
+        }
         if let Some(view) = view {
             self.bump_layout_epoch();
             set_home(&view.view, None);
             // Pulling a page out of WebKit's fullscreen window would strand
             // that window; the host lets WebKit hand it back before teardown.
-            if !super::fullscreen::webkit_owns(&view.view, self) {
+            if !self.webkit_owns(&view.view) {
                 view.view.removeFromSuperview();
             }
         }
@@ -1329,6 +1338,16 @@ impl ContentStage {
             if let Some(view) = views.get(&id) {
                 view.presentation_permit.store(false, Ordering::Release);
             }
+        }
+        let serial = self.ivars().document_serial.get().wrapping_add(1);
+        self.ivars().document_serial.set(serial);
+        let Ok(mut documents) = self.ivars().documents.try_borrow_mut() else {
+            return false;
+        };
+        documents.insert(id, serial);
+        drop(documents);
+        if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
+            parked.remove(&id);
         }
         let removed = match self.ivars().ready.try_borrow_mut() {
             Ok(mut ready) => ready.remove(&id),
@@ -2039,7 +2058,7 @@ impl ContentStage {
                     if rounded_native_size(backing.width, backing.height, 1.0).is_some() {
                         paintable.insert(id);
                     }
-                    if super::fullscreen::webkit_owns(&view.view, self) {
+                    if self.webkit_owns(&view.view) {
                         continue;
                     }
                     let current = view.view.frame();
@@ -2134,7 +2153,7 @@ impl ContentStage {
                     || !paintable.contains(id)
                     || !view.presentation_permit.load(Ordering::Acquire)
             }) {
-                if super::fullscreen::webkit_owns(&view.view, self) {
+                if self.webkit_owns(&view.view) {
                     continue;
                 }
                 if !view.view.isHidden() {
@@ -2175,7 +2194,7 @@ impl ContentStage {
                     superseded = true;
                     break;
                 }
-                if super::fullscreen::webkit_owns(&view.view, self) {
+                if self.webkit_owns(&view.view) {
                     continue;
                 }
                 let hidden = view.view.isHidden();
@@ -2249,7 +2268,7 @@ impl ContentStage {
         if let Ok(views) = self.ivars().views.try_borrow() {
             for (id, view) in views.iter() {
                 if !view.view.isHidden()
-                    && !super::fullscreen::webkit_owns(&view.view, self)
+                    && !self.webkit_owns(&view.view)
                     && (!visible.contains(id)
                         || !ready.contains(id)
                         || !paintable.contains(id)
@@ -2473,6 +2492,16 @@ impl ContentStage {
         }
     }
 
+    fn webkit_owns(&self, view: &NSView) -> bool {
+        let parking = self
+            .ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|window| window.contentView()));
+        super::fullscreen::webkit_owns(view, self, parking.as_deref())
+    }
+
     fn is_offstage(&self, parent: &NSView) -> bool {
         self.ivars()
             .offstage
@@ -2491,8 +2520,10 @@ impl ContentStage {
             .try_borrow_mut()
             .ok()
             .and_then(|mut parked| parked.remove(&id))
-            .filter(|(owner, _)| *owner == view_key(view))
-            .and_then(|(_, snapshot)| snapshot.image());
+            .filter(|(owner, document, _)| {
+                *owner == view_key(view) && Some(*document) == self.document(id)
+            })
+            .and_then(|(_, _, snapshot)| snapshot.image());
         let Some(image) = image else {
             return;
         };
@@ -2569,6 +2600,15 @@ impl ContentStage {
         }
     }
 
+    /// The page's current document; zero before its first commit.
+    fn document(&self, id: ItemId) -> Option<u64> {
+        self.ivars()
+            .documents
+            .try_borrow()
+            .ok()
+            .map(|documents| documents.get(&id).copied().unwrap_or(0))
+    }
+
     /// Takes the frame of a page while it is shown: WebKit can leave its
     /// display link running after snapshotting a page that is already hidden.
     fn capture_shown(&self, id: ItemId, view: &NSView) {
@@ -2589,6 +2629,12 @@ impl ContentStage {
             return;
         };
         let owner = view_key(view);
+        let Some(document) = self.document(id) else {
+            if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
+                parking.remove(&id);
+            }
+            return;
+        };
         let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
         let started = super::PageSnapshot::capture_page(page, move |snapshot| {
             let Some(mtm) = MainThreadMarker::new() else {
@@ -2605,7 +2651,9 @@ impl ContentStage {
                     .get(&id)
                     .is_some_and(|host| view_key(&host.view) == owner)
             });
-            if !current {
+            // A navigation that committed while WebKit was drawing makes
+            // this frame another document's.
+            if !current || stage.document(id) != Some(document) {
                 return;
             }
             let (Some(snapshot), Ok(mut parked)) =
@@ -2613,7 +2661,7 @@ impl ContentStage {
             else {
                 return;
             };
-            parked.insert(id, (owner, snapshot));
+            parked.insert(id, (owner, document, snapshot));
         });
         if !started {
             if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
@@ -2819,7 +2867,7 @@ impl ContentStage {
             if covered
                 || !here
                 || !view.view.isHiddenOrHasHiddenAncestor()
-                || super::fullscreen::webkit_owns(&view.view, self)
+                || self.webkit_owns(&view.view)
                 || super::fullscreen::in_transition(&view.view)
                 || needs_window(&view.view)
             {

@@ -1093,7 +1093,7 @@ fn a_concealed_page_leaves_the_window_only_hidden_and_revalidated() {
     // Pages WebKit holds, pages mid-transition, capturing or audible pages,
     // covered pages and pages under a drop preview stay in the window.
     for kept in [
-        "super::fullscreen::webkit_owns(&view.view, self)",
+        "self.webkit_owns(&view.view)",
         "super::fullscreen::in_transition(&view.view)",
         "needs_window(&view.view)",
         "covers.contains_key(&id)",
@@ -1150,9 +1150,7 @@ fn a_detached_page_is_re_attached_hidden_before_any_reveal_or_cover() {
     let check = &sync[back..reveal];
     assert!(check.contains("self.layout_epoch_is_current(epoch)"));
     assert!(check.contains("presentation_permit.load(Ordering::Acquire)"));
-    assert!(sync[..back]
-        .rfind("super::fullscreen::webkit_owns(&view.view, self)")
-        .is_some());
+    assert!(sync[..back].rfind("self.webkit_owns(&view.view)").is_some());
 
     let cover = macos_stage_fn(stage, "cover");
     let back = cover
@@ -1281,7 +1279,8 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
     // WebKit's next presentation or the bound, whichever comes first.
     let cover = macos_stage_fn(stage, "cover_return");
     assert!(cover.contains("parked.remove(&id)"));
-    assert!(cover.contains(".filter(|(owner, _)| *owner == view_key(view))"));
+    assert!(cover.contains(".filter(|(owner, document, _)| {"));
+    assert!(cover.contains("*owner == view_key(view)"));
     assert!(cover.contains("_doAfterNextPresentationUpdate:"));
     assert!(cover.contains("RETURN_COVER_BOUND"));
     assert!(cover.contains("stage.uncover(id, token)"));
@@ -1329,12 +1328,93 @@ fn window_lookups_for_a_concealed_page_follow_it_out_of_the_window() {
 }
 
 #[test]
+fn a_return_frame_never_outlives_its_document() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    // A commit starts a new document and drops the old one's frame.
+    let pending = macos_stage_fn(stage, "set_pending");
+    let bump = pending
+        .find("documents.insert(id, serial)")
+        .expect("document bump");
+    let drop = pending.find("parked.remove(&id)").expect("frame dropped");
+    let sync = pending.find("self.sync_visibility()").expect("sync");
+    assert!(pending.contains("self.ivars().document_serial.set(serial)"));
+    assert!(bump < drop && drop < sync);
+
+    // A capture in flight when the page navigates is thrown away.
+    let capture = macos_stage_fn(stage, "capture_shown");
+    let taken = capture
+        .find("let Some(document) = self.document(id)")
+        .expect("document read");
+    let started = capture.find("capture_page(page").expect("capture");
+    assert!(taken < started);
+    let done = &capture[started..];
+    let check = done
+        .find("stage.document(id) != Some(document)")
+        .expect("completion checks the document");
+    let store = done
+        .find("parked.insert(id, (owner, document, snapshot))")
+        .expect("frame stored with its document");
+    assert!(check < store);
+
+    // On return the frame must match both the view and the document.
+    let back = macos_stage_fn(stage, "cover_return");
+    assert!(back.contains("*owner == view_key(view) && Some(*document) == self.document(id)"));
+
+    // Closing a page or reusing its slot forgets its document.
+    for (from, to) in [
+        ("pub fn insert_view(", "pub fn remove_view("),
+        ("pub fn remove_view(", "pub fn adopt_after_fullscreen("),
+    ] {
+        let body = stage
+            .split_once(from)
+            .expect(from)
+            .1
+            .split_once(to)
+            .expect(to)
+            .0;
+        assert!(body.contains("documents.remove(&id)"), "{from}");
+    }
+}
+
+#[test]
+fn a_parked_page_is_not_mistaken_for_webkit_fullscreen() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    // Every stage check names its own off-stage window, so a parked page that
+    // is selected again re-attaches, lays out and closes like any other.
+    assert_eq!(stage.matches("super::fullscreen::webkit_owns(").count(), 1);
+    let owns = macos_stage_fn(stage, "webkit_owns");
+    assert!(owns.contains(".offstage"));
+    assert!(owns.contains("window.contentView()"));
+    assert!(owns.contains("super::fullscreen::webkit_owns(view, self, parking.as_deref())"));
+    let sync = macos_stage_fn(stage, "sync_visibility");
+    let guard = sync.find("self.webkit_owns(&view.view)").expect("guard");
+    let back = sync.find("self.reattach(&view.view)").expect("reattach");
+    assert!(guard < back);
+    let remove = stage
+        .split_once("pub fn remove_view(")
+        .expect("remove_view")
+        .1
+        .split_once("pub fn adopt_after_fullscreen(")
+        .expect("adopt_after_fullscreen")
+        .0;
+    assert!(remove.contains(
+        "if !self.webkit_owns(&view.view) {\n                view.view.removeFromSuperview();"
+    ));
+}
+
+#[test]
 fn the_macos_stage_never_moves_a_page_webkit_is_showing_fullscreen() {
     let stage = include_str!("../../platform/macos/stage.rs")
         .split_once("#[cfg(test)]")
         .expect("stage tests boundary")
         .0;
-    let guard = "fullscreen::webkit_owns(&view.view, self)";
+    let guard = "self.webkit_owns(&view.view)";
     for mutation in [
         "view.view.setFrame(",
         "view.view.setHidden(",
