@@ -2300,6 +2300,10 @@ impl EngineHost {
                 }
                 return None;
             }
+            let extension_frame_permit = event_permit.clone();
+            security_policy.admit_extension_frames(move |uri| {
+                extension_frame_permit.allows_extension_frame(uri)
+            });
             let frame_site_scope = site_scope.clone();
             if let Err(error) = security_policy.judge_frame_navigations(move |uri| {
                 frame_site_scope.blocks_navigation(uri, true).is_some()
