@@ -23,7 +23,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 
 const photo = vi.hoisted(() => ({ url: "" }));
 vi.mock("$domain/profiles/avatar", async (original) => {
-  const actual = await original<typeof import("$domain/profiles/avatar")>();
+  const actual = await original<typeof import("$domain/profiles")>();
   return {
     ...actual,
     drawn: (profile: Parameters<typeof actual.drawn>[0]) => {
