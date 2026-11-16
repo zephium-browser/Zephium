@@ -35,6 +35,7 @@
   );
   let offered = $derived(kinds.filter((kind) => source?.kinds.includes(kind)));
   let running = $derived(browserImport.busy());
+  let refused = $derived(browserImport.startFailure());
   let jobSource = $derived(found?.find((candidate) => candidate.id === job?.source) ?? null);
   let jobName = $derived(jobSource?.name ?? "");
   const number = new Intl.NumberFormat();
@@ -185,12 +186,18 @@
       <Button
         size="compact"
         variant="primary"
-        disabled={running || offered.length === 0 || profileId === null}
+        pending={running}
+        disabled={offered.length === 0 || profileId === null}
         onclick={() => profileId && void browserImport.start(source.id, profileId, offered)}
         >{m.onb_import_action()}</Button
       >
     {/if}
   </SettingsRow>
+{/if}
+{#if refused && (job || source?.id === refused.id)}
+  <p class="start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
+{/if}
+{#if !job}
   {#if found && found.length > 0}
     <div class="sources" role="radiogroup" aria-label={m.onb_import_from()}>
       {#each found as candidate, index (candidate.id)}
@@ -242,6 +249,13 @@
 {/if}
 
 <style>
+  .start-error {
+    margin: 0;
+    padding: 0 18px 12px;
+    color: var(--color-danger);
+    font-size: var(--text-label);
+  }
+
   /* The browsers sit under the row that names them, as one choice. */
   .sources {
     display: flex;
