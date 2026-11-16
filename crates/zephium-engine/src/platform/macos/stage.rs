@@ -17,7 +17,6 @@ use objc2_app_kit::{
     NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
     NSWorkspace,
 };
-use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSNumber,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue,
@@ -65,6 +64,9 @@ const FRAME_REFRESH: Duration = Duration::from_secs(30);
 const FRAME_GAP: Duration = Duration::from_secs(5);
 /// Cover tokens the stage hands itself, apart from the host's.
 const RETURN_COVER_TOKENS: u64 = 1 << 62;
+// Parked frames beyond this are dropped oldest first; those pages return
+// without a cover, as before they had one.
+const MAX_PARKED_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 thread_local! {
     /// The window each page kept off stage belongs to, by view address.
@@ -82,6 +84,26 @@ pub fn home_window(view: &NSView) -> Option<Retained<NSWindow>> {
                 .and_then(|homes| homes.get(&view_key(view)).and_then(Weak::load))
         })
         .or_else(|| view.window())
+}
+
+struct ParkedFrame {
+    owner: usize,
+    document: u64,
+    taken: Instant,
+    snapshot: super::PageSnapshot,
+}
+
+/// The frames to drop, oldest first, so the newest fit in `budget`.
+fn over_budget<K: Copy>(mut frames: Vec<(K, usize, Instant)>, budget: usize) -> Vec<K> {
+    frames.sort_by_key(|frame| std::cmp::Reverse(frame.2));
+    let mut total = 0usize;
+    frames
+        .into_iter()
+        .filter_map(|(key, bytes, _)| {
+            total = total.saturating_add(bytes);
+            (total > budget).then_some(key)
+        })
+        .collect()
 }
 
 fn view_key(view: &NSView) -> usize {
@@ -343,7 +365,7 @@ pub struct StageIvars {
     /// The last frame of each page taken before it left the window, shown
     /// over it on return until WebKit presents it again. None: no frame.
     /// Memory only, keyed by the exact view and document it was taken from.
-    parked: RefCell<HashMap<ItemId, (usize, u64, super::PageSnapshot)>>,
+    parked: RefCell<HashMap<ItemId, ParkedFrame>>,
     /// The main-frame document each page last committed, by a stage-wide serial.
     documents: RefCell<HashMap<ItemId, u64>>,
     document_serial: Cell<u64>,
@@ -849,7 +871,7 @@ impl ContentStage {
 
     /// A transient visual cover never grants document presentation authority.
     /// It is installed while the shared document permit is still revoked.
-    pub fn cover(&self, id: ItemId, token: u64, image: Option<&CGImage>) -> bool {
+    pub fn cover(&self, id: ItemId, token: u64, frame: Option<&super::PageSnapshot>) -> bool {
         if self.ivars().stage_retry_terminal.get() || !self.wants_visible(id) {
             return false;
         }
@@ -881,15 +903,19 @@ impl ContentStage {
         let view = cover.into_super();
         view.setWantsLayer(true);
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
-        view.setFrame(host.view.frame());
+        let page_frame = host.view.frame();
+        view.setFrame(page_frame);
         if let Some(layer) = view.layer() {
             layer.setBackgroundColor(Some(&page_ground(self).CGColor()));
+            let image = frame
+                .filter(|frame| frame.fits(page_frame.size))
+                .and_then(super::PageSnapshot::image);
             if let Some(image) = image {
                 let contents: &AnyObject = image.as_ref();
                 // SAFETY: a CGImage is valid layer contents; the layer retains it.
                 unsafe { layer.setContents(Some(contents)) };
                 // SAFETY: immutable framework constant.
-                layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityResizeAspectFill });
+                layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityResize });
             }
             if let Some(page_layer) = host.view.layer() {
                 layer.setCornerRadius(page_layer.cornerRadius());
@@ -2514,23 +2540,24 @@ impl ContentStage {
     /// WebKit repaints a page that re-enters the window a few frames after it
     /// is shown. Its last frame covers it meanwhile, never another page's.
     fn cover_return(&self, id: ItemId, view: &NSView) {
-        let image = self
+        let frame = self
             .ivars()
             .parked
             .try_borrow_mut()
             .ok()
             .and_then(|mut parked| parked.remove(&id))
-            .filter(|(owner, document, _)| {
-                *owner == view_key(view) && Some(*document) == self.document(id)
-            })
-            .and_then(|(_, _, snapshot)| snapshot.image());
-        let Some(image) = image else {
+            .filter(|frame| {
+                frame.owner == view_key(view)
+                    && Some(frame.document) == self.document(id)
+                    && frame.snapshot.fits(view.frame().size)
+            });
+        let Some(frame) = frame else {
             return;
         };
         let serial = self.ivars().return_covers.get().wrapping_add(1);
         self.ivars().return_covers.set(serial);
         let token = RETURN_COVER_TOKENS | (serial & (RETURN_COVER_TOKENS - 1));
-        if !self.cover(id, token, Some(&image)) {
+        if !self.cover(id, token, Some(&frame.snapshot)) {
             return;
         }
         let Some(mtm) = MainThreadMarker::new() else {
@@ -2661,7 +2688,22 @@ impl ContentStage {
             else {
                 return;
             };
-            parked.insert(id, (owner, document, snapshot));
+            parked.insert(
+                id,
+                ParkedFrame {
+                    owner,
+                    document,
+                    taken: Instant::now(),
+                    snapshot,
+                },
+            );
+            let frames = parked
+                .iter()
+                .map(|(&id, frame)| (id, frame.snapshot.bytes(), frame.taken))
+                .collect();
+            for id in over_budget(frames, MAX_PARKED_FRAME_BYTES) {
+                parked.remove(&id);
+            }
         });
         if !started {
             if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
@@ -3126,6 +3168,25 @@ mod tests {
             [ItemId::from(3), ItemId::from(1), ItemId::from(4)]
         );
         assert!(due_for_detach(&HashMap::new(), now, grace).is_empty());
+    }
+
+    #[test]
+    fn parked_frames_over_budget_drop_oldest_first() {
+        let now = Instant::now();
+        let ago = |s| now - Duration::from_secs(s);
+        let frames = vec![
+            (ItemId::from(1), 4, ago(30)),
+            (ItemId::from(2), 4, ago(1)),
+            (ItemId::from(3), 4, ago(60)),
+            (ItemId::from(4), 4, ago(10)),
+        ];
+        assert_eq!(
+            over_budget(frames.clone(), 8),
+            [ItemId::from(1), ItemId::from(3)]
+        );
+        assert!(over_budget(frames.clone(), 16).is_empty());
+        assert_eq!(over_budget(frames, 0).len(), 4);
+        assert!(over_budget(Vec::<(ItemId, usize, Instant)>::new(), 0).is_empty());
     }
 
     #[test]
