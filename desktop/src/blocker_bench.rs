@@ -1125,7 +1125,12 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
         }
     }
     let flag = |key: &str| command.get(key).and_then(Value::as_bool);
-    let (backdrops, opaque, detach) = (flag("backdrops"), flag("opaque"), flag("detachHidden"));
+    let (backdrops, opaque, detach, leaves) = (
+        flag("backdrops"),
+        flag("opaque"),
+        flag("detachHidden"),
+        flag("detachHiddenLeaves"),
+    );
     let window = app
         .get_webview_window(crate::MAIN_LABEL)
         .ok_or("no main window")?;
@@ -1147,12 +1152,19 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
                 }
             }
         }
-        if detach == Some(true) {
-            if let Some(content) = ns_window.contentView() {
-                for view in content.subviews().iter() {
-                    if view.isHidden() {
+        if let Some(content) = ns_window.contentView() {
+            for view in content.subviews().iter() {
+                if view.isHidden() {
+                    if detach == Some(true) {
                         view.removeFromSuperview();
                         count += 1;
+                    }
+                } else if leaves == Some(true) {
+                    for leaf in view.subviews().iter() {
+                        if leaf.isHidden() {
+                            leaf.removeFromSuperview();
+                            count += 1;
+                        }
                     }
                 }
             }
