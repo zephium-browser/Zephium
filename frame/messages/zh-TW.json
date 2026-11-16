@@ -3542,7 +3542,7 @@
   "native_account_more": "帳戶…",
   "native_split_view_more": "分割畫面…",
   "native_extensions_more": "擴充功能…",
-  "native_reload_tab": "重新載入分頁",
+  "native_refresh": "重新載入分頁",
   "native_duplicate_tab": "複製分頁",
   "native_copy_link": "拷貝連結",
   "native_autofill_password_more": "自動填寫密碼…",

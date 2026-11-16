@@ -3542,7 +3542,7 @@
   "native_account_more": "Учетная запись…",
   "native_split_view_more": "Разделенный экран…",
   "native_extensions_more": "Расширения…",
-  "native_reload_tab": "Обновить вкладку",
+  "native_refresh": "Обновить вкладку",
   "native_duplicate_tab": "Дублировать вкладку",
   "native_copy_link": "Копировать ссылку",
   "native_autofill_password_more": "Автозаполнение пароля…",

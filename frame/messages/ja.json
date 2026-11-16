@@ -3542,7 +3542,7 @@
   "native_account_more": "アカウント…",
   "native_split_view_more": "分割表示…",
   "native_extensions_more": "機能拡張…",
-  "native_reload_tab": "タブを再読み込み",
+  "native_refresh": "タブを再読み込み",
   "native_duplicate_tab": "タブを複製",
   "native_copy_link": "リンクをコピー",
   "native_autofill_password_more": "パスワードを自動入力…",
