@@ -583,13 +583,13 @@ mod tests {
             ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
             PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
         };
-        use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-        use std::os::windows::io::{FromRawHandle, OwnedHandle};
         use ::windows::Win32::Storage::FileSystem::{
             FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL, WRITE_DAC,
         };
+        use ::windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
         use std::os::windows::fs::OpenOptionsExt;
         use std::os::windows::io::AsRawHandle;
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
 
         fn open(path: &Path) -> fs::File {
             fs::OpenOptions::new()
