@@ -67,6 +67,8 @@ mod scriptlets;
 mod scripts;
 mod site_permissions;
 mod stages;
+#[cfg(any(target_os = "windows", test))]
+mod windows_dormancy;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod store_button;
 mod style_worker;

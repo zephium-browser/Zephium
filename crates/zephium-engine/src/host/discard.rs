@@ -1550,9 +1550,14 @@ impl EngineHost {
                 // when scripts must keep going. Do not set Low on ordinary hide
                 // (that would mix with TrySuspend). Show restores Normal.
                 if let Some(view) = self.views.get(&id) {
+                    use super::windows_dormancy::{ops_on_final_refuse, DormancyNativeOp};
                     use wry::{MemoryUsageLevel, WebViewExtWindows as _};
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
-                    self.refuse_memory_low.insert(id);
+                    for op in ops_on_final_refuse() {
+                        if matches!(op, DormancyNativeOp::MemoryLow) {
+                            let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
+                            self.refuse_memory_low.insert(id);
+                        }
+                    }
                 }
                 // The shell then stops asking, so its desired set says what
                 // is really suspended.
@@ -1608,7 +1613,11 @@ impl EngineHost {
                         && !self.suspending.contains(id)
                         && !self.suspend_failed.contains(id)
                         && !self.suspend_uncertain.contains(id)
-                        && !self.refuse_memory_low.contains(id)
+                        && super::windows_dormancy::may_admit_try_suspend(
+                            super::windows_dormancy::RefuseMemoryLow::from_recorded(
+                                self.refuse_memory_low.contains(id),
+                            ),
+                        )
                 })
                 .copied()
                 .min();

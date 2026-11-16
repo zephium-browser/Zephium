@@ -445,8 +445,13 @@ impl EngineHost {
         // sets Low itself. Low is reserved for tabs that refuse suspension
         // (see discard). Only those refuse-path Lows restore Normal here —
         // successful suspend/resume must not get a MemoryUsageTargetLevel poke.
+        // Sequence authority: `windows_dormancy` (hide → TrySuspend, refuse →
+        // Low, show → Normal only after refuse Low).
         #[cfg(target_os = "windows")]
         {
+            use super::windows_dormancy::{
+                ops_on_show, DormancyNativeOp, RefuseMemoryLow,
+            };
             use wry::{MemoryUsageLevel, WebViewExtWindows as _};
 
             let mut woken = Vec::new();
@@ -459,6 +464,12 @@ impl EngineHost {
                     continue;
                 }
                 if off {
+                    // Hide never pokes MemoryUsageTargetLevel; TrySuspend
+                    // follows via pump (`ops_on_hide` = TrySuspend only).
+                    debug_assert_eq!(
+                        super::windows_dormancy::ops_on_hide(),
+                        &[super::windows_dormancy::DormancyNativeOp::TrySuspend]
+                    );
                     self.hidden.insert(*id);
                 } else {
                     self.hidden.remove(id);
@@ -486,18 +497,24 @@ impl EngineHost {
                 .filter(|id| !self.hidden.contains(id))
                 .collect();
             for id in pending {
-                match self.views.get(&id) {
-                    Some(view)
-                        if view
-                            .set_memory_usage_level(MemoryUsageLevel::Normal)
-                            .is_ok() =>
-                    {
-                        self.refuse_memory_low.remove(&id);
+                let owed = RefuseMemoryLow::from_recorded(true);
+                for op in ops_on_show(owed) {
+                    if !matches!(op, DormancyNativeOp::MemoryNormal) {
+                        continue;
                     }
-                    None => {
-                        self.refuse_memory_low.remove(&id);
+                    match self.views.get(&id) {
+                        Some(view)
+                            if view
+                                .set_memory_usage_level(MemoryUsageLevel::Normal)
+                                .is_ok() =>
+                        {
+                            self.refuse_memory_low.remove(&id);
+                        }
+                        None => {
+                            self.refuse_memory_low.remove(&id);
+                        }
+                        Some(_) => {}
                     }
-                    Some(_) => {}
                 }
             }
         }
