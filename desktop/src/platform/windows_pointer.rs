@@ -112,11 +112,11 @@ pub fn forget_buttons(window: HWND, listener: ButtonListener) {
     follow_front();
 }
 
-fn buttons_in_front() -> bool {
+fn button_owner(front: HWND) -> Option<HWND> {
     BUTTON_LISTENERS.with(|listeners| {
-        // SAFETY: reads only the current native window state.
-        listeners.borrow().iter().any(|(window, _)| unsafe {
-            GetForegroundWindow() == *window && !IsIconic(*window).as_bool()
+        listeners.borrow().iter().find_map(|(window, _)| {
+            // SAFETY: reads only the matching window's minimized state.
+            (*window == front && !unsafe { IsIconic(*window) }.as_bool()).then_some(*window)
         })
     })
 }
@@ -192,12 +192,9 @@ fn sink_hwnd() -> Option<HWND> {
 }
 
 /// Whether a listening window is in front and not minimized.
-fn listening_in_front() -> bool {
+fn listening_in_front(front: HWND) -> bool {
     // SAFETY: plain reads of the window in front and its owner.
-    let front = unsafe {
-        let front = GetForegroundWindow();
-        (!front.0.is_null()).then(|| GetAncestor(front, GA_ROOTOWNER))
-    };
+    let front = unsafe { (!front.0.is_null()).then(|| GetAncestor(front, GA_ROOTOWNER)) };
     let Some(front) = front else {
         return false;
     };
@@ -214,7 +211,11 @@ fn listening_in_front() -> bool {
 }
 
 fn follow_front() {
-    let wanted = buttons_in_front() || (listening_in_front() && !SETTLING.get());
+    // SAFETY: read foreground ownership once for this notification.
+    let front = unsafe { GetForegroundWindow() };
+    let owner = button_owner(front);
+    super::middle_click_foreground_changed(owner);
+    let wanted = owner.is_some() || (listening_in_front(front) && !SETTLING.get());
     if wanted != REGISTERED.get() {
         register(wanted);
     }
@@ -315,8 +316,8 @@ unsafe extern "system" fn sink_proc(
     match msg {
         // Button transitions must survive move-listener frame throttling.
         WM_INPUT => {
-            let _ = std::panic::catch_unwind(|| notify_buttons(l));
-            if SETTLING.get() {
+            let mouse = std::panic::catch_unwind(|| notify_input(l)).unwrap_or(false);
+            if !mouse || SETTLING.get() {
                 return DefSubclassProc(hwnd, msg, w, l);
             }
             // Input is held back only while a timer will end the frame;
@@ -341,14 +342,11 @@ unsafe extern "system" fn sink_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 
-fn notify_buttons(data: LPARAM) {
-    if !buttons_in_front() {
-        return;
-    }
+fn notify_input(data: LPARAM) -> bool {
     let mut input = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     // SAFETY: WM_INPUT supplies the handle. The output is aligned and bounded
-    // by size. Read the union only after validating the mouse header.
+    // by size. Read the union only after validating its tag and record length.
     let buttons = unsafe {
         let read = GetRawInputData(
             HRAWINPUT(data.0 as *mut _),
@@ -357,14 +355,21 @@ fn notify_buttons(data: LPARAM) {
             &mut size,
             size_of::<RAWINPUTHEADER>() as u32,
         );
+        if read == u32::MAX || read < size_of::<RAWINPUTHEADER>() as u32 {
+            return false;
+        }
         if read != size_of::<RAWINPUT>() as u32 || input.header.dwType != RIM_TYPEMOUSE.0 {
-            return;
+            return false;
         }
         input.data.mouse.Anonymous.Anonymous.usButtonFlags
     };
-    if buttons == 0 {
-        return;
+    if buttons & 0x03ff == 0 {
+        return true;
     }
+    // SAFETY: read foreground ownership once for all button listeners.
+    let Some(owner) = button_owner(unsafe { GetForegroundWindow() }) else {
+        return true;
+    };
     // SAFETY: these describe the input message currently being dispatched,
     // including queued modifiers, rather than the later hardware state.
     let (position, shift, age) = unsafe {
@@ -382,11 +387,11 @@ fn notify_buttons(data: LPARAM) {
     };
     let listeners = BUTTON_LISTENERS.with(|listeners| listeners.borrow().clone());
     for (window, listener) in listeners {
-        // SAFETY: a plain foreground-window query.
-        if unsafe { GetForegroundWindow() } == window {
+        if window == owner {
             listener(buttons, position, shift, age);
         }
     }
+    true
 }
 
 impl Drop for Sink {

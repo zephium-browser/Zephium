@@ -164,8 +164,6 @@ pub fn init(
     let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
     if hardened.is_ok() {
         if let Ok(hwnd) = window.hwnd() {
-            pointer::listen(hwnd, middle_click_foreground_changed);
-            middle_click_foreground_changed(hwnd);
             pointer::listen_buttons(hwnd, zephium_engine::record_middle_click);
         }
     }
@@ -173,19 +171,14 @@ pub fn init(
     hardened
 }
 
-fn middle_click_foreground_changed(hwnd: windows::Win32::Foundation::HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic};
-    // SAFETY: these queries read top-level window state on the UI thread.
-    let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
-    zephium_engine::watch_middle_clicks(foreground.then_some(hwnd));
+fn middle_click_foreground_changed(owner: Option<windows::Win32::Foundation::HWND>) {
+    zephium_engine::watch_middle_clicks(owner);
 }
 
 pub fn unwatch_middle_clicks(window: &WebviewWindow) {
     if let Ok(hwnd) = window.hwnd() {
-        pointer::forget(hwnd, middle_click_foreground_changed);
         pointer::forget_buttons(hwnd, zephium_engine::record_middle_click);
     }
-    zephium_engine::watch_middle_clicks(None);
 }
 
 /// F10 and Alt+Space typed into the chrome WebView never reach the window, so

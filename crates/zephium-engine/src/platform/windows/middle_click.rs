@@ -63,7 +63,8 @@ fn capture_message(
     age: Duration,
     target_at: impl FnOnce(POINT) -> Option<HWND>,
 ) {
-    let Some(created) = Instant::now().checked_sub(age).filter(|_| age < MAX_AGE) else {
+    let now = Instant::now();
+    let Some(created) = now.checked_sub(age).filter(|created| fresh(*created, now)) else {
         PRESSED.set(None);
         CLICK.set(None);
         return;
@@ -109,27 +110,25 @@ fn capture_input(buttons: u16, target: Option<HWND>, shift: bool, created: Insta
 pub(crate) fn take_foreground(opener: HWND, fallback: bool) -> bool {
     // A receipt can only affect selection for the physical view that received
     // the click. It does not grant popup or navigation admission.
-    let click = CLICK.take().and_then(|click| {
-        if click.released.elapsed() >= MAX_AGE {
-            return None;
-        }
-        if click.target == opener || unsafe { IsChild(opener, click.target) }.as_bool() {
-            Some(click)
-        } else {
-            CLICK.set(Some(click));
-            None
-        }
-    });
-    foreground(fallback, click, Instant::now())
+    foreground(opener, fallback, CLICK.take(), Instant::now())
 }
 
-fn foreground(fallback: bool, click: Option<Click>, now: Instant) -> bool {
-    click
-        .filter(|click| {
-            now.checked_duration_since(click.released)
-                .is_some_and(|age| age < MAX_AGE)
-        })
-        .map_or(fallback, |click| click.shift)
+fn fresh(created: Instant, now: Instant) -> bool {
+    now.checked_duration_since(created)
+        .is_some_and(|age| age < MAX_AGE)
+}
+
+fn foreground(opener: HWND, fallback: bool, click: Option<Click>, now: Instant) -> bool {
+    let Some(click) = click.filter(|click| fresh(click.released, now)) else {
+        return fallback;
+    };
+    // SAFETY: IsChild only queries the relationship between native handle values.
+    if click.target == opener || unsafe { IsChild(opener, click.target) }.as_bool() {
+        click.shift
+    } else {
+        CLICK.set(Some(click));
+        fallback
+    }
 }
 
 #[cfg(test)]
@@ -236,7 +235,7 @@ mod tests {
             released,
             shift: false,
         };
-        assert!(!foreground(true, Some(click), released));
+        assert!(!foreground(HWND::default(), true, Some(click), released));
     }
 
     #[test]
@@ -247,7 +246,7 @@ mod tests {
             released,
             shift: true,
         };
-        assert!(foreground(false, Some(click), released));
+        assert!(foreground(HWND::default(), false, Some(click), released));
     }
 
     #[test]
@@ -258,8 +257,13 @@ mod tests {
             released,
             shift: false,
         };
-        assert!(foreground(true, Some(click), released + MAX_AGE));
-        assert!(!foreground(false, None, released));
+        assert!(foreground(
+            HWND::default(),
+            true,
+            Some(click),
+            released + MAX_AGE
+        ));
+        assert!(!foreground(HWND::default(), false, None, released));
     }
 
     #[test]
@@ -295,5 +299,60 @@ mod tests {
         assert_eq!(PRESSED.get(), Some(owner));
         watch_middle_clicks(None);
         assert_eq!(PRESSED.get(), None);
+    }
+
+    #[test]
+    fn foreground_refusal_cannot_create_a_receipt() {
+        let owner = HWND(std::ptr::dangling_mut());
+        let other = HWND(2_usize as *mut _);
+        capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), false);
+        capture(
+            RI_MOUSE_MIDDLE_BUTTON_UP as u16,
+            eligible_target(owner, owner, owner, other),
+            false,
+        );
+        assert!(take_foreground(owner, true));
+        assert_eq!(PRESSED.get(), None);
+    }
+
+    #[test]
+    fn teardown_clears_pressed_and_released_input() {
+        let owner = HWND(std::ptr::dangling_mut());
+        for released in [false, true] {
+            OWNER.set(Some(owner));
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), false);
+            if released {
+                capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), false);
+            }
+            watch_middle_clicks(None);
+            assert_eq!(PRESSED.get(), None);
+            assert!(take_foreground(owner, true));
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), false);
+            assert!(take_foreground(owner, true));
+        }
+    }
+
+    #[test]
+    fn request_before_release_uses_foreground_fallback() {
+        let owner = HWND(std::ptr::dangling_mut());
+        capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), false);
+        assert!(take_foreground(owner, true));
+        capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), false);
+        assert!(!take_foreground(owner, true));
+        assert!(take_foreground(owner, true));
+    }
+
+    #[test]
+    fn rapid_clicks_replace_unclaimed_receipts_and_remain_single_use() {
+        let owner = HWND(std::ptr::dangling_mut());
+        for shift in [false, true, false, true] {
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), !shift);
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), !shift);
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(owner), shift);
+            assert!(take_foreground(owner, true));
+            capture(RI_MOUSE_MIDDLE_BUTTON_UP as u16, Some(owner), shift);
+            assert_eq!(take_foreground(owner, !shift), shift);
+            assert!(take_foreground(owner, true));
+        }
     }
 }
