@@ -22,7 +22,7 @@ const state = vi.hoisted(() => ({
 }));
 // Rust serves the account picture and a pick being framed; pictures stand in here.
 vi.mock("$domain/account/account-model", async (original) => ({
-  ...(await original<typeof import("$domain/account/account-model")>()),
+  ...(await original<typeof import("$domain/account")>()),
   avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
   stagedAvatarUrl: () => landscapeFixture,
 }));

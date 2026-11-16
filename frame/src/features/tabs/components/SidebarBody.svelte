@@ -12,6 +12,7 @@
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
+  import { openOnBackgroundMiddleClick } from "../lib/middle-click";
   import { untrack, type Snippet } from "svelte";
 
   let {
@@ -30,6 +31,7 @@
   } = $props();
 
   const selection = new TabSelection();
+  const backgroundClick = openOnBackgroundMiddleClick(tabs.open);
   export function clearSelection() {
     selection.clear();
   }
@@ -112,6 +114,7 @@
       use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
       class="tab-scroller scroll-edges"
       data-glide-scroller
+      {...backgroundClick}
     >
       <TabList
         {selection}

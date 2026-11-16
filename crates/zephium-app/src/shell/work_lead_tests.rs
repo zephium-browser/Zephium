@@ -2375,10 +2375,7 @@ fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
 }
 
 async fn zero_folder_computer_parts_body() {
-    let folder = tempfile::Builder::new()
-        .prefix("zephium-picker-home-")
-        .tempdir()
-        .unwrap();
+    let folder = crate::work_files::test_tempdir();
     let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
     let project = folder.path().join("Documents/project");
     std::fs::create_dir_all(&project).unwrap();
