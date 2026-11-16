@@ -26,6 +26,13 @@ let observationLifetime = new AbortController();
 let initialized = false;
 let initializing: Promise<void> | null = null;
 export const currentPage = () => page;
+/** A tool open in full: the page a panel's full mode opens. */
+export const toolPage = () =>
+  page === "tasks" ||
+  page === "notes" ||
+  page === "time" ||
+  page === "history" ||
+  page === "downloads";
 export const navigationFailed = () => error;
 async function initialize(epoch: number) {
   const listeners = await listenAll([

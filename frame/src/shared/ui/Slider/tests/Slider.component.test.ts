@@ -1,7 +1,10 @@
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { userEvent } from "vitest/browser";
+import { IS_MAC } from "$shared/platform";
 import Slider from "../Slider.svelte";
+
+const selectAll = IS_MAC ? "{Meta>}a{/Meta}" : "{Control>}a{/Control}";
 
 test("slider exposes its value and steps from the keyboard", async () => {
   const onchange = vi.fn();
@@ -17,7 +20,7 @@ test("slider exposes its value and steps from the keyboard", async () => {
   const track = screen.getByRole("slider", { name: "Zoom" });
   await expect.element(track).toHaveAttribute("aria-valuenow", "2");
   await expect.element(track).toHaveAttribute("aria-valuetext", "2x");
-  await userEvent.keyboard(navigator.platform.includes("Mac") ? "{Alt>}{Tab}{/Alt}" : "{Tab}");
+  await userEvent.keyboard(IS_MAC ? "{Alt>}{Tab}{/Alt}" : "{Tab}");
   await expect.element(track).toHaveFocus();
   await userEvent.keyboard("{ArrowRight}");
   expect(onchange).toHaveBeenCalledWith(2.5);
@@ -39,7 +42,7 @@ test("typing a value clamps and quantizes it", async () => {
   await screen.getByRole("button", { name: "275" }).click();
   const input = screen.getByRole("textbox", { name: "Delay" });
   await expect.element(input).toHaveFocus();
-  await userEvent.keyboard("{Control>}a{/Control}1203{Enter}");
+  await userEvent.keyboard(`${selectAll}1203{Enter}`);
   expect(oncommit).toHaveBeenCalledWith(1000);
   await expect
     .element(screen.getByRole("slider", { name: "Delay" }))
@@ -56,7 +59,11 @@ test("clearing the typed value does not reset the slider to zero", async () => {
   const oncommit = vi.fn();
   const screen = await render(Slider, { label: "Tint", value: 40, oncommit });
   await screen.getByRole("button", { name: "40", exact: true }).click();
-  await userEvent.keyboard("{Control>}a{/Control}{Backspace}{Enter}");
+  const input = screen.getByRole("textbox", { name: "Tint" });
+  await expect.element(input).toHaveFocus();
+  await userEvent.keyboard(`${selectAll}{Backspace}`);
+  await expect.element(input).toHaveValue("");
+  await userEvent.keyboard("{Enter}");
   await expect
     .element(screen.getByRole("slider", { name: "Tint" }))
     .toHaveAttribute("aria-valuenow", "40");

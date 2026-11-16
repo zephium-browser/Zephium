@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { acceptPanelState } from "../lib/panel-model";
 import type { PanelState } from "$shared/ipc/bindings";
 const snapshot = (revision: string): PanelState => ({
+  switcher: null,
   window_id: "window",
   revision,
   session_id: revision,

@@ -27,6 +27,7 @@
     ontoggle,
     pageControls = true,
     launcher = false,
+    search = true,
   }: {
     compact: boolean;
     ontoggle: () => void;
@@ -34,6 +35,8 @@
     pageControls?: boolean;
     /** Beside a tool panel, search stands where the shape toggle would. */
     launcher?: boolean;
+    /** Tab search in the rail's head; a tool in full has no tabs to search. */
+    search?: boolean;
   } = $props();
 
   let active = $derived(tabs.activeTab());
@@ -119,18 +122,18 @@
       <div style:height="8px" aria-hidden="true"></div>
     {/if}
     <ModeTabs compact />
-    <div class="flex items-center gap-0.5">
-      <!-- Its menu acts on the page and the column's shape; Work has neither. -->
-      {#if pageControls}<IconButton
-          icon={EllipsisIcon}
-          label={m.ui_sidebar_options()}
-          size={15}
-          buttonSize={26}
-          haspopup
-          onclick={openSidebarMenu}
-        />{/if}
-      <SidebarSearch small />
-    </div>
+    {#if pageControls || search}<div class="flex items-center gap-0.5">
+        <!-- Its menu acts on the page and the column's shape; Work has neither. -->
+        {#if pageControls}<IconButton
+            icon={EllipsisIcon}
+            label={m.ui_sidebar_options()}
+            size={15}
+            buttonSize={26}
+            haspopup
+            onclick={openSidebarMenu}
+          />{/if}
+        {#if search}<SidebarSearch small />{/if}
+      </div>{/if}
     <span class="mt-[6px] mb-[7px] h-px w-[22px] rounded-full bg-border" aria-hidden="true"></span>
   </header>
 {:else}
