@@ -3925,7 +3925,7 @@ fn toggle_window_fullscreen(window: &WebviewWindow) {
     if enter {
         platform::imp::set_caption_window_fullscreen(window, true);
     }
-    let changed = window.set_fullscreen(enter).is_ok();
+    let changed = platform::set_window_fullscreen(window, enter).is_ok();
     #[cfg(target_os = "windows")]
     platform::imp::set_caption_window_fullscreen(window, enter == changed);
     #[cfg(not(target_os = "windows"))]
