@@ -4,11 +4,10 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_SHIFT};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetCursorPos, GetForegroundWindow, IsChild, WindowFromPoint, GA_ROOT,
-    RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_LEFT_BUTTON_DOWN,
-    RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
+    GetAncestor, GetForegroundWindow, IsChild, WindowFromPoint, GA_ROOT, RI_MOUSE_BUTTON_4_DOWN,
+    RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_DOWN,
+    RI_MOUSE_MIDDLE_BUTTON_UP, RI_MOUSE_RIGHT_BUTTON_DOWN,
 };
 
 const MAX_AGE: Duration = Duration::from_millis(250);
@@ -37,31 +36,46 @@ pub fn watch_middle_clicks(owner: Option<HWND>) {
 
 /// Receives mouse button flags from the desktop's existing raw-input sink.
 /// This notification runs after input delivery and cannot block the pointer.
-pub fn record_middle_click(buttons: u16) {
+/// Position, modifiers and age describe the queued input message.
+pub fn record_middle_click(buttons: u16, position: POINT, shift: bool, age: Duration) {
     let Some(owner) = OWNER.get() else {
         return;
     };
-    let mut point = POINT::default();
-    // SAFETY: queries on this UI thread, with an initialized cursor out value.
-    let (target, root, front, shift) = unsafe {
-        let target = GetCursorPos(&mut point)
-            .map(|()| WindowFromPoint(point))
-            .unwrap_or_default();
-        (
-            target,
-            GetAncestor(target, GA_ROOT),
-            GetForegroundWindow(),
-            GetAsyncKeyState(i32::from(VK_SHIFT.0)) < 0,
-        )
+    capture_message(buttons, position, shift, age, |position| {
+        // SAFETY: native window queries on this UI thread using the message's
+        // cursor position, even if the physical cursor has since moved.
+        unsafe {
+            let target = WindowFromPoint(position);
+            eligible_target(
+                owner,
+                target,
+                GetAncestor(target, GA_ROOT),
+                GetForegroundWindow(),
+            )
+        }
+    });
+}
+
+fn capture_message(
+    buttons: u16,
+    position: POINT,
+    shift: bool,
+    age: Duration,
+    target_at: impl FnOnce(POINT) -> Option<HWND>,
+) {
+    let Some(created) = Instant::now().checked_sub(age).filter(|_| age < MAX_AGE) else {
+        PRESSED.set(None);
+        CLICK.set(None);
+        return;
     };
-    capture(buttons, eligible_target(owner, target, root, front), shift);
+    capture_input(buttons, target_at(position), shift, created);
 }
 
 fn eligible_target(owner: HWND, target: HWND, root: HWND, front: HWND) -> Option<HWND> {
     (!target.0.is_null() && root == owner && front == owner).then_some(target)
 }
 
-fn capture(buttons: u16, target: Option<HWND>, shift: bool) {
+fn capture_input(buttons: u16, target: Option<HWND>, shift: bool, created: Instant) {
     let buttons = u32::from(buttons);
     if buttons
         & (RI_MOUSE_LEFT_BUTTON_DOWN
@@ -85,7 +99,7 @@ fn capture(buttons: u16, target: Option<HWND>, shift: bool) {
                 .filter(|target| Some(*target) == pressed)
                 .map(|target| Click {
                     target,
-                    released: Instant::now(),
+                    released: created,
                     shift,
                 }),
         );
@@ -121,6 +135,48 @@ fn foreground(fallback: bool, click: Option<Click>, now: Instant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture(buttons: u16, target: Option<HWND>, shift: bool) {
+        capture_input(buttons, target, shift, Instant::now());
+    }
+
+    #[test]
+    fn queued_click_keeps_its_event_position_and_shift() {
+        let target = HWND(std::ptr::dangling_mut());
+        let event_position = POINT { x: -100, y: 50 };
+        let current_position = POINT { x: 600, y: 50 };
+        for buttons in [RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP] {
+            capture_message(
+                buttons as u16,
+                event_position,
+                true,
+                Duration::from_millis(20),
+                |position| {
+                    assert_eq!(position.x, event_position.x);
+                    assert_ne!(position.x, current_position.x);
+                    Some(target)
+                },
+            );
+        }
+        assert!(take_foreground(target, false));
+    }
+
+    #[test]
+    fn queued_release_expires_from_message_creation() {
+        let target = HWND(std::ptr::dangling_mut());
+        for age in [MAX_AGE, Duration::from_millis(400)] {
+            capture(RI_MOUSE_MIDDLE_BUTTON_DOWN as u16, Some(target), false);
+            capture_message(
+                RI_MOUSE_MIDDLE_BUTTON_UP as u16,
+                POINT::default(),
+                false,
+                age,
+                |_| panic!("an expired event must not look up a target"),
+            );
+            assert!(take_foreground(target, true));
+            assert_eq!(PRESSED.take(), None);
+        }
+    }
 
     #[test]
     fn raw_button_capture_requires_a_matching_press_and_release() {

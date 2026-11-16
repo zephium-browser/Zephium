@@ -10,20 +10,23 @@
 //! to answer. Raw input is only told about moves after the fact.
 
 use std::cell::{Cell, RefCell};
+use std::time::Duration;
 
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, IsIconic, IsWindow,
-    KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
+    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos,
+    GetMessageTime, IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
 };
 
 /// About a display frame, as often as the pointer was read while it moved.
@@ -43,7 +46,7 @@ const SLOW_RETRY_MS: u32 = 30_000;
 /// Told that the pointer moved, or that a window came to the front or left
 /// it. Receives the window it listens for; it reads the pointer itself.
 pub type Listener = fn(HWND);
-pub type ButtonListener = fn(u16);
+pub type ButtonListener = fn(u16, POINT, bool, Duration);
 
 struct Sink {
     hwnd: HWND,
@@ -362,11 +365,26 @@ fn notify_buttons(data: LPARAM) {
     if buttons == 0 {
         return;
     }
+    // SAFETY: these describe the input message currently being dispatched,
+    // including queued modifiers, rather than the later hardware state.
+    let (position, shift, age) = unsafe {
+        let packed = GetMessagePos();
+        (
+            POINT {
+                x: i32::from(packed as u16 as i16),
+                y: i32::from((packed >> 16) as u16 as i16),
+            },
+            GetKeyState(i32::from(VK_SHIFT.0)) < 0,
+            Duration::from_millis(u64::from(
+                GetTickCount().wrapping_sub(GetMessageTime() as u32),
+            )),
+        )
+    };
     let listeners = BUTTON_LISTENERS.with(|listeners| listeners.borrow().clone());
     for (window, listener) in listeners {
         // SAFETY: a plain foreground-window query.
         if unsafe { GetForegroundWindow() } == window {
-            listener(buttons);
+            listener(buttons, position, shift, age);
         }
     }
 }
