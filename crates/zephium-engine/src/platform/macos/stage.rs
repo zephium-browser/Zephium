@@ -60,6 +60,7 @@ const RETURN_COVER_BOUND: Duration = Duration::from_millis(800);
 /// rarely while it stays shown.
 const FRAME_SETTLE: Duration = Duration::from_millis(1500);
 const FRAME_REFRESH: Duration = Duration::from_secs(30);
+const FRAME_GAP: Duration = Duration::from_secs(5);
 /// Cover tokens the stage hands itself, apart from the host's.
 const RETURN_COVER_TOKENS: u64 = 1 << 62;
 
@@ -295,10 +296,12 @@ pub struct StageIvars {
     /// The last frame of each page taken before it left the window, shown
     /// over it on return until WebKit presents it again. None: no frame.
     /// Memory only, keyed by the exact view it was taken from.
-    parked: RefCell<HashMap<ItemId, (usize, Option<super::PageSnapshot>)>>,
+    parked: RefCell<HashMap<ItemId, (usize, super::PageSnapshot)>>,
     parking: RefCell<HashSet<ItemId>>,
     return_covers: Cell<u64>,
     frame_refresh: Cell<u64>,
+    frame_due: Cell<Option<Instant>>,
+    frame_taken: Cell<Option<Instant>>,
 }
 
 define_class!(
@@ -2394,8 +2397,7 @@ impl ContentStage {
             .ok()
             .and_then(|mut parked| parked.remove(&id))
             .filter(|(owner, _)| *owner == view_key(view))
-            .and_then(|(_, snapshot)| snapshot)
-            .and_then(|snapshot| snapshot.image());
+            .and_then(|(_, snapshot)| snapshot.image());
         let Some(image) = image else {
             return;
         };
@@ -2409,12 +2411,29 @@ impl ContentStage {
             return;
         };
         let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        let owner = view_key(view);
+        let lifted = Cell::new(false);
         let lift: Rc<dyn Fn()> = Rc::new(move || {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
             };
-            if let Some(stage) = stage.get(mtm).load() {
-                stage.uncover(id, token);
+            let Some(stage) = stage.get(mtm).load() else {
+                return;
+            };
+            stage.uncover(id, token);
+            if lifted.replace(true) {
+                return;
+            }
+            // The frame went to this cover; a page hidden again before the
+            // next refresh would otherwise leave the window without one.
+            let view = stage.ivars().views.try_borrow().ok().and_then(|views| {
+                views
+                    .get(&id)
+                    .filter(|host| view_key(&host.view) == owner)
+                    .map(|host| host.view.clone())
+            });
+            if let Some(view) = view {
+                stage.capture_shown(id, &view);
             }
         });
         let bounded = MainThreadBound::new(lift.clone(), mtm);
@@ -2494,9 +2513,12 @@ impl ContentStage {
             if !current {
                 return;
             }
-            if let Ok(mut parked) = stage.ivars().parked.try_borrow_mut() {
-                parked.insert(id, (owner, snapshot));
+            let (Some(snapshot), Ok(mut parked)) =
+                (snapshot, stage.ivars().parked.try_borrow_mut())
+            else {
+                return;
             };
+            parked.insert(id, (owner, snapshot));
         });
         if !started {
             if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
@@ -2505,11 +2527,29 @@ impl ContentStage {
         }
     }
 
-    /// Re-arms the frame refresh `after` from now; a newer arm supersedes it.
+    /// Arms the frame refresh `after` from now, never sooner than `FRAME_GAP`
+    /// after the last one and never later than one already armed, so a page
+    /// that keeps changing is still captured.
     fn refresh_frames_in(&self, after: Duration) {
+        let now = Instant::now();
+        let mut due = now + after;
+        if let Some(taken) = self.ivars().frame_taken.get() {
+            due = due.max(taken + FRAME_GAP);
+        }
+        if self
+            .ivars()
+            .frame_due
+            .get()
+            .is_some_and(|armed| armed <= due)
+        {
+            return;
+        }
+        self.ivars().frame_due.set(Some(due));
         let generation = self.ivars().frame_refresh.get().wrapping_add(1);
         self.ivars().frame_refresh.set(generation);
-        let (Some(mtm), Ok(when)) = (MainThreadMarker::new(), DispatchTime::try_from(after)) else {
+        let (Some(mtm), Ok(when)) = (MainThreadMarker::new(), DispatchTime::try_from(due - now))
+        else {
+            self.ivars().frame_due.set(None);
             return;
         };
         let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
@@ -2524,7 +2564,9 @@ impl ContentStage {
                 if stage.ivars().frame_refresh.get() != generation {
                     return;
                 }
+                stage.ivars().frame_due.set(None);
                 if stage.capture_all_shown() {
+                    stage.ivars().frame_taken.set(Some(Instant::now()));
                     stage.refresh_frames_in(FRAME_REFRESH);
                 }
             }));
@@ -2577,24 +2619,17 @@ impl ContentStage {
             return;
         }
         let now = Instant::now();
-        let Some((attached, concealed)) = self.ivars().views.try_borrow().ok().map(|views| {
-            let attached = views
+        let Some(concealed) = self.ivars().views.try_borrow().ok().map(|views| {
+            views
                 .iter()
                 .filter(|(_, view)| {
                     // SAFETY: retained parent access on the AppKit main thread.
                     unsafe { view.view.superview() }
                         .is_some_and(|parent| std::ptr::eq(&*parent, self as &NSView))
+                        && view.view.isHiddenOrHasHiddenAncestor()
                 })
-                .map(|(id, view)| (*id, view.view.isHiddenOrHasHiddenAncestor()))
-                .collect::<Vec<_>>();
-            (
-                attached.iter().map(|(id, _)| *id).collect::<HashSet<_>>(),
-                attached
-                    .iter()
-                    .filter(|(_, concealed)| *concealed)
-                    .map(|(id, _)| *id)
-                    .collect::<HashSet<_>>(),
-            )
+                .map(|(id, _)| *id)
+                .collect::<HashSet<_>>()
         }) else {
             return;
         };
@@ -2602,10 +2637,6 @@ impl ContentStage {
             return;
         };
         since.retain(|id, _| concealed.contains(id));
-        if let Ok(mut parked) = self.ivars().parked.try_borrow_mut() {
-            // A frame belongs to a page still concealed or already out.
-            parked.retain(|id, _| concealed.contains(id) || !attached.contains(id));
-        }
         for id in concealed {
             since.entry(id).or_insert(now);
         }

@@ -1217,6 +1217,16 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
     assert!(cover.contains("_doAfterNextPresentationUpdate:"));
     assert!(cover.contains("RETURN_COVER_BOUND"));
     assert!(cover.contains("stage.uncover(id, token)"));
+    // Once lifted, the page is shown: its fresh frame replaces the one used.
+    let lifted = cover.find("stage.uncover(id, token)").expect("lift");
+    assert!(
+        lifted
+            < cover
+                .find("stage.capture_shown(id, &view)")
+                .expect("fresh frame")
+    );
+    // A failed snapshot never replaces a frame.
+    assert!(shown.contains("let (Some(snapshot), Ok(mut parked))"));
     assert!(shown.contains("view_key(&host.view) == owner"));
     assert!(!stage.contains("write_to_file") && !shown.contains("std::fs"));
 
@@ -1226,7 +1236,8 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
             "{entry} keeps an old frame"
         );
     }
-    assert!(macos_stage_fn(stage, "track_concealed_after").contains("parked.retain("));
+    // A shown page keeps its last frame; the refresh replaces it.
+    assert!(!stage.contains("parked.retain("));
 }
 
 #[test]
