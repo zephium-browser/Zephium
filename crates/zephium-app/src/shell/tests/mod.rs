@@ -2376,6 +2376,8 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         Box::new(move |p| apply_projection(&mut sink.lock().unwrap(), p)),
     );
     shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen)
 }
@@ -2447,6 +2449,8 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
         }),
     );
     shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, icons)
 }
@@ -2472,6 +2476,8 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
         Box::new(move |projection| apply_projection(&mut sink.lock().unwrap(), projection)),
     );
     shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, chrome, screen)
 }
@@ -2516,6 +2522,8 @@ pub(super) fn setup_with_operation_log_and_failure(
         }),
     );
     shell.profile_cleanup = Some(Arc::new(SuccessfulProfileCleanup));
+    // Same shell path on every platform; tests opt into the native source.
+    shell.disable_native_notification_source_for_test();
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     (shell, engine, screen, operations)
 }

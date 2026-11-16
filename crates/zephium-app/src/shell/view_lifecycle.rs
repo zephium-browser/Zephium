@@ -429,6 +429,10 @@ impl Shell {
     pub(super) fn enable_native_notification_source_for_test(&mut self) {
         self.residency.notifications.native = true;
     }
+    #[cfg(test)]
+    pub(super) fn disable_native_notification_source_for_test(&mut self) {
+        self.residency.notifications.native = false;
+    }
 
     fn refresh_notification_sleep(&mut self) {
         if !self.residency.notifications.native {
