@@ -92,6 +92,7 @@
         autocomplete="off"
         disabled={preferences.saving()}
         onkeydown={(event) => {
+          if (event.isComposing) return;
           if (event.key === "Enter") event.currentTarget.blur();
           else if (event.key === "Escape") {
             event.currentTarget.value = entry.keywords.join(" ");

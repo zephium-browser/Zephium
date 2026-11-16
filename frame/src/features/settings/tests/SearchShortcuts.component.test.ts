@@ -78,6 +78,22 @@ test("duplicate keywords are refused without saving", async () => {
   expect(native.stored).toBe("");
 });
 
+test.each(["Enter", "Escape"])("IME %s leaves keyword composition alone", async (key) => {
+  await preferences.init();
+  const screen = await render(SearchShortcuts);
+  const keyword = screen.getByRole("textbox", { name: "Keyword, YouTube" });
+  await userEvent.fill(keyword, "video");
+  keyword
+    .element()
+    .dispatchEvent(new KeyboardEvent("keydown", { key, isComposing: true, bubbles: true }));
+  await expect.element(keyword).toHaveFocus();
+  await expect.element(keyword).toHaveValue("video");
+  expect(native.stored).toBe("");
+
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => preferences.searchShortcuts()[0]?.keywords).toEqual(["video"]);
+});
+
 test("a rejected keyword edit restores the saved keyword without a validation error", async () => {
   await preferences.init();
   const screen = await render(SearchShortcuts);
