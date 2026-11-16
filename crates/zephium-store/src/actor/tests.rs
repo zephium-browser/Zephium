@@ -4848,7 +4848,9 @@ fn extension_profile_deletion_erases_registry_temporary_and_owned_staging() {
             .unwrap(),
         ProfileDeletionAuthorizeOutcome::Authorized
     );
-    assert!(hub.finalize_profile_deletion(profile).unwrap());
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     for path in [&registry, &temporary, &staged] {
         assert!(
             !path.exists(),
@@ -4858,7 +4860,11 @@ fn extension_profile_deletion_erases_registry_temporary_and_owned_staging() {
     }
     assert_eq!(std::fs::read(other).unwrap(), b"keep other profile");
     drop(hub);
-    let reopened = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let mut reopened = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    assert_eq!(reopened.pending_profile_deletions().unwrap().len(), 1);
+    assert!(reopened
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(reopened.pending_profile_deletions().unwrap().is_empty());
     assert!(!registry.exists());
 }
