@@ -635,7 +635,7 @@ impl EngineHost {
         #[cfg(target_os = "macos")]
         let initial_download_window = popup_opener
             .as_ref()
-            .and_then(|opener| opener.webview.window());
+            .and_then(|opener| crate::platform::imp::home_window(&opener.webview));
         // A download a new tab starts before showing anything is asked about
         // on the tab that opened it.
         #[cfg(any(target_os = "macos", target_os = "windows"))]

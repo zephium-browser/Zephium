@@ -1,21 +1,18 @@
-import { IS_MAC } from "$shared/platform";
-import { reducedMotion } from "./motion";
-
 const IDLE_MS = 4000;
 
 /**
  * Replaces a focused empty field's native caret after an idle interval to
  * reduce caret-driven drawing. The field loses focus and an aria-hidden
- * caret takes its place. On macOS it animates opacity unless reduced motion
- * is enabled; elsewhere it remains still.
+ * caret takes its place. It stands still: on macOS any blink, as an
+ * animation or a timer, kept WebKit drawing frames, and over the window's
+ * glass an opacity fade held the GPU near half busy on an idle new tab.
  *
  * A parked field still takes every key it would have taken focused. Text
  * and Tab land natively once focus is back; other keys, such as Escape,
  * Enter or the arrows, are handed to the field so its own handlers run.
  * Ctrl shortcuts without AltGraph and Cmd shortcuts other than Cmd+V are
  * left alone, so Windows paste (Ctrl+V) does not wake a parked field.
- * Focus and pointer interaction release the parked caret. Actual idle
- * rendering behavior depends on the native engine and needs measurement.
+ * Focus and pointer interaction release the parked caret.
  */
 export function parkCaret(
   input: HTMLInputElement | HTMLTextAreaElement,
@@ -65,18 +62,6 @@ export function parkCaret(
       willChange: "opacity",
     });
     field.append(caret);
-    if (IS_MAC && !reducedMotion()) {
-      caret.animate(
-        [
-          { opacity: 1, offset: 0 },
-          { opacity: 1, offset: 0.45 },
-          { opacity: 0, offset: 0.6 },
-          { opacity: 0, offset: 0.9 },
-          { opacity: 1, offset: 1 },
-        ],
-        { duration: 1100, iterations: Infinity },
-      );
-    }
     input.dataset.caretParked = "";
     onpark?.(true);
     window.addEventListener("keydown", wake, true);

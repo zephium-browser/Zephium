@@ -138,7 +138,11 @@ test("a field with text keeps its caret, and clicking elsewhere lets go", () => 
   expect(document.activeElement).not.toBe(input);
 });
 
-test("on macOS the drawn caret blinks", () => {
+test("on macOS the drawn caret stands still", () => {
   vi.advanceTimersByTime(4100);
-  expect(caret()?.getAnimations()).toHaveLength(1);
+  const drawn = caret() as HTMLElement;
+  expect(drawn.getAnimations()).toHaveLength(0);
+  vi.advanceTimersByTime(5000);
+  expect(drawn.style.opacity).toBe("");
+  expect(drawn.getAnimations()).toHaveLength(0);
 });
