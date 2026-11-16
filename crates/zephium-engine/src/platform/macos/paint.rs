@@ -45,10 +45,17 @@ impl PageSnapshot {
 
     /// Returns false when no completion will be delivered.
     pub(crate) fn capture(view: &wry::WebView, done: impl FnOnce(Option<Self>) + 'static) -> bool {
+        Self::capture_page(&view.webview(), done)
+    }
+
+    /// As `capture`, for a page the caller holds as its WebKit view.
+    pub(crate) fn capture_page(
+        page: &objc2_web_kit::WKWebView,
+        done: impl FnOnce(Option<Self>) + 'static,
+    ) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
-        let page = view.webview();
         let bounds = page.bounds();
         if !(bounds.size.width >= 2.0 && bounds.size.height >= 2.0) {
             return false;
@@ -85,7 +92,7 @@ impl PageSnapshot {
         .is_ok()
     }
 
-    fn image(&self) -> Option<Retained<CGImage>> {
+    pub(crate) fn image(&self) -> Option<Retained<CGImage>> {
         let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &self.0)?;
         rep.CGImage()
     }

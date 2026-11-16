@@ -1070,6 +1070,185 @@ fn only_tabs_a_person_reads_may_take_element_fullscreen() {
         .is_some_and(|(_, cfg)| cfg.starts_with("target_os = \"macos\")")));
 }
 
+fn macos_stage_fn<'a>(stage: &'a str, name: &str) -> &'a str {
+    let body = stage
+        .split_once(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("{name}"))
+        .1;
+    let end = ["\n    fn ", "\n    pub fn "]
+        .into_iter()
+        .filter_map(|next| body.find(next))
+        .min()
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+#[test]
+fn a_concealed_page_leaves_the_window_only_hidden_and_revalidated() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    let detach = macos_stage_fn(stage, "detach_concealed");
+    // Pages WebKit holds, pages mid-transition, capturing or audible pages,
+    // covered pages and pages under a drop preview stay in the window.
+    for kept in [
+        "super::fullscreen::webkit_owns(&view.view, self)",
+        "super::fullscreen::in_transition(&view.view)",
+        "needs_window(&view.view)",
+        "covers.contains_key(&id)",
+        "view.view.isHiddenOrHasHiddenAncestor()",
+        "displaced",
+        "armed",
+    ] {
+        assert!(detach.contains(kept), "detach does not check {kept}");
+    }
+    let hide = detach.find("view.view.setHidden(true)").expect("hide");
+    let remove = detach
+        .find("view.view.removeFromSuperview()")
+        .expect("detach primitive");
+    assert!(
+        hide < remove,
+        "a page is hidden before it leaves the window"
+    );
+    // `setHidden:` and `removeFromSuperview` can pump AppKit: a newer layout
+    // stops the pass between and after them.
+    let between = &detach[hide..remove];
+    assert!(between.contains("if !self.layout_epoch_is_current(epoch) {\n                break;"));
+    assert!(detach[remove..]
+        .contains("if !self.layout_epoch_is_current(epoch) {\n                break;"));
+    assert!(detach.contains("self.track_concealed_after(Instant::now() + DETACH_AFTER)"));
+}
+
+#[test]
+fn a_detached_page_is_re_attached_hidden_before_any_reveal_or_cover() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    let reattach = macos_stage_fn(stage, "reattach");
+    let hide = reattach.find("view.setHidden(true)").expect("hidden first");
+    let add = reattach
+        .find("self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None)")
+        .expect("re-attach below covers");
+    assert!(hide < add);
+    assert!(reattach.contains("Some(parent) => std::ptr::eq(&*parent, self as &NSView)"));
+
+    let sync = macos_stage_fn(stage, "sync_visibility");
+    let back = sync
+        .find("self.reattach(&view.view)")
+        .expect("reveal re-attaches");
+    let reveal = sync.find("view.view.setHidden(false)").expect("reveal");
+    assert!(back < reveal);
+    let check = &sync[back..reveal];
+    assert!(check.contains("self.layout_epoch_is_current(epoch)"));
+    assert!(check.contains("presentation_permit.load(Ordering::Acquire)"));
+    assert!(sync[..back]
+        .rfind("super::fullscreen::webkit_owns(&view.view, self)")
+        .is_some());
+
+    let cover = macos_stage_fn(stage, "cover");
+    let back = cover
+        .find("self.reattach(&host.view)")
+        .expect("cover re-attaches");
+    assert!(cover[back..].contains("self.layout_epoch_is_current(epoch)"));
+    assert!(
+        back < cover
+            .find("addSubview_positioned_relativeTo(&view")
+            .expect("cover")
+    );
+
+    for entry in [
+        "finish_content_update",
+        "abort_content_update",
+        "set_visible",
+        "set_ready",
+        "set_pending",
+    ] {
+        assert!(
+            macos_stage_fn(stage, entry).contains("self.track_concealed();"),
+            "{entry} does not track concealed pages"
+        );
+    }
+    let remove = macos_stage_fn(stage, "remove_view");
+    assert!(remove.contains("since.remove(&id)"));
+    assert!(remove.contains("set_home(&view.view, None)"));
+}
+
+#[test]
+fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    // Frames are taken only from shown pages, soon after a visibility change
+    // and rarely after; snapshotting a page that is already hidden can leave
+    // WebKit's display link running. Detach waits only for a frame on its way.
+    let shown = macos_stage_fn(stage, "capture_shown");
+    let guard = shown
+        .find("if view.window().is_none() || view.isHiddenOrHasHiddenAncestor() {")
+        .expect("shown pages only");
+    assert!(guard < shown.find("capture_page(").expect("capture"));
+    let all = macos_stage_fn(stage, "capture_all_shown");
+    assert!(all.contains("ready.contains(id)") && all.contains("paintable.contains(id)"));
+    assert!(all.contains("!view.isHiddenOrHasHiddenAncestor()"));
+    assert!(
+        macos_stage_fn(stage, "track_concealed").contains("self.refresh_frames_in(FRAME_SETTLE)")
+    );
+    assert!(macos_stage_fn(stage, "refresh_frames_in")
+        .contains("stage.refresh_frames_in(FRAME_REFRESH)"));
+    assert!(!macos_stage_fn(stage, "sync_visibility").contains("capture_"));
+    let detach = macos_stage_fn(stage, "detach_concealed");
+    let wait = detach
+        .find("parking.contains(&id)")
+        .expect("waits for a frame on its way");
+    assert!(
+        wait < detach
+            .find("view.view.removeFromSuperview()")
+            .expect("detach")
+    );
+    assert!(!stage.contains("fn park("));
+
+    // The frame is used once, over the view it was taken from, and lifts on
+    // WebKit's next presentation or the bound, whichever comes first.
+    let cover = macos_stage_fn(stage, "cover_return");
+    assert!(cover.contains("parked.remove(&id)"));
+    assert!(cover.contains(".filter(|(owner, _)| *owner == view_key(view))"));
+    assert!(cover.contains("_doAfterNextPresentationUpdate:"));
+    assert!(cover.contains("RETURN_COVER_BOUND"));
+    assert!(cover.contains("stage.uncover(id, token)"));
+    assert!(shown.contains("view_key(&host.view) == owner"));
+    assert!(!stage.contains("write_to_file") && !shown.contains("std::fs"));
+
+    for entry in ["insert_view", "remove_view"] {
+        assert!(
+            macos_stage_fn(stage, entry).contains("parked.remove(&id)"),
+            "{entry} keeps an old frame"
+        );
+    }
+    assert!(macos_stage_fn(stage, "track_concealed_after").contains("parked.retain("));
+}
+
+#[test]
+fn window_lookups_for_a_concealed_page_follow_it_out_of_the_window() {
+    for (source, lookup) in [
+        (
+            include_str!("../downloads/platform_macos.rs"),
+            "crate::platform::imp::home_window(&view)",
+        ),
+        (
+            include_str!("../page_open.rs"),
+            "crate::platform::imp::home_window(&observed)",
+        ),
+        (
+            include_str!("../construction.rs"),
+            "crate::platform::imp::home_window(&opener.webview)",
+        ),
+    ] {
+        assert!(source.contains(lookup), "{lookup}");
+    }
+}
+
 #[test]
 fn the_macos_stage_never_moves_a_page_webkit_is_showing_fullscreen() {
     let stage = include_str!("../../platform/macos/stage.rs")

@@ -173,7 +173,7 @@ pub(crate) use native::{native_discard_idle, page_footprint, set_background_susp
 pub use navigation::NavigationObserver;
 use objc2::rc::Retained;
 use objc2_web_kit::{WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
-pub use stage::ContentStage;
+pub use stage::{home_window, ContentStage};
 pub type InstalledNavigationObserver = objc2::rc::Retained<NavigationObserver>;
 
 pub(crate) struct ContentPolicyTimeout {
