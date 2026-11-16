@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# Non-shipping Windows recovery-journal qualification; the dependency refuses release builds.
+windows-namespace-validation = ["work-runtime", "zephium-private-fs/windows-namespace-validation"]
 # Dormant composition seam for the production agent browser runtime. The
 # ordinary desktop graph does not enable it until a concrete lifecycle owner
 # and its full platform qualification are integrated.
