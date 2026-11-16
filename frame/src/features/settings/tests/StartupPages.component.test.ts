@@ -48,6 +48,22 @@ test("a page native refuses is named invalid and stays in the field", async () =
   await expect.element(screen.getByRole("textbox")).toHaveValue("two words");
 });
 
+test.each(["Remove https://kept.example/", "Use current tabs"])(
+  "a failed %s does not mark the URL field invalid",
+  async (name) => {
+    state.failed = true;
+    state.open = [{ url: "https://open.example/" }];
+    const screen = await render(StartupPages);
+    await screen.getByRole("button", { name, exact: true }).click();
+    expect(preferences.set).toHaveBeenCalledWith(
+      "tabs.startup-pages",
+      name === "Use current tabs" ? "https://open.example/" : "",
+    );
+    expect(screen.getByRole("textbox").element()).not.toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("Enter a valid website or URL.").query()).toBeNull();
+  },
+);
+
 test("a full list takes no more", async () => {
   state.values["tabs.startup-pages"] = Array.from(
     { length: 10 },
