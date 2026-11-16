@@ -1008,7 +1008,7 @@ fn frame(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 #[cfg(target_os = "macos")]
 fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
     use objc2::runtime::AnyObject;
-    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_app_kit::NSView;
     use objc2_quartz_core::CALayer;
     fn layer_tree(layer: &CALayer, depth: usize, out: &mut Vec<Value>) {
         if out.len() >= 2000 || depth > 40 {
@@ -1035,14 +1035,7 @@ fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
             }
         }
     }
-    let window = app
-        .get_webview_window(crate::MAIN_LABEL)
-        .ok_or("no main window")?;
-    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
-    let (done, answer) = std::sync::mpsc::channel();
-    app.run_on_main_thread(move || {
-        // SAFETY: Tao's live NSWindow, on the main thread for this call.
-        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let out = on_main_window(app, "layer walk", |ns_window| {
         let mut out = Vec::new();
         // The frame view holds the content view and the titlebar's own views.
         let root: Option<objc2::rc::Retained<NSView>> = ns_window
@@ -1051,12 +1044,8 @@ fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
         if let Some(layer) = root.and_then(|view| view.layer()) {
             layer_tree(&layer, 0, &mut out);
         }
-        let _ = done.send(out);
-    })
-    .map_err(|error| error.to_string())?;
-    let out = answer
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "the layer walk did not finish".to_owned())?;
+        out
+    })?;
     Ok(json!({ "layers": out }))
 }
 
@@ -1064,27 +1053,12 @@ fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
 /// bottom-left origin) to see what its size costs the window server.
 #[cfg(target_os = "macos")]
 fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
-    use objc2_app_kit::{NSView, NSWindow};
+    use objc2_app_kit::NSView;
     use objc2_foundation::{NSPoint, NSRect, NSSize};
     const EFFECT_VIEW_TAGS: [isize; 2] = [91_376_254, 96_945_937];
-    let number = |key: &str| {
-        command
-            .get(key)
-            .and_then(Value::as_f64)
-            .ok_or(format!("{key} is required"))
-    };
-    let rect = NSRect::new(
-        NSPoint::new(number("x")?, number("y")?),
-        NSSize::new(number("w")?, number("h")?),
-    );
-    let window = app
-        .get_webview_window(crate::MAIN_LABEL)
-        .ok_or("no main window")?;
-    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
-    let (done, answer) = std::sync::mpsc::channel();
-    app.run_on_main_thread(move || {
-        // SAFETY: Tao's live NSWindow, on the main thread for this call.
-        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let [x, y, w, h] = glass_rect(command)?;
+    let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+    let found = on_main_window(app, "glass change", move |ns_window| {
         let mut found = Vec::new();
         if let Some(content) = ns_window.contentView() {
             for tag in EFFECT_VIEW_TAGS {
@@ -1096,13 +1070,57 @@ fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
                 }
             }
         }
-        let _ = done.send(found);
+        found
+    })?;
+    Ok(json!({ "tags": found }))
+}
+
+/// The largest frame, in points, AppKit is asked to lay out for the glass op.
+const GLASS_LIMIT: f64 = 16_384.0;
+
+/// The glass op's `x`, `y`, `w` and `h`: finite, not negative, and no larger
+/// than [`GLASS_LIMIT`] in either direction.
+fn glass_rect(command: &Value) -> Result<[f64; 4], String> {
+    let mut rect = [0.0; 4];
+    for (slot, key) in rect.iter_mut().zip(["x", "y", "w", "h"]) {
+        let value = command
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or(format!("{key} is required"))?;
+        if !value.is_finite() || !(0.0..=GLASS_LIMIT).contains(&value) {
+            return Err(format!("{key} must be between 0 and {GLASS_LIMIT}"));
+        }
+        *slot = value;
+    }
+    if rect[0] + rect[2] > GLASS_LIMIT || rect[1] + rect[3] > GLASS_LIMIT {
+        return Err(format!("the rect must end within {GLASS_LIMIT}"));
+    }
+    Ok(rect)
+}
+
+/// Runs `work` with the main NSWindow on the main thread. The window is
+/// looked up there too, so the timeout covers the whole call.
+#[cfg(target_os = "macos")]
+fn on_main_window<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    what: &str,
+    work: impl FnOnce(&objc2_app_kit::NSWindow) -> T + Send + 'static,
+) -> Result<T, String> {
+    let (done, answer) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = handle
+            .get_webview_window(crate::MAIN_LABEL)
+            .ok_or_else(|| "no main window".to_owned())
+            .and_then(|window| window.ns_window().map_err(|error| error.to_string()))
+            // SAFETY: Tao's live NSWindow, on the main thread for this call.
+            .map(|pointer| work(unsafe { &*(pointer as *const objc2_app_kit::NSWindow) }));
+        let _ = done.send(result);
     })
     .map_err(|error| error.to_string())?;
-    let found = answer
+    answer
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "the glass change did not finish".to_owned())?;
-    Ok(json!({ "tags": found }))
+        .map_err(|_| format!("the {what} did not finish"))?
 }
 
 /// Measurement only: hides the window's backdrop layers (the material's and
@@ -1110,7 +1128,7 @@ fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
 /// out of the window, to see what each costs the window server.
 #[cfg(target_os = "macos")]
 fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
-    use objc2_app_kit::{NSColor, NSView, NSWindow};
+    use objc2_app_kit::{NSColor, NSView};
     use objc2_quartz_core::CALayer;
     fn hide_backdrops(layer: &CALayer, hidden: bool, count: &mut usize) {
         let class: &objc2::runtime::AnyObject = layer.as_ref();
@@ -1131,14 +1149,7 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
         flag("detachHidden"),
         flag("detachHiddenLeaves"),
     );
-    let window = app
-        .get_webview_window(crate::MAIN_LABEL)
-        .ok_or("no main window")?;
-    let pointer = window.ns_window().map_err(|error| error.to_string())? as usize;
-    let (done, answer) = std::sync::mpsc::channel();
-    app.run_on_main_thread(move || {
-        // SAFETY: Tao's live NSWindow, on the main thread for this call.
-        let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    let count = on_main_window(app, "window change", move |ns_window| {
         let mut count = 0;
         if let Some(shown) = backdrops {
             let frame: Option<objc2::rc::Retained<NSView>> = ns_window
@@ -1178,12 +1189,8 @@ fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String
             };
             ns_window.setBackgroundColor(Some(&color));
         }
-        let _ = done.send(count);
-    })
-    .map_err(|error| error.to_string())?;
-    let count = answer
-        .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "the window change did not finish".to_owned())?;
+        count
+    })?;
     Ok(json!({ "changed": count }))
 }
 
@@ -1193,7 +1200,8 @@ fn window_parts(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn glass(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+fn glass(_: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    glass_rect(command)?;
     Err("glass is macOS only".into())
 }
 
@@ -1345,5 +1353,30 @@ mod tests {
         );
         bench.await_results(false);
         assert!(bench.lock().results.is_empty());
+    }
+
+    #[test]
+    fn the_glass_op_takes_a_finite_rect_inside_the_limit() {
+        assert_eq!(
+            glass_rect(&json!({ "x": 0, "y": 12.5, "w": 320, "h": 0 })),
+            Ok([0.0, 12.5, 320.0, 0.0])
+        );
+        assert!(glass_rect(&json!({ "x": 0, "y": 0, "w": GLASS_LIMIT, "h": GLASS_LIMIT })).is_ok());
+    }
+
+    #[test]
+    fn the_glass_op_refuses_malformed_rects_before_appkit_sees_them() {
+        for command in [
+            json!({ "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": "0", "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": -1, "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": 0, "y": 0, "w": -10, "h": 10 }),
+            json!({ "x": 0, "y": 0, "w": 10, "h": 1e300 }),
+            json!({ "x": 0, "y": 0, "w": GLASS_LIMIT + 1.0, "h": 10 }),
+            json!({ "x": GLASS_LIMIT, "y": 0, "w": 1, "h": 10 }),
+            json!({ "x": 0, "y": 10, "w": 10, "h": GLASS_LIMIT }),
+        ] {
+            assert!(glass_rect(&command).is_err(), "{command}");
+        }
     }
 }
