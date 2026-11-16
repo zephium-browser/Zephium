@@ -2356,6 +2356,10 @@ impl EngineHost {
                 }
                 return None;
             }
+            let extension_frame_permit = event_permit.clone();
+            security_policy.admit_extension_frames(move |uri| {
+                extension_frame_permit.allows_extension_frame(uri)
+            });
             let frame_site_scope = site_scope.clone();
             let frame_refused_permit = event_permit.clone();
             let frame_refused_id = id.clone();

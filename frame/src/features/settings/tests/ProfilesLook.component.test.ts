@@ -35,7 +35,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 /** Photos are served natively; here a painted one stands in for it. */
 const photo = vi.hoisted(() => ({ url: "" }));
 vi.mock("$domain/profiles/avatar", async (original) => {
-  const actual = await original<typeof import("$domain/profiles/avatar")>();
+  const actual = await original<typeof import("$domain/profiles")>();
   const swap = <T extends { style: string; src: string | null }>(view: T): T =>
     view.style === "photo" ? { ...view, src: photo.url } : view;
   return {

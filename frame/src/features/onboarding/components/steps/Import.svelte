@@ -25,6 +25,7 @@
   );
   let available = $derived(browserImport.available());
   let job = $derived(browserImport.current());
+  let refused = $derived(browserImport.startFailure());
   let nothingFound = $derived(browserImport.found()?.length === 0);
   let failure = $derived(job?.kinds.find((entry) => entry.state === "failed") ?? null);
   let jobBrowser = $derived(sources.find((candidate) => candidate.id === job?.source)?.name ?? "");
@@ -186,6 +187,7 @@
           size="compact"
           shape="capsule"
           disabled={!available || offered.length === 0 || source.running}
+          pending={browserImport.busy()}
           onclick={() => void browserImport.start(source.id, source.profiles[0]?.id ?? "", offered)}
           >{m.onb_import_action()}</Button
         >
@@ -196,6 +198,9 @@
     <p class="note">{m.onb_import_none()}</p>
   {/if}
   {#if hint}<p class="note">{hint}</p>{/if}
+  {#if refused && (job || source?.id === refused.id)}
+    <p class="note start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
+  {/if}
 
   <div class="search">
     <p class="label" aria-hidden="true">{m.onb_search_with()}</p>
@@ -470,6 +475,10 @@
     margin: -12px 0 0;
     color: var(--color-faint);
     line-height: 1.45;
+  }
+
+  .note.start-error {
+    color: var(--color-danger);
   }
 
   @keyframes lift {

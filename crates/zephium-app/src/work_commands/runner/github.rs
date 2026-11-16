@@ -254,7 +254,20 @@ mod tests {
             .prefix("zgh-")
             .tempdir_in("/private/tmp")
             .unwrap();
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        // Some Windows hosts reject AF_UNIX under the profile temp tree. Allow
+        // an explicit short, writable local path on hosts where PUBLIC is unsuitable.
+        let directory = tempfile::Builder::new()
+            .prefix("zgh-")
+            .tempdir_in(
+                std::env::var_os("ZEPHIUM_TEST_SOCKET_DIR")
+                    .or_else(|| std::env::var_os("PUBLIC"))
+                    .expect("set ZEPHIUM_TEST_SOCKET_DIR to a writable local AF_UNIX directory"),
+            )
+            .expect(
+                "create AF_UNIX fixture; set ZEPHIUM_TEST_SOCKET_DIR if PUBLIC is not writable",
+            );
+        #[cfg(not(any(unix, windows)))]
         let directory = tempfile::Builder::new().prefix("zgh-").tempdir().unwrap();
         let path = directory.path().canonicalize().unwrap().join("broker.sock");
         let listener = Listener::bind(&path).unwrap();
