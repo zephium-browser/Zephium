@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 
 impl EngineHost {
     pub(crate) fn capture_tab_preview(
@@ -7,6 +9,7 @@ impl EngineHost {
         url: String,
         done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
     ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if self.dormant.contains(&id) {
             done(None);
             return;
@@ -15,6 +18,11 @@ impl EngineHost {
             done(None);
             return;
         };
+        #[cfg(target_os = "linux")]
+        if !view.presentable || !view.presentation_permit.load(Ordering::Acquire) {
+            done(None);
+            return;
+        }
         let navigation = view.navigation.clone();
         let Some((epoch, committed)) = navigation
             .committed_snapshot()

@@ -12,7 +12,7 @@
         "minWidth": 680,
         "minHeight": 480,
         "decorations": false,
-        "transparent": true
+        "transparent": false
       }
     ]
   },

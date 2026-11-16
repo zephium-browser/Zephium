@@ -9,10 +9,12 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let scratch = tempfile::Builder::new()
-            .prefix("work-recovery-fixture-")
-            .tempdir_in("/private/tmp")
-            .unwrap();
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("work-recovery-fixture-");
+        #[cfg(target_os = "macos")]
+        let scratch = builder.tempdir_in("/private/tmp").unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let scratch = builder.tempdir().unwrap();
         let root = scratch.path().canonicalize().unwrap();
         let storage = root.join("application");
         let files = root.join("files");

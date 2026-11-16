@@ -3,6 +3,8 @@
 //! loaded, so nothing heavy is ever instantiated a second time here.
 pub(crate) mod geometry;
 mod idle;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
 mod model;
 #[cfg(target_os = "windows")]
 mod viewport;
@@ -555,7 +557,9 @@ impl Overlay {
         }
         #[cfg(target_os = "macos")]
         crate::panel::show(&self.window);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        do_show_with_activation(&self.window, None, None);
+        #[cfg(target_os = "windows")]
         {
             let _ = self.window.show();
             let _ = self.window.set_focus();
@@ -726,24 +730,44 @@ impl Overlay {
     /// looking, at the same height every time.
     #[cfg(not(target_os = "macos"))]
     fn place(&self) {
-        let monitor = self
+        #[cfg(target_os = "linux")]
+        let owner = self
             .window
             .app_handle()
-            .cursor_position()
-            .ok()
-            .and_then(|cursor| {
-                self.window
-                    .available_monitors()
-                    .ok()?
-                    .into_iter()
-                    .find(|monitor| {
-                        let area = monitor.work_area();
-                        cursor.x >= f64::from(area.position.x)
-                            && cursor.y >= f64::from(area.position.y)
-                            && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
-                            && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
-                    })
-            })
+            .get_webview_window(crate::MAIN_LABEL);
+        #[cfg(target_os = "linux")]
+        let supports_position = self.window.gtk_window().is_ok_and(|window| {
+            linux::set_switcher(&window, self.state().model.switcher.is_some());
+            let owner = owner.as_ref().and_then(|owner| owner.gtk_window().ok());
+            linux::prepare(&window, owner.as_ref())
+        });
+        #[cfg(not(target_os = "linux"))]
+        let supports_position = true;
+        // Tao returns a successful (0, 0) on native Wayland. Only X11 exposes
+        // global coordinates; otherwise size for the browser owner's display.
+        let cursor = supports_position
+            .then(|| self.window.app_handle().cursor_position().ok())
+            .flatten();
+        let monitor = cursor.and_then(|cursor| {
+            self.window
+                .available_monitors()
+                .ok()?
+                .into_iter()
+                .find(|monitor| {
+                    let area = monitor.work_area();
+                    cursor.x >= f64::from(area.position.x)
+                        && cursor.y >= f64::from(area.position.y)
+                        && cursor.x < f64::from(area.position.x) + f64::from(area.size.width)
+                        && cursor.y < f64::from(area.position.y) + f64::from(area.size.height)
+                })
+        });
+        #[cfg(target_os = "linux")]
+        let monitor = monitor.or_else(|| {
+            owner
+                .as_ref()
+                .and_then(|owner| owner.current_monitor().ok().flatten())
+        });
+        let monitor = monitor
             .or_else(|| self.window.current_monitor().ok().flatten())
             .or_else(|| self.window.primary_monitor().ok().flatten());
         let Some(monitor) = monitor else {
@@ -781,12 +805,30 @@ impl Overlay {
                 .window
                 .set_size(PhysicalSize::new(placement.width * scale, height * scale));
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        if let Ok(window) = self.window.gtk_window() {
+            linux::place(
+                &window,
+                LogicalSize::new(placement.width, height),
+                supports_position.then(|| {
+                    PhysicalPosition::new(
+                        f64::from(work.position.x) + placement.x * scale,
+                        f64::from(work.position.y) + placement.y * scale,
+                    )
+                }),
+                placement
+                    .x
+                    .min(placement.y)
+                    .min(f64::from(work.size.width) / scale - placement.x - placement.width)
+                    .min(f64::from(work.size.height) / scale - placement.y - height),
+            );
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = self
                 .window
                 .set_size(LogicalSize::new(placement.width, height));
-            if position_supported() {
+            if supports_position {
                 let _ = self.window.set_position(PhysicalPosition::new(
                     f64::from(work.position.x) + placement.x * scale,
                     f64::from(work.position.y) + placement.y * scale,
@@ -832,7 +874,11 @@ impl Overlay {
         let height = placement.height(content);
         #[cfg(target_os = "macos")]
         crate::panel::set_height(&self.window, height);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        if let Ok(window) = self.window.gtk_window() {
+            linux::resize(&window, LogicalSize::new(placement.width, height));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let _ = self
             .window
             .set_size(LogicalSize::new(placement.width, height));
@@ -919,10 +965,6 @@ pub fn update_context(app: &tauri::AppHandle, context: &PanelOwner) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn position_supported() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_none()
-}
 fn do_hide(window: &WebviewWindow) {
     #[cfg(target_os = "macos")]
     crate::panel::hide(window);
@@ -1038,6 +1080,7 @@ pub fn request(app: &tauri::AppHandle, action: impl FnOnce(&Overlay) + Send + 's
         }
         if let Some(panel) = handle.try_state::<Overlay>() {
             action(&panel);
+            #[cfg(not(target_os = "linux"))]
             return;
         }
         #[cfg(not(target_os = "linux"))]

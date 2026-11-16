@@ -477,10 +477,12 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         assert!(ensure_available().is_err());
-        let directory = tempfile::Builder::new()
-            .prefix("work-cli-gate-")
-            .tempdir_in("/private/tmp")
-            .unwrap();
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("work-cli-gate-");
+        #[cfg(target_os = "macos")]
+        let directory = builder.tempdir_in("/private/tmp").unwrap();
+        #[cfg(not(target_os = "macos"))]
+        let directory = builder.tempdir().unwrap();
         let marker = directory.path().join("executed");
         let program = directory.path().join("fixture-cli");
         std::fs::write(

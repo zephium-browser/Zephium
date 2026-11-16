@@ -9,6 +9,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use zephium_agentic::ContextOperationKind;
 use zephium_agentic::{
     AgentBrowserPort, ContextCancellationSettlement, ContextConstructionSettlement,
     ContextCookieTransferFailure, ContextCookieTransferOutcome, ContextCookieTransferRequest,
@@ -22,8 +24,7 @@ use zephium_agentic::{
 };
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use zephium_agentic::{
-    ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextOperationKind,
-    ContextRendererLoss,
+    ContextJoin, ContextNavigationReplacement, ContextNavigationTarget, ContextRendererLoss,
 };
 #[cfg(target_os = "macos")]
 use zephium_agentic::{SemanticScreenshotNativeCapture, SemanticScreenshotNativeFailure};
@@ -1644,6 +1645,7 @@ impl EngineAgentBrowserPort {
 }
 
 impl AgentBrowserPort for EngineAgentBrowserPort {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn work_screenshot_public_candidate(
         &self,
         lease: &zephium_agentic::WorkBrowserExecutionLease,
@@ -1652,6 +1654,7 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         self.native_image_public_candidate(lease, context)
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn claim_work_screenshot_source(
         &self,
         lease: &zephium_agentic::WorkBrowserExecutionLease,
@@ -1926,6 +1929,7 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const fn supports_owned_transition(kind: ContextOperationKind) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -3247,6 +3251,55 @@ mod tests {
             dispatches.load(Ordering::Relaxed),
             usize::from(cfg!(any(target_os = "macos", target_os = "windows")))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_shared_runtime_never_admits_missing_native_browser_adapters() {
+        let slot = AgentContextPortSlot::new(
+            Arc::new(|_| panic!("unsupported native browser operation was scheduled")),
+            Arc::new(|_| panic!("unsupported operation raised an invariant failure")),
+        );
+        let port = slot
+            .take(Arc::new(|_| {
+                panic!("unsupported operation published a native event")
+            }))
+            .expect("port");
+        assert_eq!(
+            port.dispatch(construction_request()),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.transfer_cookies(cookie_request()),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.invoke_semantic(semantic_invocation(FrameId::MAIN)),
+            ContextDispatch::Unsupported
+        );
+        assert_eq!(
+            port.capture_semantic_screenshot(
+                screenshot_native_request(500),
+                Box::new(|_| panic!("unsupported capture invoked its completion")),
+            ),
+            ContextDispatch::Unsupported
+        );
+        assert!(!port.supports_work_resource_history_back());
+        for kind in [
+            ContextOperationKind::Suspend,
+            ContextOperationKind::Resume,
+            ContextOperationKind::Recover,
+            ContextOperationKind::Close,
+        ] {
+            assert!(!supports_owned_transition(kind));
+        }
+        let state = slot.state.lock().expect("slot state");
+        let admission = state.admission.as_ref().expect("admission");
+        let state = admission.state.lock().expect("admission state");
+        assert_eq!(state.pending, 0);
+        assert_eq!(state.physical_screenshots, 0);
+        assert!(!state.sealed);
+        assert!(!state.invariant_failed);
     }
 
     #[test]

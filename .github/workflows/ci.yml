@@ -34,6 +34,13 @@ jobs:
         run: bash scripts/ci/test_macos_blocker_seed_probe.sh
       - name: Test which changes need which jobs
         run: bash scripts/ci/test_scope.sh
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+      - name: Test native platform allowlist
+        run: node --test scripts/require-supported-platform.test.mjs
+      - name: Test Linux native session isolation
+        run: bash scripts/ci/test_linux_test.sh
       - name: Test release policy
         run: python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
       - name: actionlint
@@ -125,8 +132,7 @@ jobs:
       - run: pnpm --dir frame run build
       - run: pnpm --dir frame run check:styles
 
-  # Zephium ships on macOS and Windows only, so Linux builds no app code; it
-  # runs the platform-neutral policy gates.
+  # Platform-neutral policy gates remain separate from native build checks.
   policy:
     name: Rust policy
     needs: changes
@@ -164,6 +170,87 @@ jobs:
       - run: cargo xtask check-security-fork-locks
       - run: cargo xtask check-agentic-probe-boundary
       - run: cargo deny --locked check
+
+  linux:
+    name: Rust (Linux foundation)
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Native build and isolated test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential cmake pkg-config \
+            libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev libdbus-1-dev libxdo-dev xvfb xauth dbus-daemon \
+            apparmor-profiles bubblewrap
+      - name: Verify unprivileged WebKit sandbox setup
+        run: |
+          # Noble restricts unprivileged user namespaces. Its packaged bwrap
+          # profile permits setup while denying capabilities to child processes.
+          # Load it only on this disposable runner when setup is otherwise denied.
+          if ! bwrap --unshare-user --ro-bind / / -- /bin/true; then
+            sudo apparmor_parser --replace --skip-cache \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          fi
+          bwrap --unshare-user --ro-bind / / -- /bin/true
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir frame run build
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Keep default features: this job must compile the shipping dependency graph.
+      - run: cargo build --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Workspace tests in an isolated native session
+        run: scripts/ci/linux-test.sh cargo test --workspace --locked
+      # This test uses ephemeral WebContexts and checks GTK placement only.
+      # The ignored principal/process tests require an admitted WebKitGTK engine;
+      # Ubuntu's package may be below the security floor. Never bypass admission.
+      - name: Native GTK stage placement
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-engine --locked
+          platform::linux::stage::tests::stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK chrome composition
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          platform::linux::native_composition_tests::linux_composition_transaction_preserves_hidden_state_and_rolls_back_exactly
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK sidebar edge input
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          platform::linux::sidebar_edge::native_tests::capture_observes_consumed_webview_motion_and_clears_lifecycle_state
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK guide painting and input
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-engine --locked --lib
+          platform::linux::guide::tests::guide_paints_above_ephemeral_webkit_and_remains_input_transparent_x11
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK modifier tracking
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          platform::linux::modifiers::native_tests::capture_tracks_both_controls_across_panel_focus_and_clears_lifecycle_state
+          -- --exact --ignored --test-threads=1
+      - name: Native X11 shortcut lifecycle
+        run: >-
+          scripts/ci/linux-test.sh cargo test -p zephium-desktop --locked --lib
+          linux_x11_shortcut::tests::native_registration_is_live_collision_checked_and_releasable
+          -- --exact --ignored --test-threads=1
+      - name: Native GTK launcher ownership
+        run: >-
+          scripts/ci/linux-test.sh env WAYLAND_DISPLAY=unavailable-wayland
+          cargo test -p zephium-desktop --locked --lib
+          overlay::linux::tests::launcher_parent_tracks_owner_without_blocking_independent_mapping
+          -- --exact --ignored --test-threads=1
 
   macos:
     name: Rust (macOS)

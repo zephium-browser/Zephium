@@ -56,10 +56,7 @@ impl super::worker::WorkerError for Error {
         matches!(self, Self::Stopped | Self::Runner(Failure::Stopped))
     }
     fn unsettled(&self) -> bool {
-        matches!(
-            self,
-            Self::Runner(Failure::CleanupPending | Failure::StopUnconfirmed)
-        )
+        matches!(self, Self::Runner(failure) if failure.unsettled())
     }
 }
 impl Error {

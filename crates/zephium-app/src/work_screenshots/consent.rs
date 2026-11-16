@@ -4,12 +4,11 @@ use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
-use zephium_core::{
-    ids::ProfileId,
-    work::model::WorkModelImageFence,
-    work::{WorkError, WorkStepId},
-};
+#[cfg(any(target_os = "macos", windows, test))]
+use zephium_core::work::WorkError;
+use zephium_core::{ids::ProfileId, work::model::WorkModelImageFence, work::WorkStepId};
 
+#[cfg(any(target_os = "macos", windows, test))]
 const MAX_RUN_ORIGINS: usize = 16;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScreenshotChoice {
@@ -43,7 +42,9 @@ struct Choice {
 #[derive(Clone)]
 pub(crate) struct QuestionTicket(Arc<Choice>);
 pub(crate) struct RunScreenshots {
+    #[cfg(any(target_os = "macos", windows, test))]
     profile: ProfileId,
+    #[cfg(any(target_os = "macos", windows, test))]
     global: zephium_agentic::lead::ModelImageGate,
     entries: Mutex<BTreeMap<String, Arc<Choice>>>,
     /// Sites the person let this run work in as them: what the run sees
@@ -52,8 +53,12 @@ pub(crate) struct RunScreenshots {
 }
 impl RunScreenshots {
     pub(crate) fn new(profile: ProfileId) -> Self {
+        #[cfg(not(any(target_os = "macos", windows, test)))]
+        let _ = profile;
         Self {
+            #[cfg(any(target_os = "macos", windows, test))]
             profile,
+            #[cfg(any(target_os = "macos", windows, test))]
             global: super::gate(),
             entries: Mutex::new(BTreeMap::new()),
             granted: Mutex::new(Vec::new()),
@@ -66,6 +71,7 @@ impl RunScreenshots {
             }
         }
     }
+    #[cfg(any(target_os = "macos", windows, test))]
     fn granted(&self, origin: &str) -> bool {
         crate::work_sites::site_of(origin).is_some_and(|site| {
             self.granted
@@ -73,6 +79,7 @@ impl RunScreenshots {
                 .is_ok_and(|granted| granted.contains(&site))
         })
     }
+    #[cfg(any(target_os = "macos", windows, test))]
     pub(crate) fn request(
         &self,
         origin: &str,
@@ -111,6 +118,7 @@ impl RunScreenshots {
         );
         Ok(choice)
     }
+    #[cfg(any(target_os = "macos", windows, test))]
     pub(crate) fn choice(&self, origin: &str) -> Option<ScreenshotChoice> {
         self.entries
             .lock()
@@ -173,6 +181,7 @@ impl RunScreenshots {
             }
         }
     }
+    #[cfg(any(target_os = "macos", windows, test))]
     pub(super) fn permission(
         &self,
         origin: &str,

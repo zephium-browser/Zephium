@@ -19,6 +19,26 @@ use zephium_core::ports::chrome::{Chrome, ChromeFrame};
 use zephium_core::ports::engine::Shortcut;
 use zephium_engine::MainThreadDispatch;
 
+#[path = "linux_modifiers.rs"]
+mod modifiers;
+
+pub fn control_down() -> bool {
+    modifiers::control_down()
+}
+
+#[path = "linux_sidebar_edge.rs"]
+mod sidebar_edge;
+
+pub fn sidebar_hidden(window: &WebviewWindow, hidden: bool) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::watch(&owner, hidden));
+}
+
+pub fn sidebar_column_width(window: &WebviewWindow, width: f64) {
+    let owner = window.clone();
+    let _ = window.run_on_main_thread(move || sidebar_edge::column_width(&owner, width));
+}
+
 mod zero_fixed {
     use super::*;
 
@@ -97,7 +117,10 @@ impl fmt::Display for LinuxInitError {
                 write!(formatter, "Tauri GTK window is unavailable: {error}")
             }
             Self::DefaultVBoxUnavailable(error) => {
-                write!(formatter, "Tauri GTK composition box is unavailable: {error}")
+                write!(
+                    formatter,
+                    "Tauri GTK composition box is unavailable: {error}"
+                )
             }
             Self::PrivilegedChildCount(count) => write!(
                 formatter,
@@ -110,37 +133,38 @@ impl fmt::Display for LinuxInitError {
             Self::MissingWebContext => {
                 formatter.write_str("privileged WebKitGTK view has no WebContext")
             }
-            Self::PersistentWebView => formatter.write_str(
-                "privileged WebKitGTK view was not constructed in ephemeral mode",
-            ),
+            Self::PersistentWebView => formatter
+                .write_str("privileged WebKitGTK view was not constructed in ephemeral mode"),
             Self::PersistentWebContext => formatter.write_str(
                 "privileged WebKitGTK view was not constructed with an ephemeral WebContext",
             ),
             Self::SandboxDisabled => {
                 formatter.write_str("privileged WebKitGTK process sandbox is disabled")
             }
-            Self::ProcessSwapDisabled => formatter
-                .write_str("privileged WebKitGTK cross-site process swapping is disabled"),
+            Self::ProcessSwapDisabled => {
+                formatter.write_str("privileged WebKitGTK cross-site process swapping is disabled")
+            }
             Self::ChromeParentMismatch => formatter.write_str(
                 "privileged WebKitGTK view is not a direct child of Tauri's composition box",
             ),
-            Self::VBoxParentMismatch => formatter.write_str(
-                "Tauri's composition box is not a direct child of its GTK window",
-            ),
+            Self::VBoxParentMismatch => formatter
+                .write_str("Tauri's composition box is not a direct child of its GTK window"),
             Self::ChromeReparentPostcondition => formatter.write_str(
                 "privileged WebKitGTK view did not enter the Zephium composition container",
             ),
             Self::FixedParentPostcondition => formatter.write_str(
                 "Zephium composition container did not become the GTK window's direct child",
             ),
-            Self::TopLevelAlreadyExposed => formatter.write_str(
-                "privileged GTK window was visible before native hardening completed",
-            ),
+            Self::TopLevelAlreadyExposed => formatter
+                .write_str("privileged GTK window was visible before native hardening completed"),
             Self::TopLevelExposed => formatter.write_str(
                 "native composition unexpectedly exposed the privileged top-level window",
             ),
             Self::ContainerInstall(error) => {
-                write!(formatter, "could not install the engine GTK container: {error}")
+                write!(
+                    formatter,
+                    "could not install the engine GTK container: {error}"
+                )
             }
             Self::CompositionRollbackFailed(original) => write!(
                 formatter,
@@ -171,6 +195,7 @@ pub fn init(window: &WebviewWindow) -> Result<(), LinuxInitError> {
         .map_err(|error| LinuxInitError::DefaultVBoxUnavailable(error.to_string()))?;
     let chrome = privileged_webview(&vbox)?;
     harden_privileged_webview(&chrome)?;
+    modifiers::install(&gtk_window);
     install_composition(
         &gtk_window,
         &vbox,
@@ -203,7 +228,17 @@ fn install_composition(
 
     let sized_chrome = chrome.clone();
     fixed.connect_size_allocate(move |_, allocation| {
-        sized_chrome.set_size_request(allocation.width(), allocation.height());
+        let (width, height) = (allocation.width(), allocation.height());
+        if sized_chrome.size_request() != (width, height) {
+            sized_chrome.set_size_request(width, height);
+        }
+        // GTK drops resize requests queued during allocation.
+        sized_chrome.size_allocate(&gtk::Allocation::new(
+            allocation.x(),
+            allocation.y(),
+            width,
+            height,
+        ));
     });
     fixed.show_all();
 
@@ -260,7 +295,9 @@ pub fn harden_privileged(window: &WebviewWindow) -> Result<(), LinuxInitError> {
         .default_vbox()
         .map_err(|error| LinuxInitError::DefaultVBoxUnavailable(error.to_string()))?;
     let chrome = privileged_webview(&vbox)?;
-    harden_privileged_webview(&chrome)
+    harden_privileged_webview(&chrome)?;
+    modifiers::install(&gtk_window);
+    Ok(())
 }
 
 fn privileged_webview(vbox: &gtk::Box) -> Result<webkit2gtk::WebView, LinuxInitError> {
@@ -443,6 +480,12 @@ mod native_composition_tests {
         assert_eq!(fixed.parent().as_ref(), Some(&expected_window));
         assert!(!window.is_visible());
         assert!(!window.is_mapped());
+        fixed.size_allocate(&gtk::Allocation::new(0, 0, 800, 600));
+        assert_eq!(chrome.allocated_width(), 800);
+        assert_eq!(chrome.allocated_height(), 600);
+        fixed.size_allocate(&gtk::Allocation::new(0, 0, 640, 480));
+        assert_eq!(chrome.allocated_width(), 640);
+        assert_eq!(chrome.allocated_height(), 480);
 
         let (rollback_window, rollback_vbox, rollback_chrome, _rollback_context) =
             tauri_tree(&application);
@@ -646,11 +689,18 @@ fn shortcut_modifiers(shortcut: &Shortcut) -> gtk::gdk::ModifierType {
 }
 
 fn observed_shortcut_modifiers(state: gtk::gdk::ModifierType) -> gtk::gdk::ModifierType {
+    observed_shortcut_modifiers_with_mask(state, gtk::accelerator_get_default_mod_mask())
+}
+
+fn observed_shortcut_modifiers_with_mask(
+    state: gtk::gdk::ModifierType,
+    accelerator_mask: gtk::gdk::ModifierType,
+) -> gtk::gdk::ModifierType {
     // GTK's default accelerator mask deliberately excludes lock modifiers.
     // Keep the virtual modifiers explicit as a defense against a process-wide
     // mask override: the shared Linux parser rejects Meta/Super/Hyper, so the
     // focused fallback must never accept them as an invisible extra chord.
-    let relevant = gtk::accelerator_get_default_mod_mask()
+    let relevant = accelerator_mask
         | gtk::gdk::ModifierType::SUPER_MASK
         | gtk::gdk::ModifierType::HYPER_MASK
         | gtk::gdk::ModifierType::META_MASK;
@@ -673,6 +723,14 @@ mod shortcut_tests {
 
     #[test]
     fn focused_shortcut_requires_exact_non_lock_modifiers() {
+        let observed_shortcut_modifiers = |state| {
+            observed_shortcut_modifiers_with_mask(
+                state,
+                gtk::gdk::ModifierType::CONTROL_MASK
+                    | gtk::gdk::ModifierType::SHIFT_MASK
+                    | gtk::gdk::ModifierType::MOD1_MASK,
+            )
+        };
         let expected = shortcut_modifiers(&launcher_shortcut());
         assert_eq!(
             observed_shortcut_modifiers(
@@ -681,6 +739,7 @@ mod shortcut_tests {
             expected
         );
         for unexpected in [
+            gtk::gdk::ModifierType::MOD1_MASK,
             gtk::gdk::ModifierType::SUPER_MASK,
             gtk::gdk::ModifierType::HYPER_MASK,
             gtk::gdk::ModifierType::META_MASK,

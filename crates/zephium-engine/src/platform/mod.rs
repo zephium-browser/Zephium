@@ -32,7 +32,7 @@ pub(crate) mod work_human_survey;
 mod agent_semantic_cdp_protocol;
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 pub(crate) mod agent_suspension;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 pub(crate) mod cosmetic_pull;
 #[cfg(all(
     feature = "agentic-browser",

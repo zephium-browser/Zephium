@@ -134,7 +134,10 @@ async fn work_parallel_reads_partition_retries_and_drain_unknown_outcomes() {
                         let peak = peak.clone();
                         let completed = completed.clone();
                         async move {
+                            assert!(!probe.cancellation_requested().await.unwrap());
+                            #[cfg(feature = "work-execution")]
                             assert!(probe.admit_read_page(WorkStepId::generate()).await.is_err());
+                            #[cfg(feature = "work-execution")]
                             let _admission = probe.admit_read_page(request.id).await.unwrap();
                             peak.fetch_max(
                                 active.fetch_add(1, Ordering::SeqCst) + 1,

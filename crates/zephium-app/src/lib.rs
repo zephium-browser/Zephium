@@ -7,7 +7,7 @@ mod diagnostics;
 #[cfg(all(test, feature = "work-execution-probe"))]
 mod work_provider_fixture;
 
-#[cfg(all(test, feature = "work-execution"))]
+#[cfg(all(test, any(feature = "work-runtime", feature = "work-execution")))]
 static WORK_RUNTIME_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 macro_rules! diagnostic {

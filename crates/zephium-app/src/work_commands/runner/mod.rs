@@ -31,12 +31,15 @@ use std::{future::Future, path::Path};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Failure {
     Unavailable,
+    #[cfg(any(target_os = "macos", windows))]
     ToolUnavailable,
     Input,
     Limit,
     Storage,
+    #[cfg(any(target_os = "macos", windows, test))]
     Launch,
     Stopped,
+    #[cfg(any(target_os = "macos", windows))]
     StopUnconfirmed,
     Failed,
     Changed,
@@ -55,16 +58,19 @@ impl Failure {
                 "Confined Git inspection is not supported on this operating-system build"
             }
             Self::CustodyUnavailable => "Git inspection is unavailable without the qualified private runner guard; guarded file tools remain available",
+            #[cfg(any(target_os = "macos", windows))]
             Self::ToolUnavailable => {
                 "Confined Git inspection needs a supported local Git installation"
             }
             Self::Input => "The folder could not be copied safely into a bounded workspace",
             Self::Limit => "The copied workspace or command exceeded its limit",
             Self::Storage => "The private copied workspace could not be prepared",
+            #[cfg(any(target_os = "macos", windows, test))]
             Self::Launch => "The confined process could not be started",
             Self::Stopped => "The confined process stopped",
             Self::WorkerBusy => "Runner worker capacity is occupied by running work or unconfirmed cleanup",
             Self::CleanupPending => "The runner operation or copied-workspace cleanup is not yet confirmed; do not automatically retry",
+            #[cfg(any(target_os = "macos", windows))]
             Self::StopUnconfirmed => "Stop was requested, but process exit has not been confirmed",
             Self::Failed => "The operation in the copied workspace failed",
             Self::GitHubUnavailable => "Public GitHub CLI reads are unavailable without the qualified private runner guard, Apple silicon macOS build 25G83 and the pinned gh 2.96.0 runtime; browser reads remain available",
@@ -191,6 +197,7 @@ enum GitOperation {
     IntentToAdd,
     Read(ReadOperation),
 }
+#[cfg(any(target_os = "macos", windows))]
 impl GitOperation {
     fn arguments(self, snapshot: &Snapshot) -> Vec<std::ffi::OsString> {
         let mut args: Vec<std::ffi::OsString> = [
@@ -293,11 +300,18 @@ where
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
-        let _ = (snapshot, operation, cancelled);
-        Err(Failure::Unavailable)
+        let _ = (snapshot, cancelled);
+        match operation {
+            GitOperation::Read(_operation) => Err(Failure::Unavailable),
+            GitOperation::Initialize
+            | GitOperation::CaptureIndex
+            | GitOperation::CommitBaseline
+            | GitOperation::IntentToAdd => Err(Failure::Unavailable),
+        }
     }
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
 fn output_text(bytes: Vec<u8>) -> Result<String, Failure> {
     let text = String::from_utf8(bytes).map_err(|_| Failure::Failed)?;
     if zephium_agentic::contains_recognized_secret(&text) {
@@ -327,5 +341,23 @@ mod disclosure_tests {
             output_text(b"+ordinary change".to_vec()).unwrap(),
             "+ordinary change"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_runners_refuse_before_admitting_work_or_fetching() {
+        assert_eq!(ensure_available(), Err(Failure::Unavailable));
+        assert_eq!(python::ensure_available(), Err(Failure::PythonUnavailable));
+        assert!(!native_recovery_qualified());
+        assert!(!github::available());
+        let result = github::run(&|| async { false }, || async {
+            panic!("unsupported GitHub runner must not fetch remote data")
+        })
+        .await;
+        assert!(matches!(result, Err(Failure::GitHubUnavailable)));
     }
 }

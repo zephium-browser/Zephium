@@ -1,8 +1,8 @@
 # Contributing to Zephium
 
 Zephium is a native Rust browser with a Tauri + Svelte interface. Windows and
-macOS are supported with equal priority. Linux is not supported; Linux CI
-runners handle platform-neutral checks, not browser builds.
+macOS are supported with equal priority. Linux has a foundation build/test job;
+it is not yet a supported browser release target.
 
 Keep a contribution focused on one problem. Small fixes and documentation
 changes can go straight to a PR. Discuss larger features, default changes,
@@ -23,6 +23,25 @@ Their versions are pinned in [ci.yml](.github/workflows/ci.yml).
 | --- | --- |
 | Windows | Windows 10/11, MSVC C++ Build Tools with the Desktop development with C++ workload and Windows SDK, and the Evergreen WebView2 runtime. Use a normal user session for native storage qualification. |
 | macOS | Xcode Command Line Tools and a supported macOS/Safari combination. Published macOS releases currently target Apple Silicon. Startup checks both the OS and the installed system WebKit; see [macOS admission policy](crates/zephium-core/src/macos.rs). |
+
+For Linux foundation builds, install these native packages in addition to the
+pinned Rust, Node and pnpm tools (package installation needs administrator access):
+
+```sh
+# Ubuntu 24.04
+sudo apt-get install --no-install-recommends build-essential cmake pkg-config \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+  librsvg2-dev patchelf libssl-dev libdbus-1-dev libxdo-dev xvfb xauth dbus-daemon
+# Fedora
+sudo dnf install gcc gcc-c++ make cmake pkgconf-pkg-config gtk3-devel \
+  webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel \
+  patchelf openssl-devel dbus-devel libxdo-devel xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon
+```
+
+Development headers permit compilation; they do not establish runtime admission.
+Linux startup enforces the [WebKitGTK admission policy](crates/zephium-core/src/webkitgtk.rs),
+including its reviewed security floor. Install an admitted runtime before native
+browser execution; do not lower the floor or disable sandboxing to start a build.
 
 Keep supported systems and engines updated. The
 [WebView2 admission policy](crates/zephium-core/src/webview2.rs) distinguishes
@@ -167,6 +186,29 @@ runner constraints. Those cases require the Windows QA environment. Preserve
 the documented exceptions; do not add exclusions to hide a failure. Native
 behavior changes need checks on both hosts, including affected excluded paths.
 Record any platform not exercised explicitly.
+
+### Linux foundation
+
+The Ubuntu 24.04 job builds the frontend assets, then runs the default-feature
+workspace graph without feature exclusions:
+
+```sh
+cargo build --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+scripts/ci/linux-test.sh cargo test --workspace --locked
+scripts/ci/linux-test.sh cargo test -p zephium-engine --locked \
+  platform::linux::stage::tests::stage_parks_pending_views_and_hidden_children_survive_ancestor_show_all \
+  -- --exact --ignored --test-threads=1
+```
+
+The wrapper creates a disposable Xvfb display, D-Bus session, home and XDG data
+directories. Tests must use temporary stores and in-memory keys, and must not
+access a personal keyring, installed application or host desktop focus. The
+explicit GTK placement test uses ephemeral WebContexts; it does not qualify
+browser admission or security isolation. The ignored principal-world and
+sandbox/process tests require an admitted WebKitGTK runtime and a separate
+isolated native run. A foundation job passing on older distro libraries does
+not establish those runtime guarantees or Linux release support.
 
 ### Local aggregate and specialized gates
 

@@ -125,6 +125,7 @@ pub(super) struct OriginEpoch {
     generation: u64,
 }
 impl OriginEpoch {
+    #[cfg(any(target_os = "macos", windows))]
     pub(super) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.origin, &other.origin) && self.generation == other.generation
     }
@@ -141,6 +142,7 @@ impl OriginEpoch {
         operation();
         true
     }
+    #[cfg(any(target_os = "macos", windows))]
     pub(super) async fn changed(&self) {
         loop {
             let notified = self.origin.changed.notified();
@@ -153,6 +155,7 @@ impl OriginEpoch {
         }
     }
 }
+#[cfg(any(target_os = "macos", windows, test))]
 pub(super) fn origin_epoch(profile: ProfileId, key: &str) -> Result<OriginEpoch, WorkError> {
     let origin = origin(profile, key)?;
     let state = origin.state.lock().map_err(|_| WorkError::Unavailable)?;

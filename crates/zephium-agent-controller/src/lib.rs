@@ -28,19 +28,23 @@ pub fn mark_contract_site(site: &'static str) {
 }
 
 /// `AgentWorkFailure::Contract`, remembering where it was raised.
+#[cfg(feature = "provider-transport")]
 macro_rules! contract {
     () => {{
         $crate::mark_contract_site(concat!(file!(), ":", line!()));
         $crate::AgentWorkFailure::Contract
     }};
 }
+#[cfg(feature = "provider-transport")]
 pub(crate) use contract;
+#[cfg(feature = "provider-transport")]
 macro_rules! continuation {
     () => {{
         $crate::mark_contract_site(concat!(file!(), ":", line!()));
         $crate::AgentBrowserProviderError::Continuation
     }};
 }
+#[cfg(feature = "provider-transport")]
 pub(crate) use continuation;
 
 #[cfg(all(feature = "probe-harness", not(debug_assertions)))]

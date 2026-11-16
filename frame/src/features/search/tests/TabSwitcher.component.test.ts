@@ -1,15 +1,27 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page, userEvent } from "vitest/browser";
+import { commands, page, userEvent } from "vitest/browser";
 import type { TabSwitcherState } from "$shared/ipc/bindings";
+import "$styles/panel.css";
 import TabSwitcher from "../components/TabSwitcher.svelte";
+
+declare module "vitest/browser" {
+  interface BrowserCommands {
+    setForcedColors: (forcedColors: "active" | null) => Promise<void>;
+  }
+}
 
 const native = vi.hoisted(() => ({ action: vi.fn(async (..._args: unknown[]) => true) }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({ tabSwitcherAction: native.action });
 });
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  delete document.documentElement.dataset.platform;
+  delete document.documentElement.dataset.material;
+  delete document.documentElement.dataset.theme;
+});
 const state: TabSwitcherState = {
   session_id: "7",
   window_id: "1",
@@ -184,4 +196,60 @@ test("the new tab card after the tabs leaves for a new tab", async () => {
   const screen = await render(TabSwitcher, { snapshot: state });
   await screen.getByRole("button", { name: "New Tab" }).click();
   await vi.waitFor(() => expect(native.action.mock.calls).toEqual([["7", { type: "new_tab" }]]));
+});
+
+const transparent = "rgba(0, 0, 0, 0)";
+
+function expectOpaque(layer: HTMLElement) {
+  const context = document.createElement("canvas").getContext("2d")!;
+  context.fillStyle = "transparent";
+  context.fillStyle = getComputedStyle(layer).backgroundColor;
+  context.fillRect(0, 0, 1, 1);
+  expect(context.getImageData(0, 0, 1, 1).data[3]).toBe(255);
+}
+
+test.for(["dark", "light"])(
+  "the Linux switcher keeps an opaque %s canvas beneath its rounded plate and faded cards",
+  async (theme, { onTestFinished }) => {
+    const { documentElement, body } = document;
+    documentElement.dataset.theme = theme;
+    const root = document.createElement("div");
+    root.id = "root";
+    body.append(root);
+    onTestFinished(() => root.remove());
+    documentElement.dataset.platform = "linux";
+    const canvas = [documentElement, body, root];
+    for (const layer of canvas) expectOpaque(layer);
+
+    documentElement.dataset.material = "none";
+    await page.viewport(680, 200);
+    const screen = await render(TabSwitcher, { snapshot: state });
+    const plate = screen.getByRole("region").element();
+    const cards = screen.getByRole("listbox").element();
+    for (const layer of canvas) expectOpaque(layer);
+    expect(getComputedStyle(plate).borderTopLeftRadius).toBe("26px");
+    expect(getComputedStyle(plate).backgroundColor).not.toBe(transparent);
+    expect(getComputedStyle(plate).boxShadow).not.toBe("none");
+    expect(getComputedStyle(plate).maskImage).toBe("none");
+    expect(getComputedStyle(cards).backgroundColor).toBe(transparent);
+    expect(getComputedStyle(cards).boxShadow).toBe("none");
+    await expect.poll(() => getComputedStyle(cards).maskImage).toContain("linear-gradient");
+
+    delete documentElement.dataset.platform;
+    expect(getComputedStyle(plate).borderTopLeftRadius).toBe("0px");
+    expect(getComputedStyle(cards).backgroundColor).not.toBe(transparent);
+  },
+);
+
+test("forced colors retain a solid Linux panel canvas", async ({ onTestFinished }) => {
+  document.documentElement.dataset.platform = "linux";
+  document.documentElement.dataset.material = "none";
+  onTestFinished(() => commands.setForcedColors(null));
+  await commands.setForcedColors("active");
+  expect(matchMedia("(forced-colors: active)").matches).toBe(true);
+
+  const screen = await render(TabSwitcher, { snapshot: state });
+  const plate = screen.getByRole("region").element();
+  expect(getComputedStyle(plate).borderTopLeftRadius).toBe("0px");
+  expectOpaque(document.body);
 });

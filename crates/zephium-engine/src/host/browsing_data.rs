@@ -7,13 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use zephium_core::browsing_data::{
-    EngineDataCall, EngineDataCompletion, EngineDataFailure, EngineDataReply,
-};
+use zephium_core::browsing_data::EngineDataFailure;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use zephium_core::browsing_data::{EngineDataCall, EngineDataCompletion, EngineDataReply};
 use zephium_core::ids::ProfileId;
 use zephium_core::ports::engine::Partition;
 
 use super::profiles::{bind_profile_persistence_class, ProfilePersistenceClass};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::EngineHost;
 
 /// The profile a data call may act on, or why none.
@@ -36,6 +37,7 @@ pub(super) fn admitted_profile(
     Ok(profile)
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl EngineHost {
     pub(crate) fn browsing_data_call(
         &mut self,

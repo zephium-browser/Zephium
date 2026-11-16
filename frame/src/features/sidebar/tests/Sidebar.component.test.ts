@@ -6,23 +6,26 @@ import * as sidebar from "$session/sidebar-mode.svelte";
 import * as attention from "$session/attention.svelte";
 import * as tools from "$session/tools.svelte";
 import { commands } from "$shared/ipc/bindings";
-import { IS_WINDOWS } from "$shared/platform";
+import { IS_MAC, IS_WINDOWS } from "$shared/platform";
 import SidebarHost from "./SidebarHost.svelte";
 
 // Browser-mode module exports snapshot getters. Select the platform before
-// importing Sidebar; run Windows coverage with VITE_SIDEBAR_WINDOWS=true.
+// importing Sidebar; select Windows or Linux with VITE_SIDEBAR_WINDOWS=true
+// or VITE_SIDEBAR_LINUX=true.
 vi.mock("$shared/platform", () => {
   const windows = import.meta.env.VITE_SIDEBAR_WINDOWS === "true";
-  return { IS_WINDOWS: windows, IS_MAC: !windows };
+  const linux = import.meta.env.VITE_SIDEBAR_LINUX === "true";
+  return { IS_WINDOWS: windows, IS_MAC: !windows && !linux };
 });
 const native = vi.hoisted(() => ({
   set: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  reduced: false,
   guide: vi.fn(async (_width: number | null) => true),
 }));
 vi.mock("$shared/lib/motion", async (original) => ({
   ...(await original<typeof import("$shared/lib/motion")>()),
   duration: () => 300,
-  reducedMotion: () => false,
+  reducedMotion: () => native.reduced,
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -42,6 +45,7 @@ afterEach(async () => {
   await cleanup();
   sidebar.holdShown(false);
   tools.close();
+  native.reduced = false;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -49,6 +53,7 @@ afterEach(async () => {
 async function peek(panel = "") {
   await sidebar.init();
   await render(SidebarHost, { panel });
+  await parkPointer();
   const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
   window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
   await expect.poll(() => aside.dataset.peek).toBe("true");
@@ -56,7 +61,15 @@ async function peek(panel = "") {
   return aside;
 }
 
+async function parkPointer() {
+  await userEvent.hover(document.documentElement, {
+    position: { x: window.innerWidth - 2, y: window.innerHeight - 2 },
+    force: true,
+  });
+}
+
 async function leave(aside: HTMLElement) {
+  await parkPointer();
   window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: false } }));
   aside.dispatchEvent(new PointerEvent("pointerleave"));
   await vi.advanceTimersByTimeAsync(1000);
@@ -112,6 +125,7 @@ test("attention still holds the card until released", async () => {
     expect(aside.dataset.peek).toBe("true");
   } finally {
     release();
+    await tick();
   }
   await vi.advanceTimersByTimeAsync(1000);
   expect(aside.dataset.peek).toBeUndefined();
@@ -227,8 +241,8 @@ test("Escape closes an open tool, after first leaving a field typed in", async (
   await expect.element(screen.getByRole("textbox", { name: "Sidebar field" })).toBeVisible();
 });
 
-describe(IS_WINDOWS ? "Windows" : "macOS", () => {
-  const windows = IS_WINDOWS;
+describe(IS_MAC ? "macOS" : IS_WINDOWS ? "Windows" : "Linux", () => {
+  const cut = !IS_MAC;
   for (const interruption of ["pin", "visible", "unmount", "reload"] as const) {
     test(`${interruption} ends a peek exactly once`, async () => {
       const native = vi.spyOn(commands, "sidebarPeek");
@@ -239,7 +253,7 @@ describe(IS_WINDOWS ? "Windows" : "macOS", () => {
         aside.dispatchEvent(new PointerEvent("pointerleave"));
         await vi.advanceTimersByTimeAsync(520);
         // The card is closing, but macOS has not lowered its native chrome yet.
-        if (!windows) {
+        if (!cut) {
           expect(aside.dataset.peek).toBeUndefined();
           expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(0);
         }
@@ -269,9 +283,45 @@ describe(IS_WINDOWS ? "Windows" : "macOS", () => {
     await Promise.resolve();
     await cleanup();
     const raisesBeforeFrames = native.mock.calls.filter(([raised]) => raised).length;
-    expect(raisesBeforeFrames).toBe(windows ? 0 : 1);
+    expect(raisesBeforeFrames).toBe(cut ? 0 : 1);
     for (const callback of frames) callback(performance.now());
     expect(native.mock.calls.filter(([raised]) => raised)).toHaveLength(raisesBeforeFrames);
-    expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(windows ? 0 : 1);
+    expect(native.mock.calls.filter(([raised]) => !raised)).toHaveLength(cut ? 0 : 1);
+  });
+
+  test.each([false, true])("native card motion respects reduced motion %s", async (reduced) => {
+    native.reduced = reduced;
+    const peekCall = vi.spyOn(commands, "sidebarPeek");
+    const aside = await peek();
+    await expect
+      .poll(() => peekCall.mock.calls.find(([raised]) => raised))
+      .toEqual([true, true, cut && !reduced]);
+    await leave(aside);
+    expect(peekCall.mock.calls.find(([raised]) => !raised)).toEqual([
+      false,
+      false,
+      cut && !reduced,
+    ]);
+  });
+
+  test.skipIf(!cut)("the native cut waits two frames for the card to start opening", async () => {
+    await sidebar.init();
+    await render(SidebarHost);
+    const aside = document.querySelector<HTMLElement>(".browser-sidebar")!;
+    const peekCall = vi.spyOn(commands, "sidebarPeek");
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    window.dispatchEvent(new CustomEvent("zephium:sidebar-edge", { detail: { near: true } }));
+    flushSync();
+    expect(aside.dataset.peek).toBe("true");
+    expect(aside.dataset.cut).toBe("true");
+    expect(peekCall).not.toHaveBeenCalled();
+    frames.shift()!(performance.now());
+    expect(peekCall).not.toHaveBeenCalled();
+    frames.shift()!(performance.now());
+    expect(peekCall).toHaveBeenCalledExactlyOnceWith(true, true, true);
   });
 });

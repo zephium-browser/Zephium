@@ -19,6 +19,7 @@ pub(super) struct Snapshot {
     // This owned root contains only broker-authored names. Source paths and Git
     // metadata are never mounted, linked or copied without file-policy checks.
     _directory: TempDir,
+    #[cfg(any(target_os = "macos", windows, test))]
     pub root: PathBuf,
     pub work: PathBuf,
     pub home: PathBuf,
@@ -61,6 +62,7 @@ impl Snapshot {
     ) -> Result<Self, Failure> {
         Self::prepare_checked(files, true, check)
     }
+    #[cfg(any(target_os = "macos", windows))]
     pub(super) fn read_only_checked(
         files: BTreeMap<PathBuf, Vec<u8>>,
         check: &dyn Fn() -> Result<(), Failure>,
@@ -164,6 +166,7 @@ impl Snapshot {
             home: private.join("home"),
             temporary: private.join("tmp"),
             empty: private.join("empty"),
+            #[cfg(any(target_os = "macos", windows, test))]
             root: private,
             files,
         };

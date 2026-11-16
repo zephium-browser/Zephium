@@ -145,7 +145,12 @@ export default defineConfig({
             enabled: true,
             headless: true,
             screenshotFailures: false,
-            commands: { benchPhotos, webkitFootprint },
+            commands: {
+              benchPhotos,
+              webkitFootprint,
+              setForcedColors: ({ page }, forcedColors: "active" | null) =>
+                page.emulateMedia({ forcedColors }),
+            },
             // Retina is the display this chrome is drawn for, and the one
             // where a radius or a hairline can actually be judged.
             provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
