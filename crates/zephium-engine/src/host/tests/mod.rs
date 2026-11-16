@@ -1105,14 +1105,18 @@ fn a_concealed_page_leaves_the_window_only_hidden_and_revalidated() {
     }
     let hide = detach.find("view.view.setHidden(true)").expect("hide");
     let remove = detach
-        .find("view.view.removeFromSuperview()")
+        .find("offstage.addSubview(&view.view)")
         .expect("detach primitive");
     assert!(
         hide < remove,
         "a page is hidden before it leaves the window"
     );
-    // `setHidden:` and `removeFromSuperview` can pump AppKit: a newer layout
-    // stops the pass between and after them.
+    // WebKit starts no media in a view outside every window: a concealed
+    // page waits in the stage's off-stage window, never in none.
+    assert!(!detach.contains("removeFromSuperview"));
+    assert!(detach[..remove].contains("set_home(&view.view, Some(&window))"));
+    // `setHidden:` and `addSubview:` can pump AppKit: a newer layout stops
+    // the pass between and after them.
     let between = &detach[hide..remove];
     assert!(between.contains("if !self.layout_epoch_is_current(epoch) {\n                break;"));
     assert!(detach[remove..]
@@ -1132,7 +1136,10 @@ fn a_detached_page_is_re_attached_hidden_before_any_reveal_or_cover() {
         .find("self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None)")
         .expect("re-attach below covers");
     assert!(hide < add);
-    assert!(reattach.contains("Some(parent) => std::ptr::eq(&*parent, self as &NSView)"));
+    assert!(
+        reattach.contains("Some(parent) if std::ptr::eq(&*parent, self as &NSView) => Some(false)")
+    );
+    assert!(reattach.contains("Some(parent) if !self.is_offstage(&parent) => None"));
 
     let sync = macos_stage_fn(stage, "sync_visibility");
     let back = sync
@@ -1173,6 +1180,67 @@ fn a_detached_page_is_re_attached_hidden_before_any_reveal_or_cover() {
     let remove = macos_stage_fn(stage, "remove_view");
     assert!(remove.contains("since.remove(&id)"));
     assert!(remove.contains("set_home(&view.view, None)"));
+    assert!(macos_stage_fn(stage, "insert_view").contains("set_home(&view, None)"));
+}
+
+#[test]
+fn the_off_stage_window_is_never_shown_listed_focused_or_left_open() {
+    let stage = include_str!("../../platform/macos/stage.rs")
+        .split_once("#[cfg(test)]")
+        .expect("stage tests boundary")
+        .0;
+    let window = &stage[stage.find("fn offstage_window(").expect("off-stage window")..];
+    let window = &window[..window.find("\n}\n").expect("end")];
+    for property in [
+        "NSWindowStyleMask::Borderless",
+        "NSBackingStoreType::Buffered,\n            true,",
+        "setReleasedWhenClosed(false)",
+        "setRestorable(false)",
+        "setExcludedFromWindowsMenu(true)",
+        "NSWindowCollectionBehavior::Transient",
+        "NSWindowCollectionBehavior::IgnoresCycle",
+        "NSWindowCollectionBehavior::FullScreenNone",
+        "setHasShadow(false)",
+        "setIgnoresMouseEvents(true)",
+        "setSharingType(NSWindowSharingType::None)",
+        "setAccessibilityElement(false)",
+    ] {
+        assert!(
+            window.contains(property),
+            "off-stage window lacks {property}"
+        );
+    }
+    for ordering in ["orderFront", "makeKey", "orderBack", "orderWindow"] {
+        assert!(
+            !stage.contains(ordering),
+            "the stage orders a window: {ordering}"
+        );
+    }
+    // Same screen and size as the stage, also across resizes.
+    assert!(macos_stage_fn(stage, "offstage")
+        .contains("NSRect::new(home.frame().origin, self.bounds().size)"));
+    assert!(stage.contains("self.fit_offstage();"));
+    // Lookups prefer the window a page returns to over the off-stage one.
+    let home = &stage[stage.find("pub fn home_window(").expect("home")..];
+    let home = &home[..home.find("\n}\n").expect("end")];
+    assert!(
+        home.find("HOMES").expect("homes")
+            < home.find(".or_else(|| view.window())").expect("own window")
+    );
+    let retire = macos_stage_fn(stage, "retire");
+    assert!(retire.contains("self.ivars().offstage.take()") && retire.contains("window.close()"));
+    // Camera, microphone, screen and system audio capture keep a page on stage.
+    let needs = &stage[stage.find("fn needs_window(").expect("needs_window")..];
+    let needs = &needs[..needs.find("\n}\n").expect("end")];
+    for capture in [
+        "cameraCaptureState()",
+        "microphoneCaptureState()",
+        "_displayCaptureState",
+        "_systemAudioCaptureState",
+        "_isPlayingAudio",
+    ] {
+        assert!(needs.contains(capture), "needs_window misses {capture}");
+    }
 }
 
 #[test]
@@ -1204,7 +1272,7 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
         .expect("waits for a frame on its way");
     assert!(
         wait < detach
-            .find("view.view.removeFromSuperview()")
+            .find("offstage.addSubview(&view.view)")
             .expect("detach")
     );
     assert!(!stage.contains("fn park("));
@@ -1271,6 +1339,7 @@ fn the_macos_stage_never_moves_a_page_webkit_is_showing_fullscreen() {
         "view.view.setFrame(",
         "view.view.setHidden(",
         "view.view.removeFromSuperview()",
+        "offstage.addSubview(&view.view)",
     ] {
         let mut found = 0;
         for (at, _) in stage.match_indices(mutation) {

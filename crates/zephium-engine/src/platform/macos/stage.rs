@@ -11,9 +11,11 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSColor, NSCursor,
-    NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWorkspace,
+    NSAccessibility, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+    NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventMask, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
+    NSWorkspace,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -65,21 +67,21 @@ const FRAME_GAP: Duration = Duration::from_secs(5);
 const RETURN_COVER_TOKENS: u64 = 1 << 62;
 
 thread_local! {
-    /// The window each detached page belongs to, by view address.
+    /// The window each page kept off stage belongs to, by view address.
     static HOMES: RefCell<HashMap<usize, Weak<NSWindow>>> = RefCell::new(HashMap::new());
 }
 
-/// The window `view` is shown in, or the one it returns to if a stage took
-/// it out of the window while concealed.
+/// The window `view` is shown in, or the one it returns to while a stage
+/// keeps it off stage.
 pub fn home_window(view: &NSView) -> Option<Retained<NSWindow>> {
-    view.window().or_else(|| {
-        HOMES.with(|homes| {
+    HOMES
+        .with(|homes| {
             homes
                 .try_borrow()
                 .ok()
                 .and_then(|homes| homes.get(&view_key(view)).and_then(Weak::load))
         })
-    })
+        .or_else(|| view.window())
 }
 
 fn view_key(view: &NSView) -> usize {
@@ -98,7 +100,7 @@ fn set_home(view: &NSView, window: Option<&NSWindow>) {
     });
 }
 
-/// Pages whose work needs the window: capture and audible playback.
+/// Pages whose work needs the stage: capture of any kind and audible playback.
 fn needs_window(view: &NSView) -> bool {
     let Some(page) = view.downcast_ref::<objc2_web_kit::WKWebView>() else {
         return true;
@@ -111,9 +113,54 @@ fn needs_window(view: &NSView) -> bool {
         {
             return true;
         }
+        let answers = |selector| -> bool { msg_send![page, respondsToSelector: selector] };
+        if answers(objc2::sel!(_displayCaptureState)) {
+            let display: isize = msg_send![page, _displayCaptureState];
+            if display != 0 {
+                return true;
+            }
+        }
+        if answers(objc2::sel!(_systemAudioCaptureState)) {
+            let system_audio: isize = msg_send![page, _systemAudioCaptureState];
+            if system_audio != 0 {
+                return true;
+            }
+        }
         let answers: bool = msg_send![page, respondsToSelector: objc2::sel!(_isPlayingAudio)];
         answers && msg_send![page, _isPlayingAudio]
     }
+}
+
+/// The window a stage keeps concealed pages in. WebKit still counts them in
+/// a window, so their media can start, but it is never ordered in: nothing
+/// composites it and nothing else lists, cycles to or focuses it.
+fn offstage_window(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSWindow> {
+    // SAFETY: `mtm` proves AppKit affinity. Deferred: no window device is
+    // made until the window is ordered in, which it never is.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            true,
+        )
+    };
+    // SAFETY: the stage owns the window and closes it on retire.
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setRestorable(false);
+    window.setExcludedFromWindowsMenu(true);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient
+            | NSWindowCollectionBehavior::IgnoresCycle
+            | NSWindowCollectionBehavior::FullScreenNone,
+    );
+    window.setAnimationBehavior(NSWindowAnimationBehavior::None);
+    window.setHasShadow(false);
+    window.setIgnoresMouseEvents(true);
+    window.setSharingType(NSWindowSharingType::None);
+    window.setAccessibilityElement(false);
+    window
 }
 
 /// Concealed pages whose grace has run out at `now`, oldest first.
@@ -298,6 +345,7 @@ pub struct StageIvars {
     /// Memory only, keyed by the exact view it was taken from.
     parked: RefCell<HashMap<ItemId, (usize, super::PageSnapshot)>>,
     parking: RefCell<HashSet<ItemId>>,
+    offstage: RefCell<Option<Retained<NSWindow>>>,
     return_covers: Cell<u64>,
     frame_refresh: Cell<u64>,
     frame_due: Cell<Option<Instant>>,
@@ -316,6 +364,7 @@ define_class!(
         fn resize_subviews(&self, _old: NSSize) {
             self.cancel_split_drag(false);
             self.bump_layout_epoch();
+            self.fit_offstage();
             if self.position_panes() && self.ivars().paintable_changed.replace(false) {
                 let _ = self.sync_visibility();
             }
@@ -1044,6 +1093,14 @@ impl ContentStage {
 
     pub fn retire(&self) {
         self.ivars().pointer_cover.take();
+        if let Some(window) = self.ivars().offstage.take() {
+            if let Some(content) = window.contentView() {
+                for view in content.subviews().iter() {
+                    view.removeFromSuperview();
+                }
+            }
+            window.close();
+        }
         self.ivars().stage_retry_terminal.set(true);
         self.cancel_split_drag(false);
         self.ivars().stage_retry_scheduled.set(false);
@@ -1080,6 +1137,7 @@ impl ContentStage {
         if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
             since.remove(&id);
         }
+        set_home(&view, None);
         let Ok(mut views) = self.ivars().views.try_borrow_mut() else {
             return false;
         };
@@ -2374,8 +2432,9 @@ impl ContentStage {
     fn reattach(&self, view: &NSView) -> Option<bool> {
         // SAFETY: retained parent access on the AppKit main thread.
         match unsafe { view.superview() } {
-            Some(parent) => std::ptr::eq(&*parent, self as &NSView).then_some(false),
-            None => {
+            Some(parent) if std::ptr::eq(&*parent, self as &NSView) => Some(false),
+            Some(parent) if !self.is_offstage(&parent) => None,
+            _ => {
                 view.setHidden(true);
                 self.addSubview_positioned_relativeTo(view, NSWindowOrderingMode::Below, None);
                 set_home(view, None);
@@ -2385,6 +2444,42 @@ impl ContentStage {
                     .then_some(true)
             }
         }
+    }
+
+    /// The off-stage window's content, sized and placed like the stage so a
+    /// page keeps its screen, scale, viewport and media queries there.
+    fn offstage(&self, home: &NSWindow) -> Option<Retained<NSView>> {
+        let mtm = MainThreadMarker::new()?;
+        let frame = NSRect::new(home.frame().origin, self.bounds().size);
+        let window = {
+            let mut slot = self.ivars().offstage.try_borrow_mut().ok()?;
+            slot.get_or_insert_with(|| offstage_window(mtm, frame))
+                .clone()
+        };
+        window.setFrame_display(frame, false);
+        window.contentView()
+    }
+
+    fn fit_offstage(&self) {
+        let window = self
+            .ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(window) = window {
+            let origin = window.frame().origin;
+            window.setFrame_display(NSRect::new(origin, self.bounds().size), false);
+        }
+    }
+
+    fn is_offstage(&self, parent: &NSView) -> bool {
+        self.ivars()
+            .offstage
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_ref().and_then(|window| window.contentView()))
+            .is_some_and(|content| std::ptr::eq(&*content, parent))
     }
 
     /// WebKit repaints a page that re-enters the window a few frames after it
@@ -2738,15 +2833,20 @@ impl ContentStage {
             {
                 continue;
             }
-            let window = view.view.window();
+            let Some(window) = view.view.window() else {
+                continue;
+            };
+            let Some(offstage) = self.offstage(&window) else {
+                continue;
+            };
             if !view.view.isHidden() {
                 view.view.setHidden(true);
             }
             if !self.layout_epoch_is_current(epoch) {
                 break;
             }
-            set_home(&view.view, window.as_deref());
-            view.view.removeFromSuperview();
+            set_home(&view.view, Some(&window));
+            offstage.addSubview(&view.view);
             if let Ok(mut since) = self.ivars().concealed_since.try_borrow_mut() {
                 since.remove(&id);
             }
