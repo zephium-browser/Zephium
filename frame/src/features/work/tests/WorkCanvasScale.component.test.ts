@@ -19,7 +19,7 @@ import { drawn, drive, scaleCanvas, settle, sweep, type ScaleMix } from "./scale
 declare module "vitest/browser" {
   interface BrowserCommands {
     benchPhotos: (count: number) => Promise<void>;
-    webkitFootprint: () => Promise<import("../../../../vitest.bench-commands").WebKitFootprint>;
+    webkitFootprint: () => Promise<import("$shared/testing/webkit-footprint").WebKitFootprint>;
   }
 }
 
