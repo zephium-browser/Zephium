@@ -921,6 +921,14 @@ pub trait Engine {
     fn go_to_history_entry(&self, _id: ItemId, _offset: i32, _url: &str) -> NativeDispatch {
         NativeDispatch::Unsupported
     }
+    fn capture_tab_preview(
+        &self,
+        _id: ItemId,
+        _url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        done(None);
+    }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's
     /// content when `region` is `None`. The engine owns pane geometry so

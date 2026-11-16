@@ -22,6 +22,7 @@ impl Shell {
         // The chrome re-invokes bootstrap whenever its webview reloads (dev
         // HMR, crash recovery); state and native surfaces must not be rebuilt.
         if self.windows.focused().is_some() {
+            self.peek_sidebar(false, false);
             let _ = self.relayout();
             self.forget_delivered_icons(zephium_ipc::IconSurface::Chrome);
             self.forget_offered_items();

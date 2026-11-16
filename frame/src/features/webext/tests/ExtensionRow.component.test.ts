@@ -93,7 +93,7 @@ test("removing asks first", async () => {
 test("specific sites are edited in place and saved as the user typed them", async () => {
   render(ExtensionRow, { extension: extension() });
   await userEvent.click(page.getByRole("button", { name: "More for Dark Reader" }));
-  await userEvent.click(page.getByRole("menuitem", { name: "On specific sites…" }));
+  await userEvent.click(page.getByRole("menuitemcheckbox", { name: "On specific sites…" }));
   await userEvent.fill(page.getByRole("textbox", { name: "Add site" }), "github.com");
   await userEvent.keyboard("{Enter}");
   await userEvent.click(page.getByRole("button", { name: "Done" }));

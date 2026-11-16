@@ -1,3 +1,4 @@
+import { preferences } from "$domain/preferences";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -23,6 +24,29 @@ const native = vi.hoisted(() => ({
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    searchShortcutDefaults: async () => [
+      {
+        id: "duckduckgo",
+        name: "DuckDuckGo",
+        keywords: ["ddg"],
+        domain: "duckduckgo.com",
+        enabled: true,
+        search_url: "https://duckduckgo.com/?q={query}",
+        home_url: "https://duckduckgo.com/",
+        suggestions: null,
+      },
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled: true,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+    settingGet: async () => null,
     newtabSearchContext: async () => native.context,
     newtabSearch: native.search,
     newtabRun: native.run,
@@ -30,13 +54,17 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 afterEach(() => {
+  preferences.dispose();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
 });
 
 /** The field hangs in a notch whose height it fills, as on the page. */
 async function mount(props: { tabId: string }) {
-  const screen = await render(NewTabSearch, props);
+  const screen = await render(NewTabSearch, {
+    ...props,
+    loadMenu: () => import("$shared/ui/Menu"),
+  });
   screen.container.style.blockSize = "50px";
   return screen;
 }
@@ -403,4 +431,47 @@ test("an offered host completes the field and the appended part stays selected",
   await userEvent.keyboard("{Backspace}");
   await reply("git", [search("git"), tab("GitHub")], "github.com");
   await expect.element(input).toHaveValue("git");
+});
+
+test("shortcut activation and empty Backspace update the accessible field immediately", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "yt ");
+  await expect.element(screen.getByRole("combobox", { name: "Search YouTube" })).toBeVisible();
+  expect(screen.container.querySelector("[data-shortcut='youtube']")).not.toBeNull();
+  await userEvent.keyboard("{Backspace}");
+  await expect.element(field).toHaveValue("");
+  expect(screen.container.querySelector("[data-shortcut]")).toBeNull();
+});
+
+test("the field's mark is the engine while it has the focus, and the site a query names", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const mark = () => screen.container.querySelector("[data-mark]")?.getAttribute("data-mark");
+  const field = screen.getByRole("combobox");
+  await vi.waitFor(() => expect(mark()).toBe("duckduckgo"));
+  (field.element() as HTMLInputElement).blur();
+  await vi.waitFor(() => expect(mark()).toBe("search"));
+  await userEvent.fill(field, "yt ");
+  await vi.waitFor(() => expect(mark()).toBe("youtube"));
+  await userEvent.fill(field, "cats !yt");
+  await vi.waitFor(() => expect(mark()).toBe("youtube"));
+  await userEvent.fill(field, "cats");
+  await vi.waitFor(() => expect(mark()).toBe("duckduckgo"));
+});
+
+test("the engine menu puts a shortcut's keyword in front of the query", async () => {
+  await preferences.init();
+  const screen = await mount({ tabId: "tab" });
+  const field = screen.getByRole("combobox");
+  await userEvent.fill(field, "cats");
+  await screen.getByRole("button", { name: "Search engine and shortcuts" }).click();
+  await expect.element(page.getByRole("menuitemcheckbox", { name: "DuckDuckGo" })).toBeVisible();
+  // The shortcuts open beside the engines.
+  await page.getByRole("menuitem", { name: "Shortcuts" }).click();
+  await page.getByRole("menuitem", { name: /YouTube/u }).click();
+  await expect.element(field).toHaveValue("!yt cats");
+  await vi.waitFor(() => expect(document.activeElement).toBe(field.element()));
+  expect(screen.container.querySelector("[data-mark]")?.getAttribute("data-mark")).toBe("youtube");
 });

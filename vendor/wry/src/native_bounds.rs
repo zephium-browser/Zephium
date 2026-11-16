@@ -118,6 +118,7 @@ pub(crate) const ORIGIN_PART_LIMIT: NativeStringLimit = NativeStringLimit {
   max_utf8_bytes: 512,
 };
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 pub(crate) const DOWNLOAD_FILENAME_LIMIT: NativeStringLimit = NativeStringLimit {
   max_utf16_units: 240,
   max_utf8_bytes: 240,

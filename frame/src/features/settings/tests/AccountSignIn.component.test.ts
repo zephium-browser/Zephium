@@ -159,6 +159,6 @@ test("the sky is the page's backdrop and its name stays for assistive technology
   const gate = document.querySelector<HTMLElement>(".account-gate")!;
   await expect.poll(() => gate.dataset.ready, { timeout: 8000 }).toBe("true");
   expect(gate.dataset.sky).toBe("night");
-  expect(gate.querySelector<HTMLElement>(".sky")!.style.backgroundImage).toContain("sky-night");
+  expect(gate.querySelector<HTMLCanvasElement>(".sky canvas")!.width).toBeGreaterThan(0);
   await expect.element(screen.getByRole("img", { name: "Zephium" })).toBeVisible();
 });

@@ -378,7 +378,7 @@ impl Downloads {
             initial_open,
             extension: self.extension_admission.get(),
         };
-        if !source.live() || !source.in_front() {
+        if !source.live() {
             unsafe { native.cancel(None) };
             return None;
         }
@@ -489,6 +489,7 @@ impl Downloads {
                 destination: None,
                 panel: None,
                 panel_lease: None,
+                picker_preferences: None,
                 on_started: initial
                     .as_mut()
                     .and_then(|context| context.on_started.take()),
@@ -656,24 +657,32 @@ impl Downloads {
     ) {
         let context = {
             let active = self.active.borrow();
-            active.get(&id).and_then(|transfer| {
-                transfer.source.as_ref().map(|source| {
-                    (
-                        source.live(),
-                        source.in_front(),
-                        source.window.clone(),
-                        transfer.record.filename.clone(),
-                        transfer.record.source.clone(),
-                        transfer.confirmed
-                            || unsafe {
-                                transfer
-                                    .native
-                                    .respondsToSelector(objc2::sel!(isUserInitiated))
-                                    && transfer.native.isUserInitiated()
-                            },
-                    )
+            active
+                .get(&id)
+                .filter(|transfer| {
+                    transfer.record.state == DownloadState::Pending
+                        && !transfer.cancelling
+                        && !transfer.authorized
+                        && transfer.panel.is_none()
                 })
-            })
+                .and_then(|transfer| {
+                    transfer.source.as_ref().map(|source| {
+                        (
+                            source.live(),
+                            source.in_front(),
+                            source.window.clone(),
+                            transfer.record.filename.clone(),
+                            transfer.record.source.clone(),
+                            transfer.confirmed
+                                || unsafe {
+                                    transfer
+                                        .native
+                                        .respondsToSelector(objc2::sel!(isUserInitiated))
+                                        && transfer.native.isUserInitiated()
+                                },
+                        )
+                    })
+                })
         };
         let Some((true, in_front, window, filename, source, user_initiated)) = context else {
             self.cancel(id, None);
@@ -700,7 +709,7 @@ impl Downloads {
             return;
         }
         if window.attachedSheet().is_some() || !in_front {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         }
         let Some(mtm) = MainThreadMarker::new() else {
@@ -708,7 +717,7 @@ impl Downloads {
             return;
         };
         let Some(lease) = PanelLease::acquire() else {
-            self.cancel(id, Some(DownloadError::Capacity));
+            self.defer_destination(id, preferences);
             return;
         };
         let panel = NSSavePanel::savePanel(mtm);
@@ -720,14 +729,20 @@ impl Downloads {
             panel.setDirectoryURL(Some(&NSURL::fileURLWithPath(&NSString::from_str(&path))));
         }
         let live = self.active.borrow().get(&id).is_some_and(|transfer| {
-            !transfer.cancelling
-                && transfer
-                    .source
-                    .as_ref()
-                    .is_some_and(|source| source.live() && source.in_front())
+            !transfer.cancelling && transfer.source.as_ref().is_some_and(|source| source.live())
         });
-        if !live || window.attachedSheet().is_some() {
+        if !live {
             self.cancel(id, Some(DownloadError::Unavailable));
+            return;
+        }
+        if window.attachedSheet().is_some()
+            || !self
+                .active
+                .borrow()
+                .get(&id)
+                .is_some_and(|transfer| transfer.source.as_ref().is_some_and(Source::in_front))
+        {
+            self.defer_destination(id, preferences);
             return;
         }
         if let Some(transfer) = self.active.borrow_mut().get_mut(&id) {
@@ -735,7 +750,7 @@ impl Downloads {
             transfer.panel_lease = Some(lease);
             // A person may browse the filesystem for longer than a network
             // callback deadline. Lifetime revocation still applies each tick.
-            transfer.deadline = DecisionDeadline::new(DecisionPhase::NativePicker, Instant::now());
+            transfer.deadline = transfer.deadline.waiting_for_picker(Instant::now());
         }
         let weak = Rc::downgrade(self);
         let selected_panel = panel.clone();

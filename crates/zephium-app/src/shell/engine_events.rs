@@ -718,6 +718,7 @@ impl Shell {
                     // completion as well as through the bounded timer.
                     self.favicon_load_completed(id);
                     self.warm_spare_after_load(id);
+                    self.capture_loaded_tab_preview(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
