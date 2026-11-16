@@ -34,13 +34,14 @@
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import { requestTab } from "$session/work-tab.svelte";
-  import { expanded as sidebarWidth } from "$session/sidebar-mode.svelte";
+  import { expanded as sidebarWidth, expandBriefly } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { untrack, type Component, type Snippet } from "svelte";
   import { clearRequest } from "$domain/site-data";
   import { BlockerShield, HidingBar, hideElements, toggleSiteProtection } from "$features/blocker";
 
-  import { onMount } from "svelte";
+  import { onDestroy, onMount, tick } from "svelte";
+  import Button from "$shared/ui/Button";
   import { events } from "$shared/ipc/native-events";
   import { askSettings, handleNativeSection } from "$features/settings";
   import * as m from "$shared/i18n/messages";
@@ -142,6 +143,96 @@
     };
   });
   let splitting = $state(false);
+  let splitCancel = $state<HTMLButtonElement>();
+  let releaseSplit: (() => void) | null = null;
+  let splitOrigin: HTMLElement | null = null;
+  let splitScope = "";
+  let splitGeneration = 0;
+  let pendingSplit = $state<{ scope: string; page: string } | null>(null);
+  const splitTarget = () =>
+    JSON.stringify([tabs.profile()?.id, tabs.activeSpaceId(), tabs.activeId()]);
+  const splitContext = () =>
+    JSON.stringify([splitTarget(), browserPage.currentPage(), toolHost.activeTool()]);
+
+  function chooseSplit() {
+    if (splitting || !tabs.activeId()) return;
+    const page = browserPage.currentPage();
+    if (page !== null) {
+      if (!pendingSplit) {
+        pendingSplit = { scope: splitTarget(), page };
+        void browserPage.open(null);
+      }
+      return;
+    }
+    pendingSplit = null;
+    const active = document.activeElement;
+    splitOrigin =
+      active instanceof HTMLElement && active.matches("button, input, textarea, select, a[href]")
+        ? active
+        : null;
+    splitScope = splitContext();
+    releaseSplit = expandBriefly({ fullColumn: true });
+    splitting = true;
+    const generation = ++splitGeneration;
+    void tick().then(() => {
+      if (splitting && generation === splitGeneration && document.hasFocus())
+        splitCancel?.focus({ preventScroll: true });
+    });
+  }
+
+  function finishSplit(restoreFocus = true) {
+    splitting = false;
+    releaseSplit?.();
+    releaseSplit = null;
+    const origin = splitOrigin;
+    splitOrigin = null;
+    const generation = ++splitGeneration;
+    if (restoreFocus)
+      void tick().then(() => {
+        if (
+          generation === splitGeneration &&
+          document.hasFocus() &&
+          origin?.isConnected &&
+          !origin.closest("[hidden], [inert]") &&
+          !origin.matches(":disabled") &&
+          origin.getClientRects().length > 0
+        )
+          origin.focus({ preventScroll: true });
+      });
+  }
+
+  function escapeSplit(event: KeyboardEvent) {
+    if (
+      (!splitting && pendingSplit === null) ||
+      event.key !== "Escape" ||
+      event.defaultPrevented ||
+      event.isComposing
+    )
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    pendingSplit = null;
+    if (splitting) finishSplit();
+  }
+
+  $effect(() => {
+    const scope = splitContext();
+    if (splitting && scope !== splitScope) untrack(() => finishSplit(false));
+  });
+  $effect(() => {
+    const pending = pendingSplit;
+    const page = browserPage.currentPage();
+    const target = splitTarget();
+    const failed = browserPage.navigationFailed();
+    if (!pending) return;
+    if (pending.scope !== target || failed || (page !== null && page !== pending.page))
+      pendingSplit = null;
+    else if (page === null) untrack(chooseSplit);
+  });
+  onDestroy(() => {
+    splitGeneration++;
+    releaseSplit?.();
+  });
   let inWork = $derived(browserPage.currentPage() === "work");
   // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
@@ -245,7 +336,7 @@
     if (command.seq === 0 || command.seq === handledCommand) return;
     handledCommand = command.seq;
     untrack(() => {
-      if (command.id === "split.choose") splitting = true;
+      if (command.id === "split.choose") chooseSplit();
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
       if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
       if (command.id === "tab.clearSiteData") clearRequest.ask(tabs.takeMenuTargetUrl());
@@ -335,8 +426,9 @@
   }
   function selectTab(id: string) {
     if (splitting) {
+      if (id === tabs.activeId()) return;
       tabs.split(id);
-      splitting = false;
+      finishSplit();
       return;
     }
     // In Work a tab opens over the canvas; the work stays where it is.
@@ -344,6 +436,8 @@
     else tabs.activate(id);
   }
 </script>
+
+<svelte:window onkeydowncapture={escapeSplit} />
 
 <!-- The player of a tab playing behind the page in front; its code loads the
      first time there is one. -->
@@ -420,9 +514,12 @@
             {#if !inWork}<SidebarPagePermission />{/if}
 
             <HidingBar />
-            {#if splitting}<p class="shrink-0 px-3 pb-1 text-[12px] text-accent" aria-live="polite">
-                {m.choose_split()}
-              </p>{/if}
+            {#if splitting}<div class="flex shrink-0 items-center gap-1 px-3 pb-1">
+                <p class="flex-1 text-[12px] text-accent" aria-live="polite">{m.choose_split()}</p>
+                <Button variant="ghost" bind:ref={splitCancel} onclick={() => finishSplit()}
+                  >{m.action_cancel()}</Button
+                >
+              </div>{/if}
             <SidebarBody
               bind:this={sidebarBody}
               pinned={tree.pinned}

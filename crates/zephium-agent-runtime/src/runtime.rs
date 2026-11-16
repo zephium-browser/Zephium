@@ -2479,6 +2479,7 @@ mod tests {
     struct EventWaitingController {
         ready: mpsc::Sender<()>,
         settled: mpsc::Sender<()>,
+        release: oneshot::Receiver<()>,
     }
 
     impl AgentRuntimeController for EventWaitingController {
@@ -2489,6 +2490,7 @@ mod tests {
         ) -> AgentRuntimeControllerFuture {
             let ready = self.ready.clone();
             let settled = self.settled.clone();
+            let release = self.release;
             Box::pin(async move {
                 let _ = ready.send(());
                 if matches!(
@@ -2499,6 +2501,9 @@ mod tests {
                 ) {
                     let _ = settled.send(());
                 }
+                // Finalization closes the mailbox. Keep it open until the
+                // publisher has returned and the test has observed delivery.
+                let _ = release.await;
             })
         }
     }
@@ -3755,11 +3760,13 @@ mod tests {
         let _guard = runtime_test_guard();
         let (ready_sender, ready_receiver) = mpsc::channel();
         let (settled_sender, settled_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
         let pending = spawn_suspended_with_controller(
             AgentRuntimeConfig::STANDARD,
             Box::new(EventWaitingController {
                 ready: ready_sender,
                 settled: settled_sender,
+                release: release_receiver,
             }),
         )
         .expect("controller worker starts");
@@ -3782,6 +3789,9 @@ mod tests {
         settled_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("event wait must wake despite the fault monitor");
+        release_sender
+            .send(())
+            .expect("controller is awaiting release");
         wait_stopped(&completion);
         assert!(matches!(
             lifecycle.shutdown_until(Instant::now() + Duration::from_secs(1)),
