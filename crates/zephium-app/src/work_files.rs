@@ -1773,8 +1773,7 @@ mod tests {
             std::fs::create_dir_all(&protected).unwrap();
             let directory = test_tempdir_with_fallback(&protected, || Ok(fallback.clone()))
                 .expect("safe temporary fallback should be available");
-            assert!(directory.path().starts_with(&fallback));
-            assert!(directory.path().parent().unwrap().starts_with(&fallback));
+            assert_eq!(directory.path().parent(), Some(fallback.as_path()));
         }
     }
 
