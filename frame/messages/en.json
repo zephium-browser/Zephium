@@ -3932,6 +3932,8 @@
   "ntp_sky": "Zephium sky",
   "ntp_own_image": "Your own image",
   "ntp_choose_image": "Choose image…",
+  "ntp_image_original": "Use original wallpaper resolution",
+  "ntp_image_original_help": "Display custom wallpapers at their original resolution. May increase memory usage, especially with 4K and 5K images.",
   "ntp_image_failed": "Choose an image that Zephium can open.",
   "ntp_dim": "Dim",
   "ntp_dim_help": "Darken the image to make text easier to read.",

@@ -356,7 +356,7 @@
 >
   {#if ground}<div class="page" aria-hidden="true" style:clip-path={`path(evenodd, "${ground}")`}>
       {#if picture && width > 0 && height > 0}
-        {#key picture.key}
+        {#key `${picture.key}:${preferences.value("ui.newtab-image-original")}`}
           {@const selected = picture}
           {#await background then loaded}
             {#if loaded}<loaded.default
@@ -364,6 +364,7 @@
                 digest={picture.digest}
                 {width}
                 {height}
+                original={preferences.value("ui.newtab-image-original") === "true"}
                 dim={preferences.value("ui.newtab-dim") === "true"}
                 onfailure={() => {
                   imageFailed(selected.key);

@@ -29,6 +29,12 @@ export function mediaUrl(profile: string, digest: string, width = 720): string |
   return `${base}${profile}/${digest}?w=${width}`;
 }
 
+/** Request the original image without thumbnail scaling. */
+export function mediaOriginalUrl(profile: string, digest: string): string | null {
+  if (!DIGEST.test(digest) || !PROFILE.test(profile)) return null;
+  return `${base}${profile}/${digest}`;
+}
+
 export function mediaSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -47,13 +53,21 @@ export function recordMediaUrl(media: WorkRecordMediaRefV1): string | null {
     media.height > 240
   )
     return null;
+
   const encoded = btoa(JSON.stringify(media))
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/u, "");
+
   return `${base}record/${encoded}`;
 }
-export type WorkPicture = { profile: string; digest: string; record?: WorkRecordMediaRefV1 };
+
+export type WorkPicture = {
+  profile: string;
+  digest: string;
+  record?: WorkRecordMediaRefV1;
+};
+
 export function pictureUrl(picture: WorkPicture, width = 720): string | null {
   return picture.record
     ? recordMediaUrl(picture.record)
