@@ -220,7 +220,7 @@ pub fn user_style_refusal(
         .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
 }
 
-fn take_pwstr_bounded(
+pub(crate) fn take_pwstr_bounded(
     source: PWSTR,
     max_utf16_units: usize,
     max_utf8_bytes: usize,
