@@ -27,6 +27,9 @@ use crate::{DuplexConfig, Fault};
 
 /// Configuration changes arrive in bursts; rebuild once they settle.
 const SETTLE: Duration = Duration::from_millis(150);
+const RETRY: Duration = Duration::from_millis(300);
+/// A started engine that delivers no input for this long is rebuilt.
+const STALL: Duration = Duration::from_millis(500);
 /// More rebuilds than this within `CHURN_WINDOW` means the device is not settling.
 const CHURN: usize = 5;
 const CHURN_WINDOW: Duration = Duration::from_secs(10);
@@ -148,8 +151,11 @@ impl Graph {
             let engine = AVAudioEngine::new();
             let input = engine.inputNode();
             if config.voice_processing {
-                if input.setVoiceProcessingEnabled_error(true).is_err() {
-                    listener.note("voice processing refused");
+                if let Err(error) = input.setVoiceProcessingEnabled_error(true) {
+                    listener.note(&format!(
+                        "duplex failed step=voice_processing code={}",
+                        error.code()
+                    ));
                     return Err(Fault::NoMicrophone);
                 }
                 input.setVoiceProcessingOtherAudioDuckingConfiguration(
@@ -159,15 +165,20 @@ impl Graph {
                     },
                 );
             }
+            let enabled = started.elapsed();
             let format = input.outputFormatForBus(0);
             let (in_rate, in_channels) = (format.sampleRate(), format.channelCount());
             if !in_rate.is_finite() || in_rate <= 0.0 || in_channels == 0 {
+                listener.note(&format!(
+                    "duplex failed step=input_format rate={in_rate} channels={in_channels}"
+                ));
                 return Err(Fault::NoMicrophone);
             }
             core.set_input(in_rate);
 
-            // Voice processing reports every microphone of the array; the
-            // processed signal is the first channel.
+            // Voice processing reports one channel per microphone of the
+            // array (seven on a MacBook Air), each carrying the same
+            // processed signal; the first is enough.
             let first_only = config.voice_processing;
             let capture = core.clone();
             let scratch = Mutex::new(Vec::<f32>::with_capacity(8_192));
@@ -211,22 +222,37 @@ impl Graph {
             engine.attachNode(&sink);
             engine.connect_to_format(&input, &sink, Some(&format));
 
-            let mixer = engine.mainMixerNode();
             let output = engine.outputNode();
-            let mut out_rate = output.outputFormatForBus(0).sampleRate();
+            // Under voice processing the output node's hardware side reads
+            // as empty and the default mixer connection is 44.1 kHz stereo,
+            // which the voice-processing unit (running at the input rate)
+            // refuses to initialize (-10875). Connect at an explicit rate.
+            let hardware = output.outputFormatForBus(0);
+            let (out_rate, out_channels) = if config.voice_processing {
+                (in_rate, 2)
+            } else {
+                (hardware.sampleRate(), hardware.channelCount().max(1))
+            };
             if !out_rate.is_finite() || out_rate <= 0.0 {
-                out_rate = mixer.outputFormatForBus(0).sampleRate();
+                listener.note(&format!("duplex failed step=output_format rate={out_rate}"));
+                return Err(Fault::NoMicrophone);
             }
-            let out_format = AVAudioFormat::initStandardFormatWithSampleRate_channels(
-                AVAudioFormat::alloc(),
-                out_rate,
-                1,
-            )
-            .ok_or(Fault::NoMicrophone)?;
+            let format_of = |channels| {
+                AVAudioFormat::initStandardFormatWithSampleRate_channels(
+                    AVAudioFormat::alloc(),
+                    out_rate,
+                    channels,
+                )
+                .ok_or(Fault::NoMicrophone)
+            };
+            let out_format = format_of(1)?;
             let latency = (output.presentationLatency().max(0.0) * out_rate).round() as u64;
             core.set_output(out_rate, latency);
             let (source, source_block) = source_node(core, &out_format);
             engine.attachNode(&source);
+            let mixer = engine.mainMixerNode();
+            let mixed = format_of(out_channels)?;
+            engine.connect_to_format(&mixer, &output, Some(&mixed));
             engine.connect_to_format(&source, &mixer, Some(&out_format));
 
             let raise = signal.clone();
@@ -241,9 +267,14 @@ impl Graph {
                 _source_block: source_block,
                 _observer_block: observer_block,
             };
+            let wired = started.elapsed();
             graph.engine.prepare();
-            if graph.engine.startAndReturnError().is_err() {
-                listener.note("duplex engine did not start");
+            let prepared = started.elapsed();
+            if let Err(error) = graph.engine.startAndReturnError() {
+                listener.note(&format!(
+                    "duplex failed step=start code={} in_rate={in_rate} in_channels={in_channels} out_rate={out_rate} out_channels={out_channels}",
+                    error.code()
+                ));
                 return Err(Fault::NoMicrophone);
             }
             let object: &AnyObject = &graph.engine;
@@ -256,8 +287,11 @@ impl Graph {
                 ),
             );
             listener.note(&format!(
-                "duplex started ms={} voice_processing={} in_rate={in_rate} in_channels={in_channels} out_rate={out_rate} latency_frames={latency}",
+                "duplex started ms={} input_ms={} wire_ms={} prepare_ms={} voice_processing={} in_rate={in_rate} in_channels={in_channels} out_rate={out_rate} out_channels={out_channels} latency_frames={latency}",
                 started.elapsed().as_millis(),
+                enabled.as_millis(),
+                (wired - enabled).as_millis(),
+                (prepared - wired).as_millis(),
                 config.voice_processing
             ));
             Ok(graph)
@@ -292,7 +326,7 @@ impl Device {
     pub(crate) fn open(config: DuplexConfig, core: Arc<Engine>) -> Result<Self, Fault> {
         ask_microphone()?;
         let signal = Arc::new(Signal::default());
-        let graph = Graph::build(config, &core, &signal)?;
+        let graph = build_settled(config, &core, &signal)?;
         let shared = Arc::new(Shared {
             graph: Mutex::new(Some(graph)),
             signal,
@@ -310,24 +344,64 @@ impl Device {
     }
 }
 
+/// Builds the graph, once more after a pause if the first attempt fails:
+/// right after another engine (ours or another app's) releases voice
+/// processing, the devices briefly report formats the I/O unit refuses.
+fn build_settled(
+    config: DuplexConfig,
+    core: &Arc<Engine>,
+    signal: &Arc<Signal>,
+) -> Result<Graph, Fault> {
+    let build = || objc2::rc::autoreleasepool(|_| Graph::build(config, core, signal));
+    build().or_else(|_| {
+        std::thread::sleep(RETRY);
+        core.listener().note("duplex retry");
+        build()
+    })
+}
+
 fn supervise(shared: &Shared, config: DuplexConfig, core: &Arc<Engine>) {
     let mut rebuilds = std::collections::VecDeque::with_capacity(CHURN);
+    let mut watching = Some(core.captured());
     loop {
-        {
+        let stalled = {
             let Ok(mut raised) = shared.signal.raised.lock() else {
                 return;
             };
+            let deadline = Instant::now() + STALL;
+            let mut stalled = false;
             while !*raised && !shared.closing.load(Ordering::Acquire) {
-                raised = match shared.signal.wake.wait(raised) {
-                    Ok(raised) => raised,
+                let Some(seen) = watching else {
+                    raised = match shared.signal.wake.wait(raised) {
+                        Ok(raised) => raised,
+                        Err(_) => return,
+                    };
+                    continue;
+                };
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    watching = None;
+                    stalled = core.captured() == seen;
+                    if stalled {
+                        break;
+                    }
+                    continue;
+                }
+                raised = match shared.signal.wake.wait_timeout(raised, left) {
+                    Ok((raised, _)) => raised,
                     Err(_) => return,
                 };
             }
-        }
+            stalled
+        };
         if shared.closing.load(Ordering::Acquire) {
             return;
         }
-        std::thread::sleep(SETTLE);
+        if stalled {
+            core.listener().note("duplex stalled");
+        } else {
+            std::thread::sleep(SETTLE);
+        }
         if shared.closing.load(Ordering::Acquire) {
             return;
         }
@@ -349,13 +423,16 @@ fn supervise(shared: &Shared, config: DuplexConfig, core: &Arc<Engine>) {
         let rebuilt = if rebuilds.len() > CHURN {
             Err(Fault::NoMicrophone)
         } else {
-            Graph::build(config, core, &shared.signal)
+            build_settled(config, core, &shared.signal)
         };
         match rebuilt {
             Ok(rebuilt) => {
                 *graph = Some(rebuilt);
                 drop(graph);
-                core.listener().route_changed();
+                watching = Some(core.captured());
+                if !stalled {
+                    core.listener().route_changed();
+                }
             }
             Err(fault) => {
                 drop(graph);

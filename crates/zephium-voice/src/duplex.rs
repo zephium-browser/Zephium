@@ -4,7 +4,7 @@
 //! ([`Engine::render`]) in the device's own rate and channel layout.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::meter::Meter;
@@ -59,6 +59,7 @@ struct Input {
 pub(crate) struct Engine {
     listener: Arc<dyn DuplexListener>,
     listening: AtomicBool,
+    captured: AtomicU64,
     input: Mutex<Input>,
     output: Mutex<Playback>,
 }
@@ -69,6 +70,7 @@ impl Engine {
         Self {
             listener,
             listening: AtomicBool::new(false),
+            captured: AtomicU64::new(0),
             input: Mutex::new(Input {
                 resampler: Resampler::new(rate, rate),
                 mono: Vec::new(),
@@ -99,8 +101,15 @@ impl Engine {
         }
     }
 
+    /// Device input callbacks so far, to tell a stalled device from a quiet one.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn captured(&self) -> u64 {
+        self.captured.load(Ordering::Relaxed)
+    }
+
     /// Input samples as the device delivered them, interleaved.
     pub(crate) fn capture(&self, samples: &[f32], channels: usize) {
+        self.captured.fetch_add(1, Ordering::Relaxed);
         let Ok(mut input) = self.input.lock() else {
             return;
         };
@@ -312,17 +321,20 @@ mod tests {
         engine.listen(true);
         let input = ramp(48_000);
         let mut rest = &input[..];
+        let mut calls = 0;
         for size in [1_usize, 7, 480, 4_800, 13, 1_024, 333].iter().cycle() {
             if rest.is_empty() {
                 break;
             }
             let size = (*size).min(rest.len());
             engine.capture(&rest[..size], 1);
+            calls += 1;
             rest = &rest[size..];
         }
         let frames = recorder.frames.lock().unwrap();
         assert!(frames.iter().all(|frame| frame.len() == FRAME_SAMPLES));
         assert_eq!(frames.len(), 100);
+        assert_eq!(engine.captured(), calls);
         let joined: Vec<i16> = frames.concat();
         let expected: Vec<i16> = input
             .iter()
