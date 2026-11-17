@@ -12,9 +12,9 @@ const native = vi.hoisted(() => ({
   edits: 0,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
+  const { mockComposerBindings } = await import("./composer-fixtures");
   const reply = (profile: string, body: unknown) => ({ version: 1, profile, reply: body });
-  return mockBindings({
+  return mockComposerBindings({
     faviconProbe: async () => true,
     workActivity: (async (profile: string, work: string) => ({
       version: 1,

@@ -11,6 +11,10 @@ const _: [(); 128] = [(); zephium_agentic::AGENT_AUDIT_RECORD_V1_BYTES];
 const _: [(); 16] = [(); zephium_agentic::MAX_AGENT_AUDIT_DELIVERY_EVENTS];
 const _: [(); 262_144] = [(); crate::hub::MAX_DURABLE_AGENT_AUDIT_EVENTS];
 const _: [(); 128] = [(); crate::hub::MAX_TIME_BATCH_RECEIPTS];
+const _: [(); 512] = [(); zephium_core::session::MAX_SESSION_SPACES];
+const _: [(); 262_144] = [(); zephium_core::work::environment::MAX_COMPOSER_DRAFT_BYTES];
+const _: [(); 64] = [(); zephium_core::work::environment::MAX_COMPOSER_DRAFTS_PER_PROFILE];
+const _: [(); 4_194_304] = [(); zephium_core::work::environment::MAX_COMPOSER_DRAFT_PROFILE_BYTES];
 
 pub struct Migration {
     pub version: i64,
@@ -1823,6 +1827,32 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 29,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE work_composer_drafts (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE CHECK(length(CAST(profile_id AS BLOB))=26),
+                    space_id TEXT NOT NULL CHECK(length(CAST(space_id AS BLOB))=26),
+                    revision INTEGER NOT NULL CHECK(revision BETWEEN 2 AND 9223372036854775807),
+                    text TEXT NOT NULL CHECK(length(CAST(text AS BLOB))<=262144),
+                    PRIMARY KEY(profile_id,space_id)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE TRIGGER work_composer_drafts_insert_budget BEFORE INSERT ON work_composer_drafts
+                 WHEN (SELECT count(*) FROM work_composer_drafts)>=512
+                    OR (NEW.text!='' AND (SELECT count(*) FROM work_composer_drafts WHERE profile_id=NEW.profile_id AND text!='')>=64)
+                    OR coalesce((SELECT sum(length(CAST(text AS BLOB))) FROM work_composer_drafts WHERE profile_id=NEW.profile_id),0)+length(CAST(NEW.text AS BLOB))>4194304
+                 BEGIN SELECT RAISE(ABORT,'composer draft capacity'); END;
+                 CREATE TRIGGER work_composer_drafts_update_budget BEFORE UPDATE OF text ON work_composer_drafts
+                 WHEN (OLD.text='' AND NEW.text!='' AND (SELECT count(*) FROM work_composer_drafts WHERE profile_id=NEW.profile_id AND text!='')>=64)
+                    OR coalesce((SELECT sum(length(CAST(text AS BLOB))) FROM work_composer_drafts WHERE profile_id=NEW.profile_id),0)-length(CAST(OLD.text AS BLOB))+length(CAST(NEW.text AS BLOB))>4194304
+                 BEGIN SELECT RAISE(ABORT,'composer draft capacity'); END;
+                 CREATE TRIGGER work_composer_drafts_identity_immutable BEFORE UPDATE OF profile_id,space_id ON work_composer_drafts
+                 WHEN OLD.profile_id!=NEW.profile_id OR OLD.space_id!=NEW.space_id
+                 BEGIN SELECT RAISE(ABORT,'composer draft scope changed'); END;",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
@@ -2841,6 +2871,7 @@ mod tests {
         (26, 0x8cf0e4639f17eb73),
         (27, 0x6c555aa33142ef81),
         (28, 0xdce79131820ba8c9),
+        (29, 0xe7926065f4d26c22),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),

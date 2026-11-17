@@ -397,3 +397,49 @@ fn a_new_browser_keeps_its_bootstrap_until_the_first_controller_is_proven() {
         }
     }
 }
+
+#[test]
+fn refused_child_frames_cannot_consume_main_frame_feedback_rate_limit() {
+    let clocks = [Cell::new(None), Cell::new(None)];
+    let now = std::time::Instant::now();
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::Subframe,
+        &clocks,
+        now
+    ));
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::MainFrame,
+        &clocks,
+        now
+    ));
+    assert!(!admit_native_url_refusal(
+        wry::NativeUrlTarget::Subframe,
+        &clocks,
+        now
+    ));
+    assert!(!admit_native_url_refusal(
+        wry::NativeUrlTarget::NewWindow,
+        &clocks,
+        now
+    ));
+    assert!(admit_native_url_refusal(
+        wry::NativeUrlTarget::NewWindow,
+        &clocks,
+        now + std::time::Duration::from_secs(1)
+    ));
+}
+
+#[test]
+fn notification_grant_source_exists_only_for_windows_human_views() {
+    assert!(matches!(
+        raw_content_permission_on(wry::PermissionKind::Notifications, false),
+        wry::PermissionResponse::Deny
+    ));
+    assert!(matches!(
+        raw_content_permission_on(wry::PermissionKind::Notifications, true),
+        wry::PermissionResponse::Prompt
+    ));
+    assert!(zephium_core::permissions::SitePermissionKind::Notifications
+        .page()
+        .is_none());
+}

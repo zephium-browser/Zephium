@@ -247,3 +247,36 @@ test("Cancel on the AutoFill warning fills nothing", async () => {
   await page.getByRole("button", { name: "Cancel" }).click();
   expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 5, "dismiss");
 });
+
+test("an unreadable native address is a dismiss-only navigation notice", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    serial: 9,
+    request: { kind: "navigation_refused", embedded: false },
+  });
+  const card = page.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("Navigation blocked");
+  await expect.element(card).toHaveTextContent("This address is too long or could not be read.");
+  await expect
+    .element(page.getByRole("button", { name: "Open", exact: true }))
+    .not.toBeInTheDocument();
+  await expect.element(page.getByRole("checkbox")).not.toBeInTheDocument();
+  await userEvent.click(page.getByRole("button", { name: "OK", exact: true }));
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 9, "dismiss");
+});
+
+test("an embedded refusal identifies child content and offers only dismissal", async () => {
+  render(PageRequestCard, {
+    tab: "tab-1",
+    serial: 10,
+    request: { kind: "navigation_refused", embedded: true },
+  });
+  const card = page.getByRole("alertdialog");
+  await expect.element(card).toHaveTextContent("Embedded content blocked");
+  await expect.element(card).toHaveTextContent("The main page stays open.");
+  await expect
+    .element(page.getByRole("button", { name: "Open", exact: true }))
+    .not.toBeInTheDocument();
+  await userEvent.click(page.getByRole("button", { name: "OK", exact: true }));
+  expect(pageAnswers).toHaveBeenCalledExactlyOnceWith("tab-1", 10, "dismiss");
+});

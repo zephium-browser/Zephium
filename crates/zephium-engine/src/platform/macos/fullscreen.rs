@@ -35,16 +35,32 @@ fn raw_state(view: &AnyObject) -> Option<isize> {
     answers.then(|| unsafe { msg_send![view, fullscreenState] })
 }
 
+/// Where a stage page sits in the view hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Slot {
+    Detached,
+    Stage,
+    Parked,
+    Elsewhere,
+}
+
+fn owns(state: Option<isize>, slot: Slot) -> bool {
+    state.is_some_and(|state| state != 0) || slot == Slot::Elsewhere
+}
+
 /// Whether WebKit is moving or presenting `view` in its fullscreen window, or
-/// has left it somewhere other than `stage`.
-pub(crate) fn webkit_owns(view: &NSView, stage: &NSView) -> bool {
-    if raw_state(view).is_some_and(|state| state != 0) {
-        return true;
-    }
+/// has left it somewhere other than `stage` or the stage's own `parking` view.
+pub(crate) fn webkit_owns(view: &NSView, stage: &NSView, parking: Option<&NSView>) -> bool {
     // SAFETY: retained parent access on the AppKit main thread.
-    unsafe { view.superview() }
-        .as_deref()
-        .is_some_and(|parent| !std::ptr::eq(parent, stage))
+    let slot = match unsafe { view.superview() }.as_deref() {
+        None => Slot::Detached,
+        Some(parent) if std::ptr::eq(parent, stage) => Slot::Stage,
+        Some(parent) if parking.is_some_and(|parking| std::ptr::eq(parent, parking)) => {
+            Slot::Parked
+        }
+        Some(_) => Slot::Elsewhere,
+    };
+    owns(raw_state(view), slot)
 }
 
 /// Whether WebKit is moving or presenting `view` in its fullscreen window.
@@ -199,7 +215,7 @@ mod tests {
     use objc2::runtime::NSObject;
     use objc2::{define_class, msg_send, AnyThread};
 
-    use super::raw_state;
+    use super::{owns, raw_state, Slot};
 
     define_class!(
         #[unsafe(super(NSObject))]
@@ -217,5 +233,24 @@ mod tests {
             unsafe { msg_send![PresentingStub::alloc(), init] };
         assert_eq!(raw_state(&presenting), Some(2));
         assert_eq!(raw_state(&NSObject::new()), None);
+    }
+
+    #[test]
+    fn the_stage_parking_window_is_not_webkit_fullscreen() {
+        for slot in [Slot::Detached, Slot::Stage, Slot::Parked] {
+            assert!(!owns(Some(0), slot), "{slot:?} with fullscreen inactive");
+            assert!(!owns(None, slot), "{slot:?} without fullscreen support");
+        }
+    }
+
+    #[test]
+    fn webkit_fullscreen_wins_wherever_the_page_sits() {
+        for slot in [Slot::Detached, Slot::Stage, Slot::Parked, Slot::Elsewhere] {
+            assert!(owns(Some(1), slot), "{slot:?} entering");
+            assert!(owns(Some(2), slot), "{slot:?} presenting");
+        }
+        // WebKit's fullscreen window keeps the page until it hands it back.
+        assert!(owns(Some(0), Slot::Elsewhere));
+        assert!(owns(None, Slot::Elsewhere));
     }
 }

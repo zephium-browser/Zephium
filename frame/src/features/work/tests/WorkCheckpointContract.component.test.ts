@@ -15,8 +15,8 @@ import { projection } from "./environment-fixtures";
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     faviconProbe: async () => true,
     workCall: native.call,
     workPaneHide: vi.fn(),

@@ -711,6 +711,7 @@ fn native_windows_runtime_recovery() {
                     view,
                     alive,
                     crash_observer: Some(observer),
+                    navigation_policy: None,
                     resource: h
                         .native_resources
                         .try_acquire(NativeResourceClass::Extension)

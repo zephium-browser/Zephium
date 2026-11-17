@@ -66,6 +66,7 @@
   let app = $derived(request.kind === "external_app" ? request : null);
   // A hung page: the person may wait for it or reload it in a fresh view.
   let hung = $derived(request.kind === "unresponsive");
+  let navigationRefused = $derived(request.kind === "navigation_refused" ? request : null);
   // A site that wants to save a file: asked once per site, or for a download
   // nobody clicked even where the site is allowed.
   let download = $derived(request.kind === "download" ? request : null);
@@ -89,7 +90,11 @@
               : m.page_request_app_missing({ scheme: app.scheme })
             : hung
               ? m.page_request_unresponsive_title()
-              : m.page_request_popup_title(),
+              : navigationRefused
+                ? navigationRefused.embedded
+                  ? m.page_request_embedded_refused_title()
+                  : m.page_request_navigation_refused_title()
+                : m.page_request_popup_title(),
   );
   let detail = $derived(
     download
@@ -104,9 +109,13 @@
             : null
           : hung
             ? m.page_request_unresponsive_detail()
-            : request.kind === "popup" && request.host
-              ? request.host
-              : null,
+            : navigationRefused
+              ? navigationRefused.embedded
+                ? m.page_request_embedded_refused_detail()
+                : m.page_request_navigation_refused_detail()
+              : request.kind === "popup" && request.host
+                ? request.host
+                : null,
   );
   let openable = $derived(
     app ? app.app !== null : request.kind === "popup" && request.host !== null,

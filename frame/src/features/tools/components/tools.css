@@ -54,7 +54,8 @@
   background: var(--color-field-hover);
 }
 
-.shared-tool-search:focus-within {
+.shared-tool-search:focus-within,
+.shared-tool-search:has(input[data-caret-parked]) {
   background: var(--color-field-hover);
   box-shadow: var(--shadow-field-focus);
   color: var(--color-muted);
