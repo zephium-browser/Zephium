@@ -1075,6 +1075,7 @@ async fn scenario_run(
             None,
         ),
         Grade::Fact(facts) => (None, Some(scenarios::has_fact(&text, facts))),
+        Grade::NotClaimed => (Some(claimed != scenarios::Claimed::ActedAllStepsDone), None),
         Grade::Asks(names) => {
             let asked = text.to_lowercase();
             (
@@ -1224,6 +1225,9 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     });
     let events = shared.clone();
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    // The engine's shutdown barrier, once the bench took it: 1 clean, 2 not.
+    let barrier = Arc::new(AtomicU8::new(0));
+    let closed = barrier.clone();
     let run = host_probe(
         profile,
         zephium_engine::MacosWorkProbeInput::LifecycleOnly,
@@ -1270,32 +1274,41 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
                 })
                 .map_err(|_| "assist_worker")?;
             let mut worker = Some(worker);
-            let mut joined = None;
-            let closed = Arc::new(AtomicU8::new(0));
+            let mut issued = false;
             Ok(Box::new(move |native_failed| {
-                if native_failed {
-                    return Some(Err("assist_native"));
-                }
-                if joined.is_none() && worker.as_ref().is_some_and(|join| join.is_finished()) {
-                    joined = Some(worker.take().is_some_and(|join| join.join().is_ok()));
+                if !issued {
+                    // Until the bench takes the barrier, a failed run leaves
+                    // it to the host's failure path: there is only ever one.
+                    if native_failed {
+                        return Some(Err("assist_native"));
+                    }
+                    if !worker.as_ref().is_some_and(|join| join.is_finished()) {
+                        return None;
+                    }
+                    if worker.take().is_none_or(|join| join.join().is_err()) {
+                        return Some(Err("assist_worker_panic"));
+                    }
                     // A successful host run leaves the shutdown barrier to the
                     // application: retire the engine's views before returning,
                     // so no WebView2 browser outlives the probe.
+                    issued = true;
                     let result = closed.clone();
                     engine.shutdown(Box::new(move |clean| {
                         result.store(if clean { 1 } else { 2 }, Ordering::Release)
                     }));
                 }
-                match (joined?, closed.load(Ordering::Acquire)) {
-                    (_, 0) => None,
-                    (false, _) => Some(Err("assist_worker_panic")),
-                    (true, 1) => Some(Ok(())),
-                    (true, _) => Some(Err("assist_engine_shutdown")),
-                }
+                // The bench's barrier is the one: the host is told the run
+                // ended, and an unclean barrier fails it below, not there.
+                (closed.load(Ordering::Acquire) != 0).then_some(Ok(()))
             }))
         },
     );
     if let Err(stage) = run {
+        say(format_args!("assist-run-failure: stage={stage}"));
+        return Err(Error::Engine(stage));
+    }
+    if barrier.load(Ordering::Acquire) != 1 {
+        let stage = "assist_engine_shutdown";
         say(format_args!("assist-run-failure: stage={stage}"));
         return Err(Error::Engine(stage));
     }
