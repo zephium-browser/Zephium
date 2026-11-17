@@ -78,14 +78,16 @@ test("duplicate keywords are refused without saving", async () => {
   expect(native.stored).toBe("");
 });
 
-test.each(["Enter", "Escape"])("IME %s leaves keyword composition alone", async (key) => {
+test.each([
+  { key: "Enter", isComposing: true },
+  { key: "Escape", isComposing: true },
+  { key: "Enter", isComposing: false, keyCode: 229 },
+])("IME key $key leaves keyword composition alone ($isComposing)", async (event) => {
   await preferences.init();
   const screen = await render(SearchShortcuts);
   const keyword = screen.getByRole("textbox", { name: "Keyword, YouTube" });
   await userEvent.fill(keyword, "video");
-  keyword
-    .element()
-    .dispatchEvent(new KeyboardEvent("keydown", { key, isComposing: true, bubbles: true }));
+  keyword.element().dispatchEvent(new KeyboardEvent("keydown", { ...event, bubbles: true }));
   await expect.element(keyword).toHaveFocus();
   await expect.element(keyword).toHaveValue("video");
   expect(native.stored).toBe("");

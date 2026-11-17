@@ -1,5 +1,6 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
+  import { isComposing } from "$shared/lib/keyboard";
   import { preferences } from "$domain/preferences";
   import { favicons } from "$domain/favicons";
   import type { SearchShortcut } from "$shared/ipc/bindings";
@@ -92,7 +93,7 @@
         autocomplete="off"
         disabled={preferences.saving()}
         onkeydown={(event) => {
-          if (event.isComposing) return;
+          if (isComposing(event)) return;
           if (event.key === "Enter") event.currentTarget.blur();
           else if (event.key === "Escape") {
             event.currentTarget.value = entry.keywords.join(" ");
