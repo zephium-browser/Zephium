@@ -1746,6 +1746,8 @@ mod suspending {
         a_refusal_for_a_page_not_asked_to_sleep_is_ignored
         a_refusal_of_an_earlier_ask_does_not_cancel_a_newer_one
         a_refused_page_is_asked_again_once_sleep_is_turned_back_on
+        private_tabs_sleep_and_discard_when_notification_snapshot_is_unavailable
+        private_notification_grants_survive_unavailable_refresh_and_protect_only_their_origin
     }
 }
 
@@ -1789,6 +1791,13 @@ fn unknown_notification_observation_and_allowed_origin_stay_awake_until_refreshe
         !shell.residency.dormant_sent.contains(&first),
         "unknown is not an empty grant observation"
     );
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(shell.residency.discard_probes.is_empty());
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Normal,
+    ));
     *engine.site_permission_reply.lock().unwrap() = Some(Some(vec![SitePermission {
         origin: PageOrigin::parse_exact("https://mail.example").unwrap(),
         kind: SitePermissionKind::Notifications,
@@ -1813,6 +1822,83 @@ fn unknown_notification_observation_and_allowed_origin_stay_awake_until_refreshe
     shell.invalidate_notification_sleep(Some(profile));
     shell.handle(Command::Tick);
     assert!(shell.residency.dormant_sent.contains(&first));
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(!shell.residency.dormant_sent.contains(&first));
+    assert!(shell.residency.discard_probes.is_empty());
+}
+
+#[test]
+fn private_tabs_sleep_and_discard_when_notification_snapshot_is_unavailable() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let first = active_id(&screen);
+    assert!(matches!(shell.partition_of(first), Partition::Ephemeral(_)));
+    navigate_and_commit(&mut shell, first, "private.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.enable_native_notification_source_for_test();
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    let (candidate, probe) = first_probing_discard(&shell);
+    assert_eq!(candidate, first);
+    acknowledge_safe_discard(&mut shell, first, probe);
+    assert!(!shell.items.tab(first).unwrap().has_view());
+    assert!(shell.items.tab(active).unwrap().has_view());
+}
+
+#[test]
+fn private_notification_grants_survive_unavailable_refresh_and_protect_only_their_origin() {
+    use zephium_core::permissions::{
+        PageOrigin, RememberedPagePermission, SitePermission, SitePermissionKind,
+    };
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let allowed = active_id(&screen);
+    navigate_and_commit(&mut shell, allowed, "mail.example");
+    let profile = shell.profile_of_item(allowed).unwrap();
+    shell.handle(Command::Open);
+    let reclaimable = active_id(&screen);
+    navigate_and_commit(&mut shell, reclaimable, "other.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    *engine.site_permission_reply.lock().unwrap() = Some(Some(vec![SitePermission {
+        origin: PageOrigin::parse_exact("https://mail.example").unwrap(),
+        kind: SitePermissionKind::Notifications,
+        decision: RememberedPagePermission::Allow,
+        scheme: None,
+    }]));
+    shell.enable_native_notification_source_for_test();
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    assert!(!shell.residency.dormant_sent.contains(&allowed));
+    assert!(shell.residency.dormant_sent.contains(&reclaimable));
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::Tick);
+    assert!(!shell.residency.dormant_sent.contains(&allowed));
+    assert!(shell.residency.dormant_sent.contains(&reclaimable));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(!shell.residency.discard_probes.contains_key(&allowed));
+    let (candidate, probe) = first_probing_discard(&shell);
+    assert_eq!(candidate, reclaimable);
+    acknowledge_safe_discard(&mut shell, reclaimable, probe);
+    assert!(!shell.items.tab(reclaimable).unwrap().has_view());
+    assert!(shell.items.tab(allowed).unwrap().has_view());
 }
 
 #[test]
