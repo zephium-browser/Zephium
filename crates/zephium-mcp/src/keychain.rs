@@ -93,23 +93,39 @@ pub fn delete_server(profile: &str, server: &str) -> Result<(), KeychainError> {
 }
 
 const MAX_PROFILE_VAULT_ITEMS: usize = 8192;
+const MAX_VAULT_INVENTORY_ITEMS: usize = 131_072;
+
+fn bounded_namespace(
+    prefix: &str,
+    names: impl IntoIterator<Item = Result<String, KeychainError>>,
+) -> Result<Vec<String>, KeychainError> {
+    let mut matched = Vec::new();
+    for (index, name) in names.into_iter().enumerate() {
+        if index >= MAX_VAULT_INVENTORY_ITEMS {
+            return Err(KeychainError::Inaccessible);
+        }
+        let name = name?;
+        if name.starts_with(prefix) {
+            if matched.len() >= MAX_PROFILE_VAULT_ITEMS {
+                return Err(KeychainError::Inaccessible);
+            }
+            matched.push(name);
+        }
+    }
+    Ok(matched)
+}
 
 fn erase_namespace(
     prefix: &str,
     mut inventory: impl FnMut() -> Result<Vec<String>, KeychainError>,
     mut erase: impl FnMut(&str) -> Result<(), KeychainError>,
 ) -> Result<(), KeychainError> {
-    let names = inventory()?;
-    if names.len() > MAX_PROFILE_VAULT_ITEMS {
-        return Err(KeychainError::Inaccessible);
-    }
-    for name in names.iter().filter(|name| name.starts_with(prefix)) {
+    let names = bounded_namespace(prefix, inventory()?.into_iter().map(Ok))?;
+    for name in &names {
         erase(name)?;
     }
-    let remaining = inventory()?;
-    if remaining.len() > MAX_PROFILE_VAULT_ITEMS
-        || remaining.iter().any(|name| name.starts_with(prefix))
-    {
+    let remaining = bounded_namespace(prefix, inventory()?.into_iter().map(Ok))?;
+    if !remaining.is_empty() {
         return Err(KeychainError::Inaccessible);
     }
     Ok(())
@@ -275,18 +291,18 @@ mod platform {
                     .class(ItemClass::generic_password())
                     .keychains(std::slice::from_ref(&keychain))
                     .load_attributes(true)
-                    .limit(super::MAX_PROFILE_VAULT_ITEMS as i64 + 1);
+                    .limit(super::MAX_VAULT_INVENTORY_ITEMS as i64 + 1);
                 match options.search() {
-                    Ok(items) if items.len() <= super::MAX_PROFILE_VAULT_ITEMS => items
-                        .into_iter()
-                        .map(|item| {
+                    Ok(items) => super::bounded_namespace(
+                        prefix,
+                        items.into_iter().map(|item| {
                             item.simplify_dict()
                                 .map(|attributes| {
                                     attributes.get("svce").cloned().unwrap_or_default()
                                 })
                                 .ok_or(KeychainError::Inaccessible)
-                        })
-                        .collect(),
+                        }),
+                    ),
                     Err(error) if error.code() == errSecItemNotFound => Ok(Vec::new()),
                     _ => Err(KeychainError::Inaccessible),
                 }
@@ -433,6 +449,107 @@ mod platform {
 #[cfg(test)]
 mod profile_erasure_tests {
     use super::*;
+
+    #[test]
+    fn unrelated_items_do_not_consume_the_profile_inventory_bound() {
+        let unrelated = MAX_PROFILE_VAULT_ITEMS + 1;
+        let mut inventory = vec![service("profile2", "server"); unrelated];
+        inventory.push(service("profile", "legacy"));
+        let names = std::cell::RefCell::new(inventory);
+        erase_namespace(
+            &service("profile", ""),
+            || Ok(names.borrow().clone()),
+            |name| {
+                names.borrow_mut().retain(|item| item != name);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(names.borrow().len(), unrelated);
+        assert!(names
+            .borrow()
+            .iter()
+            .all(|name| name == &service("profile2", "server")));
+    }
+
+    #[test]
+    fn matching_accounts_are_bounded_before_any_deletion() {
+        let prefix = service("profile", "");
+        let item = service("profile", "server");
+        assert_eq!(
+            bounded_namespace(
+                &prefix,
+                std::iter::repeat_n(Ok(item.clone()), MAX_PROFILE_VAULT_ITEMS)
+            )
+            .unwrap()
+            .len(),
+            MAX_PROFILE_VAULT_ITEMS
+        );
+        assert_eq!(
+            erase_namespace(
+                &prefix,
+                || Ok(vec![item.clone(); MAX_PROFILE_VAULT_ITEMS + 1]),
+                |_| panic!("an overfull profile inventory cannot authorize deletion")
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+    }
+
+    #[test]
+    fn total_inventory_safety_bound_cannot_hide_a_late_profile_item() {
+        let prefix = service("profile", "");
+        assert!(bounded_namespace(
+            &prefix,
+            std::iter::repeat_n(Ok("other.service".into()), MAX_VAULT_INVENTORY_ITEMS)
+        )
+        .unwrap()
+        .is_empty());
+        let mut names = vec!["other.service".into(); MAX_VAULT_INVENTORY_ITEMS];
+        names.push(service("profile", "late"));
+        assert_eq!(
+            erase_namespace(
+                &prefix,
+                || Ok(names.clone()),
+                |_| panic!("an incomplete inventory cannot authorize deletion")
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+    }
+
+    #[test]
+    fn unreadable_inventory_attributes_fail_closed_even_after_a_match() {
+        assert_eq!(
+            bounded_namespace(
+                &service("profile", ""),
+                [
+                    Ok(service("profile", "server")),
+                    Err(KeychainError::Inaccessible),
+                ]
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+    }
+
+    #[test]
+    fn failed_verification_inventory_never_claims_erasure() {
+        let scans = std::cell::Cell::new(0);
+        assert_eq!(
+            erase_namespace(
+                &service("profile", ""),
+                || {
+                    scans.set(scans.get() + 1);
+                    if scans.get() == 1 {
+                        Ok(vec![service("profile", "server")])
+                    } else {
+                        Err(KeychainError::Inaccessible)
+                    }
+                },
+                |_| Ok(())
+            ),
+            Err(KeychainError::Inaccessible)
+        );
+        assert_eq!(scans.get(), 2);
+    }
 
     #[test]
     fn inventory_erases_vault_only_remnants_and_preserves_sibling_profiles() {

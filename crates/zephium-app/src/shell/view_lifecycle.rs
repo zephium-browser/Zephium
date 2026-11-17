@@ -68,6 +68,7 @@ type NotificationReplies = std::sync::Arc<
 
 struct NotificationObservation {
     request: u64,
+    private: bool,
     pending: bool,
     valid: bool,
     checked: Option<std::time::Instant>,
@@ -85,14 +86,18 @@ impl NotificationSleepState {
     fn invalidate(&mut self, profile: ProfileId) {
         if let Some(observation) = self.profiles.get_mut(&profile) {
             observation.valid = false;
-            observation.allowed = None;
+            if !observation.private {
+                observation.allowed = None;
+            }
             observation.checked = None;
         }
     }
     fn invalidate_all(&mut self) {
         for observation in self.profiles.values_mut() {
             observation.valid = false;
-            observation.allowed = None;
+            if !observation.private {
+                observation.allowed = None;
+            }
             observation.checked = None;
         }
     }
@@ -111,7 +116,11 @@ impl NotificationSleepState {
             {
                 observation.pending = false;
                 if observation.valid && live.contains(&profile) {
-                    observation.allowed = allowed;
+                    observation.allowed = allowed.or_else(|| {
+                        observation
+                            .private
+                            .then(|| observation.allowed.take().unwrap_or_default())
+                    });
                     observation.checked = Some(now);
                 }
             }
@@ -121,7 +130,7 @@ impl NotificationSleepState {
         self.profiles
             .retain(|profile, observation| live.contains(profile) || observation.pending);
     }
-    fn begin(&mut self, profile: ProfileId, now: std::time::Instant) -> Option<u64> {
+    fn begin(&mut self, profile: ProfileId, private: bool, now: std::time::Instant) -> Option<u64> {
         if !self.native {
             return None;
         }
@@ -144,7 +153,7 @@ impl NotificationSleepState {
         let (checked, allowed) = self
             .profiles
             .remove(&profile)
-            .filter(|observation| observation.valid)
+            .filter(|observation| observation.valid || observation.private)
             .map_or((None, None), |observation| {
                 (observation.checked, observation.allowed)
             });
@@ -152,6 +161,7 @@ impl NotificationSleepState {
             profile,
             NotificationObservation {
                 request,
+                private,
                 pending: true,
                 valid: true,
                 checked,
@@ -451,7 +461,8 @@ impl Shell {
         let now = std::time::Instant::now();
         self.residency.notifications.reconcile(&live, now);
         for profile in &live {
-            let Some(request) = self.residency.notifications.begin(*profile, now) else {
+            let private = self.incognito_profile(*profile);
+            let Some(request) = self.residency.notifications.begin(*profile, private, now) else {
                 continue;
             };
             let profile = *profile;
@@ -1534,14 +1545,16 @@ mod notification_sleep_tests {
             native: true,
             ..Default::default()
         };
-        let first = state.begin(profile, now).unwrap();
+        let first = state.begin(profile, false, now).unwrap();
         state
             .replies
             .lock()
             .unwrap()
             .insert(profile, (first, Some(Default::default())));
         state.reconcile(&live, now);
-        let refresh = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        let refresh = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
         assert!(
             !state.keeps_awake(profile, Some(&origin), true),
             "unchanged background refresh does not wake a dormant page"
@@ -1562,7 +1575,9 @@ mod notification_sleep_tests {
             state.keeps_awake(profile, Some(&origin), true),
             "an invalidated in-flight result cannot restore authority"
         );
-        let fresh = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        let fresh = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
         state
             .replies
             .lock()
@@ -1571,7 +1586,7 @@ mod notification_sleep_tests {
         state.reconcile(&live, now + NOTIFICATION_REFRESH);
         state.next = u64::MAX;
         assert!(state
-            .begin(profile, now + NOTIFICATION_REFRESH * 2)
+            .begin(profile, false, now + NOTIFICATION_REFRESH * 2)
             .is_none());
         assert!(
             state.keeps_awake(profile, Some(&origin), false),
@@ -1588,10 +1603,10 @@ mod notification_sleep_tests {
             native: true,
             ..Default::default()
         };
-        let first = state.begin(profile, now).unwrap();
+        let first = state.begin(profile, false, now).unwrap();
         state.invalidate(profile);
         assert!(
-            state.begin(profile, now).is_none(),
+            state.begin(profile, false, now).is_none(),
             "an unresolved native read retains its reservation"
         );
         state
@@ -1601,7 +1616,7 @@ mod notification_sleep_tests {
             .insert(profile, (first, Some(Default::default())));
         state.reconcile(&live, now);
         assert!(state.keeps_awake(profile, None, false));
-        let second = state.begin(profile, now).unwrap();
+        let second = state.begin(profile, false, now).unwrap();
         assert_ne!(first, second);
         state
             .replies
@@ -1622,7 +1637,9 @@ mod notification_sleep_tests {
         let origin =
             zephium_core::permissions::PageOrigin::parse_exact("https://mail.example").unwrap();
         assert!(!state.keeps_awake(profile, Some(&origin), false));
-        let third = state.begin(profile, now + NOTIFICATION_REFRESH).unwrap();
+        let third = state
+            .begin(profile, false, now + NOTIFICATION_REFRESH)
+            .unwrap();
         live.clear();
         state.reconcile(&live, now);
         assert!(state.profiles[&profile].pending);
@@ -1643,18 +1660,20 @@ mod notification_sleep_tests {
             ..Default::default()
         };
         for id in 1..=zephium_core::session::MAX_SESSION_PROFILES {
-            assert!(state.begin(ProfileId::from(id as u128), now).is_some());
+            assert!(state
+                .begin(ProfileId::from(id as u128), false, now)
+                .is_some());
         }
         for _ in 0..100 {
             state.invalidate_all();
             state.reconcile(&Default::default(), now);
-            assert!(state.begin(ProfileId::from(999), now).is_none());
+            assert!(state.begin(ProfileId::from(999), false, now).is_none());
         }
         assert_eq!(
             state.profiles.len(),
             zephium_core::session::MAX_SESSION_PROFILES
         );
         state.next = u64::MAX;
-        assert!(state.begin(ProfileId::from(999), now).is_none());
+        assert!(state.begin(ProfileId::from(999), false, now).is_none());
     }
 }
