@@ -49,6 +49,12 @@ const EFFECT_READS_MS: [u64; 4] = [0, 250, 700, 1_500];
 const EFFECT_BUSY_READS_MS: [u64; 3] = [2_200, 3_000, 4_000];
 /// Longest a step's effect is watched for, a new document included.
 const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
+/// The one read before an unpaired press only buys evidence: it never holds
+/// a spoken command back longer than this.
+const BEFORE_PRESS_READ: Duration = Duration::from_secs(1);
+/// The act result when the document a step moved to had not loaded by the
+/// step's new-document bound.
+const STILL_LOADING: &str = "\n\nThe page it moved to is still loading, so it was not read. Read it again before answering.";
 const EFFECT_POLL: Duration = Duration::from_millis(50);
 /// Most views `find` scrolls down to reach its words.
 const FIND_SCROLLS: usize = 4;
@@ -1715,6 +1721,8 @@ struct Plan {
     volatile: effect::Volatile,
     /// Two reads of the document with no step between them were compared.
     paired: bool,
+    /// A step moved the page on: its new document is to load by then.
+    settle_by: Option<tokio::time::Instant>,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
@@ -2006,6 +2014,7 @@ async fn act(
         latest: record.readout.clone(),
         volatile,
         paired,
+        settle_by: None,
         record,
         requests,
         rows,
@@ -2033,8 +2042,13 @@ async fn act(
     reply.phase(Some(PageAssistPhaseV1::Thinking));
     match result {
         Ok(()) if finish => {
-            reply.with_data(|data| data.finished = true);
-            Ok(Ok(plan.summary()))
+            // A reply never ends on a page it moved to and could not read.
+            if !plan.moved || loaded(reply, &plan).await {
+                reply.with_data(|data| data.finished = true);
+                Ok(Ok(plan.summary()))
+            } else {
+                Ok(Ok(format!("{}{STILL_LOADING}", plan.summary())))
+            }
         }
         Ok(()) => Ok(Ok(format!(
             "{}{}",
@@ -2085,7 +2099,8 @@ fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> (effect::Volatile, boo
 /// failed, late or stale read changes nothing.
 async fn read_before(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> bool {
     let page = reply.service.ports().page.clone();
-    let Ok(Ok(now)) = tokio::time::timeout(READ_TIMEOUT, page.read(&plan.tab, plan.epoch)).await
+    let Ok(Ok(now)) =
+        tokio::time::timeout(BEFORE_PRESS_READ, page.read(&plan.tab, plan.epoch)).await
     else {
         return true;
     };
@@ -2116,8 +2131,13 @@ async fn after_steps(reply: &Reply, plan: &Plan) -> String {
     if !plan.moved && !stale && plan.latest.passages == plan.record.readout.passages {
         return String::new();
     }
-    let Ok(index) = reply.read_tab(&plan.tab).await else {
-        return String::new();
+    if plan.moved && !loaded(reply, plan).await {
+        return STILL_LOADING.to_owned();
+    }
+    let index = match reply.read_tab(&plan.tab).await {
+        Ok(index) => index,
+        Err(PageAssistFaultV1::Loading) if plan.moved => return STILL_LOADING.to_owned(),
+        Err(_) => return String::new(),
     };
     let Some((letters, read)) = reply
         .with_data(|data| {
@@ -2162,6 +2182,25 @@ async fn after_steps(reply: &Reply, plan: &Plan) -> String {
         prompt::fence(&read.page.host),
         prompt::fence(&changed.join("\n"))
     )
+}
+
+/// Whether the document a step moved the page to finished loading, waiting
+/// no later than that step's new-document bound.
+async fn loaded(reply: &Reply, plan: &Plan) -> bool {
+    let Some(by) = plan.settle_by else {
+        return true;
+    };
+    let page = reply.service.ports().page.clone();
+    loop {
+        if !page.facts(&plan.tab).is_some_and(|facts| facts.loading) {
+            return true;
+        }
+        let left = by.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(left.min(EFFECT_POLL)).await;
+    }
 }
 
 /// Whether `hay` holds `word` on its own, not inside a longer word or number.
@@ -2397,9 +2436,13 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             plan.fail(reply, index, failure);
             return Err(None);
         }
+        let observed = tokio::time::Instant::now();
         let settled = observe(reply, plan, &step).await;
         let navigated = settled == Settled::Navigated;
         plan.moved |= navigated;
+        if navigated {
+            plan.settle_by = Some(observed + EFFECT_NAVIGATION);
+        }
         let reason = match settled {
             Settled::Took(after) => {
                 if let Some(after) = after {

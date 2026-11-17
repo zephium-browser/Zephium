@@ -71,6 +71,11 @@ struct PageState {
     renamed: bool,
     /// Reads made when the first step was dispatched.
     reads_at_act: Option<u64>,
+    /// A press on a `navigates` control starts a load that ends this long
+    /// after it; `Some(None)` never ends.
+    loads: Option<Option<Duration>>,
+    /// When the load in progress ends.
+    loading_until: Option<Option<Instant>>,
 }
 
 /// The page's own "working" note, far from every control.
@@ -168,8 +173,12 @@ impl PageState {
             return;
         }
         if self.navigates.contains(&target) {
+            if let Some(load) = self.loads {
+                self.loading_until = Some(load.map(|load| Instant::now() + load));
+            }
             if let Some(facts) = self.facts.get_mut(tab) {
                 facts.epoch += 1;
+                facts.loading |= self.loads.is_some();
             }
             if let Some(readout) = self.readouts.get_mut(tab) {
                 readout.epoch += 1;
@@ -218,7 +227,16 @@ impl PagePort for FakePage {
         true
     }
     fn facts(&self, tab: &str) -> Option<TabFacts> {
-        self.lock().facts.get(tab).cloned()
+        let mut state = self.lock();
+        if let Some(until) = state.loading_until {
+            if until.is_some_and(|until| Instant::now() >= until) {
+                state.loading_until = None;
+                if let Some(facts) = state.facts.get_mut(tab) {
+                    facts.loading = false;
+                }
+            }
+        }
+        state.facts.get(tab).cloned()
     }
     fn read<'a>(
         &'a self,
@@ -231,6 +249,9 @@ impl PagePort for FakePage {
         let read = state.reads;
         if state.stalls == Some(read) {
             return Box::pin(std::future::pending());
+        }
+        if state.loading_until.is_some() {
+            return Box::pin(async { Err(ReadFailure::NotReady) });
         }
         if state.renamed {
             if let Some(button) = state
@@ -3224,10 +3245,10 @@ async fn an_unpaired_press_reads_once_more_before_it_runs() {
         }
         match name {
             "quiet press" => assert!(took < think + ms(1_000), "{name}: took {took:?}"),
-            // The step ran under the old rule once the read timed out.
+            // The step ran under the old rule once the 1 s read bound passed.
             "read before it stalls" => {
                 assert!(
-                    took >= think + Duration::from_secs(8),
+                    took >= think + ms(1_000) && took < think + ms(2_500),
                     "{name}: took {took:?}"
                 )
             }
@@ -3235,6 +3256,57 @@ async fn an_unpaired_press_reads_once_more_before_it_runs() {
             _ => {}
         }
     }
+}
+
+/// A click that moves the page to a document that loads for `load` (never
+/// when none): the act's result, whether the model was asked again, and how
+/// long the reply took.
+async fn click_into_a_load(load: Option<Duration>, finish: bool) -> (String, usize, Duration) {
+    let mut act = json!({"steps": [{"verb": "click", "ref": "a10"}]});
+    if finish {
+        act["finish"] = json!(true);
+    }
+    let h = harness(vec![tool("act", act), say("Here is the new page.")]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.navigates.insert(10);
+        state.loads = Some(load);
+    }
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(14)).await;
+    let took = started.elapsed();
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert_eq!(steps[0].state, PageAssistStepStateV1::Done, "{steps:?}");
+    (h.tool_result(1).0, h.requests().len(), took)
+}
+
+#[tokio::test]
+async fn the_page_a_step_moved_to_is_read_once_it_loads() {
+    let ms = Duration::from_millis;
+    let runs = [(Some(ms(2_000)), false), (None, false), (None, true)]
+        .map(|(load, finish)| tokio::spawn(click_into_a_load(load, finish)));
+    let [loads, never, never_finish] = runs;
+    let (result, _, took) = loads.await.unwrap();
+    assert!(result.contains("The page now"), "{result}");
+    assert!(took >= ms(2_000) && took < ms(4_000), "took {took:?}");
+    let (result, asked, took) = never.await.unwrap();
+    assert!(result.contains("still loading"), "{result}");
+    assert!(!result.contains("<<<PAGE"), "{result}");
+    assert_eq!(asked, 2, "the model hears it is still loading");
+    assert!(
+        took >= ms(9_500) && took < ms(11_500),
+        "within the bound: {took:?}"
+    );
+    let (result, asked, _) = never_finish.await.unwrap();
+    assert!(result.contains("still loading"), "{result}");
+    assert_eq!(
+        asked, 2,
+        "a reply asked to end with its steps does not end on it"
+    );
 }
 
 #[tokio::test]
