@@ -41,27 +41,15 @@ test("record pictures retain exact local custody and never turn into a remote im
     height: 100,
     origin: "native_crop",
   };
-
   const url = recordMediaUrl(record)!;
-
   expect(url).toContain("/record/");
   expect(url).not.toContain("?w=");
-
   const encoded = url.split("/record/")[1]!;
-
   expect(JSON.parse(atob(encoded.replaceAll("-", "+").replaceAll("_", "/")))).toEqual(record);
-
   expect(pictureUrl({ profile: PROFILE, digest: DIGEST, record }, 1600)).toBe(url);
-
   expect(recordMediaUrl({ ...record, record: 1 })).not.toBe(url);
   expect(recordMediaUrl({ ...record, digest: "b".repeat(64) })).not.toBe(url);
-  expect(
-    recordMediaUrl({
-      ...record,
-      profile: "01M3CTWDG20GFZPACD7905RSRK",
-    }),
-  ).not.toBe(url);
-
+  expect(recordMediaUrl({ ...record, profile: "01M3CTWDG20GFZPACD7905RSRK" })).not.toBe(url);
   expect(recordMediaUrl({ ...record, width: 321 })).toBeNull();
   expect(recordMediaUrl({ ...record, source: "not-a-native-digest" })).toBeNull();
 });

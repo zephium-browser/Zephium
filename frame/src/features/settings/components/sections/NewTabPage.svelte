@@ -96,12 +96,11 @@
       ]}
     />
   </SettingsRow>
-
   {#if ownImage}
     <SettingsRow title={m.ntp_own_image()}>
-      <Button size="compact" disabled={busy} onclick={() => void importImage()}>
-        {m.ntp_choose_image()}
-      </Button>
+      <Button size="compact" disabled={busy} onclick={() => void importImage()}
+        >{m.ntp_choose_image()}</Button
+      >
     </SettingsRow>
 
     <SettingsRow
@@ -117,7 +116,6 @@
         onchange={(v) => set("ui.newtab-image-original", String(v))}
       />
     </SettingsRow>
-
     <SettingsRow settingId="ntp.dim" title={m.ntp_dim()} description={m.ntp_dim_help()}>
       <Switch
         label={m.ntp_dim()}

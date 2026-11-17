@@ -53,21 +53,13 @@ export function recordMediaUrl(media: WorkRecordMediaRefV1): string | null {
     media.height > 240
   )
     return null;
-
   const encoded = btoa(JSON.stringify(media))
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/u, "");
-
   return `${base}record/${encoded}`;
 }
-
-export type WorkPicture = {
-  profile: string;
-  digest: string;
-  record?: WorkRecordMediaRefV1;
-};
-
+export type WorkPicture = { profile: string; digest: string; record?: WorkRecordMediaRefV1 };
 export function pictureUrl(picture: WorkPicture, width = 720): string | null {
   return picture.record
     ? recordMediaUrl(picture.record)

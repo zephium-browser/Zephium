@@ -356,7 +356,7 @@
 >
   {#if ground}<div class="page" aria-hidden="true" style:clip-path={`path(evenodd, "${ground}")`}>
       {#if picture && width > 0 && height > 0}
-        {#key `${picture.key}:${preferences.value("ui.newtab-image-original")}`}
+        {#key picture.key}
           {@const selected = picture}
           {#await background then loaded}
             {#if loaded}<loaded.default
