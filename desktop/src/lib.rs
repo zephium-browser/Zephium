@@ -131,6 +131,7 @@ mod swipe;
 mod system_time;
 mod tab_previews;
 mod tab_switcher;
+mod talk_key;
 #[cfg(all(target_os = "windows", feature = "work-product"))]
 mod taskbar_badge;
 mod updates;
@@ -7350,6 +7351,7 @@ fn finish_browser_setup(
     app.manage(history_menu::HistoryMenuTarget::default());
 
     app.manage(keymap::Keymap::load());
+    app.manage(talk_key::TalkKey::new());
     app.manage(browser_import::ImportJobs::default());
     let keymap = keymap_overrides(&handle);
     // Windows and Linux get the same menu as a popup from the sidebar

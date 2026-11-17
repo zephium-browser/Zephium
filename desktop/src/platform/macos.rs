@@ -970,8 +970,40 @@ mod tests {
 }
 
 thread_local! {
-    static KEY_MONITOR: RefCell<Option<Retained<objc2::runtime::AnyObject>>> =
+    static KEY_MONITOR: RefCell<Option<KeyMonitor>> =
         const { RefCell::new(None) };
+}
+
+struct KeyMonitor {
+    monitor: Retained<objc2::runtime::AnyObject>,
+    observers: Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>,
+}
+
+impl Drop for KeyMonitor {
+    fn drop(&mut self) {
+        // SAFETY: these tokens belong to this main-thread monitor.
+        unsafe {
+            objc2_app_kit::NSEvent::removeMonitor(&self.monitor);
+            let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+            for observer in &self.observers {
+                center.removeObserver(observer.as_ref());
+            }
+        }
+    }
+}
+
+fn talk_signal(app: &tauri::AppHandle, signal: Option<crate::talk_key::TalkSignal>) {
+    use crate::talk_key::{Claimed, TalkKey, TalkSignal};
+    let Some(signal) = signal else {
+        return;
+    };
+    let talk = app.state::<TalkKey>();
+    match signal {
+        TalkSignal::Down => talk.press(),
+        TalkSignal::Up => talk.release(),
+        TalkSignal::Cancel => talk.take(Claimed::Escape),
+        TalkSignal::Confirm => talk.take(Claimed::Enter),
+    }
 }
 
 /// Keyboard-only commands (Select Tab 1-9) have no menu item to carry their
@@ -984,46 +1016,134 @@ pub fn install_key_monitor(
     table: Arc<std::sync::RwLock<Vec<(zephium_core::accelerator::Accelerator, &'static str)>>>,
     on: impl Fn(&str) + 'static,
 ) {
+    use crate::talk_key::{Capture, Claimed, KeyEvent, Modifiers, TalkKey};
     use block2::RcBlock;
-    use objc2_app_kit::{NSEvent, NSEventMask, NSEventModifierFlags};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationDidResignActiveNotification, NSEvent, NSEventMask,
+        NSEventModifierFlags, NSEventType, NSWindowDidResignKeyNotification,
+    };
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
     use std::ptr::NonNull;
+    use std::rc::Rc;
 
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
     let Ok(main_window) = window.ns_window() else {
         return;
     };
+    // SAFETY: Tauri owns this live main-thread NSWindow during installation.
+    let native_window = unsafe { &*main_window.cast::<objc2_app_kit::NSWindow>() };
     let main_window = main_window as usize;
+    let application = NSApplication::sharedApplication(mtm);
+    let capture = Rc::new(RefCell::new(Capture::default()));
+    let resigned_capture = capture.clone();
+    let app = window.app_handle().clone();
+    let resigned = RcBlock::new(move |_: NonNull<NSNotification>| {
+        let action = resigned_capture.borrow_mut().resign();
+        talk_signal(&app, action.signal);
+    });
+    let center = NSNotificationCenter::defaultCenter();
+    // SAFETY: both notifications and the shared capture run on the main thread;
+    // the registration owns the tokens until it removes the observers.
+    let observers = unsafe {
+        vec![
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSWindowDidResignKeyNotification),
+                Some(native_window),
+                None,
+                &resigned,
+            ),
+            center.addObserverForName_object_queue_usingBlock(
+                Some(NSApplicationDidResignActiveNotification),
+                Some(&application),
+                None,
+                &resigned,
+            ),
+        ]
+    };
+    let app = window.app_handle().clone();
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event_ref = unsafe { event.as_ref() };
         let Some(mtm) = MainThreadMarker::new() else {
             return event.as_ptr();
         };
-        let in_main = event_ref
+        let Some(window) = event_ref
             .window(mtm)
-            .is_some_and(|w| Retained::as_ptr(&w) as usize == main_window);
-        if !in_main {
+            .filter(|w| Retained::as_ptr(w) as usize == main_window)
+        else {
+            return event.as_ptr();
+        };
+        let kind = match event_ref.r#type() {
+            NSEventType::KeyDown => KeyEvent::Down,
+            NSEventType::KeyUp => KeyEvent::Up,
+            NSEventType::FlagsChanged => KeyEvent::FlagsChanged,
+            _ => return event.as_ptr(),
+        };
+        let flags = event_ref.modifierFlags();
+        let modifiers = Modifiers {
+            meta: flags.contains(NSEventModifierFlags::Command),
+            ctrl: flags.contains(NSEventModifierFlags::Control),
+            alt: flags.contains(NSEventModifierFlags::Option),
+            shift: flags.contains(NSEventModifierFlags::Shift),
+            other: flags.intersects(NSEventModifierFlags::Function | NSEventModifierFlags::Help),
+        };
+        let key_down = matches!(kind, KeyEvent::Down);
+        let repeat = key_down && event_ref.isARepeat();
+        let character = key_down
+            .then(|| {
+                event_ref
+                    .charactersByApplyingModifiers(NSEventModifierFlags::empty())
+                    .map(|text| text.to_string().to_lowercase())
+            })
+            .flatten();
+        let key_code = event_ref.keyCode();
+        let hit = key_down
+            .then(|| {
+                table
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .find(|(accelerator, _)| {
+                        flags.contains(NSEventModifierFlags::Command) == accelerator.meta
+                            && flags.contains(NSEventModifierFlags::Control) == accelerator.ctrl
+                            && flags.contains(NSEventModifierFlags::Option) == accelerator.alt
+                            && flags.contains(NSEventModifierFlags::Shift) == accelerator.shift
+                            && key_matches(accelerator.key, character.as_deref(), key_code)
+                    })
+                    .map(|(_, id)| *id)
+            })
+            .flatten();
+        let keymap = app.state::<crate::keymap::Keymap>();
+        if keymap.recording() {
+            capture.borrow_mut().resign();
+        } else if window.isKeyWindow() && NSApplication::sharedApplication(mtm).isActive() {
+            let claimed = match key_code {
+                53 => Some(Claimed::Escape),
+                36 | 76 => Some(Claimed::Enter),
+                _ => None,
+            }
+            .filter(|key| keymap.offers("voice.talk") && app.state::<TalkKey>().claimed(*key));
+            let action = capture.borrow_mut().event(
+                kind,
+                key_code,
+                modifiers,
+                repeat,
+                hit == Some("voice.talk"),
+                claimed,
+            );
+            talk_signal(&app, action.signal);
+            if action.consume {
+                return std::ptr::null_mut();
+            }
+        }
+        if !key_down || hit == Some("voice.talk") {
             return event.as_ptr();
         }
-        let flags = event_ref.modifierFlags();
-        let character = event_ref
-            .charactersByApplyingModifiers(NSEventModifierFlags::empty())
-            .map(|text| text.to_string().to_lowercase());
-        let key_code = event_ref.keyCode();
-        let hit = table
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|(accelerator, _)| {
-                flags.contains(NSEventModifierFlags::Command) == accelerator.meta
-                    && flags.contains(NSEventModifierFlags::Control) == accelerator.ctrl
-                    && flags.contains(NSEventModifierFlags::Option) == accelerator.alt
-                    && flags.contains(NSEventModifierFlags::Shift) == accelerator.shift
-                    && key_matches(accelerator.key, character.as_deref(), key_code)
-            })
-            .map(|(_, id)| *id);
         match hit {
             Some(id) => {
-                if !event_ref.isARepeat() {
+                if !repeat {
                     on(id);
                 }
                 std::ptr::null_mut()
@@ -1037,9 +1157,18 @@ pub fn install_key_monitor(
     // SAFETY: the block returns the event it was given, or null to consume it,
     // as AppKit requires.
     let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown | NSEventMask::KeyUp | NSEventMask::FlagsChanged,
+            &handler,
+        )
     };
-    KEY_MONITOR.with(|slot| *slot.borrow_mut() = monitor);
+    if let Some(monitor) = monitor {
+        KEY_MONITOR.with(|slot| *slot.borrow_mut() = Some(KeyMonitor { monitor, observers }));
+    } else {
+        for observer in observers {
+            unsafe { center.removeObserver(observer.as_ref()) };
+        }
+    }
 }
 
 /// Printable keys compare by the character they type unmodified, so the
