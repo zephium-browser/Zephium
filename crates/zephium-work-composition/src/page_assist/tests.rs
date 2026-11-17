@@ -65,6 +65,11 @@ struct PageState {
     relabels: std::collections::HashSet<u16>,
     /// Controls whose press bumps the count beside the clock.
     counts: std::collections::HashSet<u16>,
+    /// Of those, the ones whose press also leaves a note beside them.
+    notes_too: std::collections::HashSet<u16>,
+    /// The count changes by itself: first then, again every period, with
+    /// this wording before its number, up to this number.
+    ticker: Option<(Instant, Duration, &'static str, u32)>,
     /// The read with this number never answers.
     stalls: Option<u64>,
     /// From now on, "Add to wishlist" reads under another name.
@@ -140,6 +145,19 @@ impl PageState {
                 }
             }
         }
+        if let Some((first, period, wording, limit)) = self.ticker {
+            if now >= first {
+                let ticks = (now - first).as_millis() / period.as_millis().max(1);
+                let count = u32::try_from(ticks).unwrap_or(u32::MAX).saturating_add(1);
+                if let Some(readout) = self.readouts.get_mut(tab) {
+                    for p in &mut readout.passages {
+                        if p.id == COUNT {
+                            p.text = format!("{wording}{}", count.min(limit));
+                        }
+                    }
+                }
+            }
+        }
         if self.ticked {
             let reads = self.reads;
             if let Some(readout) = self.readouts.get_mut(tab) {
@@ -178,7 +196,9 @@ impl PageState {
                     }
                 }
             }
-            return;
+            if !self.notes_too.contains(&target) {
+                return;
+            }
         }
         if self.navigates.contains(&target) {
             if let Some(load) = self.loads {
@@ -2967,6 +2987,8 @@ enum Press {
     NoOp,
     Relabels,
     Counts,
+    /// Bumps the count and leaves a note beside the button.
+    CountsNotes,
     Notes,
 }
 
@@ -2994,6 +3016,10 @@ async fn clocked_click(press: Press, clock: bool) -> (PageAssistStepV1, Duration
             }
             Press::Counts => {
                 state.counts.insert(10);
+            }
+            Press::CountsNotes => {
+                state.counts.insert(10);
+                state.notes_too.insert(10);
             }
             Press::Notes => {}
         }
@@ -3039,9 +3065,28 @@ async fn a_clock_beside_a_button_is_never_its_effect() {
             ms(0),
             ms(1_000),
         ),
+        // A number changing in place is read once more before it counts.
         (
             "counts, clock",
             Press::Counts,
+            true,
+            Done,
+            None,
+            ms(1_100),
+            ms(1_600),
+        ),
+        (
+            "counts, quiet",
+            Press::Counts,
+            false,
+            Done,
+            None,
+            ms(1_100),
+            ms(1_600),
+        ),
+        (
+            "counts and notes, clock",
+            Press::CountsNotes,
             true,
             Done,
             None,
@@ -3133,7 +3178,7 @@ async fn unpaired_click(
             Press::Relabels => {
                 state.relabels.insert(10);
             }
-            Press::Counts | Press::Notes => {}
+            Press::Counts | Press::CountsNotes | Press::Notes => {}
         }
         match before {
             Before::Reads | Before::Stalls | Before::Renamed => {}
@@ -3176,6 +3221,108 @@ async fn unpaired_click(
         state.reads_at_act.map(|reads| reads - planned),
         state.acted.len(),
     )
+}
+
+/// A click planned on the only read of the page, after `think`, beside a
+/// number the page changes by itself from `first` after the ask (none when
+/// `ticks` is none): the step and how long the reply took.
+async fn ticking_click(
+    press: Press,
+    think: Duration,
+    ticks: Option<(Duration, Duration, &'static str, u32)>,
+) -> (PageAssistStepV1, Duration) {
+    let h = harness(vec![
+        Turn {
+            think,
+            ..tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]}))
+        },
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    let started = Instant::now();
+    {
+        let mut state = h.page.lock();
+        let wording = ticks.map_or("Saved: ", |(_, _, wording, _)| wording);
+        let passages = &mut state.readouts.get_mut(TAB).unwrap().passages;
+        let at = passages.iter().position(|p| p.id == 10).unwrap();
+        passages.insert(at, passage(COUNT, Role::Text, &format!("{wording}0")));
+        state.ticker =
+            ticks.map(|(first, period, wording, limit)| (started + first, period, wording, limit));
+        match press {
+            Press::NoOp => {
+                state.inert.insert(10);
+            }
+            Press::Counts => {
+                state.counts.insert(10);
+            }
+            _ => unreachable!(),
+        }
+    }
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(14)).await;
+    let took = started.elapsed();
+    let step = h
+        .blocks()
+        .await
+        .iter()
+        .find_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.first().cloned(),
+            _ => None,
+        })
+        .expect("a step");
+    (step, took)
+}
+
+#[tokio::test]
+async fn a_number_that_moves_by_itself_is_never_the_press_effect() {
+    use PageAssistStepReasonV1::Unconfirmed;
+    use PageAssistStepStateV1::{Done, Failed};
+    let ms = Duration::from_millis;
+    let countdown = "Sale ends in 4:";
+    let cases = [
+        // No step-free pair saw it tick before the press.
+        (
+            "countdown, think 0",
+            Press::NoOp,
+            ms(0),
+            Some((ms(300), ms(1_000), countdown, 99)),
+        ),
+        (
+            "countdown, first tick after the press",
+            Press::NoOp,
+            ms(1_500),
+            Some((ms(1_700), ms(1_000), countdown, 99)),
+        ),
+        (
+            "count bumps twice by itself",
+            Press::NoOp,
+            ms(0),
+            Some((ms(300), ms(900), "Saved: ", 2)),
+        ),
+        ("count bump alone", Press::Counts, ms(0), None),
+    ];
+    let runs: Vec<_> = cases
+        .into_iter()
+        .map(|(name, press, think, ticks)| {
+            tokio::spawn(async move { (name, think, ticking_click(press, think, ticks).await) })
+        })
+        .collect();
+    for run in runs {
+        let (name, think, (step, took)) = run.await.unwrap();
+        if name == "count bump alone" {
+            assert_eq!(step.state, Done, "{name}: {step:?}");
+            assert!(
+                took >= think + ms(1_100) && took < think + ms(1_600),
+                "{name}: took {took:?}"
+            );
+        } else {
+            assert_eq!(
+                (step.state, step.reason),
+                (Failed, Some(Unconfirmed)),
+                "{name}: {step:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

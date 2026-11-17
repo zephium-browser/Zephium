@@ -49,6 +49,10 @@ const EFFECT_READS_MS: [u64; 4] = [0, 250, 700, 1_500];
 const EFFECT_BUSY_READS_MS: [u64; 3] = [2_200, 3_000, 4_000];
 /// Longest a step's effect is watched for, a new document included.
 const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
+/// A press credited only with a number changing in place beside it is read
+/// once more this long after: a count stays put, a clock or a countdown the
+/// page runs itself has moved on.
+const CREDIT_WATCH: Duration = Duration::from_millis(1_100);
 /// The one read before an unpaired press only buys evidence: it never holds
 /// a spoken command back longer than this.
 const BEFORE_PRESS_READ: Duration = Duration::from_secs(1);
@@ -2459,7 +2463,7 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             return Err(None);
         }
         let observed = tokio::time::Instant::now();
-        let settled = observe(reply, plan, &step).await;
+        let settled = observe(reply, &mut *plan, &step).await;
         let navigated = settled == Settled::Navigated;
         plan.moved |= navigated;
         if navigated {
@@ -2528,7 +2532,7 @@ enum Settled {
 /// the same-document cap, and is never called unchanged while it was busy.
 /// Busy is timing evidence only: it decides how long to look, not what was
 /// seen.
-async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
+async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled {
     if step.verb == Verb::Scroll {
         return Settled::Took(None);
     }
@@ -2544,6 +2548,9 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
     let mut last: Option<Observed> = None;
     let mut previous: Option<Readout> = None;
     let mut busy = false;
+    // A credit held back: the places it rests on, the read that showed
+    // them, and when to read again.
+    let mut watch: Option<(std::collections::HashSet<effect::Shape>, Readout, Duration)> = None;
     while let Some(facts) = page.facts(&plan.tab) {
         if facts.epoch != plan.epoch {
             return Settled::Navigated;
@@ -2554,20 +2561,37 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
         }
         busy |= facts.loading;
         if !facts.loading {
-            let due = EFFECT_READS_MS.get(reads).or_else(|| {
-                busy.then(|| EFFECT_BUSY_READS_MS.get(reads - EFFECT_READS_MS.len()))
-                    .flatten()
-            });
-            let Some(due) = due else {
+            let scheduled = EFFECT_READS_MS
+                .get(reads)
+                .or_else(|| {
+                    busy.then(|| EFFECT_BUSY_READS_MS.get(reads - EFFECT_READS_MS.len()))
+                        .flatten()
+                })
+                .map(|ms| Duration::from_millis(*ms));
+            let watched = watch.as_ref().map(|(_, _, due)| *due);
+            let Some(due) = scheduled.into_iter().chain(watched).min() else {
                 break;
             };
-            if started.elapsed() >= Duration::from_millis(*due) {
-                reads += 1;
+            if started.elapsed() >= due {
+                if scheduled == Some(due) {
+                    reads += 1;
+                }
                 if let Ok(Ok(after)) =
                     tokio::time::timeout(left.min(READ_TIMEOUT), page.read(&plan.tab, plan.epoch))
                         .await
                 {
                     if after.epoch == plan.epoch {
+                        if let Some((shapes, credited, due)) = watch.take() {
+                            if effect::moved(&shapes, &credited, &after) {
+                                // It moved on with no step: the page's own.
+                                plan.volatile.learn_shapes(&credited, &after, &shapes);
+                                busy = true;
+                            } else if started.elapsed() >= due {
+                                return Settled::Took(Some(after));
+                            } else {
+                                watch = Some((shapes, credited, due));
+                            }
+                        }
                         let observed = effect::judge(
                             step.verb,
                             step.value.as_deref(),
@@ -2577,7 +2601,20 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
                             &plan.volatile,
                         );
                         if observed == Observed::Took {
-                            return Settled::Took(Some(after));
+                            match effect::numbers_only(
+                                step.verb,
+                                &control,
+                                &plan.latest,
+                                &after,
+                                &plan.volatile,
+                            ) {
+                                None => return Settled::Took(Some(after)),
+                                Some(shapes) if watch.is_none() => {
+                                    let due = started.elapsed() + CREDIT_WATCH;
+                                    watch = Some((shapes, after.clone(), due));
+                                }
+                                Some(_) => {}
+                            }
                         }
                         busy |= effect::changed(previous.as_ref().unwrap_or(&plan.latest), &after);
                         last = Some(observed);
