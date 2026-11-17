@@ -145,7 +145,7 @@ impl Meter {
     }
 }
 
-fn to_level(rms: f32) -> f32 {
+pub(crate) fn to_level(rms: f32) -> f32 {
     if rms <= 0.0 || !rms.is_finite() {
         return 0.0;
     }

@@ -1,25 +1,48 @@
 //! Dictation capture for the Work bar: the microphone, a live level, and
 //! either Apple's on-device recognizer or a speech take held in memory for a
-//! cloud transcription. Audio is never written to disk or logged, and the
+//! cloud transcription; and [`Duplex`], the voice engine's echo-cancelled
+//! capture and streamed playback. Audio is never written to disk or logged, and the
 //! device is released the moment a take finishes or is cancelled.
 
+// Until the WASAPI layer drives it, Windows builds only the API surface.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "file-probe")),
+    allow(dead_code)
+)]
+mod duplex;
 #[cfg(any(target_os = "macos", test))]
 mod failure;
 mod language;
 mod meter;
 mod pcm;
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "file-probe")),
+    allow(dead_code)
+)]
+mod playback;
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "file-probe")),
+    allow(dead_code)
+)]
+mod resample;
 #[cfg(any(target_os = "macos", test))]
 mod stitch;
 
 #[cfg(target_os = "macos")]
 mod apple;
+#[cfg(target_os = "macos")]
+mod apple_duplex;
 #[cfg(target_os = "windows")]
 mod wasapi;
+#[cfg(any(feature = "file-probe", test))]
+#[cfg_attr(not(feature = "file-probe"), allow(dead_code))]
+mod wavfile;
 
 use std::sync::{Arc, Mutex};
 
 #[cfg(all(feature = "file-probe", target_os = "macos"))]
 pub use apple::transcribe_file;
+pub use duplex::{Duplex, DuplexConfig, DuplexListener, FRAME_SAMPLES, VOICE_RATE};
 pub use language::pick_locale;
 pub use meter::{Ending, MAX_MS};
 pub use pcm::{wav, SPEECH_RATE};

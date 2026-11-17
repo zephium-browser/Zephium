@@ -56,7 +56,7 @@ pub(crate) fn microphone_permission() -> Permission {
     }
 }
 
-fn ask_microphone() -> Result<(), Fault> {
+pub(crate) fn ask_microphone() -> Result<(), Fault> {
     match microphone_permission() {
         Permission::Granted => return Ok(()),
         Permission::Denied => return Err(Fault::MicrophoneDenied),

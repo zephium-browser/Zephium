@@ -6,11 +6,16 @@ license.workspace = true
 publish = false
 
 [features]
-# Feeds an audio file to the on-device recognizer, for automated checks.
+# Feeds an audio file to the on-device recognizer or to the duplex engine in
+# place of the microphone, for automated checks.
 file-probe = ["objc2-avf-audio/AVAudioFile", "objc2-foundation/NSURL"]
 
 [[example]]
 name = "transcribe"
+required-features = ["file-probe"]
+
+[[example]]
+name = "duplex"
 required-features = ["file-probe"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -18,11 +23,13 @@ block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    "block2",
     "NSArray",
     "NSBundle",
     "NSEnumerator",
     "NSError",
     "NSLocale",
+    "NSNotification",
     "NSOperation",
     "NSSet",
     "NSString",
@@ -47,9 +54,18 @@ objc2-avf-audio = { version = "=0.3.2", default-features = false, features = [
     "AVAudioEngine",
     "AVAudioFormat",
     "AVAudioIONode",
+    "AVAudioMixerNode",
     "AVAudioNode",
+    "AVAudioSinkNode",
+    "AVAudioSourceNode",
     "AVAudioTime",
     "AVAudioTypes",
+    "objc2-core-audio-types",
+] }
+objc2-core-audio-types = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "objc2",
+    "CoreAudioBaseTypes",
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
