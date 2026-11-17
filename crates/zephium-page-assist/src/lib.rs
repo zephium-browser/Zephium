@@ -31,5 +31,6 @@ pub mod refs;
 pub mod stream;
 pub mod suggest;
 pub mod text;
+pub mod voice;
 
 pub use zephium_ipc::page_assist as ipc;
