@@ -1270,16 +1270,28 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
                 })
                 .map_err(|_| "assist_worker")?;
             let mut worker = Some(worker);
+            let mut joined = None;
+            let closed = Arc::new(AtomicU8::new(0));
             Ok(Box::new(move |native_failed| {
-                if worker.as_ref().is_some_and(|join| join.is_finished()) {
-                    let joined = worker.take().is_some_and(|join| join.join().is_ok());
-                    return Some(if joined {
-                        Ok(())
-                    } else {
-                        Err("assist_worker_panic")
-                    });
+                if native_failed {
+                    return Some(Err("assist_native"));
                 }
-                native_failed.then_some(Err("assist_native"))
+                if joined.is_none() && worker.as_ref().is_some_and(|join| join.is_finished()) {
+                    joined = Some(worker.take().is_some_and(|join| join.join().is_ok()));
+                    // A successful host run leaves the shutdown barrier to the
+                    // application: retire the engine's views before returning,
+                    // so no WebView2 browser outlives the probe.
+                    let result = closed.clone();
+                    engine.shutdown(Box::new(move |clean| {
+                        result.store(if clean { 1 } else { 2 }, Ordering::Release)
+                    }));
+                }
+                match (joined?, closed.load(Ordering::Acquire)) {
+                    (_, 0) => None,
+                    (false, _) => Some(Err("assist_worker_panic")),
+                    (true, 1) => Some(Ok(())),
+                    (true, _) => Some(Err("assist_engine_shutdown")),
+                }
             }))
         },
     );
