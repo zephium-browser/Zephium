@@ -1,5 +1,6 @@
 //! A WAV file in place of the microphone, for end-to-end checks without a
-//! device: fed in real time, then silence; playback is paced and discarded.
+//! device: fed in real time while running, then silence; playback is paced
+//! and discarded.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -77,6 +78,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Option<Wav> {
 
 pub(crate) struct Feeder {
     stop: Arc<AtomicBool>,
+    running: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -91,7 +93,7 @@ impl Feeder {
         let bytes = std::fs::read(path).map_err(|_| Fault::NoMicrophone)?;
         let wav = parse(&bytes).ok_or(Fault::NoMicrophone)?;
         drop(bytes);
-        engine.set_input(f64::from(wav.rate));
+        engine.begin_capture(f64::from(wav.rate));
         engine.set_output(f64::from(VOICE_RATE), 0);
         engine.listener().note(&format!(
             "file input rate={} ms={}",
@@ -100,6 +102,8 @@ impl Feeder {
         ));
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let running = Arc::new(AtomicBool::new(false));
+        let worker_running = running.clone();
         let worker = std::thread::Builder::new()
             .name("zephium-voice-file".into())
             .spawn(move || {
@@ -110,7 +114,8 @@ impl Feeder {
                 let mut next = Instant::now();
                 while !worker_stop.load(Ordering::Acquire) {
                     let end = (position + input_tick).min(wav.samples.len());
-                    if position < end {
+                    if !worker_running.load(Ordering::Acquire) {
+                    } else if position < end {
                         engine.capture(&wav.samples[position..end], 1);
                         position = end;
                     } else {
@@ -124,8 +129,16 @@ impl Feeder {
             .map_err(|_| Fault::NoMicrophone)?;
         Ok(Self {
             stop,
+            running,
             worker: Some(worker),
         })
+    }
+}
+
+impl Feeder {
+    /// While not running the file waits, as a microphone in standby hears nothing.
+    pub(crate) fn run(&self, on: bool) {
+        self.running.store(on, Ordering::Release);
     }
 }
 

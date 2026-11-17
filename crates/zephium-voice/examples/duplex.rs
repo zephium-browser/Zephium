@@ -3,13 +3,23 @@
 //!
 //! ```text
 //! cargo run -p zephium-voice --features file-probe --example duplex            # device runs
+//! cargo run -p zephium-voice --features file-probe --example duplex -- --acoustic --gain 0.1
 //! cargo run -p zephium-voice --features file-probe --example duplex -- --file speech.wav
 //! ```
+//!
+//! Test sounds play at `--gain` (default 0.03, a quiet level at any volume).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use zephium_voice::{Duplex, DuplexConfig, DuplexListener, Fault, Permission, VOICE_RATE};
+
+static GAIN: OnceLock<f32> = OnceLock::new();
+
+/// Peak amplitude of the test sounds.
+fn gain() -> f32 {
+    *GAIN.get_or_init(|| 0.03)
+}
 
 #[derive(Default)]
 struct Probe {
@@ -137,8 +147,197 @@ fn open(voice_processing: bool) -> (Duplex, Arc<Probe>, Instant) {
             panic!("open vp={voice_processing}: {fault:?} [{notes}]");
         }
     };
+    duplex.start();
     duplex.listen(true);
     (duplex, probe, started)
+}
+
+fn facts() -> String {
+    let facts = zephium_voice::audio_facts();
+    format!(
+        "input_running={:?} output_running={:?}",
+        facts.input_running, facts.output_running
+    )
+}
+
+fn notes(probe: &Probe) -> String {
+    std::mem::take(&mut probe.state.lock().unwrap().notes).join("; ")
+}
+
+/// The input and output devices' running state in each engine state.
+fn states(voice_processing: bool) {
+    let probe = Arc::new(Probe::default());
+    println!("states vp={voice_processing} before_open {}", facts());
+    let duplex = Duplex::open(DuplexConfig { voice_processing }, probe.clone()).expect("open");
+    std::thread::sleep(Duration::from_millis(500));
+    println!(
+        "states vp={voice_processing} standby_after_open {} [{}]",
+        facts(),
+        notes(&probe)
+    );
+    duplex.start();
+    std::thread::sleep(Duration::from_millis(500));
+    println!(
+        "states vp={voice_processing} running {} [{}]",
+        facts(),
+        notes(&probe)
+    );
+    duplex.standby();
+    std::thread::sleep(Duration::from_millis(500));
+    println!(
+        "states vp={voice_processing} standby_again {} [{}]",
+        facts(),
+        notes(&probe)
+    );
+    let asked = Instant::now();
+    duplex.play(&tone(1_000.0, gain(), 400));
+    duplex.mark(1);
+    std::thread::sleep(Duration::from_millis(250));
+    println!(
+        "states vp={voice_processing} playing_in_standby {}",
+        facts()
+    );
+    std::thread::sleep(Duration::from_millis(400));
+    let played = probe
+        .state
+        .lock()
+        .unwrap()
+        .played
+        .first()
+        .map(|(at, _)| *at - asked);
+    println!(
+        "states vp={voice_processing} played_400ms_line_after_ms={}",
+        played.map_or("none".into(), |d| format!("{:.0}", d.as_secs_f64() * 1e3))
+    );
+    std::thread::sleep(Duration::from_millis(2_500));
+    println!(
+        "states vp={voice_processing} standby_idle {} [{}]",
+        facts(),
+        notes(&probe)
+    );
+    drop(duplex);
+    std::thread::sleep(Duration::from_millis(300));
+    println!("states vp={voice_processing} closed {}", facts());
+}
+
+fn rss_kb() -> u64 {
+    std::process::Command::new("/bin/ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// start() from standby to the first frame, then standby/start cycles.
+fn cycles(voice_processing: bool) {
+    let probe = Arc::new(Probe::default());
+    let duplex = Duplex::open(DuplexConfig { voice_processing }, probe.clone()).expect("open");
+    duplex.listen(true);
+    let mut firsts = Vec::new();
+    let mut rss_at_10 = 0;
+    for run in 0..30 {
+        if run == 10 {
+            rss_at_10 = rss_kb();
+        }
+        std::thread::sleep(Duration::from_millis(if run < 10 { 700 } else { 300 }));
+        probe.state.lock().unwrap().first_frame = None;
+        let asked = Instant::now();
+        duplex.start();
+        let deadline = asked + Duration::from_secs(2);
+        while probe.state.lock().unwrap().first_frame.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let first = probe.state.lock().unwrap().first_frame.map(|at| at - asked);
+        std::thread::sleep(Duration::from_millis(200));
+        duplex.standby();
+        let note = notes(&probe);
+        let first = first.map_or("none".into(), |d| format!("{:.1}", d.as_secs_f64() * 1e3));
+        if run < 10 {
+            println!("start vp={voice_processing} run={run} first_frame_ms={first} [{note}]");
+        } else {
+            firsts.push(first);
+            if note.contains("stalled") || note.contains("retry") || note.contains("prepared") {
+                println!("cycle vp={voice_processing} run={run} [{note}]");
+            }
+        }
+    }
+    println!(
+        "cycles vp={voice_processing} rss_kb_after_10={rss_at_10} rss_kb_after_30={} first_frame_ms={}",
+        rss_kb(),
+        firsts.join(" ")
+    );
+}
+
+/// The first start() after a long standby.
+fn idle(voice_processing: bool, seconds: u64) {
+    let probe = Arc::new(Probe::default());
+    let duplex = Duplex::open(DuplexConfig { voice_processing }, probe.clone()).expect("open");
+    duplex.listen(true);
+    std::thread::sleep(Duration::from_secs(seconds));
+    let asked = Instant::now();
+    duplex.start();
+    while probe.state.lock().unwrap().first_frame.is_none()
+        && asked.elapsed() < Duration::from_secs(3)
+    {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let first = probe.state.lock().unwrap().first_frame.map(|at| at - asked);
+    println!(
+        "idle vp={voice_processing} seconds={seconds} first_frame_ms={} [{}]",
+        first.map_or("none".into(), |d| format!("{:.1}", d.as_secs_f64() * 1e3)),
+        notes(&probe)
+    );
+}
+
+/// Another app's 1 kHz tone heard by a raw engine before any voice engine
+/// exists, then by a raw engine while a voice-processing engine sits in
+/// standby beside it, then by the voice-processing engine itself started.
+fn standby_ducking(other: &str) {
+    let measure = |label: &str| {
+        let (raw, probe, _) = open(false);
+        std::thread::sleep(Duration::from_millis(1_000));
+        let from = Instant::now();
+        std::thread::sleep(Duration::from_millis(800));
+        drop(raw);
+        let state = probe.state.lock().unwrap();
+        let level = rms_of(&state.tones, from, from + Duration::from_millis(800));
+        println!("standby ducking {label} 1khz_db={:.1}", db(level));
+    };
+    let mut player = std::process::Command::new("/usr/bin/afplay")
+        .arg(other)
+        .spawn()
+        .expect("afplay");
+    std::thread::sleep(Duration::from_millis(300));
+    measure("raw_before_voice_engine");
+    let probe = Arc::new(Probe::default());
+    let voice = Duplex::open(
+        DuplexConfig {
+            voice_processing: true,
+        },
+        probe.clone(),
+    )
+    .expect("open");
+    measure("raw_beside_standby_voice_engine");
+    voice.start();
+    voice.listen(true);
+    std::thread::sleep(Duration::from_millis(800));
+    let from = Instant::now();
+    std::thread::sleep(Duration::from_millis(800));
+    let state = probe.state.lock().unwrap();
+    println!(
+        "standby ducking voice_engine_running 1khz_db={:.1}",
+        db(rms_of(
+            &state.tones,
+            from,
+            from + Duration::from_millis(800)
+        ))
+    );
+    drop(state);
+    drop(voice);
+    let _ = player.kill();
+    let _ = player.wait();
 }
 
 fn cold_open(voice_processing: bool) {
@@ -171,6 +370,7 @@ fn cold_open(voice_processing: bool) {
 fn gate(voice_processing: bool) {
     let probe = Arc::new(Probe::default());
     let duplex = Duplex::open(DuplexConfig { voice_processing }, probe.clone()).expect("open");
+    duplex.start();
     for run in 0..5 {
         std::thread::sleep(Duration::from_millis(700));
         probe.state.lock().unwrap().frames.clear();
@@ -199,7 +399,7 @@ fn flush_latency() {
     let (duplex, probe, _) = open(false);
     std::thread::sleep(Duration::from_millis(400));
     let quiet_end = Instant::now();
-    duplex.play(&tone(1_000.0, 0.9, 1_000));
+    duplex.play(&tone(1_000.0, gain(), 1_000));
     std::thread::sleep(Duration::from_millis(400));
     let flushed = Instant::now();
     duplex.flush();
@@ -244,9 +444,9 @@ fn echo(voice_processing: bool, tone_probe: bool) -> (f32, f32) {
     std::thread::sleep(Duration::from_millis(500));
     let start = Instant::now();
     if tone_probe {
-        duplex.play(&tone(1_000.0, 0.9, 2_000));
+        duplex.play(&tone(1_000.0, gain(), 2_000));
     } else {
-        duplex.play(&speech_noise(0.3, 2_000));
+        duplex.play(&speech_noise(gain() / 3.0, 2_000));
     }
     std::thread::sleep(Duration::from_millis(2_100));
     drop(duplex);
@@ -276,7 +476,7 @@ fn converge(voice_processing: bool) {
     let (duplex, probe, _) = open(voice_processing);
     std::thread::sleep(Duration::from_millis(500));
     let start = Instant::now();
-    duplex.play(&tone(1_000.0, 0.9, 4_000));
+    duplex.play(&tone(1_000.0, gain(), 4_000));
     std::thread::sleep(Duration::from_millis(4_300));
     drop(duplex);
     let state = probe.state.lock().unwrap();
@@ -367,6 +567,7 @@ fn ducking(other: &str) {
 fn file(path: &str) {
     let probe = Arc::new(Probe::default());
     let duplex = Duplex::open_file(std::path::Path::new(path), probe.clone()).expect("file");
+    duplex.start();
     duplex.listen(true);
     std::thread::sleep(Duration::from_millis(500));
     duplex.play(&tone(1_000.0, 0.1, 1_000));
@@ -397,7 +598,17 @@ fn file(path: &str) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(at) = args.iter().position(|arg| arg == "--gain") {
+        let value: f32 = args
+            .get(at + 1)
+            .and_then(|value| value.parse().ok())
+            .expect("--gain 0..1");
+        let _ = GAIN.set(value.clamp(0.0, 1.0));
+        args.drain(at..at + 2);
+    }
+    let facts = zephium_voice::audio_facts();
+    println!("gain={} output_volume={:?}", gain(), facts.output_volume);
     if args.first().map(String::as_str) == Some("--file") {
         file(args.get(1).expect("a WAV file"));
         return;
@@ -418,6 +629,19 @@ fn main() {
             converge(false);
             std::thread::sleep(Duration::from_millis(500));
             return converge(true);
+        }
+        Some("--states") => {
+            states(false);
+            std::thread::sleep(Duration::from_millis(500));
+            return states(true);
+        }
+        Some("--cycles") => {
+            cycles(false);
+            return cycles(true);
+        }
+        Some("--idle") => return idle(true, 60),
+        Some("--standby-ducking") => {
+            return standby_ducking(args.get(1).expect("a WAV for the other app"))
         }
         Some("--gate") => {
             gate(false);

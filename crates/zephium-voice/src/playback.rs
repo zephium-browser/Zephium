@@ -108,6 +108,11 @@ impl Playback {
         accepted
     }
 
+    /// Nothing queued, playing or waiting to be reported.
+    pub(crate) fn idle(&self) -> bool {
+        !self.playing && self.queue.is_empty() && self.marks.is_empty() && self.due.is_empty()
+    }
+
     pub(crate) fn mark(&mut self, id: u64) {
         self.marks.push_back((self.enqueued, id));
     }

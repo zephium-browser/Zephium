@@ -47,6 +47,7 @@ pub trait DuplexListener: Send + Sync + 'static {
 }
 
 struct Input {
+    rate: f64,
     resampler: Resampler,
     mono: Vec<f32>,
     frame: Vec<i16>,
@@ -72,6 +73,7 @@ impl Engine {
             listening: AtomicBool::new(false),
             captured: AtomicU64::new(0),
             input: Mutex::new(Input {
+                rate,
                 resampler: Resampler::new(rate, rate),
                 mono: Vec::new(),
                 frame: Vec::with_capacity(FRAME_SAMPLES),
@@ -87,11 +89,20 @@ impl Engine {
         &self.listener
     }
 
-    /// The input device's rate. A partial frame carries over.
-    pub(crate) fn set_input(&self, rate: f64) {
+    /// Capture (re)starts at the input device's `rate`: anything heard
+    /// before is stale.
+    pub(crate) fn begin_capture(&self, rate: f64) {
         if let Ok(mut input) = self.input.lock() {
+            input.rate = rate;
             input.resampler = Resampler::new(rate, f64::from(VOICE_RATE));
+            input.frame.clear();
+            input.preroll.clear();
         }
+    }
+
+    /// Nothing left to play or report.
+    pub(crate) fn output_idle(&self) -> bool {
+        self.output.lock().map_or(true, |output| output.idle())
     }
 
     /// The output device's rate and latency in its own frames. Queued audio stays.
@@ -121,6 +132,7 @@ impl Engine {
             preroll,
             meter,
             listening,
+            ..
         } = &mut *input;
         let listen = self.listening.load(Ordering::Acquire);
         if listen && !*listening {
@@ -212,22 +224,25 @@ impl Engine {
 
 enum Device {
     #[cfg(target_os = "macos")]
-    Apple(#[allow(dead_code)] crate::apple_duplex::Device),
+    Apple(crate::apple_duplex::Device),
     #[cfg(target_os = "windows")]
-    Wasapi(#[allow(dead_code)] crate::wasapi_duplex::Device),
+    Wasapi(crate::wasapi_duplex::Device),
     #[cfg(feature = "file-probe")]
-    File(#[allow(dead_code)] crate::wavfile::Feeder),
+    File(crate::wavfile::Feeder),
 }
 
 /// A live duplex engine. Dropping it releases the microphone and stops playback.
 pub struct Duplex {
     engine: Arc<Engine>,
-    _device: Device,
+    device: Device,
 }
 
 impl Duplex {
-    /// Asks for the microphone on first use, then opens input and output.
-    /// Blocks while a permission prompt is up; call off the async executor.
+    /// Asks for the microphone on first use, then configures input and output
+    /// in standby: nothing is captured or rendered until [`Duplex::start`],
+    /// and on macOS the microphone is not in use. Blocks while a permission
+    /// prompt is up and while the devices are configured; call off the async
+    /// executor.
     pub fn open(config: DuplexConfig, listener: Arc<dyn DuplexListener>) -> Result<Self, Fault> {
         #[cfg(target_os = "macos")]
         {
@@ -235,7 +250,7 @@ impl Duplex {
             let device = crate::apple_duplex::Device::open(config, engine.clone())?;
             Ok(Self {
                 engine,
-                _device: Device::Apple(device),
+                device: Device::Apple(device),
             })
         }
         #[cfg(target_os = "windows")]
@@ -244,7 +259,7 @@ impl Duplex {
             let device = crate::wasapi_duplex::Device::open(config, engine.clone())?;
             Ok(Self {
                 engine,
-                _device: Device::Wasapi(device),
+                device: Device::Wasapi(device),
             })
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -254,8 +269,8 @@ impl Duplex {
         }
     }
 
-    /// A WAV file plays the microphone in real time, then silence; playback is
-    /// paced in real time and discarded.
+    /// A WAV file plays the microphone in real time once started, then
+    /// silence; playback is paced in real time and discarded.
     #[cfg(feature = "file-probe")]
     pub fn open_file(
         path: &std::path::Path,
@@ -265,18 +280,56 @@ impl Duplex {
         let feeder = crate::wavfile::Feeder::start(path, engine.clone())?;
         Ok(Self {
             engine,
-            _device: Device::File(feeder),
+            device: Device::File(feeder),
         })
     }
 
-    /// Gates frame and level delivery; the device stays open when off.
+    /// Runs capture and playback (the microphone is in use). Frames fill the
+    /// pre-roll; [`Duplex::listen`] still governs delivery. Returns at once;
+    /// idempotent.
+    pub fn start(&self) {
+        match &self.device {
+            #[cfg(target_os = "macos")]
+            Device::Apple(device) => device.start(),
+            #[cfg(target_os = "windows")]
+            Device::Wasapi(device) => device.start(),
+            #[cfg(feature = "file-probe")]
+            Device::File(feeder) => feeder.run(true),
+        }
+    }
+
+    /// Stops capture (the microphone is released) but keeps the
+    /// configuration, so the next [`Duplex::start`] is quick. Queued speech
+    /// keeps playing without the microphone where the platform allows it.
+    /// Returns at once; idempotent.
+    pub fn standby(&self) {
+        match &self.device {
+            #[cfg(target_os = "macos")]
+            Device::Apple(device) => device.standby(),
+            #[cfg(target_os = "windows")]
+            Device::Wasapi(device) => device.standby(),
+            #[cfg(feature = "file-probe")]
+            Device::File(feeder) => feeder.run(false),
+        }
+    }
+
+    /// Gates frame and level delivery; capture keeps running when off.
     pub fn listen(&self, on: bool) {
         self.engine.listen(on);
     }
 
-    /// Enqueues PCM16 mono at [`VOICE_RATE`]; never waits for the device.
+    /// Enqueues PCM16 mono at [`VOICE_RATE`]; never waits for the device. In
+    /// standby, output starts without the microphone.
     pub fn play(&self, pcm: &[i16]) {
         self.engine.play(pcm);
+        match &self.device {
+            #[cfg(target_os = "macos")]
+            Device::Apple(device) => device.output(),
+            #[cfg(target_os = "windows")]
+            Device::Wasapi(device) => device.output(),
+            #[cfg(feature = "file-probe")]
+            Device::File(_) => {}
+        }
     }
 
     /// Reports `id` through [`DuplexListener::played`] once everything
@@ -359,7 +412,7 @@ mod tests {
     fn device_rates_resample_to_whole_frames_with_stereo_downmixed() {
         let recorder = Arc::new(Recorder::default());
         let engine = Engine::new(recorder.clone());
-        engine.set_input(48_000.0);
+        engine.begin_capture(48_000.0);
         engine.listen(true);
         let stereo: Vec<f32> = (0..96_000)
             .map(|n| if n % 2 == 0 { 0.2 } else { 0.4 })

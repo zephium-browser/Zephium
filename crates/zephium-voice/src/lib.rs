@@ -31,6 +31,8 @@ mod stitch;
 mod apple;
 #[cfg(target_os = "macos")]
 mod apple_duplex;
+#[cfg(target_os = "macos")]
+mod hal;
 #[cfg(target_os = "windows")]
 mod wasapi;
 #[cfg(target_os = "windows")]
@@ -119,6 +121,29 @@ pub fn microphone_permission() -> Permission {
     return apple::microphone_permission();
     #[cfg(not(target_os = "macos"))]
     Permission::Granted
+}
+
+/// Read-only facts about the default audio devices, for diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioFacts {
+    /// The default input device runs for some process: the microphone
+    /// indicator is on.
+    pub input_running: Option<bool>,
+    pub output_running: Option<bool>,
+    /// The default output device's volume, 0–1.
+    pub output_volume: Option<f32>,
+}
+
+/// The default devices' state, read without changing anything.
+pub fn audio_facts() -> AudioFacts {
+    #[cfg(target_os = "macos")]
+    return AudioFacts {
+        input_running: hal::running_somewhere(true),
+        output_running: hal::running_somewhere(false),
+        output_volume: hal::output_volume(),
+    };
+    #[cfg(not(target_os = "macos"))]
+    AudioFacts::default()
 }
 
 /// The on-device speech recognition permission, without prompting.

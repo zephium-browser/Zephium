@@ -76,6 +76,8 @@ const IDLE_WAIT_MS: u32 = 200;
 const SETTLE: Duration = Duration::from_millis(150);
 const CHURN: usize = 5;
 const CHURN_WINDOW: Duration = Duration::from_secs(10);
+/// In standby the render stream stops after this long with nothing to play.
+const SPEAKER_IDLE: Duration = Duration::from_secs(2);
 
 fn fault(error: &windows::core::Error) -> Fault {
     if error.code() == E_ACCESSDENIED {
@@ -117,6 +119,10 @@ struct Shared {
     wake: Event,
     closing: AtomicBool,
     changed: AtomicBool,
+    /// Wanted: capture and render run. Off is standby.
+    running: AtomicBool,
+    /// Something was queued to play.
+    output: AtomicBool,
 }
 
 struct Com;
@@ -336,6 +342,9 @@ struct Streams {
     render_event: Event,
     out_channels: usize,
     out_frames: u32,
+    in_rate: f64,
+    capturing: bool,
+    rendering: bool,
     scratch: Vec<f32>,
 }
 
@@ -469,7 +478,6 @@ impl Streams {
                 .map_err(|error| fault(&error))?;
             let capture_client: IAudioCaptureClient =
                 capture.GetService().map_err(|error| fault(&error))?;
-            core.set_input(f64::from(in_mix.rate));
 
             if let Ok(silence) = render_client.GetBuffer(out_frames) {
                 if !silence.is_null() {
@@ -477,10 +485,8 @@ impl Streams {
                         .ReleaseBuffer(out_frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32);
                 }
             }
-            render.Start().map_err(|_| Fault::NoMicrophone)?;
-            capture.Start().map_err(|error| fault(&error))?;
             listener.note(&format!(
-                "duplex started ms={} voice_processing={} in_rate={} in_channels={} out_rate={out_rate} out_channels={} period_frames={} buffer_frames={out_frames} latency_frames={latency}; {}",
+                "duplex prepared ms={} voice_processing={} in_rate={} in_channels={} out_rate={out_rate} out_channels={} period_frames={} buffer_frames={out_frames} latency_frames={latency}; {}",
                 started.elapsed().as_millis(),
                 config.voice_processing,
                 in_mix.rate,
@@ -499,9 +505,39 @@ impl Streams {
                 render_event,
                 out_channels: usize::from(out_mix.channels),
                 out_frames,
+                in_rate: f64::from(in_mix.rate),
+                capturing: false,
+                rendering: false,
                 scratch: Vec::with_capacity(8_192),
             })
         }
+    }
+
+    /// Starts or stops each stream; capture never runs without render, so
+    /// the echo canceller always has its reference.
+    fn set(&mut self, core: &Engine, capture: bool, render: bool) -> windows::core::Result<()> {
+        let render = render || capture;
+        // SAFETY: starting and stopping the clients this worker opened.
+        unsafe {
+            if render && !self.rendering {
+                self.render.Start()?;
+                self.rendering = true;
+            }
+            if capture && !self.capturing {
+                core.begin_capture(self.in_rate);
+                self.capture.Start()?;
+                self.capturing = true;
+            }
+            if !capture && self.capturing {
+                self.capture.Stop()?;
+                self.capturing = false;
+            }
+            if !render && self.rendering {
+                self.render.Stop()?;
+                self.rendering = false;
+            }
+        }
+        Ok(())
     }
 
     /// Drains captured packets and tops up the render buffer.
@@ -510,7 +546,7 @@ impl Streams {
         // paired with ReleaseBuffer before the next, and the buffers hold the
         // frames the calls report in the float format they were opened with.
         unsafe {
-            loop {
+            while self.capturing {
                 if self.capture_client.GetNextPacketSize()? == 0 {
                     break;
                 }
@@ -529,6 +565,9 @@ impl Streams {
                 }
                 self.capture_client.ReleaseBuffer(frames)?;
                 core.capture(&self.scratch, self.in_channels);
+            }
+            if !self.rendering {
+                return Ok(());
             }
             let free = self
                 .out_frames
@@ -658,6 +697,8 @@ impl Device {
             wake: Event::new()?,
             closing: AtomicBool::new(false),
             changed: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+            output: AtomicBool::new(false),
         });
         let (ready, opened) = mpsc::sync_channel(1);
         let watch = shared.clone();
@@ -679,6 +720,23 @@ impl Device {
                 Err(Fault::NoMicrophone)
             }
         }
+    }
+}
+
+impl Device {
+    pub(crate) fn start(&self) {
+        self.shared.running.store(true, Ordering::Release);
+        self.shared.wake.raise();
+    }
+
+    pub(crate) fn standby(&self) {
+        self.shared.running.store(false, Ordering::Release);
+        self.shared.wake.raise();
+    }
+
+    pub(crate) fn output(&self) {
+        self.shared.output.store(true, Ordering::Release);
+        self.shared.wake.raise();
     }
 }
 
@@ -723,9 +781,20 @@ fn run(
     }
     let _ = ready.send(Ok(()));
     let mut rebuilds: VecDeque<Instant> = VecDeque::with_capacity(CHURN + 1);
+    let mut quiet_since: Option<Instant> = None;
     while !shared.closing.load(Ordering::Acquire) {
         let mut rebuild = shared.changed.swap(false, Ordering::AcqRel);
         if let Some(live) = streams.as_mut() {
+            let capture = shared.running.load(Ordering::Acquire);
+            let queued = shared.output.swap(false, Ordering::AcqRel) || !core.output_idle();
+            let render = if capture || queued {
+                quiet_since = None;
+                true
+            } else {
+                live.rendering
+                    && quiet_since.get_or_insert_with(Instant::now).elapsed() < SPEAKER_IDLE
+            };
+            rebuild |= live.set(core, capture, render).is_err();
             let handles = [shared.wake.0, live.capture_event.0, live.render_event.0];
             // SAFETY: the handles stay open across the wait.
             unsafe { WaitForMultipleObjects(&handles, false, IDLE_WAIT_MS) };
