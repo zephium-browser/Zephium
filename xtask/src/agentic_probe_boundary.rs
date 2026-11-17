@@ -422,6 +422,10 @@ pub(crate) fn check(repository: &Path) -> Result<(), String> {
         &read(repository.join(STORE_AGENT_AUDIT_ACTOR))?,
         &read(repository.join(STORE_AGENT_AUDIT_HUB))?,
     )?;
+    validate_voice_transport(
+        &read(repository.join("crates/zephium-agentic/src/provider_transport/lead/mod.rs"))?,
+        &read(repository.join("crates/zephium-agentic/src/provider_transport/lead/voice/mod.rs"))?,
+    )?;
     validate_provider_transport_manifest(&read(repository.join(PROVIDER_TRANSPORT_MANIFEST))?)?;
     validate_provider_transport_facade(
         &read(repository.join(PROVIDER_TRANSPORT_FACADE_MANIFEST))?,
@@ -4374,6 +4378,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "base64",
         "crc32fast",
         "futures-util",
+        "log",
         // Pure pinned suffix data for same-site takeover checks (68a07141).
         "psl",
         "reqwest",
@@ -4387,6 +4392,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "sha2",
         "thiserror",
         "tokio",
+        "tokio-tungstenite",
         "ulid",
         "url",
         "zeroize",
@@ -4413,11 +4419,13 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "dep:dirs",
         "dep:futures-util",
         "dep:httpdate",
+        "dep:log",
         "dep:reqwest",
         "dep:rig-core",
         "dep:security-framework",
         "dep:security-framework-sys",
         "dep:tokio",
+        "dep:tokio-tungstenite",
         "dep:zeroize",
         "dep:zephium-decision",
         "dep:zephium-credentials",
@@ -4466,8 +4474,10 @@ fn validate_manifest(source: &str) -> Result<(), String> {
     }
     for runtime in [
         "futures-util",
+        "log",
         "reqwest",
         "tokio",
+        "tokio-tungstenite",
         "zeroize",
         "rig-core",
         "httpdate",
@@ -4484,6 +4494,44 @@ fn validate_manifest(source: &str) -> Result<(), String> {
                 "zephium-agentic runtime dependency {runtime} must remain optional"
             ));
         }
+    }
+    let logging = dependencies
+        .get("log")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "voice logging dependency is missing".to_owned())?;
+    if logging.len() != 3
+        || logging.get("version").and_then(toml::Value::as_str) != Some("=0.4.32")
+        || logging.get("optional").and_then(toml::Value::as_bool) != Some(true)
+        || logging
+            .get("features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| {
+                features.as_slice()
+                    != [
+                        toml::Value::String("max_level_info".into()),
+                        toml::Value::String("release_max_level_info".into()),
+                    ]
+            })
+    {
+        return Err("voice logging pin must compile out debug and trace in every build".to_owned());
+    }
+    let websocket = dependencies
+        .get("tokio-tungstenite")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "voice protocol dependency is missing".to_owned())?;
+    if websocket.len() != 4
+        || websocket.get("version").and_then(toml::Value::as_str) != Some("=0.30.0")
+        || websocket
+            .get("default-features")
+            .and_then(toml::Value::as_bool)
+            != Some(false)
+        || websocket.get("optional").and_then(toml::Value::as_bool) != Some(true)
+        || websocket
+            .get("features")
+            .and_then(toml::Value::as_array)
+            .is_none_or(|features| features.as_slice() != [toml::Value::String("handshake".into())])
+    {
+        return Err("voice protocol pin must exclude connector and TLS features".to_owned());
     }
     let review_binary = manifest
         .get("bin")
@@ -5538,6 +5586,66 @@ fn validate_agent_policy_settlement_contract(
         if policy.contains(forbidden) {
             return Err(format!(
                 "clean agent policy settlement acquired forbidden authority/runtime seam {forbidden}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_voice_transport(lead: &str, voice: &str) -> Result<(), String> {
+    let lead = compact(lead);
+    let voice = compact(voice);
+    for required in [
+        "fnhttp_builder(local:bool)->reqwest::ClientBuilder",
+        ".redirect(reqwest::redirect::Policy::none())",
+        ".retry(reqwest::retry::never())",
+        ".referer(false)",
+        ".https_only(!local)",
+        "http_builder(local).build().ok()",
+        "pubmodvoice;",
+    ] {
+        if !lead.contains(required) {
+            return Err(format!("voice shared HTTP boundary lost {required}"));
+        }
+    }
+    for required in [
+        "root.scheme()!=\"https\"",
+        "root.host_str()!=Some(\"api.zephium.app\")",
+        "root.port().is_some()",
+        "!root.username().is_empty()",
+        "root.password().is_some()",
+        "root.query().is_some()",
+        "root.fragment().is_some()",
+        "root.path()!=\"/\"",
+        "super::join(root,\"v1/voice\")?",
+        "url.set_scheme(\"wss\")",
+        "super::http_builder(local).http1_only()",
+        "WebSocketStream::from_raw_socket(upgraded,Role::Client,Some(config))",
+        "super::refused(status,&headers,&body,true)",
+        "credential.rejected()",
+        "header(\"sec-websocket-protocol\")!=Some(PROTOCOL)",
+        "tungstenite::handshake::derive_accept_key(key.as_bytes())",
+        "constPROTOCOL:&str=\"zephium.voice.v1\";",
+        ".max_message_size(Some(BINARY_LIMIT))",
+        ".max_frame_size(Some(BINARY_LIMIT))",
+    ] {
+        if !voice.contains(required) {
+            return Err(format!("voice fixed boundary lost {required}"));
+        }
+    }
+    for forbidden in [
+        "connect_async",
+        "client_async",
+        "danger_accept_invalid",
+        ".redirect(",
+        ".retry(",
+        ".no_proxy(",
+        "println!",
+        "dbg!",
+    ] {
+        if voice.contains(forbidden) {
+            return Err(format!(
+                "voice acquired forbidden transport surface {forbidden}"
             ));
         }
     }
@@ -12999,13 +13107,87 @@ mod tests {
     }
 
     #[test]
+    fn voice_transport_keeps_cloud_admission_and_no_connector_authority() {
+        let lead = include_str!("../../crates/zephium-agentic/src/provider_transport/lead/mod.rs");
+        let voice =
+            include_str!("../../crates/zephium-agentic/src/provider_transport/lead/voice/mod.rs");
+        validate_voice_transport(lead, voice).expect("voice boundary");
+        for (pin, drift) in [
+            ("api.zephium.app", "example.com"),
+            ("v1/voice", "v1/other"),
+            (".http1_only()", ""),
+            (
+                "super::refused(status, &headers, &body, true)",
+                "super::classify(status, &body)",
+            ),
+            (
+                "header(\"sec-websocket-protocol\") != Some(PROTOCOL)",
+                "false",
+            ),
+        ] {
+            assert!(voice.contains(pin));
+            assert!(validate_voice_transport(lead, &voice.replace(pin, drift)).is_err());
+        }
+        for bypass in [
+            "connect_async",
+            "client_async",
+            "danger_accept_invalid_certs",
+        ] {
+            assert!(validate_voice_transport(lead, &format!("{voice} {bypass}")).is_err());
+        }
+        assert!(validate_voice_transport(
+            &lead.replace(".retry(reqwest::retry::never())", ""),
+            voice
+        )
+        .is_err());
+        let manifest = include_str!("../../crates/zephium-agentic/Cargo.toml");
+        for (pin, drift) in [
+            ("=0.30.0", "0.30.0"),
+            (
+                "features = [\"handshake\"]",
+                "features = [\"handshake\", \"connect\"]",
+            ),
+            (
+                "default-features = false, features = [\"handshake\"]",
+                "default-features = true, features = [\"handshake\"]",
+            ),
+        ] {
+            assert!(manifest.contains(pin));
+            assert!(validate_manifest(&manifest.replace(pin, drift)).is_err());
+        }
+    }
+
+    #[test]
+    fn voice_logging_requires_static_info_caps_in_every_build() {
+        let manifest = include_str!("../../crates/zephium-agentic/Cargo.toml");
+        validate_manifest(manifest).expect("statically capped voice logging");
+        for (pin, drift) in [
+            ("=0.4.32", "0.4.32"),
+            ("\"dep:log\",", ""),
+            ("\"max_level_info\", ", ""),
+            (", \"release_max_level_info\"", ""),
+            (
+                "features = [\"max_level_info\", \"release_max_level_info\"]",
+                "features = []",
+            ),
+            (
+                "features = [\"max_level_info\", \"release_max_level_info\"], optional = true",
+                "features = [\"max_level_info\", \"release_max_level_info\"], optional = false",
+            ),
+        ] {
+            assert!(manifest.contains(pin));
+            assert!(validate_manifest(&manifest.replace(pin, drift)).is_err());
+        }
+    }
+
+    #[test]
     fn default_agentic_core_retains_closed_dependency_and_authority_sets() {
         let manifest = r#"
             [package]
             publish = false
             [features]
             default = []
-            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate", "dep:zephium-credentials"]
+            provider-transport = ["dep:futures-util", "dep:log", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:tokio-tungstenite", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate", "dep:zephium-credentials"]
             probe-harness = ["zephium-decision?/evals"]
             [[bin]]
             name = "windows-agentic-input-evidence-review"
@@ -13019,6 +13201,7 @@ mod tests {
             base64 = "0.22"
             crc32fast = "1"
             futures-util = { version = "1", optional = true }
+            log = { version = "=0.4.32", features = ["max_level_info", "release_max_level_info"], optional = true }
             psl = "=2.1.220"
             reqwest = { version = "1", optional = true }
             rig-core = { version = "1", optional = true }
@@ -13027,6 +13210,7 @@ mod tests {
             sha2 = "1"
             thiserror = "2"
             tokio = { version = "1", optional = true }
+            tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"], optional = true }
             ulid = "1"
             url = "2"
             zeroize = { version = "1", optional = true }
