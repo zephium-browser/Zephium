@@ -140,7 +140,7 @@ fn slot(read: &Readout, changed: &HashSet<usize>, at: usize) -> Slot {
 /// What a changed passage says with its numbers left out, so a clock or a
 /// countdown is recognised by its wording wherever the page puts it.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct Shape {
+pub(crate) struct Shape {
     role: Role,
     region: u8,
     text: String,
@@ -175,14 +175,28 @@ pub(crate) struct Volatile {
 impl Volatile {
     /// Learns from two reads of one document that no step came between.
     pub(crate) fn learn(&mut self, earlier: &Readout, later: &Readout) {
+        self.learn_where(earlier, later, |_| true);
+    }
+
+    /// Learns only the places with one of these wordings, from two reads no
+    /// step came between: anything else that changed may still be a step's
+    /// late effect.
+    pub(crate) fn learn_shapes(&mut self, earlier: &Readout, later: &Readout, of: &HashSet<Shape>) {
+        self.learn_where(earlier, later, |shape| of.contains(shape));
+    }
+
+    fn learn_where(&mut self, earlier: &Readout, later: &Readout, keep: impl Fn(&Shape) -> bool) {
         if earlier.epoch != later.epoch {
             return;
         }
         for (read, other) in [(earlier, later), (later, earlier)] {
             let changed: HashSet<usize> = unmatched(read, other).into_iter().collect();
             for &at in &changed {
-                self.slots.insert(slot(read, &changed, at));
-                self.shapes.insert(shape(&read.passages[at]));
+                let shape = shape(&read.passages[at]);
+                if keep(&shape) {
+                    self.slots.insert(slot(read, &changed, at));
+                    self.shapes.insert(shape);
+                }
             }
         }
     }
@@ -197,12 +211,79 @@ impl Volatile {
 /// Whether a change within reach of the control at `at` is not one of the
 /// page's own.
 fn near(changed: &[usize], at: Option<usize>, read: &Readout, volatile: &Volatile) -> bool {
+    !crediting(changed, at, read, volatile).is_empty()
+}
+
+/// The changes within reach of the control at `at` that are not the page's
+/// own.
+fn crediting(
+    changed: &[usize],
+    at: Option<usize>,
+    read: &Readout,
+    volatile: &Volatile,
+) -> Vec<usize> {
     let set: HashSet<usize> = changed.iter().copied().collect();
-    at.is_some_and(|at| {
-        changed
-            .iter()
-            .any(|&changed| changed.abs_diff(at) <= NEAR && !volatile.holds(read, &set, changed))
-    })
+    let Some(at) = at else {
+        return Vec::new();
+    };
+    changed
+        .iter()
+        .copied()
+        .filter(|&changed| changed.abs_diff(at) <= NEAR && !volatile.holds(read, &set, changed))
+        .collect()
+}
+
+/// For a press `judge` credited, the wordings of the places it was credited
+/// with when every one is a number changing in place beside the control (a
+/// count, or a clock the page runs itself): a removed and an added passage
+/// of the same shape. None when any evidence stands on its own: the control
+/// itself changed or went, or a note, label or row came or went.
+pub(crate) fn numbers_only(
+    verb: Verb,
+    control: &Control,
+    before: &Readout,
+    after: &Readout,
+    volatile: &Volatile,
+) -> Option<HashSet<Shape>> {
+    if !matches!(verb, Verb::Click | Verb::Expand | Verb::Open | Verb::Submit) {
+        return None;
+    }
+    let removed = unmatched(before, after);
+    let added = unmatched(after, before);
+    let (was, found) = (control.find(before), control.find(after));
+    let gone: HashSet<usize> = removed.iter().copied().collect();
+    if was.is_some_and(|at| found.is_none() && !volatile.holds(before, &gone, at)) {
+        return None;
+    }
+    let removed = crediting(&removed, was, before, volatile);
+    let added = crediting(&added, found, after, volatile);
+    if was.is_some_and(|at| removed.contains(&at)) || found.is_some_and(|at| added.contains(&at)) {
+        return None;
+    }
+    let gone: Vec<Shape> = removed
+        .iter()
+        .map(|&at| shape(&before.passages[at]))
+        .collect();
+    let came: Vec<Shape> = added.iter().map(|&at| shape(&after.passages[at])).collect();
+    let numeric =
+        |shape: &Shape, other: &[Shape]| shape.text.contains('#') && other.contains(shape);
+    (!gone.is_empty()
+        && gone.iter().all(|shape| numeric(shape, &came))
+        && came.iter().all(|shape| numeric(shape, &gone)))
+    .then(|| gone.into_iter().collect())
+}
+
+/// Whether a place with one of these wordings changed between two reads.
+pub(crate) fn moved(of: &HashSet<Shape>, earlier: &Readout, later: &Readout) -> bool {
+    unmatched(earlier, later)
+        .into_iter()
+        .map(|at| &earlier.passages[at])
+        .chain(
+            unmatched(later, earlier)
+                .into_iter()
+                .map(|at| &later.passages[at]),
+        )
+        .any(|passage| of.contains(&shape(passage)))
 }
 
 fn same(value: &str, wanted: &str) -> bool {
@@ -523,6 +604,62 @@ mod tests {
             super::judge(Verb::Click, None, &control, &now, &saved, &volatile),
             Observed::Took,
             "a note beside the button still counts"
+        );
+    }
+
+    #[test]
+    fn a_press_credited_only_with_a_number_is_told_apart() {
+        let before = page(vec![]);
+        let control = Control::of(&before, 40).unwrap();
+        let counted = |count: u32| {
+            let mut read = before.clone();
+            read.passages.insert(
+                33,
+                passage(90, Role::Text, &format!("Saved: {count}"), None),
+            );
+            read
+        };
+        let (zero, one) = (counted(0), counted(1));
+        let volatile = Volatile::default();
+        assert_eq!(
+            judge(Verb::Click, None, &control, &zero, &one),
+            Observed::Took
+        );
+        let shapes = numbers_only(Verb::Click, &control, &zero, &one, &volatile)
+            .expect("a count bump alone is watched");
+        assert!(
+            !moved(&shapes, &one, &one.clone()),
+            "a count that stays put"
+        );
+        assert!(moved(&shapes, &one, &counted(2)), "a count that moves on");
+        let mut noted = one.clone();
+        noted
+            .passages
+            .insert(34, passage(91, Role::Text, "Added to your wishlist", None));
+        assert_eq!(
+            numbers_only(Verb::Click, &control, &zero, &noted, &volatile),
+            None,
+            "a note beside it stands on its own"
+        );
+        let renamed = with(&one, 40, |p| p.text = "On your wishlist".into());
+        assert_eq!(
+            numbers_only(Verb::Click, &control, &zero, &renamed, &volatile),
+            None,
+            "the control itself changed"
+        );
+        let mut swapped = zero.clone();
+        swapped.passages[33].text = "Sold out".into();
+        assert_eq!(
+            numbers_only(Verb::Click, &control, &zero, &swapped, &volatile),
+            None,
+            "new wording is not a number in place"
+        );
+        let mut learned = Volatile::default();
+        learned.learn_shapes(&one, &counted(2), &shapes);
+        assert_eq!(
+            super::judge(Verb::Click, None, &control, &zero, &counted(3), &learned),
+            Observed::Unclear,
+            "once seen moving by itself it is the page's own"
         );
     }
 
