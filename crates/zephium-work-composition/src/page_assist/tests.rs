@@ -76,6 +76,11 @@ struct PageState {
     loads: Option<Option<Duration>>,
     /// When the load in progress ends.
     loading_until: Option<Option<Instant>>,
+    /// After a step's effect is read, the page reloads itself into a load
+    /// that ends this long after; `Some(None)` never ends.
+    reloads: Option<Option<Duration>>,
+    /// Reads made when that step ran.
+    armed_at: Option<u64>,
 }
 
 /// The page's own "working" note, far from every control.
@@ -92,6 +97,9 @@ impl PageState {
     /// chosen option, or a note beside a pressed control.
     fn take(&mut self, tab: &str, step: &StepRequest) {
         self.ticked |= self.ticking;
+        if self.reloads.is_some() {
+            self.armed_at = Some(self.reads);
+        }
         if let Some(delay) = step.target.and_then(|target| self.late.get(&target)) {
             self.due
                 .push((Instant::now() + *delay, tab.to_owned(), step.clone()));
@@ -228,6 +236,19 @@ impl PagePort for FakePage {
     }
     fn facts(&self, tab: &str) -> Option<TabFacts> {
         let mut state = self.lock();
+        if let (Some(load), Some(at)) = (state.reloads, state.armed_at) {
+            if state.reads > at {
+                state.armed_at = None;
+                state.loading_until = Some(load.map(|load| Instant::now() + load));
+                if let Some(facts) = state.facts.get_mut(tab) {
+                    facts.epoch += 1;
+                    facts.loading = true;
+                }
+                if let Some(readout) = state.readouts.get_mut(tab) {
+                    readout.epoch += 1;
+                }
+            }
+        }
         if let Some(until) = state.loading_until {
             if until.is_some_and(|until| Instant::now() >= until) {
                 state.loading_until = None;
@@ -3302,6 +3323,65 @@ async fn the_page_a_step_moved_to_is_read_once_it_loads() {
         "within the bound: {took:?}"
     );
     let (result, asked, _) = never_finish.await.unwrap();
+    assert!(result.contains("still loading"), "{result}");
+    assert_eq!(
+        asked, 2,
+        "a reply asked to end with its steps does not end on it"
+    );
+}
+
+/// A click whose effect is seen, after which the page reloads itself into a
+/// load that ends after `load` (never when none): the act's result, the
+/// step, whether the model was asked again, and how long the reply took.
+async fn click_then_reload(
+    load: Option<Duration>,
+    finish: bool,
+) -> (String, PageAssistStepV1, usize, Duration) {
+    let mut act = json!({"steps": [{"verb": "click", "ref": "a10"}]});
+    if finish {
+        act["finish"] = json!(true);
+    }
+    let h = harness(vec![tool("act", act), say("Here is the page.")]);
+    h.controls();
+    h.page.lock().reloads = Some(load);
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(14)).await;
+    let took = started.elapsed();
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    (
+        h.tool_result(1).0,
+        steps[0].clone(),
+        h.requests().len(),
+        took,
+    )
+}
+
+#[tokio::test]
+async fn a_page_that_reloads_itself_is_read_once_it_loads() {
+    let ms = Duration::from_millis;
+    let [loads, never, never_finish] = [(Some(ms(2_000)), false), (None, false), (None, true)]
+        .map(|(load, finish)| tokio::spawn(click_then_reload(load, finish)));
+    let (result, step, _, took) = loads.await.unwrap();
+    assert_eq!(step.state, PageAssistStepStateV1::Done, "{step:?}");
+    assert!(result.contains("The page now"), "{result}");
+    assert!(took >= ms(2_000) && took < ms(4_000), "took {took:?}");
+    let (result, step, asked, took) = never.await.unwrap();
+    assert_eq!(
+        step.state,
+        PageAssistStepStateV1::Done,
+        "the step row is unchanged"
+    );
+    assert!(result.contains("still loading"), "{result}");
+    assert!(!result.contains("<<<PAGE"), "{result}");
+    assert_eq!(asked, 2, "the model hears it is still loading");
+    assert!(
+        took >= ms(9_500) && took < ms(11_500),
+        "within the bound: {took:?}"
+    );
+    let (result, _, asked, _) = never_finish.await.unwrap();
     assert!(result.contains("still loading"), "{result}");
     assert_eq!(
         asked, 2,

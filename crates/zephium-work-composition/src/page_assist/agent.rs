@@ -52,9 +52,9 @@ const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
 /// The one read before an unpaired press only buys evidence: it never holds
 /// a spoken command back longer than this.
 const BEFORE_PRESS_READ: Duration = Duration::from_secs(1);
-/// The act result when the document a step moved to had not loaded by the
-/// step's new-document bound.
-const STILL_LOADING: &str = "\n\nThe page it moved to is still loading, so it was not read. Read it again before answering.";
+/// The act result when the page's new document had not loaded within its
+/// new-document bound.
+const STILL_LOADING: &str = "\n\nThe page moved on to a new document that is still loading, so it was not read. Read it again before answering.";
 const EFFECT_POLL: Duration = Duration::from_millis(50);
 /// Most views `find` scrolls down to reach its words.
 const FIND_SCROLLS: usize = 4;
@@ -1721,8 +1721,8 @@ struct Plan {
     volatile: effect::Volatile,
     /// Two reads of the document with no step between them were compared.
     paired: bool,
-    /// A step moved the page on: its new document is to load by then.
-    settle_by: Option<tokio::time::Instant>,
+    /// A step moved the page on to this document, which is to load by then.
+    settle_by: Option<(u64, tokio::time::Instant)>,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
@@ -2042,8 +2042,12 @@ async fn act(
     reply.phase(Some(PageAssistPhaseV1::Thinking));
     match result {
         Ok(()) if finish => {
-            // A reply never ends on a page it moved to and could not read.
-            if !plan.moved || loaded(reply, &plan).await {
+            // A reply never ends on a new document it could not read.
+            let settled = match load_bound(reply, &plan) {
+                Some(by) => loaded(reply, &plan, by).await,
+                None => true,
+            };
+            if settled {
                 reply.with_data(|data| data.finished = true);
                 Ok(Ok(plan.summary()))
             } else {
@@ -2128,15 +2132,21 @@ async fn after_steps(reply: &Reply, plan: &Plan) -> String {
             Some(PageAssistStepReasonV1::PageChanged | PageAssistStepReasonV1::Unsuitable)
         )
     });
-    if !plan.moved && !stale && plan.latest.passages == plan.record.readout.passages {
+    // On another document than the plan's, whether a step moved it there or
+    // the page did so itself.
+    let bound = load_bound(reply, plan);
+    let away = bound.is_some();
+    if !away && !plan.moved && !stale && plan.latest.passages == plan.record.readout.passages {
         return String::new();
     }
-    if plan.moved && !loaded(reply, plan).await {
-        return STILL_LOADING.to_owned();
+    if let Some(by) = bound {
+        if !loaded(reply, plan, by).await {
+            return STILL_LOADING.to_owned();
+        }
     }
     let index = match reply.read_tab(&plan.tab).await {
         Ok(index) => index,
-        Err(PageAssistFaultV1::Loading) if plan.moved => return STILL_LOADING.to_owned(),
+        Err(PageAssistFaultV1::Loading) if away || plan.moved => return STILL_LOADING.to_owned(),
         Err(_) => return String::new(),
     };
     let Some((letters, read)) = reply
@@ -2148,7 +2158,7 @@ async fn after_steps(reply: &Reply, plan: &Plan) -> String {
     else {
         return String::new();
     };
-    if plan.moved || stale || read.epoch != plan.epoch {
+    if plan.moved || stale || away || read.epoch != plan.epoch {
         return format!("\n\nThe page now:\n{}", reply.page_block(index));
     }
     let body = |line: &str| {
@@ -2184,12 +2194,20 @@ async fn after_steps(reply: &Reply, plan: &Plan) -> String {
     )
 }
 
-/// Whether the document a step moved the page to finished loading, waiting
-/// no later than that step's new-document bound.
-async fn loaded(reply: &Reply, plan: &Plan) -> bool {
-    let Some(by) = plan.settle_by else {
-        return true;
-    };
+/// When the tab is on another document than the plan's, the latest its load
+/// may finish: the bound of the step that moved it there, or for a change
+/// no step made, the new-document bound from now, when it is first seen.
+fn load_bound(reply: &Reply, plan: &Plan) -> Option<tokio::time::Instant> {
+    let epoch = reply.service.ports().page.facts(&plan.tab)?.epoch;
+    match plan.settle_by {
+        Some((moved_to, by)) if moved_to == epoch => Some(by),
+        _ if epoch != plan.epoch => Some(tokio::time::Instant::now() + EFFECT_NAVIGATION),
+        _ => None,
+    }
+}
+
+/// Whether the tab's document finished loading, waiting no later than `by`.
+async fn loaded(reply: &Reply, plan: &Plan, by: tokio::time::Instant) -> bool {
     let page = reply.service.ports().page.clone();
     loop {
         if !page.facts(&plan.tab).is_some_and(|facts| facts.loading) {
@@ -2441,7 +2459,9 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
         let navigated = settled == Settled::Navigated;
         plan.moved |= navigated;
         if navigated {
-            plan.settle_by = Some(observed + EFFECT_NAVIGATION);
+            plan.settle_by = page
+                .facts(&plan.tab)
+                .map(|facts| (facts.epoch, observed + EFFECT_NAVIGATION));
         }
         let reason = match settled {
             Settled::Took(after) => {
