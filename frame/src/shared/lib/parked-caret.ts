@@ -11,7 +11,8 @@ const IDLE_MS = 4000;
  *
  * A parked field still takes every key it would have taken focused. Text
  * and Tab land natively once focus is back; other keys, such as Escape,
- * Enter or the arrows, are handed to the field so its own handlers run.
+ * Enter or the arrows, are handed to the field so its own handlers run, and
+ * a text area's Enter still breaks the line when they leave it.
  * Paste (Cmd+V, and Ctrl+V or Ctrl+Shift+V off macOS) brings focus back
  * before its default action, so the text lands in the field. Other Ctrl
  * shortcuts without AltGraph and other Cmd shortcuts leave it parked.
@@ -86,23 +87,25 @@ export function parkCaret(
     input.focus({ preventScroll: true });
     const text = paste || event.key.length === 1 || STARTS_TEXT.has(event.key) || event.isComposing;
     if (text || event.key === "Tab" || event.target === input) return;
-    event.preventDefault();
     event.stopImmediatePropagation();
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", {
-        key: event.key,
-        code: event.code,
-        location: event.location,
-        repeat: event.repeat,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-        metaKey: event.metaKey,
-        ctrlKey: event.ctrlKey,
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-      }),
-    );
+    const echo = new KeyboardEvent("keydown", {
+      key: event.key,
+      code: event.code,
+      location: event.location,
+      repeat: event.repeat,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    input.dispatchEvent(echo);
+    // Only the native key inserts a text area's line break, so it runs
+    // unless the field's own handler took the key.
+    const lineBreak = input instanceof HTMLTextAreaElement && event.key === "Enter";
+    if (echo.defaultPrevented || !lineBreak) event.preventDefault();
   }
 
   function release(event: Event) {

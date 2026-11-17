@@ -141,6 +141,44 @@ test("a text area parks with its caret on its first line", () => {
   }
 });
 
+test("a parked text area breaks the line on Shift+Enter, and its handler still takes Enter", async () => {
+  stop();
+  const area = document.createElement("textarea");
+  field.append(area);
+  const sent: string[] = [];
+  area.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sent.push(area.value);
+    }
+  });
+  area.focus();
+  const unpark = parkCaret(area);
+  try {
+    vi.advanceTimersByTime(4100);
+    expect(area.dataset.caretParked).toBe("");
+    vi.useRealTimers();
+    await userEvent.keyboard("{Shift>}{Enter}{/Shift}");
+    expect(document.activeElement).toBe(area);
+    expect(area.value).toBe("\n");
+    area.value = "";
+    area.blur();
+    vi.useFakeTimers();
+    area.focus();
+    vi.advanceTimersByTime(4100);
+    expect(area.dataset.caretParked).toBe("");
+    vi.useRealTimers();
+    await userEvent.keyboard("{Enter}");
+    expect(document.activeElement).toBe(area);
+    expect(sent).toEqual([""]);
+    expect(area.value).toBe("");
+  } finally {
+    unpark();
+    area.remove();
+    stop = parkCaret(input);
+  }
+});
+
 test("a field with text keeps its caret, and clicking elsewhere lets go", () => {
   input.value = "zephium";
   input.dispatchEvent(new Event("input"));
