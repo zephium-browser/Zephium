@@ -57,6 +57,7 @@ pub(crate) mod browse_reader;
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
+pub(crate) mod extension_navigation;
 pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
@@ -184,8 +185,8 @@ use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
-const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
-const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
+const PAGE_URL_UTF16_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
+const PAGE_URL_UTF8_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
 const WINDOWS_PATH_UTF16_LIMIT: usize = 32_767;
 const WINDOWS_PATH_UTF8_LIMIT: usize = 4 * WINDOWS_PATH_UTF16_LIMIT;
 const VERSION_UTF16_LIMIT: usize = 256;
@@ -219,7 +220,7 @@ pub fn user_style_refusal(
         .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
 }
 
-fn take_pwstr_bounded(
+pub(crate) fn take_pwstr_bounded(
     source: PWSTR,
     max_utf16_units: usize,
     max_utf8_bytes: usize,
@@ -308,12 +309,14 @@ fn configure_with_credential_denied(
     let core10 = core.cast::<ICoreWebView2_10>()?;
     let core5 = core.cast::<ICoreWebView2_5>()?;
     let core14 = core.cast::<ICoreWebView2_14>()?;
+    let extension_frames = ExtensionFrames::default();
     let mut policy = SecurityPolicy {
         core: core.clone(),
         core18: core18.clone(),
         core10: core10.clone(),
         core5: core5.clone(),
         core14: core14.clone(),
+        extension_frames: extension_frames.clone(),
         frame_token: None,
         judged_frame_token: None,
         refused_frame_requests: None,
@@ -436,7 +439,7 @@ fn configure_with_credential_denied(
     // Wry's navigation callback covers top-level navigations. WebView2 has a
     // separate event for frames; cancel first so URI extraction or policy
     // evaluation failure cannot accidentally authorize the navigation.
-    let frame_navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
+    let frame_navigation = NavigationStartingEventHandler::create(Box::new(move |_, args| {
         // A frame navigating keeps list-update work waiting for quiet pages.
         zephium_core::blocker::PageActivity::shared().note_navigation();
         let Some(args) = args else {
@@ -454,6 +457,7 @@ fn configure_with_credential_denied(
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
                         || zephium_core::navigation::external_app_link(&uri).is_some()
+                        || extension_frames.admits(&uri)
                 },
             ) {
                 args.SetCancel(false)?;
@@ -491,6 +495,7 @@ pub struct SecurityPolicy {
     core10: ICoreWebView2_10,
     core5: ICoreWebView2_5,
     core14: ICoreWebView2_14,
+    extension_frames: ExtensionFrames,
     frame_token: Option<i64>,
     judged_frame_token: Option<i64>,
     refused_frame_requests: Option<refused_frames::RefusedFrameRequests>,
@@ -500,7 +505,38 @@ pub struct SecurityPolicy {
     certificate_error_token: Option<i64>,
 }
 
+/// Which `chrome-extension://` child frames the frame check lets load. Empty
+/// until a view's owner supplies its extension grants, so raw, private, agent
+/// and chrome views keep refusing every extension frame.
+#[derive(Clone, Default)]
+struct ExtensionFrames(Rc<RefCell<Option<ExtensionFrameAdmission>>>);
+
+type ExtensionFrameAdmission = Box<dyn Fn(&str) -> bool>;
+
+impl ExtensionFrames {
+    fn admits(&self, uri: &str) -> bool {
+        url::Url::parse(uri)
+            .ok()
+            .is_some_and(|url| zephium_core::navigation::extension_document_id(&url).is_some())
+            && self
+                .0
+                .try_borrow()
+                .is_ok_and(|admits| admits.as_ref().is_some_and(|admits| admits(uri)))
+    }
+}
+
 impl SecurityPolicy {
+    /// Lets a page frame an extension's document when `admits` grants that
+    /// extension in this view's profile, as password managers do for their
+    /// inline menus and passkey prompts. Main-frame loads keep their own
+    /// gate, and Chromium still refuses a document the extension does not
+    /// list in `web_accessible_resources`.
+    pub fn admit_extension_frames(&mut self, admits: impl Fn(&str) -> bool + 'static) {
+        if let Ok(mut slot) = self.extension_frames.0.try_borrow_mut() {
+            *slot = Some(Box::new(admits));
+        }
+    }
+
     /// Human tabs: WebView2 still never launches an app link itself; each
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
@@ -557,6 +593,7 @@ impl SecurityPolicy {
     pub fn judge_frame_navigations(
         &mut self,
         blocks: impl Fn(&str) -> bool + 'static,
+        unreadable: impl Fn() + 'static,
     ) -> windows_core::Result<()> {
         if self.refused_frame_requests.is_none() {
             // Without it a refused frame is still never shown; only its
@@ -578,9 +615,12 @@ impl SecurityPolicy {
             };
             unsafe {
                 let mut uri = PWSTR::null();
-                let uri = args.Uri(&mut uri).ok().and_then(|()| {
-                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                });
+                let received = args.Uri(&mut uri);
+                let uri = take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT);
+                let uri = received.ok().and(uri);
+                if uri.is_none() {
+                    unreadable();
+                }
                 if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
                     if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {

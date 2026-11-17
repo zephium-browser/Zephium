@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutHint } from "../lib/platform";
   import { untrack } from "svelte";
   import { MediaQuery } from "svelte/reactivity";
   import { noteSession } from "$domain/notes";
@@ -110,7 +111,7 @@
                   label: m.note_delete(),
                   icon: Delete02Icon,
                   danger: true,
-                  hint: "⌘⌫",
+                  hint: shortcutHint("CmdOrCtrl+Backspace"),
                 },
               ]
             : []),
@@ -188,7 +189,7 @@
               type="button"
               class="head-button"
               aria-label={m.note_new()}
-              title="{m.note_new()}  ⌥⌘N"
+              title="{m.note_new()}  {shortcutHint('CmdOrCtrl+Alt+N')}"
               onclick={() => void session?.create()}
               ><Icon icon={PencilEdit02Icon} size={17} /></button
             >{/if}
@@ -299,7 +300,7 @@
           <div class="stage-empty-actions">
             <button type="button" class="stage-new" onclick={() => void session?.create()}
               ><Icon icon={PencilEdit02Icon} size={15} /><span>{m.note_new()}</span><span
-                class="stage-hint">⌥⌘N</span
+                class="stage-hint">{shortcutHint("CmdOrCtrl+Alt+N")}</span
               ></button
             >
             <button type="button" class="stage-link" onclick={() => void session?.reveal(null)}

@@ -12,6 +12,7 @@
   import { mediaPlayer } from "$domain/media-player";
   import { tabs } from "$domain/tabs";
   import { clock, fraction } from "../lib/time";
+  import { everyWhileVisible } from "$shared/lib/visible-interval";
 
   let { compact = false }: { compact?: boolean } = $props();
 
@@ -25,8 +26,7 @@
   $effect(() => {
     if (!player?.playing || player.waiting) return;
     now = performance.now();
-    const tick = setInterval(() => (now = performance.now()), 1000);
-    return () => clearInterval(tick);
+    return everyWhileVisible(1000, () => (now = performance.now()));
   });
   // A seek holds its place until native reports the next state.
   let sought = $state.raw<{ for: object; seconds: number } | null>(null);

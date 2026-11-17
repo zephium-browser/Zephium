@@ -128,7 +128,12 @@ impl ExtensionDataCall {
                 HistoryRequest::Visits { url }
                 | HistoryRequest::Address { url }
                 | HistoryRequest::RemoveUrl { url } => address(url),
-                HistoryRequest::Add { url } => crate::navigation::is_allowed_str(url),
+                HistoryRequest::Add { url } => {
+                    address(url)
+                        && url::Url::parse(url).is_ok_and(|target| {
+                            address(target.as_str()) && crate::navigation::is_allowed(&target)
+                        })
+                }
                 HistoryRequest::RemoveRange { start, end } => start <= end,
                 HistoryRequest::MostVisited { .. } | HistoryRequest::RemoveAll => true,
             },
@@ -204,5 +209,25 @@ pub struct ExtensionDataInterest {
 impl ExtensionDataInterest {
     pub fn any(self) -> bool {
         self.history || self.bookmarks || self.sessions
+    }
+}
+
+#[cfg(test)]
+mod history_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn extension_history_add_retains_its_eight_kib_address_budget() {
+        let max = crate::bookmarks::MAX_URL_BYTES;
+        let prefix = "https://example.test/";
+        let at_bound = format!("{prefix}{}", "x".repeat(max - prefix.len()));
+        let add = |url| ExtensionDataCall::History(HistoryRequest::Add { url });
+        assert!(add(at_bound.clone()).validate());
+        assert!(!add(format!("{at_bound}x")).validate());
+        assert!(!add(format!("{at_bound}\n")).validate());
+        let expanded = format!("{prefix}{}", "é".repeat((max - prefix.len()) / 2));
+        assert!(expanded.len() <= max);
+        assert!(crate::navigation::is_allowed_str(&expanded));
+        assert!(!add(expanded).validate());
     }
 }

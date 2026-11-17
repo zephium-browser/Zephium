@@ -879,7 +879,7 @@ fn validate_engine_manifest(source: &str) -> Result<(), String> {
         .get("dependencies")
         .and_then(|dependencies| dependencies.get("zeroize"))
         .and_then(toml::Value::as_str)
-        != Some("=1.9.0")
+        != Some("=1.9.1")
     {
         return Err(
             "engine secret-wiping zeroize dependency must remain exactly pinned".to_owned(),
@@ -9015,12 +9015,14 @@ fn validate_agent_app_lifecycle(
         "typeFailure=AgenticSpawnFailure;",
         "structShellHandoff<Agent=NoAgentLifecycle>",
         "agent_lifecycle:Agent,",
+        "profile_cleanup:Option<Arc<dyncrate::profile_cleanup::ProfileCleanup>>,",
+        "drop(profile_cleanup)",
         "pubstructAgenticSpawnFailure{error:SpawnError,agent_lifecycle:AgentLifecycle,worker_cleanup_proven:bool,}",
         "pubfninto_parts(self)->(SpawnError,AgentLifecycle)",
         "pubfnspawn_agentic_suspended(",
         "agent_lifecycle:PendingAgentBrowserLifecycle(agent_lifecycle),",
         "#[cfg_attr(not(test),deny(clippy::panic,clippy::unreachable,clippy::unwrap_used))]fnspawn_suspended_with_worker_spawner",
-        "lethandoff=ShellHandoff{engine,store,blocker,agent_lifecycle,terminal_failure,chrome,emit,};",
+        "lethandoff=ShellHandoff{engine,store,blocker,agent_lifecycle,profile_cleanup,terminal_failure,chrome,emit,};",
         "ShellHandoff<Agent>",
         "ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle())",
     ] {
@@ -13100,7 +13102,7 @@ mod tests {
             futures-util = { version = "=0.3.32", optional = true }
             reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
             tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
-            zeroize = { version = "=1.9.0", optional = true }
+            zeroize = { version = "=1.9.1", optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
             security-framework = { version = "=3.7.0", optional = true }
             security-framework-sys = { version = "=2.17.0", optional = true }
@@ -13801,7 +13803,7 @@ mod tests {
             required-features = ["native-agentic-semantic-probe"]
             [dependencies]
             zephium-agentic = { optional = true }
-            zeroize = "=1.9.0"
+            zeroize = "=1.9.1"
             image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"], optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
             windows = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
@@ -13825,10 +13827,10 @@ mod tests {
             "agentic-browser = [\"zephium-agentic/probe-harness\"]",
         ))
         .is_err());
-        assert!(validate_engine_manifest(&valid.replace("=1.9.0", "=1.9.1")).is_err());
+        assert!(validate_engine_manifest(&valid.replace("=1.9.1", "=1.9.2")).is_err());
         assert!(validate_engine_manifest(&valid.replace(
-            "zeroize = \"=1.9.0\"",
-            "zeroize = { version = \"=1.9.0\", optional = true }",
+            "zeroize = \"=1.9.1\"",
+            "zeroize = { version = \"=1.9.1\", optional = true }",
         ))
         .is_err());
         assert!(validate_engine_manifest(&valid.replace("=0.25.10", "=0.25.11")).is_err());

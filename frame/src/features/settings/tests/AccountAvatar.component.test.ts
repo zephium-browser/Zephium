@@ -18,7 +18,7 @@ const PHOTO = `data:image/svg+xml,${encodeURIComponent(
 )}`;
 // Rust serves the picture by revision; here a picture stands in for it.
 vi.mock("$domain/account/account-model", async (original) => ({
-  ...(await original<typeof import("$domain/account/account-model")>()),
+  ...(await original<typeof import("$domain/account")>()),
   avatarUrl: (revision: number | null | undefined) => (revision === 3 ? PHOTO : null),
 }));
 vi.mock("$shared/ipc/bindings", async () => {

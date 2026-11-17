@@ -18,7 +18,7 @@ import { loadNewTab } from "$features/newtab";
  */
 declare module "vitest/browser" {
   interface BrowserCommands {
-    webkitFootprint: () => Promise<import("../../../../vitest.bench-commands").WebKitFootprint>;
+    webkitFootprint: () => Promise<import("$shared/testing/webkit-footprint").WebKitFootprint>;
   }
 }
 

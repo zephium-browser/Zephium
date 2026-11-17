@@ -73,6 +73,7 @@ struct ShellHandoff<Agent = NoAgentLifecycle> {
     store: SharedStore,
     blocker: SharedBlocker,
     agent_lifecycle: Agent,
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -1448,6 +1449,33 @@ pub fn spawn_suspended(
             store,
             blocker,
             agent_lifecycle: NoAgentLifecycle,
+            profile_cleanup: None,
+            terminal_failure,
+            chrome,
+            emit,
+        },
+        spawn_worker,
+    )
+}
+
+/// Starts a suspended Shell with the external profile erasure owner installed
+/// before journal recovery can enter any cleanup phase.
+pub fn spawn_suspended_with_profile_cleanup(
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+    profile_cleanup: Arc<dyn crate::profile_cleanup::ProfileCleanup>,
+) -> Result<Handle, SpawnFailure> {
+    spawn_suspended_with_worker_spawner(
+        ShellHandoff {
+            engine,
+            store,
+            blocker,
+            agent_lifecycle: NoAgentLifecycle,
+            profile_cleanup: Some(profile_cleanup),
             terminal_failure,
             chrome,
             emit,
@@ -1478,6 +1506,7 @@ pub fn spawn_agentic_suspended(
             store,
             blocker,
             agent_lifecycle: PendingAgentBrowserLifecycle(agent_lifecycle),
+            profile_cleanup: None,
             terminal_failure,
             chrome,
             emit,
@@ -1525,6 +1554,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         store,
         blocker,
         agent_lifecycle,
+        profile_cleanup,
         terminal_failure,
         chrome,
         emit,
@@ -1569,11 +1599,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
             store,
             blocker,
             agent_lifecycle,
+            profile_cleanup,
             terminal_failure,
             chrome,
             emit,
         } = handoff;
-        let ports = ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit);
+        let ports = ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit)
+            .with_profile_cleanup(profile_cleanup);
         #[cfg(feature = "agentic-browser")]
         let ports = ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle());
         #[cfg(not(feature = "agentic-browser"))]
@@ -1817,6 +1849,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         store,
         blocker,
         agent_lifecycle,
+        profile_cleanup,
         terminal_failure,
         chrome,
         emit,
@@ -1829,6 +1862,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 store,
                 blocker,
                 agent_lifecycle,
+                profile_cleanup,
                 terminal_failure,
                 chrome,
                 emit,
@@ -1840,6 +1874,8 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(engine))).is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(store))).is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(blocker))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(profile_cleanup)))
+                    .is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(terminal_failure)))
                     .is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(chrome))).is_ok(),

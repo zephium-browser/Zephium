@@ -731,7 +731,9 @@ pub(crate) fn classify(
                     SiteEffect::Commit(Consequence::Save)
                 }
             } else {
-                SiteEffect::Draft
+                // A label or absent submit semantics cannot establish that
+                // a page handler has only local effects.
+                SiteEffect::Commit(Consequence::Save)
             }
         }
         SemanticActionKind::Fill | SemanticActionKind::Select => typing_effect(node, snapshot),
@@ -2649,6 +2651,47 @@ mod tests {
     }
 
     #[test]
+    fn unknown_clicks_and_keyboard_activations_require_confirmation() {
+        let unknown = page(vec![
+            json!({"k":1,"r":"document","o":16}),
+            json!({"k":2,"p":0,"r":"button","n":"送信する","o":9,"ak":1,"fc":true,
+                "b":{"x":1,"y":1,"w":100,"h":30}}),
+        ]);
+        for (kind, key) in [
+            (SemanticActionKind::Click, None),
+            (SemanticActionKind::Press, Some(SemanticPressKey::Enter)),
+            (SemanticActionKind::Press, Some(SemanticPressKey::Space)),
+        ] {
+            assert_eq!(
+                effect_key(&unknown, 2, kind, key),
+                SiteEffect::Commit(Consequence::Save)
+            );
+        }
+        let gate = Arc::new(SiteGate::new("example.com".into(), false, false));
+        let policy = SiteWorkPolicy {
+            gate: gate.clone(),
+            asks: true,
+        };
+        assert_eq!(
+            policy
+                .assess(&click(&unknown, 2, SemanticEffectClass::Read), &unknown)
+                .err(),
+            Some(AgentWorkFailure::ActionDenied)
+        );
+        assert!(
+            gate.pending().is_some(),
+            "unknown effects must ask before dispatch"
+        );
+        gate.approve(false).unwrap();
+        assert!(policy
+            .assess(
+                &click(&unknown, 2, SemanticEffectClass::ExternalWrite),
+                &unknown
+            )
+            .is_ok());
+    }
+
+    #[test]
     fn research_readers_raise_visible_sign_in_and_check_walls_before_extraction() {
         let sign_in = page(vec![
             json!({"k":1,"r":"document","o":16}),
@@ -2732,7 +2775,7 @@ mod tests {
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"textbox","n":"Message #design","o":10}),
             json!({"k":3,"p":0,"r":"button","n":"Send now","o":1,"ak":1}),
-            json!({"k":4,"p":0,"r":"button","n":"Emoji","o":1,"ak":1}),
+            json!({"k":4,"p":0,"r":"button","n":"Emoji","o":1,"ak":6}),
             json!({"k":5,"p":0,"r":"link","n":"#general","o":1,"ak":4}),
             json!({"k":6,"p":0,"r":"tab","n":"Threads","o":1}),
         ]);
@@ -2742,7 +2785,7 @@ mod tests {
         );
         assert_eq!(
             effect(&slack, 4, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Read
         );
         assert_eq!(
             effect(&slack, 5, SemanticActionKind::Click),
@@ -2780,7 +2823,7 @@ mod tests {
         );
         assert_eq!(
             effect(&booking, 3, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Commit(Consequence::Save)
         );
         assert_eq!(
             effect(&booking, 6, SemanticActionKind::Click),
@@ -2880,8 +2923,8 @@ mod tests {
         );
         assert_eq!(
             effect(&tasks, 6, SemanticActionKind::Click),
-            SiteEffect::Draft,
-            "Add task beside an empty field only opens the editor",
+            SiteEffect::Commit(Consequence::Save),
+            "an empty field cannot prove what its Add button does",
         );
         let drafted = page(vec![
             json!({"k":1,"r":"document","o":16}),
@@ -2969,7 +3012,7 @@ mod tests {
         );
         assert_eq!(
             effect(&apps, 3, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Commit(Consequence::Save)
         );
         assert_eq!(
             effect(&apps, 5, SemanticActionKind::Fill),
@@ -2981,7 +3024,7 @@ mod tests {
         );
         assert_eq!(
             effect(&apps, 7, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Commit(Consequence::Save)
         );
         assert_eq!(
             effect(&apps, 8, SemanticActionKind::Click),
@@ -3417,7 +3460,7 @@ mod tests {
             json!({"k":1,"r":"document","o":16,"fc":true}),
             json!({"k":2,"p":0,"r":"textbox","n":"Message to design","o":11,"fs":1,"es":[1,2,false],"fc":true,
                 "b":{"x":1,"y":1,"w":300,"h":60}}),
-            json!({"k":3,"p":0,"r":"button","n":"Emoji","o":9,"ak":1,"fc":true,
+            json!({"k":3,"p":0,"r":"button","n":"Emoji","o":9,"ak":6,"fc":true,
                 "b":{"x":1,"y":70,"w":30,"h":30}}),
             json!({"k":4,"p":0,"r":"button","o":9,"ak":1,"fc":true,
                 "b":{"x":40,"y":70,"w":30,"h":30}}),
@@ -3432,9 +3475,7 @@ mod tests {
         let emoji = click(&look, 3, SemanticEffectClass::Communication);
         assert!(matches!(
             policy.assess(&emoji, &look),
-            Err(AgentWorkFailure::EffectRequired(
-                SemanticEffectClass::LocalWrite
-            ))
+            Err(AgentWorkFailure::EffectRequired(SemanticEffectClass::Read))
         ));
         let unnamed = click(&look, 4, SemanticEffectClass::Communication);
         assert!(matches!(
@@ -3796,7 +3837,7 @@ mod tests {
     fn a_step_read_as_harmless_that_says_it_committed_stops_the_page() {
         let before = page(vec![
             json!({"k":1,"r":"document","o":16,"fc":true}),
-            json!({"k":2,"p":0,"r":"button","n":"Done","o":9,"ak":1,"fc":true,
+            json!({"k":2,"p":0,"r":"button","n":"Details","o":9,"ak":6,"fc":true,
                 "b":{"x":1,"y":1,"w":100,"h":30}}),
         ]);
         let after = page(vec![
@@ -3809,7 +3850,7 @@ mod tests {
             asks: true,
         };
         assert!(policy
-            .assess(&click(&before, 2, SemanticEffectClass::LocalWrite), &before)
+            .assess(&click(&before, 2, SemanticEffectClass::Read), &before)
             .is_ok());
         policy.after_step(&after);
         assert_eq!(gate.unconfirmed().as_deref(), Some("Message sent"));
@@ -3836,7 +3877,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stays_checkout_date_is_no_purchase() {
+    fn an_unknown_checkout_date_button_requires_generic_confirmation() {
         let widget = page(vec![
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"button","n":"Change dates; Check-in: Add date; Checkout: Add date","o":1,"ak":1}),
@@ -3844,7 +3885,7 @@ mod tests {
         ]);
         assert_eq!(
             effect(&widget, 2, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Commit(Consequence::Save)
         );
         assert_eq!(
             effect(&widget, 3, SemanticActionKind::Click),
@@ -4444,11 +4485,11 @@ mod tests {
         }
         let look = page(vec![
             json!({"k":1,"r":"document","o":16,"fc":true}),
-            json!({"k":2,"p":0,"r":"button","n":"Open details","o":9,"fc":true,"b":{"x":1,"y":1,"w":200,"h":30}}),
+            json!({"k":2,"p":0,"r":"button","n":"Open details","o":9,"ak":6,"fc":true,"b":{"x":1,"y":1,"w":200,"h":30}}),
         ]);
         assert_eq!(
             effect(&look, 2, SemanticActionKind::Click),
-            SiteEffect::Draft
+            SiteEffect::Read
         );
         let policy = SiteWorkPolicy {
             gate: Arc::new(SiteGate::default()),
@@ -5048,7 +5089,7 @@ mod tests {
     }
 
     #[test]
-    fn setting_where_to_deliver_is_a_draft_never_a_commit() {
+    fn location_buttons_with_unknown_handlers_require_confirmation() {
         let location = page(vec![
             json!({"k":1,"r":"document","o":16}),
             json!({"k":2,"p":0,"r":"dialog","n":"Choose your location"}),
@@ -5062,7 +5103,7 @@ mod tests {
             assert!(
                 matches!(
                     effect(&location, key, SemanticActionKind::Click),
-                    SiteEffect::Draft | SiteEffect::Read
+                    SiteEffect::Commit(Consequence::Save)
                 ),
                 "{key}"
             );

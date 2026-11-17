@@ -11,8 +11,8 @@ const native = vi.hoisted(() => ({
   reveal: vi.fn(),
 }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     workCall: native.call,
     workAdmitFolder: native.admitFolder,
     workRevealPath: native.reveal,

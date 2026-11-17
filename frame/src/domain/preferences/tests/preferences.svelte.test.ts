@@ -16,12 +16,24 @@ vi.mock("$shared/ipc/bindings", async () => {
     searchShortcutDefaults: native.shortcuts,
   });
 });
+const platform = vi.hoisted(() => ({ IS_MAC: false, IS_WINDOWS: false }));
+vi.mock("$shared/platform", async (original) => ({
+  ...(await original<object>()),
+  get IS_MAC() {
+    return platform.IS_MAC;
+  },
+  get IS_WINDOWS() {
+    return platform.IS_WINDOWS;
+  },
+}));
 vi.mock("$domain/operations", () => ({ settle: native.settle }));
 vi.mock("$shared/ipc/native-events", () => ({ events: { uiCommand: { listen: native.listen } } }));
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
   vi.resetAllMocks();
+  platform.IS_MAC = false;
+  platform.IS_WINDOWS = false;
   native.listener = null;
   native.listen.mockImplementation((listener: typeof native.listener) => {
     native.listener = listener;
@@ -70,6 +82,26 @@ describe("preference observation lifecycle", () => {
     preferences.dispose();
     expect(native.stop).toHaveBeenCalledOnce();
   });
+  it.each(["IS_MAC", "IS_WINDOWS"] as const)(
+    "starts every startup read at once when %s",
+    async (host) => {
+      platform[host] = true;
+      const preferences = await import("../preferences.svelte");
+      const releases: (() => void)[] = [];
+      const hold = <T>(value: T) =>
+        new Promise<T>((resolve) => releases.push(() => resolve(value)));
+      native.shortcuts.mockImplementation(() => hold([]));
+      native.get.mockImplementation(() => hold(null));
+      const startup = preferences.init();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(native.shortcuts).toHaveBeenCalledOnce();
+      expect(releases.length).toBeGreaterThan(8);
+      expect(native.get).toHaveBeenCalledTimes(releases.length - 1);
+      for (const release of releases) release();
+      await startup;
+      preferences.dispose();
+    },
+  );
   it("limits native startup reads and reuses a free slot while another read is held", async () => {
     const preferences = await import("../preferences.svelte");
     const releases: (() => void)[] = [];

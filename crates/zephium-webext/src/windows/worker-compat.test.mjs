@@ -17,9 +17,26 @@ function fixture() {
       get: async id => ({id, url: 'https://example.com/'})},
     action: {onClicked: event(), isEnabled: async () => true, getPopup: async () => ''}
   };
-  vm.runInNewContext(source, {chrome, URL, setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn)});
-  return {chrome, calls, timers};
+  const context = vm.createContext({chrome, URL, setTimeout: fn => { timers.add(fn); return fn; }, clearTimeout: fn => timers.delete(fn)});
+  vm.runInContext(source, context);
+  return {chrome, calls, timers, context};
 }
+
+test('create and the action relay keep working after the worker replaces its chrome global', async () => {
+  // Proton Pass swaps `chrome` for a locked Proxy once its worker starts.
+  const {chrome, calls, context} = fixture();
+  const {runtime} = chrome;
+  context.chrome = new Proxy({}, {get: () => undefined});
+  const result = chrome.tabs.create({url: 'https://example.com/'});
+  calls[0].callback({id: 7});
+  assert.equal((await result).id, 7);
+  const host = {id: runtime.id, url: runtime.getURL('zephium-windows-host/host.html')};
+  const seen = [];
+  chrome.action.onClicked.addListener(tab => seen.push(tab.id));
+  const reply = await new Promise(resolve => runtime.onMessage.emit({__zephiumActionClick: true, tabId: 5}, host, resolve));
+  assert.equal(reply.dispatched, true);
+  assert.deepEqual(seen, [5]);
+});
 
 test('native Tab result wins and the temporary listener is removed', async () => {
   const {chrome, calls, timers} = fixture();

@@ -2191,13 +2191,14 @@
     const current = objectiveSession;
     if (runningObjective && current) {
       const context = contextSel;
-      session.composer = "";
+      const submitted = await session.prepareComposer();
+      if (!submitted || submitted.text.trim() !== text) return;
       openTabs = false;
-      // Words typed while the agent works steer it now; if it cannot take
-      // them mid-step, they go next.
+      // Only native admission permits clearing these durable words.
       if (activeExecution) {
-        if (!(await current.steer(text))) current.enqueue(text);
-      } else await current.continueWith(text, context);
+        if (!(await current.steer(text))) return;
+      } else if (!(await current.continueWith(text, context))) return;
+      await session.clearComposer(submitted);
       return;
     }
     await createObjective();
@@ -2208,8 +2209,11 @@
     if (!session.composer.trim() || objectivePending || busy) return;
     const current = workSession(session.profile);
     if (!current) return;
+    const composer = session.objectiveSubmission?.composer ?? (await session.prepareComposer());
+    if (!composer || !composer.text.trim()) return;
     const submission = session.objectiveSubmission ?? {
-      objective: session.composer.trim(),
+      objective: composer.text.trim(),
+      composer,
       command: commandId(),
       attached: false,
       context: contextSel,
@@ -2280,7 +2284,7 @@
       if (!(await current.open(objectiveId))) return;
       const basis = current.projection?.work;
       if (current.selected !== objectiveId || basis?.id !== objectiveId) return;
-      session.composer = "";
+      await session.clearComposer(submission.composer);
       session.objectiveToAttach = null;
       session.objectiveSubmission = null;
       openTabs = false;
@@ -2587,7 +2591,12 @@
           canvasRef?.focusCard(pageEntries.get(card)?.part ?? card);
         }}
         onfocusagent={(id) => canvasRef?.center(id)}
-        onsteered={() => (session.composer = "")}
+        prepareDraft={async () => {
+          const submitted = await session.prepareComposer();
+          return submitted
+            ? { text: submitted.text, clear: () => session.clearComposer(submitted) }
+            : null;
+        }}
         {human}
         onopenstep={openStep}
       />{/snippet}</LazyView
@@ -3069,6 +3078,28 @@
   {/if}
   <div class="bar-dock" bind:clientHeight={dockHeight}>
     {#if blockSaveFailed || owned.failed}<p role="alert">{m.resource_conflict()}</p>{/if}
+    {#if session.composerFailure}
+      <div role="alert">
+        <p>
+          {session.composerFailure === "conflict"
+            ? m.resource_conflict()
+            : m.resource_save_failed()}
+        </p>
+        {#if session.composerFailure === "conflict"}
+          <p>{m.resource_overwrite_explanation()}</p>
+          <Button size="compact" onclick={() => void session.resolveComposer("load")}
+            >{m.resource_load_saved()}</Button
+          >
+          <Button size="compact" onclick={() => void session.resolveComposer("replace")}
+            >{m.resource_confirm_replace()}</Button
+          >
+        {:else}
+          <Button size="compact" onclick={() => void session.resolveComposer("retry")}
+            >{m.surface_retry()}</Button
+          >
+        {/if}
+      </div>
+    {/if}
     {#if aiEnabled}<WorkBar
         bind:ref={composerElement}
         bind:surface={composerSurface}

@@ -362,6 +362,7 @@ pub struct Shell {
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
     notes: Option<zephium_core::ports::notes::SharedNotes>,
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     chrome: SharedChrome,
     emit: EmitFn,
     #[cfg(test)]
@@ -369,6 +370,7 @@ pub struct Shell {
 }
 
 pub(super) struct ShellPorts {
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
@@ -389,6 +391,7 @@ impl ShellPorts {
         emit: EmitFn,
     ) -> Self {
         Self {
+            profile_cleanup: None,
             engine,
             store,
             blocker,
@@ -398,6 +401,14 @@ impl ShellPorts {
             chrome,
             emit,
         }
+    }
+
+    pub(super) fn with_profile_cleanup(
+        mut self,
+        cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
+    ) -> Self {
+        self.profile_cleanup = cleanup;
+        self
     }
 
     #[cfg(feature = "agentic-browser")]
@@ -503,6 +514,7 @@ impl Shell {
         #[cfg(test)] auto_settle_content_rules: bool,
     ) -> Self {
         let ShellPorts {
+            profile_cleanup,
             engine,
             store,
             blocker,
@@ -623,6 +635,7 @@ impl Shell {
             store,
             store_reads: store_reads.into(),
             notes: None,
+            profile_cleanup,
             chrome,
             emit,
             #[cfg(test)]
@@ -877,6 +890,9 @@ impl Shell {
                 profile,
                 extension_id,
             } => {
+                #[cfg(target_os = "windows")]
+                self.open_web_extension_options(profile, extension_id);
+                #[cfg(not(target_os = "windows"))]
                 let _ = self
                     .engine
                     .open_web_extension_options(profile, extension_id);
