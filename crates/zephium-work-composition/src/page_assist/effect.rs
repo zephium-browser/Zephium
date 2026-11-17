@@ -94,6 +94,12 @@ fn unmatched(from: &Readout, to: &Readout) -> Vec<usize> {
         .collect()
 }
 
+/// Whether two reads of one document differ anywhere: a sign the page is
+/// still working, never a verdict on a step.
+pub(crate) fn changed(before: &Readout, after: &Readout) -> bool {
+    !unmatched(before, after).is_empty() || !unmatched(after, before).is_empty()
+}
+
 fn near(changed: &[usize], at: Option<usize>) -> bool {
     at.is_some_and(|at| changed.iter().any(|changed| changed.abs_diff(at) <= NEAR))
 }

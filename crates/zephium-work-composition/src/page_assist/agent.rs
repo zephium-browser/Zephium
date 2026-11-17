@@ -43,6 +43,10 @@ const UNLISTED_TIMEOUT: Duration = Duration::from_millis(1_500);
 const TEXT_INTERVAL_MS: u64 = 50;
 /// When, after a step ran, the page is read again to see its effect.
 const EFFECT_READS_MS: [u64; 4] = [0, 250, 700, 1_500];
+/// Further reads, only when the page was busy after the step (loading, or
+/// its reads changing): a late effect still counts. The last is the cap for
+/// the same document.
+const EFFECT_BUSY_READS_MS: [u64; 3] = [2_200, 3_000, 4_000];
 /// Longest a step's effect is watched for, a new document included.
 const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
 const EFFECT_POLL: Duration = Duration::from_millis(50);
@@ -2386,7 +2390,11 @@ enum Settled {
 }
 
 /// Watches the page after one step ran, bounded, and never runs it again: a
-/// new document, or reads of the same one against the read before it.
+/// new document, or reads of the same one against the read before it. A
+/// quiet page is judged on the first reads; one that was busy is read on to
+/// the same-document cap, and is never called unchanged while it was busy.
+/// Busy is timing evidence only: it decides how long to look, not what was
+/// seen.
 async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
     if step.verb == Verb::Scroll {
         return Settled::Took(None);
@@ -2401,6 +2409,8 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
     let started = tokio::time::Instant::now();
     let mut reads = 0;
     let mut last: Option<Observed> = None;
+    let mut previous: Option<Readout> = None;
+    let mut busy = false;
     while let Some(facts) = page.facts(&plan.tab) {
         if facts.epoch != plan.epoch {
             return Settled::Navigated;
@@ -2409,8 +2419,13 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
         if left.is_zero() {
             break;
         }
+        busy |= facts.loading;
         if !facts.loading {
-            let Some(due) = EFFECT_READS_MS.get(reads) else {
+            let due = EFFECT_READS_MS.get(reads).or_else(|| {
+                busy.then(|| EFFECT_BUSY_READS_MS.get(reads - EFFECT_READS_MS.len()))
+                    .flatten()
+            });
+            let Some(due) = due else {
                 break;
             };
             if started.elapsed() >= Duration::from_millis(*due) {
@@ -2430,7 +2445,9 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
                         if observed == Observed::Took {
                             return Settled::Took(Some(after));
                         }
+                        busy |= effect::changed(previous.as_ref().unwrap_or(&plan.latest), &after);
                         last = Some(observed);
+                        previous = Some(after);
                     }
                 }
                 continue;
@@ -2439,7 +2456,7 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
         tokio::time::sleep(EFFECT_POLL).await;
     }
     match last {
-        Some(Observed::Nothing) => Settled::NoEffect,
+        Some(Observed::Nothing) if !busy => Settled::NoEffect,
         _ => Settled::Unconfirmed,
     }
 }
