@@ -213,6 +213,8 @@ impl Engine {
 enum Device {
     #[cfg(target_os = "macos")]
     Apple(#[allow(dead_code)] crate::apple_duplex::Device),
+    #[cfg(target_os = "windows")]
+    Wasapi(#[allow(dead_code)] crate::wasapi_duplex::Device),
     #[cfg(feature = "file-probe")]
     File(#[allow(dead_code)] crate::wavfile::Feeder),
 }
@@ -236,7 +238,16 @@ impl Duplex {
                 _device: Device::Apple(device),
             })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let engine = Arc::new(Engine::new(listener));
+            let device = crate::wasapi_duplex::Device::open(config, engine.clone())?;
+            Ok(Self {
+                engine,
+                _device: Device::Wasapi(device),
+            })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let _ = (config, listener);
             Err(Fault::Unsupported)
