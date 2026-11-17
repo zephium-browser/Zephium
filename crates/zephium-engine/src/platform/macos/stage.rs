@@ -110,8 +110,8 @@ fn over_budget<K: Copy>(mut frames: Vec<(K, usize, Instant)>, budget: usize) -> 
 fn reframe_cover(view: &NSView, frame: NSRect) {
     let size = view.frame().size;
     view.setFrame(frame);
-    if (size.width - frame.size.width).abs() >= 1.0
-        || (size.height - frame.size.height).abs() >= 1.0
+    if (size.width - frame.size.width).abs() >= 0.01
+        || (size.height - frame.size.height).abs() >= 0.01
     {
         if let Some(layer) = view.layer() {
             // SAFETY: clearing layer contents on the AppKit main thread.

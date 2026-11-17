@@ -111,10 +111,13 @@ impl PageSnapshot {
     }
 }
 
+/// Equal only when the frame would land on the same device pixels.
 fn same_frame(taken: (NSSize, f64), size: NSSize, scale: Option<f64>) -> bool {
-    (taken.0.width - size.width).abs() < 1.0
-        && (taken.0.height - size.height).abs() < 1.0
-        && scale.is_some_and(|scale| (taken.1 - scale).abs() < 0.01)
+    let pixels =
+        |size: NSSize, scale: f64| ((size.width * scale).round(), (size.height * scale).round());
+    scale.is_some_and(|scale| {
+        (taken.1 - scale).abs() < 0.01 && pixels(taken.0, taken.1) == pixels(size, scale)
+    })
 }
 
 fn encode(image: &NSImage, size: NSSize) -> Option<PageSnapshot> {
@@ -245,7 +248,8 @@ mod tests {
     fn a_frame_fits_only_the_size_and_scale_it_was_taken_at() {
         let size = NSSize::new(1280.0, 800.0);
         let taken = (size, 2.0);
-        assert!(same_frame(taken, NSSize::new(1280.4, 799.6), Some(2.0)));
+        assert!(same_frame(taken, NSSize::new(1280.2, 799.8), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1280.5, 800.0), Some(2.0)));
         assert!(!same_frame(taken, NSSize::new(1000.0, 800.0), Some(2.0)));
         assert!(!same_frame(taken, NSSize::new(1280.0, 760.0), Some(2.0)));
         assert!(!same_frame(taken, NSSize::new(640.0, 400.0), Some(2.0)));
