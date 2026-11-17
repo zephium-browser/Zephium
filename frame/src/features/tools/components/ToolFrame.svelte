@@ -16,6 +16,7 @@
     Search01Icon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import { parkCaret } from "$shared/lib/parked-caret";
   import "./tools.css";
   let {
     tool,
@@ -99,6 +100,8 @@
   // component already has a prop called `state`.)
   const takeFocus = (node: HTMLInputElement) => {
     if (searchFocus) node.focus();
+    // A blinking caret keeps WebKit drawing; an idle empty field parks it.
+    return { destroy: parkCaret(node) };
   };
   onMount(() => {
     content.scrollTop = state.scrollTop;
