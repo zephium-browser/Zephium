@@ -2096,11 +2096,12 @@ fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> (effect::Volatile, boo
     (volatile, paired)
 }
 
-/// One read just before a press whose planning read has no step-free
-/// partner. No step ran since the planning read, so the two pair across the
-/// model's thinking time and show what the page changes on its own. False
-/// when the control the step names is gone from the page or renamed; a
-/// failed, late or stale read changes nothing.
+/// One read just before the first step of an act that holds a press, when
+/// the planning read has no step-free partner. No step ran since the
+/// planning read, so the two pair across the model's thinking time and show
+/// what the page changes on its own; it is also that first step's before.
+/// False when the control the step names is gone from the page or renamed;
+/// a failed, late or stale read changes nothing.
 async fn read_before(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> bool {
     let page = reply.service.ports().page.clone();
     let Ok(Ok(now)) =
@@ -2433,8 +2434,11 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             plan.skip_from(reply, index);
             return Err(Some(End::Cancelled(CancelReason::Redirected)));
         }
-        let unpaired = presses(step.verb)
-            && !plan.paired
+        // Once per act, before its first step: the planning read has no
+        // step-free partner and a press is to come, so plan.volatile covers
+        // every press in it.
+        let unpaired = !plan.paired
+            && plan.requests.iter().any(|step| presses(step.verb))
             && reply.with_data(|data| data.acted) == Some(plan.record.acted);
         if unpaired && !read_before(reply, plan, &step).await {
             // The plan no longer matches the page: as when the control is

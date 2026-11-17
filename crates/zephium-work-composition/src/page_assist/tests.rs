@@ -3389,6 +3389,65 @@ async fn a_page_that_reloads_itself_is_read_once_it_loads() {
     );
 }
 
+/// A fill and then a click on "Add to wishlist", planned on the only read
+/// of a page with a clock just above the button: both steps, and how many
+/// reads came between the planning read and the first dispatch.
+async fn fill_then_click(press: Press) -> (Vec<PageAssistStepV1>, Option<u64>) {
+    let h = harness(vec![
+        Turn {
+            think: Duration::from_millis(1_200),
+            ..tool(
+                "act",
+                json!({"steps": [
+                    {"verb": "fill", "ref": "a7", "value": "Alex"},
+                    {"verb": "click", "ref": "a10"}
+                ]}),
+            )
+        },
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.clock = true;
+        if let Press::NoOp = press {
+            state.inert.insert(10);
+        }
+    }
+    let (page, client) = (h.page.clone(), h.client.clone());
+    let planned = tokio::spawn(async move {
+        while client.requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let reads = page.lock().reads;
+        reads
+    });
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(9)).await;
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    let planned = planned.await.unwrap();
+    let at = h.page.lock().reads_at_act.map(|reads| reads - planned);
+    (steps.clone(), at)
+}
+
+#[tokio::test]
+async fn one_read_before_an_act_covers_a_press_after_a_fill() {
+    use PageAssistStepStateV1::{Done, Failed};
+    let (steps, at) = fill_then_click(Press::NoOp).await;
+    assert_eq!(at, Some(1), "one read before the first step, a fill");
+    assert_eq!(steps[0].state, Done, "{steps:?}");
+    assert_eq!(
+        (steps[1].state, steps[1].reason),
+        (Failed, Some(PageAssistStepReasonV1::Unconfirmed)),
+        "the clock is not the click's effect: {steps:?}"
+    );
+    let (steps, at) = fill_then_click(Press::Notes).await;
+    assert_eq!(at, Some(1));
+    assert_eq!((steps[0].state, steps[1].state), (Done, Done), "{steps:?}");
+}
+
 #[tokio::test]
 async fn a_new_document_keeps_its_longer_bound() {
     let h = harness(vec![
