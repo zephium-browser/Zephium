@@ -1075,6 +1075,7 @@ async fn scenario_run(
             None,
         ),
         Grade::Fact(facts) => (None, Some(scenarios::has_fact(&text, facts))),
+        Grade::NotClaimed => (Some(claimed != scenarios::Claimed::ActedAllStepsDone), None),
         Grade::Asks(names) => {
             let asked = text.to_lowercase();
             (
