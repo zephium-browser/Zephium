@@ -379,6 +379,7 @@ impl Reply {
                 epoch: facts.epoch,
                 readout,
                 page,
+                acted: data.acted,
             })
         });
         self.handle(tab);
@@ -1710,6 +1711,8 @@ struct Plan {
     record: ReadRecord,
     /// The page as last read: the plan's read, then each step's effect read.
     latest: Readout,
+    /// Where the document was seen changing on its own before the steps.
+    volatile: effect::Volatile,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
@@ -1991,11 +1994,15 @@ async fn act(
             steps: rows.clone(),
         },
     );
+    let volatile = reply
+        .with_data(|data| volatile(&data.reads, &record))
+        .unwrap_or_default();
     let mut plan = Plan {
         tab: record.tab.clone(),
         epoch: record.epoch,
         moved: false,
         latest: record.readout.clone(),
+        volatile,
         record,
         requests,
         rows,
@@ -2047,6 +2054,22 @@ async fn act(
             Ok(Err(format!("{}{fresh}", plan.summary())))
         }
     }
+}
+
+/// Where `record`'s document changed between reads of it this reply took
+/// with no step between them. Reads only what the reply already has.
+fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> effect::Volatile {
+    let mut volatile = effect::Volatile::default();
+    let same: Vec<&ReadRecord> = reads
+        .iter()
+        .filter(|read| read.tab == record.tab && read.epoch == record.epoch)
+        .collect();
+    for pair in same.windows(2) {
+        if pair[0].acted == pair[1].acted {
+            volatile.learn(&pair[0].readout, &pair[1].readout);
+        }
+    }
+    volatile
 }
 
 /// The page after an act, so the model need not read it again: the whole
@@ -2205,6 +2228,7 @@ async fn find(reply: &Reply, page: &str, words: &str) -> ToolOutcome {
             break;
         }
         reply.glow(&current.tab, Glow::Working);
+        reply.with_data(|data| data.acted += 1);
         if !matches!(
             tokio::time::timeout(
                 READ_TIMEOUT,
@@ -2327,6 +2351,7 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             resolved.effect,
             PageAssistStepStateV1::Running,
         );
+        reply.with_data(|data| data.acted += 1);
         if let Err(failure) = page.act(&plan.tab, plan.epoch, &step).await {
             plan.fail(reply, index, failure);
             return Err(None);
@@ -2441,6 +2466,7 @@ async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
                             &control,
                             &plan.latest,
                             &after,
+                            &plan.volatile,
                         );
                         if observed == Observed::Took {
                             return Settled::Took(Some(after));
@@ -2507,6 +2533,9 @@ async fn take_over(
     reply.phase(Some(PageAssistPhaseV1::Acting));
     for step in plan.requests.iter_mut().skip(from) {
         step.read = fresh.readout.read;
+    }
+    if fresh.epoch != plan.epoch {
+        plan.volatile = effect::Volatile::default();
     }
     plan.epoch = fresh.epoch;
     plan.latest = fresh.readout.clone();
