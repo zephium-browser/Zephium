@@ -404,6 +404,7 @@ struct Utterance {
     press: Press,
     at: u64,
     confirm: Option<ConfirmKey>,
+    words: String,
 }
 
 struct Pending {
@@ -411,6 +412,7 @@ struct Pending {
     held: bool,
     confirm: Option<ConfirmKey>,
     at: u64,
+    ack: Option<String>,
     result: Option<Result<String, Fault>>,
 }
 
@@ -600,6 +602,7 @@ impl Session {
             press,
             at: now,
             confirm,
+            words: String::new(),
         });
     }
 
@@ -613,11 +616,19 @@ impl Session {
         });
         fx.push(Effect::Earcon(Earcon::ListeningEnded));
         self.warm_until = Some(now.saturating_add(self.config.warm_ms));
+        let held = held && utterance.press == Press::Held;
+        let ack = if held && utterance.confirm.is_some() {
+            None
+        } else {
+            phrases::ack(&text::clean(&utterance.words), self.config.language)
+                .and_then(|ack| self.speak(Speech::Line(Line::Ack(ack)), fx))
+        };
         self.finals.push(Pending {
             id: utterance.id,
-            held: held && utterance.press == Press::Held,
+            held,
             confirm: utterance.confirm,
             at: now,
+            ack,
             result: None,
         });
     }
@@ -635,11 +646,14 @@ impl Session {
 
     fn escape(&mut self, now: u64, fx: &mut Vec<Effect>) {
         let mut discarded = self.end_listening(now, fx);
-        for pending in self.finals.drain(..) {
+        let mut acked = None;
+        for pending in std::mem::take(&mut self.finals) {
             fx.push(Effect::CancelUtterance { id: pending.id });
+            acked = acked.or(pending.ack);
             discarded = true;
         }
         if discarded {
+            self.retract(acked, fx);
             return;
         }
         if let Some(reply) = &mut self.reply {
@@ -697,6 +711,9 @@ impl Session {
         if ours {
             self.interim = text::bounded(&text::clean(text), MAX_SHOWN_CHARS);
         }
+        if let Some(utterance) = self.open.as_mut().filter(|u| u.id == id) {
+            utterance.words = text::bounded(text, MAX_SHOWN_CHARS);
+        }
     }
 
     fn resolve(&mut self, id: &str, result: Result<String, Fault>, now: u64, fx: &mut Vec<Effect>) {
@@ -747,24 +764,42 @@ impl Session {
             let Pending {
                 held,
                 confirm,
+                ack,
                 result,
                 ..
             } = self.finals.remove(0);
             match result {
-                Some(Ok(text)) => self.heard(held, confirm, &text, fx),
-                Some(Err(fault)) => self.fail(fault, fx),
+                Some(Ok(text)) => self.heard(held, confirm, ack, &text, fx),
+                Some(Err(fault)) => {
+                    self.retract(ack, fx);
+                    self.fail(fault, fx);
+                }
                 None => {}
             }
         }
     }
 
-    fn heard(&mut self, held: bool, confirm: Option<ConfirmKey>, text: &str, fx: &mut Vec<Effect>) {
+    fn retract(&mut self, ack: Option<String>, fx: &mut Vec<Effect>) {
+        if ack.is_some_and(|id| self.speeches.contains(&id)) {
+            self.flush(fx);
+        }
+    }
+
+    fn heard(
+        &mut self,
+        held: bool,
+        confirm: Option<ConfirmKey>,
+        acked: Option<String>,
+        text: &str,
+        fx: &mut Vec<Effect>,
+    ) {
         let text =
             text::verbatim_prefix(&text::clean(text), PAGE_ASSIST_MAX_QUESTION_BYTES).to_owned();
         if self.open.is_none() && self.finals.is_empty() {
             self.interim.clear();
         }
         if text.is_empty() {
+            self.retract(acked, fx);
             return;
         }
         self.heard = Some(text::bounded(&text, MAX_SHOWN_CHARS));
@@ -795,8 +830,10 @@ impl Session {
                 self.reply = Some(Reply::default());
             }
         }
-        if let Some(ack) = phrases::ack(&text, language) {
-            self.speak(Speech::Line(Line::Ack(ack)), fx);
+        if acked.is_none() {
+            if let Some(ack) = phrases::ack(&text, language) {
+                self.speak(Speech::Line(Line::Ack(ack)), fx);
+            }
         }
     }
 
@@ -939,7 +976,9 @@ impl Session {
             }
             Closing::Paused if reply.paused => {}
             Closing::NeedsYou { step: Some(step) } if reply.prompted.contains(&step) => {}
-            line => self.speak(Speech::Line(Line::Closing(line)), fx),
+            line => {
+                self.speak(Speech::Line(Line::Closing(line)), fx);
+            }
         }
     }
 
@@ -959,9 +998,9 @@ impl Session {
         })
     }
 
-    fn speak(&mut self, speech: Speech, fx: &mut Vec<Effect>) {
+    fn speak(&mut self, speech: Speech, fx: &mut Vec<Effect>) -> Option<String> {
         if !self.config.spoken || self.open.is_some() {
-            return;
+            return None;
         }
         let id = (self.ids)();
         self.link_up(fx);
@@ -969,7 +1008,8 @@ impl Session {
             id: id.clone(),
             speech,
         });
-        self.speeches.push(id);
+        self.speeches.push(id.clone());
+        Some(id)
     }
 
     fn flush(&mut self, fx: &mut Vec<Effect>) {
@@ -1872,6 +1912,151 @@ mod tests {
         assert!(!run.session.view().speaking);
     }
 
+    fn is_ack(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::Speak {
+                speech: Speech::Line(Line::Ack(_)),
+                ..
+            }
+        )
+    }
+
+    fn partial(run: &mut Run, id: &str, text: &str) {
+        run.at(
+            50,
+            Event::Partial {
+                id: id.into(),
+                text: text.into(),
+            },
+        );
+    }
+
+    #[test]
+    fn a_qualifying_interim_is_acknowledged_at_release_and_only_once() {
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "open the cheapest flight to Lisbon");
+        let fx = run.at(400, Event::KeyUp);
+        let commit = position(&fx, &Effect::CommitUtterance { id: id.clone() });
+        let ack = fx.iter().position(is_ack).unwrap();
+        assert!(commit < ack);
+        let fx = run.at(
+            500,
+            Event::Final {
+                id,
+                text: "open the cheapest flight to Lisbon".into(),
+            },
+        );
+        assert!(has(&fx, |e| matches!(e, Effect::Ask { .. })));
+        assert!(!has(&fx, is_ack));
+
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "open it");
+        assert!(!has(&run.at(400, Event::KeyUp), is_ack));
+        let fx = run.at(
+            500,
+            Event::Final {
+                id,
+                text: "open it and book the cheapest seat".into(),
+            },
+        );
+        assert!(has(&fx, is_ack));
+
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "find a quiet hotel near the station");
+        run.at(100, Event::KeyUp);
+        assert_eq!(run.state(), State::Listening(Press::Latched));
+        let fx = run.at(2_000, Event::KeyDown);
+        assert!(
+            position(&fx, &Effect::CommitUtterance { id }) < fx.iter().position(is_ack).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_early_acknowledgment_is_cut_when_the_words_come_back_empty_or_fail() {
+        for result in [None, Some(Fault::RateLimited)] {
+            let mut run = Run::new();
+            let id = run.press();
+            partial(&mut run, &id, "open the cheapest flight to Lisbon");
+            assert!(has(&run.at(400, Event::KeyUp), is_ack));
+            let event = match result {
+                None => Event::Final {
+                    id,
+                    text: String::new(),
+                },
+                Some(fault) => Event::ListenFailed { id, fault },
+            };
+            let fx = run.at(500, event);
+            assert!(has(&fx, |e| *e == Effect::FlushSpeech));
+            assert!(has(&fx, |e| *e == Effect::CancelSpeech));
+            assert!(spoken(&fx).is_empty());
+            assert!(!run.session.view().speaking);
+            assert_eq!(run.state(), State::Idle);
+        }
+
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "open the cheapest flight to Lisbon");
+        let fx = run.at(400, Event::KeyUp);
+        let Some(Effect::Speak { id: speech, .. }) = fx.iter().find(|e| is_ack(e)) else {
+            panic!("{fx:?}");
+        };
+        run.at(100, Event::SpeechEnded { id: speech.clone() });
+        let fx = run.at(
+            400,
+            Event::Final {
+                id,
+                text: String::new(),
+            },
+        );
+        assert!(!has(&fx, |e| *e == Effect::FlushSpeech));
+
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "open the cheapest flight to Lisbon");
+        run.at(400, Event::KeyUp);
+        assert!(has(&run.at(10, Event::Escape), |e| *e == Effect::FlushSpeech));
+    }
+
+    #[test]
+    fn a_held_press_over_a_pending_confirm_waits_for_the_final() {
+        let mut run = Run::new();
+        run.confirming();
+        let id = run.press();
+        partial(&mut run, &id, "yes and also add the insurance please");
+        assert!(!has(&run.at(500, Event::KeyUp), is_ack));
+        let fx = run.at(
+            400,
+            Event::Final {
+                id,
+                text: "yes".into(),
+            },
+        );
+        assert!(has(&fx, |e| matches!(e, Effect::Decide { .. })));
+        assert!(spoken(&fx).is_empty());
+
+        let mut run = Run::new();
+        run.confirming();
+        let id = run.press();
+        partial(&mut run, &id, "what does the insurance cover exactly");
+        run.at(100, Event::KeyUp);
+        assert!(
+            has(&run.at(2_000, Event::KeyDown), is_ack),
+            "latched cannot decide"
+        );
+
+        let mut run = Run::with(Config {
+            spoken: false,
+            ..Config::default()
+        });
+        let id = run.press();
+        partial(&mut run, &id, "open the cheapest flight to Lisbon");
+        assert!(spoken(&run.at(400, Event::KeyUp)).is_empty());
+    }
+
     #[test]
     fn nothing_happens_after_dispose() {
         let mut run = Run::new();
@@ -1892,6 +2077,7 @@ mod tests {
         speeches: Vec<String>,
         mic: bool,
         may_speak: bool,
+        acked: Vec<String>,
         reply: u32,
     }
 
@@ -1931,7 +2117,9 @@ mod tests {
                 },
                 11 => Event::Partial {
                     id: first(&self.open),
-                    text: "open the".into(),
+                    text: ["open the", "open the cheapest flight please", "yes", ""]
+                        [usize::from(pick) % 4]
+                        .into(),
                 },
                 12 | 13 => Event::Final {
                     id: self
@@ -2011,16 +2199,14 @@ mod tests {
         fn apply(&mut self, event: Event, after: u64) -> Result<(), TestCaseError> {
             if matches!(event, Event::Final { ref text, .. } if !text.trim().is_empty())
                 || matches!(event, Event::Admitted { .. } | Event::Settings { .. })
+                || matches!(event, Event::Partial { ref text, .. } if text.split(' ').count() >= 4)
             {
                 self.may_speak = true;
             }
+            let mut committed = None;
+            let mut acks = 0;
             let key_up = event == Event::KeyUp;
-            let candidates: Vec<String> = match &event {
-                Event::Final { id, .. } => self.pending.iter().position(|p| p == id),
-                _ => None,
-            }
-            .map(|at| self.pending[..=at].to_vec())
-            .unwrap_or_default();
+            let candidates = self.pending.clone();
             if matches!(event, Event::MicFailed { .. }) {
                 self.mic = false;
             }
@@ -2036,6 +2222,7 @@ mod tests {
                         self.open.push(id.clone());
                     }
                     Effect::CommitUtterance { id } => {
+                        committed = Some(id.clone());
                         self.open.retain(|o| o != id);
                         self.pending.push(id.clone());
                         if key_up {
@@ -2051,7 +2238,22 @@ mod tests {
                         self.mic = true;
                     }
                     Effect::CloseMic => self.mic = false,
-                    Effect::Speak { id, .. } => {
+                    Effect::Speak { id, speech } => {
+                        if matches!(speech, Speech::Line(Line::Ack(_))) {
+                            acks += 1;
+                            if let Some(utterance) = committed.take() {
+                                self.acked.push(utterance);
+                            } else {
+                                let fresh = candidates
+                                    .iter()
+                                    .filter(|c| !self.acked.contains(c))
+                                    .count();
+                                prop_assert!(
+                                    acks <= fresh,
+                                    "two acknowledgments for one utterance"
+                                );
+                            }
+                        }
                         prop_assert!(self.may_speak, "spoke after a flush without new words");
                         prop_assert!(self.open.is_empty(), "spoke over the person");
                         self.speeches.push(id.clone());
@@ -2106,6 +2308,7 @@ mod tests {
                 speeches: Vec::new(),
                 mic: false,
                 may_speak: false,
+                acked: Vec::new(),
                 reply: 7,
             };
             for (code, pick, after) in steps {
