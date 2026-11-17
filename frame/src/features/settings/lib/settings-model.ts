@@ -22,6 +22,7 @@ import {
   Brain01Icon,
   Plug01Icon,
   DashboardSquare02Icon,
+  AudioWave01Icon,
 } from "@hugeicons/core-free-icons";
 /** Navigation order: groups in `groups` order, sections within a group as
  *  listed here. Ids are deep-link targets, so a rename changes titles only. */
@@ -104,6 +105,13 @@ const allSections = [
     icon: ChipIcon,
   },
   {
+    id: "voice",
+    group: "work",
+    title: m.section_voice,
+    description: m.section_voice_description,
+    icon: AudioWave01Icon,
+  },
+  {
     id: "skills",
     group: "work",
     title: m.section_skills,
@@ -175,6 +183,7 @@ const featureSections: Partial<Record<SettingsSection, () => boolean>> = {
   work: () => preferences.enabled("work"),
   focus: () => preferences.enabled("time"),
   ai: preferences.aiEnabled,
+  voice: preferences.aiEnabled,
   skills: preferences.aiEnabled,
   memory: preferences.aiEnabled,
   sites: preferences.aiEnabled,

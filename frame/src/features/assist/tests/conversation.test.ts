@@ -42,6 +42,7 @@ const started: Conversation = {
       cost: null,
       fault: null,
       inert: false,
+      end: null,
     },
   ],
 };
@@ -75,7 +76,7 @@ test("text creates its block, grows it, and cites replace; blocks set by index",
         ],
       },
     }),
-    event(8, 2, { type: "done", cost: { kind: "local", model: "m" } }),
+    event(8, 2, { type: "done", cost: { kind: "local", model: "m" }, end: null }),
   );
   const reply = latestReply(view)!;
   expect(reply.state).toBe("done");
@@ -95,6 +96,14 @@ test("an event already folded is skipped; a gap or a stranger reply goes back to
   expect(fold(started, event(3, 9, { type: "cancelled" }))).toBe("reload");
   expect(fold(started, { ...event(3, 2, { type: "cancelled" }), conversation: "c2" })).toBeNull();
   expect(fold(started, { ...event(0, 0, { type: "invalidated" }) })).toBe("reload");
+});
+
+test("done keeps how the reply ended: asked, redirected, or plainly answered", () => {
+  for (const end of ["asked", "redirected", null] as const) {
+    const reply = latestReply(run(started, event(3, 2, { type: "done", cost: null, end })))!;
+    expect(reply.state).toBe("done");
+    expect(reply.end).toBe(end);
+  }
 });
 
 test("inert reaches every reply up to the one named; titled names the conversation", () => {

@@ -92,7 +92,7 @@ function applyReply(reply: Reply, kind: PageAssistEventV1): Reply | null {
     case "state":
       return { ...reply, state: kind.state };
     case "done":
-      return { ...reply, state: "done", phase: null, cost: kind.cost };
+      return { ...reply, state: "done", phase: null, cost: kind.cost, end: kind.end };
     case "cost":
       return { ...reply, cost: kind.cost };
     case "failed":

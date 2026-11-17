@@ -12,13 +12,23 @@
   import Disclosure from "$shared/ui/Disclosure";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
+  import Badge from "$shared/ui/Badge";
   import { ASK_TOOL, RECORD_TOOLS, SHELF_TOOLS, toolPresentation } from "../lib/dock-tools";
   import NoticePip from "./NoticePip.svelte";
   import { keymap } from "$domain/keymap";
   import { acceleratorKeys } from "$shared/lib/accelerator";
   import { IS_MAC } from "$shared/platform";
 
-  let { compact = false, roomy = false }: { compact?: boolean; roomy?: boolean } = $props();
+  let {
+    compact = false,
+    roomy = false,
+    onvoice,
+  }: {
+    compact?: boolean;
+    roomy?: boolean;
+    /** Opens Voice settings; without it the stack offers no Voice row. */
+    onvoice?: () => void;
+  } = $props();
   // Down a rail alone the stack is glyphs; with a tool or Work beside the
   // rail it has room to name them, as in the full column.
   const glyphs = $derived(compact && !roomy);
@@ -40,9 +50,11 @@
     ...SHELF_TOOLS.filter((kind) => preferences.enabled(kind)),
   ]);
   const groups = $derived([shelf, RECORD_TOOLS].filter((group) => group.length > 0));
+  /** Voice is new: it stands by Settings, with a badge, where AI is on and the window is not private. */
+  const voice = $derived(!!onvoice && preferences.aiEnabled() && !privately);
   // Rows settle in nearest the case first, so each counts from the bottom:
-  // Settings, the tools, then who you are.
-  const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0));
+  // Settings, Voice, the tools, then who you are.
+  const toolRows = $derived(groups.reduce((sum, group) => sum + group.length, 0) + (voice ? 1 : 0));
   const headStep = $derived(toolRows + 1);
   function pick(kind: ToolKind) {
     if (tools.activeTool() === kind) tools.close();
@@ -178,6 +190,37 @@
       {/each}
     {/each}
     <div class="shelf-rule" role="separator"></div>
+    {#if voice}<button
+        type="button"
+        role="menuitem"
+        class="ui-menu-item shelf-item shelf-voice"
+        style:--step={1}
+        title={glyphs ? `${m.talk_menu()} · ${m.talk_new()}` : undefined}
+        aria-label={glyphs ? `${m.talk_menu()}, ${m.talk_new()}` : undefined}
+        onclick={() => onvoice?.()}
+      >
+        <span class="ui-menu-icon shelf-voice-icon"
+          ><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+            ><rect x="2.25" y="5.5" width="2" height="5" rx="1" /><rect
+              x="5.5"
+              y="2.5"
+              width="2"
+              height="11"
+              rx="1"
+            /><rect x="8.75" y="4" width="2" height="8" rx="1" /><rect
+              x="12"
+              y="6.25"
+              width="2"
+              height="3.5"
+              rx="1"
+            /></svg
+          ></span
+        >
+        {#if !glyphs}<span>{m.talk_menu()}</span>{/if}
+        {#if glyphs}<span class="shelf-new-dot" aria-hidden="true"></span>{:else}<span
+            class="shelf-new"><Badge tone="accent">{m.talk_new()}</Badge></span
+          >{/if}
+      </button>{/if}
     {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
       run("browser.settings"),
     )}
@@ -391,6 +434,36 @@
     font: inherit;
     font-size: var(--text-body);
     text-align: start;
+  }
+
+  .shelf-voice-icon svg {
+    fill: currentcolor;
+  }
+
+  .shelf-new {
+    display: flex;
+    margin-inline-start: auto;
+  }
+
+  .shelf-new :global(.ui-badge) {
+    padding-block: 0;
+    font-size: 10.5px;
+    line-height: 16px;
+  }
+
+  /* At rail width the badge is its dot, on the glyph's shoulder. */
+  .shelf-voice {
+    position: relative;
+  }
+
+  .shelf-new-dot {
+    position: absolute;
+    inset-block-start: 7px;
+    inset-inline-end: 8px;
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: 50%;
+    background: var(--color-text);
   }
 
   /* A caption, not a keycap: the key belongs to the row and steps forward

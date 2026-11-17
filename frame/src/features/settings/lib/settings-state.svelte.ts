@@ -37,6 +37,7 @@ const PAGES = [
   "profiles",
   "work",
   "ai",
+  "voice",
   "skills",
   "memory",
   "sites",

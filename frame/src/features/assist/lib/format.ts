@@ -51,6 +51,8 @@ export function stepReason(reason: PageAssistStepReasonV1 | null): string {
       return m.assist_step_page_changed();
     case "no_effect":
       return m.assist_step_no_effect();
+    case "unconfirmed":
+      return m.assist_step_unconfirmed();
     default:
       return m.assist_step_failed();
   }

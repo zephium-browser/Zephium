@@ -20,6 +20,7 @@ export { default as Folder01Icon } from "@hugeicons/core-free-icons/Folder01Icon
 export { default as GithubIcon } from "@hugeicons/core-free-icons/GithubIcon";
 export { default as Globe02Icon } from "@hugeicons/core-free-icons/Globe02Icon";
 export { default as HandIcon } from "@hugeicons/core-free-icons/HandIcon";
+export { default as HelpCircleIcon } from "@hugeicons/core-free-icons/HelpCircleIcon";
 export { default as InformationCircleIcon } from "@hugeicons/core-free-icons/InformationCircleIcon";
 export { default as LeftToRightListBulletIcon } from "@hugeicons/core-free-icons/LeftToRightListBulletIcon";
 export { default as LeftToRightListNumberIcon } from "@hugeicons/core-free-icons/LeftToRightListNumberIcon";

@@ -5,7 +5,7 @@
   import { Orb } from "$shared/ui/presence";
   import type { PageAssistDecisionV1, PageAssistStepV1 } from "$shared/ipc/bindings";
   import { consequence, controlOf, labelParts, stepReason } from "../../lib/format";
-  import { AlertCircleIcon, Cancel01Icon, Tick02Icon } from "../../lib/icons";
+  import { AlertCircleIcon, Cancel01Icon, HelpCircleIcon, Tick02Icon } from "../../lib/icons";
   import "../assist.css";
 
   let {
@@ -62,12 +62,16 @@
         </div>
       </li>
     {:else}
-      <li class="step" data-state={step.state}>
+      {@const unconfirmed = step.state === "failed" && step.reason === "unconfirmed"}
+      <li class="step" data-state={step.state} data-unconfirmed={unconfirmed || undefined}>
         <span class="glyph" aria-hidden="true">
           {#if step.state === "running"}<Orb size={13} />{:else if step.state === "done"}<Icon
               icon={Tick02Icon}
               size={14}
               strokeWidth={2.1}
+            />{:else if unconfirmed}<Icon
+              icon={HelpCircleIcon}
+              size={14}
             />{:else if step.state === "failed"}<Icon
               icon={AlertCircleIcon}
               size={14}
@@ -113,6 +117,11 @@
 
   .step[data-state="failed"] .glyph {
     color: var(--color-warning);
+  }
+
+  /* Pressed, but not seen to take: an open question rather than a failure. */
+  .step[data-unconfirmed] .glyph {
+    color: var(--color-label-secondary);
   }
 
   .words {

@@ -142,6 +142,10 @@
     />
   {:else if reply.state === "cancelled"}
     <p class="assist-quiet">{m.assist_stopped()}</p>
+  {:else if reply.state === "done" && reply.end === "redirected"}
+    <p class="assist-quiet" data-end="redirected">{m.assist_end_redirected()}</p>
+  {:else if reply.state === "done" && reply.end === "asked" && latest}
+    <p class="asked" data-end="asked">{m.assist_end_asked()}</p>
   {/if}
   {#if settled && words}
     <footer class="foot">
@@ -170,6 +174,25 @@
 
   .block {
     min-inline-size: 0;
+  }
+
+  /* Its last words are a question: the reply waits on the person, quietly. */
+  .asked {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: -4px 0 0;
+    color: var(--color-muted);
+    font-size: 12.5px;
+    line-height: 18px;
+  }
+
+  .asked::before {
+    inline-size: 6px;
+    block-size: 6px;
+    border-radius: 50%;
+    background: var(--color-text);
+    content: "";
   }
 
   .paused .head {

@@ -10,6 +10,7 @@ test("every settings page a menu or command names is the one that opens", () => 
     "profiles",
     "newtab",
     "ai",
+    "voice",
     "sites",
     "focus",
     "appearance",

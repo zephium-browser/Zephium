@@ -220,3 +220,25 @@ test("a press on the page, which takes focus away, puts the stack away", async (
   window.dispatchEvent(new FocusEvent("blur"));
   await expect.poll(() => stack.inert).toBe(true);
 });
+
+test("voice has its own row, marked new, and goes with AI", async () => {
+  await preferences.init();
+  await page.viewport(900, 800);
+  const onvoice = vi.fn();
+  const screen = await render(ToolShelf, { onvoice });
+  screen.container.style.cssText =
+    "padding:440px 16px 16px;inline-size:260px;background:var(--color-chrome)";
+  await screen.getByRole("button", { name: /^Tools/ }).click();
+  await expect.element(screen.getByRole("menuitem", { name: /^Voice/u })).toBeVisible();
+  expect(names(screen.container).at(-2)).toBe("Voice");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/voice-ui-shots/menu-voice-row.png" });
+  await screen.getByRole("menuitem", { name: /^Voice/u }).click();
+  expect(onvoice).toHaveBeenCalledOnce();
+  emitNativeEvent("uiCommand", "preference.ai.enabled=false");
+  await expect.poll(() => names(screen.container)).not.toContain("Voice");
+  emitNativeEvent("uiCommand", "preference.ai.enabled=true");
+  preferences.dispose();
+});

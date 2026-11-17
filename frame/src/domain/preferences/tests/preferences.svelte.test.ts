@@ -239,3 +239,14 @@ it("persists shortcut settings and preserves equals signs in live URL templates"
   expect(preferences.searchShortcuts()[0]?.id).toBe("custom:example");
   preferences.dispose();
 });
+
+it("the talk key leaves and returns with AI, as Rust's feature map says", async () => {
+  native.get.mockImplementation(async (key: string) => (key === "ai.enabled" ? "false" : null));
+  const preferences = await import("../preferences.svelte");
+  await preferences.init();
+  expect(preferences.commandOffered("voice.talk")).toBe(false);
+  expect(preferences.commandOffered("tab.new")).toBe(true);
+  native.listener?.({ payload: "preference.ai.enabled=true" });
+  expect(preferences.commandOffered("voice.talk")).toBe(true);
+  preferences.dispose();
+});

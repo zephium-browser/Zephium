@@ -3,6 +3,7 @@
   import { CubeIcon, Settings02Icon, UserCircleIcon, UserIcon } from "@hugeicons/core-free-icons";
   import { accountFoot, accountSession } from "$domain/account";
   import { keymap } from "$domain/keymap";
+  import { preferences } from "$domain/preferences";
   import { drawn, profiles } from "$domain/profiles";
   import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
@@ -11,12 +12,20 @@
   import { IS_MAC } from "$shared/platform";
   import AccountSummary from "$shared/ui/AccountSummary";
   import Disclosure from "$shared/ui/Disclosure";
+  import Badge from "$shared/ui/Badge";
   import Icon from "$shared/ui/Icon";
   import ProfileAvatar from "$shared/ui/ProfileAvatar";
   import "$shared/ui/Shine/shine.css";
 
   /** The profile's name until the window's own profile is known. */
-  let { name = "" }: { name?: string } = $props();
+  let {
+    name = "",
+    onvoice,
+  }: {
+    name?: string;
+    /** Opens Voice settings; without it the menu offers no Voice row. */
+    onvoice?: () => void;
+  } = $props();
 
   onMount(() => {
     void accountSession.retain();
@@ -33,6 +42,9 @@
   const shown = $derived(who || m.browse_profile_settings());
   const others = $derived(profiles.others());
   const tone = $derived(foot.tone);
+  const voice = $derived(!!onvoice && preferences.aiEnabled() && !privately);
+  // Rows settle in from the trigger: Settings first, you last.
+  const lift = $derived(voice ? 1 : 0);
 
   function keysFor(command: string) {
     const accelerator = keymap.all().find((entry) => entry.id === command)?.accelerator;
@@ -80,7 +92,7 @@
         strokeWidth={1.7}
       />{/if}{#if tone !== "calm"}<span class="pip" data-tone={tone} aria-hidden="true"
       ></span>{/if}{/snippet}
-  <div class="head" role="presentation" style:--step={3}>
+  <div class="head" role="presentation" style:--step={3 + lift}>
     <button
       type="button"
       role="menuitem"
@@ -112,7 +124,7 @@
         type="button"
         role="menuitem"
         class="ui-menu-item account"
-        style:--step={2}
+        style:--step={2 + lift}
         aria-label={`${m.account_menu()} — ${foot.email ?? ""}`}
         onclick={() => run("settings.account")}
         ><AccountSummary
@@ -124,13 +136,40 @@
           metered={foot.metered}
           tone={foot.tone}
         /></button
-      >{:else}{@render row(UserCircleIcon, m.settings_sign_in(), null, 2, () =>
+      >{:else}{@render row(UserCircleIcon, m.settings_sign_in(), null, 2 + lift, () =>
         run("settings.account"),
       )}{/if}
     <div class="rule" role="separator"></div>
   {/if}
-  {@render row(CubeIcon, m.settings_models(), null, 1, () => run("settings.ai"))}
+  {@render row(CubeIcon, m.settings_models(), null, 1 + lift, () => run("settings.ai"))}
   <div class="rule" role="separator"></div>
+  {#if voice}<button
+      type="button"
+      role="menuitem"
+      class="ui-menu-item row"
+      style:--step={1}
+      onclick={() => onvoice?.()}
+    >
+      <span class="ui-menu-icon"
+        ><svg class="voice-glyph" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"
+          ><rect x="2.25" y="5.5" width="2" height="5" rx="1" /><rect
+            x="5.5"
+            y="2.5"
+            width="2"
+            height="11"
+            rx="1"
+          /><rect x="8.75" y="4" width="2" height="8" rx="1" /><rect
+            x="12"
+            y="6.25"
+            width="2"
+            height="3.5"
+            rx="1"
+          /></svg
+        ></span
+      >
+      <span class="label">{m.talk_menu()}</span>
+      <span class="new"><Badge tone="accent">{m.talk_new()}</Badge></span>
+    </button>{/if}
   {@render row(Settings02Icon, m.command_browser_settings(), keysFor("browser.settings"), 0, () =>
     run("browser.settings"),
   )}
@@ -312,6 +351,21 @@
 
   .label {
     white-space: nowrap;
+  }
+
+  .voice-glyph {
+    fill: currentcolor;
+  }
+
+  .new {
+    display: flex;
+    margin-inline-start: auto;
+    padding-inline-start: 16px;
+  }
+
+  .new :global(.ui-badge) {
+    padding-block: 0;
+    font-size: 10.5px;
   }
 
   /* A caption, not a keycap: it belongs to the row and says what stands behind it. */

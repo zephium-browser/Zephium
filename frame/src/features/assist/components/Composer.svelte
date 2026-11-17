@@ -18,6 +18,8 @@
     Target02Icon,
   } from "../lib/icons";
   import AddMenu from "./AddMenu.svelte";
+  import TalkButton from "./TalkButton.svelte";
+  import { voiceSession } from "$domain/voice-session";
 
   let {
     session,
@@ -240,6 +242,7 @@
           role="page"
         />{/await}
     </span>
+    {#if voiceSession.available()}<TalkButton />{/if}
     <div class="action" data-action={action}>
       <button
         type="button"

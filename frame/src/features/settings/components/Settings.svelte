@@ -27,6 +27,7 @@
     focus: () => import("./sections/FocusPage.svelte"),
     work: () => import("./sections/WorkPage.svelte"),
     ai: () => import("./sections/AiPage.svelte"),
+    voice: () => import("./sections/VoicePage.svelte"),
     skills: () => import("./sections/SkillsPage.svelte"),
     memory: () => import("./sections/MemoryPage.svelte"),
     sites: () => import("./sections/SitesPage.svelte"),

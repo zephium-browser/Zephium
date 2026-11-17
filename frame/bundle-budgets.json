@@ -304,6 +304,10 @@
       "js": 11442,
       "css": 1816
     },
+    "lazy:features/voice/components/VoiceIsland.svelte": {
+      "js": 38617,
+      "css": 18895
+    },
     "lazy:features/webext/components/WebExtensionManager.svelte": {
       "js": 223289,
       "css": 13351

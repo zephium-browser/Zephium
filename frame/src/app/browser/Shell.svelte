@@ -22,6 +22,8 @@
   import { DownloadPulse, DownloadStatus } from "$features/downloads";
   import { loadMediaPlayer } from "$features/media";
   import { mediaPlayer } from "$domain/media-player";
+  import { loadVoiceIsland } from "$features/voice";
+  import { voiceSession } from "$domain/voice-session";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
   import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
@@ -93,6 +95,10 @@
     handleNativeSection("settings.section.account");
     void browserPage.open("settings");
   }
+  function openVoiceSettings() {
+    handleNativeSection("settings.section.voice");
+    void browserPage.open("settings");
+  }
   function openSearchSettings() {
     handleNativeSection("settings.section.search");
     void browserPage.open("settings");
@@ -141,6 +147,11 @@
       stop?.();
       void noteListener.then((stop) => stop());
     };
+  });
+  // Voice's island loads as soon as voice can be used, so it shows on the
+  // first frame after the key goes down.
+  $effect(() => {
+    if (voiceSession.available()) void loadVoiceIsland();
   });
   let splitting = $state(false);
   let splitCancel = $state<HTMLButtonElement>();
@@ -439,12 +450,17 @@
 
 <svelte:window onkeydowncapture={escapeSplit} />
 
-<!-- The player of a tab playing behind the page in front; its code loads the
-     first time there is one. -->
+<!-- Voice above the player of a tab playing behind the page in front, which
+     steps back while voice is on; each one's code loads the first time it is
+     needed. -->
 {#snippet player(
   compact: boolean,
-)}{#if mediaPlayer.view()}{#await loadMediaPlayer() then { default: MediaPlayer }}<MediaPlayer
+)}{#if voiceSession.active()}{#await loadVoiceIsland() then { default: VoiceIsland }}<VoiceIsland
         {compact}
+        onaccount={openAccount}
+      />{/await}{/if}{#if mediaPlayer.view()}{#await loadMediaPlayer() then { default: MediaPlayer }}<MediaPlayer
+        {compact}
+        yielding={voiceSession.active()}
       />{/await}{/if}{/snippet}
 
 <!-- The chrome view starts at the window's corner in every shape and draws
@@ -544,6 +560,7 @@
       compact,
     )}{#snippet accountFoot()}{#await loadAccountButton() then { default: AccountButton }}<AccountButton
             name={tabs.profile()?.name ?? ""}
+            onvoice={openVoiceSettings}
           />{/await}{/snippet}{#if compact && incognito}{@render player(true)}<PrivateBar
           compact
         />{:else if compact}{@render player(true)}{#if tabs.profile()?.id && !inWork}<DownloadPulse
@@ -551,6 +568,7 @@
           />{/if}<PrivateReturn compact /><UpdateNotice view="glyph" onabout={openAbout} /><Dock
           compact
           roomy={besideRail}
+          onvoice={openVoiceSettings}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
         >
@@ -561,7 +579,7 @@
         </Dock>{:else if incognito}
         <!-- A private window keeps nothing, so it has no tools or kept sites;
              its foot names the scope and closes it. -->
-        <PrivateBar />{:else}<Dock>
+        <PrivateBar />{:else}<Dock onvoice={openVoiceSettings}>
           {#snippet above()}
             <div
               class="dock-sites"

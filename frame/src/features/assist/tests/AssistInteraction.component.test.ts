@@ -200,7 +200,7 @@ test("while a reply works, Send is Stop, and Escape stops it before closing anyt
   native.status = status([person(1, "Summarize"), reply(2, [text("Done.")])]);
   native.status.conversation.seq = 42;
   emitNativeEvent("pageAssistChanged", event(2, { type: "text", block: 0, delta: "Done." }));
-  emitNativeEvent("pageAssistChanged", event(2, { type: "done", cost: null }));
+  emitNativeEvent("pageAssistChanged", event(2, { type: "done", cost: null, end: null }));
   await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
   await field.click();
   await userEvent.keyboard("{Escape}");

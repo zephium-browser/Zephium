@@ -54,6 +54,7 @@ export const reply = (
   cost: { kind: "byok", model: "GPT-6 Luna", provider: "OpenAI", usd: "0.004" },
   fault: null,
   inert: false,
+  end: null,
   ...patch,
 });
 

@@ -18,6 +18,7 @@
   import { pagePermissions } from "$domain/permissions";
   import { runtime } from "$domain/runtime";
   import { mediaPlayer } from "$domain/media-player";
+  import { voiceSession } from "$domain/voice-session";
   import { updates } from "$domain/updates";
   import { focus } from "$domain/time";
   import { tabs } from "$domain/tabs";
@@ -156,6 +157,7 @@
     const runtimeReady = runtime.init();
     // Native offers the player with the same bootstrap that supplies tabs.
     void mediaPlayer.init();
+    void voiceSession.init();
     void focus.init();
     void updates.init();
     void updateNotices.init();
@@ -226,6 +228,7 @@
       blocker.dispose();
       runtime.dispose();
       mediaPlayer.dispose();
+      voiceSession.dispose();
       updates.dispose();
       updateNotices.dispose();
       focus.dispose();

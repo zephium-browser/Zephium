@@ -56,7 +56,7 @@ it("groups sections as Browser, Work and App with stable ids", async () => {
     "focus",
     "performance",
   ]);
-  expect(listed("work")).toEqual(["work", "ai", "skills", "memory", "sites", "mcp"]);
+  expect(listed("work")).toEqual(["work", "ai", "voice", "skills", "memory", "sites", "mcp"]);
   expect(listed("app")).toEqual(["features", "shortcuts", "about"]);
 });
 
@@ -99,7 +99,7 @@ it("takes each feature's pages out of navigation and search while its switch is 
   const shown = () => shownSections().map((section) => section.id);
   expect(shown()).toEqual(expect.arrayContaining(["work", "ai", "focus", "features"]));
   off.add("ai");
-  const gone = new Set(["ai", "skills", "memory", "sites", "mcp"]);
+  const gone = new Set(["ai", "voice", "skills", "memory", "sites", "mcp"]);
   expect(shown().filter((id) => gone.has(id))).toEqual([]);
   expect(shown()).toContain("work");
   for (const query of ["models", "skills", "memory", "site access", "MCP", "API key", "dictation"])

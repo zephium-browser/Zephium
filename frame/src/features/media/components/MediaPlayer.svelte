@@ -14,7 +14,14 @@
   import { clock, fraction } from "../lib/time";
   import { everyWhileVisible } from "$shared/lib/visible-interval";
 
-  let { compact = false }: { compact?: boolean } = $props();
+  let {
+    compact = false,
+    yielding = false,
+  }: {
+    compact?: boolean;
+    /** Voice's island stands above it: the card keeps to its head and its colour steps back. */
+    yielding?: boolean;
+  } = $props();
 
   // The disc is 36px and its ring a 1.5px stroke along its edge.
   const RING = 17.25;
@@ -38,7 +45,7 @@
 
   let hovered = $state(false);
   let focused = $state(false);
-  let expanded = $derived(hovered || focused);
+  let expanded = $derived(!yielding && (hovered || focused));
 
   function toggle() {
     if (player?.playing) mediaPlayer.pause();
@@ -107,6 +114,7 @@
       aria-label={m.media_player()}
       data-expanded={expanded || undefined}
       data-playing={player.playing || undefined}
+      data-yielding={yielding || undefined}
       onpointerenter={() => (hovered = true)}
       onpointerleave={() => (hovered = false)}
       onfocusin={() => (focused = true)}
@@ -242,8 +250,13 @@
     transition: opacity var(--motion-base) var(--ease-out);
   }
 
-  .media-player:not([data-playing]) .media-ambient {
+  .media-player:not([data-playing]) .media-ambient,
+  .media-player[data-yielding] .media-ambient {
     opacity: 0.16;
+  }
+
+  .media-player[data-yielding] {
+    margin-block-start: 0;
   }
 
   .media-head {

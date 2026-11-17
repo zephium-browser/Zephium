@@ -103,7 +103,7 @@ export type Feature = "work" | "notes" | "tasks" | "time";
 export const enabled = (feature: Feature) => values[`${feature}.enabled`] !== "false";
 /** The feature a command belongs to. Mirrors `zephium_core::commands::feature_of`. */
 function featureOf(command: string): Feature | "ai" | null {
-  if (["work.dictate", "tool.ai", "mode.choose"].includes(command)) return "ai";
+  if (["work.dictate", "voice.talk", "tool.ai", "mode.choose"].includes(command)) return "ai";
   if (command === "browser.work" || command === "mode.work" || command.startsWith("work."))
     return "work";
   if (["tool.notes", "browser.notes", "note.new"].includes(command)) return "notes";

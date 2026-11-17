@@ -567,6 +567,36 @@ export const fields = {
     description: m.voice_language_desc,
     initial: "",
   },
+  "talk.key": {
+    section: "voice",
+    label: m.talk_settings_key,
+    description: m.talk_settings_key_desc,
+    initial: "",
+  },
+  "talk.spoken": {
+    section: "voice",
+    label: m.talk_settings_spoken,
+    description: m.talk_settings_spoken_desc,
+    initial: "",
+  },
+  "talk.voice": {
+    section: "voice",
+    label: m.talk_settings_voice,
+    description: m.talk_settings_voice_desc,
+    initial: "",
+  },
+  "talk.language": {
+    section: "voice",
+    label: m.talk_settings_language,
+    description: m.talk_settings_language_desc,
+    initial: "",
+  },
+  "talk.sounds": {
+    section: "voice",
+    label: m.talk_settings_sounds,
+    description: m.talk_settings_sounds_desc,
+    initial: "",
+  },
   "work.decisions": {
     section: "ai",
     label: m.settings_decisions,
