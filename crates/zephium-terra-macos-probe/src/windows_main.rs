@@ -6,6 +6,10 @@
 compile_error!("Windows Work qualification is forbidden in optimized builds");
 
 #[cfg(target_os = "windows")]
+mod assist_bench;
+#[cfg(target_os = "windows")]
+mod assist_scenarios;
+#[cfg(target_os = "windows")]
 mod loopback_support;
 #[cfg(target_os = "windows")]
 use loopback_support as acceptance;
@@ -30,6 +34,7 @@ enum ProbeFailure {
     Runtime,
     Keychain,
     Verification,
+    Engine(&'static str),
 }
 
 #[cfg(target_os = "windows")]
@@ -37,6 +42,18 @@ fn main() {
     use std::io::Write as _;
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = match args.as_slice() {
+        [flag, scenario] if flag == "--assist-bench" => assist_bench::run(scenario),
+        [flag] if flag == "--assist-bench-list" => {
+            for scenario in assist_scenarios::SCENARIOS.iter().filter(|s| !s.live) {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "{}\tloopback\t{}",
+                    scenario.name,
+                    scenario.request
+                );
+            }
+            Ok(())
+        }
         [flag, scenario] if flag == "--loopback-site" => {
             windows_work_storage_fixture::run(scenario)
         }
@@ -92,6 +109,13 @@ fn main() {
                 std::io::stdout().lock(),
                 "windows-work-probe: passed; content=redacted"
             );
+        }
+        Err(ProbeFailure::Engine(stage)) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "windows-work-probe: failed; reason=Engine; stage={stage}; content=redacted"
+            );
+            std::process::exit(1);
         }
         Err(reason) => {
             let _ = writeln!(

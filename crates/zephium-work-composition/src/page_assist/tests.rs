@@ -49,12 +49,68 @@ struct PageState {
     act_gate: Option<Arc<Notify>>,
     /// Views further down, shown one per scroll down.
     below: VecDeque<Vec<Passage>>,
+    /// Controls whose step shows its effect only this long after it ran.
+    late: HashMap<u16, Duration>,
+    /// Effects due, with the tab and step they belong to.
+    due: Vec<(Instant, String, StepRequest)>,
+    /// While a late effect is due, the page shows that it is working.
+    working: bool,
+    /// After any step the page changes on every read, forever.
+    ticking: bool,
+    /// A step ran on a ticking page.
+    ticked: bool,
 }
+
+/// The page's own "working" note, far from every control.
+const WORKING: u16 = 200;
+/// A counter a ticking page changes on every read.
+const TICK: u16 = 201;
 
 impl PageState {
     /// What a live page shows after `step`: a typed value, a ticked box, a
     /// chosen option, or a note beside a pressed control.
     fn take(&mut self, tab: &str, step: &StepRequest) {
+        self.ticked |= self.ticking;
+        if let Some(delay) = step.target.and_then(|target| self.late.get(&target)) {
+            self.due
+                .push((Instant::now() + *delay, tab.to_owned(), step.clone()));
+            if self.working {
+                if let Some(readout) = self.readouts.get_mut(tab) {
+                    readout
+                        .passages
+                        .insert(0, passage(WORKING, Role::Text, "Saving"));
+                }
+            }
+            return;
+        }
+        self.apply(tab, step);
+    }
+
+    /// What the page shows by now: late effects that came due, and a tick.
+    fn catch_up(&mut self, tab: &str) {
+        let now = Instant::now();
+        let (ready, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.due)
+            .into_iter()
+            .partition(|(at, _, _)| *at <= now);
+        self.due = waiting;
+        for (_, at, step) in ready {
+            if let Some(readout) = self.readouts.get_mut(&at) {
+                readout.passages.retain(|p| p.id != WORKING);
+            }
+            self.apply(&at, &step);
+        }
+        if self.ticked {
+            let reads = self.reads;
+            if let Some(readout) = self.readouts.get_mut(tab) {
+                readout.passages.retain(|p| p.id != TICK);
+                readout
+                    .passages
+                    .insert(0, passage(TICK, Role::Text, &format!("Tick {reads}")));
+            }
+        }
+    }
+
+    fn apply(&mut self, tab: &str, step: &StepRequest) {
         let Some(target) = step.target else {
             if step.verb == Verb::Scroll {
                 if let (Some(view), Some(readout)) =
@@ -128,6 +184,7 @@ impl PagePort for FakePage {
     ) -> BoxFuture<'a, Result<Readout, ReadFailure>> {
         let mut state = self.lock();
         state.reads += 1;
+        state.catch_up(tab);
         let read = state.reads;
         let readout = state
             .readouts
@@ -2586,7 +2643,7 @@ async fn one_step(
         }
     }
     h.ask("Do it", true).await.unwrap();
-    h.settle_within(Duration::from_secs(5)).await;
+    h.settle_within(Duration::from_secs(8)).await;
     let blocks = h.blocks().await;
     let step = blocks
         .iter()
@@ -2657,6 +2714,180 @@ async fn a_step_is_done_only_when_its_effect_is_seen() {
             _ => assert!(result.contains("done"), "{result}"),
         }
     }
+}
+
+/// How one step settles on a late or busy page, and how long after the ask
+/// the reply took.
+async fn late_step(
+    (verb, target): (&str, u16),
+    late: Option<Duration>,
+    working: bool,
+    ticking: bool,
+) -> (PageAssistStepV1, Duration) {
+    let h = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": verb, "ref": format!("a{target}")}]}),
+        ),
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        match late {
+            Some(delay) => {
+                state.late.insert(target, delay);
+            }
+            None => {
+                state.inert.insert(target);
+            }
+        }
+        state.working = working;
+        state.ticking = ticking;
+    }
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(9)).await;
+    let took = started.elapsed();
+    let blocks = h.blocks().await;
+    let step = blocks
+        .iter()
+        .find_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.first().cloned(),
+            _ => None,
+        })
+        .expect("a step");
+    assert_eq!(h.page.lock().acted.len(), 1, "never run twice");
+    (step, took)
+}
+
+#[tokio::test]
+async fn a_late_effect_counts_only_while_the_page_is_busy() {
+    use PageAssistStepReasonV1::{NoEffect, Unconfirmed};
+    use PageAssistStepStateV1::{Done, Failed};
+    let one = Some(Duration::from_secs(1));
+    let three = Some(Duration::from_secs(3));
+    let uncheck = ("uncheck", 8);
+    let click = ("click", 10);
+    type Case = (
+        &'static str,
+        (&'static str, u16),
+        Option<Duration>,
+        bool,
+        bool,
+        PageAssistStepStateV1,
+        Option<PageAssistStepReasonV1>,
+    );
+    let cases: Vec<Case> = vec![
+        ("1 s flip, quiet", uncheck, one, false, false, Done, None),
+        ("3 s flip, saving", uncheck, three, true, false, Done, None),
+        ("3 s flip, ticking", uncheck, three, false, true, Done, None),
+        (
+            "3 s flip, quiet",
+            uncheck,
+            three,
+            false,
+            false,
+            Failed,
+            Some(NoEffect),
+        ),
+        (
+            "no-op, quiet",
+            uncheck,
+            None,
+            false,
+            false,
+            Failed,
+            Some(NoEffect),
+        ),
+        (
+            "no-op, ticking",
+            uncheck,
+            None,
+            false,
+            true,
+            Failed,
+            Some(Unconfirmed),
+        ),
+        // A clock far from the button is busy, never the click's effect.
+        (
+            "click no-op, ticking",
+            click,
+            None,
+            false,
+            true,
+            Failed,
+            Some(Unconfirmed),
+        ),
+        (
+            "click no-op, quiet",
+            click,
+            None,
+            false,
+            false,
+            Failed,
+            Some(NoEffect),
+        ),
+    ];
+    let runs: Vec<_> = cases
+        .into_iter()
+        .map(|(name, step, late, working, ticking, state, reason)| {
+            tokio::spawn(async move {
+                let (step, took) = late_step(step, late, working, ticking).await;
+                (name, state, reason, step, took)
+            })
+        })
+        .collect();
+    let ms = Duration::from_millis;
+    for run in runs {
+        let (name, state, reason, step, took) = run.await.unwrap();
+        assert_eq!(
+            (step.state, step.reason),
+            (state, reason),
+            "{name}: {step:?}"
+        );
+        let (from, to) = match name {
+            // A quiet page is judged on the 1.5 s read, as before.
+            "no-op, quiet" | "3 s flip, quiet" | "1 s flip, quiet" | "click no-op, quiet" => {
+                (ms(1_000), ms(2_100))
+            }
+            // A busy page is read on to the 4 s cap and no further.
+            "no-op, ticking" | "click no-op, ticking" => (ms(4_000), ms(5_000)),
+            // Seen on the first busy read after it, at 3 s.
+            _ => (ms(3_000), ms(3_600)),
+        };
+        assert!(took >= from && took < to, "{name}: took {took:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_new_document_keeps_its_longer_bound() {
+    let h = harness(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("Done."),
+    ]);
+    h.controls();
+    h.page.lock().inert.insert(10);
+    let page = h.page.clone();
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    // The click starts a load that commits a new document 6 s later.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        page.lock().facts.get_mut(TAB).unwrap().loading = true;
+        tokio::time::sleep(Duration::from_millis(5_800)).await;
+        let mut state = page.lock();
+        let facts = state.facts.get_mut(TAB).unwrap();
+        facts.loading = false;
+        facts.epoch += 1;
+        state.readouts.get_mut(TAB).unwrap().epoch += 1;
+    });
+    h.settle_within(Duration::from_secs(12)).await;
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert_eq!(steps[0].state, PageAssistStepStateV1::Done, "{steps:?}");
+    assert!(started.elapsed() >= Duration::from_millis(6_000));
 }
 
 #[tokio::test]
