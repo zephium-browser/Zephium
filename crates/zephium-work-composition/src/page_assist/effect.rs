@@ -1,8 +1,9 @@
 //! Whether a step took, judged from the page read after it against the read
 //! before it. Dispatch only says the page was handed the step; the effect is
 //! what the person would see changed: the value typed, the box ticked, the
-//! option chosen, or for a press, the page changing at the control.
-use std::collections::HashMap;
+//! option chosen, or for a press, the page changing at the control. A press
+//! never takes credit for a place the page was seen changing on its own.
+use std::collections::{HashMap, HashSet};
 
 use zephium_page_assist::actions::Verb;
 use zephium_page_assist::text;
@@ -100,8 +101,75 @@ pub(crate) fn changed(before: &Readout, after: &Readout) -> bool {
     !unmatched(before, after).is_empty() || !unmatched(after, before).is_empty()
 }
 
-fn near(changed: &[usize], at: Option<usize>) -> bool {
-    at.is_some_and(|at| changed.iter().any(|changed| changed.abs_diff(at) <= NEAR))
+type Owned = (Role, String, Option<String>);
+
+/// Where a changed passage sits, recognisable while its own text changes:
+/// its kind and region, and the nearest unchanged passage either side.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Slot {
+    role: Role,
+    region: u8,
+    before: Option<Owned>,
+    after: Option<Owned>,
+}
+
+fn slot(read: &Readout, changed: &HashSet<usize>, at: usize) -> Slot {
+    let owned = |(_, passage): (usize, &Passage)| {
+        (passage.role, passage.text.clone(), passage.value.clone())
+    };
+    let passages = &read.passages;
+    Slot {
+        role: kind(passages[at].role),
+        region: passages[at].region,
+        before: passages[..at]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, _)| !changed.contains(i))
+            .map(owned),
+        after: passages
+            .iter()
+            .enumerate()
+            .skip(at + 1)
+            .find(|(i, _)| !changed.contains(i))
+            .map(owned),
+    }
+}
+
+/// Places on a document seen changing between two reads with no step
+/// between them: a clock, a countdown, a rotating banner. A change there is
+/// the page's own, never a step's effect.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Volatile(HashSet<Slot>);
+
+impl Volatile {
+    /// Learns from two reads of one document that no step came between.
+    pub(crate) fn learn(&mut self, earlier: &Readout, later: &Readout) {
+        if earlier.epoch != later.epoch {
+            return;
+        }
+        for (read, other) in [(earlier, later), (later, earlier)] {
+            let changed: HashSet<usize> = unmatched(read, other).into_iter().collect();
+            for &at in &changed {
+                self.0.insert(slot(read, &changed, at));
+            }
+        }
+    }
+
+    fn holds(&self, read: &Readout, changed: &HashSet<usize>, at: usize) -> bool {
+        !self.0.is_empty() && self.0.contains(&slot(read, changed, at))
+    }
+}
+
+/// Whether a change within reach of the control at `at` is not one of the
+/// page's own.
+fn near(changed: &[usize], at: Option<usize>, read: &Readout, volatile: &Volatile) -> bool {
+    let set: HashSet<usize> = changed.iter().copied().collect();
+    at.is_some_and(|at| {
+        changed
+            .iter()
+            .any(|&changed| changed.abs_diff(at) <= NEAR && !volatile.holds(read, &set, changed))
+    })
 }
 
 fn same(value: &str, wanted: &str) -> bool {
@@ -128,13 +196,15 @@ fn holds(verb: Verb, value: Option<&str>, passage: &Passage) -> Option<bool> {
     }
 }
 
-/// Judges `verb` on `control` from the reads before and after it.
+/// Judges `verb` on `control` from the reads before and after it. A press
+/// takes credit only for a change that is not in a `volatile` place.
 pub(crate) fn judge(
     verb: Verb,
     value: Option<&str>,
     control: &Control,
     before: &Readout,
     after: &Readout,
+    volatile: &Volatile,
 ) -> Observed {
     let removed = unmatched(before, after);
     let added = unmatched(after, before);
@@ -151,11 +221,12 @@ pub(crate) fn judge(
         Verb::Scroll => Observed::Took,
         Verb::Click | Verb::Expand | Verb::Open | Verb::Submit => {
             let was = control.find(before);
+            let gone: HashSet<usize> = removed.iter().copied().collect();
             if unchanged {
                 Observed::Nothing
-            } else if (was.is_some() && found.is_none())
-                || near(&removed, was)
-                || near(&added, found)
+            } else if was.is_some_and(|at| found.is_none() && !volatile.holds(before, &gone, at))
+                || near(&removed, was, before, volatile)
+                || near(&added, found, after, volatile)
             {
                 Observed::Took
             } else {
@@ -169,6 +240,17 @@ pub(crate) fn judge(
 mod tests {
     use super::*;
     use crate::page_assist::port::FieldKind;
+
+    /// The rule with no place known to change on its own.
+    fn judge(
+        verb: Verb,
+        value: Option<&str>,
+        control: &Control,
+        before: &Readout,
+        after: &Readout,
+    ) -> Observed {
+        super::judge(verb, value, control, before, after, &Volatile::default())
+    }
 
     fn passage(id: u16, role: Role, text: &str, value: Option<&str>) -> Passage {
         Passage {
@@ -299,6 +381,64 @@ mod tests {
         assert_eq!(
             judge(Verb::Select, Some("Billing"), &topic, &before, &before),
             Observed::Nothing
+        );
+    }
+
+    #[test]
+    fn a_press_never_takes_credit_for_a_place_that_changes_on_its_own() {
+        let before = page(vec![]);
+        // A clock just above the button, inside its reach.
+        let clocked = |time: &str| {
+            let mut read = before.clone();
+            read.passages.insert(
+                31,
+                passage(91, Role::Text, &format!("Ends in {time}"), None),
+            );
+            read
+        };
+        let (earlier, now) = (clocked("0:59"), clocked("0:58"));
+        let mut volatile = Volatile::default();
+        volatile.learn(&earlier, &now);
+        let control = Control::of(&now, 40).unwrap();
+        let ticked = clocked("0:57");
+        assert_eq!(
+            super::judge(
+                Verb::Click,
+                None,
+                &control,
+                &now,
+                &ticked,
+                &Volatile::default()
+            ),
+            Observed::Took,
+            "without a step-free pair the rule is as before"
+        );
+        assert_eq!(
+            super::judge(Verb::Click, None, &control, &now, &ticked, &volatile),
+            Observed::Unclear,
+            "the clock ticking is not the click's effect"
+        );
+        let relabeled = with(&ticked, 40, |p| p.text = "On your wishlist".into());
+        assert_eq!(
+            super::judge(Verb::Click, None, &control, &now, &relabeled, &volatile),
+            Observed::Took,
+            "the button's own label changed"
+        );
+        let mut noted = ticked.clone();
+        noted
+            .passages
+            .insert(34, passage(92, Role::Text, "Saved: 1", None));
+        assert_eq!(
+            super::judge(Verb::Click, None, &control, &now, &noted, &volatile),
+            Observed::Took,
+            "a count appeared beside the button"
+        );
+        let name = Control::of(&now, 41).unwrap();
+        let typed = with(&ticked, 41, |p| p.value = Some("Alex".into()));
+        assert_eq!(
+            super::judge(Verb::Fill, Some("Alex"), &name, &now, &typed, &volatile),
+            Observed::Took,
+            "a value step is judged on the control alone"
         );
     }
 

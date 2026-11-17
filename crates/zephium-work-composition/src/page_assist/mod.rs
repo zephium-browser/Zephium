@@ -179,6 +179,9 @@ struct ReadRecord {
     epoch: u64,
     readout: Readout,
     page: PageRead,
+    /// Steps the reply had dispatched when it was read: two reads of one
+    /// document with the same count had no step between them.
+    acted: u64,
 }
 
 struct PendingStyle {
@@ -214,6 +217,8 @@ struct ReplyData {
     )>,
     /// An act asked to end the reply once all its steps were done, and they were.
     finished: bool,
+    /// Steps dispatched to any page so far, scrolls included.
+    acted: u64,
 }
 
 struct Live {

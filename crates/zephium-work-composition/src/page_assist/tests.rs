@@ -59,12 +59,22 @@ struct PageState {
     ticking: bool,
     /// A step ran on a ticking page.
     ticked: bool,
+    /// A clock just above "Add to wishlist" that changes on every read.
+    clock: bool,
+    /// Controls whose press changes their own label.
+    relabels: std::collections::HashSet<u16>,
+    /// Controls whose press bumps the count beside the clock.
+    counts: std::collections::HashSet<u16>,
 }
 
 /// The page's own "working" note, far from every control.
 const WORKING: u16 = 200;
 /// A counter a ticking page changes on every read.
 const TICK: u16 = 201;
+/// The clock beside the wishlist button.
+const CLOCK: u16 = 202;
+/// A count beside the clock.
+const COUNT: u16 = 203;
 
 impl PageState {
     /// What a live page shows after `step`: a typed value, a ticked box, a
@@ -99,6 +109,18 @@ impl PageState {
             }
             self.apply(&at, &step);
         }
+        if self.clock {
+            let reads = self.reads;
+            if let Some(readout) = self.readouts.get_mut(tab) {
+                readout.passages.retain(|p| p.id != CLOCK);
+                if let Some(at) = readout.passages.iter().position(|p| p.id == 10) {
+                    readout.passages.insert(
+                        at,
+                        passage(CLOCK, Role::Text, &format!("Ends in 0:{reads:02}")),
+                    );
+                }
+            }
+        }
         if self.ticked {
             let reads = self.reads;
             if let Some(readout) = self.readouts.get_mut(tab) {
@@ -122,6 +144,21 @@ impl PageState {
             return;
         };
         if self.inert.contains(&target) {
+            return;
+        }
+        let relabel = self.relabels.contains(&target);
+        let count = self.counts.contains(&target);
+        if relabel || count {
+            if let Some(readout) = self.readouts.get_mut(tab) {
+                for p in &mut readout.passages {
+                    if relabel && p.id == target {
+                        p.text = "On your wishlist".into();
+                    }
+                    if count && p.id == COUNT {
+                        p.text = "Saved: 1".into();
+                    }
+                }
+            }
             return;
         }
         if self.navigates.contains(&target) {
@@ -2856,6 +2893,140 @@ async fn a_late_effect_counts_only_while_the_page_is_busy() {
             // Seen on the first busy read after it, at 3 s.
             _ => (ms(3_000), ms(3_600)),
         };
+        assert!(took >= from && took < to, "{name}: took {took:?}");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Press {
+    NoOp,
+    Relabels,
+    Counts,
+    Notes,
+}
+
+/// A click on "Add to wishlist" after two reads of the page, with or without
+/// a clock just above the button; how it settled and how long it took.
+async fn clocked_click(press: Press, clock: bool) -> (PageAssistStepV1, Duration) {
+    let h = harness(vec![
+        tool("read_page", json!({"tab": "t1"})),
+        tool("act", json!({"steps": [{"verb": "click", "ref": "b10"}]})),
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.clock = clock;
+        let passages = &mut state.readouts.get_mut(TAB).unwrap().passages;
+        let at = passages.iter().position(|p| p.id == 10).unwrap();
+        passages.insert(at, passage(COUNT, Role::Text, "Saved: 0"));
+        match press {
+            Press::NoOp => {
+                state.inert.insert(10);
+            }
+            Press::Relabels => {
+                state.relabels.insert(10);
+            }
+            Press::Counts => {
+                state.counts.insert(10);
+            }
+            Press::Notes => {}
+        }
+    }
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(9)).await;
+    let took = started.elapsed();
+    let step = h
+        .blocks()
+        .await
+        .iter()
+        .find_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.first().cloned(),
+            _ => None,
+        })
+        .expect("a step");
+    assert_eq!(h.page.lock().acted.len(), 1, "never run twice");
+    (step, took)
+}
+
+#[tokio::test]
+async fn a_clock_beside_a_button_is_never_its_effect() {
+    use PageAssistStepReasonV1::{NoEffect, Unconfirmed};
+    use PageAssistStepStateV1::{Done, Failed};
+    let ms = Duration::from_millis;
+    let cases = [
+        (
+            "no-op, clock",
+            Press::NoOp,
+            true,
+            Failed,
+            Some(Unconfirmed),
+            ms(4_000),
+            ms(5_000),
+        ),
+        (
+            "relabels, clock",
+            Press::Relabels,
+            true,
+            Done,
+            None,
+            ms(0),
+            ms(1_000),
+        ),
+        (
+            "counts, clock",
+            Press::Counts,
+            true,
+            Done,
+            None,
+            ms(0),
+            ms(1_000),
+        ),
+        (
+            "notes, clock",
+            Press::Notes,
+            true,
+            Done,
+            None,
+            ms(0),
+            ms(1_000),
+        ),
+        (
+            "notes, quiet",
+            Press::Notes,
+            false,
+            Done,
+            None,
+            ms(0),
+            ms(1_000),
+        ),
+        (
+            "no-op, quiet",
+            Press::NoOp,
+            false,
+            Failed,
+            Some(NoEffect),
+            ms(1_000),
+            ms(2_100),
+        ),
+    ];
+    let runs: Vec<_> = cases
+        .into_iter()
+        .map(|(name, press, clock, state, reason, from, to)| {
+            tokio::spawn(async move {
+                let (step, took) = clocked_click(press, clock).await;
+                (name, state, reason, from, to, step, took)
+            })
+        })
+        .collect();
+    for run in runs {
+        let (name, state, reason, from, to, step, took) = run.await.unwrap();
+        assert_eq!(
+            (step.state, step.reason),
+            (state, reason),
+            "{name}: {step:?}"
+        );
         assert!(took >= from && took < to, "{name}: took {took:?}");
     }
 }
