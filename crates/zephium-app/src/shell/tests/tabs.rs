@@ -1564,3 +1564,53 @@ fn glance_actions_do_nothing_once_another_tab_is_focused() {
     assert!(shell.items.tab(child).is_some());
     assert!(shell.windows.focused().unwrap().splits.is_none());
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_split_made_before_the_page_presents_cancels_its_glance() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let source = active_id(&screen);
+    navigate_and_commit(&mut shell, source, "example.com");
+    shell.handle(Command::Open);
+    let other = active_id(&screen);
+    navigate_and_commit(&mut shell, other, "example.org");
+    let effects = shell.focus_tab(source);
+    shell.commit(effects);
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        url: "https://example.com/article".into(),
+        modifiers: zephium_core::glance::LinkModifiers {
+            shift: true,
+            ctrl: false,
+        },
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    shell.handle_operation(Command::SplitWith {
+        other,
+        axis: Axis::Row,
+    });
+    assert!(shell.windows.focused().unwrap().splits.is_some());
+    assert!(shell
+        .native_openers
+        .get(&child)
+        .is_some_and(|opener| opener.glance && opener.activate_when_presentable));
+
+    commit_url(&mut shell, child, "https://example.com/article");
+    present_committed(&mut shell, child, "https://example.com/article");
+
+    let window = shell.windows.focused().unwrap();
+    assert!(window.glance.is_none());
+    assert_eq!(window.active, Some(source));
+    assert!(shell.items.tab(child).is_some());
+    assert!(shell.glance_backdrop.is_none());
+
+    shell.handle_operation(Command::Unsplit);
+    assert!(shell.windows.focused().unwrap().glance.is_none());
+    assert!(shell
+        .glance_layout(zephium_core::geometry::Rect::new(0.0, 0.0, 1000.0, 800.0))
+        .is_none());
+}

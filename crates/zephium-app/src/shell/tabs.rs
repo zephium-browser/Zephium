@@ -875,7 +875,13 @@ impl Shell {
             return;
         };
         if glance {
-            self.show_glance(source, child);
+            if self
+                .windows
+                .focused()
+                .is_some_and(|window| window.splits.is_none())
+            {
+                self.show_glance(source, child);
+            }
         } else {
             let effects = self.focus_tab(child);
             self.commit(effects);
