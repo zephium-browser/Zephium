@@ -1713,6 +1713,8 @@ struct Plan {
     latest: Readout,
     /// Where the document was seen changing on its own before the steps.
     volatile: effect::Volatile,
+    /// Two reads of the document with no step between them were compared.
+    paired: bool,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
@@ -1994,7 +1996,7 @@ async fn act(
             steps: rows.clone(),
         },
     );
-    let volatile = reply
+    let (volatile, paired) = reply
         .with_data(|data| volatile(&data.reads, &record))
         .unwrap_or_default();
     let mut plan = Plan {
@@ -2003,6 +2005,7 @@ async fn act(
         moved: false,
         latest: record.readout.clone(),
         volatile,
+        paired,
         record,
         requests,
         rows,
@@ -2057,9 +2060,11 @@ async fn act(
 }
 
 /// Where `record`'s document changed between reads of it this reply took
-/// with no step between them. Reads only what the reply already has.
-fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> effect::Volatile {
+/// with no step between them, and whether any two such reads exist. Reads
+/// only what the reply already has.
+fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> (effect::Volatile, bool) {
     let mut volatile = effect::Volatile::default();
+    let mut paired = false;
     let same: Vec<&ReadRecord> = reads
         .iter()
         .filter(|read| read.tab == record.tab && read.epoch == record.epoch)
@@ -2067,9 +2072,36 @@ fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> effect::Volatile {
     for pair in same.windows(2) {
         if pair[0].acted == pair[1].acted {
             volatile.learn(&pair[0].readout, &pair[1].readout);
+            paired = true;
         }
     }
-    volatile
+    (volatile, paired)
+}
+
+/// One read just before a press whose planning read has no step-free
+/// partner. No step ran since the planning read, so the two pair across the
+/// model's thinking time and show what the page changes on its own. False
+/// when the control the step names is gone from the page or renamed; a
+/// failed, late or stale read changes nothing.
+async fn read_before(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> bool {
+    let page = reply.service.ports().page.clone();
+    let Ok(Ok(now)) = tokio::time::timeout(READ_TIMEOUT, page.read(&plan.tab, plan.epoch)).await
+    else {
+        return true;
+    };
+    if now.epoch != plan.epoch {
+        return true;
+    }
+    plan.paired = true;
+    let control = step
+        .target
+        .and_then(|target| Control::of(&plan.record.readout, target));
+    if control.is_some_and(|control| control.find(&now).is_none()) {
+        return false;
+    }
+    plan.volatile.learn(&plan.record.readout, &now);
+    plan.latest = now;
+    true
 }
 
 /// The page after an act, so the model need not read it again: the whole
@@ -2344,6 +2376,15 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             plan.skip_from(reply, index);
             return Err(Some(End::Cancelled(CancelReason::Redirected)));
         }
+        let unpaired = presses(step.verb)
+            && !plan.paired
+            && reply.with_data(|data| data.acted) == Some(plan.record.acted);
+        if unpaired && !read_before(reply, plan, &step).await {
+            // The plan no longer matches the page: as when the control is
+            // gone at dispatch, it never runs on the old plan.
+            plan.fail(reply, index, StepFailure::Unsuitable);
+            return Err(None);
+        }
         plan.mark(
             reply,
             index,
@@ -2536,6 +2577,7 @@ async fn take_over(
     }
     if fresh.epoch != plan.epoch {
         plan.volatile = effect::Volatile::default();
+        plan.paired = false;
     }
     plan.epoch = fresh.epoch;
     plan.latest = fresh.readout.clone();
