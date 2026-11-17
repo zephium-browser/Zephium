@@ -1325,8 +1325,12 @@ fn a_shift_clicked_link_glances_over_its_page_and_closing_returns_to_it() {
         .native_openers
         .get(&child)
         .is_some_and(|opener| opener.glance && opener.activate_when_presentable));
+    assert!(shell.windows.focused().unwrap().glance.is_none());
+    assert_eq!(shell.windows.focused().unwrap().active, Some(source));
 
-    shell.show_glance(source, child);
+    commit_url(&mut shell, child, "https://example.com/article");
+    assert!(shell.windows.focused().unwrap().glance.is_none());
+    present_committed(&mut shell, child, "https://example.com/article");
     let window = shell.windows.focused().unwrap();
     let id = window.id;
     assert_eq!(window.active, Some(child));
@@ -1469,4 +1473,94 @@ fn splitting_during_a_glance_ends_it_and_its_actions_settle_as_operations() {
             .outcome,
         OperationOutcome::NoOp
     );
+}
+
+#[cfg(target_os = "windows")]
+fn glance_over_source(shell: &mut Shell, screen: &Screen) -> (ItemId, ItemId) {
+    shell.handle(Command::Bootstrap);
+    let source = active_id(screen);
+    navigate_and_commit(shell, source, "example.com");
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        url: "https://example.com/article".into(),
+        modifiers: zephium_core::glance::LinkModifiers {
+            shift: true,
+            ctrl: false,
+        },
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|_| {}),
+    }));
+    commit_url(shell, child, "https://example.com/article");
+    present_committed(shell, child, "https://example.com/article");
+    assert!(shell.windows.focused().unwrap().glance.is_some());
+    (source, child)
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn expanding_a_glance_keeps_its_page_as_the_focused_tab() {
+    use zephium_ipc::{GlanceAction, OperationOutcome};
+    let (mut shell, _, screen) = setup();
+    let (source, child) = glance_over_source(&mut shell, &screen);
+    let window = shell.windows.focused().unwrap().id;
+    shell.handle(Command::GlanceBackdropReady {
+        request: 1,
+        bytes: Some(vec![1]),
+    });
+
+    let expanded = shell.handle_operation(Command::Glance(GlanceAction::Expand));
+
+    assert_eq!(expanded.outcome, OperationOutcome::Applied);
+    let focused = shell.windows.focused().unwrap();
+    assert!(focused.glance.is_none());
+    assert_eq!(focused.active, Some(child));
+    assert!(shell.items.tab(source).is_some());
+    assert!(shell.glance_backdrop.is_none());
+    assert_eq!(shell.read_glance_backdrop(window, source, 1), None);
+    assert!(shell
+        .glance_layout(zephium_core::geometry::Rect::new(0.0, 0.0, 1000.0, 800.0))
+        .is_none());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn splitting_a_glance_places_its_page_beside_the_opener() {
+    use zephium_ipc::{GlanceAction, OperationOutcome};
+    let (mut shell, _, screen) = setup();
+    let (source, child) = glance_over_source(&mut shell, &screen);
+
+    let split = shell.handle_operation(Command::Glance(GlanceAction::Split));
+
+    assert_ne!(split.outcome, OperationOutcome::Rejected);
+    assert_ne!(split.outcome, OperationOutcome::NativeAdmissionFailed);
+    let focused = shell.windows.focused().unwrap();
+    assert!(focused.glance.is_none());
+    let tabs = focused.splits.as_ref().unwrap().tabs();
+    assert!(tabs.contains(&source) && tabs.contains(&child));
+    assert!(shell.glance_backdrop.is_none());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn glance_actions_do_nothing_once_another_tab_is_focused() {
+    use zephium_ipc::{GlanceAction, OperationOutcome};
+    let (mut shell, _, screen) = setup();
+    let (source, child) = glance_over_source(&mut shell, &screen);
+    let effects = shell.focus_tab(source);
+    shell.commit(effects);
+
+    for action in [
+        GlanceAction::Close,
+        GlanceAction::Expand,
+        GlanceAction::Split,
+    ] {
+        assert_eq!(
+            shell.handle_operation(Command::Glance(action)).outcome,
+            OperationOutcome::NoOp
+        );
+    }
+    assert!(shell.items.tab(child).is_some());
+    assert!(shell.windows.focused().unwrap().splits.is_none());
 }

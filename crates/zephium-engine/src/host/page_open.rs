@@ -156,18 +156,9 @@ impl EngineHost {
             }
         }
         #[cfg(target_os = "windows")]
-        let glance = {
-            use windows::Win32::UI::Input::KeyboardAndMouse::{
-                GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_SHIFT,
-            };
-            let held = |key: VIRTUAL_KEY| {
-                clicked && (unsafe { GetAsyncKeyState(i32::from(key.0)) } as u16) & 0x8000 != 0
-            };
-            zephium_core::glance::LinkModifiers {
-                shift: held(VK_SHIFT),
-                ctrl: held(VK_CONTROL),
-            }
-        };
+        let glance = link_modifiers(clicked, |key| unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key.0))
+        });
         #[cfg(not(target_os = "windows"))]
         let glance = zephium_core::glance::LinkModifiers::default();
         self.adopt_native_tab(
@@ -374,6 +365,19 @@ pub(super) fn filter_windows_context_menu(
     navigation.matches_activity(activity)
         && windows_context_foreground(permit, presented, controller)
 }
+#[cfg(target_os = "windows")]
+fn link_modifiers(
+    clicked: bool,
+    key_state: impl Fn(windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> i16,
+) -> zephium_core::glance::LinkModifiers {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VIRTUAL_KEY, VK_CONTROL, VK_SHIFT};
+    let held = |key: VIRTUAL_KEY| clicked && (key_state(key) as u16) & 0x8000 != 0;
+    zephium_core::glance::LinkModifiers {
+        shift: held(VK_SHIFT),
+        ctrl: held(VK_CONTROL),
+    }
+}
+
 #[cfg(any(target_os = "windows", test))]
 pub(super) fn windows_menu_item_allowed(name: &str) -> bool {
     matches!(
@@ -415,6 +419,38 @@ pub(super) fn windows_menu_item_allowed(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn link_modifiers_read_held_keys_only_for_a_click() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT};
+        let down = 0x8000_u16 as i16;
+        let reads = std::cell::Cell::new(0);
+        let shift_only = |key| {
+            reads.set(reads.get() + 1);
+            if key == VK_SHIFT {
+                down
+            } else {
+                1
+            }
+        };
+        let both = |key| {
+            if key == VK_SHIFT || key == VK_CONTROL {
+                down
+            } else {
+                0
+            }
+        };
+
+        let shift = link_modifiers(true, shift_only);
+        assert!(shift.shift && !shift.ctrl);
+        let held = link_modifiers(true, both);
+        assert!(held.shift && held.ctrl);
+
+        reads.set(0);
+        let scripted = link_modifiers(false, shift_only);
+        assert!(!scripted.shift && !scripted.ctrl);
+        assert_eq!(reads.get(), 0);
+    }
     #[test]
     fn native_windows_context_menu_keeps_file_actions_but_denies_unbrokered_surfaces() {
         assert!(windows_menu_item_allowed("saveImageAs"));

@@ -218,8 +218,21 @@ impl Shell {
 
     fn split_glance(&mut self, parent: ItemId, tab: ItemId) -> OperationDisposition {
         let effects = self.focus_tab(parent);
-        self.commit(effects);
-        self.operation_split(tab, Axis::Row)
+        let restored = self.commit(effects);
+        if restored.rejected {
+            return mutation_result(restored);
+        }
+        if !self.items.tab(parent).is_some_and(TabState::has_view) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
+        }
+        let split = self.operation_split(tab, Axis::Row);
+        if restored.scheduled && split.outcome == OperationOutcome::Applied {
+            return mutation_result(restored);
+        }
+        split
     }
 }
 

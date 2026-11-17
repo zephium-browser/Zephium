@@ -9066,6 +9066,34 @@ mod tests {
     }
 
     #[test]
+    fn glance_actions_are_refused_outside_the_main_window_before_dispatch() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let body = source
+            .split("fn glance_act(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("glance_act");
+        let authorize = body
+            .find("authorize(&caller, CallerPolicy::Main, \"glance_act\")")
+            .expect("Main caller policy");
+        let refusal = body.find("return rejected_operation();").unwrap();
+        let dispatch = body.find("dispatch_operation(").unwrap();
+        assert!(authorize < refusal && refusal < dispatch);
+        assert!(super::caller_allowed(
+            super::CallerPolicy::Main,
+            super::MAIN_LABEL
+        ));
+        assert!(!super::caller_allowed(
+            super::CallerPolicy::Main,
+            super::overlay::PANEL_LABEL
+        ));
+        assert!(!super::caller_allowed(
+            super::CallerPolicy::Main,
+            "settings"
+        ));
+    }
+
+    #[test]
     fn quit_menus_use_the_coordinated_exit_request() {
         let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
         assert!(!source.contains(".quit()"));

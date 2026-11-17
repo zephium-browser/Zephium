@@ -1352,6 +1352,19 @@ fn require_native_layout_application(
     applied
 }
 
+fn capture_then_layout<H>(
+    host: &mut H,
+    previews: &TabPreviewSlot,
+    capture: impl Fn(&TabPreviewRequest, &mut H),
+    apply: impl FnOnce(&mut H),
+) {
+    let pending = std::mem::take(&mut *previews.lock().unwrap_or_else(|e| e.into_inner()));
+    for preview in pending {
+        capture(&preview, host);
+    }
+    apply(host);
+}
+
 fn dispatch_layout_turn(
     dispatch: MainThreadDispatch,
     updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
@@ -1374,30 +1387,32 @@ fn dispatch_layout_turn(
             let application_fatal = fatal.clone();
             let admitted = host::try_with(move |host| {
                 // A coalesced layout can occupy a queue position before capture.
-                let previews = std::mem::take(
-                    &mut *update.tab_preview.lock().unwrap_or_else(|e| e.into_inner()),
+                capture_then_layout(
+                    host,
+                    &update.tab_preview,
+                    |preview, host| preview.capture(host),
+                    |host| {
+                        if host_item_tokens
+                            .iter()
+                            .all(|(_, token)| token.load(Ordering::Acquire))
+                        {
+                            // A hint belongs to the first layout of its window that
+                            // is actually applied, however many were coalesced first.
+                            let hint = motion
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .remove(&update.window);
+                            let applied =
+                                host.set_content(update.window, update.tree, update.region, hint);
+                            let _ = require_native_layout_application(
+                                applied,
+                                &application_delivery,
+                                &application_retirement,
+                                &application_fatal,
+                            );
+                        }
+                    },
                 );
-                for preview in previews {
-                    preview.capture(host);
-                }
-                if host_item_tokens
-                    .iter()
-                    .all(|(_, token)| token.load(Ordering::Acquire))
-                {
-                    // A hint belongs to the first layout of its window that
-                    // is actually applied, however many were coalesced first.
-                    let hint = motion
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&update.window);
-                    let applied = host.set_content(update.window, update.tree, update.region, hint);
-                    let _ = require_native_layout_application(
-                        applied,
-                        &application_delivery,
-                        &application_retirement,
-                        &application_fatal,
-                    );
-                }
             });
             if !admitted
                 && lock_retirement_gate(&retirement).allows_item_tokens(&update.item_tokens)
@@ -4091,14 +4106,22 @@ mod tests {
         preview.lock().unwrap().push(backdrop.clone());
         preview.lock().unwrap().push(thumbnail.clone());
         let update = updates.take_batch().pop().unwrap();
-        let taken = std::mem::take(&mut *update.tab_preview.lock().unwrap());
-        assert_eq!(taken.len(), 2);
-        assert!(taken[0].1 && !taken[1].1);
-        assert!(taken.iter().all(|held| held.is_pending()));
-        for held in &taken {
-            let _ = held.take();
-        }
-        assert!(!backdrop.is_pending() && !thumbnail.is_pending());
+        let mut order = Vec::new();
+        capture_then_layout(
+            &mut order,
+            &update.tab_preview,
+            |held, order: &mut Vec<String>| {
+                assert!(held.is_pending());
+                order.push(format!("capture full={}", held.1));
+                let _ = held.take();
+            },
+            |order| {
+                assert!(!backdrop.is_pending() && !thumbnail.is_pending());
+                order.push("layout".into());
+            },
+        );
+        assert_eq!(order, ["capture full=true", "capture full=false", "layout"]);
+        assert!(update.tab_preview.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -41,6 +41,7 @@ export type GlanceView = {
 function box(rect: GlanceRect): Box | null {
   const { x, y, width, height } = rect;
   if (x === null || y === null || width === null || height === null) return null;
+  if (![x, y, width, height].every(Number.isFinite)) return null;
   return { x, y, width, height };
 }
 
