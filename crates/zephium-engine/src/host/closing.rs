@@ -93,6 +93,7 @@ impl EngineHost {
             crate::platform::imp::schedule_presentation_timeout(ANSWER_DEADLINE, move || {
                 let _ = super::dispatch::try_with(move |host| {
                     if let Some(closing) = host.closing.take(token) {
+                        eprintln!("engine: ended a closed page's web process that did not answer");
                         crate::platform::imp::end_web_process(&closing.view.view);
                     }
                 });
