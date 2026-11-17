@@ -85,6 +85,9 @@ pub enum Outcome {
 pub enum Closing {
     /// Speak the assistant's own final text.
     Say,
+    /// Every step took effect and the assistant said nothing after them.
+    /// Chosen by the session, never by [`closing`].
+    Done,
     /// It ran, but no effect was observed (or the reply ended before it settled).
     NotConfirmed {
         /// The step, when one is to blame.
@@ -237,7 +240,7 @@ pub fn outcome(facts: &ReplyFacts) -> Outcome {
         })
         | Some(StepFact {
             state: StepState::Failed,
-            reason: Some(StepReason::NoEffect),
+            reason: Some(StepReason::NoEffect | StepReason::Unconfirmed),
             ..
         }) => Outcome::NotConfirmed,
         _ => Outcome::Failed,
@@ -285,9 +288,8 @@ pub fn closing(facts: &ReplyFacts) -> Closing {
         (StepState::Confirm, _) => Closing::NeedsYou { step: Some(step) },
         (StepState::Declined, _) => Closing::Declined,
         (StepState::Failed, Some(StepReason::Refused)) => Closing::Refused { step },
-        (StepState::Failed, Some(StepReason::NoEffect)) | (StepState::Running, _) => {
-            Closing::NotConfirmed { step: Some(step) }
-        }
+        (StepState::Failed, Some(StepReason::NoEffect | StepReason::Unconfirmed))
+        | (StepState::Running, _) => Closing::NotConfirmed { step: Some(step) },
         (StepState::Failed | StepState::Skipped | StepState::Done, reason) => Closing::Failed {
             step: Some(step),
             reason,
@@ -353,6 +355,17 @@ mod tests {
             }
         ));
         assert_eq!(outcome(&no_effect), Outcome::NotConfirmed);
+        let unseen = facts(
+            ReplyState::Done,
+            &[DONE, (StepState::Failed, Some(StepReason::Unconfirmed))],
+        );
+        assert!(matches!(
+            closing(&unseen),
+            Closing::NotConfirmed {
+                step: Some(StepRef { index: 1, .. })
+            }
+        ));
+        assert_eq!(outcome(&unseen), Outcome::Partial);
         let refused = facts(
             ReplyState::Failed,
             &[
@@ -489,6 +502,7 @@ mod tests {
                 Just(Some(StepReason::Unsuitable)),
                 Just(Some(StepReason::PageChanged)),
                 Just(Some(StepReason::NoEffect)),
+                Just(Some(StepReason::Unconfirmed)),
             ],
         )
     }
@@ -507,7 +521,9 @@ mod tests {
             states in proptest::collection::vec(any_state(), 0..6),
         ) {
             let reply = facts(state, &states);
-            let say = closing(&reply) == Closing::Say;
+            let line = closing(&reply);
+            prop_assert_ne!(line, Closing::Done);
+            let say = line == Closing::Say;
             prop_assert_eq!(say, matches!(outcome(&reply), Outcome::Answered | Outcome::Acted));
             if say {
                 prop_assert_eq!(reply.state, ReplyState::Done);

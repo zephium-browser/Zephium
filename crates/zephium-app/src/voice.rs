@@ -170,6 +170,99 @@ pub async fn transcribe(
     result.map(|transcript| transcript.text)
 }
 
+/// Talking to the assistant: spoken replies, the voice, the language and
+/// the earcons, as stored. `language` is an ISO 639-1 code; none follows
+/// the system.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TalkSettings {
+    pub spoken: bool,
+    pub voice: Option<String>,
+    pub language: Option<String>,
+    pub earcons: bool,
+}
+
+const TALK_SPOKEN_KEY: &str = "voice.talk.spoken";
+const TALK_VOICE_KEY: &str = "voice.talk.voice";
+const TALK_LANGUAGE_KEY: &str = "voice.talk.language";
+const TALK_EARCONS_KEY: &str = "voice.talk.earcons";
+
+fn valid_voice(voice: &str) -> bool {
+    (1..=64).contains(&voice.len())
+        && voice
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+pub fn talk_settings() -> TalkSettings {
+    let on = |key| work_models::setting(key).as_deref() != Some("false");
+    TalkSettings {
+        spoken: on(TALK_SPOKEN_KEY),
+        voice: work_models::setting(TALK_VOICE_KEY).filter(|voice| valid_voice(voice)),
+        language: work_models::setting(TALK_LANGUAGE_KEY)
+            .filter(|code| code.len() == 2 && code.bytes().all(|b| b.is_ascii_lowercase())),
+        earcons: on(TALK_EARCONS_KEY),
+    }
+}
+
+pub fn store_talk_settings(settings: &TalkSettings) -> bool {
+    if settings
+        .voice
+        .as_deref()
+        .is_some_and(|voice| !valid_voice(voice))
+        || settings
+            .language
+            .as_deref()
+            .is_some_and(|code| code.len() != 2 || !code.bytes().all(|b| b.is_ascii_lowercase()))
+    {
+        return false;
+    }
+    let flag = |on: bool| if on { "true" } else { "false" }.to_owned();
+    [
+        (TALK_SPOKEN_KEY, flag(settings.spoken)),
+        (TALK_VOICE_KEY, settings.voice.clone().unwrap_or_default()),
+        (
+            TALK_LANGUAGE_KEY,
+            settings.language.clone().unwrap_or_default(),
+        ),
+        (TALK_EARCONS_KEY, flag(settings.earcons)),
+    ]
+    .into_iter()
+    .all(|(key, value)| work_models::store_setting(key.to_owned(), value))
+}
+
+/// Whether a Zephium account is signed in now.
+pub fn cloud_signed_in() -> bool {
+    work_models::cloud().is_some_and(|session| session.signed_in())
+}
+
+/// Opens the account's voice socket. Every utterance's and speech's usage
+/// record reaches the account the way a hosted take's does, as voice.
+pub async fn talk_link() -> Result<
+    (
+        lead::voice::VoiceLink,
+        lead::voice::VoiceReady,
+        tokio::sync::mpsc::Receiver<lead::voice::VoiceEvent>,
+    ),
+    WorkModelError,
+> {
+    let session = work_models::cloud()
+        .filter(|session| session.signed_in())
+        .ok_or(WorkModelError::MissingKey)?;
+    let root = url::Url::parse(&session.base()).map_err(|_| WorkModelError::BadRequest)?;
+    let target = lead::voice::VoiceTarget::cloud(&root)?;
+    let credential = session.credential();
+    let observer: lead::LeadCloudObserver = {
+        let session = session.clone();
+        std::sync::Arc::new(move |record: lead::LeadCloudRecord| {
+            if let Some(id) = &record.request_id {
+                session.sourced(id, &work_models::WorkCallSource::Voice);
+            }
+            session.recorded(record);
+        })
+    };
+    lead::voice::VoiceLink::open(&target, credential.as_ref(), Some(observer)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,6 +7,7 @@ use specta::Type;
 
 pub mod page_assist;
 mod time;
+pub mod voice_session;
 pub mod work;
 mod zoom;
 

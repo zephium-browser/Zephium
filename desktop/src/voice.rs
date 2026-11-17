@@ -402,6 +402,7 @@ mod product {
                 fault: Some(fault),
             }
         };
+        crate::voice_session::yield_microphone();
         let take = {
             let mut current = live();
             if current.is_some() {
@@ -618,6 +619,14 @@ mod product {
         true
     }
 
+    /// Cancels whatever take is running.
+    pub(super) fn cancel_any(app: &tauri::AppHandle) {
+        let request = live().as_ref().map(|live| live.request.clone());
+        if let Some(request) = request {
+            cancel(app, &request, None);
+        }
+    }
+
     /// The take that is listening now, if any.
     pub(super) fn listening() -> Option<u32> {
         live()
@@ -715,6 +724,14 @@ pub(crate) fn window_blurred(app: &tauri::AppHandle) {
     if let Some(take) = product::listening() {
         product::finish(app.clone(), take);
     }
+    #[cfg(not(feature = "work-product"))]
+    let _ = app;
+}
+
+/// A voice session is taking the microphone: dictation ends first.
+pub(crate) fn cancel_dictation(app: &tauri::AppHandle) {
+    #[cfg(feature = "work-product")]
+    product::cancel_any(app);
     #[cfg(not(feature = "work-product"))]
     let _ = app;
 }

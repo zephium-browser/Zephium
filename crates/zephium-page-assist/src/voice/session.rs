@@ -7,8 +7,9 @@ use super::closing::{self, Closing, Outcome, ReplyFacts, StepKind, StepRef};
 use super::cutter::Cutter;
 use super::phrases::{self, Ack, Language};
 use crate::ipc::{
-    PageAssistBlockV1 as Block, PageAssistDecisionV1 as Decision, PageAssistEventV1 as AssistEvent,
-    PageAssistFaultV1 as AssistFault, PageAssistMessageV1 as Message, PageAssistPhaseV1 as Phase,
+    PageAssistBlockV1 as Block, PageAssistDecisionV1 as Decision, PageAssistEndV1 as End,
+    PageAssistEventV1 as AssistEvent, PageAssistFaultV1 as AssistFault,
+    PageAssistMessageV1 as Message, PageAssistPhaseV1 as Phase,
     PageAssistReplyStateV1 as ReplyState, PageAssistStepStateV1 as StepState,
     WorkModelFaultV1 as ModelFault, PAGE_ASSIST_MAX_QUESTION_BYTES,
 };
@@ -16,6 +17,8 @@ use crate::text;
 
 const MAX_SHOWN_CHARS: usize = 500;
 const MAX_LABEL_CHARS: usize = 120;
+/// Reply events held while the reply they belong to awaits admission.
+const MAX_EARLY_EVENTS: usize = 256;
 
 /// Hands out a fresh utterance or speech id (a UUIDv4 in production).
 pub type IdSource = Box<dyn FnMut() -> String + Send>;
@@ -29,6 +32,12 @@ pub struct Config {
     pub warm_ms: u64,
     /// How long a committed utterance waits for its final text.
     pub final_timeout_ms: u64,
+    /// How long a settled outcome, or a passing fault, stays shown once
+    /// speech has finished.
+    pub settled_ms: u64,
+    /// How long the microphone stays warm for the answer when a reply ends
+    /// with a question.
+    pub answer_warm_ms: u64,
     /// Spoken replies on.
     pub spoken: bool,
     /// The language the person speaks.
@@ -41,6 +50,8 @@ impl Default for Config {
             hold_ms: 300,
             warm_ms: 6_000,
             final_timeout_ms: 8_000,
+            settled_ms: 4_000,
+            answer_warm_ms: 20_000,
             spoken: true,
             language: Language::En,
         }
@@ -116,6 +127,19 @@ pub enum Fault {
 }
 
 impl Fault {
+    /// Whether it stays shown until the person acts, instead of fading
+    /// with the settled outcome.
+    pub fn persists(self) -> bool {
+        matches!(
+            self,
+            Self::MicrophoneDenied
+                | Self::NoMicrophone
+                | Self::PlanRequired
+                | Self::OutOfCredit
+                | Self::DailyLimit
+        )
+    }
+
     /// The voice fault for an assistant fault.
     pub fn from_assist(fault: &AssistFault) -> Self {
         match fault {
@@ -254,12 +278,13 @@ pub enum Event {
         /// Why.
         fault: Fault,
     },
-    /// The assistant admitted the last ask, or resumed after a steer.
+    /// The assistant admitted an ask or steer; one per `Ask` or `Steer`
+    /// effect, in order, each answered by this or `Refused`.
     Admitted {
         /// The reply it now runs.
         reply: u32,
     },
-    /// The assistant refused the last ask or steer.
+    /// The assistant refused an ask or steer.
     Refused {
         /// Why.
         fault: Fault,
@@ -429,6 +454,9 @@ pub struct Session {
     finals: Vec<Pending>,
     reply: Option<Reply>,
     settled: Option<Outcome>,
+    fading_since: Option<u64>,
+    answer_tail: bool,
+    early: Vec<(u32, AssistEvent)>,
     speeches: Vec<String>,
     interim: String,
     heard: Option<String>,
@@ -451,6 +479,9 @@ impl Session {
             finals: Vec::new(),
             reply: None,
             settled: None,
+            fading_since: None,
+            answer_tail: false,
+            early: Vec::new(),
             speeches: Vec::new(),
             interim: String::new(),
             heard: None,
@@ -480,7 +511,7 @@ impl Session {
             Event::Partial { id, text } => self.partial(&id, &text),
             Event::Final { id, text } => self.resolve(&id, Ok(text), now, &mut fx),
             Event::ListenFailed { id, fault } => self.resolve(&id, Err(fault), now, &mut fx),
-            Event::Admitted { reply } => self.admitted(reply),
+            Event::Admitted { reply } => self.admitted(reply, &mut fx),
             Event::Refused { fault } => self.refused(fault, &mut fx),
             Event::Reply { reply, event } => self.reply_event(reply, event, &mut fx),
             Event::Decided { reply } => self.decided(reply),
@@ -504,6 +535,27 @@ impl Session {
         }
         self.settle(now, &mut fx);
         fx
+    }
+
+    /// When the session next needs a [`Event::Tick`]; none while nothing
+    /// waits on time.
+    pub fn deadline(&self) -> Option<u64> {
+        if self.disposed {
+            return None;
+        }
+        let timeout = self.config.final_timeout_ms;
+        let finals = self
+            .finals
+            .iter()
+            .filter(|pending| pending.result.is_none())
+            .map(|pending| pending.at.saturating_add(timeout));
+        let warm = self
+            .warm_until
+            .filter(|_| self.open.is_none() && self.mic == Mic::Open);
+        let fade = self
+            .fading_since
+            .map(|since| since.saturating_add(self.config.settled_ms));
+        finals.chain(warm).chain(fade).min()
     }
 
     /// What the interface shows now.
@@ -659,6 +711,9 @@ impl Session {
         if let Some(reply) = &mut self.reply {
             fx.push(Effect::StopAssistant { reply: reply.id });
             reply.muted = true;
+        } else {
+            self.settled = None;
+            self.fault = None;
         }
         self.flush(fx);
     }
@@ -746,6 +801,15 @@ impl Session {
             }
         }
         self.drain(fx);
+        let shown = self.config.settled_ms;
+        if self
+            .fading_since
+            .is_some_and(|since| now >= since.saturating_add(shown))
+        {
+            self.fading_since = None;
+            self.settled = None;
+            self.fault = self.fault.filter(|fault| fault.persists());
+        }
     }
 
     fn cool(&mut self, now: u64, fx: &mut Vec<Effect>) {
@@ -823,11 +887,15 @@ impl Session {
                     text: text.clone(),
                 });
                 reply.steering = true;
+                reply.awaiting = reply.awaiting.saturating_add(1);
                 reply.muted = true;
             }
             None => {
                 fx.push(Effect::Ask { text: text.clone() });
-                self.reply = Some(Reply::default());
+                self.reply = Some(Reply {
+                    awaiting: 1,
+                    ..Reply::default()
+                });
             }
         }
         if acked.is_none() {
@@ -837,27 +905,48 @@ impl Session {
         }
     }
 
-    fn admitted(&mut self, id: u32) {
-        let Some(reply) = &mut self.reply else {
+    fn admitted(&mut self, id: u32, fx: &mut Vec<Effect>) {
+        let Some(reply) = self.reply.as_mut().filter(|reply| reply.awaiting > 0) else {
             return;
         };
-        if reply.id.is_some() && !reply.steering {
-            return;
-        }
-        let muted = reply.muted && !reply.steering;
-        if reply.id == Some(id) {
-            reply.restart();
-        } else {
-            *reply = Reply::default();
+        reply.awaiting -= 1;
+        if reply.awaiting == 0 {
+            let muted = reply.muted && !reply.steering;
+            if reply.id == Some(id) {
+                reply.restart();
+            } else {
+                *reply = Reply::default();
+            }
+            reply.muted = muted;
+        } else if reply.id != Some(id) {
+            *reply = Reply {
+                muted: reply.muted,
+                steering: reply.steering,
+                awaiting: reply.awaiting,
+                ..Reply::default()
+            };
         }
         reply.id = Some(id);
-        reply.muted = muted;
+        let last = reply.awaiting == 0;
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.early)
+            .into_iter()
+            .partition(|(reply, _)| *reply == id);
+        if !last {
+            self.early = later;
+        }
+        for (_, event) in now {
+            self.reply_event(id, event, fx);
+        }
     }
 
     fn refused(&mut self, fault: Fault, fx: &mut Vec<Effect>) {
-        let Some(reply) = &mut self.reply else {
+        let Some(reply) = self.reply.as_mut().filter(|reply| reply.awaiting > 0) else {
             return;
         };
+        reply.awaiting -= 1;
+        if reply.awaiting > 0 {
+            return;
+        }
         if reply.id.is_none() {
             self.reply = None;
             self.flush(fx);
@@ -879,13 +968,20 @@ impl Session {
             if let Some(reply) = &mut self.reply {
                 reply.state = Some(ReplyState::Cancelled);
                 reply.steering = false;
+                reply.awaiting = 0;
                 self.end(fx);
             }
             return;
         }
-        let Some(reply) = self.reply.as_mut().filter(|reply| reply.id == Some(id)) else {
+        let Some(reply) = self.reply.as_mut() else {
             return;
         };
+        if reply.id != Some(id) {
+            if reply.awaiting > 0 && self.early.len() < MAX_EARLY_EVENTS {
+                self.early.push((id, event));
+            }
+            return;
+        }
         let mut speech = Vec::new();
         let ended = match event {
             AssistEvent::Message { message } => match *message {
@@ -894,10 +990,12 @@ impl Session {
                     phase,
                     blocks,
                     fault,
+                    end,
                     ..
                 } => {
                     reply.phase = phase;
                     reply.fault = fault;
+                    reply.end = end;
                     for (index, block) in (0..=u16::MAX).zip(blocks) {
                         speech.extend(reply.block(index, block));
                     }
@@ -922,8 +1020,9 @@ impl Session {
                 speech.extend(reply.set_state(state));
                 terminal(state)
             }
-            AssistEvent::Done { .. } => {
+            AssistEvent::Done { end, .. } => {
                 reply.state = Some(ReplyState::Done);
+                reply.end = end;
                 true
             }
             AssistEvent::Failed { fault } => {
@@ -961,16 +1060,31 @@ impl Session {
         let tail = reply.cutter.finish();
         let spoken = reply.route(tail);
         let facts = reply.facts();
-        self.settled = Some(closing::outcome(&facts));
-        if reply.muted {
+        self.settled = match reply.end {
+            Some(End::Redirected) => None,
+            Some(End::Asked) => Some(Outcome::NeedsYou),
+            None => Some(closing::outcome(&facts)),
+        };
+        if reply.muted || reply.end == Some(End::Redirected) {
             return;
         }
         for speech in spoken {
             self.speak(speech, fx);
         }
+        if reply.end == Some(End::Asked) {
+            for chunk in std::mem::take(&mut reply.held) {
+                self.speak(Speech::Text(chunk), fx);
+            }
+            self.answer_tail = true;
+            return;
+        }
         match closing::closing(&facts) {
             Closing::Say => {
-                for chunk in std::mem::take(&mut reply.held) {
+                let held = std::mem::take(&mut reply.held);
+                if held.is_empty() && self.settled == Some(Outcome::Acted) {
+                    self.speak(Speech::Line(Line::Closing(Closing::Done)), fx);
+                }
+                for chunk in held {
                     self.speak(Speech::Text(chunk), fx);
                 }
             }
@@ -1042,8 +1156,28 @@ impl Session {
     }
 
     fn settle(&mut self, now: u64, fx: &mut Vec<Effect>) {
-        if self.state() == State::Idle {
+        let state = self.state();
+        if state == State::Idle {
             self.flush(fx);
+        }
+        if self.reply.as_ref().is_none_or(|reply| reply.awaiting == 0) {
+            self.early.clear();
+        }
+        if std::mem::take(&mut self.answer_tail) && self.open.is_none() {
+            if self.mic == Mic::Closed {
+                fx.push(Effect::OpenMic);
+                self.mic = Mic::Opening;
+            }
+            let until = now.saturating_add(self.config.answer_warm_ms);
+            self.warm_until = Some(self.warm_until.map_or(until, |warm| warm.max(until)));
+        }
+        let fading = self.speeches.is_empty()
+            && ((matches!(state, State::Idle | State::Settled(_)) && self.settled.is_some())
+                || self.fault.is_some_and(|fault| !fault.persists()));
+        if fading {
+            self.fading_since.get_or_insert(now);
+        } else {
+            self.fading_since = None;
         }
         self.cool(now, fx);
         let view = self.view();
@@ -1071,8 +1205,10 @@ struct Reply {
     cutter: Cutter,
     text_block: Option<u16>,
     held: Vec<String>,
+    end: Option<End>,
     muted: bool,
     steering: bool,
+    awaiting: u8,
     ended: bool,
     paused: bool,
     decided: Vec<StepRef>,
@@ -1744,7 +1880,10 @@ mod tests {
             },
         );
         assert_eq!(run.state(), State::Working(Work::Thinking));
-        run.reply(AssistEvent::Done { cost: None });
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
         assert_eq!(run.state(), State::Settled(Outcome::Answered));
     }
 
@@ -1766,7 +1905,10 @@ mod tests {
         );
         assert!(spoken(&run.text(2, "Your order is placed. ")).is_empty());
         run.steps(&[(StepState::Done, None)]);
-        let fx = run.reply(AssistEvent::Done { cost: None });
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
         assert_eq!(spoken(&fx), [says("Your order is placed.")]);
         assert_eq!(run.state(), State::Settled(Outcome::Acted));
 
@@ -1775,7 +1917,10 @@ mod tests {
         run.steps(&[(StepState::Running, None)]);
         assert!(spoken(&run.text(2, "Your order is placed. ")).is_empty());
         run.steps(&[(StepState::Failed, Some(Reason::NoEffect))]);
-        let fx = run.reply(AssistEvent::Done { cost: None });
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
         assert_eq!(
             spoken(&fx),
             [Speech::Line(Line::Closing(Closing::NotConfirmed {
@@ -1855,9 +2000,13 @@ mod tests {
             all.extend(run.say("yes", 500));
             all.extend(run.steps(&[(StepState::Done, None)]));
             all.extend(run.text(2, "Booked."));
-            all.extend(run.reply(AssistEvent::Done { cost: None }));
+            all.extend(run.reply(AssistEvent::Done {
+                cost: None,
+                end: None,
+            }));
+            let state = run.state();
             all.extend(run.at(10_000, Event::Tick));
-            (all, run.state())
+            (all, state)
         };
         let (on, on_state) = script(true);
         let (off, off_state) = script(false);
@@ -1903,7 +2052,10 @@ mod tests {
         let mut run = Run::new();
         run.working();
         run.text(0, "Sunny all day.\n");
-        run.reply(AssistEvent::Done { cost: None });
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
         assert!(run.session.view().speaking);
         assert_eq!(
             run.at(10, Event::Escape),
@@ -2069,6 +2221,274 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_settled_reply_fades_once_speech_ends_and_escape_dismisses_it() {
+        let mut run = Run::new();
+        run.working();
+        let fx = run.text(0, "Sunny all day.\n");
+        let Some(Effect::Speak { id, .. }) = fx.iter().find(|e| matches!(e, Effect::Speak { .. }))
+        else {
+            panic!("{fx:?}");
+        };
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert_eq!(run.session.fading_since, None, "speech is still playing");
+        run.at(10_000, Event::Tick);
+        assert_eq!(run.state(), State::Settled(Outcome::Answered));
+        for speech in run.session.speeches.clone() {
+            if speech != *id {
+                run.at(0, Event::SpeechEnded { id: speech });
+            }
+        }
+        assert_eq!(run.session.fading_since, None);
+        run.at(10, Event::SpeechEnded { id: id.clone() });
+        assert_eq!(run.session.deadline(), Some(run.now + 4_000));
+        run.at(3_999, Event::Tick);
+        assert_eq!(run.state(), State::Settled(Outcome::Answered));
+        run.at(1, Event::Tick);
+        assert_eq!(run.state(), State::Idle);
+        assert_eq!(run.session.view().outcome, None);
+        assert_eq!(run.session.deadline(), None);
+
+        let mut run = Run::new();
+        run.working();
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert_eq!(run.state(), State::Settled(Outcome::Answered));
+        let fx = run.at(10, Event::Escape);
+        assert!(!has(&fx, |e| matches!(e, Effect::StopAssistant { .. })));
+        assert_eq!(run.state(), State::Idle);
+    }
+
+    #[test]
+    fn passing_faults_fade_and_ones_that_need_the_person_stay() {
+        let mut run = Run::new();
+        run.say("open the cheapest flight to Lisbon", 500);
+        run.at(10, Event::Refused { fault: Fault::Busy });
+        assert_eq!(run.session.view().fault, Some(Fault::Busy));
+        run.at(4_000, Event::Tick);
+        assert_eq!(run.session.view().fault, None);
+
+        for fault in [
+            Fault::PlanRequired,
+            Fault::MicrophoneDenied,
+            Fault::NoMicrophone,
+            Fault::OutOfCredit,
+            Fault::DailyLimit,
+        ] {
+            let mut run = Run::new();
+            let id = run.press();
+            run.at(400, Event::KeyUp);
+            run.at(100, Event::ListenFailed { id, fault });
+            run.at(60_000, Event::Tick);
+            assert_eq!(run.session.view().fault, Some(fault));
+            assert_eq!(run.session.deadline(), None);
+            run.at(10, Event::Escape);
+            assert_eq!(run.session.view().fault, None);
+        }
+
+        let mut run = Run::new();
+        run.at(0, Event::KeyDown);
+        run.at(
+            10,
+            Event::MicFailed {
+                fault: Fault::MicrophoneDenied,
+            },
+        );
+        run.at(10, Event::KeyUp);
+        run.at(10, Event::KeyDown);
+        assert_eq!(
+            run.session.view().fault,
+            None,
+            "the next press dismisses it"
+        );
+    }
+
+    #[test]
+    fn verified_steps_with_nothing_said_after_them_end_with_done() {
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Running, None)]);
+        run.steps(&[(StepState::Done, None)]);
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert_eq!(spoken(&fx), [Speech::Line(Line::Closing(Closing::Done))]);
+        assert_eq!(run.state(), State::Settled(Outcome::Acted));
+
+        let mut run = Run::new();
+        run.working();
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert!(
+            spoken(&fx).is_empty(),
+            "an answer with no words says nothing"
+        );
+
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Done, None), (StepState::Running, None)]);
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert!(!spoken(&fx).contains(&Speech::Line(Line::Closing(Closing::Done))));
+        assert_eq!(run.state(), State::Settled(Outcome::Partial));
+    }
+
+    #[test]
+    fn a_steer_before_admission_keeps_steering_and_early_events_are_kept() {
+        let mut run = Run::new();
+        run.say("open the cheapest flight to Lisbon", 500);
+        run.text(0, "Looking now. ");
+        let fx = run.say("and book the window seat please", 500);
+        assert!(has(&fx, |e| matches!(e, Effect::Steer { reply: None, .. })));
+        run.at(10, Event::Admitted { reply: 7 });
+        assert!(run.session.reply.as_ref().unwrap().steering);
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert!(matches!(run.state(), State::Working(_)));
+        assert!(spoken(&run.at(
+            10,
+            Event::Reply {
+                reply: 8,
+                event: AssistEvent::Text {
+                    block: 0,
+                    delta: "Booked the window seat.\n".into(),
+                },
+            },
+        ))
+        .is_empty());
+        let fx = run.at(10, Event::Admitted { reply: 8 });
+        assert_eq!(spoken(&fx), [says("Booked the window seat.")]);
+        assert!(!run.session.reply.as_ref().unwrap().steering);
+        run.at(
+            10,
+            Event::Reply {
+                reply: 8,
+                event: AssistEvent::Done {
+                    cost: None,
+                    end: None,
+                },
+            },
+        );
+        assert_eq!(run.state(), State::Settled(Outcome::Answered));
+        assert!(run.session.early.is_empty());
+
+        let mut run = Run::new();
+        run.say("open the cheapest flight to Lisbon", 500);
+        run.say("and book the window seat please", 500);
+        let fx = run.at(10, Event::Refused { fault: Fault::Busy });
+        assert!(!has(&fx, |e| *e == Effect::Earcon(Earcon::Error)));
+        assert!(matches!(run.state(), State::Working(_)));
+        let fx = run.at(10, Event::Refused { fault: Fault::Busy });
+        assert!(has(&fx, |e| *e == Effect::Earcon(Earcon::Error)));
+        assert_eq!(run.state(), State::Idle);
+        assert!(run.at(10, Event::Admitted { reply: 9 }).is_empty());
+    }
+
+    #[test]
+    fn early_events_are_bounded_and_dropped_for_other_replies() {
+        let mut run = Run::new();
+        run.say("open the cheapest flight to Lisbon", 500);
+        for _ in 0..(MAX_EARLY_EVENTS + 40) {
+            run.at(
+                1,
+                Event::Reply {
+                    reply: 3,
+                    event: AssistEvent::Phase { phase: None },
+                },
+            );
+        }
+        assert_eq!(run.session.early.len(), MAX_EARLY_EVENTS);
+        run.at(10, Event::Admitted { reply: 7 });
+        assert!(run.session.early.is_empty());
+        run.reply(AssistEvent::Text {
+            block: 0,
+            delta: "x".into(),
+        });
+        assert!(
+            run.session.early.is_empty(),
+            "nothing is held once admitted"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_asks_speaks_its_question_and_waits_warm_for_the_answer() {
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Done, None)]);
+        run.text(2, "Which date works for you? ");
+        run.at(30_000, Event::Tick);
+        assert!(!run.session.view().mic, "the first tail cooled");
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: Some(End::Asked),
+        });
+        assert_eq!(spoken(&fx), [says("Which date works for you?")]);
+        assert!(has(&fx, |e| *e == Effect::OpenMic));
+        assert_eq!(run.state(), State::Settled(Outcome::NeedsYou));
+        run.at(10, Event::MicOpened);
+        run.at(19_000, Event::Tick);
+        assert!(run.session.view().mic);
+        assert!(has(&run.at(1_000, Event::Tick), |e| *e == Effect::CloseMic));
+    }
+
+    #[test]
+    fn a_redirected_reply_ends_silently() {
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Done, None)]);
+        run.text(2, "Booking it now. ");
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: Some(End::Redirected),
+        });
+        assert!(spoken(&fx).is_empty());
+        assert_eq!(run.session.view().outcome, None);
+        assert_eq!(run.state(), State::Idle);
+
+        let mut run = Run::new();
+        run.working();
+        run.say("actually make it the aisle seat", 500);
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: Some(End::Redirected),
+        });
+        assert!(spoken(&fx).is_empty());
+        assert!(
+            matches!(run.state(), State::Working(_)),
+            "waits for the steer"
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_step_is_never_success() {
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Failed, Some(Reason::Unconfirmed))]);
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert!(matches!(
+            spoken(&fx)[..],
+            [Speech::Line(Line::Closing(Closing::NotConfirmed {
+                step: Some(_)
+            }))]
+        ));
+        assert_eq!(run.state(), State::Settled(Outcome::NotConfirmed));
+    }
+
     struct Driver {
         run: Run,
         open: Vec<String>,
@@ -2079,6 +2499,7 @@ mod tests {
         may_speak: bool,
         acked: Vec<String>,
         reply: u32,
+        outstanding: u32,
     }
 
     impl Driver {
@@ -2162,7 +2583,10 @@ mod tests {
                 }),
                 19 => reply(
                     [
-                        AssistEvent::Done { cost: None },
+                        AssistEvent::Done {
+                            cost: None,
+                            end: None,
+                        },
                         AssistEvent::Failed {
                             fault: AssistFault::StepFailed,
                         },
@@ -2174,7 +2598,15 @@ mod tests {
                             state: ReplyState::Waiting,
                         },
                         AssistEvent::Invalidated,
-                    ][usize::from(pick) % 6]
+                        AssistEvent::Done {
+                            cost: None,
+                            end: Some(End::Asked),
+                        },
+                        AssistEvent::Done {
+                            cost: None,
+                            end: Some(End::Redirected),
+                        },
+                    ][usize::from(pick) % 8]
                         .clone(),
                 ),
                 20 => Event::SpeechEnded {
@@ -2209,6 +2641,9 @@ mod tests {
             let candidates = self.pending.clone();
             if matches!(event, Event::MicFailed { .. }) {
                 self.mic = false;
+            }
+            if matches!(event, Event::Admitted { .. } | Event::Refused { .. }) {
+                self.outstanding = self.outstanding.saturating_sub(1);
             }
             if let Event::SpeechEnded { id } | Event::SpeechFailed { id, .. } = &event {
                 self.speeches.retain(|s| s != id);
@@ -2262,6 +2697,7 @@ mod tests {
                         self.may_speak = false;
                         self.speeches.clear();
                     }
+                    Effect::Ask { .. } | Effect::Steer { .. } => self.outstanding += 1,
                     Effect::Decide { .. } => {
                         prop_assert!(
                             candidates.iter().any(|c| self.held.contains(c)),
@@ -2282,6 +2718,33 @@ mod tests {
                 self.open.clear();
             }
             let view = self.run.session.view();
+            let session = &self.run.session;
+            match &session.reply {
+                Some(reply) => {
+                    prop_assert_eq!(u32::from(reply.awaiting), self.outstanding);
+                    if reply.awaiting == 0 {
+                        prop_assert!(session.early.is_empty(), "held events with nothing awaited");
+                    }
+                }
+                None => {
+                    self.outstanding = 0;
+                    prop_assert!(session.early.is_empty());
+                }
+            }
+            prop_assert!(session.early.len() <= MAX_EARLY_EVENTS);
+            let done = Speech::Line(Line::Closing(Closing::Done));
+            if spoken(&fx).contains(&done) {
+                prop_assert_eq!(
+                    view.outcome,
+                    Some(Outcome::Acted),
+                    "done without verified steps"
+                );
+            }
+            let fades = matches!(view.state, State::Settled(_))
+                || (view.state == State::Idle && view.fault.is_some_and(|f| !f.persists()));
+            if fades && !view.speaking {
+                prop_assert!(session.deadline().is_some(), "a settled view never fades");
+            }
             prop_assert!(self.open.len() <= 1);
             prop_assert_eq!(view.mic, self.mic && self.run.session.mic == Mic::Open);
             if view.state == State::Idle {
@@ -2310,6 +2773,7 @@ mod tests {
                 may_speak: false,
                 acked: Vec::new(),
                 reply: 7,
+                outstanding: 0,
             };
             for (code, pick, after) in steps {
                 let event = driver.event(code, pick);
@@ -2321,7 +2785,13 @@ mod tests {
             driver.apply(Event::MicFailed { fault: Fault::NoMicrophone }, 0)?;
             driver.apply(Event::MicOpened, 0)?;
             driver.apply(Event::Tick, 20_000)?;
+            for id in driver.speeches.clone() {
+                driver.apply(Event::SpeechEnded { id }, 0)?;
+            }
+            driver.apply(Event::Tick, 5_000)?;
             let view = driver.run.session.view();
+            prop_assert!(!matches!(view.state, State::Settled(_)), "settled outlived its display");
+            prop_assert!(view.fault.is_none_or(Fault::persists));
             prop_assert!(!view.mic && !driver.mic, "microphone left open");
             prop_assert!(driver.run.session.open.is_none() && driver.run.session.finals.is_empty());
             prop_assert!(driver.run.session.on(Event::Dispose, driver.run.now).iter().all(|e| !matches!(e, Effect::Speak { .. })), "spoke on dispose");

@@ -8065,6 +8065,7 @@ dependencies = [
 name = "zephium-work-composition"
 version = "0.1.0"
 dependencies = [
+ "crossbeam-queue",
  "serde_json",
  "sha2 0.10.9",
  "tokio",

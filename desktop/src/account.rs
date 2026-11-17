@@ -417,6 +417,7 @@ pub(crate) fn install(app: &tauri::AppHandle) {
         );
         #[cfg(feature = "work-product")]
         hosted::account_changed();
+        crate::voice_session::refresh(&events);
     }));
     if SERVICE.set(service.clone()).is_err() {
         return;

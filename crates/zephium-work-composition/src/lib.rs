@@ -49,6 +49,8 @@ mod native_work_clock;
 mod open_objective;
 #[cfg(feature = "durable-runtime")]
 pub mod page_assist;
+#[cfg(feature = "durable-runtime")]
+pub mod voice_session;
 #[cfg(feature = "macos-work")]
 pub use native::NativeWorkComposition as MacosWorkComposition;
 #[cfg(feature = "native-work")]

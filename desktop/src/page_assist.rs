@@ -83,7 +83,7 @@ mod product {
 
     static SERVICE: OnceLock<PageAssist> = OnceLock::new();
 
-    pub(super) fn service() -> Option<&'static PageAssist> {
+    pub(crate) fn service() -> Option<&'static PageAssist> {
         SERVICE.get()
     }
 
@@ -685,6 +685,7 @@ mod product {
     struct Events(tauri::AppHandle);
     impl EventSink for Events {
         fn emit(&self, event: PageAssistChangedV1) {
+            crate::voice_session::assist(&event);
             emit_to_privileged(&self.0, MAIN_LABEL, EVENT, &event);
         }
     }
@@ -1150,6 +1151,7 @@ mod product {
 #[cfg(feature = "work-product")]
 pub(crate) use product::{
     hosted_charged, hosted_sourced, install, observe_items, observe_tab, preference_changed,
+    service,
 };
 
 #[cfg(not(feature = "work-product"))]

@@ -136,6 +136,7 @@ mod talk_key;
 mod taskbar_badge;
 mod updates;
 mod voice;
+mod voice_session;
 mod webext;
 #[cfg(any(
     all(target_os = "windows", feature = "webext-qa"),
@@ -2017,6 +2018,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             voice::voice_stop,
             voice::voice_cancel,
             voice::voice_open_privacy,
+            voice_session::voice_session_view,
+            voice_session::voice_session_intent,
+            voice_session::voice_session_decide,
+            voice_session::voice_session_settings,
+            voice_session::voice_session_set_settings,
             page_assist::page_assist_status,
             page_assist::page_assist_ask,
             page_assist::page_assist_stop,
@@ -2259,6 +2265,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_models::WorkModelsChanged,
             voice::VoiceChanged,
             voice::VoiceLevels,
+            voice_session::VoiceSessionChanged,
+            voice_session::VoiceSessionLevels,
             page_assist::PageAssistChanged,
             swipe::SwipeScroll,
             account::AccountChanged,
@@ -6915,6 +6923,9 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     if matches!(&event, tauri::RunEvent::Exit) {
         updates::finish_on_exit(app);
     }
+    if matches!(&event, tauri::RunEvent::Exit) {
+        voice_session::dispose();
+    }
     #[cfg(not(target_os = "windows"))]
     if matches!(&event, tauri::RunEvent::Exit) {
         relaunch::finish_on_exit(app);
@@ -7452,6 +7463,8 @@ fn finish_browser_setup(
             blocker_bench::items(&state);
             spaces::follow(&emit_handle, &state);
             page_assist::observe_items(&state);
+            voice_session::observe_items(&state);
+            voice_session::refresh(&emit_handle);
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
         }
         Projection::Tab(tab) => {
@@ -7532,6 +7545,9 @@ fn finish_browser_setup(
                 .and_then(|rest| rest.split_once('='))
             {
                 page_assist::preference_changed(key, value);
+                if key == "ai.enabled" {
+                    voice_session::refresh(&emit_handle);
+                }
                 if material::theme_changed(key, value) {
                     reinstall_native_materials(&emit_handle);
                 }
@@ -7793,6 +7809,7 @@ fn finish_browser_setup(
     }
     #[cfg(feature = "work-product")]
     page_assist::install(app, engine.clone(), store.clone());
+    voice_session::install(app);
     notes::install(app, &data_dir, store.clone(), &shell);
     external_links::adopt(app);
     #[cfg(feature = "work-product")]
@@ -7952,6 +7969,7 @@ fn finish_browser_setup(
                     // Fallback for platform/programmatic destruction paths
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
+                        voice_session::dispose();
                         #[cfg(target_os = "windows")]
                         if !platform::imp::remove_privileged_version_observer(MAIN_LABEL) {
                             diagnostic!(
@@ -8003,6 +8021,7 @@ fn finish_browser_setup(
                         #[cfg(target_os = "windows")]
                         focus_engine.window_foreground();
                         presence::report_app_active(resize_window.app_handle());
+                        voice_session::foreground(true);
                     }
                     // Losing focus alone does not make a browser tab
                     // background work: audio and timers must continue. Only
@@ -8011,6 +8030,7 @@ fn finish_browser_setup(
                         resize_shell.dispatch(Command::SetWindowFocused(false));
                         voice::window_blurred(resize_window.app_handle());
                         if resize_window.is_minimized().unwrap_or(false) {
+                            voice_session::foreground(false);
                             resize_shell.dispatch(Command::SetWindowVisible(false));
                             #[cfg(target_os = "windows")]
                             platform::imp::set_chrome_minimized(&resize_window, true);

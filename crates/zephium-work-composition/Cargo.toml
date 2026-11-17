@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 default = []
-durable-runtime = ["native-work", "dep:serde_json", "dep:sha2", "dep:zephium-core", "dep:zephium-ipc", "zephium-app/work-runtime", "dep:tokio", "dep:zephium-page-assist"]
+durable-runtime = ["native-work", "dep:serde_json", "dep:sha2", "dep:zephium-core", "dep:zephium-ipc", "zephium-app/work-runtime", "dep:tokio", "dep:zephium-page-assist", "dep:crossbeam-queue"]
 native-work = ["dep:zephium-app", "dep:zephium-engine", "dep:zephium-store", "dep:zephium-agent-controller", "dep:zephium-agent-provider-transport", "dep:zephium-agentic"]
 macos-work = ["native-work"]
 public-qualification = [
@@ -34,6 +34,7 @@ sha2 = { version = "=0.10.9", optional = true }
 zephium-ipc = { workspace = true, optional = true }
 zephium-page-assist = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["time"] }
+crossbeam-queue = { workspace = true, optional = true }
 zephium-app = { workspace = true, optional = true, features = ["work-execution"] }
 zephium-engine = { workspace = true, optional = true, features = ["agentic-browser"] }
 zephium-store = { workspace = true, optional = true, features = ["work-execution"] }
