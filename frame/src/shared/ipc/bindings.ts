@@ -113,6 +113,52 @@ export const commands = {
 	 *  recognition, after the person declined one.
 	 */
 	voiceOpenPrivacy: (kind: VoicePrivacyV1) => __TAURI_INVOKE<boolean>("voice_open_privacy", { kind }),
+	/**  The voice session's view; null when voice is not part of this build. */
+	voiceSessionView: () => __TAURI_INVOKE<{
+	version: number,
+	/**  Grows with every change; an older view is stale. */
+	seq: number,
+	availability: VoiceAvailabilityV1,
+	state: VoiceSessionStateV1,
+	/**  The microphone is open. */
+	mic: boolean,
+	/**  The microphone is open with listening gated off. */
+	warm: boolean,
+	/**  The interim transcript while listening. */
+	interim: string,
+	/**  The last final transcript. */
+	heard: string | null,
+	phase: PageAssistPhaseV1 | null,
+	/**  The step the reply is on, for display only. */
+	step: string | null,
+	confirm: VoiceConfirmV1 | null,
+	/**  Speech is queued or playing. */
+	speaking: boolean,
+	outcome: VoiceOutcomeV1 | null,
+	fault: VoiceSessionFaultV1 | null,
+} | null>("voice_session_view"),
+	/**  The on-screen talk button: start, stop (send) or cancel. */
+	voiceSessionIntent: (intent: VoiceSessionIntentV1) => __TAURI_INVOKE<boolean>("voice_session_intent", { intent }),
+	/**  Approves or declines the confirm voice is waiting on, as a click does. */
+	voiceSessionDecide: (decision: PageAssistDecisionV1) => __TAURI_INVOKE<boolean>("voice_session_decide", { decision }),
+	/**  Voice settings and the voices the service offers. */
+	voiceSessionSettings: () => __TAURI_INVOKE<{
+	version: number,
+	preferences: VoiceSessionPreferencesV1,
+	/**  The voices the service offers, once it has been reached; empty before. */
+	voices: string[],
+	/**  The service's default voice, once known. */
+	default_voice: string | null,
+} | null>("voice_session_settings"),
+	/**  Stores voice settings; null when they were refused. */
+	voiceSessionSetSettings: (preferences: VoiceSessionPreferencesV1) => __TAURI_INVOKE<{
+	version: number,
+	preferences: VoiceSessionPreferencesV1,
+	/**  The voices the service offers, once it has been reached; empty before. */
+	voices: string[],
+	/**  The service's default voice, once known. */
+	default_voice: string | null,
+} | null>("voice_session_set_settings", { preferences }),
 	/**
 	 *  The assistant for a Space with `tab` in front: availability, the page chip and
 	 *  the whole conversation.
@@ -738,6 +784,8 @@ export const events = {
 	zephiumSwipe: makeEvent<SwipeScroll>("zephium:swipe"),
 	zephiumVoiceChanged: makeEvent<VoiceChanged>("zephium:voice-changed"),
 	zephiumVoiceLevels: makeEvent<VoiceLevels>("zephium:voice-levels"),
+	zephiumVoiceSessionChanged: makeEvent<VoiceSessionChanged>("zephium:voice-session-changed"),
+	zephiumVoiceSessionLevels: makeEvent<VoiceSessionLevels>("zephium:voice-session-levels"),
 	zephiumWorkDecisionPreferenceChanged: makeEvent<WorkDecisionPreferenceChanged>("zephium:work-decision-preference-changed"),
 	zephiumWorkHumanChanged: makeEvent<WorkHumanChanged>("zephium:work-human-changed"),
 	zephiumWorkModelsChanged: makeEvent<WorkModelsChanged>("zephium:work-models-changed"),
@@ -2193,6 +2241,13 @@ export type PageAssistCostV1 =
 
 export type PageAssistDecisionV1 = "approve" | "decline";
 
+/**  How a finished reply ended, beyond answering. */
+export type PageAssistEndV1 =
+/**  It ends with a question to the person and took no step after it. */
+"asked" |
+/**  The person redirected it while it worked; the next reply carries on. */
+"redirected";
+
 /**
  *  One change to a conversation, in `seq` order. On `invalidated`, read
  *  `page_assist_status` again.
@@ -2213,7 +2268,7 @@ export type PageAssistEventV1 =
  *  The reply finished. `cost` may still be confirming; a later `cost`
  *  event replaces it.
  */
-{ type: "done"; cost: PageAssistCostV1 | null } | { type: "cost"; cost: PageAssistCostV1 } | { type: "failed"; fault: PageAssistFaultV1 } | { type: "cancelled" } |
+{ type: "done"; cost: PageAssistCostV1 | null; end: PageAssistEndV1 | null } | { type: "cost"; cost: PageAssistCostV1 } | { type: "failed"; fault: PageAssistFaultV1 } | { type: "cancelled" } |
 /**  Replies up to and including `reply` no longer jump to their pages. */
 { type: "inert" } |
 /**  The conversation was titled from its first message. */
@@ -2290,7 +2345,9 @@ export type PageAssistItemV1 = {
 /**  One message of a conversation. */
 export type PageAssistMessageV1 = { kind: "person"; id: number; text: string; suggestion: PageAssistSuggestionV1 | null; attachments: PageAssistAttachmentV1[] } | { kind: "reply"; id: number; state: PageAssistReplyStateV1; phase: PageAssistPhaseV1 | null; blocks: PageAssistBlockV1[]; cost: PageAssistCostV1 | null; fault: PageAssistFaultV1 | null;
 /**  The pages it read changed since; its cites no longer jump. */
-inert: boolean };
+inert: boolean;
+/**  Set once it is done, when it ended other than by answering. */
+end: PageAssistEndV1 | null };
 
 /**  The model the conversation uses, as the composer names it. */
 export type PageAssistModelV1 = {
@@ -2403,8 +2460,13 @@ export type PageAssistStepReasonV1 =
 "unsuitable" |
 /**  The page changed before it ran. */
 "page_changed" |
-/**  It ran, but the page did not change as expected. */
-"no_effect";
+/**  It ran, and nothing on the page changed. */
+"no_effect" |
+/**
+ *  It ran, but whether it took could not be seen: the page changed
+ *  elsewhere, moved on, or could not be read again.
+ */
+"unconfirmed";
 
 export type PageAssistStepStateV1 = "running" |
 /**  Waits on the person: Approve or Decline through `page_assist_decide`. */
@@ -2423,7 +2485,10 @@ export type PageAssistStepV1 = {
 	/**  Set when the step commits something and so needs the person's confirm. */
 	category: WorkConfirmCategoryV1 | null,
 	state: PageAssistStepStateV1,
-	/**  Set when `state` is `failed`. */
+	/**
+	 *  Set when `state` is `failed`. A step is `done` only when its effect
+	 *  was seen on the page after it ran.
+	 */
 	reason: PageAssistStepReasonV1 | null,
 };
 
@@ -3534,6 +3599,17 @@ export type UpdateStatus_Deserialize = ({ state: "unavailable" }) & { retry_reas
 
 export type UpdateStatus_Serialize = ({ state: "unavailable" }) & { retry_reason?: never; version?: never } | ({ state: "idle" }) & { retry_reason?: never; version?: never } | ({ state: "checking" }) & { retry_reason?: never; version?: never } | ({ state: "upToDate" }) & { retry_reason?: never; version?: never } | ({ state: "downloading" }) & { retry_reason?: never; version?: never } | { state: "ready"; version: string; retry_reason?: UpdateRetryReason | null } | ({ state: "manualInstall"; version: string }) & { retry_reason?: never } | ({ state: "installing" }) & { retry_reason?: never; version?: never } | ({ state: "failed" }) & { retry_reason?: never; version?: never };
 
+/**  Whether voice can be used in this window now. */
+export type VoiceAvailabilityV1 = "available" |
+/**  AI is switched off in Settings. */
+"ai_off" |
+/**  No Zephium account is signed in. */
+"signed_out" |
+/**  Private windows never use voice. */
+"private" |
+/**  This platform or build has no voice engine. */
+"unsupported";
+
 /**  A take moved on. `text` is set once, when it is done. */
 export type VoiceChanged = {
 	take: number,
@@ -3544,6 +3620,18 @@ export type VoiceChanged = {
 	partial: string | null,
 	text: string | null,
 	fault: VoiceFaultV1 | null,
+};
+
+/**  A step waiting on the person's confirm. */
+export type VoiceConfirmV1 = {
+	/**  The reply block the step is in. */
+	block: number,
+	/**  Its index within the block. */
+	index: number,
+	/**  What it commits. */
+	category: WorkConfirmCategoryV1 | null,
+	/**  Its label, for display only (untrusted, bounded). */
+	label: string,
 };
 
 export type VoiceEngineV1 = "on_device" | "zephium" | "open_ai" | "groq";
@@ -3574,6 +3662,11 @@ export type VoiceFaultV1 = "microphone_denied" | "recognition_denied" | "no_micr
 /**  The recording is longer than Zephium AI takes. */
 "audio_too_long" | "rate_limited" | "offline" | "provider_down" | "too_long" | "busy" | "unavailable";
 
+/**  The language the person speaks to voice. */
+export type VoiceLanguageV1 =
+/**  The system's preferred language. */
+"automatic" | "en" | "es" | "de" | "fr" | "pl" | "pt" | "ru" | "it" | "ja" | "zh";
+
 /**
  *  Input levels in percent, one per 40 ms of audio, oldest first; they
  *  arrive about ten times a second.
@@ -3584,13 +3677,125 @@ export type VoiceLevels = {
 	levels: number[],
 };
 
+/**  How the last reply ended. */
+export type VoiceOutcomeV1 =
+/**  Done with no steps. */
+"answered" |
+/**  Every step that ran is done with its effect verified. */
+"acted" | "partial" |
+/**  A step ran, but its effect was not observed. */
+"not_confirmed" | "failed" | "declined" | "cancelled" |
+/**  It waits on the person. */
+"needs_you";
+
 export type VoicePermissionV1 = "granted" | "undetermined" | "denied";
 
 export type VoicePhaseV1 = "listening" | "transcribing" | "done" | "failed" | "cancelled";
 
+/**  How the person is talking. */
+export type VoicePressV1 =
+/**  The key is held down. */
+"held" |
+/**  A short press latched listening on until the next press. */
+"latched";
+
 export type VoicePrivacyV1 = "microphone" | "recognition" |
 /**  The keyboard settings, where Dictation is switched on. */
 "dictation";
+
+/**  The voice session's view changed. */
+export type VoiceSessionChanged = VoiceSessionViewV1;
+
+/**  Why voice could not do something. Closed; never provider text. */
+export type VoiceSessionFaultV1 = "microphone_denied" | "no_microphone" |
+/**  The voice service cannot be reached. */
+"offline" |
+/**  The plan does not include voice. */
+"plan_required" | "out_of_credit" | "daily_limit" | "rate_limited" |
+/**  The speech provider is down. */
+"provider_down" |
+/**  No answer in time. */
+"timeout" |
+/**  The connection dropped. */
+"interrupted" |
+/**  The assistant is busy with another reply. */
+"busy" | "unavailable";
+
+/**  The on-screen button, mirroring the talk key. */
+export type VoiceSessionIntentV1 =
+/**  Start listening (latched). */
+"start" |
+/**  Stop listening and send the words. */
+"stop" |
+/**  Stop listening and discard, or stop the reply, or silence speech. */
+"cancel";
+
+/**  Microphone and speech levels, about 25 a second while live. */
+export type VoiceSessionLevels = VoiceSessionLevelsV1;
+
+/**
+ *  Payload of `zephium:voice-session-levels`, about 25 a second, only while
+ *  the microphone listens or speech plays.
+ */
+export type VoiceSessionLevelsV1 = {
+	/**  Microphone level in percent. */
+	input: number,
+	/**  Speech level in percent. */
+	output: number,
+};
+
+/**  What the person can change. */
+export type VoiceSessionPreferencesV1 = {
+	/**  Replies are spoken aloud. */
+	spoken: boolean,
+	/**  The speaking voice; none uses the service's default. */
+	voice: string | null,
+	language: VoiceLanguageV1,
+	/**  The short listening and error sounds. */
+	earcons: boolean,
+};
+
+/**  The settings and what can be chosen. */
+export type VoiceSessionSettingsV1 = {
+	version: number,
+	preferences: VoiceSessionPreferencesV1,
+	/**  The voices the service offers, once it has been reached; empty before. */
+	voices: string[],
+	/**  The service's default voice, once known. */
+	default_voice: string | null,
+};
+
+/**  The session's state. */
+export type VoiceSessionStateV1 = { state: "idle" } |
+/**  Listening was asked for; the microphone is opening. */
+{ state: "arming"; press: VoicePressV1 } | { state: "listening"; press: VoicePressV1 } |
+/**  The person finished; waiting for the final words. */
+{ state: "finalizing" } | { state: "working"; work: VoiceWorkV1 } | { state: "settled"; outcome: VoiceOutcomeV1 };
+
+/**  Payload of `zephium:voice-session-changed`, and the view command's answer. */
+export type VoiceSessionViewV1 = {
+	version: number,
+	/**  Grows with every change; an older view is stale. */
+	seq: number,
+	availability: VoiceAvailabilityV1,
+	state: VoiceSessionStateV1,
+	/**  The microphone is open. */
+	mic: boolean,
+	/**  The microphone is open with listening gated off. */
+	warm: boolean,
+	/**  The interim transcript while listening. */
+	interim: string,
+	/**  The last final transcript. */
+	heard: string | null,
+	phase: PageAssistPhaseV1 | null,
+	/**  The step the reply is on, for display only. */
+	step: string | null,
+	confirm: VoiceConfirmV1 | null,
+	/**  Speech is queued or playing. */
+	speaking: boolean,
+	outcome: VoiceOutcomeV1 | null,
+	fault: VoiceSessionFaultV1 | null,
+};
 
 export type VoiceStartV1 = {
 	/**  The take's id, which its events carry; null when it did not start. */
@@ -3617,6 +3822,11 @@ export type VoiceStatusV1 = {
 	on_device: string | null,
 	microphone: VoicePermissionV1,
 };
+
+/**  What the assistant is doing. */
+export type VoiceWorkV1 = "thinking" | "reading" | "acting" |
+/**  Waiting on the person. */
+"confirming";
 
 /**  An extension's run-time request for access, awaiting the user's answer. */
 export type WebExtensionAccessRequestView = {
