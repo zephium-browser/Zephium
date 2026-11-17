@@ -200,8 +200,9 @@ test("holding Control names the keys on every row", async () => {
 test("a right-click on a row opens its name to be typed over", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const row = screen.container.querySelectorAll<HTMLElement>("[data-space-row]")[1]!;
-  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
+    button: "right",
+  });
   const name = screen.getByRole("textbox", { name: "Name" });
   await expect.element(name).toHaveValue("Studio");
   await expect.element(name).toHaveFocus();
