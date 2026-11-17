@@ -147,20 +147,38 @@ pub(super) fn validate_ready(ready: &VoiceReady) -> Result<(), ()> {
 fn failure(code: &str) -> Result<VoiceError, ()> {
     let status = match code {
         "cancelled" => return Ok(VoiceError::Cancelled),
-        "timeout" => return Ok(VoiceError::Timeout),
+        "timeout" | "provider_timeout" => return Ok(VoiceError::Timeout),
         "interrupted" => return Ok(VoiceError::Interrupted),
         "too_long" => return Ok(VoiceError::TooLong),
         "audio_too_long" => return Ok(VoiceError::AudioTooLong),
         "invalid_audio" => return Ok(VoiceError::InvalidAudio),
         "offline" => return Ok(VoiceError::Model(WorkModelError::Network)),
-        "unauthenticated" | "session_ended" => StatusCode::UNAUTHORIZED,
-        "rate_limited" | "concurrency_limited" | "provider_rate_limited" => {
-            StatusCode::TOO_MANY_REQUESTS
-        }
+        "unauthenticated"
+        | "session_ended"
+        | "unauthorized"
+        | "reauthentication_required"
+        | "account_unavailable"
+        | "email_not_verified" => StatusCode::UNAUTHORIZED,
+        "rate_limited"
+        | "concurrency_limited"
+        | "provider_rate_limited"
+        | "credit_reservation_pending"
+        | "request_in_progress" => StatusCode::TOO_MANY_REQUESTS,
         "provider_unavailable"
         | "provider_error"
         | "provider_failure"
         | "provider_failed"
+        | "provider_request_failed"
+        | "invalid_provider_response"
+        | "provider_not_configured"
+        | "invalid_model_configuration"
+        | "plan_not_configured"
+        | "cloud_policy_changed"
+        | "server_shutdown"
+        | "invalid_request"
+        | "request_cost_limit"
+        | "request_expired"
+        | "request_already_recorded"
         | "cloud_disabled" => StatusCode::SERVICE_UNAVAILABLE,
         "insufficient_credits"
         | "daily_limit_reached"

@@ -327,8 +327,35 @@ async fn failure_codes_are_closed_and_accounted_once() {
             "unauthenticated",
             VoiceError::Model(WorkModelError::Unauthorized),
         ),
+        (
+            "reauthentication_required",
+            VoiceError::Model(WorkModelError::Unauthorized),
+        ),
+        (
+            "credit_reservation_pending",
+            VoiceError::Model(WorkModelError::RateLimited {
+                retry_after_ms: None,
+            }),
+        ),
+        (
+            "provider_request_failed",
+            VoiceError::Model(WorkModelError::Overloaded),
+        ),
+        (
+            "invalid_provider_response",
+            VoiceError::Model(WorkModelError::Overloaded),
+        ),
+        (
+            "server_shutdown",
+            VoiceError::Model(WorkModelError::Overloaded),
+        ),
+        (
+            "invalid_request",
+            VoiceError::Model(WorkModelError::Overloaded),
+        ),
         ("cancelled", VoiceError::Cancelled),
         ("timeout", VoiceError::Timeout),
+        ("provider_timeout", VoiceError::Timeout),
         ("interrupted", VoiceError::Interrupted),
         ("too_long", VoiceError::TooLong),
         ("audio_too_long", VoiceError::AudioTooLong),
