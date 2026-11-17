@@ -405,6 +405,20 @@ pub(crate) fn new_ephemeral_data_store() -> Result<WebsiteDataStore, &'static st
     Ok(store)
 }
 
+#[cfg(feature = "native-agentic-semantic-probe")]
+static NONPERSISTENT_STORES_FOR_PROBE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+#[doc(hidden)]
+pub fn nonpersistent_stores_for_probe() {
+    NONPERSISTENT_STORES_FOR_PROBE.store(true, Ordering::Release);
+}
+
+#[cfg(feature = "native-agentic-semantic-probe")]
+pub(crate) fn nonpersistent_stores_selected_for_probe() -> bool {
+    NONPERSISTENT_STORES_FOR_PROBE.load(Ordering::Acquire)
+}
+
 /// Build a fresh mutable configuration for one WKWebView while binding it to
 /// the profile-owned store. Configurations themselves must never be shared:
 /// Wry installs per-view scripts, delegates and scheme handlers into them.

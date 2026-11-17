@@ -46,6 +46,9 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
+#[doc(hidden)]
+pub use platform::macos::nonpersistent_stores_for_probe;
 #[cfg(all(target_os = "macos", feature = "blocker-bench"))]
 pub use platform::macos::qa_capture::capture_window_png;
 mod pane_geometry;

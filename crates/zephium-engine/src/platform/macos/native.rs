@@ -340,6 +340,14 @@ fn validate_data_store_postcondition(
                 return Err("ephemeral WKWebView exposed a durable data-store identifier".into());
             }
         }
+        #[cfg(feature = "native-agentic-semantic-probe")]
+        Partition::Default(_) | Partition::Persistent(_)
+            if super::nonpersistent_stores_selected_for_probe() =>
+        {
+            if !has_expected_ephemeral_store || persistent || identifier.is_some() {
+                return Err("probe WKWebView did not retain a non-persistent data store".into());
+            }
+        }
         Partition::Default(profile) | Partition::Persistent(profile) => {
             if has_expected_ephemeral_store {
                 return Err("durable WKWebView received an ephemeral data-store proof".into());

@@ -1,5 +1,5 @@
 //! One spoken-style request against the real sidebar assistant service, the
-//! person's Page model and native Browse views of a private (non-persistent)
+//! person's Page model and native Browse views of a regular, non-persistent
 //! profile, measured from typed facts. The page ports mirror
 //! `desktop/src/page_assist.rs` over the same engine reader.
 use std::collections::{BTreeMap, HashMap};
@@ -126,7 +126,7 @@ impl Shared {
         let (width, height) = BOUNDS;
         if !engine.create_view(
             item,
-            Partition::Ephemeral(self.profile),
+            Partition::Persistent(self.profile),
             url,
             zephium_core::geometry::Rect::new(0.0, 0.0, width, height),
         ) {
@@ -339,8 +339,6 @@ impl PagePort for BenchPage {
                     space: Some(self.0.space.clone()),
                     url: entry.url.clone(),
                     title: Some(entry.title.clone()),
-                    // A private profile keeps the data store non-persistent; the
-                    // panel's private-window refusal is not what is measured.
                     private: false,
                     viewer: false,
                     loading: entry.loading || unread,
@@ -1197,7 +1195,7 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         ))
     };
     zephium_engine::page_reader::set_diagnostics(reader_note);
-    zephium_engine::page_reader::read_private_views_for_probe();
+    zephium_engine::nonpersistent_stores_for_probe();
     let profile = ProfileId::generate();
     let shared = Arc::new(Shared {
         profile,

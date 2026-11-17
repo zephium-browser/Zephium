@@ -155,7 +155,23 @@ impl WebextHost {
         self.profiles.entry(profile).or_insert_with(|| {
             let mtm = MainThreadMarker::new().expect("engine host runs on the main thread");
             let identifier = profile_uuid(profile);
+            #[cfg(feature = "native-agentic-semantic-probe")]
+            let (store, runtime_identifier) =
+                if crate::platform::macos::nonpersistent_stores_selected_for_probe() {
+                    (
+                        unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) },
+                        None,
+                    )
+                } else {
+                    (
+                        unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) },
+                        Some(&*identifier),
+                    )
+                };
+            #[cfg(not(feature = "native-agentic-semantic-probe"))]
             let store = unsafe { WKWebsiteDataStore::dataStoreForIdentifier(&identifier, mtm) };
+            #[cfg(not(feature = "native-agentic-semantic-probe"))]
+            let runtime_identifier = Some(&*identifier);
             let bridge = Rc::new(Bridge {
                 profile,
                 sink: sink.clone(),
@@ -172,7 +188,7 @@ impl WebextHost {
                 data: RefCell::new(HashMap::new()),
             });
             *bridge.self_weak.borrow_mut() = Rc::downgrade(&bridge);
-            let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
+            let runtime = Runtime::new(mtm, &store, runtime_identifier, bridge.clone());
             let page_script = zephium_webext_macos::PageScript::supported()
                 .then(|| zephium_webext_macos::PageScript::new(runtime.controller(), false));
             ProfileRuntime {

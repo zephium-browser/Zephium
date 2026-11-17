@@ -243,25 +243,6 @@ pub enum PageReadFailure {
     Unavailable,
 }
 
-#[cfg(feature = "native-agentic-semantic-probe")]
-static PRIVATE_VIEWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Probe only: views of a private (non-persistent) profile get the reader
-/// too, so a bench can run it without a persistent data store.
-#[cfg(feature = "native-agentic-semantic-probe")]
-#[doc(hidden)]
-pub fn read_private_views_for_probe() {
-    PRIVATE_VIEWS.store(true, std::sync::atomic::Ordering::Release);
-}
-
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
-pub(crate) fn private_views_readable() -> bool {
-    #[cfg(feature = "native-agentic-semantic-probe")]
-    return PRIVATE_VIEWS.load(std::sync::atomic::Ordering::Acquire);
-    #[cfg(not(feature = "native-agentic-semantic-probe"))]
-    false
-}
-
 /// When the reader may install: the shell's switch and its site policy.
 #[derive(Clone)]
 pub struct PageReaderPolicy {
