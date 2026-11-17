@@ -9,6 +9,10 @@
 
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod acceptance;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod assist_bench;
+#[cfg(any(all(target_os = "macos", feature = "durable-runtime"), test))]
+mod assist_scenarios;
 #[cfg(all(target_os = "macos", feature = "decision-eval"))]
 mod decision_eval;
 #[cfg(all(target_os = "macos", feature = "decision-eval"))]
@@ -221,6 +225,21 @@ fn main() {
         [argument] if argument == "--live-agent-trip-work" => work_durable::run_agent_trip(),
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument, scenario] if argument == "--assist-bench" => assist_bench::run(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--assist-bench-list" => {
+            for scenario in assist_scenarios::SCENARIOS {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "{}\t{}\t{}",
+                    scenario.name,
+                    if scenario.live { "live" } else { "loopback" },
+                    scenario.request
+                );
+            }
+            Ok(())
+        }
         #[cfg(feature = "durable-runtime")]
         [argument, case, export] if argument == "--live-local-fixture" => {
             work_durable::run_local_fixture(case, export)

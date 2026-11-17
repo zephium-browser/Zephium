@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""Scenario bench for the sidebar assistant: one spoken-style request per run
+through the signed probe, the real service, the Page model and native views.
+
+CARGO_TARGET_DIR defaults to /private/tmp/zephium-engine-target; ASSIST_BENCH_OUT
+can override its assist-bench evidence folder.
+
+  scripts/assist-bench build                  build the probe (run signs a private copy)
+  scripts/assist-bench run [scenario ...]     run (default: every scenario)
+  scripts/assist-bench show [run.json]        print a run (default: the latest)
+  scripts/assist-bench compare a.json b.json  deltas of b against a
+  scripts/assist-bench baseline [run.json]    mark a run (default: the latest) as the baseline
+  scripts/assist-bench list                   scenarios
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime
+
+REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+TARGET = os.path.abspath(os.path.join(REPO, os.environ.get("CARGO_TARGET_DIR", "/private/tmp/zephium-engine-target")))
+PROBE = os.path.join(TARGET, "debug/macos-terra-agentic-probe")
+OUT = os.path.abspath(os.path.join(REPO, os.environ.get("ASSIST_BENCH_OUT", os.path.join(TARGET, "assist-bench"))))
+SCHEMA = 1
+IDENTIFIER = "app.zephium.work-integration.probe"
+SETUP_ENV = ("ZEPHIUM_PROBE_PAGE_MODEL",)
+TIMEOUT = 660
+STOP_FAULTS = ("missing_key", "key_refused", "provider_credit", "no_model")
+SOURCES = ("crates/zephium-terra-macos-probe/src/assist_scenarios.rs",
+           "crates/zephium-terra-macos-probe/src/assist_bench.rs")
+
+
+def die(message):
+    print(f"assist-bench: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def sh(*command, **kwargs):
+    return subprocess.run(command, cwd=REPO, **kwargs)
+
+
+def file_id(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_signed(probe):
+    shown = subprocess.run(["/usr/bin/codesign", "-dv", "--verbose=4", probe], capture_output=True, text=True)
+    verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict", probe], capture_output=True)
+    lines = shown.stderr.splitlines()
+    team = [line for line in lines if line.startswith("TeamIdentifier=")]
+    if (shown.returncode or verified.returncode or f"Identifier={IDENTIFIER}" not in lines
+            or not team or team[0] == "TeamIdentifier=not set"):
+        die("private probe signature verification failed (a Team-signed identity is required)")
+    return [line for line in lines if line.startswith(("Identifier=", "CDHash=", "TeamIdentifier=", "Authority="))]
+
+
+def prepare_probe(directory):
+    if not os.path.isfile(PROBE) or os.path.islink(PROBE):
+        die("probe not built: run scripts/assist-bench build")
+    probe = os.path.join(directory, "macos-terra-agentic-probe")
+    source_hash = file_id(PROBE)
+    shutil.copyfile(PROBE, probe)
+    if file_id(probe) != source_hash or file_id(PROBE) != source_hash:
+        die("Cargo probe changed while copying; retry after the build finishes")
+    os.chmod(probe, 0o700)
+    try:
+        signed = sh(os.path.join(REPO, "scripts/sign-work-probe.sh"), probe, timeout=120).returncode
+    except subprocess.TimeoutExpired:
+        die("signing did not finish (it may be waiting on a Keychain prompt); not running")
+    if signed:
+        die("private probe signing failed")
+    signature = check_signed(probe)
+    os.chmod(probe, 0o500)
+    return probe, file_id(probe), signature
+
+
+def build():
+    env = dict(os.environ, CARGO_TARGET_DIR=TARGET)
+    if sh("cargo", "build", "-p", "zephium-terra-macos-probe", "--features", "durable-runtime", env=env).returncode:
+        die("probe build failed")
+    print(f"Built {PROBE}; run will sign and retain a private copy.")
+
+
+def scenarios(probe):
+    listed = subprocess.run([probe, "--assist-bench-list"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if listed.returncode:
+        die("probe does not list assist scenarios; rebuild it")
+    rows = [line.split("\t", 2) for line in listed.stdout.splitlines() if line.count("\t") == 2]
+    return {name: (kind, request) for name, kind, request in rows}
+
+
+ROW = re.compile(r"^assist-run: (\{.*\})$", re.M)
+FAILURE = re.compile(r"^assist-run-failure: stage=(\S+)$", re.M)
+
+
+def run_one(name, logs, probe, probe_hash):
+    log_path = os.path.join(logs, f"{name}.log")
+    if file_id(probe) != probe_hash:
+        die("private probe bytes changed before launch")
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix=f"assist-bench-{name}-") as cwd, open(log_path, "w") as log:
+        child = subprocess.Popen([probe, "--assist-bench", name], cwd=cwd, stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=subprocess.STDOUT)
+        try:
+            code = child.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()
+            code = -9
+        except KeyboardInterrupt:
+            child.kill()
+            child.wait()
+            raise
+    wall = int((time.monotonic() - started) * 1000)
+    with open(log_path, errors="replace") as log:
+        output = log.read()
+    found = ROW.findall(output)
+    row = json.loads(found[-1]) if found else {"scenario": name}
+    failure = FAILURE.findall(output)
+    if failure:
+        row["harness_fault"] = failure[-1]
+    elif not found:
+        row["harness_fault"] = row.get("harness_fault", "no_result")
+    row.update(exit=code, process_ms=wall, log=log_path, probe=probe_hash,
+               probe_unchanged=file_id(probe) == probe_hash)
+    return row
+
+
+def commit_id():
+    head = sh("git", "rev-parse", "--short", "HEAD", capture_output=True, text=True).stdout.strip()
+    dirty = bool(sh("git", "status", "--porcelain", "--untracked-files=no", capture_output=True, text=True).stdout.strip())
+    return head + ("+dirty" if dirty else "")
+
+
+def seconds(ms):
+    return "-" if ms is None else f"{ms / 1000:.1f}s"
+
+
+def flag(value):
+    return {True: "yes", False: "NO", None: "-"}.get(value, str(value))
+
+
+HEAD = ["scenario", "verified", "fact", "claimed", "false_done", "steps", "calls", "reads", "wall",
+        "first-text", "first-action", "tokens", "cost"]
+
+
+def cell(row):
+    if row.get("harness_fault"):
+        return [row["scenario"], f"harness:{row['harness_fault']}"] + [""] * (len(HEAD) - 2)
+    tokens = row.get("tokens") or {}
+    cost = row.get("cost_micro_usd")
+    return [
+        row["scenario"],
+        flag(row.get("task_verified")),
+        flag(row.get("answer_fact")),
+        row.get("claimed", "-"),
+        "FALSE-DONE" if row.get("false_done") else "no",
+        str(row.get("steps", 0)),
+        str(row.get("model_calls", 0)),
+        str(row.get("page_reads", 0)),
+        seconds(row.get("wall_ms")),
+        seconds(row.get("first_text_ms")),
+        seconds(row.get("first_action_ms")),
+        f"{(tokens.get('input', 0) + tokens.get('output', 0)) / 1000:.1f}k",
+        "unknown" if cost is None else f"${cost / 1e6:.4f}",
+    ]
+
+
+def table(head, rows):
+    widths = [max(len(head[i]), *(len(r[i]) for r in rows)) if rows else len(head[i]) for i in range(len(head))]
+
+    def line(r):
+        return "  ".join(c.ljust(widths[i]) for i, c in enumerate(r)).rstrip()
+
+    return "\n".join([line(head), line(["-" * w for w in widths])] + [line(r) for r in rows])
+
+
+def total(rows, key):
+    return sum(r.get(key) or 0 for r in rows)
+
+
+def show(run):
+    rows = run["rows"]
+    models = sorted({json.dumps(r.get("model"), sort_keys=True) for r in rows if r.get("model")})
+    print(f"assist-bench run {run['stamp']} at {run['commit']} probe {rows[0].get('probe', '')[:12] if rows else ''}")
+    print(f"models: {', '.join(models) or 'unknown'}")
+    print(table(HEAD, [cell(r) for r in rows]))
+    ok = [r for r in rows if not r.get("harness_fault")]
+    verified = [r.get("task_verified") for r in ok]
+    facts = [r.get("answer_fact") for r in ok if r.get("answer_fact") is not None]
+    claims = {}
+    for r in ok:
+        claims[r["claimed"]] = claims.get(r["claimed"], 0) + 1
+    cost = [r.get("cost_micro_usd") for r in ok]
+    print(f"\ntotal: {len(ok)}/{len(rows)} ran; verified {verified.count(True)} yes / {verified.count(False)} no / "
+          f"{verified.count(None)} n/a; facts {facts.count(True)}/{len(facts)}; "
+          f"false_done {sum(1 for r in ok if r.get('false_done'))}")
+    print(f"claimed: {', '.join(f'{k} {v}' for k, v in sorted(claims.items()))}")
+    print(f"steps {total(ok, 'steps')}, model calls {total(ok, 'model_calls')}, reads {total(ok, 'page_reads')}, "
+          f"acts {total(ok, 'acts')}, confirms {sum(len(r.get('confirms', [])) for r in ok)}, "
+          f"refusals {total(ok, 'refusals')}, wall {total(ok, 'wall_ms') / 1000:.0f}s, "
+          f"cost {'unknown' if None in cost else f'${sum(cost) / 1e6:.4f}'}")
+    phases = {k: sum((r.get(k) or {}).get("total_ms", 0) for r in ok) for k in ("model_time", "read_time", "act_time")}
+    print("time in: " + ", ".join(f"{k.split('_')[0]} {v / 1000:.0f}s" for k, v in phases.items()))
+
+
+def load(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def latest():
+    runs = sorted(f for f in os.listdir(OUT) if re.fullmatch(r"\d{8}-\d{6}-\d{6}\.json", f)) if os.path.isdir(OUT) else []
+    if not runs:
+        die("no runs yet")
+    return os.path.join(OUT, runs[-1])
+
+
+METRICS = [
+    ("wall", lambda r: (r.get("wall_ms") or 0) / 1000, "{:.1f}s"),
+    ("first-text", lambda r: (r.get("first_text_ms") or 0) / 1000, "{:.1f}s"),
+    ("first-action", lambda r: (r.get("first_action_ms") or 0) / 1000, "{:.1f}s"),
+    ("calls", lambda r: r.get("model_calls", 0), "{:.0f}"),
+    ("reads", lambda r: r.get("page_reads", 0), "{:.0f}"),
+    ("steps", lambda r: r.get("steps", 0), "{:.0f}"),
+    ("tokens", lambda r: ((r.get("tokens") or {}).get("input", 0) + (r.get("tokens") or {}).get("output", 0)) / 1000, "{:.1f}k"),
+]
+
+
+def compare(a_path, b_path):
+    a, b = load(a_path), load(b_path)
+    print(f"{os.path.basename(a_path)} ({a['commit']}) -> {os.path.basename(b_path)} ({b['commit']})")
+    before = {r["scenario"]: r for r in a["rows"]}
+    after = {r["scenario"]: r for r in b["rows"]}
+    rows, regressions = [], []
+    for name in dict.fromkeys([*before, *after]):
+        base, row = before.get(name), after.get(name)
+        if base is None or row is None or base.get("harness_fault") or row.get("harness_fault"):
+            rows.append([name, "UNMATCHED"] + [""] * (len(METRICS) + 1))
+            continue
+        if a.get("scenario_source") != b.get("scenario_source"):
+            result = "scenarios changed"
+        else:
+            result = "same scenarios"
+        if row.get("false_done") and not base.get("false_done"):
+            regressions.append(f"{name}: new false done")
+            result = "REGRESSED"
+        elif base.get("task_verified") is True and row.get("task_verified") is not True:
+            regressions.append(f"{name}: task no longer verified")
+            result = "REGRESSED"
+        line = [name, result, f"{base.get('claimed')} > {row.get('claimed')}" if base.get("claimed") != row.get("claimed") else "="]
+        for _, get, fmt in METRICS:
+            x, y = get(base), get(row)
+            line.append("=" if abs(x - y) < 1e-9 else f"{fmt.format(x)} > {fmt.format(y)}")
+        rows.append(line)
+    print(table(["scenario", "comparison", "claimed"] + [m[0] for m in METRICS], rows))
+    if regressions:
+        print("\nregressions:\n  " + "\n  ".join(regressions))
+    return 1 if regressions else 0
+
+
+def run(names):
+    os.makedirs(OUT, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    logs = os.path.join(OUT, stamp)
+    os.mkdir(logs, 0o700)
+    probe, probe_hash, signature = prepare_probe(logs)
+    known = scenarios(probe)
+    names = names or list(known)
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        die(f"unknown scenario {unknown[0]} (see: scripts/assist-bench list)")
+    if len(set(names)) != len(names):
+        die("duplicate scenarios would overwrite evidence logs")
+    setup = {"schema": SCHEMA, "stamp": stamp, "commit": commit_id(), "cargo_target_dir": TARGET,
+             "probe_path": probe, "signature": signature, "harness": file_id(__file__),
+             "scenario_source": [file_id(os.path.join(REPO, s)) for s in SOURCES],
+             "platform": list(os.uname()), "environment": {k: os.environ.get(k) for k in SETUP_ENV}}
+    rows, stopped = [], None
+    for name in names:
+        print(f"[{name}] running ...", flush=True)
+        row = run_one(name, logs, probe, probe_hash)
+        rows.append(row)
+        print("  " + "  ".join(cell(row)[1:]), flush=True)
+        if not row["probe_unchanged"]:
+            stopped = "private probe bytes changed; stopped"
+            break
+        fault = row.get("fault") or {}
+        if fault.get("reason") in STOP_FAULTS or fault.get("fault") in STOP_FAULTS or row.get("availability") == "no_model":
+            stopped = f"model unavailable ({fault}) in {name}; stopped"
+            break
+    result = dict(setup, rows=rows)
+    if stopped:
+        result["stopped"] = stopped
+    path = os.path.join(OUT, f"{stamp}.json")
+    with open(path, "w") as f:
+        json.dump(result, f, indent=2)
+    print()
+    show(result)
+    if stopped:
+        print(f"\n{stopped}")
+    print(f"\n{path}")
+    baseline = os.path.join(OUT, "baseline.json")
+    if os.path.isfile(baseline):
+        print()
+        compare(baseline, path)
+    return 0 if all(not r.get("harness_fault") and r.get("exit") == 0 for r in rows) else 1
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else "run"
+    rest = argv[2:]
+    if command == "build":
+        build()
+    elif command == "run":
+        sys.exit(run(rest))
+    elif command == "show":
+        show(load(rest[0] if rest else latest()))
+    elif command == "compare":
+        if len(rest) != 2:
+            die("compare takes two run files")
+        sys.exit(compare(rest[0], rest[1]))
+    elif command == "baseline":
+        source = rest[0] if rest else latest()
+        os.makedirs(OUT, exist_ok=True)
+        shutil.copyfile(source, os.path.join(OUT, "baseline.json"))
+        print(f"baseline: {source}")
+    elif command == "list":
+        if not os.path.isfile(PROBE):
+            die("probe not built: run scripts/assist-bench build")
+        for name, (kind, request) in scenarios(PROBE).items():
+            print(f"{name:18} {kind:9} {request}")
+    else:
+        print(__doc__)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv)

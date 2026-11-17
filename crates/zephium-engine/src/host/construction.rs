@@ -2227,7 +2227,9 @@ impl EngineHost {
         }
         // Private windows never get the Ask panel's reader.
         #[cfg(all(feature = "agentic-browser", target_os = "macos"))]
-        if !matches!(partition, Partition::Ephemeral(_)) {
+        if !matches!(partition, Partition::Ephemeral(_))
+            || crate::page_reader::private_views_readable()
+        {
             let committed = navigation.clone();
             let settled = navigation.clone();
             *page_reader.borrow_mut() = crate::platform::macos::browse_reader::BrowseReader::new(
@@ -2518,7 +2520,9 @@ impl EngineHost {
         .ok();
         // Private windows never get the Ask panel's reader.
         #[cfg(all(feature = "agentic-browser", target_os = "windows"))]
-        if !matches!(partition, Partition::Ephemeral(_)) {
+        if !matches!(partition, Partition::Ephemeral(_))
+            || crate::page_reader::private_views_readable()
+        {
             let committed = navigation.clone();
             *page_reader.borrow_mut() = crate::platform::windows::browse_reader::BrowseReader::new(
                 wry::WebViewExtWindows::webview(&view),
