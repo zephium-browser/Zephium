@@ -55,6 +55,22 @@ test("dead keys and AltGr bring focus back, plain Control doesn't", () => {
   expect(document.activeElement).toBe(input);
 });
 
+test("Cmd+V wakes a parked field before the paste, Ctrl+V doesn't on macOS", () => {
+  vi.advanceTimersByTime(4100);
+  const ctrl = new KeyboardEvent("keydown", { key: "v", code: "KeyV", ctrlKey: true });
+  window.dispatchEvent(ctrl);
+  expect(document.activeElement).not.toBe(input);
+  const cmd = new KeyboardEvent("keydown", {
+    key: "v",
+    code: "KeyV",
+    metaKey: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(cmd);
+  expect(document.activeElement).toBe(input);
+  expect(cmd.defaultPrevented).toBe(false);
+});
+
 test("Escape, Enter and the arrows reach a parked field's own handlers once", () => {
   const field: string[] = [];
   const window_: string[] = [];

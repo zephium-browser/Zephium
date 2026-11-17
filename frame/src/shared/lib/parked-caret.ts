@@ -1,3 +1,5 @@
+import { IS_MAC } from "$shared/platform";
+
 const IDLE_MS = 4000;
 
 /**
@@ -10,8 +12,9 @@ const IDLE_MS = 4000;
  * A parked field still takes every key it would have taken focused. Text
  * and Tab land natively once focus is back; other keys, such as Escape,
  * Enter or the arrows, are handed to the field so its own handlers run.
- * Ctrl shortcuts without AltGraph and Cmd shortcuts other than Cmd+V are
- * left alone, so Windows paste (Ctrl+V) does not wake a parked field.
+ * Paste (Cmd+V, and Ctrl+V or Ctrl+Shift+V off macOS) brings focus back
+ * before its default action, so the text lands in the field. Other Ctrl
+ * shortcuts without AltGraph and other Cmd shortcuts leave it parked.
  * Focus and pointer interaction release the parked caret.
  */
 export function parkCaret(
@@ -74,11 +77,14 @@ export function parkCaret(
   const MODIFIERS = new Set(["Alt", "AltGraph", "CapsLock", "Control", "Fn", "Meta", "Shift"]);
   function wake(event: KeyboardEvent) {
     const altGraph = event.getModifierState("AltGraph");
-    if (event.ctrlKey && !altGraph) return;
-    if (event.metaKey && event.key.toLowerCase() !== "v") return;
+    // The physical key too, so paste still wakes it on a non-Latin layout.
+    const v = event.key.toLowerCase() === "v" || event.code === "KeyV";
+    const paste = v && !event.altKey && (event.metaKey || (!IS_MAC && event.ctrlKey));
+    if (event.ctrlKey && !altGraph && !paste) return;
+    if (event.metaKey && !paste) return;
     if (MODIFIERS.has(event.key)) return;
     input.focus({ preventScroll: true });
-    const text = event.key.length === 1 || STARTS_TEXT.has(event.key) || event.isComposing;
+    const text = paste || event.key.length === 1 || STARTS_TEXT.has(event.key) || event.isComposing;
     if (text || event.key === "Tab" || event.target === input) return;
     event.preventDefault();
     event.stopImmediatePropagation();
