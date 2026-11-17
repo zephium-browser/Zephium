@@ -1,6 +1,7 @@
 <script lang="ts">
   import "$shared/ui/Menu/surface.css";
   import * as m from "$shared/i18n/messages";
+  import { isComposing } from "$shared/lib/keyboard";
   import { Add01Icon, ArrowDown01Icon } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -53,7 +54,7 @@
     const away = () => flow.dismiss();
     // WebKit does not focus a pressed button, so Escape is heard window-wide.
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      if (event.key !== "Escape" || isComposing(event) || event.defaultPrevented) return;
       // The panel owns Escape ahead of the selection beneath it, regardless
       // of the order in which the window listeners were installed.
       event.preventDefault();

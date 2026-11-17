@@ -254,6 +254,30 @@ test("Escape puts the space back as it was", async () => {
   await expect.element(screen.getByRole("menuitemradio").first()).toBeVisible();
 });
 
+test("an IME Escape leaves the space editor open", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
+    button: "right",
+  });
+  const name = screen.getByRole("textbox", { name: "Name" });
+  await expect.element(name).toHaveFocus();
+
+  const escape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  name.element().dispatchEvent(escape);
+  expect(escape.defaultPrevented).toBe(false);
+  await expect.element(name).toHaveFocus();
+  expect(native.update).not.toHaveBeenCalled();
+
+  await userEvent.keyboard("{Escape}");
+  await expect.element(screen.getByRole("menuitemradio", { name: "Studio" })).toBeVisible();
+});
+
 test("deleting asks first and says how many tabs will close", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
