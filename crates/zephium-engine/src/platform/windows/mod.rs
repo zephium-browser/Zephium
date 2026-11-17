@@ -152,10 +152,11 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10, ICoreWebView2_13,
     ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
-    COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
-    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
-    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS, COREWEBVIEW2_PROCESS_FAILED_KIND,
-    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+    COREWEBVIEW2_KEY_EVENT_KIND, COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,
+    COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
+    COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT,
+    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS,
+    COREWEBVIEW2_PROCESS_FAILED_KIND, COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
@@ -2111,6 +2112,53 @@ impl Drop for AcceleratorRegistration {
     }
 }
 
+/// A key as WebView2 reports it to its host: the virtual key and the
+/// `WM_KEYDOWN`-style lParam of the message it came from.
+pub struct HostKey {
+    pub key: u32,
+    pub lparam: i32,
+    pub up: bool,
+}
+
+type KeyFilter = Box<dyn Fn(HostKey) -> bool + Send + Sync>;
+static KEY_FILTER: std::sync::OnceLock<KeyFilter> = std::sync::OnceLock::new();
+
+/// Sees every key the main window's web views report, down and up, before
+/// any other matching; returning true consumes it.
+pub fn set_key_filter(filter: impl Fn(HostKey) -> bool + Send + Sync + 'static) {
+    let _ = KEY_FILTER.set(Box::new(filter));
+}
+
+/// Offers the key to the filter. `Some(true)` when it was consumed, `None`
+/// for kinds the caller's own matching never handles.
+fn filter_key(
+    args: &ICoreWebView2AcceleratorKeyPressedEventArgs,
+    kind: COREWEBVIEW2_KEY_EVENT_KIND,
+) -> windows_core::Result<Option<bool>> {
+    let up = kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_UP
+        || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP;
+    let down = kind == COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+        || kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN;
+    let consumed = match KEY_FILTER.get() {
+        Some(filter) => {
+            let (mut key, mut lparam) = (0u32, 0i32);
+            // SAFETY: the arguments are live for this callback.
+            unsafe {
+                args.VirtualKey(&mut key)?;
+                args.KeyEventLParam(&mut lparam)?;
+            }
+            let consumed = filter(HostKey { key, lparam, up });
+            if consumed {
+                // SAFETY: as above.
+                unsafe { args.SetHandled(true)? };
+            }
+            consumed
+        }
+        None => false,
+    };
+    Ok((down || consumed).then_some(consumed))
+}
+
 /// F10 and Alt+Space belong to the window's caption, yet WebView2 takes them
 /// before the window sees them. They reach the parent as the messages Windows
 /// itself would have produced.
@@ -2169,9 +2217,7 @@ pub fn bridge_caption_keys(controller: &ICoreWebView2Controller) -> windows_core
         };
         let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
         unsafe { args.KeyEventKind(&mut kind)? };
-        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
-            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
-        {
+        if filter_key(&args, kind)? != Some(false) {
             return Ok(());
         }
         let mut key = 0u32;
@@ -2201,9 +2247,7 @@ pub fn install_accelerators(
         };
         let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
         unsafe { args.KeyEventKind(&mut kind)? };
-        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
-            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
-        {
+        if filter_key(&args, kind)? != Some(false) {
             return Ok(());
         }
         let mut key = 0u32;

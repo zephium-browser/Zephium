@@ -55,7 +55,8 @@ mod pane_geometry;
 mod platform;
 #[cfg(target_os = "windows")]
 pub use platform::windows::{
-    bridge_caption_keys, forget_window_caption_offset, set_window_caption_offset,
+    bridge_caption_keys, forget_window_caption_offset, set_key_filter, set_window_caption_offset,
+    HostKey,
 };
 #[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
 mod work_site_session;

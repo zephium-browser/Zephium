@@ -37,6 +37,9 @@ pub(crate) struct Keymap {
     /// on macOS is a menu key equivalent.
     #[cfg(target_os = "macos")]
     key_table: Arc<RwLock<Vec<(Accelerator, &'static str)>>>,
+    /// The talk key, matched by the Windows key filters.
+    #[cfg(target_os = "windows")]
+    talk_table: RwLock<Vec<Shortcut>>,
 }
 
 impl Keymap {
@@ -112,11 +115,15 @@ impl Keymap {
         self.key_table.clone()
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn talks(&self, key: u32, ctrl: bool, shift: bool, alt: bool) -> bool {
+        Shortcut::match_windows(&read(&self.talk_table), key, ctrl, shift, alt).is_some()
+    }
+
     fn refresh_tables(&self) {
         if let Some(apply) = self.engine.get() {
             apply(self.engine_table());
         }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let recording = self.recording.load(Ordering::Acquire);
         #[cfg(target_os = "linux")]
         {
@@ -150,6 +157,18 @@ impl Keymap {
                 })
                 .collect();
         }
+        #[cfg(target_os = "windows")]
+        {
+            *write(&self.talk_table) = self
+                .resolved()
+                .iter()
+                .filter(|command| command.id == "voice.talk")
+                .filter(|command| !recording && self.offers(command.id))
+                .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
+                .collect();
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let _ = recording;
     }
 
     #[cfg(target_os = "macos")]
@@ -196,7 +215,7 @@ impl Keymap {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn recording(&self) -> bool {
         self.recording.load(Ordering::Acquire)
     }
@@ -643,6 +662,35 @@ mod tests {
         write(&keymap.overrides).insert("voice.talk".into(), String::new());
         keymap.refresh_tables();
         assert!(!has_talk());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn talk_key_follows_rebinding_feature_switch_and_recording_on_windows() {
+        let keymap = Keymap::default();
+        keymap.refresh_tables();
+        let a = u32::from(b'A');
+        assert!(keymap.talks(a, true, true, false));
+        assert!(!keymap.talks(a, true, false, false));
+        assert!(!keymap.talks(a, true, true, true));
+        write(&keymap.overrides).insert("voice.talk".into(), "CmdOrCtrl+Shift+F8".into());
+        keymap.refresh_tables();
+        assert!(!keymap.talks(a, true, true, false));
+        let f8 = 0x77;
+        assert!(keymap.talks(f8, true, true, false));
+        assert!(!keymap.recording());
+        keymap.set_recording(true);
+        assert!(keymap.recording());
+        assert!(!keymap.talks(f8, true, true, false));
+        keymap.set_recording(false);
+        assert!(keymap.talks(f8, true, true, false));
+        keymap.follow_preference("ai.enabled", "false");
+        assert!(!keymap.talks(f8, true, true, false));
+        keymap.follow_preference("ai.enabled", "true");
+        assert!(keymap.talks(f8, true, true, false));
+        write(&keymap.overrides).insert("voice.talk".into(), String::new());
+        keymap.refresh_tables();
+        assert!(!keymap.talks(f8, true, true, false));
     }
 
     #[test]

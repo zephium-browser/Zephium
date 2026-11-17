@@ -9,9 +9,12 @@ mod pointer;
 pub(crate) mod renderer;
 #[path = "windows_sidebar_edge.rs"]
 mod sidebar_edge;
+#[path = "windows_talk_keys.rs"]
+mod talk_keys;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+pub(crate) use talk_keys::install_talk_keys;
 
 use tauri::{Manager, WebviewWindow};
 use windows::core::Interface;
