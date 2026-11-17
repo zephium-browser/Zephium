@@ -621,13 +621,18 @@ pub(crate) mod read {
                         None => {}
                     }
                 }
-                (SemanticReadField::OrdinalValue, _)
-                    if previous.is_none() && role == PageRole::Select =>
+                (SemanticReadField::OrdinalValue, SemanticReadContent::Ordinal(ordinal))
+                    if role == PageRole::Select =>
                 {
-                    passages.push((
-                        unnamed(fragment.id().get(), role, fragment.region()),
-                        reference,
-                    ));
+                    let value = chosen(&observation, node, ordinal);
+                    match previous {
+                        Some(previous) => previous.value = value,
+                        None => {
+                            let mut passage = unnamed(fragment.id().get(), role, fragment.region());
+                            passage.value = value;
+                            passages.push((passage, reference));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -692,6 +697,39 @@ pub(crate) mod read {
                 | PageRole::Checkbox { .. }
                 | PageRole::Select
         )
+    }
+
+    /// The name of the option `select` shows: the one marked selected, else
+    /// the one at its selected index.
+    fn chosen(
+        observation: &zephium_agentic::SemanticObservation,
+        select: &zephium_agentic::SemanticNode,
+        ordinal: u16,
+    ) -> Option<String> {
+        let nodes = observation.frames().first()?.nodes();
+        let index = nodes
+            .iter()
+            .position(|node| node.reference() == select.reference())?;
+        let mut inside = vec![index];
+        let mut options = Vec::new();
+        for (at, node) in nodes.iter().enumerate().skip(index + 1) {
+            if !node
+                .parent()
+                .is_some_and(|parent| inside.contains(&usize::from(parent)))
+            {
+                continue;
+            }
+            inside.push(at);
+            if node.role() == SemanticRole::Option {
+                options.push(node);
+            }
+        }
+        let option = options
+            .iter()
+            .find(|node| node.states().contains(SemanticState::Selected))
+            .or_else(|| options.get(usize::from(ordinal)))?;
+        let name = option.name()?.as_str().trim();
+        (!name.is_empty()).then(|| name.to_owned())
     }
 
     fn unnamed(id: u16, role: PageRole, region: u8) -> PagePassage {
@@ -1075,6 +1113,34 @@ pub(crate) mod read {
             ids.sort_unstable();
             ids.dedup();
             assert_eq!(ids.len(), passages.len(), "ids stay unique");
+        }
+
+        #[test]
+        fn a_select_reads_as_the_option_it_shows() {
+            let context = reader_context().expect("context");
+            let (invocation, pending) =
+                super::invocation(context, "https://shop.example.com/", 6).expect("invocation");
+            let wire = r#"{"v":1,"i":6,"g":6,"c":"complete","n":[
+                {"k":1,"r":"document","o":16},
+                {"k":2,"p":0,"r":"combobox","n":"Topic","v":{"k":"ordinal","value":1},"o":13},
+                {"k":3,"p":1,"r":"option","n":"General","v":{"k":"ordinal","value":0},"o":9},
+                {"k":4,"p":1,"r":"option","n":"Billing","v":{"k":"ordinal","value":1},"o":9},
+                {"k":5,"p":0,"r":"combobox","n":"Size","v":{"k":"ordinal","value":0},"o":13},
+                {"k":6,"p":4,"r":"option","n":"Small","v":{"k":"ordinal","value":0},"o":9},
+                {"k":7,"p":4,"r":"option","n":"Large","v":{"k":"ordinal","value":1},"s":2,"o":9}
+            ]}"#;
+            let (passages, _) =
+                passages(pending, snapshot_for(&invocation, wire), 1, 7).expect("read");
+            let selects: Vec<(&str, Option<&str>)> = passages
+                .iter()
+                .filter(|p| p.role == PageRole::Select)
+                .map(|p| (p.text.as_str(), p.value.as_deref()))
+                .collect();
+            assert_eq!(
+                selects,
+                [("Topic", Some("Billing")), ("Size", Some("Large"))],
+                "the option marked selected wins over the index"
+            );
         }
 
         #[test]

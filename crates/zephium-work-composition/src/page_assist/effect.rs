@@ -1,0 +1,316 @@
+//! Whether a step took, judged from the page read after it against the read
+//! before it. Dispatch only says the page was handed the step; the effect is
+//! what the person would see changed: the value typed, the box ticked, the
+//! option chosen, or for a press, the page changing at the control.
+use std::collections::HashMap;
+
+use zephium_page_assist::actions::Verb;
+use zephium_page_assist::text;
+
+use super::port::{Passage, Readout, Role};
+
+/// Passages either side of a control within which a change counts as its own.
+const NEAR: usize = 12;
+
+/// What a read after a step shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Observed {
+    /// The step's expected effect is on the page.
+    Took,
+    /// Nothing on the page changed.
+    Nothing,
+    /// Something changed, but not provably what the step names.
+    Unclear,
+}
+
+/// A control as it stays recognisable across reads of one document: its
+/// kind and name, and which of the controls so named it is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Control {
+    role: Role,
+    text: String,
+    nth: usize,
+}
+
+fn kind(role: Role) -> Role {
+    match role {
+        Role::Checkbox { .. } => Role::Checkbox { checked: false },
+        role => role,
+    }
+}
+
+impl Control {
+    /// Passage `id` of `read`.
+    pub(crate) fn of(read: &Readout, id: u16) -> Option<Self> {
+        let at = read.passages.iter().position(|passage| passage.id == id)?;
+        let passage = &read.passages[at];
+        let nth = read.passages[..at]
+            .iter()
+            .filter(|other| kind(other.role) == kind(passage.role) && other.text == passage.text)
+            .count();
+        Some(Self {
+            role: kind(passage.role),
+            text: passage.text.clone(),
+            nth,
+        })
+    }
+
+    fn find(&self, read: &Readout) -> Option<usize> {
+        read.passages
+            .iter()
+            .enumerate()
+            .filter(|(_, passage)| kind(passage.role) == self.role && passage.text == self.text)
+            .nth(self.nth)
+            .map(|(at, _)| at)
+    }
+}
+
+type Signature<'a> = (Role, &'a str, Option<&'a str>);
+
+fn signature(passage: &Passage) -> Signature<'_> {
+    (
+        passage.role,
+        passage.text.as_str(),
+        passage.value.as_deref(),
+    )
+}
+
+/// Positions in `from` of passages `to` does not hold as often.
+fn unmatched(from: &Readout, to: &Readout) -> Vec<usize> {
+    let mut left: HashMap<Signature<'_>, usize> = HashMap::new();
+    for passage in &to.passages {
+        *left.entry(signature(passage)).or_default() += 1;
+    }
+    from.passages
+        .iter()
+        .enumerate()
+        .filter_map(|(at, passage)| match left.get_mut(&signature(passage)) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                None
+            }
+            _ => Some(at),
+        })
+        .collect()
+}
+
+fn near(changed: &[usize], at: Option<usize>) -> bool {
+    at.is_some_and(|at| changed.iter().any(|changed| changed.abs_diff(at) <= NEAR))
+}
+
+fn same(value: &str, wanted: &str) -> bool {
+    let value = text::clean(value);
+    let wanted = text::clean(wanted);
+    value.eq_ignore_ascii_case(&wanted)
+        // A long value comes back as a bounded preview of its start.
+        || (value.chars().count() >= 32 && wanted.starts_with(value.trim_end_matches('…')))
+}
+
+/// Whether the control now holds what the step asked for; none when the read
+/// cannot show it.
+fn holds(verb: Verb, value: Option<&str>, passage: &Passage) -> Option<bool> {
+    match (verb, passage.role) {
+        (Verb::Fill, _) => Some(same(passage.value.as_deref()?, value?)),
+        (Verb::Check, Role::Checkbox { checked }) => Some(checked),
+        (Verb::Uncheck, Role::Checkbox { checked }) => Some(!checked),
+        (Verb::Select, _) => {
+            let wanted = value?;
+            let shown = passage.value.as_deref().or(Some(passage.text.as_str()))?;
+            Some(same(shown, wanted))
+        }
+        _ => None,
+    }
+}
+
+/// Judges `verb` on `control` from the reads before and after it.
+pub(crate) fn judge(
+    verb: Verb,
+    value: Option<&str>,
+    control: &Control,
+    before: &Readout,
+    after: &Readout,
+) -> Observed {
+    let removed = unmatched(before, after);
+    let added = unmatched(after, before);
+    let unchanged = removed.is_empty() && added.is_empty();
+    let found = control.find(after);
+    match verb {
+        Verb::Fill | Verb::Check | Verb::Uncheck | Verb::Select => {
+            match found.and_then(|at| holds(verb, value, &after.passages[at])) {
+                Some(true) => Observed::Took,
+                Some(false) if unchanged => Observed::Nothing,
+                _ => Observed::Unclear,
+            }
+        }
+        Verb::Scroll => Observed::Took,
+        Verb::Click | Verb::Expand | Verb::Open | Verb::Submit => {
+            let was = control.find(before);
+            if unchanged {
+                Observed::Nothing
+            } else if (was.is_some() && found.is_none())
+                || near(&removed, was)
+                || near(&added, found)
+            {
+                Observed::Took
+            } else {
+                Observed::Unclear
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page_assist::port::FieldKind;
+
+    fn passage(id: u16, role: Role, text: &str, value: Option<&str>) -> Passage {
+        Passage {
+            id,
+            role,
+            text: text.into(),
+            verbatim: true,
+            value: value.map(str::to_owned),
+            region: 0,
+            href: None,
+        }
+    }
+
+    fn read(passages: Vec<Passage>) -> Readout {
+        Readout {
+            epoch: 1,
+            read: 1,
+            title: None,
+            passages,
+        }
+    }
+
+    fn filler(from: u16, count: u16) -> Vec<Passage> {
+        (from..from + count)
+            .map(|id| passage(id, Role::Text, &format!("Line {id}"), None))
+            .collect()
+    }
+
+    fn page(extra: Vec<Passage>) -> Readout {
+        let mut passages = vec![passage(1, Role::Text, "Clock 10:00", None)];
+        passages.extend(filler(2, 30));
+        passages.push(passage(40, Role::Button, "Add to wishlist", None));
+        passages.push(passage(41, Role::Field(FieldKind::Text), "Name", Some("")));
+        passages.push(passage(42, Role::Checkbox { checked: true }, "Email", None));
+        passages.push(passage(43, Role::Select, "Topic", Some("General")));
+        passages.extend(extra);
+        read(passages)
+    }
+
+    fn with(read: &Readout, id: u16, change: impl FnOnce(&mut Passage)) -> Readout {
+        let mut read = read.clone();
+        change(read.passages.iter_mut().find(|p| p.id == id).unwrap());
+        read
+    }
+
+    #[test]
+    fn a_press_that_changes_nothing_had_no_effect() {
+        let before = page(vec![]);
+        let control = Control::of(&before, 40).unwrap();
+        assert_eq!(
+            judge(Verb::Click, None, &control, &before, &before.clone()),
+            Observed::Nothing
+        );
+        let elsewhere = with(&before, 1, |p| p.text = "Clock 10:01".into());
+        assert_eq!(
+            judge(Verb::Click, None, &control, &before, &elsewhere),
+            Observed::Unclear,
+            "a change far from the control is not its effect"
+        );
+        let mut beside = before.clone();
+        beside
+            .passages
+            .insert(33, passage(90, Role::Text, "Added to your wishlist", None));
+        assert_eq!(
+            judge(Verb::Click, None, &control, &before, &beside),
+            Observed::Took
+        );
+        let renamed = with(&before, 40, |p| p.text = "On your wishlist".into());
+        assert_eq!(
+            judge(Verb::Click, None, &control, &before, &renamed),
+            Observed::Took
+        );
+    }
+
+    #[test]
+    fn a_value_step_took_only_when_the_control_holds_it() {
+        let before = page(vec![]);
+        let name = Control::of(&before, 41).unwrap();
+        let typed = with(&before, 41, |p| p.value = Some("Alex Moreno".into()));
+        assert_eq!(
+            judge(Verb::Fill, Some("Alex  Moreno"), &name, &before, &typed),
+            Observed::Took
+        );
+        assert_eq!(
+            judge(Verb::Fill, Some("Alex Moreno"), &name, &before, &before),
+            Observed::Nothing
+        );
+        let other = with(&before, 41, |p| p.value = Some("(555) 123".into()));
+        assert_eq!(
+            judge(Verb::Fill, Some("555123"), &name, &before, &other),
+            Observed::Unclear
+        );
+        let unread = with(&before, 41, |p| p.value = None);
+        assert_eq!(
+            judge(Verb::Fill, Some("x"), &name, &unread, &unread),
+            Observed::Unclear,
+            "a field whose value is never read cannot prove anything"
+        );
+        let long = "please resend my March invoice and the April one too";
+        let preview = with(&before, 41, |p| p.value = Some(long[..40].to_owned() + "…"));
+        assert_eq!(
+            judge(Verb::Fill, Some(long), &name, &before, &preview),
+            Observed::Took
+        );
+
+        let email = Control::of(&before, 42).unwrap();
+        let off = with(&before, 42, |p| p.role = Role::Checkbox { checked: false });
+        assert_eq!(
+            judge(Verb::Uncheck, None, &email, &before, &off),
+            Observed::Took
+        );
+        assert_eq!(
+            judge(Verb::Uncheck, None, &email, &before, &before),
+            Observed::Nothing
+        );
+        assert_eq!(
+            judge(Verb::Check, None, &email, &before, &before),
+            Observed::Took,
+            "already as asked"
+        );
+
+        let topic = Control::of(&before, 43).unwrap();
+        let billing = with(&before, 43, |p| p.value = Some("Billing".into()));
+        assert_eq!(
+            judge(Verb::Select, Some("billing"), &topic, &before, &billing),
+            Observed::Took
+        );
+        assert_eq!(
+            judge(Verb::Select, Some("Billing"), &topic, &before, &before),
+            Observed::Nothing
+        );
+    }
+
+    #[test]
+    fn controls_are_found_again_by_kind_name_and_order() {
+        let before = read(vec![
+            passage(1, Role::Button, "Add to cart", None),
+            passage(2, Role::Button, "Add to cart", None),
+        ]);
+        let second = Control::of(&before, 2).unwrap();
+        let mut after = read(vec![passage(7, Role::Text, "New banner", None)]);
+        after
+            .passages
+            .extend(before.passages.iter().cloned().map(|mut p| {
+                p.id += 10;
+                p
+            }));
+        assert_eq!(second.find(&after), Some(2));
+        assert_eq!(Control::of(&before, 9), None);
+    }
+}

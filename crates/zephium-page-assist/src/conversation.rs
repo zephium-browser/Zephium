@@ -181,6 +181,7 @@ impl Conversation {
             cost: None,
             fault: None,
             inert: false,
+            end: None,
         };
         self.view.messages.push(message.clone());
         self.trim();
@@ -218,6 +219,7 @@ impl Conversation {
             blocks,
             cost,
             fault,
+            end,
             ..
         } = message
         else {
@@ -257,10 +259,14 @@ impl Conversation {
                 }
             }
             Event::State { state: next } => *state = *next,
-            Event::Done { cost: next } => {
+            Event::Done {
+                cost: next,
+                end: ended,
+            } => {
                 *state = ReplyState::Done;
                 *phase = None;
                 *cost = next.clone();
+                *end = *ended;
             }
             Event::Cost { cost: next } => *cost = Some(next.clone()),
             Event::Failed { fault: next } => {
@@ -313,14 +319,19 @@ mod tests {
             .apply(
                 reply,
                 Event::Done {
-                    cost: Some(Cost::Local { model: "m".into() })
+                    cost: Some(Cost::Local { model: "m".into() }),
+                    end: Some(crate::ipc::PageAssistEndV1::Asked),
                 }
             )
             .is_some());
-        let Message::Reply { blocks, state, .. } = &c.messages()[1] else {
+        let Message::Reply {
+            blocks, state, end, ..
+        } = &c.messages()[1]
+        else {
             panic!()
         };
         assert_eq!(*state, ReplyState::Done);
+        assert_eq!(*end, Some(crate::ipc::PageAssistEndV1::Asked));
         assert_eq!(
             blocks[0],
             Block::Text {

@@ -16,6 +16,8 @@ const MAX_META: usize = 4;
 const MAX_META_CHARS: usize = 40;
 const MAX_CSS_BYTES: usize = 24 * 1024;
 const MAX_SUMMARY_CHARS: usize = 160;
+const MAX_QUESTION_CHARS: usize = 300;
+const MAX_FIND_CHARS: usize = 80;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ItemCall {
@@ -42,6 +44,12 @@ pub(crate) enum Call {
     },
     Act {
         steps: Vec<Step>,
+        /// Nothing is left to say once every step is done.
+        finish: bool,
+    },
+    Find {
+        page: String,
+        words: String,
     },
     InspectStyle {
         page: String,
@@ -55,6 +63,9 @@ pub(crate) enum Call {
         title: String,
         summary: String,
         bring: BringRequest,
+    },
+    AskPerson {
+        question: String,
     },
 }
 
@@ -149,9 +160,23 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
                             "required": ["verb"],
                             "additionalProperties": false
                         }
-                    }
+                    },
+                    "finish": {"type": "boolean", "description": "true when, if every step works, nothing is left to tell the person: the reply then ends with the steps. Leave it out when they also asked for information."}
                 },
                 "required": ["steps"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "find",
+            "Finds words on a page you read, anywhere in it, even far below what was read: returns the matching passages with their neighbours, under fresh references to act on. Use it instead of scrolling and reading again.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "page": {"type": "string", "description": "The page's letter, such as a."},
+                    "words": {"type": "string", "description": "Words the passage holds, such as \"52C\" or \"Add to cart\"."}
+                },
+                "required": ["page", "words"],
                 "additionalProperties": false
             }),
         ),
@@ -197,6 +222,16 @@ pub(crate) fn definitions() -> Vec<WorkModelTool> {
                 "additionalProperties": false
             }),
         ),
+        tool(
+            "ask_person",
+            "Ends your reply with one short question to the person, when their request could mean different things on the page and guessing would change what happens. Name the candidates. No step runs after it; their answer comes as their next message.",
+            json!({
+                "type": "object",
+                "properties": {"question": {"type": "string", "description": "Such as \"The navy cap or the sky blue one?\""}},
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+        ),
     ]
 }
 
@@ -237,9 +272,11 @@ pub(crate) fn known(name: &str) -> &'static str {
         "open_tabs",
         "go_to",
         "act",
+        "find",
         "inspect_style",
         "restyle",
         "hand_off",
+        "ask_person",
     ]
     .into_iter()
     .find(|known| *known == name)
@@ -311,7 +348,20 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Option<Call> {
                     )
                 })
                 .collect();
-            Call::Act { steps: steps? }
+            Call::Act {
+                steps: steps?,
+                finish: arguments
+                    .get("finish")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }
+        }
+        "find" => {
+            let words = bounded(arguments, "words", MAX_FIND_CHARS)?;
+            Call::Find {
+                page: string(arguments, "page")?,
+                words,
+            }
         }
         "inspect_style" => Call::InspectStyle {
             page: string(arguments, "page")?,
@@ -338,6 +388,9 @@ pub(crate) fn parse(name: &str, arguments: &Value) -> Option<Call> {
                 folder: bounded(arguments, "folder", 260),
             },
         },
+        "ask_person" => Call::AskPerson {
+            question: bounded(arguments, "question", MAX_QUESTION_CHARS)?,
+        },
         _ => return None,
     })
 }
@@ -358,6 +411,7 @@ mod tests {
             ("open_tabs", json!({"targets": ["a3"]})),
             ("go_to", json!({"target": "search: rust language"})),
             ("act", json!({"steps": [{"verb": "click", "ref": "a3"}]})),
+            ("find", json!({"page": "a", "words": "52C"})),
             ("inspect_style", json!({"page": "a"})),
             (
                 "restyle",
@@ -366,6 +420,10 @@ mod tests {
             (
                 "hand_off",
                 json!({"title": "Status page", "summary": "Compare three monitors."}),
+            ),
+            (
+                "ask_person",
+                json!({"question": "The navy cap or the sky one?"}),
             ),
         ];
         let names: Vec<String> = definitions().into_iter().map(|tool| tool.name).collect();

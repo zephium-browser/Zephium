@@ -39,7 +39,7 @@ pub struct TabFacts {
 }
 
 /// A form field's kind, as the reader judged it from the live control.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FieldKind {
     /// Ordinary text.
     Text,
@@ -65,7 +65,7 @@ impl FieldKind {
 }
 
 /// What a passage is.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Role {
     /// A heading of the given level.
     Heading(u8),

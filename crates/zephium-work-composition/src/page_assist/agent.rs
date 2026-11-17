@@ -21,9 +21,10 @@ use zephium_page_assist::refs::{self, Ref};
 use zephium_page_assist::stream::CiteRewriter;
 use zephium_page_assist::{css, guard, prompt, suggest, text};
 
+use super::effect::{self, Control, Observed};
 use super::port::{
-    BringRequest, Glow, ReadFailure, ResolvedModel, Role, StepEffect, StepFailure, StepRequest,
-    WorkStart,
+    BringRequest, Glow, ReadFailure, Readout, ResolvedModel, Role, StepEffect, StepFailure,
+    StepRequest, WorkStart,
 };
 use super::tools::{self, Call, ItemCall};
 use super::{
@@ -40,6 +41,19 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 /// Longest a new tab may stay unknown to the shell before it counts as open.
 const UNLISTED_TIMEOUT: Duration = Duration::from_millis(1_500);
 const TEXT_INTERVAL_MS: u64 = 50;
+/// When, after a step ran, the page is read again to see its effect.
+const EFFECT_READS_MS: [u64; 4] = [0, 250, 700, 1_500];
+/// Longest a step's effect is watched for, a new document included.
+const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
+const EFFECT_POLL: Duration = Duration::from_millis(50);
+/// Most views `find` scrolls down to reach its words.
+const FIND_SCROLLS: usize = 4;
+/// Passages either side of each one `find` returns.
+const FIND_AROUND: usize = 2;
+/// Most lines `find` and an act's changes return.
+const FIND_LINES: usize = 30;
+/// Time a scrolled page gets before it is read again.
+const SCROLL_SETTLE: Duration = Duration::from_millis(150);
 /// Most model calls one reply makes.
 const MAX_CALLS: usize = 16;
 /// Most tool calls one reply runs.
@@ -61,12 +75,17 @@ pub(super) struct Reply {
     pub(super) cancel: Arc<Cancel>,
     pub(super) leased: Arc<AtomicBool>,
     pub(super) took_over: Arc<AtomicBool>,
+    pub(super) redirect: Arc<super::Redirect>,
+    pub(super) ended: Arc<tokio::sync::Notify>,
     /// Tabs lit while this reply works on them.
     pub(super) glowing: std::sync::Mutex<Vec<String>>,
+    /// What its model calls cost so far.
+    pub(super) spent: std::sync::Mutex<Option<PageAssistCostV1>>,
+    pub(super) spoken: bool,
 }
 
 enum End {
-    Done(Option<PageAssistCostV1>),
+    Done(Option<PageAssistCostV1>, Option<PageAssistEndV1>),
     Failed(PageAssistFaultV1),
     Cancelled(CancelReason),
 }
@@ -137,6 +156,20 @@ impl Reply {
             .get_mut(&self.conversation)
             .and_then(|live| live.replies.get_mut(&self.reply))
             .map(apply)
+    }
+
+    /// Whether the model has written anything to the person in this reply.
+    fn said(&self) -> bool {
+        let state = self.service.state();
+        state
+            .live
+            .get(&self.conversation)
+            .and_then(|live| live.conversation.blocks(self.reply))
+            .is_some_and(|blocks| {
+                blocks.iter().any(
+                    |block| matches!(block, PageAssistBlockV1::Text { text, .. } if !text.trim().is_empty()),
+                )
+            })
     }
 
     fn next_block(&self) -> u16 {
@@ -551,6 +584,9 @@ impl Reply {
                 biased;
                 _ = &mut idle => break None,
                 outcome = &mut call => break Some(outcome),
+                () = self.redirect.requested() => {
+                    return Err(End::Cancelled(CancelReason::Redirected));
+                }
                 Some(chunk) = receiver.recv() => {
                     idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                     if let Some(chunk) = chunk {
@@ -631,20 +667,33 @@ pub(super) async fn run(reply: Reply) {
     reply.note(format_args!(
         "end {}",
         match &end {
-            End::Done(_) => "done".to_owned(),
+            End::Done(_, end) => format!("done end={end:?}"),
+            End::Cancelled(CancelReason::Redirected) => "redirected".to_owned(),
             End::Failed(fault) => format!("failed fault={fault:?}"),
             End::Cancelled(reason) => format!("cancelled reason={reason:?}"),
         }
     ));
     match end {
-        End::Done(cost) => {
-            reply.apply(PageAssistEventV1::Done { cost });
+        End::Done(cost, end) => {
+            reply.apply(PageAssistEventV1::Done { cost, end });
         }
         End::Failed(fault) => {
             reply.apply(PageAssistEventV1::Failed { fault });
         }
         End::Cancelled(CancelReason::Stopped) => {
             reply.apply(PageAssistEventV1::Cancelled);
+        }
+        End::Cancelled(CancelReason::Redirected) => {
+            reply.phase(None);
+            let cost = reply
+                .spent
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            reply.apply(PageAssistEventV1::Done {
+                cost,
+                end: Some(PageAssistEndV1::Redirected),
+            });
         }
         End::Cancelled(CancelReason::Gone) => {}
     }
@@ -658,6 +707,7 @@ pub(super) async fn run(reply: Reply) {
             state.running.remove(&reply.conversation);
         }
     }
+    reply.ended.notify_waiters();
     reply.service.persist(&reply.conversation);
 }
 
@@ -686,10 +736,16 @@ async fn body(reply: &Reply) -> End {
     messages.push(WorkModelMessage::User(
         parts.into_iter().map(WorkModelPart::Text).collect(),
     ));
-    let system = vec![WorkModelSystemBlock {
+    let mut system = vec![WorkModelSystemBlock {
         text: prompt::SYSTEM.to_owned(),
         cache: true,
     }];
+    if reply.spoken {
+        system.push(WorkModelSystemBlock {
+            text: prompt::SPOKEN.to_owned(),
+            cache: true,
+        });
+    }
     let tools = if model.entry.supports.tools {
         tools::definitions()
     } else {
@@ -699,8 +755,13 @@ async fn body(reply: &Reply) -> End {
     let mut text = Text::default();
     let mut usage = WorkModelUsage::default();
     let mut ran = 0usize;
+    let mut asked = false;
     let mut calls_left = MAX_CALLS;
     while calls_left > 0 {
+        if reply.redirect.asked() {
+            reply.flush(&mut text);
+            return End::Cancelled(CancelReason::Redirected);
+        }
         if text.block.is_none() {
             reply.phase(Some(PageAssistPhaseV1::Thinking));
         }
@@ -729,6 +790,8 @@ async fn body(reply: &Reply) -> End {
             }
         };
         add_usage(&mut usage, &outcome.usage);
+        *reply.spent.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some(fault::cost(&model.entry, &usage));
         reply.note(format_args!(
             "call stop={:?} in={} cached={} out={} reasoning={} text_blocks={}",
             outcome.stop,
@@ -759,11 +822,26 @@ async fn body(reply: &Reply) -> End {
         let mut results = Vec::with_capacity(calls.len());
         let mut stop = false;
         for call in calls {
+            if reply.redirect.asked() {
+                reply.flush(&mut text);
+                return End::Cancelled(CancelReason::Redirected);
+            }
             ran += 1;
             let outcome = if ran > MAX_TOOLS {
                 Err("Too many tool calls in one reply; answer with what you have.".to_owned())
+            } else if asked {
+                Err("You already asked the person; wait for their answer.".to_owned())
             } else {
                 match tools::parse(&call.name, &call.arguments) {
+                    Some(Call::AskPerson { question }) => {
+                        if text.block.is_some() {
+                            reply.take(&mut text, "\n\n");
+                        }
+                        reply.take(&mut text, &question);
+                        asked = true;
+                        stop = true;
+                        Ok("Asked; the reply ends here.".to_owned())
+                    }
                     Some(parsed) => {
                         stop |= matches!(parsed, Call::HandOff { .. });
                         match run_tool(reply, &mut text, parsed).await {
@@ -794,7 +872,10 @@ async fn body(reply: &Reply) -> End {
             });
         }
         messages.push(WorkModelMessage::ToolResults(results));
-        if stop {
+        let finished = reply
+            .with_data(|data| std::mem::take(&mut data.finished))
+            .unwrap_or(false);
+        if stop || (finished && reply.said()) {
             break;
         }
         calls_left -= 1;
@@ -809,7 +890,10 @@ async fn body(reply: &Reply) -> End {
     if reply.next_block() == 0 {
         return End::Failed(PageAssistFaultV1::NoAnswer);
     }
-    End::Done(Some(fault::cost(&model.entry, &usage)))
+    End::Done(
+        Some(fault::cost(&model.entry, &usage)),
+        asked.then_some(PageAssistEndV1::Asked),
+    )
 }
 
 async fn run_tool(reply: &Reply, text: &mut Text, call: Call) -> Result<ToolOutcome, End> {
@@ -819,7 +903,8 @@ async fn run_tool(reply: &Reply, text: &mut Text, call: Call) -> Result<ToolOutc
         Call::ShowItems { items } => show_items(reply, text, items).await,
         Call::OpenTabs { targets } => open_tabs(reply, text, targets).await,
         Call::GoTo { target, new_tab } => go_to(reply, text, &target, new_tab).await,
-        Call::Act { steps } => return act(reply, text, steps).await,
+        Call::Act { steps, finish } => return act(reply, text, steps, finish).await,
+        Call::Find { page, words } => find(reply, &page, &words).await,
         Call::InspectStyle { page } => inspect_style(reply, &page).await,
         Call::Restyle { page, summary, css } => restyle(reply, text, &page, summary, &css).await,
         Call::HandOff {
@@ -827,6 +912,7 @@ async fn run_tool(reply: &Reply, text: &mut Text, call: Call) -> Result<ToolOutc
             summary,
             bring,
         } => hand_off(reply, text, title, summary, bring).await,
+        Call::AskPerson { .. } => Err("ask_person ends the reply.".to_owned()),
     })
 }
 
@@ -1145,7 +1231,9 @@ async fn approve_navigation(
         Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
             PageAssistStepStateV1::Done
         }
-        Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+        Ok(PageAssistDecisionV1::Decline) | Err(CancelReason::Redirected) => {
+            PageAssistStepStateV1::Declined
+        }
         _ => PageAssistStepStateV1::Skipped,
     };
     reply.set_block(block, proposal(state));
@@ -1208,7 +1296,9 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
             Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
                 PageAssistStepStateV1::Running
             }
-            Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+            Ok(PageAssistDecisionV1::Decline) | Err(CancelReason::Redirected) => {
+                PageAssistStepStateV1::Declined
+            }
             _ => PageAssistStepStateV1::Skipped,
         };
         reply.set_block(block, proposal(state));
@@ -1611,7 +1701,11 @@ fn admissible(record: &ReadRecord, step: &StepRequest) -> Result<(), StepFailure
 struct Plan {
     tab: String,
     epoch: u64,
+    /// A step's effect was a new document.
+    moved: bool,
     record: ReadRecord,
+    /// The page as last read: the plan's read, then each step's effect read.
+    latest: Readout,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
@@ -1630,14 +1724,22 @@ impl Plan {
     }
 
     fn fail(&mut self, reply: &Reply, index: usize, failure: StepFailure) {
-        if let Some(row) = self.rows.get_mut(index) {
-            row.state = PageAssistStepStateV1::Failed;
-            row.reason = Some(match failure {
+        self.fail_with(
+            reply,
+            index,
+            match failure {
                 StepFailure::Refused => PageAssistStepReasonV1::Refused,
                 StepFailure::Unsuitable => PageAssistStepReasonV1::Unsuitable,
                 StepFailure::PageChanged => PageAssistStepReasonV1::PageChanged,
-                StepFailure::Failed => PageAssistStepReasonV1::NoEffect,
-            });
+                StepFailure::Failed => PageAssistStepReasonV1::Unconfirmed,
+            },
+        );
+    }
+
+    fn fail_with(&mut self, reply: &Reply, index: usize, reason: PageAssistStepReasonV1) {
+        if let Some(row) = self.rows.get_mut(index) {
+            row.state = PageAssistStepStateV1::Failed;
+            row.reason = Some(reason);
         }
         self.skip_from(reply, index + 1);
     }
@@ -1701,12 +1803,17 @@ impl Plan {
                         "refused: a secret, a protected field or a link to another site"
                     }
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Unsuitable)) => {
-                        "failed: that passage is not a control this verb can use"
+                        "failed: that passage is not a control this verb can use; act on the control's own passage (a button, field, checkbox, select or same-site link)"
                     }
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::PageChanged)) => {
-                        "failed: the page changed"
+                        "failed: the page changed before it ran; use the references of the page as it is now"
                     }
-                    (PageAssistStepStateV1::Failed, _) => "ran, but the page did not change",
+                    (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::NoEffect)) => {
+                        "ran, but nothing on the page changed: it did not take"
+                    }
+                    (PageAssistStepStateV1::Failed, _) => {
+                        "ran, but whether it took could not be confirmed"
+                    }
                     (PageAssistStepStateV1::Done, _) => "done",
                     (PageAssistStepStateV1::Declined, _) => "declined by the person",
                     (PageAssistStepStateV1::Skipped, _) => "skipped",
@@ -1785,15 +1892,28 @@ async fn decision(reply: &Reply, block: u16) -> Result<PageAssistDecisionV1, Can
     });
     let decided = tokio::select! {
         reason = reply.cancel.cancelled() => Err(reason),
+        () = reply.redirect.requested() => Err(CancelReason::Redirected),
         decision = receiver => decision.map_err(|_| CancelReason::Gone),
     };
+    if decided.is_err() {
+        reply
+            .service
+            .running_reply(&reply.conversation, reply.reply, |running| {
+                running.decision = None
+            });
+    }
     reply.apply(PageAssistEventV1::State {
         state: PageAssistReplyStateV1::Working,
     });
     decided
 }
 
-async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOutcome, End> {
+async fn act(
+    reply: &Reply,
+    text: &mut Text,
+    steps: Vec<Step>,
+    finish: bool,
+) -> Result<ToolOutcome, End> {
     let first = steps
         .iter()
         .find_map(|step| step.target)
@@ -1813,6 +1933,28 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
     else {
         return Ok(Err("Read the page before acting on it.".to_owned()));
     };
+    let repeated = reply
+        .with_data(|data| {
+            steps.iter().any(|step| {
+                let control = step
+                    .target
+                    .and_then(|target| Control::of(&record.readout, target.passage));
+                data.untaken.iter().any(|(tab, epoch, verb, untaken)| {
+                    *tab == record.tab
+                        && *epoch == record.epoch
+                        && *verb == step.verb
+                        && control.as_ref() == Some(untaken)
+                })
+            })
+        })
+        .unwrap_or(false);
+    if repeated {
+        return Ok(Err(
+            "That step already ran in this reply and did not take; running it \
+             again could do it twice. Do not repeat it: tell the person it did not work."
+                .to_owned(),
+        ));
+    }
     let requests: Vec<StepRequest> = steps
         .iter()
         .map(|step| StepRequest {
@@ -1848,6 +1990,8 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
     let mut plan = Plan {
         tab: record.tab.clone(),
         epoch: record.epoch,
+        moved: false,
+        latest: record.readout.clone(),
         record,
         requests,
         rows,
@@ -1874,10 +2018,229 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
         });
     reply.phase(Some(PageAssistPhaseV1::Thinking));
     match result {
-        Ok(()) => Ok(Ok(plan.summary())),
+        Ok(()) if finish => {
+            reply.with_data(|data| data.finished = true);
+            Ok(Ok(plan.summary()))
+        }
+        Ok(()) => Ok(Ok(format!(
+            "{}{}",
+            plan.summary(),
+            after_steps(reply, &plan).await
+        ))),
         Err(Some(end)) => Err(end),
-        Err(None) => Ok(Err(plan.summary())),
+        Err(None) => {
+            let stale = plan.rows.iter().any(|row| {
+                matches!(
+                    row.reason,
+                    Some(PageAssistStepReasonV1::PageChanged | PageAssistStepReasonV1::Unsuitable)
+                )
+            });
+            let fresh = if stale || plan.moved {
+                after_steps(reply, &plan).await
+            } else {
+                String::new()
+            };
+            Ok(Err(format!("{}{fresh}", plan.summary())))
+        }
     }
+}
+
+/// The page after an act, so the model need not read it again: the whole
+/// new document when it moved on, else only the passages that changed.
+async fn after_steps(reply: &Reply, plan: &Plan) -> String {
+    let stale = plan.rows.iter().any(|row| {
+        matches!(
+            row.reason,
+            Some(PageAssistStepReasonV1::PageChanged | PageAssistStepReasonV1::Unsuitable)
+        )
+    });
+    if !plan.moved && !stale && plan.latest.passages == plan.record.readout.passages {
+        return String::new();
+    }
+    let Ok(index) = reply.read_tab(&plan.tab).await else {
+        return String::new();
+    };
+    let Some((letters, read)) = reply
+        .with_data(|data| {
+            let read = data.reads.get(index)?.clone();
+            Some((refs::letters(u16::try_from(index).ok()?)?, read))
+        })
+        .flatten()
+    else {
+        return String::new();
+    };
+    if plan.moved || stale || read.epoch != plan.epoch {
+        return format!("\n\nThe page now:\n{}", reply.page_block(index));
+    }
+    let body = |line: &str| {
+        line.split_once(' ')
+            .map_or(String::new(), |(_, rest)| rest.to_owned())
+    };
+    let mut before: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for line in plan.record.page.payload.lines() {
+        *before.entry(body(line)).or_default() += 1;
+    }
+    let changed: Vec<&str> = read
+        .page
+        .payload
+        .lines()
+        .filter(|line| match before.get_mut(&body(line)) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect();
+    if changed.is_empty() {
+        return String::new();
+    }
+    if changed.len() > FIND_LINES {
+        return format!("\n\nThe page now:\n{}", reply.page_block(index));
+    }
+    format!(
+        "\n\nChanged on the page, read again as {letters}; other passages are as before:\n<<<PAGE {letters}\nhost: {}\n{}\nPAGE>>>",
+        prompt::fence(&read.page.host),
+        prompt::fence(&changed.join("\n"))
+    )
+}
+
+/// Whether `hay` holds `word` on its own, not inside a longer word or number.
+fn holds_word(hay: &str, word: &str) -> bool {
+    hay.match_indices(word).any(|(at, _)| {
+        let before = hay[..at].chars().next_back();
+        let after = hay[at + word.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// The lines of read `index` holding every one of `words`, with their
+/// neighbours, under the read's letters.
+fn found(reply: &Reply, index: usize, words: &[String]) -> Option<String> {
+    let (letters, read) = reply
+        .with_data(|data| {
+            let read = data.reads.get(index)?.clone();
+            Some((refs::letters(u16::try_from(index).ok()?)?, read))
+        })
+        .flatten()?;
+    let lines: Vec<&str> = read.page.payload.lines().collect();
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            let line = line.to_lowercase();
+            let text = line.split_once(' ').map_or("", |(_, rest)| rest);
+            words.iter().all(|word| holds_word(text, word))
+        })
+        .map(|(at, _)| at)
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    let mut keep: Vec<usize> = hits
+        .iter()
+        .flat_map(|&at| at.saturating_sub(FIND_AROUND)..=(at + FIND_AROUND).min(lines.len() - 1))
+        .collect();
+    keep.sort_unstable();
+    keep.dedup();
+    keep.truncate(FIND_LINES);
+    let shown: Vec<&str> = keep.iter().map(|&at| lines[at]).collect();
+    Some(format!(
+        "{} found on page {letters}:\n<<<PAGE {letters}\nhost: {}\n{}\nPAGE>>>",
+        hits.len(),
+        prompt::fence(&read.page.host),
+        prompt::fence(&shown.join("\n"))
+    ))
+}
+
+/// Looks for `words` on a page read in this reply, scrolling further down a
+/// view at a time, bounded, when the latest read of it does not hold them.
+async fn find(reply: &Reply, page: &str, words: &str) -> ToolOutcome {
+    let Some((first, record)) = reply.record(page.trim()) else {
+        return Err(format!(
+            "{page} is not a page you read. Use a page's letter, such as a."
+        ));
+    };
+    let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+    if wanted.is_empty() {
+        return Err("Give the words to look for.".to_owned());
+    }
+    let mut at = reply
+        .with_data(|data| {
+            data.reads
+                .iter()
+                .rposition(|read| read.tab == record.tab && read.epoch == record.epoch)
+        })
+        .flatten()
+        .unwrap_or(first);
+    let page_port = reply.service.ports().page.clone();
+    for scrolled in 0..=FIND_SCROLLS {
+        if let Some(found) = found(reply, at, &wanted) {
+            return Ok(found);
+        }
+        if scrolled == FIND_SCROLLS {
+            break;
+        }
+        let Some(current) = reply
+            .with_data(|data| data.reads.get(at).cloned())
+            .flatten()
+        else {
+            break;
+        };
+        let step = StepRequest {
+            verb: Verb::Scroll,
+            read: current.readout.read,
+            target: None,
+            direction: Some(zephium_page_assist::actions::Direction::Down),
+            value: None,
+        };
+        if page_port
+            .resolve(&current.tab, current.epoch, &step)
+            .is_err()
+        {
+            break;
+        }
+        reply.glow(&current.tab, Glow::Working);
+        if !matches!(
+            tokio::time::timeout(
+                READ_TIMEOUT,
+                page_port.act(&current.tab, current.epoch, &step)
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            break;
+        }
+        tokio::time::sleep(SCROLL_SETTLE).await;
+        let Ok(next) = reply.read_tab(&current.tab).await else {
+            break;
+        };
+        let same = reply
+            .with_data(|data| {
+                data.reads.get(next).map(|read| {
+                    read.epoch != current.epoch
+                        || read
+                            .readout
+                            .passages
+                            .iter()
+                            .map(|p| (p.role, &p.text))
+                            .eq(current.readout.passages.iter().map(|p| (p.role, &p.text)))
+                })
+            })
+            .flatten()
+            .unwrap_or(true);
+        at = next;
+        if same {
+            if let Some(found) = found(reply, at, &wanted) {
+                return Ok(found);
+            }
+            break;
+        }
+    }
+    Err(format!(
+        "“{}” is not on that page, as far down as it was read. Try other words, or tell the person it is not there.",
+        text::bounded(words, 80)
+    ))
 }
 
 /// `Err(None)` ends the steps and tells the model; `Err(Some)` ends the reply.
@@ -1885,6 +2248,10 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
     let page = reply.service.ports().page.clone();
     let mut index = 0;
     while index < plan.requests.len() {
+        if reply.redirect.asked() {
+            plan.skip_from(reply, index);
+            return Err(Some(End::Cancelled(CancelReason::Redirected)));
+        }
         if reply.took_over.swap(false, Ordering::AcqRel) {
             take_over(reply, text, plan, index).await?;
             continue;
@@ -1928,11 +2295,26 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                     plan.skip_from(reply, index + 1);
                     return Err(None);
                 }
+                Err(CancelReason::Redirected) => {
+                    plan.mark(
+                        reply,
+                        index,
+                        &resolved.label,
+                        resolved.effect,
+                        PageAssistStepStateV1::Declined,
+                    );
+                    plan.skip_from(reply, index + 1);
+                    return Err(Some(End::Cancelled(CancelReason::Redirected)));
+                }
                 Err(reason) => return Err(Some(End::Cancelled(reason))),
             }
         }
         if reply.took_over.load(Ordering::Acquire) {
             continue;
+        }
+        if reply.redirect.asked() {
+            plan.skip_from(reply, index);
+            return Err(Some(End::Cancelled(CancelReason::Redirected)));
         }
         plan.mark(
             reply,
@@ -1941,22 +2323,125 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             resolved.effect,
             PageAssistStepStateV1::Running,
         );
-        match page.act(&plan.tab, plan.epoch, &step).await {
-            Ok(()) => plan.mark(
-                reply,
-                index,
-                &resolved.label,
-                resolved.effect,
-                PageAssistStepStateV1::Done,
-            ),
-            Err(failure) => {
-                plan.fail(reply, index, failure);
-                return Err(None);
-            }
+        if let Err(failure) = page.act(&plan.tab, plan.epoch, &step).await {
+            plan.fail(reply, index, failure);
+            return Err(None);
         }
+        let settled = observe(reply, plan, &step).await;
+        let navigated = settled == Settled::Navigated;
+        plan.moved |= navigated;
+        let reason = match settled {
+            Settled::Took(after) => {
+                if let Some(after) = after {
+                    plan.latest = after;
+                }
+                None
+            }
+            Settled::Navigated if presses(step.verb) => None,
+            Settled::NoEffect => Some(PageAssistStepReasonV1::NoEffect),
+            Settled::Navigated | Settled::Unconfirmed => Some(PageAssistStepReasonV1::Unconfirmed),
+        };
+        if let Some(reason) = reason {
+            if let Some(control) = step
+                .target
+                .and_then(|target| Control::of(&plan.record.readout, target))
+            {
+                let untaken = (plan.tab.clone(), plan.epoch, step.verb, control);
+                reply.with_data(|data| data.untaken.push(untaken));
+            }
+            plan.fail_with(reply, index, reason);
+            return Err(None);
+        }
+        plan.mark(
+            reply,
+            index,
+            &resolved.label,
+            resolved.effect,
+            PageAssistStepStateV1::Done,
+        );
         index += 1;
+        if navigated && index < plan.requests.len() {
+            plan.skip_from(reply, index);
+            return Err(None);
+        }
     }
     Ok(())
+}
+
+/// Steps whose effect may be the document itself moving on.
+fn presses(verb: Verb) -> bool {
+    matches!(verb, Verb::Click | Verb::Open | Verb::Submit | Verb::Expand)
+}
+
+#[derive(Debug, PartialEq)]
+enum Settled {
+    /// Its effect is on the page; the read that shows it, when one did.
+    Took(Option<Readout>),
+    /// The tab committed a new document.
+    Navigated,
+    /// The page read the same after it.
+    NoEffect,
+    /// It could not be told either way.
+    Unconfirmed,
+}
+
+/// Watches the page after one step ran, bounded, and never runs it again: a
+/// new document, or reads of the same one against the read before it.
+async fn observe(reply: &Reply, plan: &Plan, step: &StepRequest) -> Settled {
+    if step.verb == Verb::Scroll {
+        return Settled::Took(None);
+    }
+    let Some(control) = step
+        .target
+        .and_then(|target| Control::of(&plan.record.readout, target))
+    else {
+        return Settled::Unconfirmed;
+    };
+    let page = reply.service.ports().page.clone();
+    let started = tokio::time::Instant::now();
+    let mut reads = 0;
+    let mut last: Option<Observed> = None;
+    while let Some(facts) = page.facts(&plan.tab) {
+        if facts.epoch != plan.epoch {
+            return Settled::Navigated;
+        }
+        let left = EFFECT_NAVIGATION.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        if !facts.loading {
+            let Some(due) = EFFECT_READS_MS.get(reads) else {
+                break;
+            };
+            if started.elapsed() >= Duration::from_millis(*due) {
+                reads += 1;
+                if let Ok(Ok(after)) =
+                    tokio::time::timeout(left.min(READ_TIMEOUT), page.read(&plan.tab, plan.epoch))
+                        .await
+                {
+                    if after.epoch == plan.epoch {
+                        let observed = effect::judge(
+                            step.verb,
+                            step.value.as_deref(),
+                            &control,
+                            &plan.latest,
+                            &after,
+                        );
+                        if observed == Observed::Took {
+                            return Settled::Took(Some(after));
+                        }
+                        last = Some(observed);
+                    }
+                }
+                continue;
+            }
+        }
+        tokio::time::sleep(EFFECT_POLL).await;
+    }
+    match last {
+        Some(Observed::Nothing) => Settled::NoEffect,
+        _ => Settled::Unconfirmed,
+    }
 }
 
 /// The person used the page: wait for Continue, then read it again and go
@@ -1985,6 +2470,9 @@ async fn take_over(
         });
     tokio::select! {
         reason = reply.cancel.cancelled() => return Err(Some(End::Cancelled(reason))),
+        () = reply.redirect.requested() => {
+            return Err(Some(End::Cancelled(CancelReason::Redirected)));
+        }
         resumed = receiver => resumed.map_err(|_| Some(End::Cancelled(CancelReason::Gone)))?,
     }
     reply.glow(&plan.tab, Glow::Working);
@@ -2004,6 +2492,7 @@ async fn take_over(
         step.read = fresh.readout.read;
     }
     plan.epoch = fresh.epoch;
+    plan.latest = fresh.readout.clone();
     plan.record = fresh;
     let page = reply.service.ports().page.clone();
     for (step, label) in plan.requests.iter().skip(from).zip(labels) {

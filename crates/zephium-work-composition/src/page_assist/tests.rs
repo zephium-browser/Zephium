@@ -39,6 +39,70 @@ struct PageState {
     cleared_picks: Vec<(String, u64)>,
     outline: Option<Outline>,
     glows: Vec<(String, Glow)>,
+    /// Controls that take a step and change nothing.
+    inert: std::collections::HashSet<u16>,
+    /// Controls whose press loads a new document.
+    navigates: std::collections::HashSet<u16>,
+    /// Controls whose step leaves only a change far from them.
+    distant: std::collections::HashSet<u16>,
+    /// Holds every dispatched step until notified.
+    act_gate: Option<Arc<Notify>>,
+    /// Views further down, shown one per scroll down.
+    below: VecDeque<Vec<Passage>>,
+}
+
+impl PageState {
+    /// What a live page shows after `step`: a typed value, a ticked box, a
+    /// chosen option, or a note beside a pressed control.
+    fn take(&mut self, tab: &str, step: &StepRequest) {
+        let Some(target) = step.target else {
+            if step.verb == Verb::Scroll {
+                if let (Some(view), Some(readout)) =
+                    (self.below.pop_front(), self.readouts.get_mut(tab))
+                {
+                    readout.passages = view;
+                }
+            }
+            return;
+        };
+        if self.inert.contains(&target) {
+            return;
+        }
+        if self.navigates.contains(&target) {
+            if let Some(facts) = self.facts.get_mut(tab) {
+                facts.epoch += 1;
+            }
+            if let Some(readout) = self.readouts.get_mut(tab) {
+                readout.epoch += 1;
+            }
+            return;
+        }
+        let distant = self.distant.contains(&target);
+        let Some(readout) = self.readouts.get_mut(tab) else {
+            return;
+        };
+        let next = readout.passages.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        if distant {
+            if let Some(first) = readout.passages.first_mut() {
+                first.text = "Changed elsewhere".into();
+            }
+            return;
+        }
+        let Some(at) = readout.passages.iter().position(|p| p.id == target) else {
+            return;
+        };
+        let control = &mut readout.passages[at];
+        match (step.verb, control.role) {
+            (Verb::Fill | Verb::Select, _) => control.value = step.value.clone(),
+            (Verb::Check, Role::Checkbox { .. }) => control.role = Role::Checkbox { checked: true },
+            (Verb::Uncheck, Role::Checkbox { .. }) => {
+                control.role = Role::Checkbox { checked: false }
+            }
+            _ => readout
+                .passages
+                .insert(at + 1, passage(next, Role::Text, "Updated")),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -98,18 +162,34 @@ impl PagePort for FakePage {
         _epoch: u64,
         step: &StepRequest,
     ) -> Result<ResolvedStep, StepFailure> {
+        if step.verb == Verb::Scroll && step.target.is_none() {
+            return Ok(ResolvedStep {
+                label: "Scroll down".into(),
+                effect: StepEffect::Read,
+            });
+        }
         step.target
             .and_then(|target| self.lock().steps.get(&target).cloned())
             .ok_or(StepFailure::Unsuitable)
     }
     fn act<'a>(
         &'a self,
-        _tab: &'a str,
+        tab: &'a str,
         _epoch: u64,
         step: &'a StepRequest,
     ) -> BoxFuture<'a, Result<(), StepFailure>> {
-        self.lock().acted.push(step.clone());
-        Box::pin(async { Ok(()) })
+        let gate = {
+            let mut state = self.lock();
+            state.acted.push(step.clone());
+            state.take(tab, step);
+            state.act_gate.clone()
+        };
+        Box::pin(async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            Ok(())
+        })
     }
     fn apply_styles(&self, _profile: &ProfileId, site: &str, css: &str) {
         self.lock().applied.push((site.to_owned(), css.to_owned()));
@@ -721,8 +801,83 @@ impl Harness {
         Ok(reply)
     }
 
+    async fn steer(&self, text: &str) -> Result<u32, PageAssistFaultV1> {
+        let conversation = self.conversation().await;
+        let (reply, task) = self
+            .service
+            .steer(
+                PageAssistAskV1 {
+                    space: SPACE.into(),
+                    conversation,
+                    text: text.into(),
+                    suggestion: None,
+                    attachments: vec![PageAssistAttachV1::Page { tab: TAB.into() }],
+                },
+                Delivery::Spoken,
+            )
+            .await?;
+        tokio::spawn(task);
+        Ok(reply)
+    }
+
+    /// Each reply's state and end, in order.
+    async fn ends(&self) -> Vec<(PageAssistReplyStateV1, Option<PageAssistEndV1>)> {
+        self.service
+            .status(SPACE, Some(TAB))
+            .await
+            .conversation
+            .messages
+            .into_iter()
+            .filter_map(|message| match message {
+                PageAssistMessageV1::Reply { state, end, .. } => Some((state, end)),
+                PageAssistMessageV1::Person { .. } => None,
+            })
+            .collect()
+    }
+
+    /// A page of form controls the steps below act on: a field, a ticked
+    /// switch, a drop-down and a button, none needing a confirm.
+    fn controls(&self) {
+        let mut page = self.page.lock();
+        let passages = &mut page.readouts.get_mut(TAB).unwrap().passages;
+        passages.extend((100..130).map(|id| passage(id, Role::Text, &format!("Line {id}"))));
+        passages.push(Passage {
+            value: Some(String::new()),
+            ..passage(7, Role::Field(FieldKind::Text), "Name")
+        });
+        passages.push(passage(
+            8,
+            Role::Checkbox { checked: true },
+            "Email notifications",
+        ));
+        passages.push(Passage {
+            value: Some("General".into()),
+            ..passage(9, Role::Select, "Topic")
+        });
+        passages.push(passage(10, Role::Button, "Add to wishlist"));
+        for (id, label) in [
+            (7, "Type into \"Name\""),
+            (8, "Uncheck \"Email notifications\""),
+            (9, "Choose in \"Topic\""),
+            (10, "Click \"Add to wishlist\""),
+        ] {
+            page.steps.insert(
+                id,
+                ResolvedStep {
+                    label: label.into(),
+                    effect: StepEffect::Draft,
+                },
+            );
+        }
+    }
+
     async fn settle(&self) {
-        for _ in 0..400 {
+        self.settle_within(Duration::from_secs(2)).await;
+    }
+
+    async fn settle_within(&self, limit: Duration) {
+        let started = Instant::now();
+        while started.elapsed() < limit {
             if self.service.state().running.is_empty() {
                 return;
             }
@@ -858,7 +1013,7 @@ async fn an_answer_streams_with_cites_from_the_page_and_is_stored() {
         request.max_output_tokens >= 8_000,
         "room to think and still write"
     );
-    assert_eq!(request.tools.len(), 9);
+    assert_eq!(request.tools.len(), 11);
     assert!(h
         .request_text(0)
         .contains("<<<PAGE a\nhost: news.ycombinator.com"));
@@ -1758,7 +1913,11 @@ async fn model_call_with_timeouts(
         cancel: Arc::new(Cancel::default()),
         leased: Arc::new(AtomicBool::new(false)),
         took_over: Arc::new(AtomicBool::new(false)),
+        redirect: Arc::new(Redirect::default()),
+        ended: Arc::new(Notify::new()),
         glowing: Mutex::new(Vec::new()),
+        spent: Mutex::new(None),
+        spoken: false,
     };
     let model = ResolvedModel {
         entry: entry(true),
@@ -2285,6 +2444,7 @@ fn exchange(id: u32, words: &str, answer: &str) -> [PageAssistMessageV1; 2] {
             cost: None,
             fault: None,
             inert: false,
+            end: None,
         },
     ]
 }
@@ -2385,4 +2545,524 @@ async fn a_question_held_past_new_conversation_never_starts() {
     let status = h.service.status(SPACE, Some(TAB)).await;
     assert_ne!(status.conversation.id, asked);
     assert!(status.conversation.messages.is_empty());
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Page {
+    Live,
+    Inert,
+    Distant,
+    Navigates,
+}
+
+async fn one_step(
+    verb: &str,
+    target: u16,
+    value: Option<&str>,
+    page: Page,
+) -> (PageAssistStepV1, usize, String) {
+    let mut step = json!({"verb": verb, "ref": format!("a{target}")});
+    if let Some(value) = value {
+        step["value"] = json!(value);
+    }
+    let h = harness(vec![
+        tool("act", json!({ "steps": [step] })),
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        match page {
+            Page::Live => {}
+            Page::Inert => {
+                state.inert.insert(target);
+            }
+            Page::Distant => {
+                state.distant.insert(target);
+            }
+            Page::Navigates => {
+                state.navigates.insert(target);
+            }
+        }
+    }
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(5)).await;
+    let blocks = h.blocks().await;
+    let step = blocks
+        .iter()
+        .find_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.first().cloned(),
+            _ => None,
+        })
+        .expect("a step");
+    let acted = h.page.lock().acted.len();
+    (step, acted, h.tool_result(1).0)
+}
+
+#[tokio::test]
+async fn a_step_is_done_only_when_its_effect_is_seen() {
+    use PageAssistStepReasonV1::{NoEffect, Unconfirmed};
+    type Case = (
+        &'static str,
+        u16,
+        Option<&'static str>,
+        Page,
+        Option<PageAssistStepReasonV1>,
+    );
+    let cases: Vec<Case> = vec![
+        ("fill", 7, Some("Alex Moreno"), Page::Live, None),
+        ("fill", 7, Some("Alex Moreno"), Page::Inert, Some(NoEffect)),
+        (
+            "fill",
+            7,
+            Some("Alex Moreno"),
+            Page::Navigates,
+            Some(Unconfirmed),
+        ),
+        ("uncheck", 8, None, Page::Live, None),
+        ("uncheck", 8, None, Page::Inert, Some(NoEffect)),
+        ("check", 8, None, Page::Inert, None),
+        ("select", 9, Some("Billing"), Page::Live, None),
+        ("select", 9, Some("Billing"), Page::Inert, Some(NoEffect)),
+        ("click", 10, None, Page::Live, None),
+        ("click", 10, None, Page::Inert, Some(NoEffect)),
+        ("click", 10, None, Page::Distant, Some(Unconfirmed)),
+        ("click", 10, None, Page::Navigates, None),
+        ("submit", 7, None, Page::Navigates, None),
+        ("submit", 7, None, Page::Inert, Some(NoEffect)),
+    ];
+    let runs: Vec<_> = cases
+        .into_iter()
+        .map(|(verb, target, value, page, reason)| {
+            tokio::spawn(async move {
+                let (step, acted, result) = one_step(verb, target, value, page).await;
+                (verb, page, reason, step, acted, result)
+            })
+        })
+        .collect();
+    for run in runs {
+        let (verb, page, reason, step, acted, result) = run.await.unwrap();
+        let case = format!("{verb} on a {page:?} page: {step:?}");
+        assert_eq!(acted, 1, "never run twice to make sure: {case}");
+        assert_eq!(step.reason, reason, "{case}");
+        let state = if reason.is_some() {
+            PageAssistStepStateV1::Failed
+        } else {
+            PageAssistStepStateV1::Done
+        };
+        assert_eq!(step.state, state, "{case}");
+        match reason {
+            Some(NoEffect) => assert!(result.contains("did not take"), "{result}"),
+            Some(Unconfirmed) => assert!(result.contains("could not be confirmed"), "{result}"),
+            _ => assert!(result.contains("done"), "{result}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_step_that_moved_the_page_skips_the_rest() {
+    let h = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": "click", "ref": "a10"}, {"verb": "fill", "ref": "a7", "value": "x"}]}),
+        ),
+        say("Done."),
+    ]);
+    h.controls();
+    h.page.lock().navigates.insert(10);
+    h.ask("Do it", true).await.unwrap();
+    h.settle().await;
+    let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+        panic!()
+    };
+    assert_eq!(steps[0].state, PageAssistStepStateV1::Done);
+    assert_eq!(steps[1].state, PageAssistStepStateV1::Skipped);
+    assert_eq!(h.page.lock().acted.len(), 1);
+}
+
+#[tokio::test]
+async fn refused_and_unsuitable_steps_never_reach_the_page() {
+    for (verb, target, value, reason) in [
+        ("fill", 5, Some("hunter2"), PageAssistStepReasonV1::Refused),
+        ("click", 1, None, PageAssistStepReasonV1::Refused),
+        ("check", 10, None, PageAssistStepReasonV1::Unsuitable),
+        ("select", 7, Some("x"), PageAssistStepReasonV1::Unsuitable),
+        ("fill", 8, Some("x"), PageAssistStepReasonV1::Unsuitable),
+        ("submit", 10, None, PageAssistStepReasonV1::Unsuitable),
+    ] {
+        let (step, acted, _) = one_step(verb, target, value, Page::Live).await;
+        assert_eq!(acted, 0, "{verb} a{target}");
+        assert_eq!(
+            step.state,
+            PageAssistStepStateV1::Failed,
+            "{verb} a{target}"
+        );
+        assert_eq!(step.reason, Some(reason), "{verb} a{target}");
+    }
+}
+
+#[tokio::test]
+async fn a_step_that_did_not_take_is_never_run_again() {
+    let click = json!({"steps": [{"verb": "click", "ref": "a10"}]});
+    let h = harness(vec![
+        tool("act", click.clone()),
+        tool("act", click),
+        say("It did not work."),
+    ]);
+    h.controls();
+    h.page.lock().inert.insert(10);
+    h.ask("Add it to my wishlist", true).await.unwrap();
+    h.settle_within(Duration::from_secs(5)).await;
+    assert_eq!(h.page.lock().acted.len(), 1);
+    let (again, _) = h.tool_result(2);
+    assert!(again.contains("Do not repeat it"), "{again}");
+}
+
+#[tokio::test]
+async fn a_question_to_the_person_ends_the_reply_as_asked() {
+    let h = harness(vec![
+        Turn {
+            deltas: vec!["Two caps are blue.".into()],
+            ..tool(
+                "ask_person",
+                json!({"question": "The navy cap or the sky blue one?"}),
+            )
+        },
+        say("never called"),
+    ]);
+    h.ask("Add the blue cap", true).await.unwrap();
+    h.settle().await;
+    assert_eq!(h.requests().len(), 1, "no call after the question");
+    let PageAssistMessageV1::Reply {
+        state, end, blocks, ..
+    } = h.reply().await
+    else {
+        panic!()
+    };
+    assert_eq!(state, PageAssistReplyStateV1::Done);
+    assert_eq!(end, Some(PageAssistEndV1::Asked));
+    let PageAssistBlockV1::Text { text, .. } = &blocks[0] else {
+        panic!("{blocks:?}")
+    };
+    assert!(
+        text.ends_with("The navy cap or the sky blue one?"),
+        "{text}"
+    );
+    assert!(h.page.lock().acted.is_empty());
+    assert!(h.kinds().iter().any(|kind| matches!(
+        kind,
+        PageAssistEventV1::Done {
+            end: Some(PageAssistEndV1::Asked),
+            ..
+        }
+    )));
+}
+
+const REDIRECTED: (PageAssistReplyStateV1, Option<PageAssistEndV1>) = (
+    PageAssistReplyStateV1::Done,
+    Some(PageAssistEndV1::Redirected),
+);
+const ANSWERED: (PageAssistReplyStateV1, Option<PageAssistEndV1>) =
+    (PageAssistReplyStateV1::Done, None);
+
+async fn until(what: impl Fn() -> bool) {
+    for _ in 0..400 {
+        if what() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("never happened");
+}
+
+#[tokio::test]
+async fn a_steer_during_the_model_wait_ends_the_call_and_asks_the_new_words() {
+    let h = harness(vec![
+        Turn {
+            deltas: vec!["Looking at".into()],
+            hang: true,
+            ..Turn::default()
+        },
+        say("The red one is $12."),
+    ]);
+    h.ask("Add the blue cap", true).await.unwrap();
+    until(|| !h.requests().is_empty()).await;
+    let next = h.steer("actually, how much is the red one").await.unwrap();
+    assert!(
+        h.client.dropped.load(Ordering::Acquire),
+        "the call was dropped"
+    );
+    h.settle().await;
+    assert_eq!(h.ends().await, [REDIRECTED, ANSWERED]);
+    assert_eq!(next, 4);
+    assert!(h
+        .request_text(1)
+        .contains("actually, how much is the red one"));
+    assert!(h.page.lock().acted.is_empty());
+}
+
+#[tokio::test]
+async fn a_steer_during_a_step_waits_for_it_to_settle_and_skips_the_rest() {
+    let h = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Alex"}, {"verb": "click", "ref": "a10"}]}),
+        ),
+        say("Stopped."),
+    ]);
+    h.controls();
+    let gate = Arc::new(Notify::new());
+    h.page.lock().act_gate = Some(gate.clone());
+    h.ask("Fill it and add it", true).await.unwrap();
+    until(|| h.page.lock().acted.len() == 1).await;
+    let steer = h.steer("no, leave it");
+    tokio::pin!(steer);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut steer)
+            .await
+            .is_err(),
+        "a dispatched step settles before the reply ends"
+    );
+    gate.notify_one();
+    steer.await.unwrap();
+    h.settle().await;
+    assert_eq!(h.page.lock().acted.len(), 1, "the rest never ran");
+    let ends = h.ends().await;
+    assert_eq!(ends, [REDIRECTED, ANSWERED]);
+    let status = h.service.status(SPACE, Some(TAB)).await;
+    let steps = status
+        .conversation
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            PageAssistMessageV1::Reply { blocks, .. } => {
+                blocks.iter().find_map(|block| match block {
+                    PageAssistBlockV1::Steps { steps } => Some(steps.clone()),
+                    _ => None,
+                })
+            }
+            PageAssistMessageV1::Person { .. } => None,
+        })
+        .unwrap();
+    assert_eq!(steps[0].state, PageAssistStepStateV1::Done);
+    assert_eq!(steps[1].state, PageAssistStepStateV1::Skipped);
+}
+
+#[tokio::test]
+async fn a_steer_during_a_confirm_declines_it_as_superseded() {
+    let h = harness(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("Okay."),
+    ]);
+    h.controls();
+    h.page.lock().steps.insert(
+        10,
+        ResolvedStep {
+            label: "Click \"Add to wishlist\"".into(),
+            effect: StepEffect::Commit(WorkConfirmCategoryV1::Save),
+        },
+    );
+    let first = h.ask("Add it", true).await.unwrap();
+    h.waiting().await;
+    h.steer("wait, the other one").await.unwrap();
+    h.settle().await;
+    assert!(h.page.lock().acted.is_empty());
+    assert_eq!(h.ends().await, [REDIRECTED, ANSWERED]);
+    let conversation = h.conversation().await;
+    assert!(!h
+        .service
+        .decide(&conversation, first, 0, PageAssistDecisionV1::Approve));
+    let status = h.service.status(SPACE, Some(TAB)).await;
+    let declined = status.conversation.messages.iter().any(|message| {
+        matches!(message, PageAssistMessageV1::Reply { blocks, .. } if blocks.iter().any(|block| matches!(
+            block,
+            PageAssistBlockV1::Steps { steps } if steps[0].state == PageAssistStepStateV1::Declined
+        )))
+    });
+    assert!(declined);
+}
+
+#[tokio::test]
+async fn two_steers_in_a_row_each_redirect_the_reply_before() {
+    let hang = Turn {
+        hang: true,
+        ..Turn::default()
+    };
+    let h = harness(vec![hang.clone(), hang, say("Done that.")]);
+    h.ask("Add the blue cap", true).await.unwrap();
+    until(|| !h.requests().is_empty()).await;
+    let (a, b) = tokio::join!(h.steer("the denim one"), h.steer("no, the wool one"));
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert!(b > a);
+    h.settle().await;
+    assert_eq!(h.ends().await, [REDIRECTED, REDIRECTED, ANSWERED]);
+    let last = h.requests().len() - 1;
+    assert!(h.request_text(last).contains("no, the wool one"));
+}
+
+#[tokio::test]
+async fn a_steer_after_the_reply_ended_is_an_ask() {
+    let h = harness(vec![say("It costs $12."), say("The blue one is $14.")]);
+    h.ask("How much is the red cap", true).await.unwrap();
+    h.settle().await;
+    h.steer("and the blue one").await.unwrap();
+    h.settle().await;
+    assert_eq!(h.ends().await, [ANSWERED, ANSWERED]);
+    assert_eq!(h.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_spoken_reply_adds_its_instructions_and_a_shown_one_stays_as_it_was() {
+    let shown = harness(vec![say("It is $12.")]);
+    shown.ask("How much is it", true).await.unwrap();
+    shown.settle().await;
+    let spoken = harness(vec![say("Twelve dollars.")]);
+    let conversation = spoken.conversation().await;
+    let (_, task) = spoken
+        .service
+        .ask_as(
+            PageAssistAskV1 {
+                space: SPACE.into(),
+                conversation,
+                text: "How much is it".into(),
+                suggestion: None,
+                attachments: vec![PageAssistAttachV1::Page { tab: TAB.into() }],
+            },
+            Delivery::Spoken,
+        )
+        .await
+        .unwrap();
+    tokio::spawn(task);
+    spoken.settle().await;
+    let (shown, spoken) = (&shown.requests()[0], &spoken.requests()[0]);
+    assert_eq!(shown.system.len(), 1);
+    assert_eq!(shown.system[0].text, zephium_page_assist::prompt::SYSTEM);
+    assert_eq!(spoken.system[0].text, shown.system[0].text);
+    assert_eq!(spoken.system[1].text, zephium_page_assist::prompt::SPOKEN);
+    assert_eq!(format!("{:?}", spoken.tools), format!("{:?}", shown.tools));
+    assert_eq!(
+        format!("{:?}", spoken.messages),
+        format!("{:?}", shown.messages)
+    );
+}
+
+#[tokio::test]
+async fn find_reaches_words_far_below_and_gives_fresh_references() {
+    let h = harness(vec![
+        tool("find", json!({"page": "a", "words": "52C"})),
+        tool("find", json!({"page": "a", "words": "99Z"})),
+        say("Found it."),
+    ]);
+    {
+        let mut page = h.page.lock();
+        let seats = |rows: std::ops::RangeInclusive<u16>| -> Vec<Passage> {
+            rows.flat_map(|row| {
+                ["A", "B", "C"]
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(n, seat)| {
+                        passage(
+                            row * 10 + u16::try_from(n).unwrap(),
+                            Role::Button,
+                            &format!("Reserve seat {row}{seat}"),
+                        )
+                    })
+            })
+            .collect()
+        };
+        page.below = VecDeque::from([seats(20..=39), seats(40..=59), seats(40..=59)]);
+    }
+    h.ask("Reserve seat 52C", true).await.unwrap();
+    h.settle_within(Duration::from_secs(5)).await;
+    let (found, error) = h.tool_result(1);
+    assert!(!error, "{found}");
+    assert!(found.starts_with("1 found on page c:"), "{found}");
+    assert!(
+        found.contains("@c522 button \"Reserve seat 52C\""),
+        "{found}"
+    );
+    assert!(
+        !found.contains("152C") && found.lines().count() <= 9,
+        "{found}"
+    );
+    let (missing, error) = h.tool_result(2);
+    assert!(error && missing.contains("not on that page"), "{missing}");
+    let scrolls = h
+        .page
+        .lock()
+        .acted
+        .iter()
+        .filter(|step| step.verb == Verb::Scroll)
+        .count();
+    assert_eq!(scrolls, 3, "one view at a time, stopping at the bottom");
+}
+
+#[tokio::test]
+async fn an_act_that_finishes_ends_the_reply_without_another_call() {
+    let h = harness(vec![
+        Turn {
+            deltas: vec!["Adding it.".into()],
+            ..tool(
+                "act",
+                json!({"steps": [{"verb": "click", "ref": "a10"}], "finish": true}),
+            )
+        },
+        say("never called"),
+    ]);
+    h.controls();
+    h.ask("Add it to my wishlist", true).await.unwrap();
+    h.settle().await;
+    assert_eq!(h.requests().len(), 1);
+    assert_eq!(h.ends().await, [ANSWERED]);
+
+    let unsaid = harness(vec![
+        tool(
+            "act",
+            json!({"steps": [{"verb": "click", "ref": "a10"}], "finish": true}),
+        ),
+        say("Added."),
+    ]);
+    unsaid.controls();
+    unsaid.ask("Add it to my wishlist", true).await.unwrap();
+    unsaid.settle().await;
+    assert_eq!(
+        unsaid.requests().len(),
+        2,
+        "no line yet: the model still answers"
+    );
+
+    let failed = harness(vec![
+        Turn {
+            deltas: vec!["Adding it.".into()],
+            ..tool(
+                "act",
+                json!({"steps": [{"verb": "click", "ref": "a10"}], "finish": true}),
+            )
+        },
+        say("It did not take."),
+    ]);
+    failed.controls();
+    failed.page.lock().inert.insert(10);
+    failed.ask("Add it to my wishlist", true).await.unwrap();
+    failed.settle_within(Duration::from_secs(5)).await;
+    assert_eq!(
+        failed.requests().len(),
+        2,
+        "a step that did not take is told"
+    );
+}
+
+#[tokio::test]
+async fn an_act_returns_only_what_changed_on_the_page() {
+    let h = harness(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("Added."),
+    ]);
+    h.controls();
+    h.ask("Add it to my wishlist", true).await.unwrap();
+    h.settle().await;
+    let (result, _) = h.tool_result(1);
+    assert!(result.contains("read again as b"), "{result}");
+    assert!(result.contains("Updated"), "{result}");
+    assert!(!result.contains("Line 101"), "{result}");
 }

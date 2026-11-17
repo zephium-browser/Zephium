@@ -276,8 +276,11 @@ pub enum PageAssistStepReasonV1 {
     Unsuitable,
     /// The page changed before it ran.
     PageChanged,
-    /// It ran, but the page did not change as expected.
+    /// It ran, and nothing on the page changed.
     NoEffect,
+    /// It ran, but whether it took could not be seen: the page changed
+    /// elsewhere, moved on, or could not be read again.
+    Unconfirmed,
 }
 
 /// One step of a light page action.
@@ -291,7 +294,8 @@ pub struct PageAssistStepV1 {
     /// Set when the step commits something and so needs the person's confirm.
     pub category: Option<WorkConfirmCategoryV1>,
     pub state: PageAssistStepStateV1,
-    /// Set when `state` is `failed`.
+    /// Set when `state` is `failed`. A step is `done` only when its effect
+    /// was seen on the page after it ran.
     pub reason: Option<PageAssistStepReasonV1>,
 }
 
@@ -456,6 +460,16 @@ pub enum PageAssistReplyStateV1 {
     Cancelled,
 }
 
+/// How a finished reply ended, beyond answering.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum PageAssistEndV1 {
+    /// It ends with a question to the person and took no step after it.
+    Asked,
+    /// The person redirected it while it worked; the next reply carries on.
+    Redirected,
+}
+
 /// One message of a conversation.
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -475,6 +489,8 @@ pub enum PageAssistMessageV1 {
         fault: Option<PageAssistFaultV1>,
         /// The pages it read changed since; its cites no longer jump.
         inert: bool,
+        /// Set once it is done, when it ended other than by answering.
+        end: Option<PageAssistEndV1>,
     },
 }
 
@@ -636,6 +652,7 @@ pub enum PageAssistEventV1 {
     /// event replaces it.
     Done {
         cost: Option<PageAssistCostV1>,
+        end: Option<PageAssistEndV1>,
     },
     Cost {
         cost: PageAssistCostV1,

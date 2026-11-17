@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zephium_ipc::page_assist::{
-    PageAssistBlockV1, PageAssistOpenStateV1, PageAssistReplyStateV1, PageAssistStepReasonV1,
-    PageAssistStepStateV1,
+    PageAssistBlockV1, PageAssistEndV1, PageAssistOpenStateV1, PageAssistReplyStateV1,
+    PageAssistStepReasonV1, PageAssistStepStateV1,
 };
 
 pub(super) enum Grade {
@@ -17,6 +17,8 @@ pub(super) enum Grade {
     State(fn(&Shop) -> bool),
     /// Read-only: an expected fact in the reply, graded separately.
     Fact(&'static [&'static str]),
+    /// A question to the person naming every one of these, with no step run.
+    Asks(&'static [&'static str]),
 }
 
 pub(super) struct Scenario {
@@ -135,14 +137,14 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         "how many people live in Lakeview according to this page",
         &["/article"],
         &[],
-        Grade::Fact(&["48,200", "48200", "48 200"]),
+        Grade::Fact(&["48,200", "48200", "48 200", "forty-eight thousand two hundred", "forty eight thousand two hundred"]),
     ),
     shop(
         "two-tabs",
         "how much cheaper per month is the cheaper of this plan and the one in my other tab",
         &["/plans/starter", "/plans/team"],
         &[],
-        Grade::Fact(&["$3", "3 dollars", "3.00"]),
+        Grade::Fact(&["$3", "3 dollars", "3.00", "three dollars"]),
     ),
     Scenario {
         rerender: true,
@@ -173,7 +175,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         "add the blue cap to my cart",
         &["/caps"],
         &[],
-        Grade::State(|s| !s.cart.keys().any(|id| id.starts_with("blue-"))),
+        Grade::Asks(&["denim", "wool"]),
     ),
     shop(
         "protected-field",
@@ -193,7 +195,7 @@ pub(super) const SCENARIOS: &[Scenario] = &[
         "live-wikipedia",
         "how tall is this mountain",
         &["https://en.wikipedia.org/wiki/Mount_Everest"],
-        &["8,848", "8848", "8 848", "8,849", "8849", "29,03"],
+        &["8,848", "8848", "8 848", "8,849", "8849", "29,03", "eight thousand eight hundred", "twenty-nine thousand"],
     ),
     live(
         "live-docs",
@@ -216,6 +218,7 @@ pub(super) fn find(name: &str) -> Option<&'static Scenario> {
 /// What the reply amounts to, from typed facts only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Claimed {
+    AskedPerson,
     ActedAllStepsDone,
     ActedWithFailures,
     Answered,
@@ -227,6 +230,7 @@ pub(super) enum Claimed {
 impl Claimed {
     pub(super) const fn name(self) -> &'static str {
         match self {
+            Self::AskedPerson => "asked_person",
             Self::ActedAllStepsDone => "acted_all_steps_done",
             Self::ActedWithFailures => "acted_with_failures",
             Self::Answered => "answered",
@@ -245,6 +249,7 @@ pub(super) struct Acts {
     pub(super) skipped: u32,
     pub(super) refused: u32,
     pub(super) no_effect: u32,
+    pub(super) unconfirmed: u32,
     pub(super) page_changed: u32,
     pub(super) unsuitable: u32,
 }
@@ -262,6 +267,7 @@ pub(super) fn acts(blocks: &[PageAssistBlockV1]) -> Acts {
         match reason {
             Some(PageAssistStepReasonV1::Refused) => acts.refused += 1,
             Some(PageAssistStepReasonV1::NoEffect) => acts.no_effect += 1,
+            Some(PageAssistStepReasonV1::Unconfirmed) => acts.unconfirmed += 1,
             Some(PageAssistStepReasonV1::PageChanged) => acts.page_changed += 1,
             Some(PageAssistStepReasonV1::Unsuitable) => acts.unsuitable += 1,
             None => {}
@@ -292,8 +298,15 @@ pub(super) fn acts(blocks: &[PageAssistBlockV1]) -> Acts {
     acts
 }
 
-pub(super) fn claimed(state: PageAssistReplyStateV1, acts: &Acts) -> Claimed {
+pub(super) fn claimed(
+    state: PageAssistReplyStateV1,
+    end: Option<PageAssistEndV1>,
+    acts: &Acts,
+) -> Claimed {
     match state {
+        PageAssistReplyStateV1::Done if end == Some(PageAssistEndV1::Asked) => {
+            return Claimed::AskedPerson
+        }
         PageAssistReplyStateV1::Done => {}
         PageAssistReplyStateV1::Cancelled => return Claimed::Cancelled,
         _ => return Claimed::Failed,
@@ -862,14 +875,19 @@ mod tests {
     #[test]
     fn claims_come_only_from_reply_and_step_states() {
         let done = PageAssistReplyStateV1::Done;
-        assert_eq!(claimed(done, &acts(&[])), Claimed::Answered);
+        assert_eq!(claimed(done, None, &acts(&[])), Claimed::Answered);
         assert_eq!(
-            claimed(done, &acts(&steps(&[(S::Done, None), (S::Done, None)]))),
+            claimed(
+                done,
+                None,
+                &acts(&steps(&[(S::Done, None), (S::Done, None)]))
+            ),
             Claimed::ActedAllStepsDone
         );
         assert_eq!(
             claimed(
                 done,
+                None,
                 &acts(&steps(&[
                     (S::Done, None),
                     (S::Failed, Some(PageAssistStepReasonV1::NoEffect))
@@ -880,6 +898,7 @@ mod tests {
         assert_eq!(
             claimed(
                 done,
+                None,
                 &acts(&steps(&[(
                     S::Failed,
                     Some(PageAssistStepReasonV1::Refused)
@@ -890,6 +909,7 @@ mod tests {
         assert_eq!(
             claimed(
                 done,
+                None,
                 &acts(&steps(&[(S::Declined, None), (S::Skipped, None)]))
             ),
             Claimed::DeclinedOrRefused
@@ -897,6 +917,7 @@ mod tests {
         assert_eq!(
             claimed(
                 done,
+                None,
                 &acts(&steps(&[(
                     S::Failed,
                     Some(PageAssistStepReasonV1::PageChanged)
@@ -907,16 +928,17 @@ mod tests {
         assert_eq!(
             claimed(
                 PageAssistReplyStateV1::Failed,
+                None,
                 &acts(&steps(&[(S::Done, None)]))
             ),
             Claimed::Failed
         );
         assert_eq!(
-            claimed(PageAssistReplyStateV1::Cancelled, &acts(&[])),
+            claimed(PageAssistReplyStateV1::Cancelled, None, &acts(&[])),
             Claimed::Cancelled
         );
         assert_eq!(
-            claimed(done, &acts(&steps(&[(S::Running, None)]))),
+            claimed(done, None, &acts(&steps(&[(S::Running, None)]))),
             Claimed::ActedWithFailures
         );
     }

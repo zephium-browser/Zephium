@@ -17,7 +17,7 @@ use zephium_core::work::model::{
 use zephium_engine::WebviewEngine;
 use zephium_ipc::page_assist::*;
 use zephium_work_composition::page_assist::port::*;
-use zephium_work_composition::page_assist::{PageAssist, Ports};
+use zephium_work_composition::page_assist::{Delivery, PageAssist, Ports};
 
 use super::assist_scenarios::{self as scenarios, Fixture, Grade, Scenario};
 
@@ -629,7 +629,7 @@ impl WorkModelClient for Counted {
                                 let name = match call.name.as_str() {
                                     "list_tabs" | "read_page" | "show_items" | "go_to"
                                     | "open_tabs" | "act" | "inspect_style" | "restyle"
-                                    | "hand_off" => call.name.clone(),
+                                    | "hand_off" | "find" | "ask_person" => call.name.clone(),
                                     _ => "other".to_owned(),
                                 };
                                 *c.tools.entry(name).or_default() += 1;
@@ -886,6 +886,7 @@ type ReplyView = (
     Vec<PageAssistBlockV1>,
     Option<PageAssistFaultV1>,
     Option<PageAssistCostV1>,
+    Option<PageAssistEndV1>,
 );
 
 fn reply_view(body: Option<&str>, reply: u32) -> Option<ReplyView> {
@@ -897,8 +898,9 @@ fn reply_view(body: Option<&str>, reply: u32) -> Option<ReplyView> {
             blocks,
             fault,
             cost,
+            end,
             ..
-        } if id == reply => Some((state, blocks, fault, cost)),
+        } if id == reply => Some((state, blocks, fault, cost, end)),
         _ => None,
     })
 }
@@ -968,13 +970,16 @@ async fn scenario_run(
         .unwrap_or_else(|p| p.into_inner())
         .clear();
     let (reply, task) = service
-        .ask(PageAssistAskV1 {
-            space: shared.space.clone(),
-            conversation: status.conversation.id.clone(),
-            text: scenario.request.to_owned(),
-            suggestion: None,
-            attachments: vec![PageAssistAttachV1::Page { tab: front.clone() }],
-        })
+        .ask_as(
+            PageAssistAskV1 {
+                space: shared.space.clone(),
+                conversation: status.conversation.id.clone(),
+                text: scenario.request.to_owned(),
+                suggestion: None,
+                attachments: vec![PageAssistAttachV1::Page { tab: front.clone() }],
+            },
+            Delivery::Spoken,
+        )
         .await
         .map_err(|_| "ask_refused")?;
     let conversation = status.conversation.id.clone();
@@ -1043,10 +1048,15 @@ async fn scenario_run(
         .unwrap_or_else(|p| p.into_inner())
         .clone();
     let view = reply_view(saved.as_deref(), reply);
-    let (state, blocks, fault, cost) =
-        view.unwrap_or((PageAssistReplyStateV1::Working, Vec::new(), None, None));
+    let (state, blocks, fault, cost, end) = view.unwrap_or((
+        PageAssistReplyStateV1::Working,
+        Vec::new(),
+        None,
+        None,
+        None,
+    ));
     let acts = scenarios::acts(&blocks);
-    let claimed = scenarios::claimed(state, &acts);
+    let claimed = scenarios::claimed(state, end, &acts);
     let text: String = blocks
         .iter()
         .filter_map(|block| match block {
@@ -1063,6 +1073,17 @@ async fn scenario_run(
             None,
         ),
         Grade::Fact(facts) => (None, Some(scenarios::has_fact(&text, facts))),
+        Grade::Asks(names) => {
+            let asked = text.to_lowercase();
+            (
+                Some(
+                    claimed == scenarios::Claimed::AskedPerson
+                        && acts == scenarios::Acts::default()
+                        && names.iter().all(|name| asked.contains(name)),
+                ),
+                None,
+            )
+        }
     };
     let shop_facts = fixture.as_ref().map(|fixture| {
         fixture.with(|shop| {
@@ -1102,6 +1123,7 @@ async fn scenario_run(
     Ok(serde_json::json!({
         "scenario": scenario.name,
         "live": scenario.live,
+        "delivery": "spoken",
         "availability": availability,
         "model": model.map(|model| serde_json::json!({"id": model.id, "effort": model.effort, "hosted": model.hosted})),
         "task_verified": task_verified,
@@ -1109,14 +1131,23 @@ async fn scenario_run(
         "claimed": claimed.name(),
         "false_done": claimed == scenarios::Claimed::ActedAllStepsDone && task_verified == Some(false),
         "reply_state": serde_json::to_value(state).unwrap_or_default(),
+        "reply_end": end.and_then(|end| serde_json::to_value(end).ok()),
         "fault": fault.and_then(|fault| serde_json::to_value(fault).ok()),
         "harness_timeout": timed_out,
         "steps": step_rows,
+        "step_log": blocks.iter().flat_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.as_slice(),
+            _ => &[],
+        }).map(|step| serde_json::json!({
+            "label": step.label,
+            "state": serde_json::to_value(step.state).unwrap_or_default(),
+            "reason": step.reason.and_then(|reason| serde_json::to_value(reason).ok()),
+        })).collect::<Vec<_>>(),
         "step_states": {
             "done": acts.done, "failed": acts.failed, "declined": acts.declined, "skipped": acts.skipped,
         },
         "step_reasons": {
-            "refused": acts.refused, "no_effect": acts.no_effect,
+            "refused": acts.refused, "no_effect": acts.no_effect, "unconfirmed": acts.unconfirmed,
             "page_changed": acts.page_changed, "unsuitable": acts.unsuitable,
         },
         "confirms": confirms.iter().map(|c| serde_json::json!({"category": category(c.category), "approved": c.approved})).collect::<Vec<_>>(),
@@ -1132,6 +1163,8 @@ async fn scenario_run(
         "opens": counters.opens,
         "wall_ms": ended,
         "first_text_ms": first_text,
+        "plain_text": !text.contains(['*', '#', '|', '`']) && !text.contains("http"),
+        "text_chars": text.chars().count(),
         "first_action_ms": counters.first_action_ms,
         "tokens": {
             "input": counters.usage.input_tokens,

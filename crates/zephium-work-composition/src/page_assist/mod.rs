@@ -5,6 +5,7 @@
 #![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
 
 mod agent;
+mod effect;
 mod fault;
 pub mod port;
 pub use zephium_page_assist as core;
@@ -47,6 +48,8 @@ const MAX_LINKS: usize = 4096;
 const HISTORY: u32 = zephium_core::ports::store::MAX_CHATS as u32;
 /// Picked elements one tab keeps attached.
 const MAX_PICKS: usize = 3;
+/// Longest a steer waits for the running reply to reach a safe boundary.
+const STEER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The ports the service works through.
 #[derive(Clone)]
@@ -73,10 +76,52 @@ pub struct Ports {
     pub diagnostics: Arc<dyn Diagnostics>,
 }
 
+/// How a reply reaches the person.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Delivery {
+    /// Shown in the panel.
+    #[default]
+    Shown,
+    /// Spoken aloud: short, plain, answer first; outcomes come from the steps.
+    Spoken,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CancelReason {
     Stopped,
     Gone,
+    /// The person steered: never set on a `Cancel`, only returned by waits
+    /// that end at a safe boundary.
+    Redirected,
+}
+
+/// The person's new words for a running reply: it ends at its next safe
+/// boundary, never between a step's dispatch and its settlement.
+#[derive(Default)]
+struct Redirect {
+    asked: AtomicBool,
+    notify: Notify,
+}
+
+impl Redirect {
+    fn ask(&self) {
+        self.asked.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn asked(&self) -> bool {
+        self.asked.load(Ordering::Acquire)
+    }
+
+    async fn requested(&self) {
+        loop {
+            let notified = self.notify.notified();
+            if self.asked() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -122,6 +167,9 @@ struct Running {
     leased: Arc<AtomicBool>,
     took_over: Arc<AtomicBool>,
     acting: Option<String>,
+    redirect: Arc<Redirect>,
+    /// Told once the reply has left `running`.
+    ended: Arc<Notify>,
 }
 
 /// One page read in a reply, under its letters.
@@ -157,6 +205,15 @@ struct ReplyData {
     credits: Option<String>,
     /// The tab the reply works in: the attached page, then wherever go_to went.
     working: Option<String>,
+    /// Steps that ran without a seen effect, by tab and document: never run again.
+    untaken: Vec<(
+        String,
+        u64,
+        zephium_page_assist::actions::Verb,
+        effect::Control,
+    )>,
+    /// An act asked to end the reply once all its steps were done, and they were.
+    finished: bool,
 }
 
 struct Live {
@@ -191,6 +248,8 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     ports: Ports,
+    /// One steer at a time per service, so a second waits on the first's reply.
+    steering: tokio::sync::Mutex<()>,
 }
 
 /// The assistant's service.
@@ -281,6 +340,7 @@ impl PageAssist {
             shared: Arc::new(Shared {
                 state: Mutex::new(State::default()),
                 ports,
+                steering: tokio::sync::Mutex::new(()),
             }),
         }
     }
@@ -634,6 +694,15 @@ impl PageAssist {
         &self,
         request: PageAssistAskV1,
     ) -> Result<(u32, TurnTask), PageAssistFaultV1> {
+        self.ask_as(request, Delivery::Shown).await
+    }
+
+    /// `ask`, for a reply delivered as `delivery`.
+    pub async fn ask_as(
+        &self,
+        request: PageAssistAskV1,
+        delivery: Delivery,
+    ) -> Result<(u32, TurnTask), PageAssistFaultV1> {
         let words = text::clean(&request.text);
         if request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES
             || (words.is_empty() && request.suggestion.is_none())
@@ -669,6 +738,8 @@ impl PageAssist {
         let cancel = Arc::new(Cancel::default());
         let leased = Arc::new(AtomicBool::new(false));
         let took_over = Arc::new(AtomicBool::new(false));
+        let redirect = Arc::new(Redirect::default());
+        let ended = Arc::new(Notify::new());
         let title = request
             .suggestion
             .filter(|_| words.is_empty())
@@ -707,6 +778,8 @@ impl PageAssist {
                     leased: leased.clone(),
                     took_over: took_over.clone(),
                     acting: None,
+                    redirect: redirect.clone(),
+                    ended: ended.clone(),
                 },
             );
             (reply, events)
@@ -730,9 +803,61 @@ impl PageAssist {
             cancel,
             leased,
             took_over,
+            redirect,
+            ended,
             glowing: Mutex::new(Vec::new()),
+            spent: Mutex::new(None),
+            spoken: delivery == Delivery::Spoken,
         };
         Ok((reply, Box::pin(agent::run(context))))
+    }
+
+    /// New words for the Space's conversation while a reply may be running.
+    /// A running reply ends at its next safe boundary, marked redirected
+    /// (a waiting confirm is declined as superseded), and the words are then
+    /// asked in the same conversation. With nothing running it is `ask`.
+    pub async fn steer(
+        &self,
+        request: PageAssistAskV1,
+        delivery: Delivery,
+    ) -> Result<(u32, TurnTask), PageAssistFaultV1> {
+        if request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES
+            || (text::clean(&request.text).is_empty() && request.suggestion.is_none())
+            || request.attachments.len() > PAGE_ASSIST_MAX_ATTACHMENTS
+        {
+            return Err(PageAssistFaultV1::Invalid);
+        }
+        let _one = self.shared.steering.lock().await;
+        let running = {
+            let state = self.state();
+            if state.current.get(&request.space) != Some(&request.conversation) {
+                return Err(PageAssistFaultV1::Invalid);
+            }
+            state.running.get(&request.conversation).map(|running| {
+                running.redirect.ask();
+                (running.reply, running.ended.clone())
+            })
+        };
+        if let Some((reply, ended)) = running {
+            let gone = async {
+                loop {
+                    let notified = ended.notified();
+                    if self
+                        .state()
+                        .running
+                        .get(&request.conversation)
+                        .is_none_or(|running| running.reply != reply)
+                    {
+                        return;
+                    }
+                    notified.await;
+                }
+            };
+            if tokio::time::timeout(STEER_WAIT, gone).await.is_err() {
+                return Err(PageAssistFaultV1::Busy);
+            }
+        }
+        self.ask_as(request, delivery).await
     }
 
     fn running_reply<T>(
