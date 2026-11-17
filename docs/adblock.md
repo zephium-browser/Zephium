@@ -137,7 +137,7 @@ uBlock filters, whose `filters.txt` copy lacked its includes, have no copy and
 must all download in one refresh; until they do, as when offline, the seed
 stays in use and the refresh backs off from 15 minutes to a day.
 
-The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
+The current bundled seed is **202611172316**, 6,236,712 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
 `LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
