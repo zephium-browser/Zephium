@@ -137,11 +137,40 @@ fn slot(read: &Readout, changed: &HashSet<usize>, at: usize) -> Slot {
     }
 }
 
+/// What a changed passage says with its numbers left out, so a clock or a
+/// countdown is recognised by its wording wherever the page puts it.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Shape {
+    role: Role,
+    region: u8,
+    text: String,
+}
+
+fn shape(passage: &Passage) -> Shape {
+    let mut text = String::new();
+    for c in passage.text.chars() {
+        if !c.is_numeric() {
+            text.push(c);
+        } else if !text.ends_with('#') {
+            text.push('#');
+        }
+    }
+    Shape {
+        role: kind(passage.role),
+        region: passage.region,
+        text,
+    }
+}
+
 /// Places on a document seen changing between two reads with no step
 /// between them: a clock, a countdown, a rotating banner. A change there is
-/// the page's own, never a step's effect.
+/// the page's own, never a step's effect. Known both by where it sits and by
+/// its wording, as a step can make the page reorder what is around it.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Volatile(HashSet<Slot>);
+pub(crate) struct Volatile {
+    slots: HashSet<Slot>,
+    shapes: HashSet<Shape>,
+}
 
 impl Volatile {
     /// Learns from two reads of one document that no step came between.
@@ -152,13 +181,16 @@ impl Volatile {
         for (read, other) in [(earlier, later), (later, earlier)] {
             let changed: HashSet<usize> = unmatched(read, other).into_iter().collect();
             for &at in &changed {
-                self.0.insert(slot(read, &changed, at));
+                self.slots.insert(slot(read, &changed, at));
+                self.shapes.insert(shape(&read.passages[at]));
             }
         }
     }
 
     fn holds(&self, read: &Readout, changed: &HashSet<usize>, at: usize) -> bool {
-        !self.0.is_empty() && self.0.contains(&slot(read, changed, at))
+        !self.slots.is_empty()
+            && (self.shapes.contains(&shape(&read.passages[at]))
+                || self.slots.contains(&slot(read, changed, at)))
     }
 }
 
@@ -440,6 +472,57 @@ mod tests {
             super::judge(Verb::Fill, Some("Alex"), &name, &now, &typed, &volatile),
             Observed::Took,
             "a value step is judged on the control alone"
+        );
+    }
+
+    #[test]
+    fn a_countdown_is_known_after_the_press_reorders_the_page() {
+        let countdown = |time: &str| passage(91, Role::Text, &format!("Sale ends in {time}"), None);
+        let button = passage(40, Role::Button, "Save for later", None);
+        let header = passage(50, Role::Link { same_site: true }, "Northfield Goods", None);
+        let blurb = passage(60, Role::Text, "A 1.5 litre stovetop kettle.", None);
+        let planned = |time: &str| {
+            read(vec![
+                header.clone(),
+                blurb.clone(),
+                countdown(time),
+                button.clone(),
+            ])
+        };
+        let (earlier, now) = (planned("5:00"), planned("4:59"));
+        let mut volatile = Volatile::default();
+        volatile.learn(&earlier, &now);
+        let control = Control::of(&now, 40).unwrap();
+        // After the press the reader lists the button first and the header
+        // after the countdown: the countdown's neighbours are new.
+        let reordered = |time: &str| {
+            read(vec![
+                button.clone(),
+                blurb.clone(),
+                countdown(time),
+                header.clone(),
+            ])
+        };
+        assert_eq!(
+            super::judge(
+                Verb::Click,
+                None,
+                &control,
+                &now,
+                &reordered("4:58"),
+                &volatile
+            ),
+            Observed::Unclear,
+            "the countdown ticking is not the click's effect"
+        );
+        let mut saved = reordered("4:58");
+        saved
+            .passages
+            .insert(1, passage(92, Role::Text, "Saved for later", None));
+        assert_eq!(
+            super::judge(Verb::Click, None, &control, &now, &saved, &volatile),
+            Observed::Took,
+            "a note beside the button still counts"
         );
     }
 
