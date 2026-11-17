@@ -615,6 +615,12 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::Keys,
     ),
     command(
+        "voice.talk",
+        "Talk to Zephium",
+        Keys::same("CmdOrCtrl+Shift+A"),
+        Group::Keys,
+    ),
+    command(
         "launcher.toggle",
         "Toggle Launcher",
         Keys::same("CmdOrCtrl+Shift+Space"),
@@ -670,7 +676,7 @@ pub fn runs_as(id: &str) -> &str {
 /// Mirrored by `commandOffered` in the frame's preferences domain.
 pub fn feature_of(id: &str) -> Option<&'static str> {
     match id {
-        "work.dictate" | "tool.ai" | "mode.choose" => Some("ai"),
+        "work.dictate" | "voice.talk" | "tool.ai" | "mode.choose" => Some("ai"),
         "browser.work" | "mode.work" => Some("work"),
         "tool.notes" | "browser.notes" | "note.new" => Some("notes"),
         "tool.tasks" | "browser.tasks" => Some("tasks"),
@@ -899,6 +905,32 @@ mod tests {
     }
 
     #[test]
+    fn talk_is_a_rebindable_keyboard_command_on_both_platforms() {
+        let talk = get("voice.talk").expect("talk command");
+        assert_eq!(talk.title, "Talk to Zephium");
+        assert_eq!(talk.keys, Keys::same("CmdOrCtrl+Shift+A"));
+        assert_eq!(talk.group, Group::Keys);
+        assert!(talk.customizable());
+        for platform in PLATFORMS {
+            let resolved = resolve_on(&HashMap::new(), platform);
+            assert!(validate_binding_on(
+                &resolved,
+                "voice.talk",
+                Some("CmdOrCtrl+Shift+F8"),
+                platform,
+            )
+            .is_ok());
+            let overrides = HashMap::from([("voice.talk".into(), String::new())]);
+            assert!(resolve_on(&overrides, platform)
+                .iter()
+                .find(|command| command.id == "voice.talk")
+                .unwrap()
+                .accelerator
+                .is_none());
+        }
+    }
+
+    #[test]
     fn the_private_window_keys_sit_beside_new_private_and_leave_the_system_cycle_alone() {
         let new = get("window.newPrivate").expect("new private command");
         assert_eq!(new.keys, Keys::same("CmdOrCtrl+Shift+N"));
@@ -1059,6 +1091,7 @@ mod tests {
     #[test]
     fn every_feature_command_names_its_switch() {
         assert_eq!(feature_of("work.dictate"), Some("ai"));
+        assert_eq!(feature_of("voice.talk"), Some("ai"));
         assert_eq!(feature_of("tool.ai"), Some("ai"));
         assert_eq!(feature_of("work.pane.close"), Some("work"));
         assert_eq!(feature_of("browser.work"), Some("work"));

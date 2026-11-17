@@ -90,7 +90,7 @@ impl Keymap {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
         self.resolved()
             .iter()
-            .filter(|command| command.id != "launcher.toggle")
+            .filter(|command| !matches!(command.id, "launcher.toggle" | "voice.talk"))
             .filter(|command| shown || command.group != Group::Work)
             .filter(|command| self.offers(command.id))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
@@ -194,6 +194,11 @@ impl Keymap {
         if self.recording.swap(recording, Ordering::AcqRel) != recording {
             self.refresh_tables();
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn recording(&self) -> bool {
+        self.recording.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_work_pane_shown(&self, app: &tauri::AppHandle, shown: bool) {
@@ -470,6 +475,9 @@ pub(crate) fn keymap_record(caller: WebviewWindow, app: tauri::AppHandle, active
     let Some(keymap) = app.try_state::<Keymap>() else {
         return false;
     };
+    if active {
+        app.state::<crate::talk_key::TalkKey>().release();
+    }
     keymap.set_recording(active);
     true
 }
@@ -544,12 +552,21 @@ mod tests {
     }
 
     #[test]
+    fn talk_key_is_not_downgraded_to_a_page_command() {
+        assert!(!Keymap::default()
+            .engine_table()
+            .iter()
+            .any(|shortcut| shortcut.id == "voice.talk"));
+    }
+
+    #[test]
     fn each_feature_switch_takes_only_its_own_keys() {
         let keymap = Keymap::default();
         keymap.follow_preference("notes.enabled", "false");
         keymap.follow_preference("ai.enabled", "false");
         assert!(!keymap.offers("tool.notes") && !keymap.offers("note.new"));
         assert!(!keymap.offers("work.dictate"));
+        assert!(!keymap.offers("voice.talk"));
         assert!(keymap.offers("tool.tasks") && keymap.offers("tool.time"));
         assert!(keymap.offers("work.pane.close") && keymap.offers("tab.new"));
         assert!(!keymap.engine_table().iter().any(|s| s.id == "tool.notes"));
@@ -596,6 +613,36 @@ mod tests {
             #[cfg(not(target_os = "macos"))]
             assert!(keymap.engine_table().iter().any(|s| s.id == id));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn talk_key_follows_rebinding_feature_switch_and_recording() {
+        let keymap = Keymap::default();
+        write(&keymap.overrides).insert("voice.talk".into(), "Ctrl+Option+V".into());
+        keymap.refresh_tables();
+        let has_talk = || {
+            read(&keymap.key_table)
+                .iter()
+                .any(|(_, id)| *id == "voice.talk")
+        };
+        assert!(read(&keymap.key_table).iter().any(|(accelerator, id)| {
+            *id == "voice.talk"
+                && *accelerator == Accelerator::parse("Ctrl+Option+V", Platform::Mac).unwrap()
+        }));
+        assert!(!keymap.recording());
+        keymap.set_recording(true);
+        assert!(keymap.recording());
+        assert!(!has_talk());
+        keymap.set_recording(false);
+        assert!(has_talk());
+        keymap.follow_preference("ai.enabled", "false");
+        assert!(!has_talk());
+        keymap.follow_preference("ai.enabled", "true");
+        assert!(has_talk());
+        write(&keymap.overrides).insert("voice.talk".into(), String::new());
+        keymap.refresh_tables();
+        assert!(!has_talk());
     }
 
     #[test]
