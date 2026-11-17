@@ -9,6 +9,11 @@
 //! around the wheel, all on one shared clock in the render server. The
 //! window server redraws the band alone, and the app does nothing per
 //! frame; it lays the pieces out again only when the view's size changes.
+//!
+//! Voice shares the same pieces: the colours hold still and one layer
+//! between the root and the colours breathes with the level, one short
+//! animation per level. With no level, nothing is scheduled; off, every
+//! animation goes with the root.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -17,7 +22,7 @@ use std::rc::Rc;
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread};
-use objc2_app_kit::NSColorSpace;
+use objc2_app_kit::{NSColorSpace, NSWorkspace};
 use objc2_core_foundation::{CFRetained, CGFloat, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     kCGColorSpaceSRGB, CGBitmapContextCreate, CGBitmapContextCreateImage, CGColor, CGColorSpace,
@@ -34,7 +39,8 @@ use objc2_quartz_core::{
 use objc2_web_kit::WKWebView;
 use zephium_core::ids::ItemId;
 
-use crate::page_reader::PageGlow;
+use crate::page_reader::{PageGlow, PageVoice};
+use crate::voice_glow::{tune, Envelope, Look};
 
 /// The luminous line hugging the edge, in points.
 const LINE: f64 = 2.5;
@@ -58,6 +64,7 @@ const STRIP_PX: usize = 512;
 const CORNER_STEPS: usize = 12;
 const TRAVEL: &str = "zephium.glow.travel";
 const FADE: &str = "zephium.glow.fade";
+const BREATH: &str = "zephium.glow.breath";
 
 /// Zephium's blues, sRGB: azure, sky, periwinkle and a cooler sky. The
 /// light travels through one family of colour, so it reads as the window's
@@ -112,6 +119,8 @@ struct Glow {
     tab: ItemId,
     view: Weak<WKWebView>,
     root: Retained<GlowLayer>,
+    /// The voice's breath: an opacity over the colours, on its own clock.
+    breath: Retained<CALayer>,
     /// The pieces' clock: holding it holds the colours.
     colours: Retained<CALayer>,
     strips: [Retained<CALayer>; 4],
@@ -122,7 +131,11 @@ struct Glow {
     radius: Cell<f64>,
     scale: Cell<f64>,
     dark: Cell<bool>,
-    shown: Cell<PageGlow>,
+    assist: Cell<PageGlow>,
+    voice: Cell<PageVoice>,
+    shown: Cell<Look>,
+    still: Cell<bool>,
+    envelope: Cell<Envelope>,
     /// When the light last came on from off, in media time.
     since: Cell<f64>,
     generation: Rc<Cell<u64>>,
@@ -145,7 +158,53 @@ pub(crate) fn set(tab: ItemId, view: &wry::WebView, glow: PageGlow, reduce_motio
 }
 
 pub(crate) fn show_on(tab: ItemId, view: &WKWebView, glow: PageGlow, reduce_motion: bool) {
-    if glow == PageGlow::Off {
+    update(tab, view, Some(glow), None, reduce_motion);
+}
+
+/// Shows or removes the voice edge on `tab`'s page view.
+pub(crate) fn set_voice(tab: ItemId, view: &wry::WebView, voice: PageVoice, reduce_motion: bool) {
+    update(
+        tab,
+        &super::native_webview(view),
+        None,
+        Some(voice),
+        reduce_motion,
+    );
+}
+
+/// One voice level for `tab`'s edge; nothing unless it breathes.
+pub(crate) fn level(tab: ItemId, level: u8) {
+    GLOWS.with(|glows| {
+        if let Some(glow) = glows.try_borrow().ok().as_ref().and_then(|g| g.get(&tab)) {
+            glow.breathe(level);
+        }
+    });
+}
+
+fn update(
+    tab: ItemId,
+    view: &WKWebView,
+    assist: Option<PageGlow>,
+    voice: Option<PageVoice>,
+    reduce_motion: bool,
+) {
+    let (assist, voice) = GLOWS.with(|glows| {
+        let glows = glows.borrow();
+        let current = glows.get(&tab);
+        let assist = assist
+            .or(current.map(|glow| glow.assist.get()))
+            .unwrap_or_default();
+        let voice = voice
+            .or(current.map(|glow| glow.voice.get()))
+            .unwrap_or_default();
+        if let Some(current) = current {
+            current.assist.set(assist);
+            current.voice.set(voice);
+        }
+        (assist, voice)
+    });
+    let look = Look::of(assist, voice);
+    if look == Look::Off {
         GLOWS.with(|glows| {
             if let Some(current) = glows.borrow().get(&tab) {
                 current.off();
@@ -153,6 +212,8 @@ pub(crate) fn show_on(tab: ItemId, view: &WKWebView, glow: PageGlow, reduce_moti
         });
         return;
     }
+    let still =
+        reduce_motion || NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion();
     GLOWS.with(|glows| {
         let mut glows = glows.borrow_mut();
         let same = glows.get(&tab).is_some_and(|current| {
@@ -166,14 +227,17 @@ pub(crate) fn show_on(tab: ItemId, view: &WKWebView, glow: PageGlow, reduce_moti
             if glows.len() >= 64 {
                 glows.retain(|_, glow| glow.view.load().is_some());
             }
-            glows.insert(tab, Glow::new(tab, view));
+            let created = Glow::new(tab, view);
+            created.assist.set(assist);
+            created.voice.set(voice);
+            glows.insert(tab, created);
         }
     });
     // Attaching resizes the root, which lays out through `resized`: the map
     // is not borrowed meanwhile.
     GLOWS.with(|glows| {
         if let Some(current) = glows.borrow().get(&tab) {
-            current.show(view, glow, reduce_motion);
+            current.show(view, look, still);
         }
     });
 }
@@ -223,6 +287,7 @@ fn resized(root: &GlowLayer) {
 impl Glow {
     fn new(tab: ItemId, view: &WKWebView) -> Self {
         let root = GlowLayer::create();
+        let breath = CALayer::new();
         let colours = CALayer::new();
         let strips = [(); 4].map(|()| CALayer::new());
         let corners = [(); 4].map(|()| CALayer::new());
@@ -236,11 +301,16 @@ impl Glow {
         );
         root.setZPosition(10_000.0);
         root.setOpacity(0.0);
+        breath.setActions(Some(&actions));
+        breath.setAutoresizingMask(
+            CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
+        );
+        root.addSublayer(&breath);
         colours.setActions(Some(&actions));
         colours.setAutoresizingMask(
             CAAutoresizingMask::LayerWidthSizable | CAAutoresizingMask::LayerHeightSizable,
         );
-        root.addSublayer(&colours);
+        breath.addSublayer(&colours);
         for strip in &strips {
             strip.setActions(Some(&actions));
             colours.addSublayer(strip);
@@ -258,6 +328,7 @@ impl Glow {
             tab,
             view: Weak::new(view),
             root,
+            breath,
             colours,
             strips,
             corners,
@@ -267,7 +338,11 @@ impl Glow {
             radius: Cell::new(0.0),
             scale: Cell::new(2.0),
             dark: Cell::new(false),
-            shown: Cell::new(PageGlow::Off),
+            assist: Cell::new(PageGlow::Off),
+            voice: Cell::new(PageVoice::Off),
+            shown: Cell::new(Look::Off),
+            still: Cell::new(false),
+            envelope: Cell::new(Envelope::default()),
             since: Cell::new(0.0),
             generation: Rc::new(Cell::new(0)),
         };
@@ -286,7 +361,7 @@ impl Glow {
         );
     }
 
-    fn show(&self, view: &WKWebView, glow: PageGlow, reduce_motion: bool) {
+    fn show(&self, view: &WKWebView, look: Look, reduce_motion: bool) {
         let Some(host) = view.layer() else {
             crate::page_reader::note(format_args!(
                 "page_glow refused tab={} reason=no-layer",
@@ -308,7 +383,7 @@ impl Glow {
             host.addSublayer(&self.root);
         }
         self.root.setFrame(host.bounds());
-        if self.shown.get() == PageGlow::Off {
+        if self.shown.get() == Look::Off {
             self.since.set(CACurrentMediaTime());
         }
         if !attached {
@@ -329,7 +404,7 @@ impl Glow {
             ));
         }
         self.layout();
-        if glow == PageGlow::Working && !reduce_motion {
+        if look.travels(reduce_motion) {
             self.resume();
         } else {
             self.hold();
@@ -340,36 +415,84 @@ impl Glow {
         } else {
             PEAK_LIGHT
         };
-        let target = if glow == PageGlow::Paused {
-            peak * PAUSED_SHARE
-        } else {
-            peak
-        };
-        self.fade_in(target);
-        self.shown.set(glow);
+        self.fade_in(peak * look.share(PAUSED_SHARE));
+        let before = self.shown.replace(look);
+        let was_still = self.still.replace(reduce_motion);
+        if !look.voiced() {
+            self.envelope.set(Envelope::default());
+        }
+        if before != look || was_still != reduce_motion {
+            let to = self.envelope.get().breath(look, reduce_motion);
+            self.glide(to, FADE_IN_SECONDS);
+        }
+    }
+
+    /// One level: the breath glides to it, then settles to rest unless the
+    /// next level comes first.
+    fn breathe(&self, level: u8) {
+        let (look, still) = (self.shown.get(), self.still.get());
+        if !look.breathes(still) || self.root.superlayer().is_none() {
+            return;
+        }
+        let mut envelope = self.envelope.get();
+        envelope.feed(level, CACurrentMediaTime());
+        self.envelope.set(envelope);
+        let to = envelope.breath(look, still);
+        let rest = look.rest(still);
+        breathe_layer(&self.breath, to, rest);
+    }
+
+    /// The breath eases to `to` and stays.
+    fn glide(&self, to: f32, seconds: f64) {
+        // SAFETY: the presentation copy is read on the main thread.
+        let from = unsafe { self.breath.presentationLayer() }
+            .map_or_else(|| self.breath.opacity(), |shown| shown.opacity());
+        if (from - to).abs() < f32::EPSILON {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            self.breath.removeAnimationForKey(ns_string!(BREATH));
+            self.breath.setOpacity(to);
+            CATransaction::commit();
+            return;
+        }
+        let glide = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+        // SAFETY: opacity takes NSNumber values.
+        unsafe {
+            glide.setFromValue(Some(&NSNumber::new_f32(from)));
+            glide.setToValue(Some(&NSNumber::new_f32(to)));
+        }
+        glide.setDuration(seconds);
+        glide.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(
+            0.25, 0.1, 0.25, 1.0,
+        )));
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        self.breath.setOpacity(to);
+        self.breath
+            .addAnimation_forKey(&glide, Some(ns_string!(BREATH)));
+        CATransaction::commit();
     }
 
     /// The light finishes coming on, holds, then fades and goes: a short
     /// run of steps is still seen.
     fn off(&self) {
-        if self.shown.replace(PageGlow::Off) == PageGlow::Off {
+        let shown = self.shown.replace(Look::Off);
+        if shown == Look::Off {
             return;
         }
+        self.envelope.set(Envelope::default());
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
         let current = self.generation.clone();
         let root = self.root.clone();
+        let breath = self.breath.clone();
         let pieces: Vec<Retained<CALayer>> =
             self.strips.iter().chain(&self.corners).cloned().collect();
         let tab = self.tab;
         let since = self.since.get();
         let done = block2::RcBlock::new(move || {
             if current.get() == generation {
-                for piece in &pieces {
-                    piece.removeAllAnimations();
-                }
-                root.removeAllAnimations();
-                root.removeFromSuperlayer();
+                still_layers(&root, &breath, &pieces);
                 crate::page_reader::note(format_args!(
                     "page_glow removed tab={tab} reason=off shown_ms={}",
                     ((CACurrentMediaTime() - since) * 1_000.0).round()
@@ -386,7 +509,11 @@ impl Glow {
             0.0
         };
         let elapsed = CACurrentMediaTime() - since;
-        let hold = HOLD_SECONDS.max(SHOWN_AT_LEAST_SECONDS - elapsed - FADE_OUT_SECONDS);
+        let hold = if shown.voiced() {
+            tune::VOICE_HOLD_SECONDS
+        } else {
+            HOLD_SECONDS.max(SHOWN_AT_LEAST_SECONDS - elapsed - FADE_OUT_SECONDS)
+        };
         let total = rise + hold + FADE_OUT_SECONDS;
         let ease = CAMediaTimingFunction::functionWithControlPoints(0.25, 0.1, 0.25, 1.0);
         let still = CAMediaTimingFunction::functionWithControlPoints(0.0, 0.0, 1.0, 1.0);
@@ -513,6 +640,7 @@ impl Glow {
         };
         CATransaction::begin();
         CATransaction::setDisableActions(true);
+        self.breath.setFrame(self.root.bounds());
         self.colours.setFrame(self.root.bounds());
         // Clockwise from the top-left: each strip's own x runs with the
         // edge, and `s` is where it starts along the band.
@@ -618,12 +746,56 @@ impl Drop for Glow {
                 ((CACurrentMediaTime() - self.since.get()) * 1_000.0).round()
             ));
         }
-        for piece in self.strips.iter().chain(&self.corners) {
-            piece.removeAllAnimations();
-        }
-        self.root.removeAllAnimations();
-        self.root.removeFromSuperlayer();
+        let pieces: Vec<Retained<CALayer>> =
+            self.strips.iter().chain(&self.corners).cloned().collect();
+        still_layers(&self.root, &self.breath, &pieces);
     }
+}
+
+/// Every animation of the glow goes and the root leaves the page: nothing
+/// remains for the render server to run.
+fn still_layers(root: &CALayer, breath: &CALayer, pieces: &[Retained<CALayer>]) {
+    for piece in pieces {
+        piece.removeAllAnimations();
+    }
+    breath.removeAllAnimations();
+    breath.setOpacity(1.0);
+    root.removeAllAnimations();
+    root.removeFromSuperlayer();
+}
+
+/// The breath glides from where it shows to `to`, then settles to `rest`;
+/// a later level replaces it from wherever it then is.
+fn breathe_layer(breath: &CALayer, to: f32, rest: f32) {
+    // SAFETY: the presentation copy is read on the main thread.
+    let from = unsafe { breath.presentationLayer() }
+        .map_or_else(|| breath.opacity(), |shown| shown.opacity());
+    let total = tune::GLIDE_SECONDS + tune::TAIL_SECONDS;
+    let animation = CAKeyframeAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+    let values = [from, to, rest].map(NSNumber::new_f32);
+    let objects: Vec<&AnyObject> = values.iter().map(|value| value.as_ref()).collect();
+    let times = [0.0, tune::GLIDE_SECONDS / total, 1.0].map(NSNumber::new_f64);
+    // SAFETY: opacity takes NSNumber values; key times are NSNumbers in
+    // [0, 1], one per value, ascending.
+    unsafe {
+        animation.setValues(Some(&NSArray::from_slice(&objects)));
+        animation.setKeyTimes(Some(&NSArray::from_retained_slice(&times)));
+    }
+    let out = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.0, 0.2, 1.0);
+    animation.setTimingFunctions(Some(&NSArray::from_retained_slice(&[out.clone(), out])));
+    animation.setDuration(total);
+    if animation.respondsToSelector(objc2::sel!(setPreferredFrameRateRange:)) {
+        animation.setPreferredFrameRateRange(CAFrameRateRange {
+            minimum: 15.0,
+            maximum: 30.0,
+            preferred: 30.0,
+        });
+    }
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    breath.setOpacity(rest);
+    breath.addAnimation_forKey(&animation, Some(ns_string!(BREATH)));
+    CATransaction::commit();
 }
 
 /// What a probe can see of a tab's glow.
@@ -874,6 +1046,28 @@ mod tests {
             "the light falls off"
         );
         assert!(strip_alpha(height - 1) < 4);
+    }
+
+    #[test]
+    fn levels_breathe_and_off_leaves_no_animation() {
+        let root = CALayer::new();
+        let breath = CALayer::new();
+        let pieces = [CALayer::new(), CALayer::new()];
+        root.addSublayer(&breath);
+        let host = CALayer::new();
+        host.addSublayer(&root);
+        breathe_layer(&breath, 0.9, tune::LISTEN_REST);
+        // SAFETY: a lookup by a fixed key on a layer this test owns.
+        assert!(unsafe { breath.animationForKey(ns_string!(BREATH)) }.is_some());
+        assert_eq!(breath.opacity(), tune::LISTEN_REST, "a lost level rests");
+        breathe_layer(&breath, 1.0, tune::LISTEN_REST);
+        assert_eq!(breath.animationKeys().map_or(0, |keys| keys.count()), 1);
+        still_layers(&root, &breath, &pieces);
+        assert!(breath.animationKeys().is_none());
+        assert!(root.animationKeys().is_none());
+        assert!(pieces.iter().all(|piece| piece.animationKeys().is_none()));
+        assert!(root.superlayer().is_none(), "nothing stays on the page");
+        assert_eq!(breath.opacity(), 1.0);
     }
 
     #[test]

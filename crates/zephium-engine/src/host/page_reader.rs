@@ -14,7 +14,7 @@ use zephium_core::ids::ItemId;
 use super::EngineHost;
 use crate::page_reader::{
     PageActFailure, PageGlow, PageMark, PageOutline, PagePick, PagePickFailure, PageReadFailure,
-    PageReaderPolicy, PageReadout,
+    PageReaderPolicy, PageReadout, PageVoice,
 };
 use crate::platform::imp::{schedule_content_policy_timeout, ContentPolicyTimeout};
 use crate::platform::page_recipe::{
@@ -281,13 +281,46 @@ impl EngineHost {
     /// The working glow on `id`'s page: only where the assistant may act
     /// (AI on, not a private window); anything else turns it off.
     pub(crate) fn page_glow(&mut self, id: ItemId, glow: PageGlow, reduce_motion: bool) {
-        let state = glow.name();
+        let Some(view) = self.glow_view(id, glow.name(), glow == PageGlow::Off, reduce_motion)
+        else {
+            return;
+        };
+        let glow = if view.1 { glow } else { PageGlow::Off };
+        crate::platform::imp::page_glow::set(id, &view.0.view, glow, reduce_motion);
+    }
+
+    /// The voice edge on `id`'s page, under the working glow's own gate:
+    /// AI on, not a private window.
+    pub(crate) fn page_voice_glow(&mut self, id: ItemId, voice: PageVoice, reduce_motion: bool) {
+        let Some(view) = self.glow_view(id, voice.name(), voice == PageVoice::Off, reduce_motion)
+        else {
+            return;
+        };
+        let voice = if view.1 { voice } else { PageVoice::Off };
+        crate::platform::imp::page_glow::set_voice(id, &view.0.view, voice, reduce_motion);
+    }
+
+    /// One level for `id`'s voice edge; never noted, it comes 25 a second.
+    pub(crate) fn page_voice_level(&mut self, id: ItemId, level: u8) {
+        if self.views.contains_key(&id) {
+            crate::platform::imp::page_glow::level(id, level);
+        }
+    }
+
+    /// `id`'s view for a glow request, and whether the glow may show there.
+    fn glow_view(
+        &self,
+        id: ItemId,
+        state: &str,
+        off: bool,
+        reduce_motion: bool,
+    ) -> Option<(&super::ObservedView, bool)> {
         let Some(view) = self.views.get(&id) else {
             crate::page_reader::note(format_args!(
                 "page_glow refused tab={id} state={state} reason=no-view"
             ));
             crate::platform::imp::page_glow::forget(id);
-            return;
+            return None;
         };
         let refused = if !enabled() {
             Some("ai-off")
@@ -298,7 +331,7 @@ impl EngineHost {
                 Err(_) => Some("reader-busy"),
             }
         };
-        if let Some(reason) = refused.filter(|_| glow != PageGlow::Off) {
+        if let Some(reason) = refused.filter(|_| !off) {
             crate::page_reader::note(format_args!(
                 "page_glow refused tab={id} state={state} reason={reason}"
             ));
@@ -307,12 +340,7 @@ impl EngineHost {
                 "page_glow requested tab={id} state={state} reduce_motion={reduce_motion}"
             ));
         }
-        let glow = if refused.is_none() {
-            glow
-        } else {
-            PageGlow::Off
-        };
-        crate::platform::imp::page_glow::set(id, &view.view, glow, reduce_motion);
+        Some((view, refused.is_none()))
     }
 
     /// The committed address of `id`'s document at `epoch`.

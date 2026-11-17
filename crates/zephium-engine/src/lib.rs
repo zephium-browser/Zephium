@@ -46,6 +46,9 @@ pub use reputation::{
 
 #[cfg(feature = "agentic-browser")]
 pub mod page_reader;
+#[cfg(feature = "agentic-browser")]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+mod voice_glow;
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 #[doc(hidden)]
 pub use platform::macos::nonpersistent_stores_for_probe;
@@ -2058,6 +2061,30 @@ impl WebviewEngine {
         });
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = (tab, glow, reduce_motion);
+    }
+
+    /// Shows or removes the voice edge on `tab`'s page: listening or
+    /// speaking. Combined natively with the assistant's glow.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_voice_glow(&self, tab: ItemId, voice: page_reader::PageVoice, reduce_motion: bool) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_voice_glow(tab, voice, reduce_motion));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, voice, reduce_motion);
+    }
+
+    /// The voice edge's level on `tab`, in percent, at most about 25 a
+    /// second; ignored unless that tab shows a voice edge.
+    #[cfg(feature = "agentic-browser")]
+    pub fn page_voice_level(&self, tab: ItemId, level: u8) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let _ = self.run(move || {
+            host::try_with(move |host| host.page_voice_level(tab, level));
+        });
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (tab, level);
     }
 
     /// Removes `tab`'s marks.

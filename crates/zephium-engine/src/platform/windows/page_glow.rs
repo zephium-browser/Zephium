@@ -8,19 +8,25 @@
 //! Four edge strips carry the colour along the edge and the falloff across
 //! it; four corner pieces round the line. The strips' falloffs overlap a
 //! little inside each corner, where the light pools slightly.
+//!
+//! Voice shares the same pieces: the colours hold still and one visual
+//! between the root and the pieces breathes with the level, one short
+//! animation per level. With no level, nothing is scheduled; off, every
+//! animation stops and the root leaves the window.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use windows::core::{Interface as _, HSTRING};
+use windows::core::{Interface as _, BOOL, HSTRING};
 use windows::Foundation::TimeSpan;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClientRect, IsWindowVisible, GA_ROOT,
+    GetAncestor, GetClientRect, IsWindowVisible, SystemParametersInfoW, GA_ROOT,
+    SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 use windows::UI::Color;
 use windows::UI::Composition::{
@@ -32,7 +38,8 @@ use windows_numerics::{Vector2, Vector3};
 use wry::WebViewExtWindows as _;
 use zephium_core::ids::ItemId;
 
-use crate::page_reader::PageGlow;
+use crate::page_reader::{PageGlow, PageVoice};
+use crate::voice_glow::{tune, Envelope, Look};
 
 const LINE: f32 = 2.5;
 const FALLOFF: f32 = 34.0;
@@ -71,11 +78,19 @@ struct Glow {
     window: HWND,
     layer: Rc<super::page_layer::PageLayer>,
     root: ContainerVisual,
+    /// The voice's breath: an opacity over the pieces.
+    breath: ContainerVisual,
     clock: CompositionPropertySet,
     dark: bool,
     /// Physical pixels per DIP: composition draws in the window's pixels.
     scale: f32,
-    shown: Cell<PageGlow>,
+    assist: Cell<PageGlow>,
+    voice: Cell<PageVoice>,
+    shown: Cell<Look>,
+    still: Cell<bool>,
+    envelope: Cell<Envelope>,
+    /// The envelope's clock.
+    born: Instant,
     /// When the light last came on from off, and when it was last asked on.
     since: Cell<Instant>,
     asked: Cell<Instant>,
@@ -91,7 +106,47 @@ thread_local! {
 
 /// Shows, holds or removes the glow on `tab`'s page view.
 pub(crate) fn set(tab: ItemId, view: &wry::WebView, glow: PageGlow, reduce_motion: bool) {
-    if glow == PageGlow::Off {
+    update(tab, view, Some(glow), None, reduce_motion);
+}
+
+/// Shows or removes the voice edge on `tab`'s page view.
+pub(crate) fn set_voice(tab: ItemId, view: &wry::WebView, voice: PageVoice, reduce_motion: bool) {
+    update(tab, view, None, Some(voice), reduce_motion);
+}
+
+/// One voice level for `tab`'s edge; nothing unless it breathes.
+pub(crate) fn level(tab: ItemId, level: u8) {
+    GLOWS.with(|glows| {
+        if let Some(glow) = glows.try_borrow().ok().as_ref().and_then(|g| g.get(&tab)) {
+            let _ = glow.breathe(level);
+        }
+    });
+}
+
+fn update(
+    tab: ItemId,
+    view: &wry::WebView,
+    assist: Option<PageGlow>,
+    voice: Option<PageVoice>,
+    reduce_motion: bool,
+) {
+    let (assist, voice) = GLOWS.with(|glows| {
+        let glows = glows.borrow();
+        let current = glows.get(&tab);
+        let assist = assist
+            .or(current.map(|glow| glow.assist.get()))
+            .unwrap_or_default();
+        let voice = voice
+            .or(current.map(|glow| glow.voice.get()))
+            .unwrap_or_default();
+        if let Some(current) = current {
+            current.assist.set(assist);
+            current.voice.set(voice);
+        }
+        (assist, voice)
+    });
+    let look = Look::of(assist, voice);
+    if look == Look::Off {
         GLOWS.with(|glows| {
             if let Some(current) = glows.borrow().get(&tab) {
                 current.off();
@@ -99,6 +154,7 @@ pub(crate) fn set(tab: ItemId, view: &wry::WebView, glow: PageGlow, reduce_motio
         });
         return;
     }
+    let still = reduce_motion || !animations_on();
     let mut window = HWND::default();
     // SAFETY: reads the container window of this live controller.
     if unsafe { view.controller().ParentWindow(&mut window) }.is_err() || window.is_invalid() {
@@ -121,12 +177,31 @@ pub(crate) fn set(tab: ItemId, view: &wry::WebView, glow: PageGlow, reduce_motio
                 ));
                 return;
             };
+            created.assist.set(assist);
+            created.voice.set(voice);
             glows.insert(tab, created);
         }
         if let Some(current) = glows.get(&tab) {
-            current.show(glow, reduce_motion);
+            current.show(look, still);
         }
     });
+}
+
+/// Windows' "Animation effects" setting.
+fn animations_on() -> bool {
+    let mut on = BOOL(1);
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL to the given
+    // pointer, which lives across the call.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            Some((&mut on as *mut BOOL).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    }
+    .is_err()
+        || on.as_bool()
 }
 
 /// Removes `tab`'s glow now.
@@ -219,6 +294,11 @@ impl Glow {
         root.SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
             .ok()?;
         root.SetOpacity(0.0).ok()?;
+        let breath = compositor.CreateContainerVisual().ok()?;
+        breath
+            .SetRelativeSizeAdjustment(Vector2 { X: 1.0, Y: 1.0 })
+            .ok()?;
+        root.Children().ok()?.InsertAtTop(&breath).ok()?;
         let clock = compositor.CreatePropertySet().ok()?;
         clock.InsertScalar(&HSTRING::from("t"), 0.0).ok()?;
         let stops = if dark { &AURORA_DARK } else { &AURORA_LIGHT };
@@ -227,10 +307,16 @@ impl Glow {
             window,
             layer,
             root,
+            breath,
             clock,
             dark,
             scale,
-            shown: Cell::new(PageGlow::Off),
+            assist: Cell::new(PageGlow::Off),
+            voice: Cell::new(PageVoice::Off),
+            shown: Cell::new(Look::Off),
+            still: Cell::new(false),
+            envelope: Cell::new(Envelope::default()),
+            born: Instant::now(),
             since: Cell::new(Instant::now()),
             asked: Cell::new(Instant::now()),
             travelling: Cell::new(false),
@@ -326,7 +412,7 @@ impl Glow {
             brush.SetSource(&colour).ok()?;
             brush.SetMask(&mask).ok()?;
             sprite.SetBrush(&brush).ok()?;
-            glow.root.Children().ok()?.InsertAtTop(&sprite).ok()?;
+            glow.breath.Children().ok()?.InsertAtTop(&sprite).ok()?;
         }
         Some(glow)
     }
@@ -473,10 +559,10 @@ impl Glow {
         Some(())
     }
 
-    fn show(&self, glow: PageGlow, reduce_motion: bool) {
+    fn show(&self, look: Look, reduce_motion: bool) {
         self.generation.set(self.generation.get().wrapping_add(1));
         self.removal.borrow_mut().take();
-        if self.shown.get() == PageGlow::Off {
+        if self.shown.get() == Look::Off {
             self.since.set(Instant::now());
         }
         self.asked.set(Instant::now());
@@ -499,7 +585,7 @@ impl Glow {
                 visible,
             ));
         }
-        let travel = glow == PageGlow::Working && !reduce_motion;
+        let travel = look.travels(reduce_motion);
         if travel && !self.travelling.get() {
             let _ = self.travel();
         } else if !travel && self.travelling.get() {
@@ -507,13 +593,53 @@ impl Glow {
             self.travelling.set(false);
         }
         let peak = if self.dark { PEAK_DARK } else { PEAK_LIGHT };
-        let target = if glow == PageGlow::Paused {
-            peak * PAUSED_SHARE
-        } else {
-            peak
-        };
-        let _ = self.fade(target, FADE_IN);
-        self.shown.set(glow);
+        let _ = self.fade(peak * look.share(PAUSED_SHARE), FADE_IN);
+        let before = self.shown.replace(look);
+        let was_still = self.still.replace(reduce_motion);
+        if !look.voiced() {
+            self.envelope.set(Envelope::default());
+        }
+        if before != look || was_still != reduce_motion {
+            let to = self.envelope.get().breath(look, reduce_motion);
+            let _ = self.glide(to);
+        }
+    }
+
+    /// One level: the breath glides to it, then settles to rest unless the
+    /// next level comes first.
+    fn breathe(&self, level: u8) -> Option<()> {
+        let (look, still) = (self.shown.get(), self.still.get());
+        if !look.breathes(still) || !self.attached.get() {
+            return None;
+        }
+        let mut envelope = self.envelope.get();
+        envelope.feed(level, self.born.elapsed().as_secs_f64());
+        self.envelope.set(envelope);
+        let to = envelope.breath(look, still);
+        let total = tune::GLIDE_SECONDS + tune::TAIL_SECONDS;
+        let compositor = super::page_layer::compositor()?;
+        let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
+        animation
+            .InsertKeyFrame((tune::GLIDE_SECONDS / total) as f32, to)
+            .ok()?;
+        animation.InsertKeyFrame(1.0, look.rest(still)).ok()?;
+        animation
+            .SetDuration(TimeSpan::from(Duration::from_secs_f64(total)))
+            .ok()?;
+        self.breath
+            .StartAnimation(&HSTRING::from("Opacity"), &animation)
+            .ok()
+    }
+
+    /// The breath eases to `to` and stays.
+    fn glide(&self, to: f32) -> Option<()> {
+        let compositor = super::page_layer::compositor()?;
+        let animation = compositor.CreateScalarKeyFrameAnimation().ok()?;
+        animation.InsertKeyFrame(1.0, to).ok()?;
+        animation.SetDuration(TimeSpan::from(FADE_IN)).ok()?;
+        self.breath
+            .StartAnimation(&HSTRING::from("Opacity"), &animation)
+            .ok()
     }
 
     /// The clock runs on from where it stopped; a whole trip later the
@@ -556,33 +682,34 @@ impl Glow {
     /// The light finishes coming on, holds, then fades and goes: a short
     /// run of steps is still seen.
     fn off(&self) {
-        let shown = self.shown.replace(PageGlow::Off);
-        if shown == PageGlow::Off {
+        let shown = self.shown.replace(Look::Off);
+        if shown == Look::Off {
             return;
         }
+        self.envelope.set(Envelope::default());
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
-        let peak = match (self.dark, shown) {
-            (true, PageGlow::Paused) => PEAK_DARK * PAUSED_SHARE,
-            (true, _) => PEAK_DARK,
-            (false, PageGlow::Paused) => PEAK_LIGHT * PAUSED_SHARE,
-            (false, _) => PEAK_LIGHT,
-        };
+        let peak = (if self.dark { PEAK_DARK } else { PEAK_LIGHT }) * shown.share(PAUSED_SHARE);
         let rise = FADE_IN.saturating_sub(self.asked.get().elapsed());
-        let hold = HOLD.max(
-            SHOWN_AT_LEAST
-                .saturating_sub(self.since.get().elapsed())
-                .saturating_sub(FADE_OUT),
-        );
+        let hold = if shown.voiced() {
+            Duration::from_secs_f64(tune::VOICE_HOLD_SECONDS)
+        } else {
+            HOLD.max(
+                SHOWN_AT_LEAST
+                    .saturating_sub(self.since.get().elapsed())
+                    .saturating_sub(FADE_OUT),
+            )
+        };
         let total = rise + hold + FADE_OUT;
         let _ = self.fade_out(peak, rise, hold, total);
         let current = self.generation.clone();
         let (layer, root, clock) = (self.layer.clone(), self.root.clone(), self.clock.clone());
+        let breath = self.breath.clone();
         let (tab, since) = (self.tab, self.since.get());
         let detached =
             super::schedule_browser_timeout(total + Duration::from_millis(50), move || {
                 if current.get() == generation {
-                    let _ = clock.StopAnimation(&HSTRING::from("t"));
+                    stop_all(&clock, &breath);
                     layer.detach(&root);
                     crate::page_reader::note(format_args!(
                         "page_glow removed tab={tab} reason=off shown_ms={}",
@@ -620,9 +747,16 @@ impl Drop for Glow {
                 self.since.get().elapsed().as_millis()
             ));
         }
-        let _ = self.clock.StopAnimation(&HSTRING::from("t"));
+        stop_all(&self.clock, &self.breath);
         self.layer.detach(&self.root);
     }
+}
+
+/// Every animation of the glow stops: nothing remains for DWM to run.
+fn stop_all(clock: &CompositionPropertySet, breath: &ContainerVisual) {
+    let _ = clock.StopAnimation(&HSTRING::from("t"));
+    let _ = breath.StopAnimation(&HSTRING::from("Opacity"));
+    let _ = breath.SetOpacity(1.0);
 }
 
 fn run(vertical: bool, reversed: bool, start: &'static str) -> Run {

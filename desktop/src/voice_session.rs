@@ -31,6 +31,7 @@ mod product {
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Instant;
     use zephium_core::work::model::WorkModelError;
+    use zephium_engine::page_reader::PageVoice;
     use zephium_ipc::page_assist::{PageAssistAskV1, PageAssistAttachV1, PageAssistAvailabilityV1};
     use zephium_work_composition::page_assist::core::voice::{Fault, Language};
     use zephium_work_composition::page_assist::Delivery;
@@ -96,6 +97,88 @@ mod product {
         front.private = profile.kind == zephium_ipc::ProfileKindView::Incognito;
         front.space = state.active_space_id.clone();
         front.tab = state.active.clone();
+        drop(front);
+        edge(None);
+    }
+
+    /// The voice edge on the main window's front page: the look the session
+    /// last asked for, and the tab showing it.
+    struct Edge {
+        look: PageVoice,
+        shown: Option<(zephium_core::ids::ItemId, PageVoice)>,
+    }
+
+    static EDGE: Mutex<Edge> = Mutex::new(Edge {
+        look: PageVoice::Off,
+        shown: None,
+    });
+
+    /// Listening while the microphone listens, speaking while speech plays;
+    /// nothing where voice is unavailable.
+    fn look_of(view: &VoiceSessionViewV1) -> PageVoice {
+        let listening = matches!(
+            view.state,
+            VoiceSessionStateV1::Arming { .. } | VoiceSessionStateV1::Listening { .. }
+        ) || (view.mic && !view.warm);
+        match view.availability {
+            VoiceAvailabilityV1::Available if listening => PageVoice::Listening,
+            VoiceAvailabilityV1::Available if view.speaking => PageVoice::Speaking,
+            _ => PageVoice::Off,
+        }
+    }
+
+    /// Moves the edge to the front tab with `look` (or the last look), off
+    /// the tab that showed it; never in a private window.
+    pub(super) fn edge(look: Option<PageVoice>) {
+        let Some(engine) = crate::page_assist::engine() else {
+            return;
+        };
+        let tab = {
+            let front = front();
+            (!front.private)
+                .then(|| {
+                    front
+                        .tab
+                        .as_deref()
+                        .and_then(zephium_core::ids::ItemId::parse)
+                })
+                .flatten()
+        };
+        let mut edge = EDGE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(look) = look {
+            edge.look = look;
+        }
+        let want = tab
+            .filter(|_| edge.look != PageVoice::Off)
+            .map(|tab| (tab, edge.look));
+        if edge.shown == want {
+            return;
+        }
+        let calm = crate::page_assist::reduce_motion();
+        if let Some((old, _)) = edge.shown {
+            if want.is_none_or(|(tab, _)| tab != old) {
+                engine.page_voice_glow(old, PageVoice::Off, calm);
+            }
+        }
+        if let Some((tab, look)) = want {
+            engine.page_voice_glow(tab, look, calm);
+        }
+        edge.shown = want;
+    }
+
+    fn edge_level(levels: VoiceSessionLevelsV1) {
+        let shown = EDGE.lock().unwrap_or_else(|p| p.into_inner()).shown;
+        let (Some((tab, look)), Some(engine)) = (shown, crate::page_assist::engine()) else {
+            return;
+        };
+        let level = match look {
+            PageVoice::Listening => levels.input,
+            PageVoice::Speaking => levels.output,
+            PageVoice::Off => return,
+        };
+        if !crate::page_assist::reduce_motion() {
+            engine.page_voice_level(tab, level);
+        }
     }
 
     fn fault_of(fault: zephium_voice::Fault) -> Fault {
@@ -328,10 +411,12 @@ mod product {
                 let busy = view.state != VoiceSessionStateV1::Idle || view.fault.is_some();
                 talk.claim(busy || view.speaking, view.confirm.is_some());
             }
+            edge(Some(look_of(view)));
             emit_to_privileged(&self.0, MAIN_LABEL, CHANGED, view);
         }
 
         fn levels(&self, levels: VoiceSessionLevelsV1) {
+            edge_level(levels);
             emit_to_privileged(&self.0, MAIN_LABEL, LEVELS, &levels);
         }
     }
@@ -481,6 +566,101 @@ mod product {
         }
 
         #[test]
+        fn the_edge_shows_the_live_microphone_and_speech_only() {
+            let view = |state, mic, warm, speaking, availability| VoiceSessionViewV1 {
+                version: 1,
+                seq: 1,
+                availability,
+                state,
+                mic,
+                warm,
+                interim: String::new(),
+                heard: None,
+                phase: None,
+                step: None,
+                confirm: None,
+                speaking,
+                outcome: None,
+                fault: None,
+            };
+            let held = VoicePressV1::Held;
+            let available = VoiceAvailabilityV1::Available;
+            let cases = [
+                (
+                    VoiceSessionStateV1::Idle,
+                    false,
+                    false,
+                    false,
+                    PageVoice::Off,
+                ),
+                (
+                    VoiceSessionStateV1::Arming { press: held },
+                    false,
+                    false,
+                    false,
+                    PageVoice::Listening,
+                ),
+                (
+                    VoiceSessionStateV1::Listening { press: held },
+                    true,
+                    false,
+                    true,
+                    PageVoice::Listening,
+                ),
+                (
+                    VoiceSessionStateV1::Finalizing,
+                    true,
+                    true,
+                    false,
+                    PageVoice::Off,
+                ),
+                (
+                    VoiceSessionStateV1::Finalizing,
+                    true,
+                    false,
+                    false,
+                    PageVoice::Listening,
+                ),
+                (
+                    VoiceSessionStateV1::Idle,
+                    true,
+                    true,
+                    true,
+                    PageVoice::Speaking,
+                ),
+                (
+                    VoiceSessionStateV1::Idle,
+                    false,
+                    false,
+                    true,
+                    PageVoice::Speaking,
+                ),
+            ];
+            for (state, mic, warm, speaking, look) in cases {
+                assert_eq!(
+                    look_of(&view(state, mic, warm, speaking, available)),
+                    look,
+                    "{state:?}"
+                );
+            }
+            for refused in [
+                VoiceAvailabilityV1::Private,
+                VoiceAvailabilityV1::AiOff,
+                VoiceAvailabilityV1::SignedOut,
+                VoiceAvailabilityV1::Unsupported,
+            ] {
+                let live = view(
+                    VoiceSessionStateV1::Listening { press: held },
+                    true,
+                    false,
+                    true,
+                    refused,
+                );
+                assert_eq!(look_of(&live), PageVoice::Off);
+            }
+        }
+
+        #[test]
         fn ids_are_uuid_v4_and_languages_round_trip() {
             let id = uuid();
             let bytes = id.as_bytes();
@@ -550,6 +730,8 @@ pub(crate) fn dispose() {
     if let Some(session) = product::session() {
         session.send(zephium_work_composition::voice_session::Command::Dispose);
     }
+    #[cfg(feature = "work-product")]
+    product::edge(Some(zephium_engine::page_reader::PageVoice::Off));
 }
 
 #[cfg(feature = "work-product")]

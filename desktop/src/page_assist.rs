@@ -260,6 +260,10 @@ mod product {
 
     static ENGINE: OnceLock<Arc<zephium_engine::WebviewEngine>> = OnceLock::new();
 
+    pub(crate) fn engine() -> Option<&'static Arc<zephium_engine::WebviewEngine>> {
+        ENGINE.get()
+    }
+
     /// Turns the Browse reader on or off in every view. It never runs on a
     /// bank, payment, health or government site.
     fn reader_switch(on: bool) {
@@ -631,7 +635,7 @@ mod product {
     /// Longest a pick may wait for the person; the page ends it sooner when idle.
     const PICK_WAIT: std::time::Duration = std::time::Duration::from_secs(150);
 
-    fn reduce_motion() -> bool {
+    pub(crate) fn reduce_motion() -> bool {
         REDUCE_MOTION.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -1150,8 +1154,8 @@ mod product {
 
 #[cfg(feature = "work-product")]
 pub(crate) use product::{
-    hosted_charged, hosted_sourced, install, observe_items, observe_tab, preference_changed,
-    service,
+    engine, hosted_charged, hosted_sourced, install, observe_items, observe_tab,
+    preference_changed, reduce_motion, service,
 };
 
 #[cfg(not(feature = "work-product"))]

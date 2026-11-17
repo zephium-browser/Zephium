@@ -198,6 +198,29 @@ impl PageGlow {
     }
 }
 
+/// The light along the front page's edges that says voice is live there.
+/// Listening outranks the assistant's glow; speaking yields to it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PageVoice {
+    /// None.
+    #[default]
+    Off,
+    /// The microphone is live: the edge breathes with the person's voice.
+    Listening,
+    /// The assistant speaks: a calmer edge follows its voice.
+    Speaking,
+}
+
+impl PageVoice {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Listening => "listening",
+            Self::Speaking => "speaking",
+        }
+    }
+}
+
 static DIAGNOSTICS: std::sync::OnceLock<fn(std::fmt::Arguments<'_>)> = std::sync::OnceLock::new();
 
 /// Where the reader's closed facts go (the app's diagnostic log); until set,
