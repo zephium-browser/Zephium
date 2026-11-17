@@ -1,6 +1,7 @@
 import { beforeEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
+import { flushSync } from "svelte";
 import "$styles/global.css";
 import type { GlanceView } from "$domain/layout";
 import * as m from "$shared/i18n/messages";
@@ -67,21 +68,41 @@ test("Escape closes it unless something else already handled the key", async () 
 
 test("copying shows a tick that resets after 1.4 seconds, and nothing on failure", async () => {
   render(GlanceOverlay, { view });
+  const copyButton = () =>
+    page
+      .getByRole("button")
+      .elements()
+      .find((button) =>
+        [m.glance_copy(), m.glance_copied()]
+          .map(String)
+          .includes(button.getAttribute("title") ?? ""),
+      );
+  const label = () => copyButton()?.getAttribute("aria-label");
+  const settle = async () => {
+    for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    flushSync();
+  };
 
-  await page.getByRole("button", { name: m.glance_copy() }).click();
-  await expect.element(page.getByRole("button", { name: m.glance_copied() })).toBeVisible();
-  const shown = performance.now();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    (copyButton() as HTMLButtonElement).click();
+    await settle();
+    expect(label()).toBe(m.glance_copied());
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-  expect(page.getByRole("button", { name: m.glance_copied() }).query()).not.toBeNull();
-  await expect
-    .element(page.getByRole("button", { name: m.glance_copy() }), { timeout: 2000 })
-    .toBeVisible();
-  expect(performance.now() - shown).toBeGreaterThanOrEqual(1350);
+    vi.advanceTimersByTime(1399);
+    flushSync();
+    expect(label()).toBe(m.glance_copied());
+    vi.advanceTimersByTime(1);
+    flushSync();
+    expect(label()).toBe(m.glance_copy());
 
-  copyActiveLink.mockResolvedValueOnce(false);
-  await page.getByRole("button", { name: m.glance_copy() }).click();
-  await expect.poll(() => copyActiveLink.mock.calls.length).toBe(2);
-  await expect.element(page.getByRole("button", { name: m.glance_copy() })).toBeVisible();
+    copyActiveLink.mockResolvedValueOnce(false);
+    (copyButton() as HTMLButtonElement).click();
+    await settle();
+    expect(copyActiveLink).toHaveBeenCalledTimes(2);
+    expect(label()).toBe(m.glance_copy());
+  } finally {
+    vi.useRealTimers();
+  }
   expect(actions()).toEqual([]);
 });
