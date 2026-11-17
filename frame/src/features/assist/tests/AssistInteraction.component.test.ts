@@ -207,6 +207,24 @@ test("while a reply works, Send is Stop, and Escape stops it before closing anyt
   expect(onclose).toHaveBeenCalledOnce();
 });
 
+test("an idle empty field parks its caret, and Escape still stops a working reply", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  const onclose = vi.fn();
+  native.status = status([person(1, "Summarize"), reply(2, [], { state: "working", cost: null })]);
+  await page.viewport(400, 820);
+  const screen = await render(PanelStage, { profile: PROFILE, onclose });
+  const field = screen.getByRole("textbox", { name: "Ask Zephium…" });
+  await expect.element(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  await field.click();
+  await expect.poll(() => field.element().dataset.caretParked, { timeout: 6000 }).toBe("");
+  expect(document.activeElement).not.toBe(field.element());
+  await userEvent.keyboard("{Escape}");
+  await expect.poll(() => native.stop.mock.calls.length).toBe(1);
+  expect(onclose).not.toHaveBeenCalled();
+  expect(document.activeElement).toBe(field.element());
+  vi.mocked(document.hasFocus).mockRestore();
+});
+
 test("one round button: the mic on an empty field, Send once there are words", async () => {
   const { screen, field } = await open(status());
   await expect.element(screen.getByRole("button", { name: "Dictate" })).toBeVisible();
