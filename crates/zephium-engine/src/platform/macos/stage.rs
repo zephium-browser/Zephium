@@ -57,11 +57,15 @@ const DETACH_AFTER: Duration = Duration::from_secs(10);
 /// The longest a returning page's last frame stays over it if WebKit never
 /// reports the page presented again.
 const RETURN_COVER_BOUND: Duration = Duration::from_millis(800);
-/// When a shown page's frame is refreshed: soon after it is revealed, then
-/// rarely while it stays shown.
+/// When a shown page's frame is checked: soon after it is revealed or input
+/// settles, then now and then while it stays shown. It is taken again only
+/// when the page may have changed since (see `needs_frame`).
 const FRAME_SETTLE: Duration = Duration::from_millis(1500);
 const FRAME_REFRESH: Duration = Duration::from_secs(30);
 const FRAME_GAP: Duration = Duration::from_secs(5);
+/// How long an untouched page keeps its frame; pages that update themselves
+/// are still captured now and then.
+const FRAME_STALE: Duration = Duration::from_secs(5 * 60);
 /// Cover tokens the stage hands itself, apart from the host's.
 const RETURN_COVER_TOKENS: u64 = 1 << 62;
 // Parked frames beyond this are dropped oldest first; those pages return
@@ -91,6 +95,37 @@ struct ParkedFrame {
     document: u64,
     taken: Instant,
     snapshot: super::PageSnapshot,
+}
+
+/// Whether a shown page's frame is taken again. Input after the frame, loading
+/// or audible playback may have changed what it shows; an untouched page's
+/// frame is kept until it no longer fits or is past `FRAME_STALE`.
+fn needs_frame(
+    taken: Option<Instant>,
+    fits: bool,
+    input: Option<Instant>,
+    busy: bool,
+    now: Instant,
+) -> bool {
+    let Some(taken) = taken else {
+        return true;
+    };
+    !fits
+        || busy
+        || input.is_some_and(|input| input > taken)
+        || now.saturating_duration_since(taken) >= FRAME_STALE
+}
+
+/// A page loading or making sound is still changing what it shows.
+fn changing(page: &objc2_web_kit::WKWebView) -> bool {
+    // SAFETY: main-thread WebKit state reads; the SPI only when present.
+    unsafe {
+        if page.isLoading() {
+            return true;
+        }
+        let answers: bool = msg_send![page, respondsToSelector: objc2::sel!(_isPlayingAudio)];
+        answers && msg_send![page, _isPlayingAudio]
+    }
 }
 
 /// The frames to drop, oldest first, so the newest fit in `budget`.
@@ -389,6 +424,10 @@ pub struct StageIvars {
     frame_refresh: Cell<u64>,
     frame_due: Cell<Option<Instant>>,
     frame_taken: Cell<Option<Instant>>,
+    /// When input last reached this stage's window, and the monitor that
+    /// notes it.
+    input_at: Cell<Option<Instant>>,
+    input_monitor: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -574,6 +613,7 @@ impl ContentStage {
         // `addSubview:` is a native painting boundary. A newly-created stage
         // remains fail-closed until one exact layout update finishes.
         this.setHidden(true);
+        this.watch_input();
         this
     }
 
@@ -1137,6 +1177,10 @@ impl ContentStage {
 
     pub fn retire(&self) {
         self.ivars().pointer_cover.take();
+        if let Some(monitor) = self.ivars().input_monitor.take() {
+            // SAFETY: the token AppKit returned, retired on the main thread.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
         if let Some(window) = self.ivars().offstage.take() {
             if let Some(content) = window.contentView() {
                 for view in content.subviews().iter() {
@@ -2681,6 +2725,8 @@ impl ContentStage {
             return;
         };
         let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        // What the frame shows is from the request, not its completion.
+        let requested = Instant::now();
         let started = super::PageSnapshot::capture_page(page, move |snapshot| {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -2711,7 +2757,7 @@ impl ContentStage {
                 ParkedFrame {
                     owner,
                     document,
-                    taken: Instant::now(),
+                    taken: requested,
                     snapshot,
                 },
             );
@@ -2768,21 +2814,33 @@ impl ContentStage {
                     return;
                 }
                 stage.ivars().frame_due.set(None);
-                if stage.capture_all_shown() {
-                    stage.ivars().frame_taken.set(Some(Instant::now()));
+                let now = Instant::now();
+                if let Some(input) = stage.ivars().input_at.get() {
+                    let settled = input + FRAME_SETTLE;
+                    if settled > now {
+                        stage.refresh_frames_in(settled - now);
+                        return;
+                    }
+                }
+                let (shown, took) = stage.capture_all_shown(now);
+                if took {
+                    stage.ivars().frame_taken.set(Some(now));
+                }
+                if shown {
                     stage.refresh_frames_in(FRAME_REFRESH);
                 }
             }));
         });
     }
 
-    /// Returns whether any page was shown.
-    fn capture_all_shown(&self) -> bool {
+    /// Captures the shown pages that may have changed since their frame.
+    /// Returns whether any page was shown and whether any was captured.
+    fn capture_all_shown(&self, now: Instant) -> (bool, bool) {
         let (Ok(ready), Ok(paintable)) = (
             self.ivars().ready.try_borrow(),
             self.ivars().paintable.try_borrow(),
         ) else {
-            return false;
+            return (false, false);
         };
         let Some(views) = self.ivars().views.try_borrow().ok().map(|views| {
             views
@@ -2795,19 +2853,76 @@ impl ContentStage {
                 .map(|(id, view)| (*id, view.view.clone()))
                 .collect::<Vec<_>>()
         }) else {
-            return false;
+            return (false, false);
         };
         drop((ready, paintable));
-        let mut shown = false;
+        let input = self.ivars().input_at.get();
+        let (mut shown, mut took) = (false, false);
         for (id, view) in views {
-            if view.window().is_some_and(|window| window.isVisible())
-                && !view.isHiddenOrHasHiddenAncestor()
+            if !view.window().is_some_and(|window| window.isVisible())
+                || view.isHiddenOrHasHiddenAncestor()
             {
-                shown = true;
+                continue;
+            }
+            shown = true;
+            let busy = view
+                .downcast_ref::<objc2_web_kit::WKWebView>()
+                .is_some_and(changing);
+            let scale = view.window().map(|window| window.backingScaleFactor());
+            let frame = self.ivars().parked.try_borrow().ok().and_then(|parked| {
+                parked
+                    .get(&id)
+                    .filter(|frame| {
+                        frame.owner == view_key(&view) && Some(frame.document) == self.document(id)
+                    })
+                    .map(|frame| (frame.taken, frame.snapshot.fits(view.frame().size, scale)))
+            });
+            let (taken, fits) = frame.map_or((None, false), |(taken, fits)| (Some(taken), fits));
+            if needs_frame(taken, fits, input, busy, now) {
+                took = true;
                 self.capture_shown(id, &view);
             }
         }
-        shown
+        (shown, took)
+    }
+
+    fn note_input(&self, event: &NSEvent) {
+        let ours = match (event.window(self.mtm()), self.window()) {
+            (Some(target), Some(window)) => std::ptr::eq(&*target, &*window),
+            _ => false,
+        };
+        if ours {
+            self.ivars().input_at.set(Some(Instant::now()));
+            self.refresh_frames_in(FRAME_SETTLE);
+        }
+    }
+
+    /// Notes input in this stage's window, so a shown page is captured again
+    /// once input that may have changed it settles, and not otherwise.
+    fn watch_input(&self) {
+        let weak = Weak::from_retained(&self.retain());
+        let noted = block2::RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(stage) = weak.load() {
+                    // SAFETY: AppKit lends the event for this local callback.
+                    stage.note_input(unsafe { event.as_ref() });
+                }
+            }));
+            event.as_ptr()
+        });
+        let mask = NSEventMask::KeyDown
+            | NSEventMask::LeftMouseDown
+            | NSEventMask::LeftMouseUp
+            | NSEventMask::RightMouseDown
+            | NSEventMask::OtherMouseDown
+            | NSEventMask::ScrollWheel
+            | NSEventMask::Magnify
+            | NSEventMask::SmartMagnify
+            | NSEventMask::Swipe;
+        // SAFETY: a local, main-thread event monitor requires no global input permission.
+        let monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &noted) };
+        self.ivars().input_monitor.replace(monitor);
     }
 
     /// Records which attached pages are concealed and queues a detach pass
@@ -3186,6 +3301,32 @@ mod tests {
             [ItemId::from(3), ItemId::from(1), ItemId::from(4)]
         );
         assert!(due_for_detach(&HashMap::new(), now, grace).is_empty());
+    }
+
+    #[test]
+    fn an_untouched_shown_page_keeps_its_frame() {
+        let now = Instant::now();
+        let taken = Some(now - Duration::from_secs(60));
+        assert!(!needs_frame(taken, true, None, false, now));
+        // Input before the frame was taken is already in it.
+        let before = Some(now - Duration::from_secs(90));
+        assert!(!needs_frame(taken, true, before, false, now));
+    }
+
+    #[test]
+    fn a_shown_page_that_may_have_changed_is_captured_again() {
+        let now = Instant::now();
+        let taken = Some(now - Duration::from_secs(60));
+        assert!(needs_frame(None, false, None, false, now), "no frame yet");
+        assert!(needs_frame(taken, false, None, false, now), "resized");
+        assert!(
+            needs_frame(taken, true, None, true, now),
+            "loading or audible"
+        );
+        let after = Some(now - Duration::from_secs(10));
+        assert!(needs_frame(taken, true, after, false, now), "input since");
+        let stale = Some(now - FRAME_STALE);
+        assert!(needs_frame(stale, true, None, false, now), "past its age");
     }
 
     #[test]

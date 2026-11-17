@@ -1248,8 +1248,9 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
         .expect("stage tests boundary")
         .0;
     // Frames are taken only from shown pages, soon after a visibility change
-    // and rarely after; snapshotting a page that is already hidden can leave
-    // WebKit's display link running. Detach waits only for a frame on its way.
+    // and again only once the page may have changed; snapshotting a page that
+    // is already hidden can leave WebKit's display link running. Detach waits
+    // only for a frame on its way.
     let shown = macos_stage_fn(stage, "capture_shown");
     let guard = shown
         .find("if view.window().is_none() || view.isHiddenOrHasHiddenAncestor() {")
@@ -1257,7 +1258,9 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
     assert!(guard < shown.find("capture_page(").expect("capture"));
     let all = macos_stage_fn(stage, "capture_all_shown");
     assert!(all.contains("ready.contains(id)") && all.contains("paintable.contains(id)"));
-    assert!(all.contains("!view.isHiddenOrHasHiddenAncestor()"));
+    assert!(all.contains("|| view.isHiddenOrHasHiddenAncestor()"));
+    let skip = all.find("if needs_frame(").expect("change-gated capture");
+    assert!(skip < all.find("self.capture_shown(id, &view)").expect("capture"));
     assert!(
         macos_stage_fn(stage, "track_concealed").contains("self.refresh_frames_in(FRAME_SETTLE)")
     );
