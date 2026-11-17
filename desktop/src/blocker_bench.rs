@@ -543,6 +543,7 @@ fn handle(
         "command" => run_command(app, &command),
         "setting" => setting(app, bench, &command),
         "capture" => capture(app, &command),
+        "input" => input(app),
         "quit" => Ok(json!({})),
         _ => Err(format!("unknown op {op:?}")),
     };
@@ -1213,6 +1214,41 @@ fn layers(_: &tauri::AppHandle) -> Result<Value, String> {
 #[cfg(not(target_os = "macos"))]
 fn frame(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
     Err("frame is macOS only".into())
+}
+
+/// Measurement only: posts a key press pages ignore (F15) to the main window,
+/// to exercise what input in the window sets off.
+#[cfg(target_os = "macos")]
+fn input(app: &tauri::AppHandle) -> Result<Value, String> {
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::{MainThreadMarker, NSPoint, NSString};
+    on_main_window(app, "input", |window| -> Result<(), String> {
+        let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_owned())?;
+        let key = NSString::from_str("\u{F712}");
+        for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                kind,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                &key,
+                &key,
+                false,
+                113,
+            )
+            .ok_or_else(|| "AppKit made no key event".to_owned())?;
+            NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        }
+        Ok(())
+    })??;
+    Ok(json!({}))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn input(_: &tauri::AppHandle) -> Result<Value, String> {
+    Err("input is macOS only".into())
 }
 
 /// The main window as a PNG at `path`, for page screenshots.
