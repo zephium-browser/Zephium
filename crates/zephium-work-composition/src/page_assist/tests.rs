@@ -34,6 +34,7 @@ struct PageState {
     marks: Vec<(String, Vec<(u8, u16)>)>,
     cleared: Vec<String>,
     reads: u64,
+    read_changes: HashMap<u64, Vec<Passage>>,
     picks: Vec<Pick>,
     cancelled_picks: Vec<String>,
     cleared_picks: Vec<(String, u64)>,
@@ -288,6 +289,11 @@ impl PagePort for FakePage {
         state.reads += 1;
         state.catch_up(tab);
         let read = state.reads;
+        if let Some(passages) = state.read_changes.remove(&read) {
+            if let Some(readout) = state.readouts.get_mut(tab) {
+                readout.passages = passages;
+            }
+        }
         if state.stalls == Some(read) {
             return Box::pin(std::future::pending());
         }
@@ -3077,13 +3083,12 @@ async fn a_clock_beside_a_button_is_never_its_effect() {
             ms(0),
             ms(1_000),
         ),
-        // A number changing in place is read once more before it counts.
         (
             "counts, clock",
             Press::Counts,
             true,
-            Done,
-            None,
+            Failed,
+            Some(Unconfirmed),
             ms(1_100),
             ms(1_600),
         ),
@@ -3091,8 +3096,8 @@ async fn a_clock_beside_a_button_is_never_its_effect() {
             "counts, quiet",
             Press::Counts,
             false,
-            Done,
-            None,
+            Failed,
+            Some(Unconfirmed),
             ms(1_100),
             ms(1_600),
         ),
@@ -3288,7 +3293,7 @@ async fn ticking_click(
 #[tokio::test]
 async fn a_number_that_moves_by_itself_is_never_the_press_effect() {
     use PageAssistStepReasonV1::Unconfirmed;
-    use PageAssistStepStateV1::{Done, Failed};
+    use PageAssistStepStateV1::Failed;
     let ms = Duration::from_millis;
     let countdown = "Sale ends in 4:";
     let cases = [
@@ -3321,19 +3326,238 @@ async fn a_number_that_moves_by_itself_is_never_the_press_effect() {
         .collect();
     for run in runs {
         let (name, think, (step, took)) = run.await.unwrap();
+        assert_eq!(
+            (step.state, step.reason),
+            (Failed, Some(Unconfirmed)),
+            "{name}: {step:?}"
+        );
         if name == "count bump alone" {
-            assert_eq!(step.state, Done, "{name}: {step:?}");
             assert!(
                 took >= think + ms(1_100) && took < think + ms(1_600),
                 "{name}: took {took:?}"
             );
-        } else {
-            assert_eq!(
-                (step.state, step.reason),
-                (Failed, Some(Unconfirmed)),
-                "{name}: {step:?}"
+        }
+    }
+}
+
+fn counting_press(turns: Vec<Turn>) -> Harness {
+    let h = harness(turns);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        let passages = &mut state.readouts.get_mut(TAB).unwrap().passages;
+        let at = passages.iter().position(|p| p.id == 10).unwrap();
+        passages.insert(at, passage(COUNT, Role::Text, "Saved: 0"));
+        state.counts.insert(10);
+    }
+    h
+}
+
+#[tokio::test]
+async fn a_stable_number_only_press_is_unconfirmed_quotes_its_evidence_and_cannot_repeat() {
+    let click = json!({"steps": [{"verb": "click", "ref": "a10"}], "finish": true});
+    let h = counting_press(vec![
+        tool(
+            "act",
+            json!({"steps": [
+            {"verb": "click", "ref": "a10"},
+            {"verb": "fill", "ref": "a7", "value": "Alex"}
+        ], "finish": true}),
+        ),
+        tool("act", click),
+        say("The page shows Saved: 1."),
+    ]);
+    h.ask("Save it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(3)).await;
+    let blocks = h.blocks().await;
+    let rows: Vec<_> = blocks
+        .iter()
+        .flat_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.as_slice(),
+            _ => &[],
+        })
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (rows[0].state, rows[0].reason),
+        (
+            PageAssistStepStateV1::Failed,
+            Some(PageAssistStepReasonV1::Unconfirmed)
+        )
+    );
+    assert_eq!(rows[1].state, PageAssistStepStateV1::Skipped);
+    assert_eq!(h.page.lock().acted.len(), 1);
+    let (summary, failed) = h.tool_result(1);
+    assert!(failed);
+    assert_eq!(summary.lines().next(), Some("Click \"Add to wishlist\" — ran; the only change beside it was a number: “Saved: 0” → “Saved: 1”. The page may have changed that by itself, so it is not confirmed. Do not run it again. Tell the person what the page shows now, and say it worked only if that number is what the step was for."));
+    let (repeated, failed) = h.tool_result(2);
+    assert!(failed);
+    assert!(repeated.contains("Do not repeat it"), "{repeated}");
+}
+
+#[tokio::test]
+async fn number_only_evidence_includes_another_place_that_changes_during_the_watch() {
+    let h = counting_press(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("Here is what the page shows."),
+    ]);
+    {
+        let mut state = h.page.lock();
+        let passages = &mut state.readouts.get_mut(TAB).unwrap().passages;
+        let at = passages.iter().position(|p| p.id == 10).unwrap();
+        passages.insert(at, passage(300, Role::Text, "Serves 4"));
+        let mut after = passages.clone();
+        after.iter_mut().find(|p| p.id == COUNT).unwrap().text = "Saved: 1".into();
+        after.iter_mut().find(|p| p.id == 300).unwrap().text = "Serves 5".into();
+        state.read_changes.insert(5, after);
+    }
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(3)).await;
+    let (summary, failed) = h.tool_result(1);
+    assert!(failed);
+    assert!(
+        summary.contains("“Saved: 0” → “Saved: 1”; “Serves 4” → “Serves 5”"),
+        "{summary}"
+    );
+}
+
+#[tokio::test]
+async fn a_note_or_row_with_the_number_confirms_the_press_on_the_first_or_a_later_read() {
+    let mut runs = Vec::new();
+    for read in [4, 5, 7] {
+        for (role, label) in [
+            (Role::Text, "Added to your wishlist"),
+            (Role::Link { same_site: true }, "Saved item"),
+        ] {
+            runs.push(tokio::spawn(async move {
+                let h = counting_press(vec![
+                    tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+                    say("Here is what happened."),
+                ]);
+                {
+                    let mut state = h.page.lock();
+                    let mut passages = state.readouts[TAB].passages.clone();
+                    passages.iter_mut().find(|p| p.id == COUNT).unwrap().text = "Saved: 1".into();
+                    let at = passages.iter().position(|p| p.id == 10).unwrap();
+                    passages.insert(at + 1, passage(300, role, label));
+                    state.read_changes.insert(read, passages);
+                }
+                h.ask("Save it", true).await.unwrap();
+                h.settle_within(Duration::from_secs(3)).await;
+                let (summary, failed) = h.tool_result(1);
+                assert!(!failed, "{label} at read {read}: {summary}");
+                assert!(summary.starts_with("Click \"Add to wishlist\" — done"), "{summary}");
+                assert!(h.blocks().await.iter().any(|block| matches!(block, PageAssistBlockV1::Steps { steps } if steps[0].state == PageAssistStepStateV1::Done)));
+                assert_eq!(h.page.lock().acted.len(), 1);
+            }));
+        }
+    }
+    for run in runs {
+        run.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_pending_number_watch_at_the_read_cap_is_unconfirmed_with_evidence() {
+    let h = counting_press(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("The page shows Saved: 1."),
+    ]);
+    {
+        let mut state = h.page.lock();
+        state.inert.insert(10);
+        let mut passages = state.readouts[TAB].passages.clone();
+        passages[0].text = "Changed elsewhere".into();
+        state.read_changes.insert(4, passages.clone());
+        passages.iter_mut().find(|p| p.id == COUNT).unwrap().text = "Saved: 1".into();
+        state.read_changes.insert(9, passages);
+        state.stalls = Some(10);
+    }
+    let started = Instant::now();
+    h.ask("Save it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(12)).await;
+    assert!(started.elapsed() >= Duration::from_secs(10));
+    let (summary, failed) = h.tool_result(1);
+    assert!(failed);
+    assert!(summary.contains("“Saved: 0” → “Saved: 1”"), "{summary}");
+    assert!(summary.contains("so it is not confirmed"), "{summary}");
+    assert!(h.blocks().await.iter().any(|block| matches!(block, PageAssistBlockV1::Steps { steps } if steps[0].reason == Some(PageAssistStepReasonV1::Unconfirmed))));
+}
+
+#[tokio::test]
+async fn a_paired_act_refreshes_before_the_press_and_does_not_credit_changes_during_thinking() {
+    let h = harness(vec![
+        tool("read_page", json!({"tab": "t1"})),
+        tool("act", json!({"steps": [{"verb": "click", "ref": "b10"}]})),
+        say("It did not change the page."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.inert.insert(10);
+        let mut passages = state.readouts[TAB].passages.clone();
+        passages.iter_mut().find(|p| p.id == 129).unwrap().text = "Changed during thinking".into();
+        state.read_changes.insert(4, passages);
+    }
+    h.ask("Save it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(3)).await;
+    assert_eq!(h.page.lock().reads_at_act, Some(4));
+    assert_eq!(h.page.lock().acted.len(), 1);
+    let (summary, failed) = h.tool_result(2);
+    assert!(failed);
+    assert!(summary.contains("nothing on the page changed"), "{summary}");
+    assert!(h.blocks().await.iter().any(|block| matches!(block, PageAssistBlockV1::Steps { steps } if steps[0].reason == Some(PageAssistStepReasonV1::NoEffect))));
+}
+
+#[tokio::test]
+async fn a_number_only_summary_quotes_at_most_three_cleaned_pairs_of_sixty_characters() {
+    let h = harness(vec![
+        tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]})),
+        say("Here is what the page shows."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.inert.insert(10);
+        let passages = &mut state.readouts.get_mut(TAB).unwrap().passages;
+        let at = passages.iter().position(|p| p.id == 10).unwrap();
+        for (offset, label) in ["Serves", "Seats", "Views", "Rows"].iter().enumerate() {
+            passages.insert(
+                at + offset,
+                passage(
+                    300 + u16::try_from(offset).unwrap(),
+                    Role::Text,
+                    &format!("{label}\u{202e}\t4\n{}", "é".repeat(80)),
+                ),
             );
         }
+        let mut after = passages.clone();
+        for p in &mut after {
+            if (300..304).contains(&p.id) {
+                p.text = p.text.replace('4', "5");
+            }
+        }
+        state.read_changes.insert(4, after);
+    }
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(3)).await;
+    let (summary, failed) = h.tool_result(1);
+    assert!(failed);
+    let expected: Vec<_> = ["Serves", "Seats", "Views"]
+        .iter()
+        .map(|label| {
+            let tail = "é".repeat(59 - label.len() - 3);
+            format!("“{label} 4 {tail}…” → “{label} 5 {tail}…”")
+        })
+        .collect();
+    assert!(summary.contains(&expected.join("; ")), "{summary}");
+    assert_eq!(summary.matches(" → ").count(), 3);
+    assert!(!summary.contains("Rows"));
+    assert!(!summary.contains(['\u{202e}', '\t', '\n']));
+    for quote in summary.split('“').skip(1) {
+        let (quoted, _) = quote.split_once('”').unwrap();
+        assert_eq!(quoted.chars().count(), 60, "{quoted}");
+        assert!(quoted.ends_with('…'));
     }
 }
 

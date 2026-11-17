@@ -49,16 +49,18 @@ const EFFECT_READS_MS: [u64; 4] = [0, 250, 700, 1_500];
 const EFFECT_BUSY_READS_MS: [u64; 3] = [2_200, 3_000, 4_000];
 /// Longest a step's effect is watched for, a new document included.
 const EFFECT_NAVIGATION: Duration = Duration::from_secs(10);
-/// A press credited only with a number changing in place beside it is read
-/// once more this long after: a count stays put, a clock or a countdown the
-/// page runs itself has moved on.
+/// A press whose only change is a number in place beside it is watched this
+/// long for the number moving again (the page's own) or for stronger
+/// evidence. A number that stays put still never confirms the press.
 const CREDIT_WATCH: Duration = Duration::from_millis(1_100);
-/// The one read before an unpaired press only buys evidence: it never holds
+/// The one read before a press only buys evidence: it never holds
 /// a spoken command back longer than this.
 const BEFORE_PRESS_READ: Duration = Duration::from_secs(1);
 /// The act result when the page's new document had not loaded within its
 /// new-document bound.
 const STILL_LOADING: &str = "\n\nThe page moved on to a new document that is still loading, so it was not read. Read it again before answering.";
+/// What the model is told after a press that only a number vouches for.
+const NUMBER_ALONE: &str = "The page may have changed that by itself, so it is not confirmed. Do not run it again. Tell the person what the page shows now, and say it worked only if that number is what the step was for.";
 const EFFECT_POLL: Duration = Duration::from_millis(50);
 /// Most views `find` scrolls down to reach its words.
 const FIND_SCROLLS: usize = 4;
@@ -1723,14 +1725,14 @@ struct Plan {
     latest: Readout,
     /// Where the document was seen changing on its own before the steps.
     volatile: effect::Volatile,
-    /// Two reads of the document with no step between them were compared.
-    paired: bool,
     /// A step moved the page on to this document, which is to load by then.
     settle_by: Option<(u64, tokio::time::Instant)>,
     requests: Vec<StepRequest>,
     rows: Vec<PageAssistStepV1>,
     /// The engine's label once a step resolved, to recognise it after a pause.
     resolved: Vec<Option<String>>,
+    /// For a press that ended on a number alone: that row's before and after.
+    numbers: std::collections::HashMap<usize, Vec<(String, String)>>,
     block: u16,
 }
 
@@ -1818,7 +1820,19 @@ impl Plan {
         let rows: Vec<String> = self
             .rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(index, row)| {
+                if let Some(pairs) = self.numbers.get(&index) {
+                    let changes: Vec<String> = pairs
+                        .iter()
+                        .map(|(before, after)| format!("“{before}” → “{after}”"))
+                        .collect();
+                    return format!(
+                        "{} — ran; the only change beside it was a number: {}. {NUMBER_ALONE}",
+                        row.label,
+                        changes.join("; ")
+                    );
+                }
                 let state = match (row.state, row.reason) {
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Refused)) => {
                         "refused: a secret, a protected field or a link to another site"
@@ -2008,7 +2022,7 @@ async fn act(
             steps: rows.clone(),
         },
     );
-    let (volatile, paired) = reply
+    let volatile = reply
         .with_data(|data| volatile(&data.reads, &record))
         .unwrap_or_default();
     let mut plan = Plan {
@@ -2017,12 +2031,12 @@ async fn act(
         moved: false,
         latest: record.readout.clone(),
         volatile,
-        paired,
         settle_by: None,
         record,
         requests,
         rows,
         resolved: Vec::new(),
+        numbers: std::collections::HashMap::new(),
         block,
     };
     plan.requests.truncate(last);
@@ -2082,11 +2096,9 @@ async fn act(
 }
 
 /// Where `record`'s document changed between reads of it this reply took
-/// with no step between them, and whether any two such reads exist. Reads
-/// only what the reply already has.
-fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> (effect::Volatile, bool) {
+/// with no step between them. Reads only what the reply already has.
+fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> effect::Volatile {
     let mut volatile = effect::Volatile::default();
-    let mut paired = false;
     let same: Vec<&ReadRecord> = reads
         .iter()
         .filter(|read| read.tab == record.tab && read.epoch == record.epoch)
@@ -2094,16 +2106,15 @@ fn volatile(reads: &[ReadRecord], record: &ReadRecord) -> (effect::Volatile, boo
     for pair in same.windows(2) {
         if pair[0].acted == pair[1].acted {
             volatile.learn(&pair[0].readout, &pair[1].readout);
-            paired = true;
         }
     }
-    (volatile, paired)
+    volatile
 }
 
-/// One read just before the first step of an act that holds a press, when
-/// the planning read has no step-free partner. No step ran since the
-/// planning read, so the two pair across the model's thinking time and show
-/// what the page changes on its own; it is also that first step's before.
+/// One read just before the first step of an act that holds a press. No
+/// step ran since the planning read, so the two pair across the model's
+/// thinking time: what the page changed on its own meanwhile is learned, not
+/// credited to the press, and the fresh read is that first step's before.
 /// False when the control the step names is gone from the page or renamed;
 /// a failed, late or stale read changes nothing.
 async fn read_before(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> bool {
@@ -2116,7 +2127,6 @@ async fn read_before(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> bool
     if now.epoch != plan.epoch {
         return true;
     }
-    plan.paired = true;
     let control = step
         .target
         .and_then(|target| Control::of(&plan.record.readout, target));
@@ -2445,13 +2455,10 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
             plan.skip_from(reply, index);
             return Err(Some(End::Cancelled(CancelReason::Redirected)));
         }
-        // Once per act, before its first step: the planning read has no
-        // step-free partner and a press is to come, so plan.volatile covers
-        // every press in it.
-        let unpaired = !plan.paired
-            && plan.requests.iter().any(|step| presses(step.verb))
+        // Once per act, before its first step, when a press is to come.
+        let needs_before = plan.requests.iter().any(|step| presses(step.verb))
             && reply.with_data(|data| data.acted) == Some(plan.record.acted);
-        if unpaired && !read_before(reply, plan, &step).await {
+        if needs_before && !read_before(reply, plan, &step).await {
             // The plan no longer matches the page: as when the control is
             // gone at dispatch, it never runs on the old plan.
             plan.fail(reply, index, StepFailure::Unsuitable);
@@ -2484,6 +2491,11 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                     plan.latest = after;
                 }
                 None
+            }
+            Settled::NumbersOnly(after, pairs) => {
+                plan.latest = after;
+                plan.numbers.insert(index, pairs);
+                Some(PageAssistStepReasonV1::Unconfirmed)
             }
             Settled::Navigated if presses(step.verb) => None,
             Settled::NoEffect => Some(PageAssistStepReasonV1::NoEffect),
@@ -2525,6 +2537,9 @@ fn presses(verb: Verb) -> bool {
 enum Settled {
     /// Its effect is on the page; the read that shows it, when one did.
     Took(Option<Readout>),
+    /// A press whose only change was numbers in place beside it, which the
+    /// page may have made itself: the read that shows them, before and after.
+    NumbersOnly(Readout, Vec<(String, String)>),
     /// The tab committed a new document.
     Navigated,
     /// The page read the same after it.
@@ -2538,7 +2553,7 @@ enum Settled {
 /// quiet page is judged on the first reads; one that was busy is read on to
 /// the same-document cap, and is never called unchanged while it was busy.
 /// Busy is timing evidence only: it decides how long to look, not what was
-/// seen.
+/// seen. A number changing in place never confirms a press by itself.
 async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled {
     if step.verb == Verb::Scroll {
         return Settled::Took(None);
@@ -2557,7 +2572,7 @@ async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled 
     let mut busy = false;
     // A credit held back: the places it rests on, the read that showed
     // them, and when to read again.
-    let mut watch: Option<(std::collections::HashSet<effect::Shape>, Readout, Duration)> = None;
+    let mut watch: Option<(effect::Numbers, Readout, Duration)> = None;
     while let Some(facts) = page.facts(&plan.tab) {
         if facts.epoch != plan.epoch {
             return Settled::Navigated;
@@ -2588,15 +2603,14 @@ async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled 
                         .await
                 {
                     if after.epoch == plan.epoch {
-                        if let Some((shapes, credited, due)) = watch.take() {
-                            if effect::moved(&shapes, &credited, &after) {
+                        if let Some((numbers, credited, due)) = watch.take() {
+                            if effect::moved(&numbers.shapes, &credited, &after) {
                                 // It moved on with no step: the page's own.
-                                plan.volatile.learn_shapes(&credited, &after, &shapes);
+                                plan.volatile
+                                    .learn_shapes(&credited, &after, &numbers.shapes);
                                 busy = true;
-                            } else if started.elapsed() >= due {
-                                return Settled::Took(Some(after));
                             } else {
-                                watch = Some((shapes, credited, due));
+                                watch = Some((numbers, credited, due));
                             }
                         }
                         let observed = effect::judge(
@@ -2616,12 +2630,19 @@ async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled 
                                 &plan.volatile,
                             ) {
                                 None => return Settled::Took(Some(after)),
-                                Some(shapes) if watch.is_none() => {
-                                    let due = started.elapsed() + CREDIT_WATCH;
-                                    watch = Some((shapes, after.clone(), due));
-                                }
-                                Some(_) => {}
+                                Some(numbers) => match watch.as_mut() {
+                                    Some((pending, _, _)) => pending.pairs = numbers.pairs,
+                                    None => {
+                                        let due = started.elapsed() + CREDIT_WATCH;
+                                        watch = Some((numbers, after.clone(), due));
+                                    }
+                                },
                             }
+                        }
+                        if let Some((numbers, _, _)) =
+                            watch.take_if(|(_, _, due)| started.elapsed() >= *due)
+                        {
+                            return Settled::NumbersOnly(after, numbers.pairs);
                         }
                         busy |= effect::changed(previous.as_ref().unwrap_or(&plan.latest), &after);
                         last = Some(observed);
@@ -2632,6 +2653,9 @@ async fn observe(reply: &Reply, plan: &mut Plan, step: &StepRequest) -> Settled 
             }
         }
         tokio::time::sleep(EFFECT_POLL).await;
+    }
+    if let Some((numbers, credited, _)) = watch {
+        return Settled::NumbersOnly(previous.unwrap_or(credited), numbers.pairs);
     }
     match last {
         Some(Observed::Nothing) if !busy => Settled::NoEffect,
@@ -2688,7 +2712,6 @@ async fn take_over(
     }
     if fresh.epoch != plan.epoch {
         plan.volatile = effect::Volatile::default();
-        plan.paired = false;
     }
     plan.epoch = fresh.epoch;
     plan.latest = fresh.readout.clone();

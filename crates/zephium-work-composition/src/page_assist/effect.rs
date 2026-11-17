@@ -233,18 +233,28 @@ fn crediting(
         .collect()
 }
 
-/// For a press `judge` credited, the wordings of the places it was credited
-/// with when every one is a number changing in place beside the control (a
-/// count, or a clock the page runs itself): a removed and an added passage
-/// of the same shape. None when any evidence stands on its own: the control
-/// itself changed or went, or a note, label or row came or went.
+/// Numbers that changed in place beside a pressed control.
+#[derive(Debug, PartialEq)]
+pub(crate) struct Numbers {
+    /// The wording of every such place, to watch for it moving again.
+    pub(crate) shapes: HashSet<Shape>,
+    /// The first few as text before and after, bounded, for the model.
+    pub(crate) pairs: Vec<(String, String)>,
+}
+
+/// For a press `judge` credited, the places it was credited with when every
+/// one is a number changing in place beside the control (a count, or a clock
+/// the page runs itself): each removed passage paired with one added passage
+/// of the same shape. Such evidence never confirms a press by itself. None
+/// when any evidence stands on its own: the control itself changed or went,
+/// or a note, label or row came or went.
 pub(crate) fn numbers_only(
     verb: Verb,
     control: &Control,
     before: &Readout,
     after: &Readout,
     volatile: &Volatile,
-) -> Option<HashSet<Shape>> {
+) -> Option<Numbers> {
     if !matches!(verb, Verb::Click | Verb::Expand | Verb::Open | Verb::Submit) {
         return None;
     }
@@ -260,17 +270,28 @@ pub(crate) fn numbers_only(
     if was.is_some_and(|at| removed.contains(&at)) || found.is_some_and(|at| added.contains(&at)) {
         return None;
     }
-    let gone: Vec<Shape> = removed
-        .iter()
-        .map(|&at| shape(&before.passages[at]))
-        .collect();
-    let came: Vec<Shape> = added.iter().map(|&at| shape(&after.passages[at])).collect();
-    let numeric =
-        |shape: &Shape, other: &[Shape]| shape.text.contains('#') && other.contains(shape);
-    (!gone.is_empty()
-        && gone.iter().all(|shape| numeric(shape, &came))
-        && came.iter().all(|shape| numeric(shape, &gone)))
-    .then(|| gone.into_iter().collect())
+    let mut remaining = added;
+    let mut shapes = HashSet::new();
+    let mut pairs = Vec::new();
+    for at in removed {
+        let was = &before.passages[at];
+        let wording = shape(was);
+        if !wording.text.contains('#') {
+            return None;
+        }
+        let paired = remaining
+            .iter()
+            .position(|&at| shape(&after.passages[at]) == wording)?;
+        let now = &after.passages[remaining.remove(paired)];
+        if pairs.len() < 3 {
+            pairs.push((
+                text::bounded(&text::clean(&was.text), 60),
+                text::bounded(&text::clean(&now.text), 60),
+            ));
+        }
+        shapes.insert(wording);
+    }
+    (!shapes.is_empty() && remaining.is_empty()).then_some(Numbers { shapes, pairs })
 }
 
 /// Whether a place with one of these wordings changed between two reads.
@@ -608,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn a_press_credited_only_with_a_number_is_told_apart() {
+    fn number_only_evidence_pairs_text_and_learns_a_number_that_moves_again() {
         let before = page(vec![]);
         let control = Control::of(&before, 40).unwrap();
         let counted = |count: u32| {
@@ -625,13 +646,17 @@ mod tests {
             judge(Verb::Click, None, &control, &zero, &one),
             Observed::Took
         );
-        let shapes = numbers_only(Verb::Click, &control, &zero, &one, &volatile)
+        let numbers = numbers_only(Verb::Click, &control, &zero, &one, &volatile)
             .expect("a count bump alone is watched");
+        assert_eq!(numbers.pairs, [("Saved: 0".into(), "Saved: 1".into())]);
         assert!(
-            !moved(&shapes, &one, &one.clone()),
+            !moved(&numbers.shapes, &one, &one.clone()),
             "a count that stays put"
         );
-        assert!(moved(&shapes, &one, &counted(2)), "a count that moves on");
+        assert!(
+            moved(&numbers.shapes, &one, &counted(2)),
+            "a count that moves on"
+        );
         let mut noted = one.clone();
         noted
             .passages
@@ -655,12 +680,68 @@ mod tests {
             "new wording is not a number in place"
         );
         let mut learned = Volatile::default();
-        learned.learn_shapes(&one, &counted(2), &shapes);
+        learned.learn_shapes(&one, &counted(2), &numbers.shapes);
         assert_eq!(
             super::judge(Verb::Click, None, &control, &zero, &counted(3), &learned),
             Observed::Unclear,
             "once seen moving by itself it is the page's own"
         );
+    }
+
+    #[test]
+    fn number_only_pairs_follow_shapes_across_reordering_and_keep_all_watch_shapes() {
+        let button = passage(1, Role::Button, "Increase", None);
+        let before = read(vec![
+            button.clone(),
+            passage(2, Role::Text, "Serves 4", None),
+            passage(3, Role::Text, "Seats 8", None),
+            passage(4, Role::Text, "Views 10", None),
+            passage(5, Role::Text, "Rows 20", None),
+        ]);
+        let after = read(vec![
+            button,
+            passage(5, Role::Text, "Rows 21", None),
+            passage(3, Role::Text, "Seats 9", None),
+            passage(2, Role::Text, "Serves 5", None),
+            passage(4, Role::Text, "Views 11", None),
+        ]);
+        let control = Control::of(&before, 1).unwrap();
+        let numbers =
+            numbers_only(Verb::Click, &control, &before, &after, &Volatile::default()).unwrap();
+        assert_eq!(
+            numbers.pairs,
+            [
+                ("Serves 4".into(), "Serves 5".into()),
+                ("Seats 8".into(), "Seats 9".into()),
+                ("Views 10".into(), "Views 11".into()),
+            ]
+        );
+        assert_eq!(numbers.shapes.len(), 4);
+        let moved_fourth = with(&after, 5, |p| p.text = "Rows 22".into());
+        assert!(moved(&numbers.shapes, &after, &moved_fourth));
+    }
+
+    #[test]
+    fn an_added_or_removed_numeric_row_is_stronger_than_number_only_pairs() {
+        let before = read(vec![
+            passage(1, Role::Button, "Increase", None),
+            passage(2, Role::Text, "Serves 4", None),
+        ]);
+        let control = Control::of(&before, 1).unwrap();
+        let mut after = with(&before, 2, |p| p.text = "Serves 5".into());
+        after
+            .passages
+            .push(passage(3, Role::Text, "Serves 6", None));
+        for (before, after) in [(&before, &after), (&after, &before)] {
+            assert_eq!(
+                judge(Verb::Click, None, &control, before, after),
+                Observed::Took
+            );
+            assert_eq!(
+                numbers_only(Verb::Click, &control, before, after, &Volatile::default()),
+                None
+            );
+        }
     }
 
     #[test]
