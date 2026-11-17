@@ -47,6 +47,11 @@
   let scale = $derived(density * zoom);
   let size = $derived(frameFor(width, height, scale));
   let frame = $derived<SkyFrame>({ ...size, density: scale, sky, horizon, pictureHorizon, quiet });
+  // The canvas holds the whole window and only grows: a page that changes
+  // size every frame, beside a column that is opening or closing, prints into
+  // its corner instead of handing the compositor a new backing store each
+  // frame. The window over it shows the print.
+  let capacity = $state({ columns: 0, rows: 0 });
 
   // Printed as soon as its picture is read, once per change the page settles:
   // a resize prints each size it is laid out at, and nothing runs at rest. No
@@ -62,10 +67,14 @@
       (picture) => {
         if (!live) return;
         const pixels = printed(wantedScene, picture, wanted);
-        if (target.width !== wanted.columns) target.width = wanted.columns;
-        if (target.height !== wanted.rows) target.height = wanted.rows;
+        const room = frameFor(globalThis.innerWidth || 0, globalThis.innerHeight || 0, scale);
+        const columns = Math.max(target.width, wanted.columns, room.columns);
+        const rows = Math.max(target.height, wanted.rows, room.rows);
+        if (target.width !== columns) target.width = columns;
+        if (target.height !== rows) target.height = rows;
+        capacity = { columns, rows };
         target.getContext("2d")?.putImageData(pixels, 0, 0);
-        frostFrom(wantedScene, target);
+        frostFrom(wantedScene, target, wanted.columns, wanted.rows);
         onready?.(wantedScene);
       },
       () => {
@@ -81,20 +90,33 @@
 <!-- One dot of the print is a whole number of device pixels, so the screen
      stays crisp at any size: the canvas is the dots, scaled up without
      smoothing. -->
-<canvas
-  bind:this={canvas}
-  class="sky-print"
+<div
+  class="sky-print-window"
   aria-hidden="true"
   style:width={`${(size.columns * size.dot) / scale}px`}
   style:height={`${(size.rows * size.dot) / scale}px`}
-></canvas>
+>
+  <canvas
+    bind:this={canvas}
+    class="sky-print"
+    style:width={`${(Math.max(capacity.columns, size.columns) * size.dot) / scale}px`}
+    style:height={`${(Math.max(capacity.rows, size.rows) * size.dot) / scale}px`}
+  ></canvas>
+</div>
 
 <style>
+  .sky-print-window {
+    position: absolute;
+    inset-block-start: 0;
+    inset-inline-start: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
   .sky-print {
     position: absolute;
     inset-block-start: 0;
     inset-inline-start: 0;
     image-rendering: pixelated;
-    pointer-events: none;
   }
 </style>

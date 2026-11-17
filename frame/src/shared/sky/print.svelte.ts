@@ -58,9 +58,15 @@ let frosts = $state.raw<Partial<Record<Scene, string>>>({});
  *  stretches over itself, so the stretch is the blur. */
 export const skyFrost = (scene: Scene) => frosts[scene] ?? null;
 
-export function frostFrom(scene: Scene, source: HTMLCanvasElement) {
-  if (frosts[scene] || source.width === 0) return;
-  const height = Math.max(1, Math.round((FROST_WIDTH * source.height) / source.width));
+/** The print fills `columns` by `rows` in the source's top left corner. */
+export function frostFrom(
+  scene: Scene,
+  source: HTMLCanvasElement,
+  columns = source.width,
+  rows = source.height,
+) {
+  if (frosts[scene] || columns === 0) return;
+  const height = Math.max(1, Math.round((FROST_WIDTH * rows) / columns));
   const middle = document.createElement("canvas");
   middle.width = FROST_WIDTH * 8;
   middle.height = height * 8;
@@ -71,7 +77,7 @@ export function frostFrom(scene: Scene, source: HTMLCanvasElement) {
   const context = small.getContext("2d", { willReadFrequently: true });
   if (!step || !context) return;
   step.imageSmoothingQuality = "high";
-  step.drawImage(source, 0, 0, middle.width, middle.height);
+  step.drawImage(source, 0, 0, columns, rows, 0, 0, middle.width, middle.height);
   context.imageSmoothingQuality = "high";
   context.drawImage(middle, 0, 0, FROST_WIDTH, height);
   const image = context.getImageData(0, 0, FROST_WIDTH, height);
