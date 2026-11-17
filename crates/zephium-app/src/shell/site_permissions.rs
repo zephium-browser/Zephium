@@ -460,6 +460,9 @@ impl Shell {
                 OperationReason::InvalidScope,
             ));
         }
+        if kind == SitePermissionKind::Notifications {
+            self.invalidate_notification_sleep(Some(profile));
+        }
         if kind == SitePermissionKind::AppLinks {
             // Asking is the default, so anything but Allow is a removal.
             let allowed = decision == Some(RememberedPagePermission::Allow);
@@ -628,6 +631,8 @@ impl Shell {
     }
 
     pub(super) fn site_permission_settled(&mut self, operation_id: String, applied: bool) {
+        self.invalidate_notification_sleep(None);
+        self.maintain_views();
         let (outcome, reason) = if applied {
             (OperationOutcome::Applied, OperationReason::MutationApplied)
         } else {

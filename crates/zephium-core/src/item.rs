@@ -159,6 +159,9 @@ pub enum PageRequest {
     /// A new tab the page tried to open that was not let through, with its
     /// address when it was an ordinary web page.
     Popup { url: Option<Url> },
+    /// A native address was unreadable or too large to open. No partial URL
+    /// or authority to retry is retained; this notice can only be dismissed.
+    NavigationRefused { embedded: bool },
     /// The site or its proxy asks to sign in; the engine holds the request.
     HttpAuth(crate::http_auth::HttpAuthPrompt),
     /// The site wants to save a file; the engine holds the download.

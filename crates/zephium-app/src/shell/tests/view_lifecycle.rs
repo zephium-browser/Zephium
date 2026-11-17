@@ -1226,10 +1226,10 @@ fn performance_preferences_load_durably_and_pressure_restores_preferred_targets(
         shell.residency.discard_idle_min,
         std::time::Duration::from_secs(30 * 60)
     );
-    // Lossless suspension never waits longer than its own short grace.
+    // Suspension keeps the five-minute background grace independent of discard age.
     assert_eq!(
         shell.residency.dormant_min,
-        std::time::Duration::from_secs(30)
+        std::time::Duration::from_secs(5 * 60)
     );
     shell.handle(Command::SetMemoryPressure(MemoryPressure::Critical));
     assert_eq!(shell.residency.warm_view_limit, 0);
@@ -1448,7 +1448,7 @@ fn acknowledged_discard_preserves_url_and_activation_recreates_lazily() {
 }
 
 #[test]
-fn minimized_window_hides_before_dormancy_and_wakes_focused_view() {
+fn minimized_window_hides_before_dormancy_and_keeps_focused_view_awake() {
     let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
@@ -1472,7 +1472,10 @@ fn minimized_window_hides_before_dormancy_and_wakes_focused_view() {
     assert!(hidden < dormant, "controllers must hide before suspension");
     let latest_dormant = &calls[dormant];
     assert!(latest_dormant.contains(&first.to_string()));
-    assert!(latest_dormant.contains(&second.to_string()));
+    assert!(
+        !latest_dormant.contains(&second.to_string()),
+        "the minimized window's active tab remains awake"
+    );
 
     shell.handle(Command::SetWindowVisible(true));
     assert_eq!(engine.last_layout(), vec![second.to_string()]);
@@ -1734,7 +1737,7 @@ mod suspending {
         stale_or_navigation_cancelled_discard_probe_cannot_close_a_view
         every_currently_visible_split_leaf_is_outside_the_discard_candidate_set
         acknowledged_discard_preserves_url_and_activation_recreates_lazily
-        minimized_window_hides_before_dormancy_and_wakes_focused_view
+        minimized_window_hides_before_dormancy_and_keeps_focused_view_awake
         split_created_views_are_not_unsafely_discarded
         a_suspended_hidden_page_is_discarded_once_its_idle_grace_passes
         a_suspended_heavy_page_is_discarded_after_the_heavy_grace
@@ -1743,5 +1746,193 @@ mod suspending {
         a_refusal_for_a_page_not_asked_to_sleep_is_ignored
         a_refusal_of_an_earlier_ask_does_not_cancel_a_newer_one
         a_refused_page_is_asked_again_once_sleep_is_turned_back_on
+        private_tabs_sleep_and_discard_when_notification_snapshot_is_unavailable
+        private_notification_grants_survive_unavailable_refresh_and_protect_only_their_origin
     }
+}
+
+#[test]
+fn default_hidden_tab_suspension_waits_five_minutes() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "first.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    for age in [299, 301] {
+        let at = std::time::Instant::now() - std::time::Duration::from_secs(age);
+        shell.residency.last_focus.insert(first, at);
+        shell.residency.resident_since.insert(first, at);
+        shell.residency.inactive_since.insert(first, at);
+        shell.handle(Command::Tick);
+        assert_eq!(shell.residency.dormant_sent.contains(&first), age >= 300);
+    }
+}
+
+#[test]
+fn unknown_notification_observation_and_allowed_origin_stay_awake_until_refreshed() {
+    use zephium_core::permissions::{
+        PageOrigin, RememberedPagePermission, SitePermission, SitePermissionKind,
+    };
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "mail.example");
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    navigate_and_commit(&mut shell, second, "second.example");
+    let profile = shell.profile_of_item(first).unwrap();
+    shell.enable_native_notification_source_for_test();
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.handle(Command::Tick);
+    assert!(
+        !shell.residency.dormant_sent.contains(&first),
+        "unknown is not an empty grant observation"
+    );
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(shell.residency.discard_probes.is_empty());
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Normal,
+    ));
+    *engine.site_permission_reply.lock().unwrap() = Some(Some(vec![SitePermission {
+        origin: PageOrigin::parse_exact("https://mail.example").unwrap(),
+        kind: SitePermissionKind::Notifications,
+        decision: RememberedPagePermission::Allow,
+        scheme: None,
+    }]));
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::Tick);
+    assert!(
+        !shell.residency.dormant_sent.contains(&first),
+        "Allow keeps the exact origin awake"
+    );
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+    navigate_and_commit(&mut shell, third, "third.example");
+    shell.handle(Command::Tick);
+    assert!(
+        shell.residency.dormant_sent.contains(&second),
+        "the grant does not exempt a different origin"
+    );
+    *engine.site_permission_reply.lock().unwrap() = Some(Some(Vec::new()));
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(!shell.residency.dormant_sent.contains(&first));
+    assert!(shell.residency.discard_probes.is_empty());
+}
+
+#[test]
+fn private_tabs_sleep_and_discard_when_notification_snapshot_is_unavailable() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let first = active_id(&screen);
+    assert!(matches!(shell.partition_of(first), Partition::Ephemeral(_)));
+    navigate_and_commit(&mut shell, first, "private.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.enable_native_notification_source_for_test();
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    assert!(shell.residency.dormant_sent.contains(&first));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    let (candidate, probe) = first_probing_discard(&shell);
+    assert_eq!(candidate, first);
+    acknowledge_safe_discard(&mut shell, first, probe);
+    assert!(!shell.items.tab(first).unwrap().has_view());
+    assert!(shell.items.tab(active).unwrap().has_view());
+}
+
+#[test]
+fn private_notification_grants_survive_unavailable_refresh_and_protect_only_their_origin() {
+    use zephium_core::permissions::{
+        PageOrigin, RememberedPagePermission, SitePermission, SitePermissionKind,
+    };
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::Run("window.newPrivate".into()));
+    let allowed = active_id(&screen);
+    navigate_and_commit(&mut shell, allowed, "mail.example");
+    let profile = shell.profile_of_item(allowed).unwrap();
+    shell.handle(Command::Open);
+    let reclaimable = active_id(&screen);
+    navigate_and_commit(&mut shell, reclaimable, "other.example");
+    shell.handle(Command::Open);
+    let active = active_id(&screen);
+    navigate_and_commit(&mut shell, active, "active.example");
+    *engine.site_permission_reply.lock().unwrap() = Some(Some(vec![SitePermission {
+        origin: PageOrigin::parse_exact("https://mail.example").unwrap(),
+        kind: SitePermissionKind::Notifications,
+        decision: RememberedPagePermission::Allow,
+        scheme: None,
+    }]));
+    shell.enable_native_notification_source_for_test();
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::Tick);
+    assert!(!shell.residency.dormant_sent.contains(&allowed));
+    assert!(shell.residency.dormant_sent.contains(&reclaimable));
+    *engine.site_permission_reply.lock().unwrap() = Some(None);
+    shell.invalidate_notification_sleep(Some(profile));
+    shell.handle(Command::Tick);
+    assert!(!shell.residency.dormant_sent.contains(&allowed));
+    assert!(shell.residency.dormant_sent.contains(&reclaimable));
+    shell.handle(Command::SetMemoryPressure(
+        zephium_core::ports::engine::MemoryPressure::Critical,
+    ));
+    assert!(!shell.residency.discard_probes.contains_key(&allowed));
+    let (candidate, probe) = first_probing_discard(&shell);
+    assert_eq!(candidate, reclaimable);
+    acknowledge_safe_discard(&mut shell, reclaimable, probe);
+    assert!(!shell.items.tab(reclaimable).unwrap().has_view());
+    assert!(shell.items.tab(allowed).unwrap().has_view());
+}
+
+#[test]
+fn minimized_work_pane_keeps_the_presented_native_page_awake() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let pane_tab = active_id(&screen);
+    navigate_and_commit(&mut shell, pane_tab, "pane.example");
+    shell.handle(Command::Open);
+    let browse_tab = active_id(&screen);
+    navigate_and_commit(&mut shell, browse_tab, "browse.example");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Work)));
+    shell.operation_work_pane_show(
+        crate::api::WorkPaneTarget::Tab(pane_tab),
+        Rect::new(300.0, 120.0, 720.0, 560.0),
+    );
+    assert_eq!(shell.work_pane_tab(), Some(pane_tab));
+    assert_eq!(shell.windows.focused().unwrap().active, Some(browse_tab));
+    assert_eq!(engine.last_layout(), [pane_tab.to_string()]);
+    shell.residency.dormant_min = std::time::Duration::ZERO;
+    shell.handle(Command::SetWindowVisible(false));
+    assert!(engine.last_layout().is_empty());
+    let dormant = engine
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|call| call.starts_with("dormant "))
+        .unwrap();
+    assert!(
+        !dormant.contains(&pane_tab.to_string()),
+        "minimized Work keeps its currently presented native page awake"
+    );
+    assert!(
+        dormant.contains(&browse_tab.to_string()),
+        "the covered Browse selection is a background page"
+    );
 }

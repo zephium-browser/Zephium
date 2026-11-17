@@ -535,6 +535,13 @@ pub(crate) fn page_footprint(view: &wry::WebView) -> Option<u64> {
     (status == 0).then_some(info.ri_phys_footprint)
 }
 
+/// Identity is borrowed only while the host groups its currently live views.
+pub(crate) fn background_preferences_key(view: &wry::WebView) -> usize {
+    // SAFETY: main-thread access to the live view's retained configuration.
+    let preferences = unsafe { webkit(view).configuration().preferences() };
+    (&*preferences as *const objc2_web_kit::WKPreferences) as usize
+}
+
 /// Hidden pages are throttled by default and suspended once dormant. WebKit
 /// keeps a page running while it is audible or capturing, whatever this says,
 /// and resumes it as soon as it becomes visible.
@@ -546,8 +553,8 @@ pub(crate) fn set_background_suspension(view: &wry::WebView, suspend: bool) {
         Policy::Throttle
     };
     let page = webkit(view);
-    // SAFETY: main-thread WebKit access; each view owns its preferences
-    // object, so this changes only this page's background scheduling.
+    // SAFETY: main-thread WebKit access. Popup views may share preferences;
+    // the host groups suspension votes before requesting Suspend.
     unsafe {
         let preferences = page.configuration().preferences();
         if preferences.inactiveSchedulingPolicy() != target {

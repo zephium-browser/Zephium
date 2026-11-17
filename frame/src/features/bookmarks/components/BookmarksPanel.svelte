@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isComposing } from "$shared/lib/keyboard";
   import { untrack } from "svelte";
   import {
     ArrowLeft01Icon,
@@ -464,6 +465,7 @@
               bind:value={draft}
               use:focusAndSelect
               onkeydown={(event) => {
+                if (isComposing(event)) return;
                 if (event.key === "Enter") void finishRename(item, true);
                 if (event.key === "Escape") {
                   event.stopPropagation();
@@ -509,6 +511,7 @@
                 role="group"
                 aria-label={m.bookmarks_remove_folder_confirm({ count: item.children })}
                 onkeydown={(event) => {
+                  if (isComposing(event)) return;
                   if (event.key !== "Escape") return;
                   event.stopPropagation();
                   confirming = null;

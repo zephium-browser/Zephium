@@ -1237,3 +1237,171 @@ fn an_https_try_whose_http_load_cannot_be_sent_shows_its_failure() {
         .unwrap();
     assert!(tab.failure.is_some());
 }
+
+#[test]
+fn native_url_refusal_without_a_browser_intent_projects_a_dismiss_only_notice() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "shown.example");
+    assert!(shell.items.pending_navigation_request(id).is_none());
+    shell.handle(Command::Engine(EngineEvent::NativeNavigationRefused {
+        id,
+        embedded: false,
+    }));
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert_eq!(
+        tab.page_request,
+        Some(zephium_ipc::PageRequestView::NavigationRefused { embedded: false })
+    );
+    assert_eq!(tab.url.as_deref(), Some("https://shown.example/"));
+    assert!(tab.failure.is_none(), "the current document did not fail");
+    let calls = engine.calls();
+    let disposition = shell.operation_answer_page_request(
+        id,
+        tab.page_request_serial.unwrap(),
+        crate::PageRequestDecision::Allow,
+    );
+    assert_eq!(disposition.outcome, OperationOutcome::Applied);
+    assert_eq!(
+        engine.calls(),
+        calls,
+        "even a forged allow answer cannot replay an unreadable URL"
+    );
+    assert!(shell.items.tab(id).unwrap().page_request.is_none());
+}
+
+#[test]
+fn native_url_policy_refusal_never_triggers_an_https_to_http_fallback() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "shown.example");
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/news".into(),
+    });
+    let calls = engine.calls();
+    assert!(calls
+        .iter()
+        .any(|call| call.contains("https://plain.example/news")));
+    shell.handle(Command::Engine(EngineEvent::NativeNavigationRefused {
+        id,
+        embedded: false,
+    }));
+    assert_eq!(
+        engine.calls(),
+        calls,
+        "policy refusal grants no transport downgrade"
+    );
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert_eq!(
+        tab.page_request,
+        Some(zephium_ipc::PageRequestView::NavigationRefused { embedded: false })
+    );
+    assert!(tab.failure.is_none());
+    let request = engine.last_navigation_request();
+    // A policy cancellation may be followed by native failure/cancellation
+    // callbacks. It must not resurrect fallback authority; only the exact
+    // native request completion may settle the browser's pending intent.
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: zephium_core::ports::engine::NavigationFailureReason::Other,
+        url: None,
+        replaced_page: false,
+    }));
+    shell.handle(Command::Engine(EngineEvent::LoadingChanged {
+        id,
+        loading: false,
+    }));
+    shell.handle(Command::Engine(EngineEvent::NavigationFailed {
+        id,
+        request,
+    }));
+    assert!(shell.items.pending_navigation_request(id).is_none());
+    assert!(!shell.items.tab(id).unwrap().loading);
+    assert!(
+        !engine
+            .calls()
+            .iter()
+            .any(|call| call.contains("http://plain.example/news")),
+        "late cancellation cannot authorize HTTP"
+    );
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/news".into(),
+    });
+    let loads: Vec<_> = engine
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            call.starts_with(&format!("navigate {id} "))
+                || call.starts_with(&format!("create {id} "))
+        })
+        .collect();
+    assert!(
+        loads.last().unwrap().contains("https://plain.example/news"),
+        "policy refusal does not mark the host HTTPS-incompatible"
+    );
+}
+
+#[test]
+fn embedded_url_refusal_is_dismiss_only_and_preserves_top_level_https_authority() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "shown.example");
+    shell.handle(Command::Navigate {
+        id,
+        input: "http://plain.example/news".into(),
+    });
+    let request = shell.items.pending_navigation_request(id).unwrap();
+    let calls = engine.calls();
+    shell.handle(Command::Engine(EngineEvent::NativeNavigationRefused {
+        id,
+        embedded: true,
+    }));
+    assert_eq!(shell.items.pending_navigation_request(id), Some(request));
+    let tab = last(&screen)
+        .tabs
+        .into_iter()
+        .find(|tab| tab.id == id.to_string())
+        .unwrap();
+    assert_eq!(
+        tab.page_request,
+        Some(zephium_ipc::PageRequestView::NavigationRefused { embedded: true })
+    );
+    shell.operation_answer_page_request(
+        id,
+        tab.page_request_serial.unwrap(),
+        crate::PageRequestDecision::AlwaysAllow,
+    );
+    assert_eq!(
+        engine.calls(),
+        calls,
+        "an embedded refusal carries no replay or grant authority"
+    );
+    assert_eq!(shell.items.pending_navigation_request(id), Some(request));
+    // A later real transport failure still owns the original HTTPS attempt.
+    shell.handle(Command::Engine(EngineEvent::NavigationFailureReported {
+        id,
+        reason: zephium_core::ports::engine::NavigationFailureReason::Unreachable,
+        url: Some("https://plain.example/news".into()),
+        replaced_page: false,
+    }));
+    assert!(
+        engine
+            .calls()
+            .iter()
+            .any(|call| call.contains("http://plain.example/news")),
+        "child refusal did not revoke the independent top-level upgrade attempt"
+    );
+}

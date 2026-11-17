@@ -129,3 +129,42 @@ for (const phase of ["between_steps", "beforeinput_recipient"]) {
   assert.equal(finished,0);assert.equal(h.listeners.size,0);
 }
 console.log("Semantic CDP action contracts passed: exact terminal, no replay, revocation, recipient replacement, selection drift, open-root binding and cleanup.");
+
+// Exercise the production discard monitor's tracking hooks with native-shaped
+// audio/capture objects. Terminal objects remain strongly reachable by the
+// fixture, so this proves pruning rather than depending on garbage collection.
+{
+  const rust = readFileSync(new URL("../crates/zephium-engine/src/host/scripts.rs", import.meta.url), "utf8");
+  const bootstrap = rust.match(/const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"([\s\S]*?)"#;/)[1];
+  const body = parse(bootstrap, {ecmaVersion:"latest"}).body[0].expression.callee.body.body;
+  const wanted = new Set(["pruneTracked", "rememberTracked", "endedTrack", "closedContext", "observeStream", "wrapAudioConstructor", "liveTrack"]);
+  const hooks = body.filter(node => node.type === "FunctionDeclaration" && wanted.has(node.id.name)).map(node => bootstrap.slice(node.start,node.end)).join("\n");
+  class AudioContext { state = "running"; }
+  const h = {apply:Reflect.apply, construct:Reflect.construct, WeakReference:WeakRef, weakDeref:WeakRef.prototype.deref,
+    arrayPush:Array.prototype.push, audioContexts: hooks.includes("function rememberTracked(") ? [] : new Set(), captureTracks: hooks.includes("function rememberTracked(") ? [] : new Set(), MAX_TRACKED:4096, uncertain:false, audioHooks:[],
+    AudioContext, contextState:function(){return this.state;}, trackReadyState:function(){return this.readyState;},
+    callGetter:(getter,value)=>Reflect.apply(getter,value,[]), getTracks:function(){return this.tracks;}};
+  runInNewContext(hooks, h);
+  const size = list => list instanceof Set ? list.size : list.length;
+  h.wrapAudioConstructor("AudioContext");
+  const retained = [];
+  for (let i=0; i<5000; i++) {
+    const context = new h.AudioContext();
+    const track = {readyState:"live"};
+    h.observeStream({tracks:[track,track]});
+    assert.equal(size(h.audioContexts),1);
+    assert.equal(size(h.captureTracks),1);
+    context.state="closed"; track.readyState="ended";
+    retained.push(context,track);
+  }
+  h.pruneTracked(h.audioContexts,h.closedContext);
+  h.pruneTracked(h.captureTracks,h.endedTrack);
+  assert.equal(h.audioContexts.length,0); assert.equal(h.captureTracks.length,0);
+  assert.equal(h.uncertain,false,"completed calls do not exhaust the live-object budget");
+  const running = new h.AudioContext(); let visited=0;
+  h.pruneTracked(h.audioContexts,h.closedContext,()=>visited++);
+  assert.equal(visited,1); assert.equal(h.audioContexts[0].deref(),running);
+  for (let i=0;i<4097;i++) { const track={readyState:"live"}; retained.push(track); h.observeStream({tracks:[track]}); }
+  assert.equal(h.captureTracks.length,4096); assert.equal(h.uncertain,true,"too many live captures still refuse discard");
+  console.log("discard audio/capture weak tracking passed");
+}

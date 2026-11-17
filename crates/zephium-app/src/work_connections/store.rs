@@ -3,7 +3,7 @@
 //! secret, bearer tokens and OAuth credentials live in the login Keychain.
 use std::path::{Path, PathBuf};
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use serde_json::{json, Value};
 use zephium_ipc::work::{WorkServerV1, MAX_WORK_SERVERS};
@@ -33,6 +33,7 @@ pub enum StoreError {
 pub struct ConnectionStore {
     folder: PathBuf,
     authority: Arc<Mutex<AuthorityRegistry>>,
+    profiles: Arc<Mutex<std::collections::HashMap<String, Arc<RwLock<bool>>>>>,
 }
 
 type AuthorityRegistry =
@@ -57,9 +58,14 @@ impl AuthorityState {
 pub(crate) struct ConnectionGeneration {
     authority: Arc<Mutex<AuthorityState>>,
     generation: u64,
+    profile: Arc<RwLock<bool>>,
 }
 impl ConnectionGeneration {
     pub(crate) fn is_current(&self) -> bool {
+        let retired = self.profile.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return false;
+        }
         let state = self.authority.lock().unwrap_or_else(|p| p.into_inner());
         state.changing == 0 && state.generation == self.generation
     }
@@ -85,7 +91,76 @@ impl ConnectionStore {
         Self {
             folder: data.join("connections"),
             authority: Default::default(),
+            profiles: Default::default(),
         }
+    }
+
+    fn profile_state(&self, profile: &str) -> Arc<RwLock<bool>> {
+        self.profiles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(profile.into())
+            .or_default()
+            .clone()
+    }
+
+    /// Retires current and delayed writers before erasing every vault account.
+    /// Configuration remains retryable until credential erasure is proven.
+    pub fn retire_profile(
+        &self,
+        profile: &str,
+        vault: &dyn zephium_mcp::keychain::SecretVault,
+    ) -> Result<(), StoreError> {
+        let path = self.path(profile)?;
+        let state = self.profile_state(profile);
+        let mut retired = state.write().unwrap_or_else(|p| p.into_inner());
+        *retired = true;
+        vault.delete_profile(profile).map_err(|_| StoreError::Io)?;
+        match std::fs::symlink_metadata(&self.folder) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(StoreError::Io),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(StoreError::Io),
+        }
+        for path in [path, self.tools_path(profile)?] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(StoreError::Io),
+            }
+        }
+        let entries = match std::fs::read_dir(&self.folder) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(StoreError::Io),
+        };
+        for (index, entry) in entries.enumerate() {
+            if index >= 10_000 {
+                return Err(StoreError::Io);
+            }
+            let entry = entry.map_err(|_| StoreError::Io)?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let temporary = [
+                format!("profile-{profile}.json."),
+                format!("profile-{profile}.tools.json."),
+            ]
+            .iter()
+            .any(|prefix| {
+                name.strip_prefix(prefix).is_some_and(|pid| {
+                    !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            });
+            if temporary {
+                std::fs::remove_file(entry.path()).map_err(|_| StoreError::Io)?;
+            }
+        }
+        #[cfg(unix)]
+        std::fs::File::open(&self.folder)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| StoreError::Io)?;
+        Ok(())
     }
 
     fn authority(&self, profile: &str, server: &str) -> Arc<Mutex<AuthorityState>> {
@@ -114,11 +189,17 @@ impl ConnectionStore {
     }
 
     pub(crate) fn generation(&self, profile: &str, server: &str) -> Option<ConnectionGeneration> {
+        let profile_state = self.profile_state(profile);
+        let retired = profile_state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return None;
+        }
         let state = self.authority(profile, server);
         let authority = state.lock().unwrap_or_else(|p| p.into_inner());
         (authority.changing == 0).then(|| ConnectionGeneration {
             authority: state.clone(),
             generation: authority.generation,
+            profile: profile_state.clone(),
         })
     }
 
@@ -191,6 +272,21 @@ impl ConnectionStore {
         server: WorkServerV1,
         previous: Option<&str>,
     ) -> Result<Vec<WorkServerV1>, StoreError> {
+        self.path(profile)?;
+        let state = self.profile_state(profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return Err(StoreError::Invalid);
+        }
+        self.put_active(profile, server, previous)
+    }
+
+    fn put_active(
+        &self,
+        profile: &str,
+        server: WorkServerV1,
+        previous: Option<&str>,
+    ) -> Result<Vec<WorkServerV1>, StoreError> {
         if !server.validate() {
             return Err(StoreError::Invalid);
         }
@@ -222,6 +318,13 @@ impl ConnectionStore {
         secrets: &std::collections::HashMap<String, String>,
         vault: &dyn zephium_mcp::keychain::SecretVault,
     ) -> Result<(), StoreError> {
+        self.path(profile)?;
+        let state = self.profile_state(profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return Err(StoreError::Invalid);
+        }
+
         use zephium_mcp::keychain::KeychainError;
         let mut before = Vec::new();
         for account in secrets.keys() {
@@ -242,7 +345,7 @@ impl ConnectionStore {
                     .write(profile, &server.id, account, value)
                     .map_err(|_| StoreError::Io)?;
             }
-            self.put(profile, server.clone(), previous)?;
+            self.put_active(profile, server.clone(), previous)?;
             Ok(())
         })();
         if result.is_err() {
@@ -266,20 +369,37 @@ impl ConnectionStore {
         id: &str,
         vault: &dyn zephium_mcp::keychain::SecretVault,
     ) -> Result<(), StoreError> {
+        self.path(profile)?;
+        let state = self.profile_state(profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return Err(StoreError::Invalid);
+        }
+
         let _change = self.begin_change(profile, id);
         vault
             .delete_server(profile, id)
             .map_err(|_| StoreError::Io)?;
-        self.remove(profile, id)?;
+        self.remove_active(profile, id)?;
         Ok(())
     }
 
     pub fn remove(&self, profile: &str, id: &str) -> Result<Vec<WorkServerV1>, StoreError> {
+        self.path(profile)?;
+        let state = self.profile_state(profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return Err(StoreError::Invalid);
+        }
+        self.remove_active(profile, id)
+    }
+
+    fn remove_active(&self, profile: &str, id: &str) -> Result<Vec<WorkServerV1>, StoreError> {
         let _change = self.begin_change(profile, id);
         let mut servers = self.servers(profile)?;
         servers.retain(|s| s.id != id);
         self.write(profile, servers.clone())?;
-        let _ = self.put_tools(profile, id, None);
+        let _ = self.put_tools_active(profile, id, None);
         Ok(servers)
     }
 
@@ -336,6 +456,21 @@ impl ConnectionStore {
         id: &str,
         tools: Option<&[McpTool]>,
     ) -> Result<(), StoreError> {
+        self.path(profile)?;
+        let state = self.profile_state(profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return Err(StoreError::Invalid);
+        }
+        self.put_tools_active(profile, id, tools)
+    }
+
+    fn put_tools_active(
+        &self,
+        profile: &str,
+        id: &str,
+        tools: Option<&[McpTool]>,
+    ) -> Result<(), StoreError> {
         let path = self.tools_path(profile)?;
         let mut all: serde_json::Map<String, Value> = std::fs::read(&path)
             .ok()
@@ -379,13 +514,28 @@ struct TrackedTokens {
 }
 impl zephium_mcp::oauth::TokenStore for TrackedTokens {
     fn load(&self) -> Option<String> {
+        let state = self.store.profile_state(&self.profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return None;
+        }
         self.tokens.load()
     }
     fn save(&self, value: &str) -> bool {
+        let state = self.store.profile_state(&self.profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return false;
+        }
         let _change = self.store.begin_change(&self.profile, &self.server);
         self.tokens.save(value)
     }
     fn clear(&self) {
+        let state = self.store.profile_state(&self.profile);
+        let retired = state.read().unwrap_or_else(|p| p.into_inner());
+        if *retired {
+            return;
+        }
         let _change = self.store.begin_change(&self.profile, &self.server);
         self.tokens.clear();
     }
@@ -458,6 +608,150 @@ mod tests {
             self.0.borrow_mut().retain(|(s, _), _| s != server);
             Ok(())
         }
+        fn delete_profile(&self, _: &str) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            if self.1.get() {
+                return Err(zephium_mcp::keychain::KeychainError::Inaccessible);
+            }
+            self.0.borrow_mut().clear();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profile_retirement_preserves_retry_evidence_on_vault_failure_and_revokes_late_writes() {
+        use zephium_mcp::keychain::SecretVault;
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        let vault = MemoryVault::default();
+        store.put("profile", server("server"), None).unwrap();
+        store.put_tools("profile", "server", Some(&[])).unwrap();
+        let generation = store.generation("profile", "server").unwrap();
+        vault
+            .write("profile", "orphan", "oauth", "private")
+            .unwrap();
+        vault.1.set(true);
+        assert_eq!(store.retire_profile("profile", &vault), Err(StoreError::Io));
+        assert!(store.path("profile").unwrap().is_file());
+        assert_eq!(vault.read("profile", "orphan", "oauth").unwrap(), "private");
+        assert!(!generation.is_current());
+        assert!(store.put("profile", server("late"), None).is_err());
+        assert!(store.put_tools("profile", "late", Some(&[])).is_err());
+        vault.1.set(false);
+        store.retire_profile("profile", &vault).unwrap();
+        store.retire_profile("profile", &vault).unwrap();
+        assert!(vault.0.borrow().is_empty());
+        assert!(!store.path("profile").unwrap().exists());
+        assert!(!store.tools_path("profile").unwrap().exists());
+    }
+
+    struct BlockingTokens {
+        entered: std::sync::mpsc::Sender<()>,
+        resume: Mutex<std::sync::mpsc::Receiver<()>>,
+        value: Arc<Mutex<Option<String>>>,
+    }
+    impl zephium_mcp::oauth::TokenStore for BlockingTokens {
+        fn load(&self) -> Option<String> {
+            self.value.lock().unwrap().clone()
+        }
+        fn save(&self, value: &str) -> bool {
+            self.entered.send(()).unwrap();
+            self.resume.lock().unwrap().recv().unwrap();
+            *self.value.lock().unwrap() = Some(value.into());
+            true
+        }
+        fn clear(&self) {
+            *self.value.lock().unwrap() = None;
+        }
+    }
+    struct TokenVault(Arc<Mutex<Option<String>>>);
+    impl zephium_mcp::keychain::SecretVault for TokenVault {
+        fn read(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<String, zephium_mcp::keychain::KeychainError> {
+            self.0
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or(zephium_mcp::keychain::KeychainError::Missing)
+        }
+        fn write(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            secret: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            *self.0.lock().unwrap() = Some(secret.into());
+            Ok(())
+        }
+        fn delete(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+        fn delete_server(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+        fn delete_profile(&self, _: &str) -> Result<(), zephium_mcp::keychain::KeychainError> {
+            *self.0.lock().unwrap() = None;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn profile_erasure_waits_for_inflight_token_save_and_rejects_delayed_oauth_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConnectionStore::new(dir.path());
+        let value = Arc::new(Mutex::new(None));
+        let (entered, started) = std::sync::mpsc::channel();
+        let (resume, gate) = std::sync::mpsc::channel();
+        let tokens = store.track_tokens(
+            "profile",
+            "server",
+            Arc::new(BlockingTokens {
+                entered,
+                resume: Mutex::new(gate),
+                value: value.clone(),
+            }),
+        );
+        let saving = tokens.clone();
+        let save = std::thread::spawn(move || saving.save("inflight secret"));
+        started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let retiring = store.clone();
+        let vault = TokenVault(value.clone());
+        let (done, erased) = std::sync::mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            let result = retiring.retire_profile("profile", &vault);
+            done.send(result).unwrap();
+        });
+        let premature = erased
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .ok();
+        resume.send(()).unwrap();
+        assert!(save.join().unwrap());
+        cleanup.join().unwrap();
+        assert!(premature.is_none());
+        erased
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert!(value.lock().unwrap().is_none());
+        assert!(!tokens.save("late secret"));
+        assert!(value.lock().unwrap().is_none());
     }
 
     #[test]

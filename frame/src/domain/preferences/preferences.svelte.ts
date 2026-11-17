@@ -3,6 +3,7 @@ import type { SearchShortcut } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { settle } from "$domain/operations";
+import { IS_MAC, IS_WINDOWS } from "$shared/platform";
 
 const defaults = {
   appearance: "system",
@@ -71,7 +72,8 @@ const defaults = {
   "privacy.smartscreen": "true",
 } as const;
 export type PreferenceKey = keyof typeof defaults;
-const STARTUP_CONCURRENCY = 8;
+// WebKitGTK admits 32 requests per context; lazy modules must not lose that race.
+const WEBKITGTK_STARTUP_CONCURRENCY = 8;
 const STARTUP_TIMEOUT_MS = 2000;
 let shortcutDefaults = $state.raw<SearchShortcut[]>([]);
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
@@ -173,7 +175,8 @@ async function initialize(generation: number, signal: AbortSignal) {
       }
     }
   }
-  await Promise.all(Array.from({ length: STARTUP_CONCURRENCY }, read));
+  const workers = IS_MAC || IS_WINDOWS ? reads.length : WEBKITGTK_STARTUP_CONCURRENCY;
+  await Promise.all(Array.from({ length: workers }, read));
   if (generation === epoch) initialized = true;
 }
 

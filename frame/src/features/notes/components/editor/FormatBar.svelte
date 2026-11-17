@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { shortcutHint } from "../../lib/platform";
   import type { Editor } from "@tiptap/core";
   import { tick } from "svelte";
   import Icon from "$shared/ui/Icon";
@@ -211,7 +212,7 @@
       type="button"
       class="format-button"
       aria-label={m.note_link()}
-      title="{m.note_link()}  ⌘K"
+      title="{m.note_link()}  {shortcutHint('CmdOrCtrl+K')}"
       aria-pressed={active.link}
       onclick={() => (linking = true)}><Icon icon={Link01Icon} size={15} /></button
     >
@@ -219,7 +220,7 @@
       type="button"
       class="format-button"
       aria-label={m.note_checklist()}
-      title="{m.note_checklist()}  ⇧⌘L"
+      title="{m.note_checklist()}  {shortcutHint('CmdOrCtrl+Shift+L')}"
       aria-pressed={active.checklist}
       onclick={() => toggleChecklist(editor)}><Icon icon={CheckListIcon} size={15} /></button
     >
