@@ -14,6 +14,10 @@ use zephium_core::work::model::{
     WorkModelClient, WorkModelError, WorkModelEvent, WorkModelFuture, WorkModelPart,
     WorkModelRequest, WorkModelRole, WorkModelUsage,
 };
+#[cfg(target_os = "macos")]
+use zephium_engine::run_macos_work_application_with_input_probe as host_probe;
+#[cfg(target_os = "windows")]
+use zephium_engine::run_windows_work_application_with_input_probe as host_probe;
 use zephium_engine::WebviewEngine;
 use zephium_ipc::page_assist::*;
 use zephium_work_composition::page_assist::port::*;
@@ -1186,6 +1190,8 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     let scenario = name
         .to_str()
         .and_then(scenarios::find)
+        // The live scenarios reach real sites and stay macOS-only.
+        .filter(|scenario| cfg!(target_os = "macos") || !scenario.live)
         .ok_or(Error::Authority)?;
     let fixture = if scenario.live {
         None
@@ -1195,6 +1201,8 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         ))
     };
     zephium_engine::page_reader::set_diagnostics(reader_note);
+    // The Windows host runs each probe on its own temporary profile.
+    #[cfg(target_os = "macos")]
     zephium_engine::nonpersistent_stores_for_probe();
     let profile = ProfileId::generate();
     let shared = Arc::new(Shared {
@@ -1216,7 +1224,7 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     });
     let events = shared.clone();
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    let run = zephium_engine::run_macos_work_application_with_input_probe(
+    let run = host_probe(
         profile,
         zephium_engine::MacosWorkProbeInput::LifecycleOnly,
         REPLY_WAIT + Duration::from_secs(120),

@@ -1,5 +1,5 @@
 //! Sidebar assistant bench: scenarios, the loopback shop they run against and
-//! the typed reading of a reply. Platform-neutral; only the host is macOS.
+//! the typed reading of a reply. Platform-neutral; only the host differs.
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
