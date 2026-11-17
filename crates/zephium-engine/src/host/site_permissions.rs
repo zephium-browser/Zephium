@@ -140,12 +140,31 @@ impl EngineHost {
     fn human_profile(
         &mut self,
         profile: ProfileId,
+        snapshot: bool,
     ) -> Option<(
         webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4,
         Option<super::lifecycle::TemporaryPage>,
     )> {
         use windows::core::Interface;
         use wry::WebViewExtWindows;
+        if snapshot
+            && self.profile_persistence_classes.get(&profile)
+                == Some(&super::profiles::ProfilePersistenceClass::Ephemeral)
+        {
+            if self.erasure_tombstones.contains(&profile) {
+                return None;
+            }
+            let view = self.views.iter().find_map(|(id, view)| {
+                (self.partitions.get(id)
+                    == Some(&zephium_core::ports::engine::Partition::Ephemeral(profile)))
+                .then_some(view)
+            })?;
+            let native = crate::platform::imp::extensions::profile(&view.webview())
+                .ok()?
+                .cast()
+                .ok()?;
+            return Some((native, None));
+        }
         let partition = zephium_core::ports::engine::Partition::Persistent(profile);
         super::browsing_data::admitted_profile(
             partition,
@@ -198,7 +217,7 @@ impl EngineHost {
         {
             use std::cell::Cell;
             use std::rc::Rc;
-            let Some((native, page)) = self.human_profile(profile) else {
+            let Some((native, page)) = self.human_profile(profile, complete) else {
                 return done(None);
             };
             let done = Self::after_answer(page, done);
@@ -289,7 +308,7 @@ impl EngineHost {
             let Some(kind) = native_kind(kind) else {
                 return done(false);
             };
-            let Some((native, page)) = self.human_profile(profile) else {
+            let Some((native, page)) = self.human_profile(profile, false) else {
                 return done(false);
             };
             let done = Self::after_answer(page, done);
