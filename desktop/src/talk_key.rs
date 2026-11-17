@@ -73,7 +73,7 @@ impl TalkKey {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Modifiers {
     pub(crate) meta: bool,
@@ -83,7 +83,7 @@ pub(crate) struct Modifiers {
     pub(crate) other: bool,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl Modifiers {
     fn contains(self, required: Self) -> bool {
         (!required.meta || self.meta)
@@ -93,7 +93,7 @@ impl Modifiers {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum KeyEvent {
     Down,
@@ -101,21 +101,21 @@ pub(crate) enum KeyEvent {
     FlagsChanged,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct KeyAction {
     pub(crate) consume: bool,
     pub(crate) signal: Option<TalkSignal>,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Default)]
 pub(crate) struct Capture {
     held: Option<(u16, Modifiers)>,
     down: bool,
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl Capture {
     pub(crate) fn event(
         &mut self,

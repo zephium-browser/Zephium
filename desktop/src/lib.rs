@@ -7400,6 +7400,8 @@ fn finish_browser_setup(
             },
         );
     }
+    #[cfg(target_os = "windows")]
+    platform::imp::install_talk_keys(&window);
     #[cfg(target_os = "linux")]
     let global_registration = linux_shortcut_portal::GlobalRegistration::default();
     #[cfg(target_os = "linux")]
