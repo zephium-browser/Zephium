@@ -56,7 +56,8 @@ impl Control {
         })
     }
 
-    fn find(&self, read: &Readout) -> Option<usize> {
+    /// Where it is in `read`, if it is still there under the same name.
+    pub(crate) fn find(&self, read: &Readout) -> Option<usize> {
         read.passages
             .iter()
             .enumerate()

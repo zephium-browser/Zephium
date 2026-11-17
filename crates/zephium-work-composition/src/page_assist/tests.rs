@@ -65,6 +65,12 @@ struct PageState {
     relabels: std::collections::HashSet<u16>,
     /// Controls whose press bumps the count beside the clock.
     counts: std::collections::HashSet<u16>,
+    /// The read with this number never answers.
+    stalls: Option<u64>,
+    /// From now on, "Add to wishlist" reads under another name.
+    renamed: bool,
+    /// Reads made when the first step was dispatched.
+    reads_at_act: Option<u64>,
 }
 
 /// The page's own "working" note, far from every control.
@@ -223,6 +229,18 @@ impl PagePort for FakePage {
         state.reads += 1;
         state.catch_up(tab);
         let read = state.reads;
+        if state.stalls == Some(read) {
+            return Box::pin(std::future::pending());
+        }
+        if state.renamed {
+            if let Some(button) = state
+                .readouts
+                .get_mut(tab)
+                .and_then(|r| r.passages.iter_mut().find(|p| p.id == 10))
+            {
+                button.text = "Save for later".into();
+            }
+        }
         let readout = state
             .readouts
             .get(tab)
@@ -275,6 +293,8 @@ impl PagePort for FakePage {
         let gate = {
             let mut state = self.lock();
             state.acted.push(step.clone());
+            let reads = state.reads;
+            state.reads_at_act.get_or_insert(reads);
             state.take(tab, step);
             state.act_gate.clone()
         };
@@ -348,6 +368,8 @@ struct Turn {
     hang: bool,
     error: Option<WorkModelError>,
     exhausted: bool,
+    /// How long the model thinks before it answers.
+    think: Duration,
 }
 
 fn say(text: &str) -> Turn {
@@ -401,6 +423,7 @@ impl WorkModelClient for FakeClient {
             if turn.hang {
                 std::future::pending::<()>().await;
             }
+            tokio::time::sleep(turn.think).await;
             if let Some(error) = turn.error {
                 return Err(error);
             }
@@ -3028,6 +3051,189 @@ async fn a_clock_beside_a_button_is_never_its_effect() {
             "{name}: {step:?}"
         );
         assert!(took >= from && took < to, "{name}: took {took:?}");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Before {
+    /// The read before the press answers.
+    Reads,
+    /// It never answers.
+    Stalls,
+    /// It shows the button under another name.
+    Renamed,
+}
+
+/// A click planned on the only read of the page, after `think` of model
+/// time: the step, how long the reply took, how many reads came between the
+/// planning read and the first dispatch, and how many steps were dispatched.
+async fn unpaired_click(
+    press: Press,
+    clock: bool,
+    before: Before,
+    think: Duration,
+) -> (PageAssistStepV1, Duration, Option<u64>, usize) {
+    let h = harness(vec![
+        Turn {
+            think,
+            ..tool("act", json!({"steps": [{"verb": "click", "ref": "a10"}]}))
+        },
+        say("Here is what happened."),
+    ]);
+    h.controls();
+    {
+        let mut state = h.page.lock();
+        state.clock = clock;
+        match press {
+            Press::NoOp => {
+                state.inert.insert(10);
+            }
+            Press::Relabels => {
+                state.relabels.insert(10);
+            }
+            Press::Counts | Press::Notes => {}
+        }
+        match before {
+            Before::Reads | Before::Stalls | Before::Renamed => {}
+        }
+    }
+    // Once the model is asked, the planning read is done: note how many
+    // reads that took, and stall the next one when asked to.
+    let (page, client) = (h.page.clone(), h.client.clone());
+    let planned = tokio::spawn(async move {
+        while client.requests.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let mut state = page.lock();
+        let reads = state.reads;
+        match before {
+            Before::Reads => {}
+            Before::Stalls => state.stalls = Some(reads + 1),
+            Before::Renamed => state.renamed = true,
+        }
+        reads
+    });
+    let started = Instant::now();
+    h.ask("Do it", true).await.unwrap();
+    h.settle_within(Duration::from_secs(14)).await;
+    let took = started.elapsed();
+    let step = h
+        .blocks()
+        .await
+        .iter()
+        .find_map(|block| match block {
+            PageAssistBlockV1::Steps { steps } => steps.first().cloned(),
+            _ => None,
+        })
+        .expect("a step");
+    let planned = planned.await.unwrap();
+    let state = h.page.lock();
+    (
+        step,
+        took,
+        state.reads_at_act.map(|reads| reads - planned),
+        state.acted.len(),
+    )
+}
+
+#[tokio::test]
+async fn an_unpaired_press_reads_once_more_before_it_runs() {
+    use PageAssistStepReasonV1::{Unconfirmed, Unsuitable};
+    use PageAssistStepStateV1::{Done, Failed};
+    let ms = Duration::from_millis;
+    let think = ms(1_200);
+    type Case = (
+        &'static str,
+        Press,
+        bool,
+        Before,
+        PageAssistStepStateV1,
+        Option<PageAssistStepReasonV1>,
+        usize,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "no-op beside a clock",
+            Press::NoOp,
+            true,
+            Before::Reads,
+            Failed,
+            Some(Unconfirmed),
+            1,
+        ),
+        (
+            "relabels beside a clock",
+            Press::Relabels,
+            true,
+            Before::Reads,
+            Done,
+            None,
+            1,
+        ),
+        (
+            "quiet press",
+            Press::Notes,
+            false,
+            Before::Reads,
+            Done,
+            None,
+            1,
+        ),
+        (
+            "read before it stalls",
+            Press::Notes,
+            false,
+            Before::Stalls,
+            Done,
+            None,
+            1,
+        ),
+        (
+            "button renamed meanwhile",
+            Press::Notes,
+            false,
+            Before::Renamed,
+            Failed,
+            Some(Unsuitable),
+            0,
+        ),
+    ];
+    let runs: Vec<_> = cases
+        .into_iter()
+        .map(|(name, press, clock, before, state, reason, acted)| {
+            tokio::spawn(async move {
+                let run = unpaired_click(press, clock, before, think).await;
+                (name, state, reason, acted, run)
+            })
+        })
+        .collect();
+    for run in runs {
+        let (name, state, reason, acted, (step, took, at_dispatch, ran)) = run.await.unwrap();
+        assert_eq!(
+            (step.state, step.reason),
+            (state, reason),
+            "{name}: {step:?}"
+        );
+        assert_eq!(ran, acted, "{name}: dispatched");
+        match name {
+            // Exactly one read between the planning read and the press.
+            "quiet press" | "no-op beside a clock" | "relabels beside a clock" => {
+                assert_eq!(at_dispatch, Some(1), "{name}: reads before the press");
+            }
+            _ => {}
+        }
+        match name {
+            "quiet press" => assert!(took < think + ms(1_000), "{name}: took {took:?}"),
+            // The step ran under the old rule once the read timed out.
+            "read before it stalls" => {
+                assert!(
+                    took >= think + Duration::from_secs(8),
+                    "{name}: took {took:?}"
+                )
+            }
+            "no-op beside a clock" => assert!(took >= think + ms(4_000), "{name}: took {took:?}"),
+            _ => {}
+        }
     }
 }
 
