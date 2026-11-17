@@ -21,18 +21,29 @@ struct Session {
 }
 
 impl Session {
+    fn choices(&self) -> usize {
+        self.tabs.len() + usize::from(!self.keyboard)
+    }
+    fn new_tab_selected(&self) -> bool {
+        !self.keyboard && self.selected == self.tabs.len()
+    }
     fn step(&mut self, reverse: bool) {
-        if !self.tabs.is_empty() {
-            self.selected =
-                (self.selected + if reverse { self.tabs.len() - 1 } else { 1 }) % self.tabs.len();
+        let choices = self.choices();
+        if choices > 0 {
+            self.selected = (self.selected + if reverse { choices - 1 } else { 1 }) % choices;
         }
     }
     fn retain(&mut self, mut keep: impl FnMut(ItemId) -> bool) {
+        let new_tab = self.new_tab_selected();
         let selected = self.tabs.get(self.selected).copied();
         self.tabs.retain(|id| keep(*id));
-        self.selected = selected
-            .and_then(|id| self.tabs.iter().position(|tab| *tab == id))
-            .unwrap_or(self.selected.min(self.tabs.len().saturating_sub(1)));
+        self.selected = if new_tab {
+            self.tabs.len()
+        } else {
+            selected
+                .and_then(|id| self.tabs.iter().position(|tab| *tab == id))
+                .unwrap_or(self.selected.min(self.tabs.len().saturating_sub(1)))
+        };
     }
 }
 
@@ -251,6 +262,8 @@ impl Shell {
             | TabSwitcherAction::Cancel
             | TabSwitcherAction::NewTab
             | TabSwitcherAction::Activate { .. } => {
+                let new_tab = action == TabSwitcherAction::NewTab
+                    || (action == TabSwitcherAction::Commit && session.new_tab_selected());
                 let target = match &action {
                     TabSwitcherAction::Commit => session.tabs.get(session.selected).copied(),
                     TabSwitcherAction::Activate { tab_id } => named(tab_id),
@@ -263,7 +276,7 @@ impl Shell {
                     session: id,
                     state: None,
                 });
-                if action == TabSwitcherAction::NewTab {
+                if new_tab {
                     let _ = self.operation_open();
                 }
                 return;
@@ -276,7 +289,7 @@ impl Shell {
             }
             TabSwitcherAction::Step { reverse } => session.step(reverse),
             TabSwitcherAction::Select { index } => {
-                if (index as usize) < session.tabs.len() {
+                if (index as usize) < session.choices() {
                     session.selected = index as usize;
                 }
             }
