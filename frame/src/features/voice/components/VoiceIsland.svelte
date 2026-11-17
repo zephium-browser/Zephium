@@ -244,9 +244,15 @@
             >
           </div>
           <p class="voice-hint">
-            {talkKeys.length
-              ? m.talk_confirm_hint({ keys: talkKeys.join(IS_MAC ? "" : "+") })
-              : m.talk_confirm_hint_plain()}
+            {#if IS_MAC}
+              {talkKeys.length
+                ? m.talk_confirm_hint({ keys: talkKeys.join("") })
+                : m.talk_confirm_hint_plain()}
+            {:else}
+              {talkKeys.length
+                ? m.talk_confirm_hint_spoken({ keys: talkKeys.join("+") })
+                : m.talk_confirm_hint_spoken_plain()}
+            {/if}
           </p>
         </div>
       {:else}

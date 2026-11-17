@@ -10765,7 +10765,7 @@ mod tests {
             plist.contains("Zephium uses the camera only when you allow a website to access it.")
         );
         assert!(plist.contains(
-            "Zephium uses the microphone while you dictate in Work, and for a website only when you allow it."
+            "Zephium uses the microphone while you talk to it or dictate, and for a website only when you allow it."
         ));
         assert!(plist.contains("<key>NSSpeechRecognitionUsageDescription</key>"));
         assert!(plist.contains("Zephium turns what you dictate in Work into text on this Mac."));
