@@ -1282,9 +1282,13 @@ fn a_returning_page_is_covered_only_by_its_own_last_frame_held_in_memory() {
     assert!(cover.contains(".filter(|frame| {"));
     assert!(cover.contains("frame.owner == view_key(view)"));
     // A frame taken at another size would show the page scaled or cropped.
-    assert!(cover.contains("frame.snapshot.fits(view.frame().size)"));
+    assert!(cover.contains("frame.snapshot.fits(\n                        view.frame().size,"));
+    assert!(cover.contains("view.window().map(|window| window.backingScaleFactor())"));
     let covered = macos_stage_fn(stage, "cover");
-    assert!(covered.contains(".filter(|frame| frame.fits(page_frame.size))"));
+    assert!(covered.contains(".filter(|frame| frame.fits(page_frame.size, scale))"));
+    // A cover resized while shown drops its frame rather than stretching it.
+    assert!(macos_stage_fn(stage, "position_panes").contains("reframe_cover(&cover.view, frame)"));
+    assert!(macos_stage_fn(stage, "reframe_cover").contains("layer.setContents(None)"));
     assert!(covered.contains("kCAGravityResize }"));
     assert!(!stage.contains("kCAGravityResizeAspectFill"));
     assert!(cover.contains("_doAfterNextPresentationUpdate:"));

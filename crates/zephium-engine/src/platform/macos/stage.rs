@@ -106,6 +106,20 @@ fn over_budget<K: Copy>(mut frames: Vec<(K, usize, Instant)>, budget: usize) -> 
         .collect()
 }
 
+/// A cover's frame no longer fits once its size changes; the ground stays.
+fn reframe_cover(view: &NSView, frame: NSRect) {
+    let size = view.frame().size;
+    view.setFrame(frame);
+    if (size.width - frame.size.width).abs() >= 1.0
+        || (size.height - frame.size.height).abs() >= 1.0
+    {
+        if let Some(layer) = view.layer() {
+            // SAFETY: clearing layer contents on the AppKit main thread.
+            unsafe { layer.setContents(None) };
+        }
+    }
+}
+
 fn view_key(view: &NSView) -> usize {
     view as *const NSView as usize
 }
@@ -907,8 +921,9 @@ impl ContentStage {
         view.setFrame(page_frame);
         if let Some(layer) = view.layer() {
             layer.setBackgroundColor(Some(&page_ground(self).CGColor()));
+            let scale = self.window().map(|window| window.backingScaleFactor());
             let image = frame
-                .filter(|frame| frame.fits(page_frame.size))
+                .filter(|frame| frame.fits(page_frame.size, scale))
                 .and_then(super::PageSnapshot::image);
             if let Some(image) = image {
                 let contents: &AnyObject = image.as_ref();
@@ -2103,7 +2118,7 @@ impl ContentStage {
                         .ok()
                         .and_then(|covers| covers.get(&id).cloned());
                     if let Some(cover) = cover {
-                        cover.view.setFrame(frame);
+                        reframe_cover(&cover.view, frame);
                         if !self.layout_epoch_is_current(epoch) {
                             continue 'attempt;
                         }
@@ -2549,7 +2564,10 @@ impl ContentStage {
             .filter(|frame| {
                 frame.owner == view_key(view)
                     && Some(frame.document) == self.document(id)
-                    && frame.snapshot.fits(view.frame().size)
+                    && frame.snapshot.fits(
+                        view.frame().size,
+                        view.window().map(|window| window.backingScaleFactor()),
+                    )
             });
         let Some(frame) = frame else {
             return;

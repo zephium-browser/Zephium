@@ -42,6 +42,7 @@ const SNAPSHOT_QUALITY: f64 = 0.7;
 pub(crate) struct PageSnapshot {
     data: Retained<NSData>,
     size: NSSize,
+    scale: f64,
 }
 
 impl PageSnapshot {
@@ -49,9 +50,10 @@ impl PageSnapshot {
         self.data.len()
     }
 
-    /// A frame drawn at another size would scale or crop the page.
-    pub(crate) fn fits(&self, size: NSSize) -> bool {
-        same_size(self.size, size)
+    /// A frame drawn at another size or backing scale would scale or crop
+    /// the page.
+    pub(crate) fn fits(&self, size: NSSize, scale: Option<f64>) -> bool {
+        same_frame((self.size, self.scale), size, scale)
     }
 
     /// Returns false when no completion will be delivered.
@@ -109,14 +111,17 @@ impl PageSnapshot {
     }
 }
 
-fn same_size(a: NSSize, b: NSSize) -> bool {
-    (a.width - b.width).abs() < 1.0 && (a.height - b.height).abs() < 1.0
+fn same_frame(taken: (NSSize, f64), size: NSSize, scale: Option<f64>) -> bool {
+    (taken.0.width - size.width).abs() < 1.0
+        && (taken.0.height - size.height).abs() < 1.0
+        && scale.is_some_and(|scale| (taken.1 - scale).abs() < 0.01)
 }
 
 fn encode(image: &NSImage, size: NSSize) -> Option<PageSnapshot> {
     // SAFETY: AppKit accepts a null proposed rectangle; nothing is retained.
     let cg =
         unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
+    let scale = CGImage::width(Some(&cg)) as f64 / size.width;
     let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
     let quality = NSNumber::new_f64(SNAPSHOT_QUALITY);
     // SAFETY: the key is an immutable AppKit constant.
@@ -127,7 +132,11 @@ fn encode(image: &NSImage, size: NSSize) -> Option<PageSnapshot> {
     let data = unsafe {
         rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &properties)
     }?;
-    (!data.is_empty() && data.len() <= MAX_SNAPSHOT_BYTES).then_some(PageSnapshot { data, size })
+    (!data.is_empty() && data.len() <= MAX_SNAPSHOT_BYTES).then_some(PageSnapshot {
+        data,
+        size,
+        scale,
+    })
 }
 
 struct State {
@@ -233,11 +242,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_frame_fits_only_the_size_it_was_taken_at() {
-        let taken = NSSize::new(1280.0, 800.0);
-        assert!(same_size(taken, NSSize::new(1280.4, 799.6)));
-        assert!(!same_size(taken, NSSize::new(1000.0, 800.0)));
-        assert!(!same_size(taken, NSSize::new(1280.0, 760.0)));
-        assert!(!same_size(taken, NSSize::new(640.0, 400.0)));
+    fn a_frame_fits_only_the_size_and_scale_it_was_taken_at() {
+        let size = NSSize::new(1280.0, 800.0);
+        let taken = (size, 2.0);
+        assert!(same_frame(taken, NSSize::new(1280.4, 799.6), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1000.0, 800.0), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1280.0, 760.0), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(640.0, 400.0), Some(2.0)));
+        assert!(!same_frame(taken, size, Some(1.0)));
+        assert!(!same_frame((size, 1.0), size, Some(2.0)));
+        assert!(!same_frame(taken, size, None));
     }
 }
