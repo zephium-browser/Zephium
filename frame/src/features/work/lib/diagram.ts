@@ -375,6 +375,7 @@ export function partAlong(
 const settled = new SvelteMap<string, DiagramLayout>();
 const rowed = new Map<string, DiagramLayout>();
 const asked = new Set<string>();
+const pending = new Set<string>();
 const KEPT = 48;
 const keyOf = (shape: DiagramShape, way: DiagramWay) => `${way}${JSON.stringify(shape)}`;
 
@@ -384,7 +385,11 @@ function provisional(shape: DiagramShape, key: string, way: DiagramWay): Diagram
   if (!layout) {
     const rows = diagramRows(shape);
     layout = named(shape, way === "down" ? rowLayout(shape, rows) : columnLayout(shape, rows));
-    if (rowed.size >= KEPT) rowed.delete(rowed.keys().next().value!);
+    if (rowed.size >= KEPT) {
+      const evicted = rowed.keys().next().value!;
+      rowed.delete(evicted);
+      if (!settled.has(evicted) && !pending.has(evicted)) asked.delete(evicted);
+    }
     rowed.set(key, layout);
   }
   return layout;
@@ -432,15 +437,23 @@ export async function layoutDiagram(
 async function settle(shape: DiagramShape, key: string, way: DiagramWay): Promise<DiagramLayout> {
   asked.add(key);
   if (!shape.parts.length) return provisional(shape, key, way);
+  pending.add(key);
   try {
     const { engineLayout } = await import("./diagram-worker");
     const layout = named(shape, await engineLayout(shape, way));
-    if (settled.size >= KEPT) settled.delete(settled.keys().next().value!);
+    if (settled.size >= KEPT) {
+      const evicted = settled.keys().next().value!;
+      settled.delete(evicted);
+      asked.delete(evicted);
+    }
     settled.set(key, layout);
     return layout;
   } catch {
     // The rows stand for good; asking again would fail the same way.
     return provisional(shape, key, way);
+  } finally {
+    pending.delete(key);
+    if (!settled.has(key) && !rowed.has(key)) asked.delete(key);
   }
 }
 

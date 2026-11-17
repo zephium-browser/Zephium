@@ -120,7 +120,7 @@ impl LeadToolSet for PersonalTools {
         vec![
             WorkModelTool {
                 name: "remember".into(),
-                description: "Keep one durable fact about the person for later works: a preference (\"prefers aisle seats\"), a person in their life or work (\"Anna leads design\"), or a fact about their projects. Only what they said or clearly showed. Never a secret, never a detail that only matters to this request. The person sees it on the canvas and can undo it.".into(),
+                description: "Propose one durable fact about the person for later works: a preference (\"prefers aisle seats\"), a person in their life or work (\"Anna leads design\"), or a fact about their projects. The person must approve the exact fact before it is saved. Never a secret, never a detail that only matters to this request.".into(),
                 schema: schema(
                     json!({
                         "text": {"type": "string", "maxLength": 280, "description": "One short line, in the third person, without the person's name."},
@@ -237,6 +237,16 @@ async fn remember(context: LeadToolContext<'_>, arguments: &Value) -> LeadToolOu
     };
     if let Err(fault) = check_memory(text) {
         return LeadToolOutcome::error(format!("text: {}", fault.words()));
+    }
+    let approved = context
+        .ask_for(
+            zephium_core::work::runtime::WorkAskPurposeV1::Confirm,
+            format!("Remember this for future work?\n{text}"),
+            vec![ALLOW.to_owned(), NOT_NOW.to_owned()],
+        )
+        .await;
+    if !matches!(approved, Ok(Some(answer)) if answer == ALLOW) || context.cancelled().await {
+        return LeadToolOutcome::ok("The fact was not approved and was not remembered.");
     }
     match super::remember(
         context.handle(),

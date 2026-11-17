@@ -10,6 +10,7 @@ ipc-types = []
 [dependencies]
 ulid.workspace = true
 url.workspace = true
+psl = "=2.1.220"
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true

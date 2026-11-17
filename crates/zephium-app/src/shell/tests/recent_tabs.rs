@@ -443,3 +443,77 @@ fn browser_pages_are_switchable_and_an_empty_switcher_still_offers_a_new_tab() {
     });
     assert_ne!(active_id(&screen), blank);
 }
+
+#[test]
+fn explicit_switcher_can_select_and_commit_new_tab_without_changing_quick_mru() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = loaded(&mut shell, &screen, "one");
+    let second = loaded(&mut shell, &screen, "two");
+    shell.handle(Command::BeginTabSwitcher {
+        session: 91,
+        reverse: false,
+        keyboard: false,
+    });
+    let before = shell.recent_tab_order().len();
+    shell.handle(Command::TabSwitcher {
+        session: 91,
+        action: TabSwitcherAction::Select {
+            index: before as u32,
+        },
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 91,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_ne!(active_id(&screen), first);
+    assert_ne!(active_id(&screen), second);
+    shell.handle(Command::Activate(second));
+    shell.handle(Command::BeginTabSwitcher {
+        session: 92,
+        reverse: false,
+        keyboard: true,
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 92,
+        action: TabSwitcherAction::Select {
+            index: before as u32,
+        },
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 92,
+        action: TabSwitcherAction::Commit,
+    });
+    assert_eq!(active_id(&screen), first);
+}
+
+#[test]
+fn explicit_new_tab_selection_survives_closing_an_existing_card() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = loaded(&mut shell, &screen, "one");
+    let second = loaded(&mut shell, &screen, "two");
+    shell.handle(Command::BeginTabSwitcher {
+        session: 93,
+        reverse: false,
+        keyboard: false,
+    });
+    for _ in 0..2 {
+        shell.handle(Command::TabSwitcher {
+            session: 93,
+            action: TabSwitcherAction::Step { reverse: false },
+        });
+    }
+    shell.handle(Command::TabSwitcher {
+        session: 93,
+        action: TabSwitcherAction::CloseTab {
+            tab_id: first.to_string(),
+        },
+    });
+    shell.handle(Command::TabSwitcher {
+        session: 93,
+        action: TabSwitcherAction::Commit,
+    });
+    assert!(shell.items.tab(first).is_none());
+    assert_ne!(active_id(&screen), second);
+}

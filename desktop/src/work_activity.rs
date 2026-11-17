@@ -42,6 +42,7 @@ pub(crate) struct WorkActivity {
     /// Pages of recent attempts, kept after the attempt ends so their last
     /// frame outlives the run for this app session.
     pages: Mutex<BTreeMap<WorkAttemptId, (WorkExecutionId, Vec<WorkPageFrame>)>>,
+    page_profiles: Mutex<BTreeMap<WorkAttemptId, ProfileId>>,
     frames: Option<Arc<WorkFrameStore>>,
     /// Frames already written this session, by attempt, step and generation.
     persisted: Mutex<BTreeSet<FrameKey>>,
@@ -50,6 +51,7 @@ pub(crate) struct WorkActivity {
     /// Stored frames of recently read works, listed once per session.
     stored: Mutex<BTreeMap<WorkId, (ProfileId, Vec<WorkFrameRecord>)>>,
     page_changed: Mutex<Option<PageChanged>>,
+    retired: std::sync::RwLock<BTreeSet<ProfileId>>,
 }
 impl WorkActivity {
     pub(crate) fn new(frames: Option<Arc<WorkFrameStore>>) -> Self {
@@ -57,20 +59,101 @@ impl WorkActivity {
             observers: Mutex::default(),
             page_observers: Mutex::default(),
             pages: Mutex::default(),
+            page_profiles: Mutex::default(),
             frames,
             persisted: Mutex::default(),
             retry_after: Mutex::default(),
             stored: Mutex::default(),
             page_changed: Mutex::default(),
+            retired: Default::default(),
         }
     }
+    pub(crate) fn retire_profile(&self, profile: ProfileId) -> std::io::Result<()> {
+        let mut retired = self.retired.write().unwrap_or_else(|p| p.into_inner());
+        retired.insert(profile);
+        if let Some(frames) = &self.frames {
+            frames.retire_profile(profile)?;
+        }
+        let mut attempts = BTreeSet::new();
+        self.page_profiles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|attempt, owner| {
+                let keep = *owner != profile;
+                if !keep {
+                    attempts.insert(*attempt);
+                }
+                keep
+            });
+        if let Ok(mut observers) = self.page_observers.lock() {
+            observers.retain(|attempt, (_, pages)| {
+                let keep = pages.scope().0 != profile;
+                if !keep {
+                    attempts.insert(*attempt);
+                }
+                keep
+            });
+        }
+        if let Ok(mut stored) = self.stored.lock() {
+            stored.retain(|_, (owner, records)| {
+                let keep = *owner != profile;
+                if !keep {
+                    attempts.extend(records.iter().map(|record| record.attempt));
+                }
+                keep
+            });
+        }
+        if let Ok(mut observers) = self.observers.lock() {
+            observers.retain(|_, observer| {
+                observer
+                    .retain_pages()
+                    .is_none_or(|pages| pages.scope().0 != profile)
+            });
+        }
+        if let Ok(mut pages) = self.pages.lock() {
+            pages.retain(|attempt, _| !attempts.contains(attempt));
+        }
+        if let Ok(mut persisted) = self.persisted.lock() {
+            persisted.retain(|(attempt, _, _)| !attempts.contains(attempt));
+        }
+        if let Ok(mut retry) = self.retry_after.lock() {
+            retry.retain(|(attempt, _, _), _| !attempts.contains(attempt));
+        }
+        Ok(())
+    }
+
     pub(crate) fn set_page_observer(&self, changed: PageChanged) {
         if let Ok(mut observer) = self.page_changed.lock() {
             *observer = Some(changed);
         }
     }
+    fn cache_pages(
+        &self,
+        profile: ProfileId,
+        attempt: WorkAttemptId,
+        execution: WorkExecutionId,
+        opened: Vec<WorkPageFrame>,
+        pages: &mut BTreeMap<WorkAttemptId, (WorkExecutionId, Vec<WorkPageFrame>)>,
+    ) {
+        let mut owners = self.page_profiles.lock().unwrap_or_else(|p| p.into_inner());
+        if pages.len() >= MAX_PAGE_ATTEMPTS && !pages.contains_key(&attempt) {
+            if let Some(oldest) = pages.keys().next().copied() {
+                pages.remove(&oldest);
+                owners.remove(&oldest);
+            }
+        }
+        owners.insert(attempt, profile);
+        pages.insert(attempt, (execution, opened));
+    }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn track(&self, observer: WorkAttemptObserver) {
+        let retired = self.retired.read().unwrap_or_else(|p| p.into_inner());
+        if observer
+            .retain_pages()
+            .is_some_and(|pages| retired.contains(&pages.scope().0))
+        {
+            return;
+        }
         let mut evicted = None;
         let frames = observer.retain_pages();
         if let Some(frames) = &frames {
@@ -166,6 +249,10 @@ impl WorkActivity {
             .collect()
     }
     pub(crate) fn read_pages(&self, state: &WorkRuntimeProjection) -> Vec<WorkPageV1> {
+        let retired = self.retired.read().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&state.work.profile) {
+            return Vec::new();
+        }
         let (Ok(mut observers), Ok(mut pages)) = (self.page_observers.lock(), self.pages.lock())
         else {
             return Vec::new();
@@ -197,13 +284,7 @@ impl WorkActivity {
                     .collect();
                 opened.extend(dropped);
             }
-            if pages.len() >= MAX_PAGE_ATTEMPTS && !pages.contains_key(attempt) {
-                let oldest = pages.keys().next().copied();
-                if let Some(oldest) = oldest {
-                    pages.remove(&oldest);
-                }
-            }
-            pages.insert(*attempt, (*execution, opened));
+            self.cache_pages(state.work.profile, *attempt, *execution, opened, &mut pages);
         }
         // Consume the final update before releasing a completed mailbox.
         observers.retain(|_, (_, observer)| {
@@ -211,6 +292,10 @@ impl WorkActivity {
         });
         let executions: Vec<_> = state.executions.iter().map(|e| e.id).collect();
         pages.retain(|_, (execution, _)| executions.contains(execution));
+        self.page_profiles
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|attempt, _| pages.contains_key(attempt));
         let profile = state.work.profile;
         let work = state.work.id;
         let mut live: Vec<WorkPageV1> = pages
@@ -367,7 +452,12 @@ impl WorkActivity {
         records
     }
     pub(crate) fn frame(&self, attempt: WorkAttemptId, step: WorkStepId) -> Option<Arc<Vec<u8>>> {
+        let retired = self.retired.read().unwrap_or_else(|p| p.into_inner());
+        let owner = self.page_profiles.lock().ok()?.get(&attempt).copied();
         if let Some(png) = self.pages.lock().ok().and_then(|pages| {
+            if owner.is_none_or(|profile| retired.contains(&profile)) {
+                return None;
+            }
             pages
                 .get(&attempt)?
                 .1
@@ -439,6 +529,38 @@ fn current(signal: &WorkSignalV1, state: &WorkRuntimeProjection) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn profile_retirement_clears_completed_cached_pages_after_other_owners_are_evicted() {
+        let activity = WorkActivity::new(None);
+        let profile = ProfileId::from(77);
+        let attempt = WorkAttemptId::from(1);
+        let step = WorkStepId::from(2);
+        activity.cache_pages(
+            profile,
+            attempt,
+            WorkExecutionId::from(3),
+            vec![WorkPageFrame {
+                step,
+                url: "https://fixture.invalid/private".into(),
+                live: false,
+                frame: Some(Arc::new(zephium_agentic::WorkBrowserFrame {
+                    generation: 1,
+                    width: 1,
+                    height: 1,
+                    png: Arc::new(b"private pixels".to_vec()),
+                })),
+            }],
+            &mut activity.pages.lock().unwrap(),
+        );
+        assert!(activity.page_observers.lock().unwrap().is_empty());
+        assert!(activity.stored.lock().unwrap().is_empty());
+        assert!(activity.frame(attempt, step).is_some());
+        activity.retire_profile(profile).unwrap();
+        assert!(activity.frame(attempt, step).is_none());
+        assert!(activity.pages.lock().unwrap().is_empty());
+        assert!(activity.page_profiles.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn evicted_mailbox_preserves_newest_frame_in_its_original_scope() {
         let temp = tempfile::tempdir().unwrap();
         let frames = Arc::new(WorkFrameStore::new(temp.path().join("frames")));
@@ -507,6 +629,11 @@ mod tests {
             ),
         )]);
         *activity.pages.lock().unwrap() = pages.clone();
+        activity
+            .page_profiles
+            .lock()
+            .unwrap()
+            .insert(attempt, profile);
         let now = Instant::now();
         activity.persist_at(profile, work, &pages, now);
         assert!(activity.persisted.lock().unwrap().is_empty());
