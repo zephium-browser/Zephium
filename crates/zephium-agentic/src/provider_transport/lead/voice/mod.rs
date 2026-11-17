@@ -189,7 +189,7 @@ impl Default for Timings {
     fn default() -> Self {
         Self {
             open: Duration::from_secs(10),
-            final_wait: Duration::from_secs(8),
+            final_wait: Duration::from_secs(10),
             ping: Duration::from_secs(20),
             silence: Duration::from_secs(45),
         }
@@ -395,7 +395,8 @@ impl VoiceLink {
         self.enqueue(&mut state, Message::Binary(pcm.to_vec().into()), pcm.len())
     }
 
-    /// Commits once and starts the eight-second final deadline.
+    /// Commits once and starts the final deadline: two seconds past the
+    /// gateway's own eight, so its per-request failure arrives first.
     pub fn listen_commit(&self, id: &str) -> bool {
         self.command(&ClientFrame::ListenCommit { id }, |state| {
             let Some(listen) = state

@@ -200,7 +200,7 @@ fn production_target_is_pinned_and_diagnostics_redact_payloads() {
         assert!(!format!("{private:?}").contains("private-canary"));
     }
     assert!(Timings::default().open == Duration::from_secs(10));
-    assert!(Timings::default().final_wait == Duration::from_secs(8));
+    assert!(Timings::default().final_wait == Duration::from_secs(10));
     assert!(Timings::default().ping == Duration::from_secs(20));
     assert!(Timings::default().silence == Duration::from_secs(45));
 }
