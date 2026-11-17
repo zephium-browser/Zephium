@@ -17,6 +17,7 @@ pub mod models;
 mod openai;
 mod sse;
 mod transcribe;
+pub mod voice;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -336,26 +337,31 @@ pub(crate) fn compatible_base(base: &str) -> Option<Url> {
     .then_some(url)
 }
 
+fn http_builder(local: bool) -> reqwest::ClientBuilder {
+    let builder = Client::builder()
+        .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        .referer(false)
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(180))
+        .timeout(Duration::from_secs(20 * 60))
+        .pool_idle_timeout(Duration::from_secs(60))
+        .https_only(!local);
+    if local {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
 fn http(local: bool) -> Result<&'static Client, WorkModelError> {
     static SECURE: OnceLock<Option<Client>> = OnceLock::new();
     static LOCAL: OnceLock<Option<Client>> = OnceLock::new();
     let slot = if local { &LOCAL } else { &SECURE };
-    slot.get_or_init(|| {
-        let builder = Client::builder()
-            .user_agent(USER_AGENT)
-            .redirect(reqwest::redirect::Policy::none())
-            .referer(false)
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(180))
-            .timeout(Duration::from_secs(20 * 60))
-            .pool_idle_timeout(Duration::from_secs(60))
-            .https_only(!local);
-        let builder = if local { builder.no_proxy() } else { builder };
-        builder.build().ok()
-    })
-    .as_ref()
-    .ok_or(WorkModelError::Network)
+    slot.get_or_init(|| http_builder(local).build().ok())
+        .as_ref()
+        .ok_or(WorkModelError::Network)
 }
 
 /// One model on one endpoint. Cheap to share; holds no socket at rest.

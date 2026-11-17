@@ -11,9 +11,11 @@ default = []
 # preserves the zero-runtime-authority functional core in the default graph.
 provider-transport = [
     "dep:futures-util",
+    "dep:log",
     "dep:reqwest",
     "dep:rig-core",
     "dep:tokio",
+    "dep:tokio-tungstenite",
     "dep:zeroize",
     "dep:security-framework",
     "dep:security-framework-sys",
@@ -42,6 +44,8 @@ base64.workspace = true
 crc32fast.workspace = true
 psl = "=2.1.220"
 futures-util = { version = "=0.3.32", default-features = false, features = ["std"], optional = true }
+# Compile out tungstenite's private frame and close-reason diagnostics in every build.
+log = { version = "=0.4.32", features = ["max_level_info", "release_max_level_info"], optional = true }
 reqwest = { version = "=0.13.4", default-features = false, features = ["http2", "rustls", "stream", "system-proxy"], optional = true }
 rig-core = { version = "=0.42.0", default-features = false, optional = true }
 serde.workspace = true
@@ -49,6 +53,7 @@ serde_json.workspace = true
 sha2 = "=0.10.9"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
+tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"], optional = true }
 ulid.workspace = true
 url.workspace = true
 zeroize = { version = "=1.9.1", optional = true }
