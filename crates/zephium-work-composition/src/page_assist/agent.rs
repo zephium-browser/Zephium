@@ -2396,7 +2396,14 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
         {
             resolved.effect = StepEffect::Commit(WorkConfirmCategoryV1::Type);
         }
-        if let StepEffect::Commit(_) = resolved.effect {
+        if super::confirmation::required(
+            &resolved,
+            step.verb,
+            !reply.other_sites(&plan.record.page.site).is_empty()
+                || reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true),
+        ) {
             plan.mark(
                 reply,
                 index,

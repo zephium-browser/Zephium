@@ -340,6 +340,7 @@ impl PagePort for FakePage {
             return Ok(ResolvedStep {
                 label: "Scroll down".into(),
                 effect: StepEffect::Read,
+                confirm: false,
             });
         }
         step.target
@@ -941,6 +942,7 @@ impl Harness {
             ResolvedStep {
                 label: "Type into \"Message\"".into(),
                 effect,
+                confirm: false,
             },
         );
     }
@@ -1044,7 +1046,12 @@ impl Harness {
                 id,
                 ResolvedStep {
                     label: label.into(),
-                    effect: StepEffect::Draft,
+                    effect: if matches!(id, 8 | 10) {
+                        StepEffect::Commit(WorkConfirmCategoryV1::Save)
+                    } else {
+                        StepEffect::Draft
+                    },
+                    confirm: false,
                 },
             );
         }
@@ -1399,6 +1406,7 @@ async fn a_commit_step_waits_for_the_person() {
         ResolvedStep {
             label: "Click \"Place order\"".into(),
             effect: StepEffect::Commit(WorkConfirmCategoryV1::Purchase),
+            confirm: true,
         },
     );
     h.ask("Place the order", true).await.unwrap();
@@ -2352,6 +2360,7 @@ async fn an_unnamed_search_box_is_read_typed_into_and_submitted_under_a_glow() {
             ResolvedStep {
                 label: "Search".into(),
                 effect: StepEffect::Draft,
+                confirm: false,
             },
         );
     }
@@ -2823,6 +2832,9 @@ async fn a_step_is_done_only_when_its_effect_is_seen() {
         let (verb, page, reason, step, acted, result) = run.await.unwrap();
         let case = format!("{verb} on a {page:?} page: {step:?}");
         assert_eq!(acted, 1, "never run twice to make sure: {case}");
+        if matches!(verb, "click" | "check" | "uncheck") {
+            assert_eq!(step.category, Some(WorkConfirmCategoryV1::Save));
+        }
         assert_eq!(step.reason, reason, "{case}");
         let state = if reason.is_some() {
             PageAssistStepStateV1::Failed
@@ -3824,8 +3836,9 @@ async fn a_steer_during_a_confirm_declines_it_as_superseded() {
     h.page.lock().steps.insert(
         10,
         ResolvedStep {
-            label: "Click \"Add to wishlist\"".into(),
+            label: "Click \"Make profile public\"".into(),
             effect: StepEffect::Commit(WorkConfirmCategoryV1::Save),
+            confirm: true,
         },
     );
     let first = h.ask("Add it", true).await.unwrap();
@@ -4031,4 +4044,78 @@ async fn an_act_returns_only_what_changed_on_the_page() {
     assert!(result.contains("read again as b"), "{result}");
     assert!(result.contains("Updated"), "{result}");
     assert!(!result.contains("Line 101"), "{result}");
+}
+
+#[tokio::test]
+async fn ordinary_saves_run_but_foreign_or_unknown_reads_keep_the_card_and_decline_path() {
+    for provenance in ["same", "foreign", "unknown"] {
+        let mut turns = Vec::new();
+        if provenance == "foreign" {
+            turns.push(tool("list_tabs", json!({})));
+            turns.push(tool("read_page", json!({"tab": "t2"})));
+        }
+        turns.push(tool(
+            "act",
+            json!({"steps": [
+                {"verb": "click", "ref": "a10"},
+                {"verb": "uncheck", "ref": "a8"}
+            ]}),
+        ));
+        if provenance == "unknown" {
+            turns.last_mut().unwrap().think = Duration::from_millis(100);
+        }
+        turns.push(say("Here is what happened."));
+        let h = harness(turns);
+        h.controls();
+        {
+            let mut page = h.page.lock();
+            page.steps.get_mut(&10).unwrap().label = "Click \"Save settings\"".into();
+        }
+        let reply = h.ask("Save settings", true).await.unwrap();
+        if provenance == "unknown" {
+            // Set provenance while the first model call is still thinking.
+            until(|| !h.requests().is_empty()).await;
+            let mut state = h.service.state();
+            let live = state.live.values_mut().next().unwrap();
+            live.replies.get_mut(&reply).unwrap().unknown_read_sites = true;
+        }
+        if provenance == "same" {
+            h.settle().await;
+            assert_eq!(h.page.lock().acted.len(), 2);
+            assert!(!h.sink.0.lock().unwrap().iter().any(|event| matches!(
+                &event.kind,
+                PageAssistEventV1::Block { value: PageAssistBlockV1::Steps { steps }, .. }
+                    if steps.iter().any(|step| step.state == PageAssistStepStateV1::Confirm)
+            )));
+            assert!(h.sink.0.lock().unwrap().iter().any(|event| matches!(
+                &event.kind,
+                PageAssistEventV1::Block { value: PageAssistBlockV1::Steps { steps }, .. }
+                    if steps[0].state == PageAssistStepStateV1::Running
+                        && steps[0].category == Some(WorkConfirmCategoryV1::Save)
+            )));
+        } else {
+            h.waiting().await;
+            assert!(h.page.lock().acted.is_empty());
+            let conversation = h.conversation().await;
+            assert!(h
+                .service
+                .decide(&conversation, reply, 0, PageAssistDecisionV1::Decline));
+            h.settle().await;
+            assert!(h.page.lock().acted.is_empty());
+            let steps = h
+                .blocks()
+                .await
+                .into_iter()
+                .find_map(|block| match block {
+                    PageAssistBlockV1::Steps { steps } => Some(steps),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(steps[0].state, PageAssistStepStateV1::Declined);
+            assert_eq!(steps[0].category, Some(WorkConfirmCategoryV1::Save));
+            assert_eq!(steps[1].state, PageAssistStepStateV1::Skipped);
+            let call = if provenance == "foreign" { 3 } else { 1 };
+            assert!(h.tool_result(call).0.contains("declined by the person"));
+        }
+    }
 }

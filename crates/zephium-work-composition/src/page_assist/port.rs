@@ -165,7 +165,7 @@ pub enum StepEffect {
     Read,
     /// Changes the page without committing anything.
     Draft,
-    /// Sends, buys, deletes or saves: needs the person's confirm.
+    /// Sends, buys, deletes or saves; attended confirmation is decided separately.
     Commit(WorkConfirmCategoryV1),
 }
 
@@ -176,6 +176,8 @@ pub struct ResolvedStep {
     pub label: String,
     /// What it would do.
     pub effect: StepEffect,
+    /// The observed control and its region require an attended confirmation.
+    pub confirm: bool,
 }
 
 /// Why a step did not run or did not take.

@@ -872,7 +872,17 @@ fn decide_confirms(
             } else {
                 PageAssistDecisionV1::Decline
             };
+            // Keep the approval record ordered before the loopback POST.
+            let mut shop = shared
+                .shop
+                .as_ref()
+                .map(|shop| shop.lock().unwrap_or_else(|p| p.into_inner()));
             if service.decide(conversation, reply, *block, decision) {
+                if scenario.name == "privacy-toggle" && approved {
+                    if let Some(shop) = shop.as_mut() {
+                        shop.profile_confirmed_before_change |= !shop.profile_public;
+                    }
+                }
                 decided.push((*block, step.index));
                 confirms.push(Confirm {
                     category: step.category,
@@ -1099,6 +1109,11 @@ async fn scenario_run(
                 "items_opened": shop.items.len(),
                 "contact_sent": shop.contact.is_some(),
                 "settings_saved": shop.settings.is_some(),
+                "profile_public": shop.profile_public,
+                "profile_confirmed_before_change": shop.profile_confirmed_before_change,
+                "profile_changed_without_confirm": shop.profile_changed_without_confirm,
+                "history_changes": shop.history_changes,
+                "subscriptions": shop.subscriptions,
                 "rerendered": shop.rerendered,
             })
         })

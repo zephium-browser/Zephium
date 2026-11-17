@@ -1,10 +1,11 @@
 //! The assistant's service: one conversation per Space, a tool-using model loop per
 //! message, and every effect on a page (marks, steps, styles, new tabs)
-//! admitted here against what was actually read. Whatever commits waits for
-//! the person; everything stops on Stop, AI off or a closed conversation.
+//! admitted here against what was actually read. Attended confirmations are
+//! decided separately from the declared effect; everything stops on Stop, AI off or a closed conversation.
 #![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
 
 mod agent;
+mod confirmation;
 mod effect;
 mod fault;
 pub mod port;

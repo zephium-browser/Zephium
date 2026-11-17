@@ -104,6 +104,26 @@ that silently changes its trust or activation semantics.
 The platform's fixed semantic protocol remains separate from diagnostic or
 release-excluded probe facilities.
 
+## Attended assistant confirmation
+
+The sidebar and voice assistant's request authorizes visible, undoable changes
+on the person's page; steps remain visible and stoppable. Its
+[confirmation policy](../crates/zephium-work-composition/src/page_assist/confirmation.rs)
+is separate from effect classification and Work's unattended approval policy.
+Purchases, communications and typing classified as requiring confirmation always
+ask. Deletions ask except for removing a line clearly within a cart, basket, bag,
+wishlist or saved-for-later list.
+
+Saving and editing ask when the observed control or committing form/region names
+an account, identity, security, privacy, money or legal matter, holds a protected
+or secret field, or is a confirmation dialog. They also ask after the reply read
+another site (or its read provenance is unknown), and for an observed cross-site
+frame. Typing after other-site reads retains its own confirmation rule.
+Other saves and edits run without a card, including ordinary preferences,
+checkboxes, cart additions and autosaving document edits. Page content and model
+claims cannot grant approval. Refusals, engine admission, declared effect classes
+and effect verification remain independent requirements.
+
 ## Native storage and isolation
 
 Owned Work contexts exclude user extensions and userscripts.

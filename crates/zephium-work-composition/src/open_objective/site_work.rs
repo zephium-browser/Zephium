@@ -199,14 +199,14 @@ fn words(text: &str) -> String {
     format!(" {} ", words.join(" "))
 }
 
-fn names_any(text: &str, phrases: &[&str]) -> bool {
+pub(crate) fn names_any(text: &str, phrases: &[&str]) -> bool {
     let text = words(text);
     phrases
         .iter()
         .any(|phrase| text.contains(&format!(" {} ", words(phrase).trim())))
 }
 
-fn label(node: &SemanticNode) -> String {
+pub(crate) fn label(node: &SemanticNode) -> String {
     let mut label = String::new();
     for part in node.name().into_iter().chain(node.text()) {
         label.push(' ');
@@ -215,7 +215,7 @@ fn label(node: &SemanticNode) -> String {
     label
 }
 
-fn ancestors<'a>(
+pub(crate) fn ancestors<'a>(
     node: &SemanticNode,
     snapshot: &'a SemanticSnapshot,
 ) -> impl Iterator<Item = (usize, &'a SemanticNode)> {
@@ -229,7 +229,7 @@ fn ancestors<'a>(
 }
 
 /// The nodes of the subtree rooted at `index`.
-fn subtree(snapshot: &SemanticSnapshot, index: usize) -> &[SemanticNode] {
+pub(crate) fn subtree(snapshot: &SemanticSnapshot, index: usize) -> &[SemanticNode] {
     let Some(root) = snapshot.nodes().get(index) else {
         return &[];
     };
@@ -476,7 +476,7 @@ fn message_region(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
 }
 
 /// The region a step acts in: its dialog, form or named region, else the page.
-fn region_index(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
+pub(crate) fn region_index(node: &SemanticNode, snapshot: &SemanticSnapshot) -> usize {
     ancestors(node, snapshot)
         .find(|(_, ancestor)| {
             ancestor.role() == SemanticRole::Dialog
@@ -576,7 +576,10 @@ fn creates(text: &str) -> bool {
         .any(|word| text.starts_with(&format!(" {word} ")))
 }
 
-fn dialog_commits(node: &SemanticNode, snapshot: &SemanticSnapshot) -> Option<Consequence> {
+pub(crate) fn dialog_commits(
+    node: &SemanticNode,
+    snapshot: &SemanticSnapshot,
+) -> Option<Consequence> {
     let (index, _) =
         ancestors(node, snapshot).find(|(_, ancestor)| ancestor.role() == SemanticRole::Dialog)?;
     let region = subtree(snapshot, index);

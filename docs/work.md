@@ -196,7 +196,8 @@ for page framing, references, citations, streams, policies, styles and steps.
 It owns no I/O, threads or async runtime.
 
 The service keeps a conversation per Space and binds effects to facts actually
-read. Committing page steps wait for the person.
+read. Its attended confirmation policy is described in
+[browser execution](agentic-browsing.md#attended-assistant-confirmation).
 Stop, disabling the assistant or closing its conversation must stop activity.
 Use the service's admission path for marks, styles and new tabs rather than
 calling the engine directly from a tool implementation.
