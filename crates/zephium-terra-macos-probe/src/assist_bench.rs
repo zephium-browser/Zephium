@@ -1115,6 +1115,7 @@ async fn scenario_run(
                 "history_changes": shop.history_changes,
                 "subscriptions": shop.subscriptions,
                 "rerendered": shop.rerendered,
+                "servings": shop.servings,
             })
         })
     });
