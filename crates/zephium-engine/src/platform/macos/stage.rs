@@ -116,6 +116,16 @@ fn needs_frame(
         || now.saturating_duration_since(taken) >= FRAME_STALE
 }
 
+/// How much longer a frame check waits for input to settle. Checks stay at
+/// most `FRAME_REFRESH` plus that settling apart, so steady input still lets
+/// them reach loading, audible and stale pages.
+fn settle_wait(input: Option<Instant>, checked: Instant, now: Instant) -> Option<Duration> {
+    let wait = (input? + FRAME_SETTLE).saturating_duration_since(now);
+    let left = (checked + FRAME_REFRESH + FRAME_SETTLE).saturating_duration_since(now);
+    let wait = wait.min(left);
+    (!wait.is_zero()).then_some(wait)
+}
+
 /// A page loading or making sound is still changing what it shows.
 fn changing(page: &objc2_web_kit::WKWebView) -> bool {
     // SAFETY: main-thread WebKit state reads; the SPI only when present.
@@ -424,6 +434,7 @@ pub struct StageIvars {
     frame_refresh: Cell<u64>,
     frame_due: Cell<Option<Instant>>,
     frame_taken: Cell<Option<Instant>>,
+    frame_checked: Cell<Option<Instant>>,
     /// When input last reached this stage's window, and the monitor that
     /// notes it.
     input_at: Cell<Option<Instant>>,
@@ -2815,13 +2826,13 @@ impl ContentStage {
                 }
                 stage.ivars().frame_due.set(None);
                 let now = Instant::now();
-                if let Some(input) = stage.ivars().input_at.get() {
-                    let settled = input + FRAME_SETTLE;
-                    if settled > now {
-                        stage.refresh_frames_in(settled - now);
-                        return;
-                    }
+                let checked = stage.ivars().frame_checked.get().unwrap_or(now);
+                stage.ivars().frame_checked.set(Some(checked));
+                if let Some(wait) = settle_wait(stage.ivars().input_at.get(), checked, now) {
+                    stage.refresh_frames_in(wait);
+                    return;
                 }
+                stage.ivars().frame_checked.set(Some(now));
                 let (shown, took) = stage.capture_all_shown(now);
                 if took {
                     stage.ivars().frame_taken.set(Some(now));
@@ -3327,6 +3338,39 @@ mod tests {
         assert!(needs_frame(taken, true, after, false, now), "input since");
         let stale = Some(now - FRAME_STALE);
         assert!(needs_frame(stale, true, None, false, now), "past its age");
+    }
+
+    #[test]
+    fn a_frame_check_waits_for_input_to_settle_but_not_forever() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(settle_wait(None, start, start), None);
+        assert_eq!(settle_wait(Some(at(0)), start, at(1500)), None, "settled");
+        assert_eq!(
+            settle_wait(Some(at(0)), start, at(500)),
+            Some(Duration::from_millis(1000))
+        );
+
+        // A key every second for longer than FRAME_STALE: the periodic check
+        // still runs, at most FRAME_SETTLE late.
+        let (mut now, mut checked, mut checks) = (start, start, vec![]);
+        while now < start + FRAME_STALE + FRAME_REFRESH {
+            let input = start + Duration::from_secs(now.duration_since(start).as_secs());
+            match settle_wait(Some(input), checked, now) {
+                Some(wait) => now += wait,
+                None => {
+                    checks.push(now);
+                    checked = now;
+                    now += FRAME_REFRESH;
+                }
+            }
+        }
+        assert!(checks
+            .last()
+            .is_some_and(|&last| last >= start + FRAME_STALE));
+        assert!(checks
+            .windows(2)
+            .all(|w| w[1] - w[0] <= FRAME_REFRESH + FRAME_SETTLE));
     }
 
     #[test]
