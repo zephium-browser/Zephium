@@ -226,7 +226,7 @@ impl Shell {
     fn remember_zoom(&mut self, profile: ProfileId, site: String, applied: f64) -> bool {
         let percent = zoom::percent(applied);
         let saved = (percent != self.zoom.default_percent).then_some(percent);
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let levels = self.site_levels(profile);
         if levels.get(&site).map(|level| level.percent) == saved {
             return true;
