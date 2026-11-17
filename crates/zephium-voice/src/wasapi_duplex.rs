@@ -361,10 +361,10 @@ impl Streams {
         // SAFETY: COM is initialized on this worker; every interface is used
         // and released on it. Formats outlive the Initialize calls reading them.
         unsafe {
-            let speaker = devices
+            let speaker_id = devices
                 .GetDefaultAudioEndpoint(eRender, role)
+                .and_then(|default| default.GetId())
                 .map_err(|_| Fault::NoMicrophone)?;
-            let speaker_id = speaker.GetId().map_err(|_| Fault::NoMicrophone)?;
             let speaker_wide: Vec<u16> = speaker_id
                 .as_wide()
                 .iter()
@@ -372,6 +372,11 @@ impl Streams {
                 .chain(std::iter::once(0))
                 .collect();
             CoTaskMemFree(Some(speaker_id.0.cast_const().cast()));
+            // Opened by id, the stream carries no communications role, so
+            // Windows does not duck other apps while it plays.
+            let speaker = devices
+                .GetDevice(PCWSTR(speaker_wide.as_ptr()))
+                .map_err(|_| Fault::NoMicrophone)?;
             if let Ok(volume) = speaker.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) {
                 if let (Ok(level), Ok(muted)) =
                     (volume.GetMasterVolumeLevelScalar(), volume.GetMute())
