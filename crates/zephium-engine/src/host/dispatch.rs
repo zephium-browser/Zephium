@@ -505,6 +505,8 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
             #[cfg(target_os = "macos")]
+            closing: Default::default(),
+            #[cfg(target_os = "macos")]
             next_fullscreen_retirement: 0,
             stages: HashMap::new(),
             native_terminal_failure,

@@ -18,6 +18,8 @@ const IMPLEMENTED: &[(&CStr, &[&CStr])] = &[
             c"_hideFindUI",
             c"_isPlayingAudio",
             c"_webProcessIdentifier",
+            c"_isJITEnabled:",
+            c"_killWebContentProcessAndResetState",
             c"_inspector",
         ],
     ),

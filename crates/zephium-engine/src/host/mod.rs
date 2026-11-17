@@ -15,6 +15,8 @@ mod browser_windows_qualification;
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;
+#[cfg(target_os = "macos")]
+mod closing;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -672,6 +674,8 @@ pub(crate) struct EngineHost {
     fullscreen: crate::fullscreen::FullscreenLedger,
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
+    #[cfg(target_os = "macos")]
+    closing: closing::ClosingViews<closing::ClosingView>,
     #[cfg(target_os = "macos")]
     next_fullscreen_retirement: u64,
     #[cfg(target_os = "macos")]
