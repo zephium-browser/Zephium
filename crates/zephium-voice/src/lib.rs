@@ -4,9 +4,8 @@
 //! capture and streamed playback. Audio is never written to disk or logged, and the
 //! device is released the moment a take finishes or is cancelled.
 
-// Until the WASAPI layer drives it, Windows builds only the API surface.
 #[cfg_attr(
-    not(any(target_os = "macos", feature = "file-probe")),
+    not(any(target_os = "macos", target_os = "windows", feature = "file-probe")),
     allow(dead_code)
 )]
 mod duplex;
@@ -16,12 +15,12 @@ mod language;
 mod meter;
 mod pcm;
 #[cfg_attr(
-    not(any(target_os = "macos", feature = "file-probe")),
+    not(any(target_os = "macos", target_os = "windows", feature = "file-probe")),
     allow(dead_code)
 )]
 mod playback;
 #[cfg_attr(
-    not(any(target_os = "macos", feature = "file-probe")),
+    not(any(target_os = "macos", target_os = "windows", feature = "file-probe")),
     allow(dead_code)
 )]
 mod resample;
@@ -34,6 +33,8 @@ mod apple;
 mod apple_duplex;
 #[cfg(target_os = "windows")]
 mod wasapi;
+#[cfg(target_os = "windows")]
+mod wasapi_duplex;
 #[cfg(any(feature = "file-probe", test))]
 #[cfg_attr(not(feature = "file-probe"), allow(dead_code))]
 mod wavfile;
