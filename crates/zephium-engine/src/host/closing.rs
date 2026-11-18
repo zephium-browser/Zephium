@@ -14,13 +14,13 @@ use super::EngineHost;
 const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Held by a token of their own, never by tab, so a reused tab id cannot
-/// reach one.
-pub(super) struct ClosingViews<V> {
+/// reach one. Each view keeps its deadline `D`, which ends with it.
+pub(super) struct ClosingViews<V, D> {
     next: u64,
-    held: HashMap<u64, (ProfileId, V)>,
+    held: HashMap<u64, (ProfileId, V, D)>,
 }
 
-impl<V> Default for ClosingViews<V> {
+impl<V, D> Default for ClosingViews<V, D> {
     fn default() -> Self {
         Self {
             next: 0,
@@ -29,19 +29,35 @@ impl<V> Default for ClosingViews<V> {
     }
 }
 
-impl<V> ClosingViews<V> {
-    fn reserve(&mut self) -> u64 {
+impl<V, D> ClosingViews<V, D> {
+    /// Holds `view` until its process answers or its deadline comes. Hands it
+    /// back, to be released now, without a profile, when its process cannot
+    /// be asked, or when no deadline can be set.
+    fn defer(
+        &mut self,
+        profile: Option<ProfileId>,
+        view: V,
+        ask: impl FnOnce(&V, u64) -> bool,
+        deadline: impl FnOnce(u64) -> Option<D>,
+    ) -> Option<V> {
+        let Some(profile) = profile else {
+            return Some(view);
+        };
         self.next = self.next.wrapping_add(1);
-        self.next
-    }
-
-    fn hold(&mut self, token: u64, profile: ProfileId, view: V) {
-        self.held.insert(token, (profile, view));
+        let token = self.next;
+        if !ask(&view, token) {
+            return Some(view);
+        }
+        let Some(deadline) = deadline(token) else {
+            return Some(view);
+        };
+        self.held.insert(token, (profile, view, deadline));
+        None
     }
 
     /// The view held under `token`, once: its answer and its deadline race.
     fn take(&mut self, token: u64) -> Option<V> {
-        self.held.remove(&token).map(|(_, view)| view)
+        self.held.remove(&token).map(|(_, view, _)| view)
     }
 
     /// Every view of `profile`, whose store WebKit removes only once nothing
@@ -50,7 +66,7 @@ impl<V> ClosingViews<V> {
         let tokens: Vec<u64> = self
             .held
             .iter()
-            .filter_map(|(token, (owner, _))| (*owner == profile).then_some(*token))
+            .filter_map(|(token, (owner, _, _))| (*owner == profile).then_some(*token))
             .collect();
         tokens
             .into_iter()
@@ -63,11 +79,6 @@ impl<V> ClosingViews<V> {
     }
 }
 
-pub(super) struct ClosingView {
-    view: super::ObservedView,
-    _deadline: crate::platform::imp::ContentPolicyTimeout,
-}
-
 impl EngineHost {
     /// Releases a closed tab's view once its web process answers, or ends the
     /// process first when it has not answered by the deadline. Without the
@@ -77,38 +88,25 @@ impl EngineHost {
         profile: Option<ProfileId>,
         view: super::ObservedView,
     ) {
-        let Some(profile) = profile.filter(|_| self.shutdown_completion.is_none()) else {
-            return;
+        let profile = profile.filter(|_| self.shutdown_completion.is_none());
+        let ask = |view: &super::ObservedView, token: u64| {
+            view.event_permit.revoke();
+            view.navigation.revoke();
+            crate::platform::imp::ask_web_process(&view.view, move || {
+                let _ = super::dispatch::try_with(move |host| drop(host.closing.take(token)));
+            })
         };
-        view.event_permit.revoke();
-        view.navigation.revoke();
-        let token = self.closing.reserve();
-        let answered = move || {
-            let _ = super::dispatch::try_with(move |host| drop(host.closing.take(token)));
-        };
-        if !crate::platform::imp::ask_web_process(&view.view, answered) {
-            return;
-        }
-        let Some(deadline) =
+        let deadline = |token: u64| {
             crate::platform::imp::schedule_presentation_timeout(ANSWER_DEADLINE, move || {
-                let _ = super::dispatch::try_with(move |host| {
-                    if let Some(closing) = host.closing.take(token) {
+                let _ = super::dispatch::with_closing_deadline(token, move |host| {
+                    if let Some(view) = host.closing.take(token) {
                         eprintln!("engine: ended a closed page's web process that did not answer");
-                        crate::platform::imp::end_web_process(&closing.view.view);
+                        crate::platform::imp::end_web_process(&view.view);
                     }
                 });
             })
-        else {
-            return;
         };
-        self.closing.hold(
-            token,
-            profile,
-            ClosingView {
-                view,
-                _deadline: deadline,
-            },
-        );
+        drop(self.closing.defer(profile, view, ask, deadline));
     }
 
     pub(super) fn release_closing_views(&mut self, profile: ProfileId) {
@@ -118,81 +116,151 @@ impl EngineHost {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::*;
+
+    /// Counts its drops, as a native release would be counted.
+    struct Counted(&'static str, Rc<Cell<usize>>);
+
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.1.set(self.1.get() + 1);
+        }
+    }
+
+    fn counter() -> (Rc<Cell<usize>>, impl Fn(&'static str) -> Counted) {
+        let drops = Rc::new(Cell::new(0));
+        let made = drops.clone();
+        (drops, move |name| Counted(name, made.clone()))
+    }
+
+    fn hold(
+        closing: &mut ClosingViews<Counted, Counted>,
+        profile: ProfileId,
+        view: Counted,
+        deadline: Counted,
+    ) -> u64 {
+        let mut asked = None;
+        let left = closing.defer(
+            Some(profile),
+            view,
+            |_, token| {
+                asked = Some(token);
+                true
+            },
+            |_| Some(deadline),
+        );
+        assert!(left.is_none(), "a supported close is held");
+        asked.unwrap()
+    }
+
+    #[test]
+    fn a_closed_view_is_released_at_once_when_it_cannot_wait_for_an_answer() {
+        let (drops, made) = counter();
+        let mut closing = ClosingViews::<Counted, Counted>::default();
+        let profile = ProfileId::from(1);
+
+        // No profile, as while shutting down: the process is not even asked.
+        let left = closing.defer(
+            None,
+            made("shutdown"),
+            |_, _| unreachable!("asked while shutting down"),
+            |_| -> Option<Counted> { unreachable!() },
+        );
+        assert_eq!(left.map(|view| view.0), Some("shutdown"));
+
+        // WebKit without the calls: no deadline is set.
+        let left = closing.defer(
+            Some(profile),
+            made("unsupported"),
+            |_, _| false,
+            |_| -> Option<Counted> { unreachable!("a deadline without a question") },
+        );
+        assert_eq!(left.map(|view| view.0), Some("unsupported"));
+
+        // A deadline that cannot be scheduled: an answer that still comes finds
+        // nothing.
+        let mut asked = None;
+        let left = closing.defer(
+            Some(profile),
+            made("no timer"),
+            |_, token| {
+                asked = Some(token);
+                true
+            },
+            |_| None,
+        );
+        assert_eq!(left.map(|view| view.0), Some("no timer"));
+        assert!(closing.take(asked.unwrap()).is_none());
+
+        assert_eq!(drops.get(), 3, "each was released at once");
+        assert!(closing.held.is_empty());
+    }
 
     #[test]
     fn a_closed_view_is_released_once_whichever_of_answer_and_deadline_comes_first() {
-        let profile = ProfileId::from(1);
+        let (drops, made) = counter();
         let mut closing = ClosingViews::default();
+        let profile = ProfileId::from(1);
 
-        // A process that answers is released then; its deadline finds nothing
-        // to end.
-        let answers = closing.reserve();
-        closing.hold(answers, profile, "answers");
-        assert_eq!(closing.take(answers), Some("answers"));
-        assert_eq!(closing.take(answers), None);
+        // A process that answers is released then, and its deadline with it;
+        // the deadline, if it still fires, finds nothing to end.
+        let answers = hold(&mut closing, profile, made("answers"), made("timer"));
+        assert_eq!(drops.get(), 0, "held until the answer");
+        assert_eq!(closing.take(answers).map(|view| view.0), Some("answers"));
+        assert_eq!(drops.get(), 2);
+        assert!(closing.take(answers).is_none());
 
         // One that never answers is there for the deadline to end, and a late
         // answer, as WebKit sends when the process exits, finds nothing.
-        let hung = closing.reserve();
-        closing.hold(hung, profile, "hung");
-        assert_eq!(closing.take(hung), Some("hung"));
-        assert_eq!(closing.take(hung), None);
+        let hung = hold(&mut closing, profile, made("hung"), made("timer"));
+        assert_eq!(drops.get(), 2);
+        assert_eq!(closing.take(hung).map(|view| view.0), Some("hung"));
+        assert!(closing.take(hung).is_none());
+        assert_eq!(drops.get(), 4);
     }
 
     #[test]
     fn held_views_answer_to_their_own_token_and_leave_with_their_profile() {
+        let (drops, made) = counter();
         let (one, two) = (ProfileId::from(1), ProfileId::from(2));
         let mut closing = ClosingViews::default();
-        let first = closing.reserve();
-        let second = closing.reserve();
-        let third = closing.reserve();
+        let first = hold(&mut closing, one, made("first"), made("timer"));
+        let second = hold(&mut closing, two, made("second"), made("timer"));
+        let third = hold(&mut closing, one, made("third"), made("timer"));
         assert!(first != second && second != third);
-        closing.hold(first, one, "first");
-        closing.hold(second, two, "second");
-        closing.hold(third, one, "third");
 
-        let mut erased = closing.take_profile(one);
+        let mut erased: Vec<_> = closing
+            .take_profile(one)
+            .into_iter()
+            .map(|view| view.0)
+            .collect();
         erased.sort_unstable();
         assert_eq!(erased, ["first", "third"]);
-        assert_eq!(closing.take(first), None, "released with its profile");
-        assert_eq!(closing.take(second), Some("second"));
+        assert_eq!(drops.get(), 4, "both views and their deadlines");
+        assert!(closing.take(first).is_none(), "released with its profile");
+        assert_eq!(closing.take(second).map(|view| view.0), Some("second"));
+        assert_eq!(drops.get(), 6);
 
-        closing.hold(closing.next, one, "late");
+        let late = hold(&mut closing, one, made("late"), made("timer"));
         closing.clear();
-        assert_eq!(closing.take(closing.next), None);
+        assert_eq!(drops.get(), 8, "clear releases what is left");
+        assert!(closing.take(late).is_none());
     }
 
     #[test]
-    fn without_the_calls_or_while_shutting_down_a_closed_view_is_released_at_once() {
-        let body = |source: &'static str, start: &str, end: &str| {
-            source
-                .split_once(start)
-                .and_then(|(_, rest)| rest.split_once(end))
-                .map(|(body, _)| body)
-                .expect(start)
-        };
-        let release = body(
-            include_str!("closing.rs"),
-            "fn release_closed_view(",
-            "\n    }\n",
-        );
-        let at = |needle: &str| release.find(needle).expect(needle);
-        assert!(at("self.shutdown_completion.is_none()") < at("ask_web_process("));
-        assert!(at("ask_web_process(") < at("self.closing.hold("));
-        assert!(at("schedule_presentation_timeout(") < at("self.closing.hold("));
-
-        let ask = body(
-            include_str!("../platform/macos/native.rs"),
-            "pub(crate) fn ask_web_process(",
-            "\n}\n",
-        );
+    fn the_web_process_is_asked_only_when_webkit_can_also_end_it() {
+        let ask = include_str!("../platform/macos/native.rs")
+            .split_once("pub(crate) fn ask_web_process(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("ask_web_process");
         let at = |needle: &str| ask.find(needle).expect(needle);
-        assert!(at("sel!(_isJITEnabled:)") < at("if !supported {\n        return false;"));
-        assert!(
-            at("sel!(_killWebContentProcessAndResetState)")
-                < at("if !supported {\n        return false;")
-        );
-        assert!(at("if !supported {\n        return false;") < at("_isJITEnabled: &*reply"));
+        let unsupported = at("if !supported {\n        return false;");
+        assert!(at("sel!(_isJITEnabled:)") < unsupported);
+        assert!(at("sel!(_killWebContentProcessAndResetState)") < unsupported);
+        assert!(unsupported < at("_isJITEnabled: &*reply"));
     }
 }

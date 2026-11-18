@@ -675,7 +675,7 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
     #[cfg(target_os = "macos")]
-    closing: closing::ClosingViews<closing::ClosingView>,
+    closing: closing::ClosingViews<ObservedView, crate::platform::imp::ContentPolicyTimeout>,
     #[cfg(target_os = "macos")]
     next_fullscreen_retirement: u64,
     #[cfg(target_os = "macos")]
