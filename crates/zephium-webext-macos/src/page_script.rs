@@ -12,11 +12,10 @@ use std::rc::Rc;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
-use objc2_foundation::{NSError, NSOperatingSystemVersion, NSProcessInfo, NSString, NSURL};
+use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextError,
-    WKWebExtensionContextErrorDomain, WKWebExtensionContextPermissionStatus,
-    WKWebExtensionController, WKWebExtensionMatchPattern,
+    WKWebExtensionContextPermissionStatus, WKWebExtensionController, WKWebExtensionMatchPattern,
 };
 
 use crate::runtime::describe;
@@ -56,11 +55,7 @@ struct State {
 impl PageScript {
     /// Main-world content scripts need macOS 15.4.
     pub fn supported() -> bool {
-        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
-            majorVersion: 15,
-            minorVersion: 4,
-            patchVersion: 0,
-        })
+        crate::supported()
     }
 
     /// `private_data` lets the program run in private browsing views, and
@@ -245,14 +240,56 @@ fn unload(
 ) -> Result<(), String> {
     match unsafe { controller.unloadExtensionContext_error(context) } {
         Ok(()) => Ok(()),
-        Err(error)
-            if error.code() == WKWebExtensionContextError::NotLoaded.0
-                && error
-                    .domain()
-                    .isEqualToString(unsafe { WKWebExtensionContextErrorDomain }) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(describe(Some(&error))),
+        Err(error) => classify_unload_error(&error),
+    }
+}
+
+fn classify_unload_error(error: &NSError) -> Result<(), String> {
+    if error.code() == WKWebExtensionContextError::NotLoaded.0
+        && crate::webkit_string(c"WKWebExtensionContextErrorDomain")
+            .is_some_and(|domain| error.domain().isEqualToString(domain))
+    {
+        Ok(())
+    } else {
+        Err(describe(Some(error)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unload_not_loaded_requires_resolved_webkit_domain() {
+        let Some(domain) = crate::webkit_string(c"WKWebExtensionContextErrorDomain") else {
+            return;
+        };
+        let error = unsafe {
+            NSError::errorWithDomain_code_userInfo(
+                domain,
+                WKWebExtensionContextError::NotLoaded.0,
+                None,
+            )
+        };
+        assert_eq!(classify_unload_error(&error), Ok(()));
+        let foreign = unsafe {
+            NSError::errorWithDomain_code_userInfo(
+                &NSString::from_str("app.zephium.tests.not-webkit"),
+                WKWebExtensionContextError::NotLoaded.0,
+                None,
+            )
+        };
+        assert!(classify_unload_error(&foreign).is_err());
+        let other_code = unsafe {
+            NSError::errorWithDomain_code_userInfo(
+                domain,
+                WKWebExtensionContextError::NotLoaded.0 + 1,
+                None,
+            )
+        };
+        assert!(classify_unload_error(&other_code).is_err());
+        crate::without_webkit_string(c"WKWebExtensionContextErrorDomain", || {
+            assert!(classify_unload_error(&error).is_err());
+        });
     }
 }
