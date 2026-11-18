@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Device-free voice loop bench (macOS): build | run [--times N] [scenario ...] | show [file] | list.
+
+VOICE_BENCH_GATEWAY is a shell command run in VOICE_BENCH_BACKEND (default
+/Users/crynta/Dev/backend-voice). Credentials are supplied by that child; this
+runner never opens the ready file. Audio and transcripts are never retained.
+"""
+import argparse
+import statistics
+import importlib.machinery
+import importlib.util
+import json
+import os
+import queue
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
+TARGET = os.path.join(REPO, "target")
+OUT = os.path.join(TARGET, "voice-bench")
+BACKEND = os.environ.get("VOICE_BENCH_BACKEND", "/Users/crynta/Dev/backend-voice")
+PROBE = os.path.join(TARGET, "debug/macos-terra-agentic-probe")
+SOURCE = "crates/zephium-terra-macos-probe/src/voice_scenarios.rs"
+TIMEOUT = 660
+READY_TIMEOUT = 90
+MAX_LINE = 1024 * 1024
+# Closed gateway request/end codes and ledger release classes. Never persist
+# arbitrary strings from child output, even in a field named error_class.
+ERROR_CLASSES = frozenset("""
+insufficient_credits credit_reservation_pending daily_limit_reached plan_required
+rate_limited concurrency_limited provider_rate_limited provider_unavailable
+provider_request_failed provider_timeout invalid_provider_response provider_not_configured
+audio_too_long invalid_audio free_usage_limit_reached usage_confirmation_limited
+request_in_progress request_already_recorded request_expired cloud_disabled
+cloud_policy_changed billing_review_required cloud_budget_exhausted request_cost_limit
+invalid_model_configuration plan_not_configured server_shutdown cancelled too_long
+invalid_request unauthorized reauthentication_required account_unavailable email_not_verified
+short_audio provider_rejected voice_refund input_timeout client_closed write_stalled
+session_ended protocol_error shutting_down plan_changed idle empty_audio empty_transcript
+""".split())
+
+
+class BenchError(Exception):
+    pass
+
+
+def fail(message):
+    raise BenchError(message)
+
+
+def load_assist():
+    loader = importlib.machinery.SourceFileLoader("assist_bench", os.path.join(REPO, "scripts/assist-bench"))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.PROBE = PROBE
+    module.TARGET = TARGET
+    module.die = fail
+    return module
+
+
+assist = load_assist()
+
+
+def scenarios():
+    with open(os.path.join(REPO, SOURCE)) as source:
+        rows = re.findall(r'name:\s*"(voice-[a-z-]+)"\s*,\s*assist:\s*"([a-z-]+)"', source.read())
+    if not rows:
+        fail("scenario data could not be read")
+    return dict(rows)
+
+
+def build():
+    free = shutil.disk_usage("/System/Volumes/Data").free
+    if free < 15_000_000_000:
+        fail(f"stopped: Data volume has {free / 1e9:.2f} GB free; 15 GB required")
+    print(f"Data volume free: {free / 1e9:.2f} GB", flush=True)
+    env = dict(os.environ, CARGO_TARGET_DIR=TARGET)
+    code = subprocess.run(["cargo", "build", "-p", "zephium-terra-macos-probe", "--bin",
+                           "macos-terra-agentic-probe", "--locked", "--features", "durable-runtime"], cwd=REPO, env=env).returncode
+    if code:
+        fail("probe build failed")
+    print(f"Built {PROBE}; run signs a private copy before launch.")
+
+
+def decimal(value):
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    try:
+        parsed = Decimal(value)
+        return value if parsed.is_finite() and parsed >= 0 else None
+    except InvalidOperation:
+        return None
+
+
+def ledger(value):
+    """Project the gateway's count-only shutdown contract; drop every other field."""
+    if not isinstance(value, list) or len(value) > 256:
+        return None
+    rows = []
+    for row in value:
+        if not isinstance(row, dict) or row.get("route") not in ("listen", "speak"):
+            return None
+        state = row.get("state")
+        error = row.get("error_class")
+        count = row.get("count")
+        if state not in ("preflight", "reserved", "running", "usage_unknown", "settled", "released"):
+            return None
+        if error is not None and (not isinstance(error, str) or error not in ERROR_CLASSES):
+            return None
+        if type(count) is not int or count < 0 or decimal(row.get("charged")) is None:
+            return None
+        clean = {"route": row["route"], "state": state, "error_class": error,
+                 "count": count, "charged": row["charged"]}
+        if decimal(row.get("reserved")) is not None:
+            clean["reserved"] = row["reserved"]
+        usage = row.get("usage")
+        if isinstance(usage, dict):
+            clean["usage"] = {k: v for k, v in usage.items()
+                              if k in ("input", "cachedInput", "cacheWrite5m", "cacheWrite1h", "output",
+                                       "reasoning", "searchCalls", "audioInput", "audioMilliseconds", "characters")
+                              and type(v) is int and v >= 0}
+        rows.append(clean)
+    return rows
+
+
+def lines(pipe, receive):
+    """Bound memory, discard unknown output, and never copy child output to logs."""
+    try:
+        while True:
+            line = pipe.readline(MAX_LINE + 1)
+            if not line:
+                break
+            if len(line) > MAX_LINE:
+                while line and not line.endswith(b"\n"):
+                    line = pipe.readline(MAX_LINE + 1)
+                continue
+            receive(line)
+    finally:
+        pipe.close()
+
+
+def stop(child, process_group=False, reader=None):
+    if child is None:
+        return
+    deadline = time.monotonic() + 15
+    # The shell may exit before its gateway finishes draining. Keep the stdout
+    # reader alive until EOF (or the same bounded deadline) before killing the
+    # remaining group, so the ledger summary survives a shell/helper wrapper.
+    def send(sig):
+        try:
+            if process_group:
+                os.killpg(child.pid, sig)
+            else:
+                child.send_signal(sig)
+        except ProcessLookupError:
+            pass
+    send(signal.SIGTERM)
+    if child.stdin:
+        child.stdin.close()
+    try:
+        child.wait(timeout=max(0.01, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        send(signal.SIGKILL)
+        child.wait(timeout=5)
+    if reader:
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+    if process_group:
+        send(signal.SIGKILL)
+    if reader:
+        reader.join(timeout=3)
+
+
+class Gateway:
+    def __init__(self, directory):
+        self.path = os.path.join(directory, "ready.json")
+        self.child = None
+        self.thread = None
+        self.notifications = queue.Queue(maxsize=4)
+        self.summary = None
+
+    def receive(self, line):
+        try:
+            value = json.loads(line)
+        except (ValueError, UnicodeError, RecursionError):
+            return
+        if not isinstance(value, dict):
+            return
+        if value.get("ready") is True and type(value.get("port")) is int and 0 < value["port"] <= 65535:
+            notice = "ready"
+        elif value.get("ready") is False:
+            notice = "missing provider key" if value.get("configured") is False else "gateway setup failed"
+        elif "summary" in value:
+            self.summary = ledger(value["summary"])
+            return
+        else:
+            return
+        try:
+            self.notifications.put_nowait(notice)
+        except queue.Full:
+            pass
+
+    def start(self):
+        env = dict(os.environ, VOICE_LOCAL_READY=self.path)
+        command = os.environ.get("VOICE_BENCH_GATEWAY", "bun scripts/voice-local.ts")
+        self.child = subprocess.Popen(command, shell=True, cwd=BACKEND, env=env,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, start_new_session=True)
+        self.thread = threading.Thread(target=lines, args=(self.child.stdout, self.receive), daemon=True)
+        self.thread.start()
+        deadline = time.monotonic() + READY_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                notice = self.notifications.get(timeout=0.1)
+            except queue.Empty:
+                if self.child.poll() is not None:
+                    self.thread.join(timeout=1)
+                    try:
+                        notice = self.notifications.get_nowait()
+                    except queue.Empty:
+                        fail("gateway exited before readiness (check its key and backend setup)")
+                else:
+                    continue
+            if notice != "ready":
+                fail(notice)
+            # The runner checks only existence and mode; only the probe reads it.
+            info = os.stat(self.path, follow_symlinks=False)
+            if not os.path.isfile(self.path) or os.path.islink(self.path) or info.st_mode & 0o777 != 0o600:
+                fail("gateway ready file must be a private regular file (0600)")
+            return
+        fail("gateway did not become ready within 90 seconds")
+
+    def close(self):
+        # A second interrupt must not abandon the process group during cleanup.
+        previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+        try:
+            stop(self.child, process_group=True, reader=self.thread)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
+def run_one(probe, probe_hash, name, ready):
+    if assist.file_id(probe) != probe_hash:
+        fail("private probe bytes changed before launch")
+    row = None
+    failure = None
+
+    def receive(line):
+        nonlocal row, failure
+        if line.startswith(b"voice-run: "):
+            try:
+                value = json.loads(line[len(b"voice-run: "):])
+                if isinstance(value, dict) and value.get("scenario") == name:
+                    row = value
+            except (ValueError, UnicodeError, RecursionError):
+                pass
+        elif re.fullmatch(rb"voice-run-failure: stage=[a-z_]+\s*", line):
+            failure = line.decode("ascii").split("stage=", 1)[1].strip()
+
+    started = time.monotonic()
+    env = dict(os.environ, ZEPHIUM_PROBE_VOICE_READY=ready)
+    with tempfile.TemporaryDirectory(prefix="voice-probe-") as directory:
+        child = subprocess.Popen([probe, "--voice-bench", name], cwd=directory, env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        reader = threading.Thread(target=lines, args=(child.stdout, receive), daemon=True)
+        reader.start()
+        try:
+            code = child.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            stop(child)
+            code, failure = -9, "probe_timeout"
+        except BaseException:
+            stop(child)
+            raise
+        finally:
+            reader.join(timeout=3)
+    row = row or {"scenario": name, "harness_fault": failure or "no_result"}
+    row.update(exit=code, process_ms=int((time.monotonic() - started) * 1000),
+               probe=probe_hash, probe_unchanged=assist.file_id(probe) == probe_hash)
+    return row
+
+
+def billing(rows, summary):
+    counts = [r.get("voice", {}).get("counts", {}) for r in rows]
+    synthesis = sum(r.get("synthesis_speeches", 0) for r in rows)
+    sent = {"listen": sum(c.get("utterances", 0) for c in counts),
+            "speak": sum(c.get("speeches", 0) for c in counts) + synthesis}
+    expected = {"listen": sum(c.get("ledger_listen_receipts", 0) for c in counts),
+                "speak": sum(c.get("ledger_speak_receipts", 0) for c in counts) + synthesis}
+    actual = {route: sum(r["count"] for r in summary or [] if r["route"] == route) for route in expected}
+    terminal = summary is not None and all(r["state"] in ("settled", "released") for r in summary)
+    clean = all(not c.get("duplicate_receipts") and not c.get("unsettled_receipts") for c in counts)
+    return {"sent_requests": sent, "admitted_receipts": expected, "ledger_requests": actual,
+            "counts_match": summary is not None and expected == actual and clean, "all_terminal": terminal,
+            "charged": str(sum((Decimal(r["charged"]) for r in summary or []), Decimal(0))),
+            "silence_ledger_classified": (any(r["route"] == "listen" and r.get("error_class") in ("short_audio", "empty_audio", "empty_transcript") for r in summary or [])
+                                          if any(r["scenario"] == "voice-silence" for r in rows) else None)}
+
+
+def checks(row):
+    voice = row.get("voice", {})
+    counts = voice.get("counts", {})
+    transcripts = voice.get("transcripts", [])
+    name = row["scenario"]
+    quiet = name == "voice-silence"
+    barge = name in ("voice-barge", "voice-barge-ask")
+    expected_utterances = 2 if barge else 1
+    valid = {"transcribed": len(transcripts) == expected_utterances and all(
+                t.get("expected_words") and (t.get("word_count") == 0 if quiet else t.get("word_count", 0) > 0)
+                for t in transcripts),
+             "input_intact": counts.get("intact_utterances") == expected_utterances,
+             "no_false_done": row.get("false_done") is False,
+             "no_session_fault": not voice.get("session_faults") and not row.get("harness_fault"),
+             "no_link_fault": all(code == "cancelled" and barge for code in voice.get("link_faults", {})),
+             "playout_accounted": not any(counts.get(k) for k in (
+                 "unattributed_play_blocks", "ambiguous_provenance_blocks", "provenance_overflow", "playback_overflow", "trace_overflow"))}
+    if quiet:
+        valid["quiet"] = not counts.get("assistant_asks") and not counts.get("assistant_steers") and not counts.get("sentences_spoken")
+    else:
+        value = voice.get("keyup_to_first_audio")
+        valid["ack_under_800ms"] = isinstance(value, (int, float)) and 0 <= value < 800
+        valid["spoken"] = counts.get("sentences_spoken", 0) > 0
+    if name == "voice-fact":
+        valid["answer_fact"] = row.get("answer_fact") is True
+        valid["fact_spoken"] = counts.get("fact_audio_enqueued", 0) > 0
+    elif name in ("voice-cart", "voice-count", "voice-confirm"):
+        valid["task_verified"] = row.get("task_verified") is True
+        if name == "voice-count":
+            valid["states_count"] = row.get("count_in_reply_text") is True
+            valid["count_spoken"] = row.get("count_in_spoken_text") is True
+        if name == "voice-confirm":
+            valid["confirmed"] = any(c.get("approved") is True for c in row.get("confirms", []))
+    elif name == "voice-no-effect":
+        valid["effect_not_claimed"] = row.get("task_verified") is False and row.get("claimed") != "acted_all_steps_done"
+    if barge:
+        value = voice.get("barge_key_down_to_silence")
+        valid["barge_under_200ms"] = isinstance(value, (int, float)) and 0 <= value < 200
+        valid["barged_during_answer"] = counts.get("barge_while_playing") == 1
+        if name == "voice-barge":
+            valid["gateway_cancel_acknowledged"] = counts.get("speak_cancel_sent", 0) > 0 and counts.get("speak_cancel_acknowledged", 0) > 0
+        else:
+            valid["second_utterance_transcribed"] = len(transcripts) == 2 and transcripts[1].get("expected_words") is True and transcripts[1].get("word_count", 0) > 0
+            valid["second_answer_spoken"] = voice.get("second_answer_spoken") is True
+        valid["no_old_reply_after_flush"] = voice.get("old_reply_samples_after_flush") == 0 and valid["playout_accounted"]
+    return valid
+
+
+# Missing stages stay absent from the sample set; n exposes incomplete runs.
+STAGES = {"stt": "stt_final", "model": "model_first_text", "tts": "tts_first_audio", "answer": "keyup_to_answer_audio"}
+
+
+def aggregate(rows):
+    grouped = {}
+    for row in rows:
+        scenario = grouped.setdefault(row["scenario"], {name: [] for name in STAGES})
+        for name, field in STAGES.items():
+            value = row.get("voice", {}).get(field)
+            if type(value) in (int, float) and value >= 0:
+                scenario[name].append(value)
+    return {scenario: {name: {"n": len(values), "min": min(values) if values else None,
+                              "median": statistics.median(values) if values else None,
+                              "max": max(values) if values else None}
+                       for name, values in stages.items()} for scenario, stages in grouped.items()}
+
+
+def measured(value):
+    return str(value) if value is not None else "-"
+
+
+def show(run):
+    rows = []
+    if run.get("times", 1) == 1:
+        head = ["scenario", "stt", "model", "sentence", "tts", "answer", "ack", "barge", "verified", "false_done", "fault"]
+        for row in run["rows"]:
+            voice = row.get("voice", {})
+            rows.append([row["scenario"], *[measured(voice.get(k)) for k in (
+                "stt_final", "model_first_text", "sentence_ready", "tts_first_audio", "keyup_to_answer_audio",
+                "keyup_to_first_audio", "barge_key_down_to_silence")], assist.flag(row.get("task_verified")),
+                assist.flag(row.get("false_done")), row.get("harness_fault", "-")])
+    else:
+        head = ["scenario", "stt min/median/max", "model min/median/max", "tts min/median/max", "answer min/median/max", "samples"]
+        for name, stages in aggregate(run["rows"]).items():
+            rows.append([name, *["/".join(measured(stage[k]) for k in ("min", "median", "max")) for stage in stages.values()],
+                         "/".join(str(stage["n"]) for stage in stages.values())])
+    print(f"voice-bench {run['stamp']} at {run['commit']} (ms)")
+    print(assist.table(head, rows))
+    for row in run["rows"]:
+        failed = [key for key, value in row.get("checks", {}).items() if not value]
+        if failed:
+            print(row["scenario"] + f" #{row.get('iteration', 1)} failed checks: " + ", ".join(failed))
+    print("billing: " + json.dumps(run.get("billing", {}), sort_keys=True))
+    if run.get("billing", {}).get("silence_ledger_classified") is False:
+        print("silence ledger case is unclassified: the current gateway does not label empty finals")
+
+
+def run(names, times=1):
+    if type(times) is not int or times < 1:
+        fail("--times must be a positive integer")
+    effort = os.environ.get("ZEPHIUM_PROBE_PAGE_EFFORT")
+    if effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
+        fail("page_effort_override: expected low|medium|high|xhigh|max")
+    known = scenarios()
+    names = names or list(known)
+    if any(name not in known for name in names) or len(set(names)) != len(names):
+        fail("unknown or duplicate scenario (see scripts/voice-bench list)")
+    os.umask(0o077)
+    if os.path.islink(OUT):
+        fail("result directory must not be a symlink")
+    os.makedirs(OUT, mode=0o700, exist_ok=True)
+    os.chmod(OUT, 0o700)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    result = {"schema": 1, "stamp": stamp, "commit": assist.commit_id(), "cargo_target_dir": TARGET,
+              "platform": list(os.uname()), "harness": assist.file_id(__file__),
+              "scenario_source": {source: assist.file_id(os.path.join(REPO, source)) for source in (
+                  SOURCE, "crates/zephium-terra-macos-probe/src/voice_audio.rs",
+                  "crates/zephium-terra-macos-probe/src/voice_bench.rs",
+                  "crates/zephium-terra-macos-probe/src/voice_metrics.rs", *assist.SOURCES)},
+              "environment": {"ZEPHIUM_PROBE_PAGE_MODEL": os.environ.get("ZEPHIUM_PROBE_PAGE_MODEL"),
+                              "ZEPHIUM_PROBE_PAGE_EFFORT": effort}, "times": times, "rows": []}
+    try:
+        with tempfile.TemporaryDirectory(prefix="voice-bench-") as directory:
+            os.chmod(directory, 0o700)
+            probe, probe_hash, signature = assist.prepare_probe(directory)
+            result.update(signature=signature, probe=probe_hash)
+            gateway = Gateway(directory)
+            try:
+                gateway.start()
+                for name in names:
+                    for iteration in range(1, times + 1):
+                        print(f"[{name} {iteration}/{times}] running ...", flush=True)
+                        row = run_one(probe, probe_hash, name, gateway.path)
+                        row["iteration"] = iteration
+                        row["answer_ms"] = row.get("voice", {}).get("keyup_to_answer_audio")
+                        row["checks"] = checks(row)
+                        row["passed"] = all(row["checks"].values())
+                        result["rows"].append(row)
+                        fault = row.get("fault") or {}
+                        if (row.get("harness_fault") or not row["probe_unchanged"]
+                                or fault.get("reason") in assist.STOP_FAULTS
+                                or fault.get("fault") in assist.STOP_FAULTS):
+                            messages = {"page_model_unavailable": "Page model is not configured or unavailable",
+                                        "page_model_missing_key": "Page model key is missing",
+                                        "page_model_key_refused": "Page model key was refused"}
+                            reason = row.get("harness_fault")
+                            fail("probe stopped: " + messages.get(reason, reason or "Page model/key unavailable or probe changed"))
+            finally:
+                gateway.close()
+                result["ledger"] = gateway.summary
+                result["billing"] = billing(result["rows"], gateway.summary)
+                if gateway.summary is not None:
+                    print(json.dumps({"summary": gateway.summary}, separators=(",", ":")))
+    except KeyboardInterrupt:
+        result["stopped"] = "interrupted"
+    except (BenchError, OSError, subprocess.SubprocessError) as error:
+        # OS exception strings may include a command or private path. Never print them.
+        result["stopped"] = str(error) if isinstance(error, BenchError) else "child process/setup failed"
+    result["aggregates"] = aggregate(result["rows"])
+    result["models"] = [r["model"] for r in result["rows"] if r.get("model")]
+    path = os.path.join(OUT, stamp + ".json")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as file:
+        json.dump(result, file, indent=2)
+    show(result)
+    print(path)
+    if result.get("stopped"):
+        fail(result["stopped"])
+    return 0 if (result["rows"] and all(r.get("exit") == 0 and r.get("passed") for r in result["rows"])
+                 and result.get("billing", {}).get("counts_match") and result.get("billing", {}).get("all_terminal")
+                 and result.get("billing", {}).get("silence_ledger_classified") is not False) else 1
+
+
+def interrupted(_signal, _frame):
+    raise KeyboardInterrupt
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else "run"
+    if command == "build":
+        build()
+    elif command == "list":
+        for name, fixture in scenarios().items():
+            print(f"{name:18} {fixture}")
+    elif command == "show":
+        paths = sorted(os.path.join(OUT, f) for f in os.listdir(OUT) if re.fullmatch(r"\d{8}-\d{6}-\d{6}\.json", f)) if os.path.isdir(OUT) else []
+        path = argv[2] if len(argv) > 2 else paths[-1] if paths else None
+        if path is None:
+            fail("no runs yet")
+        with open(path) as file:
+            show(json.load(file))
+    elif command == "run":
+        parser = argparse.ArgumentParser(prog="scripts/voice-bench run")
+        parser.add_argument("--times", type=int, default=1)
+        parser.add_argument("scenarios", nargs="*")
+        args = parser.parse_args(argv[2:])
+        return run(args.scenarios, times=args.times)
+    else:
+        fail("usage: scripts/voice-bench build | run [--times N] [scenario ...] | show [file] | list")
+    return 0
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        sys.exit(main(sys.argv))
+    except (BenchError, OSError, ValueError) as error:
+        print("voice-bench: " + (str(error) if isinstance(error, BenchError) else "setup/result file unavailable"), file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("voice-bench: interrupted; children stopped and private temporary files removed", file=sys.stderr)
+        sys.exit(130)

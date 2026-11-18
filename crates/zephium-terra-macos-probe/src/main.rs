@@ -22,6 +22,12 @@ mod lead_smoke;
 #[cfg(target_os = "macos")]
 mod loopback_support;
 #[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod voice_audio;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
+mod voice_metrics;
+#[cfg(any(all(target_os = "macos", feature = "durable-runtime"), test))]
+mod voice_scenarios;
+#[cfg(all(target_os = "macos", feature = "durable-runtime"))]
 mod work_account;
 #[cfg(target_os = "macos")]
 mod work_actor;
@@ -227,6 +233,20 @@ fn main() {
         [argument, scenario] if argument == "--live-lead" => work_durable::run_lead(scenario),
         #[cfg(feature = "durable-runtime")]
         [argument, scenario] if argument == "--assist-bench" => assist_bench::run(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument, scenario] if argument == "--voice-bench" => assist_bench::run_voice(scenario),
+        #[cfg(feature = "durable-runtime")]
+        [argument] if argument == "--voice-bench-list" => {
+            for scenario in voice_scenarios::SCENARIOS {
+                let _ = writeln!(
+                    std::io::stdout().lock(),
+                    "{}\t{}",
+                    scenario.name,
+                    scenario.assist
+                );
+            }
+            Ok(())
+        }
         #[cfg(feature = "durable-runtime")]
         [argument] if argument == "--assist-bench-list" => {
             for scenario in assist_scenarios::SCENARIOS {

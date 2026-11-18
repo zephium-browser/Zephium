@@ -12,7 +12,7 @@ use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::{Engine as _, EngineEvent, NavigationRequestId, Partition};
 use zephium_core::work::model::{
     WorkModelClient, WorkModelError, WorkModelEvent, WorkModelFuture, WorkModelPart,
-    WorkModelRequest, WorkModelRole, WorkModelUsage,
+    WorkModelReasoning, WorkModelRequest, WorkModelRole, WorkModelUsage,
 };
 #[cfg(target_os = "macos")]
 use zephium_engine::run_macos_work_application_with_input_probe as host_probe;
@@ -24,6 +24,15 @@ use zephium_work_composition::page_assist::port::*;
 use zephium_work_composition::page_assist::{Delivery, PageAssist, Ports};
 
 use super::assist_scenarios::{self as scenarios, Fixture, Grade, Scenario};
+
+#[cfg(target_os = "macos")]
+#[path = "voice_bench.rs"]
+pub(super) mod voice_bench;
+
+#[cfg(target_os = "macos")]
+pub(super) fn run_voice(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
+    voice_bench::run(name)
+}
 
 const READY_WAIT: Duration = Duration::from_secs(30);
 const REPLY_WAIT: Duration = Duration::from_secs(420);
@@ -66,11 +75,16 @@ struct Counters {
 }
 
 struct Shared {
+    effort_override: Option<WorkModelReasoning>,
+    #[cfg(target_os = "macos")]
+    voice_metrics: OnceLock<Arc<crate::voice_metrics::Metrics>>,
     profile: ProfileId,
     space: String,
     tabs: Mutex<Vec<(String, TabEntry)>>,
     engine: OnceLock<Arc<WebviewEngine>>,
     service: OnceLock<PageAssist>,
+    #[cfg(target_os = "macos")]
+    voice: OnceLock<zephium_work_composition::voice_session::VoiceSession>,
     rules: AtomicU8,
     asked: OnceLock<Instant>,
     events: Mutex<Vec<(u64, PageAssistChangedV1)>>,
@@ -602,11 +616,20 @@ struct Counted {
 impl WorkModelClient for Counted {
     fn call<'a>(
         &'a self,
-        request: WorkModelRequest,
+        mut request: WorkModelRequest,
         events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
     ) -> WorkModelFuture<'a> {
         Box::pin(async move {
+            // Explicit experiments also override the sidebar's normal high
+            // cap. The unmodified default path keeps the product's policy.
+            if let Some(effort) = self.shared.effort_override {
+                request.reasoning = Some(effort);
+            }
             let started = Instant::now();
+            #[cfg(target_os = "macos")]
+            if let Some(metrics) = self.shared.voice_metrics.get() {
+                metrics.model_started();
+            }
             let outcome = self.inner.call(request, events).await;
             let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut plans_act = false;
@@ -671,7 +694,10 @@ impl ModelSource for BenchModels {
                 zephium_app::work_models::resolve_entry_for(*profile, WorkModelRole::Page, None)
                     .await
                     .ok()?;
-            let effort = zephium_app::work_models::lead_effort(*profile, &entry);
+            let effort = self
+                .0
+                .effort_override
+                .or_else(|| zephium_app::work_models::lead_effort(*profile, &entry));
             Some(ModelChoice { entry, effort })
         })
     }
@@ -687,7 +713,10 @@ impl ModelSource for BenchModels {
                 Some(source),
             )
             .await?;
-            let effort = zephium_app::work_models::lead_effort(*profile, &entry);
+            let effort = self
+                .0
+                .effort_override
+                .or_else(|| zephium_app::work_models::lead_effort(*profile, &entry));
             Ok(ResolvedModel {
                 entry,
                 effort,
@@ -704,11 +733,36 @@ struct Sink(Arc<Shared>);
 impl EventSink for Sink {
     fn emit(&self, event: PageAssistChangedV1) {
         let at = self.0.since();
+        #[cfg(target_os = "macos")]
+        if let Some(metrics) = self.0.voice_metrics.get() {
+            metrics.with(|f| {
+                if let PageAssistEventV1::Text { delta, .. } = &event.kind {
+                    if !delta.is_empty() { f.reply_first_text.entry(event.reply).or_insert(at); }
+                }
+                let (kind, block, state) = match &event.kind {
+                    PageAssistEventV1::Text { block, .. } => ("text", Some(*block), None),
+                    PageAssistEventV1::Block { block, .. } => ("block", Some(*block), None),
+                    PageAssistEventV1::State { state } => ("state", None, Some(*state)),
+                    PageAssistEventV1::Done { .. } => ("done", None, Some(PageAssistReplyStateV1::Done)),
+                    PageAssistEventV1::Cancelled => ("cancelled", None, Some(PageAssistReplyStateV1::Cancelled)),
+                    PageAssistEventV1::Failed { .. } => ("failed", None, Some(PageAssistReplyStateV1::Failed)),
+                    _ => ("other", None, None),
+                };
+                if f.reply_trace.len() < 4096 {
+                    f.reply_trace.push(serde_json::json!({"at_ms": at, "reply": event.reply,
+                        "event": kind, "block": block, "reply_state": state, "session_state": f.states.last()}));
+                } else { *f.counts.entry("trace_overflow").or_default() += 1; }
+            });
+        }
         self.0
             .events
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push((at, event));
+            .push((at, event.clone()));
+        #[cfg(target_os = "macos")]
+        if let Some(voice) = self.0.voice.get() {
+            voice.assist(&event);
+        }
     }
 }
 
@@ -926,11 +980,11 @@ fn stats(values: &[u64]) -> serde_json::Value {
     })
 }
 
-async fn scenario_run(
-    shared: Arc<Shared>,
-    scenario: &'static Scenario,
-    fixture: Option<Arc<Fixture>>,
-) -> Result<serde_json::Value, &'static str> {
+async fn prepare(
+    shared: &Arc<Shared>,
+    scenario: &Scenario,
+    fixture: Option<&Fixture>,
+) -> Result<(PageAssist, String, PageAssistStatusV1), &'static str> {
     let deadline = Instant::now() + Duration::from_secs(20);
     while shared.rules.load(Ordering::Acquire) == 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -945,9 +999,7 @@ async fn scenario_run(
     }
     let mut tabs = Vec::new();
     for tab in scenario.tabs {
-        let url = fixture
-            .as_ref()
-            .map_or_else(|| (*tab).to_owned(), |fixture| fixture.url(tab));
+        let url = fixture.map_or_else(|| (*tab).to_owned(), |fixture| fixture.url(tab));
         let after = tabs.last().cloned();
         tabs.push(
             shared
@@ -956,14 +1008,23 @@ async fn scenario_run(
         );
     }
     for tab in &tabs {
-        if !wait_ready(&shared, tab).await {
+        if !wait_ready(shared, tab).await {
             return Err("page_not_ready");
         }
     }
     let front = tabs.first().cloned().ok_or("no_tab")?;
-    let service = PageAssist::new(ports(&shared));
+    let service = PageAssist::new(ports(shared));
     let _ = shared.service.set(service.clone());
     let status = service.status(&shared.space, Some(&front)).await;
+    Ok((service, front, status))
+}
+
+async fn scenario_run(
+    shared: Arc<Shared>,
+    scenario: &'static Scenario,
+    fixture: Option<Arc<Fixture>>,
+) -> Result<serde_json::Value, &'static str> {
+    let (service, front, status) = prepare(&shared, scenario, fixture.as_deref()).await?;
     let model = status.model.clone();
     let availability = availability_name(status.availability);
     if status.availability != PageAssistAvailabilityV1::Ready {
@@ -1053,6 +1114,51 @@ async fn scenario_run(
     }
     shared.frozen.store(true, Ordering::Release);
     let _ = tokio::time::timeout(Duration::from_secs(10), running).await;
+    Ok(grade_reply(
+        &shared,
+        scenario,
+        fixture.as_deref(),
+        ReplyResult {
+            reply,
+            ended,
+            first_text,
+            timed_out,
+            confirms: &confirms,
+            model,
+            availability: &availability,
+            labels: true,
+        },
+    )
+    .await)
+}
+
+struct ReplyResult<'a> {
+    reply: u32,
+    ended: Option<u64>,
+    first_text: Option<u64>,
+    timed_out: bool,
+    confirms: &'a [Confirm],
+    model: Option<PageAssistModelV1>,
+    availability: &'a str,
+    labels: bool,
+}
+
+async fn grade_reply(
+    shared: &Shared,
+    scenario: &Scenario,
+    fixture: Option<&Fixture>,
+    result: ReplyResult<'_>,
+) -> serde_json::Value {
+    let ReplyResult {
+        reply,
+        ended,
+        first_text,
+        timed_out,
+        confirms,
+        model,
+        availability,
+        labels,
+    } = result;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let saved = shared
         .saved
@@ -1139,7 +1245,7 @@ async fn scenario_run(
             }
         }
     }
-    Ok(serde_json::json!({
+    serde_json::json!({
         "scenario": scenario.name,
         "live": scenario.live,
         "delivery": "spoken",
@@ -1158,7 +1264,7 @@ async fn scenario_run(
             PageAssistBlockV1::Steps { steps } => steps.as_slice(),
             _ => &[],
         }).map(|step| serde_json::json!({
-            "label": step.label,
+            "label": labels.then_some(&step.label),
             "state": serde_json::to_value(step.state).unwrap_or_default(),
             "reason": step.reason.and_then(|reason| serde_json::to_value(reason).ok()),
         })).collect::<Vec<_>>(),
@@ -1199,7 +1305,7 @@ async fn scenario_run(
         "act_time": stats(&counters.act_ms),
         "rerender_wait_ms": counters.rerender_wait_ms,
         "shop": shop_facts,
-    }))
+    })
 }
 
 pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
@@ -1210,6 +1316,57 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         // The live scenarios reach real sites and stay macOS-only.
         .filter(|scenario| cfg!(target_os = "macos") || !scenario.live)
         .ok_or(Error::Authority)?;
+    run_host(
+        scenario,
+        move |shared, fixture| Box::pin(scenario_run(shared, scenario, fixture)),
+        "assist-run",
+    )
+}
+
+fn page_effort_override() -> Result<Option<WorkModelReasoning>, &'static str> {
+    let Some(value) = std::env::var_os("ZEPHIUM_PROBE_PAGE_EFFORT") else {
+        return Ok(None);
+    };
+    parse_page_effort(value.to_str().ok_or("page_effort_override")?).map(Some)
+}
+
+fn parse_page_effort(value: &str) -> Result<WorkModelReasoning, &'static str> {
+    match value {
+        "low" => Ok(WorkModelReasoning::Low),
+        "medium" => Ok(WorkModelReasoning::Medium),
+        "high" => Ok(WorkModelReasoning::High),
+        "xhigh" => Ok(WorkModelReasoning::XHigh),
+        "max" => Ok(WorkModelReasoning::Max),
+        _ => Err("page_effort_override"),
+    }
+}
+
+#[cfg(test)]
+mod voice_effort_tests {
+    use super::*;
+    #[test]
+    fn voice_effort_override_accepts_only_existing_reasoning_names() {
+        for value in ["low", "medium", "high", "xhigh", "max"] {
+            assert!(parse_page_effort(value).is_ok());
+        }
+        for value in ["minimal", "", "HIGH", "unknown"] {
+            assert_eq!(parse_page_effort(value), Err("page_effort_override"));
+        }
+    }
+}
+
+type BenchTask = BoxFuture<'static, Result<serde_json::Value, &'static str>>;
+
+fn run_host(
+    scenario: &'static Scenario,
+    task: impl FnOnce(Arc<Shared>, Option<Arc<Fixture>>) -> BenchTask + Send + 'static,
+    prefix: &'static str,
+) -> Result<(), super::ProbeFailure> {
+    use super::ProbeFailure as Error;
+    let effort_override = page_effort_override().map_err(|stage| {
+        say(format_args!("{prefix}-failure: stage={stage}"));
+        Error::Engine(stage)
+    })?;
     let fixture = if scenario.live {
         None
     } else {
@@ -1223,11 +1380,16 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
     zephium_engine::nonpersistent_stores_for_probe();
     let profile = ProfileId::generate();
     let shared = Arc::new(Shared {
+        effort_override,
+        #[cfg(target_os = "macos")]
+        voice_metrics: OnceLock::new(),
         profile,
         space: zephium_core::ids::SpaceId::generate().to_string(),
         tabs: Mutex::new(Vec::new()),
         engine: OnceLock::new(),
         service: OnceLock::new(),
+        #[cfg(target_os = "macos")]
+        voice: OnceLock::new(),
         rules: AtomicU8::new(0),
         asked: OnceLock::new(),
         events: Mutex::new(Vec::new()),
@@ -1283,9 +1445,7 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
                         .enable_all()
                         .build()
                         .map_err(|_| "assist_tokio")
-                        .and_then(|runtime| {
-                            runtime.block_on(scenario_run(shared, scenario, fixture))
-                        });
+                        .and_then(|runtime| runtime.block_on(task(shared, fixture)));
                     let _ = result_tx.send(result);
                 })
                 .map_err(|_| "assist_worker")?;
@@ -1320,21 +1480,28 @@ pub(super) fn run(name: &std::ffi::OsStr) -> Result<(), super::ProbeFailure> {
         },
     );
     if let Err(stage) = run {
-        say(format_args!("assist-run-failure: stage={stage}"));
+        say(format_args!("{prefix}-failure: stage={stage}"));
         return Err(Error::Engine(stage));
     }
     if barrier.load(Ordering::Acquire) != 1 {
         let stage = "assist_engine_shutdown";
-        say(format_args!("assist-run-failure: stage={stage}"));
+        say(format_args!("{prefix}-failure: stage={stage}"));
         return Err(Error::Engine(stage));
     }
     match result_rx.try_recv() {
-        Ok(Ok(row)) => {
-            say(format_args!("assist-run: {row}"));
+        Ok(Ok(mut row)) => {
+            if let Some(effort) = effort_override {
+                if row["model"].is_object() {
+                    row["model"]["effort"] = serde_json::json!(effort);
+                }
+            }
+            row["environment"] = serde_json::json!({"ZEPHIUM_PROBE_PAGE_MODEL": std::env::var("ZEPHIUM_PROBE_PAGE_MODEL").ok(),
+                "ZEPHIUM_PROBE_PAGE_EFFORT": effort_override});
+            say(format_args!("{prefix}: {row}"));
             Ok(())
         }
         Ok(Err(stage)) => {
-            say(format_args!("assist-run-failure: stage={stage}"));
+            say(format_args!("{prefix}-failure: stage={stage}"));
             Err(Error::Engine(stage))
         }
         Err(_) => Err(Error::Runtime),
