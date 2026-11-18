@@ -1,5 +1,4 @@
 use super::*;
-use chrono::Datelike;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use zephium_core::blocker::{BlockedLoadCounter, BlockerStatistics};
 use zephium_ipc::BlockerStatsView;
@@ -17,6 +16,17 @@ struct State {
     revision: u64,
     pending: Option<(u64, Arc<AtomicU8>)>,
     last_write: std::time::Instant,
+}
+
+/// Stored days count from 0001-01-01 as day 1, as chrono's
+/// `num_days_from_ce` did when they were first written.
+fn day_number(date: jiff::civil::Date) -> i32 {
+    const BEFORE_CE: jiff::civil::Date = jiff::civil::Date::constant(0, 12, 31);
+    date.since(BEFORE_CE).map_or(0, |span| span.get_days())
+}
+
+fn local_day() -> i32 {
+    day_number(jiff::Zoned::now().date())
 }
 
 #[derive(Clone)]
@@ -98,7 +108,7 @@ impl Statistics {
         store: &SharedStore,
         force: bool,
     ) -> Option<BlockerStatsView> {
-        let day = chrono::Local::now().date_naive().num_days_from_ce();
+        let day = local_day();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         if state.retired || !self.counter.2.load(Ordering::Relaxed) {
             return None;
@@ -310,9 +320,18 @@ mod tests {
         statistics.reply(ProfileId::from(4), &store, reply);
         assert!(receive.try_recv().is_err());
         let mut saved = BlockerStatistics::default();
-        saved.record(chrono::Local::now().date_naive().num_days_from_ce(), 12);
+        saved.record(local_day(), 12);
         statistics.loaded(ProfileId::from(4), &store, Some(saved));
         assert_eq!(receive.try_recv().unwrap().unwrap().today, 12);
+    }
+
+    #[test]
+    fn stored_days_keep_their_numbers() {
+        use jiff::civil::date;
+        assert_eq!(day_number(date(1, 1, 1)), 1);
+        assert_eq!(day_number(date(1970, 1, 1)), 719_163);
+        assert_eq!(day_number(date(2024, 2, 29)), 738_945);
+        assert_eq!(day_number(date(2026, 11, 17)), 739_937);
     }
 
     #[test]

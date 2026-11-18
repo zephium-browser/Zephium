@@ -7554,13 +7554,13 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "chrono",
  "flate2",
  "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "jiff",
  "libc",
  "lopdf",
  "objc2",
