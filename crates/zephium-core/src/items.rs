@@ -14,6 +14,9 @@ use crate::navigation;
 use crate::ports::engine::NavigationRequestId;
 use crate::spaces::RemovedProfileSpaces;
 
+mod folders;
+pub use folders::MAX_FOLDER_DEPTH;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
     CreateView {
@@ -266,54 +269,8 @@ impl Items {
         placement: Placement,
         before: Option<ItemId>,
     ) -> bool {
-        let Some(item) = self.items.get(&id).filter(|item| item.tab().is_some()) else {
-            return false;
-        };
-        match item.tab().expect("tab filtered above").content {
-            TabContent::Web => {}
-            TabContent::BrowserOwned(_) => {
-                if !matches!(
-                    (item.placement, placement),
-                    (
-                        Placement::Space { space: current, .. },
-                        Placement::Space { space: destination, .. }
-                    ) if current == destination
-                ) {
-                    return false;
-                }
-            }
-            TabContent::ExtensionOwned if item.placement != placement => return false,
-            TabContent::ExtensionOwned => {}
-        }
-        if before == Some(id) {
-            return item.placement == placement && item.parent.is_none();
-        }
-        if before.is_some_and(|target| {
-            self.items
-                .get(&target)
-                .is_none_or(|item| item.parent.is_some() || item.placement != placement)
-        }) {
-            return false;
-        }
-        let parent = item.parent;
-        let old_placement = item.placement;
-        let siblings = match parent {
-            Some(parent) => self.children.get_mut(&parent),
-            None => self.roots.get_mut(&old_placement),
-        };
-        if let Some(siblings) = siblings {
-            siblings.retain(|item| *item != id);
-        }
-        let target = self.roots.entry(placement).or_default();
-        let index = before
-            .and_then(|before| target.iter().position(|item| *item == before))
-            .unwrap_or(target.len());
-        target.insert(index, id);
-        if let Some(item) = self.items.get_mut(&id) {
-            item.parent = None;
-            item.placement = placement;
-        }
-        true
+        self.items.get(&id).is_some_and(|item| item.tab().is_some())
+            && self.move_item(id, placement, None, before)
     }
 
     pub fn remove(&mut self, id: ItemId) -> Vec<Effect> {
@@ -950,7 +907,7 @@ mod tests {
             id: fid,
             parent: None,
             placement: today(),
-            kind: ItemKind::Folder { name: "F".into() },
+            kind: ItemKind::folder("F"),
         }));
         fid
     }
@@ -1012,7 +969,7 @@ mod tests {
             placement: Placement::Favorites {
                 space: target_space,
             },
-            kind: ItemKind::Folder { name: "F".into() },
+            kind: ItemKind::folder("F"),
         }));
         assert!(items.insert_tab(
             structurally_foreign_child,
@@ -1075,7 +1032,7 @@ mod tests {
                 id: child,
                 parent: Some(parent),
                 placement: today(),
-                kind: ItemKind::Folder { name: "F".into() },
+                kind: ItemKind::folder("F"),
             }));
             parent = child;
         }
@@ -1437,7 +1394,7 @@ mod tests {
                             id: id(n),
                             parent: None,
                             placement: today(),
-                            kind: ItemKind::Folder { name: "F".into() },
+                            kind: ItemKind::folder("F"),
                         };
                         if items.insert(item) {
                             ids.push(id(n));

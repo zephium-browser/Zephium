@@ -239,10 +239,38 @@ impl TabState {
     }
 }
 
+/// A folder's colour: one of the interface's soft hues, or none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderColor {
+    Sky,
+    Mint,
+    Lemon,
+    Peach,
+    Rose,
+    Lilac,
+}
+
 #[derive(Clone, Debug)]
 pub enum ItemKind {
-    Folder { name: String },
+    Folder {
+        name: String,
+        color: Option<FolderColor>,
+        /// Folded in the sidebar. Kept with the session.
+        collapsed: bool,
+    },
     Tab(TabState),
+}
+
+impl ItemKind {
+    /// An open folder without a colour.
+    pub fn folder(name: impl Into<String>) -> Self {
+        Self::Folder {
+            name: name.into(),
+            color: None,
+            collapsed: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

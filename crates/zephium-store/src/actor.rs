@@ -1840,7 +1840,7 @@ fn admissible_session(session: &SessionState) -> bool {
             .iter()
             .all(|space| space.name.len() <= MAX_NAME_BYTES)
         && session.items.iter().all(|item| match &item.kind {
-            PersistedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
+            PersistedKind::Folder { name, .. } => name.len() <= MAX_NAME_BYTES,
             PersistedKind::Tab {
                 url, title, zoom, ..
             } => {

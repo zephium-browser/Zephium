@@ -106,6 +106,11 @@ enum BoundedPlacement {
 enum BoundedKind {
     Folder {
         name: String,
+        /// Only in sessions saved as version 3 or later.
+        #[serde(default)]
+        color: Option<zephium_core::item::FolderColor>,
+        #[serde(default)]
+        collapsed: Option<bool>,
     },
     Tab {
         url: String,
@@ -143,7 +148,7 @@ where
 {
     bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_ITEMS, |item| {
         match &item.kind {
-            BoundedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
+            BoundedKind::Folder { name, .. } => name.len() <= MAX_NAME_BYTES,
             BoundedKind::Tab {
                 url, title, zoom, ..
             } => {
@@ -177,7 +182,8 @@ where
 
 impl BoundedSessionState {
     /// `version` is the schema the snapshot was saved under, which decides
-    /// whose Essentials its items name: a space's (2), or a profile's (1).
+    /// whose Essentials its items name: a space's (2), or a profile's (1),
+    /// and whether its folders may carry a look (3).
     fn into_state(self, version: i64) -> Option<SessionState> {
         let spaces: Vec<PersistedSpace> = self
             .spaces
@@ -225,7 +231,22 @@ impl BoundedSessionState {
                 parent: item.parent,
                 placement,
                 kind: match item.kind {
-                    BoundedKind::Folder { name } => PersistedKind::Folder { name },
+                    BoundedKind::Folder {
+                        name,
+                        color,
+                        collapsed,
+                    } => {
+                        // A folder's look came with version 3; an older
+                        // snapshot naming one is not what it claims to be.
+                        if version < 3 && (color.is_some() || collapsed.is_some()) {
+                            return None;
+                        }
+                        PersistedKind::Folder {
+                            name,
+                            color,
+                            collapsed: collapsed.unwrap_or(false),
+                        }
+                    }
                     BoundedKind::Tab {
                         url,
                         title,
@@ -2972,6 +2993,61 @@ mod essentials_per_space_tests {
         assert!(decode_snapshot(&version_two, 2).is_some());
         assert!(decode_snapshot(&version_one, 2).is_none());
         assert!(decode_snapshot(&version_two, 1).is_none());
+    }
+
+    #[test]
+    fn folders_carry_a_look_from_version_three_and_older_sessions_read_as_plain() {
+        let today = Placement::Space {
+            space: SpaceId::from(HOME),
+            section: SpaceSection::Today,
+        };
+        let folder = |kind| PersistedItem {
+            id: ItemId::from(90),
+            parent: None,
+            placement: today,
+            kind,
+        };
+        let mut plain = session(SECOND);
+        plain.items.push(folder(PersistedKind::folder("Trips")));
+        let mut styled = session(SECOND);
+        styled.items.push(folder(PersistedKind::Folder {
+            name: "Trips".into(),
+            color: Some(zephium_core::item::FolderColor::Rose),
+            collapsed: true,
+        }));
+        let plain_json = serde_json::to_string(&plain).unwrap();
+        let styled_json = serde_json::to_string(&styled).unwrap();
+
+        assert_eq!(decode_snapshot(&plain_json, 2), Some(plain.clone()));
+        assert_eq!(decode_snapshot(&styled_json, 3), Some(styled.clone()));
+        assert!(decode_snapshot(&styled_json, 2).is_none());
+        let last = plain.items.len() - 1;
+        let mut half = serde_json::to_value(&plain).unwrap();
+        half["items"][last]["kind"]["Folder"]["collapsed"] = serde_json::json!(false);
+        assert!(decode_snapshot(&half.to_string(), 2).is_none());
+        assert!(decode_snapshot(&half.to_string(), 3).is_some());
+        let mut unknown = serde_json::to_value(&styled).unwrap();
+        unknown["items"][last]["kind"]["Folder"]["color"] = serde_json::json!("neon");
+        assert!(decode_snapshot(&unknown.to_string(), 3).is_none());
+
+        let mut hub = Hub::in_memory().unwrap();
+        hub.save(&core_session::canonicalize(styled)).unwrap();
+        let loaded = hub.load().unwrap().unwrap();
+        assert!(loaded.items.iter().any(|item| matches!(
+            &item.kind,
+            PersistedKind::Folder {
+                color: Some(zephium_core::item::FolderColor::Rose),
+                collapsed: true,
+                ..
+            }
+        )));
+        let version: i64 = hub
+            .meta
+            .query_row("SELECT schema_version FROM session_snapshot", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 3);
     }
 
     #[test]

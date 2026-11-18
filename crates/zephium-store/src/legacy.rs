@@ -335,7 +335,7 @@ fn decode_item(
         _ => return None,
     };
     let kind = match (item.folder, item.url) {
-        (Some(name), None) => PersistedKind::Folder { name },
+        (Some(name), None) => PersistedKind::folder(name),
         (None, Some(url)) => PersistedKind::Tab {
             url,
             title: item.title.unwrap_or_default(),

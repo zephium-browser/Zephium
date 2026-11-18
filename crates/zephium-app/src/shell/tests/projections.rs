@@ -5,7 +5,7 @@ fn folder(id: ItemId, parent: Option<ItemId>, placement: Placement, name: &str) 
         id,
         parent,
         placement,
-        kind: PersistedKind::Folder { name: name.into() },
+        kind: PersistedKind::folder(name),
     }
 }
 

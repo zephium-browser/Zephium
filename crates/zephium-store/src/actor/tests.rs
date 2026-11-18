@@ -301,9 +301,7 @@ fn sample() -> SessionState {
                     space,
                     section: SpaceSection::Pinned,
                 },
-                kind: PersistedKind::Folder {
-                    name: "Work".into(),
-                },
+                kind: PersistedKind::folder("Work"),
             },
             PersistedItem {
                 id: ItemId::from(21),
