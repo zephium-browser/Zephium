@@ -281,12 +281,16 @@ const PRIVILEGED_BOOTSTRAP_URL: &str = "about:blank";
 // The chrome and launcher load their own pages, so a warm spare renderer
 // waiting for another site would mostly sit in memory. They load nothing from
 // the network either, so their network service runs inside their browser
-// process instead of a utility process of its own. Page environments never
-// take these arguments.
+// process instead of a utility process of its own. Nor do they use any
+// downloaded component (CRLSets, filter lists, Widevine, speech). Each launch
+// starts a fresh runtime generation, so the component updater would otherwise
+// fetch the whole set again a minute after every start. Page environments
+// never take these arguments.
 #[cfg(any(target_os = "windows", test))]
 const PRIVILEGED_WEBVIEW2_BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
-     --enable-features=NetworkServiceInProcess2";
+     --enable-features=NetworkServiceInProcess2 \
+     --disable-component-update";
 
 #[derive(Clone)]
 struct ShutdownCoordinator {
@@ -10572,7 +10576,8 @@ mod tests {
         assert_eq!(
             super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS,
             "--disable-features=msWebOOUI,msPdfOOUI,SpareRendererForSitePerProcess \
-             --enable-features=NetworkServiceInProcess2"
+             --enable-features=NetworkServiceInProcess2 \
+             --disable-component-update"
         );
         let args = super::PRIVILEGED_WEBVIEW2_BROWSER_ARGS.to_ascii_lowercase();
         assert!(!args.contains("smartscreen"));

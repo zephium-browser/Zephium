@@ -608,6 +608,13 @@ impl State {
     }
 }
 
+/// The construction load of a fresh view: WebKit names the view's own empty
+/// main frame (an opaque origin) as the frame that asked, or no frame.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn bootstrap_source(source: &wry::AppleNavigationSource) -> bool {
+    source.is_main_frame && source.scheme.is_empty() && source.host.is_empty() && source.port == 0
+}
+
 impl WorkDocumentNavigation {
     /// Opens the follow window for one dispatched action on a ready
     /// site-session page; it lasts until the next action, document change
@@ -1133,7 +1140,7 @@ impl WorkDocumentNavigation {
         target: &str,
         action: wry::AppleNavigationAction,
     ) -> bool {
-        use wry::{AppleNavigationAction, AppleNavigationType};
+        use wry::AppleNavigationType;
         let Ok(mut state) = self.0.lock() else {
             return false;
         };
@@ -1146,13 +1153,10 @@ impl WorkDocumentNavigation {
         if state.phase == Phase::Bootstrap
             && target == "about:blank"
             && state.bootstrap_available
-            && action
-                == (AppleNavigationAction {
-                    navigation_type: AppleNavigationType::Other,
-                    is_get: true,
-                    target_is_main_frame: Some(true),
-                    source: None,
-                })
+            && action.navigation_type == AppleNavigationType::Other
+            && action.is_get
+            && action.target_is_main_frame == Some(true)
+            && action.source.as_ref().is_none_or(bootstrap_source)
         {
             state.bootstrap_available = false;
             return true;
@@ -1827,6 +1831,49 @@ mod tests {
             is_get,
             target_is_main_frame: Some(true),
             source: None,
+        }
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[test]
+    fn apple_bootstrap_admits_the_views_own_empty_frame_once() {
+        use wry::{AppleNavigationSource, AppleNavigationType as T};
+        let sourced = |is_main_frame: bool, scheme: &str, host: &str| wry::AppleNavigationAction {
+            source: Some(AppleNavigationSource {
+                is_main_frame,
+                scheme: scheme.into(),
+                host: host.into(),
+                port: 0,
+            }),
+            ..apple_action(T::Other, true)
+        };
+        // WebKit names the fresh view's own opaque main frame as the source
+        // of its construction load; the gate must take it, then read the page.
+        let gate = WorkDocumentNavigation::default();
+        assert!(gate.allows_apple_action("about:blank", sourced(true, "", "")));
+        assert!(!gate.allows_apple_action("about:blank", sourced(true, "", "")));
+        for phase in [E::Started, E::Committed, E::Finished] {
+            gate.observe(event(9, phase, "about:blank")).unwrap();
+        }
+        assert!(!gate.failed());
+        assert!(gate.bootstrap_ready());
+        gate.arm(ContextNavigationTarget::parse(URL).unwrap())
+            .unwrap();
+        assert!(gate.allows_apple_action(URL, apple_action(T::Other, true)));
+
+        let unsourced = WorkDocumentNavigation::default();
+        assert!(unsourced.allows_apple_action("about:blank", apple_action(T::Other, true)));
+
+        // A page, a subframe or a page-caused load is never the construction load.
+        for action in [
+            sourced(true, "https", "example.test"),
+            sourced(false, "", ""),
+            apple_action(T::LinkActivated, true),
+            apple_action(T::Other, false),
+        ] {
+            let gate = WorkDocumentNavigation::default();
+            assert!(!gate.allows_apple_action("about:blank", action));
+            gate.observe(event(9, E::Started, "about:blank")).unwrap();
+            assert!(gate.failed());
         }
     }
     #[cfg(any(target_os = "macos", target_os = "ios"))]

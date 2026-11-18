@@ -147,8 +147,10 @@ export default defineConfig({
             screenshotFailures: false,
             commands: { benchPhotos, webkitFootprint },
             // Retina is the display this chrome is drawn for, and the one
-            // where a radius or a hairline can actually be judged.
-            provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
+            // where a radius or a hairline can actually be judged. Dates and
+            // amounts follow the browser's locale, which is the machine's own
+            // (en-GB writes "13 Oct"), so the suites read one fixed locale.
+            provider: playwright({ contextOptions: { deviceScaleFactor: 2, locale: "en-US" } }),
             instances: [
               {
                 browser:

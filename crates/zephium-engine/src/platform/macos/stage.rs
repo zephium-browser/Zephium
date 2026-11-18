@@ -17,7 +17,6 @@ use objc2_app_kit::{
     NSWindowDidResignKeyNotification, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask,
     NSWorkspace,
 };
-use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSNumber,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue,
@@ -58,13 +57,20 @@ const DETACH_AFTER: Duration = Duration::from_secs(10);
 /// The longest a returning page's last frame stays over it if WebKit never
 /// reports the page presented again.
 const RETURN_COVER_BOUND: Duration = Duration::from_millis(800);
-/// When a shown page's frame is refreshed: soon after it is revealed, then
-/// rarely while it stays shown.
+/// When a shown page's frame is checked: soon after it is revealed or input
+/// settles, then now and then while it stays shown. It is taken again only
+/// when the page may have changed since (see `needs_frame`).
 const FRAME_SETTLE: Duration = Duration::from_millis(1500);
 const FRAME_REFRESH: Duration = Duration::from_secs(30);
 const FRAME_GAP: Duration = Duration::from_secs(5);
+/// How long an untouched page keeps its frame; pages that update themselves
+/// are still captured now and then.
+const FRAME_STALE: Duration = Duration::from_secs(5 * 60);
 /// Cover tokens the stage hands itself, apart from the host's.
 const RETURN_COVER_TOKENS: u64 = 1 << 62;
+// Parked frames beyond this are dropped oldest first; those pages return
+// without a cover, as before they had one.
+const MAX_PARKED_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 thread_local! {
     /// The window each page kept off stage belongs to, by view address.
@@ -82,6 +88,81 @@ pub fn home_window(view: &NSView) -> Option<Retained<NSWindow>> {
                 .and_then(|homes| homes.get(&view_key(view)).and_then(Weak::load))
         })
         .or_else(|| view.window())
+}
+
+struct ParkedFrame {
+    owner: usize,
+    document: u64,
+    taken: Instant,
+    snapshot: super::PageSnapshot,
+}
+
+/// Whether a shown page's frame is taken again. Input after the frame, loading
+/// or audible playback may have changed what it shows; an untouched page's
+/// frame is kept until it no longer fits or is past `FRAME_STALE`.
+fn needs_frame(
+    taken: Option<Instant>,
+    fits: bool,
+    input: Option<Instant>,
+    busy: bool,
+    now: Instant,
+) -> bool {
+    let Some(taken) = taken else {
+        return true;
+    };
+    !fits
+        || busy
+        || input.is_some_and(|input| input > taken)
+        || now.saturating_duration_since(taken) >= FRAME_STALE
+}
+
+/// How much longer a frame check waits for input to settle. Checks stay at
+/// most `FRAME_REFRESH` plus that settling apart, so steady input still lets
+/// them reach loading, audible and stale pages.
+fn settle_wait(input: Option<Instant>, checked: Instant, now: Instant) -> Option<Duration> {
+    let wait = (input? + FRAME_SETTLE).saturating_duration_since(now);
+    let left = (checked + FRAME_REFRESH + FRAME_SETTLE).saturating_duration_since(now);
+    let wait = wait.min(left);
+    (!wait.is_zero()).then_some(wait)
+}
+
+/// A page loading or making sound is still changing what it shows.
+fn changing(page: &objc2_web_kit::WKWebView) -> bool {
+    // SAFETY: main-thread WebKit state reads; the SPI only when present.
+    unsafe {
+        if page.isLoading() {
+            return true;
+        }
+        let answers: bool = msg_send![page, respondsToSelector: objc2::sel!(_isPlayingAudio)];
+        answers && msg_send![page, _isPlayingAudio]
+    }
+}
+
+/// The frames to drop, oldest first, so the newest fit in `budget`.
+fn over_budget<K: Copy>(mut frames: Vec<(K, usize, Instant)>, budget: usize) -> Vec<K> {
+    frames.sort_by_key(|frame| std::cmp::Reverse(frame.2));
+    let mut total = 0usize;
+    frames
+        .into_iter()
+        .filter_map(|(key, bytes, _)| {
+            total = total.saturating_add(bytes);
+            (total > budget).then_some(key)
+        })
+        .collect()
+}
+
+/// A cover's frame no longer fits once its size changes; the ground stays.
+fn reframe_cover(view: &NSView, frame: NSRect) {
+    let size = view.frame().size;
+    view.setFrame(frame);
+    if (size.width - frame.size.width).abs() >= 0.01
+        || (size.height - frame.size.height).abs() >= 0.01
+    {
+        if let Some(layer) = view.layer() {
+            // SAFETY: clearing layer contents on the AppKit main thread.
+            unsafe { layer.setContents(None) };
+        }
+    }
 }
 
 fn view_key(view: &NSView) -> usize {
@@ -343,7 +424,7 @@ pub struct StageIvars {
     /// The last frame of each page taken before it left the window, shown
     /// over it on return until WebKit presents it again. None: no frame.
     /// Memory only, keyed by the exact view and document it was taken from.
-    parked: RefCell<HashMap<ItemId, (usize, u64, super::PageSnapshot)>>,
+    parked: RefCell<HashMap<ItemId, ParkedFrame>>,
     /// The main-frame document each page last committed, by a stage-wide serial.
     documents: RefCell<HashMap<ItemId, u64>>,
     document_serial: Cell<u64>,
@@ -353,6 +434,11 @@ pub struct StageIvars {
     frame_refresh: Cell<u64>,
     frame_due: Cell<Option<Instant>>,
     frame_taken: Cell<Option<Instant>>,
+    frame_checked: Cell<Option<Instant>>,
+    /// When input last reached this stage's window, and the monitor that
+    /// notes it.
+    input_at: Cell<Option<Instant>>,
+    input_monitor: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -538,6 +624,7 @@ impl ContentStage {
         // `addSubview:` is a native painting boundary. A newly-created stage
         // remains fail-closed until one exact layout update finishes.
         this.setHidden(true);
+        this.watch_input();
         this
     }
 
@@ -849,7 +936,7 @@ impl ContentStage {
 
     /// A transient visual cover never grants document presentation authority.
     /// It is installed while the shared document permit is still revoked.
-    pub fn cover(&self, id: ItemId, token: u64, image: Option<&CGImage>) -> bool {
+    pub fn cover(&self, id: ItemId, token: u64, frame: Option<&super::PageSnapshot>) -> bool {
         if self.ivars().stage_retry_terminal.get() || !self.wants_visible(id) {
             return false;
         }
@@ -881,15 +968,20 @@ impl ContentStage {
         let view = cover.into_super();
         view.setWantsLayer(true);
         view.setTranslatesAutoresizingMaskIntoConstraints(false);
-        view.setFrame(host.view.frame());
+        let page_frame = host.view.frame();
+        view.setFrame(page_frame);
         if let Some(layer) = view.layer() {
             layer.setBackgroundColor(Some(&page_ground(self).CGColor()));
+            let scale = self.window().map(|window| window.backingScaleFactor());
+            let image = frame
+                .filter(|frame| frame.fits(page_frame.size, scale))
+                .and_then(super::PageSnapshot::image);
             if let Some(image) = image {
                 let contents: &AnyObject = image.as_ref();
                 // SAFETY: a CGImage is valid layer contents; the layer retains it.
                 unsafe { layer.setContents(Some(contents)) };
                 // SAFETY: immutable framework constant.
-                layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityResizeAspectFill });
+                layer.setContentsGravity(unsafe { objc2_quartz_core::kCAGravityResize });
             }
             if let Some(page_layer) = host.view.layer() {
                 layer.setCornerRadius(page_layer.cornerRadius());
@@ -1096,6 +1188,10 @@ impl ContentStage {
 
     pub fn retire(&self) {
         self.ivars().pointer_cover.take();
+        if let Some(monitor) = self.ivars().input_monitor.take() {
+            // SAFETY: the token AppKit returned, retired on the main thread.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
         if let Some(window) = self.ivars().offstage.take() {
             if let Some(content) = window.contentView() {
                 for view in content.subviews().iter() {
@@ -2077,7 +2173,7 @@ impl ContentStage {
                         .ok()
                         .and_then(|covers| covers.get(&id).cloned());
                     if let Some(cover) = cover {
-                        cover.view.setFrame(frame);
+                        reframe_cover(&cover.view, frame);
                         if !self.layout_epoch_is_current(epoch) {
                             continue 'attempt;
                         }
@@ -2514,23 +2610,27 @@ impl ContentStage {
     /// WebKit repaints a page that re-enters the window a few frames after it
     /// is shown. Its last frame covers it meanwhile, never another page's.
     fn cover_return(&self, id: ItemId, view: &NSView) {
-        let image = self
+        let frame = self
             .ivars()
             .parked
             .try_borrow_mut()
             .ok()
             .and_then(|mut parked| parked.remove(&id))
-            .filter(|(owner, document, _)| {
-                *owner == view_key(view) && Some(*document) == self.document(id)
-            })
-            .and_then(|(_, _, snapshot)| snapshot.image());
-        let Some(image) = image else {
+            .filter(|frame| {
+                frame.owner == view_key(view)
+                    && Some(frame.document) == self.document(id)
+                    && frame.snapshot.fits(
+                        view.frame().size,
+                        view.window().map(|window| window.backingScaleFactor()),
+                    )
+            });
+        let Some(frame) = frame else {
             return;
         };
         let serial = self.ivars().return_covers.get().wrapping_add(1);
         self.ivars().return_covers.set(serial);
         let token = RETURN_COVER_TOKENS | (serial & (RETURN_COVER_TOKENS - 1));
-        if !self.cover(id, token, Some(&image)) {
+        if !self.cover(id, token, Some(&frame.snapshot)) {
             return;
         }
         let Some(mtm) = MainThreadMarker::new() else {
@@ -2636,6 +2736,8 @@ impl ContentStage {
             return;
         };
         let stage = MainThreadBound::new(Weak::from_retained(&self.retain()), mtm);
+        // What the frame shows is from the request, not its completion.
+        let requested = Instant::now();
         let started = super::PageSnapshot::capture_page(page, move |snapshot| {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
@@ -2661,7 +2763,22 @@ impl ContentStage {
             else {
                 return;
             };
-            parked.insert(id, (owner, document, snapshot));
+            parked.insert(
+                id,
+                ParkedFrame {
+                    owner,
+                    document,
+                    taken: requested,
+                    snapshot,
+                },
+            );
+            let frames = parked
+                .iter()
+                .map(|(&id, frame)| (id, frame.snapshot.bytes(), frame.taken))
+                .collect();
+            for id in over_budget(frames, MAX_PARKED_FRAME_BYTES) {
+                parked.remove(&id);
+            }
         });
         if !started {
             if let Ok(mut parking) = self.ivars().parking.try_borrow_mut() {
@@ -2708,21 +2825,33 @@ impl ContentStage {
                     return;
                 }
                 stage.ivars().frame_due.set(None);
-                if stage.capture_all_shown() {
-                    stage.ivars().frame_taken.set(Some(Instant::now()));
+                let now = Instant::now();
+                let checked = stage.ivars().frame_checked.get().unwrap_or(now);
+                stage.ivars().frame_checked.set(Some(checked));
+                if let Some(wait) = settle_wait(stage.ivars().input_at.get(), checked, now) {
+                    stage.refresh_frames_in(wait);
+                    return;
+                }
+                stage.ivars().frame_checked.set(Some(now));
+                let (shown, took) = stage.capture_all_shown(now);
+                if took {
+                    stage.ivars().frame_taken.set(Some(now));
+                }
+                if shown {
                     stage.refresh_frames_in(FRAME_REFRESH);
                 }
             }));
         });
     }
 
-    /// Returns whether any page was shown.
-    fn capture_all_shown(&self) -> bool {
+    /// Captures the shown pages that may have changed since their frame.
+    /// Returns whether any page was shown and whether any was captured.
+    fn capture_all_shown(&self, now: Instant) -> (bool, bool) {
         let (Ok(ready), Ok(paintable)) = (
             self.ivars().ready.try_borrow(),
             self.ivars().paintable.try_borrow(),
         ) else {
-            return false;
+            return (false, false);
         };
         let Some(views) = self.ivars().views.try_borrow().ok().map(|views| {
             views
@@ -2735,19 +2864,76 @@ impl ContentStage {
                 .map(|(id, view)| (*id, view.view.clone()))
                 .collect::<Vec<_>>()
         }) else {
-            return false;
+            return (false, false);
         };
         drop((ready, paintable));
-        let mut shown = false;
+        let input = self.ivars().input_at.get();
+        let (mut shown, mut took) = (false, false);
         for (id, view) in views {
-            if view.window().is_some_and(|window| window.isVisible())
-                && !view.isHiddenOrHasHiddenAncestor()
+            if !view.window().is_some_and(|window| window.isVisible())
+                || view.isHiddenOrHasHiddenAncestor()
             {
-                shown = true;
+                continue;
+            }
+            shown = true;
+            let busy = view
+                .downcast_ref::<objc2_web_kit::WKWebView>()
+                .is_some_and(changing);
+            let scale = view.window().map(|window| window.backingScaleFactor());
+            let frame = self.ivars().parked.try_borrow().ok().and_then(|parked| {
+                parked
+                    .get(&id)
+                    .filter(|frame| {
+                        frame.owner == view_key(&view) && Some(frame.document) == self.document(id)
+                    })
+                    .map(|frame| (frame.taken, frame.snapshot.fits(view.frame().size, scale)))
+            });
+            let (taken, fits) = frame.map_or((None, false), |(taken, fits)| (Some(taken), fits));
+            if needs_frame(taken, fits, input, busy, now) {
+                took = true;
                 self.capture_shown(id, &view);
             }
         }
-        shown
+        (shown, took)
+    }
+
+    fn note_input(&self, event: &NSEvent) {
+        let ours = match (event.window(self.mtm()), self.window()) {
+            (Some(target), Some(window)) => std::ptr::eq(&*target, &*window),
+            _ => false,
+        };
+        if ours {
+            self.ivars().input_at.set(Some(Instant::now()));
+            self.refresh_frames_in(FRAME_SETTLE);
+        }
+    }
+
+    /// Notes input in this stage's window, so a shown page is captured again
+    /// once input that may have changed it settles, and not otherwise.
+    fn watch_input(&self) {
+        let weak = Weak::from_retained(&self.retain());
+        let noted = block2::RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if let Some(stage) = weak.load() {
+                    // SAFETY: AppKit lends the event for this local callback.
+                    stage.note_input(unsafe { event.as_ref() });
+                }
+            }));
+            event.as_ptr()
+        });
+        let mask = NSEventMask::KeyDown
+            | NSEventMask::LeftMouseDown
+            | NSEventMask::LeftMouseUp
+            | NSEventMask::RightMouseDown
+            | NSEventMask::OtherMouseDown
+            | NSEventMask::ScrollWheel
+            | NSEventMask::Magnify
+            | NSEventMask::SmartMagnify
+            | NSEventMask::Swipe;
+        // SAFETY: a local, main-thread event monitor requires no global input permission.
+        let monitor =
+            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &noted) };
+        self.ivars().input_monitor.replace(monitor);
     }
 
     /// Records which attached pages are concealed and queues a detach pass
@@ -3126,6 +3312,84 @@ mod tests {
             [ItemId::from(3), ItemId::from(1), ItemId::from(4)]
         );
         assert!(due_for_detach(&HashMap::new(), now, grace).is_empty());
+    }
+
+    #[test]
+    fn an_untouched_shown_page_keeps_its_frame() {
+        let now = Instant::now();
+        let taken = Some(now - Duration::from_secs(60));
+        assert!(!needs_frame(taken, true, None, false, now));
+        // Input before the frame was taken is already in it.
+        let before = Some(now - Duration::from_secs(90));
+        assert!(!needs_frame(taken, true, before, false, now));
+    }
+
+    #[test]
+    fn a_shown_page_that_may_have_changed_is_captured_again() {
+        let now = Instant::now();
+        let taken = Some(now - Duration::from_secs(60));
+        assert!(needs_frame(None, false, None, false, now), "no frame yet");
+        assert!(needs_frame(taken, false, None, false, now), "resized");
+        assert!(
+            needs_frame(taken, true, None, true, now),
+            "loading or audible"
+        );
+        let after = Some(now - Duration::from_secs(10));
+        assert!(needs_frame(taken, true, after, false, now), "input since");
+        let stale = Some(now - FRAME_STALE);
+        assert!(needs_frame(stale, true, None, false, now), "past its age");
+    }
+
+    #[test]
+    fn a_frame_check_waits_for_input_to_settle_but_not_forever() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        assert_eq!(settle_wait(None, start, start), None);
+        assert_eq!(settle_wait(Some(at(0)), start, at(1500)), None, "settled");
+        assert_eq!(
+            settle_wait(Some(at(0)), start, at(500)),
+            Some(Duration::from_millis(1000))
+        );
+
+        // A key every second for longer than FRAME_STALE: the periodic check
+        // still runs, at most FRAME_SETTLE late.
+        let (mut now, mut checked, mut checks) = (start, start, vec![]);
+        while now < start + FRAME_STALE + FRAME_REFRESH {
+            let input = start + Duration::from_secs(now.duration_since(start).as_secs());
+            match settle_wait(Some(input), checked, now) {
+                Some(wait) => now += wait,
+                None => {
+                    checks.push(now);
+                    checked = now;
+                    now += FRAME_REFRESH;
+                }
+            }
+        }
+        assert!(checks
+            .last()
+            .is_some_and(|&last| last >= start + FRAME_STALE));
+        assert!(checks
+            .windows(2)
+            .all(|w| w[1] - w[0] <= FRAME_REFRESH + FRAME_SETTLE));
+    }
+
+    #[test]
+    fn parked_frames_over_budget_drop_oldest_first() {
+        let now = Instant::now();
+        let ago = |s| now - Duration::from_secs(s);
+        let frames = vec![
+            (ItemId::from(1), 4, ago(30)),
+            (ItemId::from(2), 4, ago(1)),
+            (ItemId::from(3), 4, ago(60)),
+            (ItemId::from(4), 4, ago(10)),
+        ];
+        assert_eq!(
+            over_budget(frames.clone(), 8),
+            [ItemId::from(1), ItemId::from(3)]
+        );
+        assert!(over_budget(frames.clone(), 16).is_empty());
+        assert_eq!(over_budget(frames, 0).len(), 4);
+        assert!(over_budget(Vec::<(ItemId, usize, Instant)>::new(), 0).is_empty());
     }
 
     #[test]

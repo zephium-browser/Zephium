@@ -137,7 +137,7 @@ uBlock filters, whose `filters.txt` copy lacked its includes, have no copy and
 must all download in one refresh; until they do, as when offline, the seed
 stays in use and the refresh backs off from 15 minutes to a day.
 
-The current bundled seed is **202611041052**, 6,211,955 uncompressed bytes.
+The current bundled seed is **202611172316**, 6,236,712 uncompressed bytes.
 `assets/blocker-seed/v1/` contains exact compressed/raw identities, upstream
 attribution, both license texts (`LICENSE-CC-BY-SA-3.0.txt`,
 `LICENSE-GPL-3.0.txt`), and a deterministic quality report. The seed is dated by
@@ -421,6 +421,14 @@ reported upstream when it applies there.
   every kind of reload (2 runs, a mix and a playlist, 16 of 16), and loop and
   shuffle were kept. In a later run, YouTube's mix once went on to a video
   outside its panel with no request from Zephium.
+  On 2026-11-17 the quick fixes replaced the `lactmilli` marker with `oaeb`.
+  Without `oaeb`, every marker Zephium sent was held, and so was the unmarked
+  page, which then waits out YouTube's hold: the first video after a consent
+  answer started 16.5 to 18.3 s late (macOS, 3 of 3 runs). `oaeb` follows
+  `lactmilli` in the rule, so whichever list is in use, its working marker is
+  tried first. With it, 18 of 18 videos played on `oaeb` alone, with no ads
+  and no blocker warning; mean watch start was 2.1 to 3.0 s against 8.1 to
+  13.0 s, and the consent-answered first video was not held at all.
 
 ## Budgets and evidence
 

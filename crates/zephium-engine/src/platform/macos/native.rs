@@ -543,6 +543,44 @@ pub(crate) fn page_footprint(view: &wry::WebView) -> Option<u64> {
     (status == 0).then_some(info.ri_phys_footprint)
 }
 
+/// Asks the page's web process for a reply that runs no page script, which a
+/// hung process never sends. False when WebKit offers no such call, or no way
+/// to end the process if the reply never comes.
+pub(crate) fn ask_web_process(view: &wry::WebView, answered: impl FnOnce() + 'static) -> bool {
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    let supported = unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_isJITEnabled:)]
+    } && unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)]
+    };
+    if !supported {
+        return false;
+    }
+    let answered = std::cell::Cell::new(Some(answered));
+    let reply = block2::RcBlock::new(move |_: objc2::runtime::Bool| {
+        if let Some(answered) = answered.take() {
+            answered();
+        }
+    });
+    // SAFETY: the selector is present; WebKit copies the block and calls it
+    // once on the main thread, also when the process exits.
+    let () = unsafe { objc2::msg_send![&*page, _isJITEnabled: &*reply] };
+    true
+}
+
+/// Ends the page's web process through WebKit, which accounts for it as it
+/// would for a crash.
+pub(crate) fn end_web_process(view: &wry::WebView) {
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    if unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)]
+    } {
+        let () = unsafe { objc2::msg_send![&*page, _killWebContentProcessAndResetState] };
+    }
+}
+
 /// Identity is borrowed only while the host groups its currently live views.
 pub(crate) fn background_preferences_key(view: &wry::WebView) -> usize {
     // SAFETY: main-thread access to the live view's retained configuration.
