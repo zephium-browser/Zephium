@@ -599,7 +599,7 @@ impl AgentWorkController {
                     {
                         return Err(AgentWorkFailure::Browser(error));
                     }
-                    observation = Box::pin(Self::observe(state, worker, browser)).await?;
+                    observation = Box::pin(Self::observe_settled(state, worker, browser)).await?;
                     captured_at = SemanticCaptureInstant::from_millis(
                         state
                             .session
@@ -922,18 +922,7 @@ impl AgentWorkController {
                         .is_some_and(AgentNavigationDiscovery::is_site_session) =>
                 {
                     waits += 1;
-                    let wake = Instant::now() + Duration::from_millis(500);
-                    if wake >= state.native.deadline {
-                        return Err(AgentWorkFailure::Deadline);
-                    }
-                    tokio::select! {
-                        biased;
-                        event = state.native.next_event(worker, browser) => {
-                            state.native.retain(event?)?;
-                            return Err(AgentWorkFailure::Mailbox);
-                        }
-                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
-                    }
+                    Self::settle_pause(state, worker, browser).await?;
                 }
                 result => break result?,
             }
@@ -1019,6 +1008,49 @@ impl AgentWorkController {
             SemanticCaptureInstant::from_millis(looked.millis()),
             transition,
         ))
+    }
+
+    /// One half-second pause while a page settles, within the run's
+    /// deadline; a native event ends it for the mailbox to handle.
+    async fn settle_pause(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(), AgentWorkFailure> {
+        let wake = Instant::now() + Duration::from_millis(500);
+        if wake >= state.native.deadline {
+            return Err(AgentWorkFailure::Deadline);
+        }
+        tokio::select! {
+            biased;
+            event = state.native.next_event(worker, browser) => {
+                state.native.retain(event?)?;
+                Err(AgentWorkFailure::Mailbox)
+            }
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => Ok(()),
+        }
+    }
+
+    /// Looks at a page that may still be replacing its document: a stale or
+    /// replaced look is taken again, briefly, instead of ending the read.
+    async fn observe_settled(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<SemanticObservation, AgentWorkFailure> {
+        let mut waits = 0u8;
+        loop {
+            match Self::observe(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::Stale
+                    | SemanticRuntimePortFailure::DocumentReplaced,
+                )) if waits < MAX_SETTLING_LOOKS => {
+                    waits += 1;
+                    Self::settle_pause(state, worker, browser).await?;
+                }
+                result => return result,
+            }
+        }
     }
 
     fn look_begins(state: &mut WorkState) -> Result<AgentPolicyInstant, AgentWorkFailure> {

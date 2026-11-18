@@ -493,6 +493,12 @@ impl AgentWorkTask for ConsentTask {
 
 #[test]
 fn a_consent_press_the_page_refuses_as_changed_is_looked_at_again() {
+    for fault in [Fault::DecisionTargetChanged, Fault::ConsentReload] {
+        consent_press_refused_as_changed(fault);
+    }
+}
+
+fn consent_press_refused_as_changed(fault: Fault) {
     let _serial = lock(&SERIAL);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -562,7 +568,7 @@ fn a_consent_press_the_page_refuses_as_changed_is_looked_at_again() {
         AgentBrowserRetention::Stateless,
     )
     .unwrap();
-    let (outcome, shutdown, calls, _) = drive(controller, handle, Fault::DecisionTargetChanged);
+    let (outcome, shutdown, calls, _) = drive(controller, handle, fault);
     assert!(matches!(shutdown, AgentBrowserShutdownOutcome::Clean(_)));
     let action = calls.iter().position(|&call| call == 7).expect("the press");
     assert_eq!(
@@ -575,8 +581,9 @@ fn a_consent_press_the_page_refuses_as_changed_is_looked_at_again() {
             !matches!(
                 closed.failure(),
                 AgentWorkFailure::Browser(AgentBrowserProviderError::Action(_))
+                    | AgentWorkFailure::Observation(_)
             ),
-            "{outcome:?}"
+            "{fault:?}: {outcome:?}"
         );
     }
     server.join().unwrap();
