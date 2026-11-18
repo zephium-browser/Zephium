@@ -9356,8 +9356,9 @@ mod tests {
     #[test]
     fn split_selection_is_a_delivered_ui_action_not_a_mutation_admission() {
         let source = include_str!("lib.rs");
+        // Group into Folder goes the same way: the frame knows the selection.
         let branch = source
-            .split(r#"if id == "split.choose" {"#)
+            .split(r#"if matches!(id, "split.choose" | "tab.group") {"#)
             .nth(1)
             .expect("split-selection command branch")
             .split("if let Some(mode)")

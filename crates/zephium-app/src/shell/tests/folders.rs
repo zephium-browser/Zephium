@@ -227,7 +227,6 @@ fn closing_a_folder_tab_keeps_it_asleep_once_then_takes_it_out() {
     );
     assert_eq!(shell.items.children(folder), &held[..2]);
     assert_eq!(shell.recently_closed.len(), closed_before + 1);
-    let held = shell.items.children(folder).to_vec();
 
     // Closing the folder's tabs ends every page and keeps every tab.
     assert_eq!(
