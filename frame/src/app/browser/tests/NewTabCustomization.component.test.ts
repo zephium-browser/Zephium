@@ -26,6 +26,9 @@ const native = vi.hoisted(() => ({
   blocked: vi.fn(),
   time: vi.fn(),
 }));
+
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: native.profile, kind: "default", name: "Alex" }) },
 }));

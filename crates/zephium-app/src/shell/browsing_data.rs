@@ -125,7 +125,7 @@ fn sites_view(hosts: Vec<EngineSite>) -> Vec<SiteDataView> {
 fn range_start(range: BrowsingDataRange) -> Option<i64> {
     range
         .window_seconds()
-        .map(|window| chrono::Utc::now().timestamp() - window)
+        .map(|window| jiff::Timestamp::now().as_second() - window)
 }
 
 impl Shell {
