@@ -75,7 +75,7 @@ impl Gateway {
         let task = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut socket = accept_hdr_async(tcp, Handshake(protocol)).await.unwrap();
-            if ready && socket.send(Message::Text(json!({"type":"ready", "policy_revision":"p1", "listen":{"max_ms":240000}, "speak":{"max_chars":600,"voices":["alloy","echo"],"voice":"alloy"}}).to_string().into())).await.is_err() { return; }
+            if ready && socket.send(Message::Text(json!({"type":"ready", "policy_revision":7, "listen":{"max_ms":240000}, "speak":{"max_chars":600,"voices":["alloy","echo"],"voice":"alloy"}}).to_string().into())).await.is_err() { return; }
             loop {
                 tokio::select! {
                     message = outgoing.recv() => {
@@ -139,7 +139,7 @@ async fn open(
         VoiceLink::open_with_timings(&gateway.target, &credential(), Some(observer), timings)
             .await
             .unwrap();
-    assert!(ready.policy_revision.as_deref() == Some("p1"));
+    assert!(ready.policy_revision.as_deref() == Some("7"));
     assert!(
         ready.listen_max_ms == 240000 && ready.speak_max_chars == 600 && ready.voice == "alloy"
     );
@@ -252,7 +252,7 @@ async fn utterance_partials_preroll_commit_final_and_one_record() {
     let expected = LeadCloudRecord {
         idempotency_key: LISTEN.into(),
         request_id: Some("r1".into()),
-        policy_revision: Some("p1".into()),
+        policy_revision: Some("7".into()),
         accounting: LeadCloudAccounting::Settled {
             charged: Some("23".into()),
         },
@@ -885,4 +885,25 @@ async fn websocket_ping_is_answered_and_protocol_failure_sends_close() {
         matches!(gateway.next().await, Message::Close(Some(close)) if close.code == tungstenite::protocol::frame::coding::CloseCode::Protocol)
     );
     assert!(!link.speak_cancel(None));
+}
+
+#[test]
+fn the_ready_revision_is_a_number_or_text_or_absent() {
+    let ready = |revision: &str| {
+        let frame = format!(
+            r#"{{"type":"ready"{revision},"listen":{{"max_ms":240000}},"speak":{{"max_chars":600,"voices":["marin"],"voice":"marin"}}}}"#
+        );
+        match wire::parse(&frame) {
+            Ok(wire::ServerFrame::Ready {
+                policy_revision, ..
+            }) => Ok(policy_revision),
+            _ => Err(()),
+        }
+    };
+    assert_eq!(ready(r#","policy_revision":7"#), Ok(Some("7".into())));
+    assert_eq!(ready(r#","policy_revision":"p1""#), Ok(Some("p1".into())));
+    assert_eq!(ready(""), Ok(None));
+    assert_eq!(ready(r#","policy_revision":null"#), Ok(None));
+    assert!(ready(r#","policy_revision":-1"#).is_err());
+    assert!(ready(r#","policy_revision":[7]"#).is_err());
 }

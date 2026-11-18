@@ -80,6 +80,7 @@ impl Usage {
 pub(super) enum ServerFrame {
     #[serde(rename = "ready")]
     Ready {
+        #[serde(default, deserialize_with = "revision")]
         policy_revision: Option<String>,
         listen: ListenPolicy,
         speak: SpeakPolicy,
@@ -112,6 +113,23 @@ pub(super) enum ServerFrame {
     Pong,
     #[serde(rename = "closing")]
     Closing { reason: VoiceClosing },
+}
+
+/// The gateway names its policy revision by number; the Cloud record keeps
+/// it as the HTTP header's text.
+fn revision<'de, D: serde::Deserializer<'de>>(from: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Revision {
+        Number(u64),
+        Text(String),
+    }
+    Ok(
+        Option::<Revision>::deserialize(from)?.map(|revision| match revision {
+            Revision::Number(number) => number.to_string(),
+            Revision::Text(text) => text,
+        }),
+    )
 }
 
 pub(super) fn parse(text: &str) -> Result<ServerFrame, ()> {
