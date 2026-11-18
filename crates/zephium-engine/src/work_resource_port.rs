@@ -208,7 +208,8 @@ impl WorkResourceGuard {
         }
     }
     /// Tells the construction's owner that its main-frame load could not
-    /// reach the site; the document still fails.
+    /// reach the site; the document still fails. The platform calls it only
+    /// for the construction load's own failure, never for a later load.
     pub(crate) fn record_unreachable(&self) {
         if let Some(unreachable) = &self.unreachable {
             unreachable.record();
