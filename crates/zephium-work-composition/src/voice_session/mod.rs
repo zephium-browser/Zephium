@@ -65,6 +65,16 @@ pub(crate) enum Input {
     },
     Asked(Result<Asked, Fault>),
     Steered(Result<Asked, Fault>),
+    /// A reply started ahead of the final is held, or could not start.
+    Ahead {
+        generation: u64,
+        result: Result<u64, Fault>,
+    },
+    /// A held reply was released for `text`, or nothing was.
+    Released {
+        text: String,
+        result: Result<Asked, Fault>,
+    },
 }
 
 /// What the window asks of the session.
@@ -317,6 +327,15 @@ enum Queued {
     Stop,
 }
 
+/// The reply started ahead of the final.
+struct Ahead {
+    generation: u64,
+    /// Its handle, once held.
+    held: Option<u64>,
+    /// The final words that release it, once they came.
+    release: Option<String>,
+}
+
 #[derive(Default)]
 struct Assist {
     conversation: Option<String>,
@@ -325,6 +344,7 @@ struct Assist {
     steering: bool,
     queued: Option<Queued>,
     held: VecDeque<PageAssistChangedV1>,
+    ahead: Option<Ahead>,
 }
 
 /// The session's state and its effect executor. Synchronous: inputs go in
@@ -361,6 +381,7 @@ pub(crate) struct Core {
     cache: Cache,
     warmed: bool,
     assist: Assist,
+    ahead_generation: u64,
     shown: Option<View>,
     seq: u32,
     levels_at: Option<u64>,
@@ -485,6 +506,7 @@ impl Core {
             cache: Cache::default(),
             warmed: false,
             assist: Assist::default(),
+            ahead_generation: 0,
             shown: None,
             seq: 0,
             levels_at: None,
@@ -533,6 +555,12 @@ impl Core {
 
     pub(crate) fn input(&mut self, input: Input) {
         if self.disposed {
+            if let Input::Ahead {
+                result: Ok(held), ..
+            } = input
+            {
+                self.ports.assistant.discard(held);
+            }
             return;
         }
         let now = self.now();
@@ -549,6 +577,8 @@ impl Core {
             Input::Link { .. } => {}
             Input::Asked(result) => self.asked(result),
             Input::Steered(result) => self.steered(result),
+            Input::Ahead { generation, result } => self.held(generation, result),
+            Input::Released { text, result } => self.released(text, result),
         }
         self.run(now);
     }
@@ -728,14 +758,43 @@ impl Core {
             }
             Effect::CancelUtterance { id } => self.cancel_capture(&id),
             Effect::Ask { text } => {
-                self.assist.asking = true;
-                self.assist.queued = None;
-                self.assist.held.clear();
-                self.tasks.push(Box::pin({
-                    let ask = self.ports.assistant.ask(text, self.preferences.spoken);
-                    async move { Input::Asked(ask.await) }
+                self.begin_ask();
+                self.ask(text);
+            }
+            Effect::AskAhead { text } => {
+                self.discard_ahead();
+                self.ahead_generation += 1;
+                let generation = self.ahead_generation;
+                self.assist.ahead = Some(Ahead {
+                    generation,
+                    held: None,
+                    release: None,
+                });
+                let ahead = self
+                    .ports
+                    .assistant
+                    .ask_ahead(text, self.preferences.spoken);
+                self.tasks.push(Box::pin(async move {
+                    Input::Ahead {
+                        generation,
+                        result: ahead.await,
+                    }
                 }));
             }
+            Effect::ReleaseAhead { text } => {
+                self.begin_ask();
+                match self.assist.ahead.take() {
+                    Some(Ahead {
+                        held: Some(held), ..
+                    }) => self.release(held, text),
+                    Some(mut ahead) => {
+                        ahead.release = Some(text);
+                        self.assist.ahead = Some(ahead);
+                    }
+                    None => self.ask(text),
+                }
+            }
+            Effect::DiscardAhead => self.discard_ahead(),
             Effect::Steer { reply, text } => match (reply, self.assist.conversation.clone()) {
                 (Some(reply), Some(conversation)) if !self.assist.asking => {
                     self.steer(conversation, reply, text);
@@ -1431,6 +1490,76 @@ impl Core {
     }
 
     // Assistant.
+
+    fn begin_ask(&mut self) {
+        self.assist.asking = true;
+        self.assist.queued = None;
+        self.assist.held.clear();
+    }
+
+    fn ask(&mut self, text: String) {
+        let ask = self.ports.assistant.ask(text, self.preferences.spoken);
+        self.tasks
+            .push(Box::pin(async move { Input::Asked(ask.await) }));
+    }
+
+    fn release(&mut self, held: u64, text: String) {
+        let release = self.ports.assistant.release(held, text.clone());
+        self.tasks.push(Box::pin(async move {
+            Input::Released {
+                text,
+                result: release.await,
+            }
+        }));
+    }
+
+    fn discard_ahead(&mut self) {
+        if let Some(Ahead {
+            held: Some(held), ..
+        }) = self.assist.ahead.take()
+        {
+            self.ports.assistant.discard(held);
+        }
+    }
+
+    /// A reply started ahead is held: released at once when its final came
+    /// meanwhile, discarded when it is no longer wanted. One that could not
+    /// start leaves its final to be asked.
+    fn held(&mut self, generation: u64, result: Result<u64, Fault>) {
+        let wanted = self
+            .assist
+            .ahead
+            .as_ref()
+            .is_some_and(|ahead| ahead.generation == generation);
+        match (wanted, result) {
+            (false, Ok(held)) => self.ports.assistant.discard(held),
+            (false, Err(_)) => {}
+            (true, result) => {
+                let Some(mut ahead) = self.assist.ahead.take() else {
+                    return;
+                };
+                match (result, ahead.release.take()) {
+                    (Ok(held), Some(text)) => self.release(held, text),
+                    (Ok(held), None) => {
+                        ahead.held = Some(held);
+                        self.assist.ahead = Some(ahead);
+                    }
+                    (Err(_), Some(text)) => self.ask(text),
+                    (Err(_), None) => {}
+                }
+            }
+        }
+    }
+
+    /// A release that did not happen leaves the words to be asked, as at a
+    /// final with nothing started ahead.
+    fn released(&mut self, text: String, result: Result<Asked, Fault>) {
+        match result {
+            Ok(asked) => self.asked(Ok(asked)),
+            Err(_) if self.assist.asking => self.ask(text),
+            Err(_) => {}
+        }
+    }
 
     /// Holds a steer or stop until the ask it follows is admitted; a steer it
     /// replaces is answered as refused so every steer gets one answer.

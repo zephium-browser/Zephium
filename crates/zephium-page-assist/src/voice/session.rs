@@ -19,6 +19,18 @@ const MAX_SHOWN_CHARS: usize = 500;
 const MAX_LABEL_CHARS: usize = 120;
 /// Reply events held while the reply they belong to awaits admission.
 const MAX_EARLY_EVENTS: usize = 256;
+/// Fewest words a reply is started ahead of the final on: shorter requests
+/// are follow-ups, decisions or stops.
+pub const AHEAD_MIN_WORDS: usize = 4;
+/// Replies started ahead of the final for one utterance: a second only after
+/// a later partial changed the first one's words.
+pub const AHEAD_MAX_STARTS: u8 = 2;
+/// How long the words heard at release must stay unchanged, counted from the
+/// release or the last partial, before a reply starts on them. Measured on
+/// the gateway, the partial at release is still two to four words short and
+/// later partials keep arriving until the full one, 75-530 ms after release;
+/// a quiet this long means none is coming.
+pub const AHEAD_QUIET_MS: u64 = 300;
 
 /// Hands out a fresh utterance or speech id (a UUIDv4 in production).
 pub type IdSource = Box<dyn FnMut() -> String + Send>;
@@ -367,6 +379,21 @@ pub enum Effect {
         /// The person's words.
         text: String,
     },
+    /// Start a reply on a partial transcript, ahead of the final, and hold
+    /// everything it does unseen: nothing of it may show, sound or take
+    /// effect until it is released. At most one is alive.
+    AskAhead {
+        /// The words it starts on.
+        text: String,
+    },
+    /// Ask with these words by releasing the reply started ahead on exactly
+    /// them; answered like `Ask`.
+    ReleaseAhead {
+        /// The final words, equal to the ones it started on.
+        text: String,
+    },
+    /// Discard the reply started ahead, without a trace.
+    DiscardAhead,
     /// Stop at the next safe step boundary, then continue this conversation
     /// with these words.
     Steer {
@@ -430,6 +457,10 @@ struct Utterance {
     at: u64,
     confirm: Option<ConfirmKey>,
     words: String,
+    /// The latest partial as it would be asked.
+    said: String,
+    /// When it arrived.
+    said_at: u64,
 }
 
 struct Pending {
@@ -439,6 +470,16 @@ struct Pending {
     at: u64,
     ack: Option<String>,
     result: Option<Result<String, Fault>>,
+    said: String,
+    said_at: u64,
+    /// Replies started ahead of its final.
+    starts: u8,
+}
+
+/// The reply started ahead of an utterance's final.
+struct Ahead {
+    utterance: String,
+    text: String,
 }
 
 /// One voice session.
@@ -457,6 +498,7 @@ pub struct Session {
     fading_since: Option<u64>,
     answer_tail: bool,
     early: Vec<(u32, AssistEvent)>,
+    ahead: Option<Ahead>,
     speeches: Vec<String>,
     interim: String,
     heard: Option<String>,
@@ -482,6 +524,7 @@ impl Session {
             fading_since: None,
             answer_tail: false,
             early: Vec::new(),
+            ahead: None,
             speeches: Vec::new(),
             interim: String::new(),
             heard: None,
@@ -497,6 +540,7 @@ impl Session {
             return fx;
         }
         self.expire(now, &mut fx);
+        self.ahead(false, now, &mut fx);
         match event {
             Event::KeyDown => self.key_down(now, &mut fx),
             Event::KeyUp => self.key_up(now, &mut fx),
@@ -508,7 +552,7 @@ impl Session {
             Event::MicFailed { fault } => self.mic_failed(fault, &mut fx),
             Event::LinkReady => self.link = Link::Ready,
             Event::LinkLost { fault } => self.link_lost(fault, now, &mut fx),
-            Event::Partial { id, text } => self.partial(&id, &text),
+            Event::Partial { id, text } => self.partial(&id, &text, now, &mut fx),
             Event::Final { id, text } => self.resolve(&id, Ok(text), now, &mut fx),
             Event::ListenFailed { id, fault } => self.resolve(&id, Err(fault), now, &mut fx),
             Event::Admitted { reply } => self.admitted(reply, &mut fx),
@@ -555,7 +599,8 @@ impl Session {
         let fade = self
             .fading_since
             .map(|since| since.saturating_add(self.config.settled_ms));
-        finals.chain(warm).chain(fade).min()
+        let quiet = self.quiet_at();
+        finals.chain(warm).chain(fade).chain(quiet).min()
     }
 
     /// What the interface shows now.
@@ -619,6 +664,7 @@ impl Session {
     }
 
     fn begin(&mut self, press: Press, now: u64, fx: &mut Vec<Effect>) {
+        self.drop_ahead(fx);
         let flushed = !self.speeches.is_empty();
         if flushed {
             fx.push(Effect::FlushSpeech);
@@ -655,6 +701,8 @@ impl Session {
             at: now,
             confirm,
             words: String::new(),
+            said: String::new(),
+            said_at: now,
         });
     }
 
@@ -682,6 +730,9 @@ impl Session {
             at: now,
             ack,
             result: None,
+            said: utterance.said,
+            said_at: utterance.said_at,
+            starts: 0,
         });
     }
 
@@ -697,6 +748,7 @@ impl Session {
     }
 
     fn escape(&mut self, now: u64, fx: &mut Vec<Effect>) {
+        self.drop_ahead(fx);
         let mut discarded = self.end_listening(now, fx);
         let mut acked = None;
         for pending in std::mem::take(&mut self.finals) {
@@ -750,6 +802,7 @@ impl Session {
     fn link_lost(&mut self, fault: Option<Fault>, now: u64, fx: &mut Vec<Effect>) {
         self.link = Link::Down;
         self.speeches.clear();
+        self.drop_ahead(fx);
         let mut lost = self.end_listening(now, fx);
         for pending in self.finals.drain(..) {
             fx.push(Effect::CancelUtterance { id: pending.id });
@@ -760,14 +813,91 @@ impl Session {
         }
     }
 
-    fn partial(&mut self, id: &str, text: &str) {
+    fn partial(&mut self, id: &str, text: &str, now: u64, fx: &mut Vec<Effect>) {
         let ours = self.open.as_ref().is_some_and(|u| u.id == id)
             || self.finals.iter().any(|p| p.id == id && p.result.is_none());
         if ours {
             self.interim = text::bounded(&text::clean(text), MAX_SHOWN_CHARS);
         }
+        let said = asked(text);
         if let Some(utterance) = self.open.as_mut().filter(|u| u.id == id) {
             utterance.words = text::bounded(text, MAX_SHOWN_CHARS);
+            utterance.said = said;
+            utterance.said_at = now;
+        } else if let Some(pending) = self
+            .finals
+            .iter_mut()
+            .find(|p| p.id == id && p.result.is_none())
+        {
+            pending.said = said;
+            pending.said_at = now;
+            self.ahead(true, now, fx);
+        }
+    }
+
+    /// Starts, keeps or discards the reply started ahead of the final, for
+    /// the one utterance waiting on its final. Its words must be the latest
+    /// partial's; a partial after release starts it at once, the words at
+    /// release only once they stayed unchanged for [`AHEAD_QUIET_MS`].
+    fn ahead(&mut self, arrived: bool, now: u64, fx: &mut Vec<Effect>) {
+        let Some(pending) = self.finals.first() else {
+            return;
+        };
+        if let Some(ahead) = &self.ahead {
+            if ahead.utterance == pending.id && ahead.text == pending.said {
+                return;
+            }
+            self.drop_ahead(fx);
+        }
+        let quiet = self.quiet_at().is_some_and(|at| now >= at);
+        if !(arrived || quiet) || !self.may_start() {
+            return;
+        }
+        let Some(pending) = self.finals.first_mut() else {
+            return;
+        };
+        pending.starts += 1;
+        let text = pending.said.clone();
+        fx.push(Effect::AskAhead { text: text.clone() });
+        self.ahead = Some(Ahead {
+            utterance: pending.id.clone(),
+            text,
+        });
+    }
+
+    /// Whether a reply may start ahead of the final now: one utterance
+    /// waits on its final, no reply runs or waits, and its words are a
+    /// request of a few words, neither a decision nor a stop.
+    fn may_start(&self) -> bool {
+        let [pending] = self.finals.as_slice() else {
+            return false;
+        };
+        let language = self.config.language;
+        self.ahead.is_none()
+            && self.open.is_none()
+            && self.reply.is_none()
+            && pending.result.is_none()
+            && pending.starts < AHEAD_MAX_STARTS
+            && phrases::words(&pending.said) >= AHEAD_MIN_WORDS
+            && phrases::decision(&pending.said, language).is_none()
+            && !phrases::halt(&pending.said, language)
+    }
+
+    /// When the words at release have been quiet long enough to start on;
+    /// none once a start was made for the utterance or none may be.
+    fn quiet_at(&self) -> Option<u64> {
+        let pending = self.finals.first()?;
+        (pending.starts == 0 && self.may_start()).then(|| {
+            pending
+                .said_at
+                .max(pending.at)
+                .saturating_add(AHEAD_QUIET_MS)
+        })
+    }
+
+    fn drop_ahead(&mut self, fx: &mut Vec<Effect>) {
+        if self.ahead.take().is_some() {
+            fx.push(Effect::DiscardAhead);
         }
     }
 
@@ -826,15 +956,23 @@ impl Session {
     fn drain(&mut self, fx: &mut Vec<Effect>) {
         while self.finals.first().is_some_and(|p| p.result.is_some()) {
             let Pending {
+                id,
                 held,
                 confirm,
                 ack,
                 result,
                 ..
             } = self.finals.remove(0);
+            let ahead = self
+                .ahead
+                .take_if(|ahead| ahead.utterance == id)
+                .map(|ahead| ahead.text);
             match result {
-                Some(Ok(text)) => self.heard(held, confirm, ack, &text, fx),
+                Some(Ok(text)) => self.heard(held, confirm, ack, &text, ahead, fx),
                 Some(Err(fault)) => {
+                    if ahead.is_some() {
+                        fx.push(Effect::DiscardAhead);
+                    }
                     self.retract(ack, fx);
                     self.fail(fault, fx);
                 }
@@ -855,10 +993,26 @@ impl Session {
         confirm: Option<ConfirmKey>,
         acked: Option<String>,
         text: &str,
+        ahead: Option<String>,
         fx: &mut Vec<Effect>,
     ) {
-        let text =
-            text::verbatim_prefix(&text::clean(text), PAGE_ASSIST_MAX_QUESTION_BYTES).to_owned();
+        let text = asked(text);
+        // Only the exact words it started on release it: the model types
+        // what it was given into pages.
+        let release = match ahead {
+            Some(ahead)
+                if ahead == text
+                    && self.reply.is_none()
+                    && !phrases::halt(&text, self.config.language) =>
+            {
+                true
+            }
+            Some(_) => {
+                fx.push(Effect::DiscardAhead);
+                false
+            }
+            None => false,
+        };
         if self.open.is_none() && self.finals.is_empty() {
             self.interim.clear();
         }
@@ -902,7 +1056,11 @@ impl Session {
                 return;
             }
             None => {
-                fx.push(Effect::Ask { text: text.clone() });
+                fx.push(if release {
+                    Effect::ReleaseAhead { text: text.clone() }
+                } else {
+                    Effect::Ask { text: text.clone() }
+                });
                 self.reply = Some(Reply {
                     awaiting: 1,
                     ..Reply::default()
@@ -1157,6 +1315,7 @@ impl Session {
     }
 
     fn dispose(&mut self, fx: &mut Vec<Effect>) {
+        self.drop_ahead(fx);
         if let Some(utterance) = self.open.take() {
             fx.push(Effect::CancelUtterance { id: utterance.id });
         }
@@ -1203,6 +1362,11 @@ impl Session {
             self.shown = Some(view);
         }
     }
+}
+
+/// The words as they are asked.
+fn asked(text: &str) -> String {
+    text::verbatim_prefix(&text::clean(text), PAGE_ASSIST_MAX_QUESTION_BYTES).to_owned()
 }
 
 fn terminal(state: ReplyState) -> bool {
@@ -1397,6 +1561,7 @@ mod tests {
         WorkConfirmCategoryV1 as Category,
     };
     use proptest::prelude::*;
+    use std::collections::HashMap;
 
     fn ids() -> IdSource {
         let mut next = 0_u32;
@@ -2206,7 +2371,10 @@ mod tests {
                 text: "open the cheapest flight to Lisbon".into(),
             },
         );
-        assert!(has(&fx, |e| matches!(e, Effect::Ask { .. })));
+        assert!(
+            has(&fx, |e| matches!(e, Effect::ReleaseAhead { .. })),
+            "words quiet since release were started on ahead of the final"
+        );
         assert!(!has(&fx, is_ack));
 
         let mut run = Run::new();
@@ -2595,6 +2763,276 @@ mod tests {
         assert_eq!(run.state(), State::Settled(Outcome::NotConfirmed));
     }
 
+    const FLIGHT: &str = "open the cheapest flight to Lisbon";
+
+    fn is_ahead(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::AskAhead { .. } | Effect::ReleaseAhead { .. } | Effect::DiscardAhead
+        )
+    }
+
+    fn ahead_of(fx: &[Effect]) -> Vec<Effect> {
+        fx.iter().filter(|e| is_ahead(e)).cloned().collect()
+    }
+
+    fn starts(text: &str) -> Effect {
+        Effect::AskAhead { text: text.into() }
+    }
+
+    impl Run {
+        /// Presses, says `before` and releases the key; the utterance now
+        /// waits on its final.
+        fn released(&mut self, before: &str) -> String {
+            let id = self.press();
+            if !before.is_empty() {
+                partial(self, &id, before);
+            }
+            assert!(ahead_of(&self.at(500, Event::KeyUp)).is_empty());
+            id
+        }
+
+        fn late(&mut self, id: &str, text: &str) -> Vec<Effect> {
+            self.at(
+                40,
+                Event::Partial {
+                    id: id.into(),
+                    text: text.into(),
+                },
+            )
+        }
+
+        fn final_text(&mut self, id: &str, text: &str) -> Vec<Effect> {
+            self.at(
+                40,
+                Event::Final {
+                    id: id.into(),
+                    text: text.into(),
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn a_partial_after_release_starts_ahead_and_the_same_final_releases_it() {
+        let mut run = Run::new();
+        let id = run.released("open the cheapest");
+        let fx = run.late(&id, FLIGHT);
+        assert_eq!(ahead_of(&fx), [starts(FLIGHT)]);
+        assert!(
+            !has(&fx, |e| matches!(
+                e,
+                Effect::Ask { .. } | Effect::Speak { .. }
+            )),
+            "{fx:?}"
+        );
+        assert_eq!(run.state(), State::Finalizing, "nothing of it shows");
+        assert!(ahead_of(&run.late(&id, &format!("  {FLIGHT} "))).is_empty());
+        let fx = run.final_text(&id, &format!("{FLIGHT}  "));
+        assert_eq!(
+            fx[0],
+            Effect::ReleaseAhead {
+                text: FLIGHT.into()
+            }
+        );
+        assert!(!has(&fx, |e| matches!(
+            e,
+            Effect::Ask { .. } | Effect::DiscardAhead
+        )));
+        assert_eq!(run.state(), State::Working(Work::Thinking));
+        assert!(run.at(10, Event::Admitted { reply: 7 }).is_empty());
+        assert_eq!(
+            spoken(&run.text(0, "It leaves at nine.\n")),
+            [says("It leaves at nine.")]
+        );
+    }
+
+    #[test]
+    fn a_release_answers_exactly_as_an_ask_would() {
+        let script = |ahead: bool| {
+            let mut run = Run::new();
+            let id = run.released("open the cheapest");
+            if ahead {
+                run.late(&id, FLIGHT);
+            }
+            let mut all = run.final_text(&id, FLIGHT);
+            all.extend(run.at(10, Event::Admitted { reply: 7 }));
+            all.extend(run.text(0, "It leaves at nine. "));
+            all.extend(run.reply(AssistEvent::Done {
+                cost: None,
+                end: None,
+            }));
+            (all, run.session.view())
+        };
+        let (mut released, released_view) = script(true);
+        let (asked, asked_view) = script(false);
+        assert_eq!(
+            released[0],
+            Effect::ReleaseAhead {
+                text: FLIGHT.into()
+            }
+        );
+        released[0] = Effect::Ask {
+            text: FLIGHT.into(),
+        };
+        assert_eq!(released, asked);
+        assert_eq!(released_view, asked_view);
+    }
+
+    #[test]
+    fn other_final_words_discard_it_first_even_when_they_fold_alike() {
+        let mut run = Run::new();
+        let id = run.released("send hello");
+        run.late(&id, "send hello world to Ana");
+        let fx = run.final_text(&id, "Send: Hello, World! to Ana");
+        assert_eq!(
+            ahead_of(&fx),
+            [Effect::DiscardAhead],
+            "folding is not equality"
+        );
+        assert!(
+            position(&fx, &Effect::DiscardAhead)
+                < position(
+                    &fx,
+                    &Effect::Ask {
+                        text: "Send: Hello, World! to Ana".into()
+                    }
+                )
+        );
+    }
+
+    #[test]
+    fn barge_in_escape_link_loss_timeout_and_failed_or_empty_finals_discard_it() {
+        type Ends = fn(&mut Run, &str) -> Vec<Effect>;
+        let ends: [(&str, Ends); 6] = [
+            ("barge-in", |run, _| run.at(10, Event::KeyDown)),
+            ("escape", |run, _| run.at(10, Event::Escape)),
+            ("link loss", |run, _| {
+                run.at(10, Event::LinkLost { fault: None })
+            }),
+            ("timeout", |run, _| run.at(8_000, Event::Tick)),
+            ("empty final", |run, id| run.final_text(id, "  ")),
+            ("failed final", |run, id| {
+                run.at(
+                    10,
+                    Event::ListenFailed {
+                        id: id.into(),
+                        fault: Fault::RateLimited,
+                    },
+                )
+            }),
+        ];
+        for (name, end) in ends {
+            let mut run = Run::new();
+            let id = run.released("open the");
+            assert_eq!(ahead_of(&run.late(&id, FLIGHT)), [starts(FLIGHT)]);
+            let fx = end(&mut run, &id);
+            assert_eq!(ahead_of(&fx), [Effect::DiscardAhead], "{name}: {fx:?}");
+            assert!(
+                !has(&fx, |e| matches!(
+                    e,
+                    Effect::Ask { .. } | Effect::ReleaseAhead { .. }
+                )),
+                "{name}"
+            );
+            assert!(run.session.ahead.is_none(), "{name}");
+            assert!(
+                ahead_of(&run.final_text(&id, FLIGHT)).is_empty(),
+                "{name}: a late final finds nothing to release"
+            );
+        }
+        let mut run = Run::new();
+        let id = run.released("open the");
+        run.late(&id, FLIGHT);
+        assert_eq!(
+            ahead_of(&run.at(10, Event::Dispose)),
+            [Effect::DiscardAhead]
+        );
+    }
+
+    #[test]
+    fn short_requests_decisions_stops_and_busy_replies_never_start_ahead() {
+        for words in ["open the flight", "do not do it", "please stop", "yes"] {
+            let mut run = Run::new();
+            let id = run.released("");
+            assert!(ahead_of(&run.late(&id, words)).is_empty(), "{words}");
+            assert!(ahead_of(&run.at(1_000, Event::Tick)).is_empty(), "{words}");
+            assert_eq!(run.session.quiet_at(), None, "{words}");
+        }
+        let mut run = Run::new();
+        run.working();
+        let id = run.released("make it");
+        assert!(ahead_of(&run.late(&id, "make it a window seat")).is_empty());
+        assert!(ahead_of(&run.at(1_000, Event::Tick)).is_empty());
+        assert!(matches!(
+            run.final_text(&id, "make it a window seat")[0],
+            Effect::Steer { .. }
+        ));
+
+        let mut run = Run::new();
+        run.confirming();
+        let id = run.released("");
+        assert!(ahead_of(&run.late(&id, "book the second one instead")).is_empty());
+
+        let mut run = Run::new();
+        run.say(FLIGHT, 500);
+        let id = run.released("");
+        assert!(
+            ahead_of(&run.late(&id, "and the cheapest hotel too")).is_empty(),
+            "an ask awaiting admission is a running reply"
+        );
+    }
+
+    #[test]
+    fn a_differing_partial_starts_a_second_and_never_a_third() {
+        let mut run = Run::new();
+        let id = run.released("open the");
+        assert_eq!(
+            ahead_of(&run.late(&id, "open the cheapest flight")),
+            [starts("open the cheapest flight")]
+        );
+        assert_eq!(
+            ahead_of(&run.late(&id, FLIGHT)),
+            [Effect::DiscardAhead, starts(FLIGHT)]
+        );
+        assert_eq!(
+            ahead_of(&run.late(&id, "open the cheapest flight to Lisbon today")),
+            [Effect::DiscardAhead]
+        );
+        assert!(ahead_of(&run.late(&id, FLIGHT)).is_empty());
+        assert!(ahead_of(&run.at(1_000, Event::Tick)).is_empty());
+        assert_eq!(run.session.finals[0].starts, AHEAD_MAX_STARTS);
+        assert!(matches!(run.final_text(&id, FLIGHT)[0], Effect::Ask { .. }));
+    }
+
+    #[test]
+    fn the_words_at_release_start_only_after_a_quiet_window() {
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, FLIGHT);
+        run.at(500, Event::KeyUp);
+        let due = run.session.deadline().unwrap();
+        assert_eq!(due, run.now + AHEAD_QUIET_MS);
+        assert!(ahead_of(&run.at(AHEAD_QUIET_MS - 1, Event::Tick)).is_empty());
+        assert_eq!(ahead_of(&run.at(1, Event::Tick)), [starts(FLIGHT)]);
+        assert!(run.session.deadline() > Some(run.now + AHEAD_QUIET_MS));
+        assert!(matches!(
+            run.final_text(&id, FLIGHT)[0],
+            Effect::ReleaseAhead { .. }
+        ));
+
+        let mut run = Run::new();
+        let id = run.press();
+        partial(&mut run, &id, "open the cheapest");
+        run.at(500, Event::KeyUp);
+        assert!(ahead_of(&run.at(200, Event::Tick)).is_empty());
+        assert_eq!(
+            ahead_of(&run.late(&id, FLIGHT)),
+            [starts(FLIGHT)],
+            "a partial after release does not wait"
+        );
+    }
+
     struct Driver {
         run: Run,
         open: Vec<String>,
@@ -2606,6 +3044,10 @@ mod tests {
         acked: Vec<String>,
         reply: u32,
         outstanding: u32,
+        /// The words of the reply started ahead, while it is alive.
+        ahead: Option<String>,
+        /// Replies started ahead, by utterance.
+        starts: HashMap<String, u8>,
     }
 
     impl Driver {
@@ -2616,6 +3058,8 @@ mod tests {
                 "no",
                 "open the cheapest flight please",
                 "and book it",
+                "and book it for two please",
+                "Open the cheapest flight, please.",
             ];
             let first = |list: &Vec<String>| list.first().cloned().unwrap_or_else(|| "none".into());
             let states = [
@@ -2628,7 +3072,7 @@ mod tests {
                 reply: self.reply,
                 event,
             };
-            match code % 26 {
+            match code % 27 {
                 0 | 1 => Event::KeyDown,
                 2 | 3 => Event::KeyUp,
                 4 => Event::Escape,
@@ -2730,6 +3174,21 @@ mod tests {
                 24 => Event::SpeechStarted {
                     id: first(&self.speeches),
                 },
+                26 => Event::Partial {
+                    id: self
+                        .pending
+                        .get(usize::from(pick) % self.pending.len().max(1))
+                        .cloned()
+                        .unwrap_or_default(),
+                    text: [
+                        "open the cheapest flight please",
+                        "open the cheapest",
+                        "and book it for two please",
+                        "do not do it",
+                        "yes",
+                    ][usize::from(pick) % 5]
+                        .into(),
+                },
                 _ => Event::Tick,
             }
         }
@@ -2745,12 +3204,17 @@ mod tests {
             let mut acks = 0;
             let key_up = event == Event::KeyUp;
             let candidates = self.pending.clone();
+            let final_words = match &event {
+                Event::Final { text, .. } => Some(asked(text)),
+                _ => None,
+            };
+            let idle_before = self.run.session.reply.is_none();
             if matches!(event, Event::MicFailed { .. }) {
                 self.mic = false;
             }
-            if matches!(event, Event::Admitted { .. } | Event::Refused { .. }) {
-                self.outstanding = self.outstanding.saturating_sub(1);
-            }
+            // An admission answers the oldest ask still awaited, which may be
+            // one this very event's timeouts emitted first.
+            let answers = matches!(event, Event::Admitted { .. } | Event::Refused { .. });
             if let Event::SpeechEnded { id } | Event::SpeechFailed { id, .. } = &event {
                 self.speeches.retain(|s| s != id);
             }
@@ -2804,6 +3268,38 @@ mod tests {
                         self.speeches.clear();
                     }
                     Effect::Ask { .. } | Effect::Steer { .. } => self.outstanding += 1,
+                    Effect::AskAhead { text } => {
+                        prop_assert!(self.ahead.is_none(), "two replies started ahead");
+                        prop_assert!(idle_before, "started ahead while a reply ran");
+                        prop_assert!(phrases::words(text) >= AHEAD_MIN_WORDS);
+                        prop_assert!(phrases::decision(text, Language::En).is_none());
+                        prop_assert!(!phrases::halt(text, Language::En));
+                        // Only the one utterance left waiting is started on;
+                        // earlier ones resolve first, in commit order.
+                        let Some(utterance) = candidates.last() else {
+                            return Err(TestCaseError::fail(
+                                "started ahead of no waiting utterance",
+                            ));
+                        };
+                        let starts = self.starts.entry(utterance.clone()).or_default();
+                        *starts += 1;
+                        prop_assert!(*starts <= AHEAD_MAX_STARTS, "a third start");
+                        self.ahead = Some(text.clone());
+                    }
+                    Effect::DiscardAhead => {
+                        prop_assert!(self.ahead.take().is_some(), "discarded nothing");
+                    }
+                    Effect::ReleaseAhead { text } => {
+                        let alive = self.ahead.take();
+                        prop_assert_eq!(alive.as_ref(), Some(text));
+                        prop_assert_eq!(
+                            final_words.as_ref(),
+                            Some(text),
+                            "released on other words"
+                        );
+                        prop_assert!(idle_before, "released over a running reply");
+                        self.outstanding += 1;
+                    }
                     Effect::Decide { .. } => {
                         prop_assert!(
                             candidates.iter().any(|c| self.held.contains(c)),
@@ -2812,6 +3308,9 @@ mod tests {
                     }
                     _ => {}
                 }
+            }
+            if answers {
+                self.outstanding = self.outstanding.saturating_sub(1);
             }
             let resolved: Vec<String> = self
                 .pending
@@ -2838,6 +3337,20 @@ mod tests {
                 }
             }
             prop_assert!(session.early.len() <= MAX_EARLY_EVENTS);
+            prop_assert_eq!(
+                session.ahead.as_ref().map(|ahead| &ahead.text),
+                self.ahead.as_ref(),
+                "an early start ended without its effect"
+            );
+            if let Some(ahead) = &session.ahead {
+                prop_assert!(
+                    session
+                        .finals
+                        .iter()
+                        .any(|p| p.id == ahead.utterance && p.result.is_none()),
+                    "started ahead of no waiting utterance"
+                );
+            }
             let done = Speech::Line(Line::Closing(Closing::Done));
             if spoken(&fx).contains(&done) {
                 prop_assert_eq!(
@@ -2867,7 +3380,7 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(512))]
         #[test]
         fn invariants_hold_under_any_sequence(
-            steps in proptest::collection::vec((0u8..26, 0u8..255, 0u64..3_000), 1..120),
+            steps in proptest::collection::vec((0u8..27, 0u8..255, 0u64..3_000), 1..120),
         ) {
             let mut driver = Driver {
                 run: Run::new(),
@@ -2880,6 +3393,8 @@ mod tests {
                 acked: Vec::new(),
                 reply: 7,
                 outstanding: 0,
+                ahead: None,
+                starts: HashMap::new(),
             };
             for (code, pick, after) in steps {
                 let event = driver.event(code, pick);
@@ -2900,8 +3415,9 @@ mod tests {
             prop_assert!(view.fault.is_none_or(Fault::persists));
             prop_assert!(!view.mic && !driver.mic, "microphone left open");
             prop_assert!(driver.run.session.open.is_none() && driver.run.session.finals.is_empty());
+            prop_assert!(driver.ahead.is_none() && driver.run.session.ahead.is_none(), "an early start outlived its utterance");
             prop_assert!(driver.run.session.on(Event::Dispose, driver.run.now).iter().all(|e| !matches!(e, Effect::Speak { .. })), "spoke on dispose");
-            for code in 0..26 {
+            for code in 0..27 {
                 let event = driver.event(code, 3);
                 prop_assert!(driver.run.session.on(event, driver.run.now).is_empty(), "effect after dispose");
             }

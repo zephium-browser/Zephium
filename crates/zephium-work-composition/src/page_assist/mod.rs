@@ -17,7 +17,7 @@ mod tools;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -51,6 +51,15 @@ const HISTORY: u32 = zephium_core::ports::store::MAX_CHATS as u32;
 const MAX_PICKS: usize = 3;
 /// Longest a steer waits for the running reply to reach a safe boundary.
 const STEER_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Most events a reply started ahead of its words holds unseen; past it the
+/// reply is discarded and the words are asked once final.
+const MAX_AHEAD_EVENTS: usize = 256;
+/// Longest a reply started ahead of its words waits to be released before
+/// it discards itself; well past the voice session's final timeout.
+const AHEAD_HOLD_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Model call sources of released replies remembered, so a charge that
+/// settles later joins the reply.
+const MAX_AHEAD_SOURCES: usize = 64;
 
 /// The ports the service works through.
 #[derive(Clone)]
@@ -193,6 +202,93 @@ struct PendingStyle {
     rules: u16,
 }
 
+/// How far a reply started ahead of its words has come.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AheadPhase {
+    /// Nothing of it is seen: its conversation, data and events are its own.
+    Held,
+    /// It joined the conversation; its held events are being sent, in order.
+    Releasing,
+    /// It runs as any reply.
+    Released,
+}
+
+/// What a held reply sees in place of the Space's conversation.
+struct Shadow {
+    conversation: Conversation,
+    replies: HashMap<u32, ReplyData>,
+    /// Addresses it admitted that the conversation does not have yet.
+    links: HashSet<String>,
+}
+
+/// A reply started on a partial transcript. Until it is released it reads
+/// pages and calls the model, but nothing of it is seen: it works on its own
+/// copy of the conversation, its events are held, and it stops before its
+/// first tool and before its end. Discarded, it leaves nothing behind.
+struct Ahead {
+    conversation: String,
+    space: String,
+    profile: ProfileId,
+    reply: u32,
+    /// The words it was asked with, exactly.
+    words: String,
+    /// What its model calls are made for.
+    source: String,
+    phase: AheadPhase,
+    /// The conversation as it was when the reply started; it is released
+    /// only onto that same conversation.
+    before: Conversation,
+    shadow: Option<Shadow>,
+    events: Vec<PageAssistChangedV1>,
+    running: Option<Running>,
+    cancel: Arc<Cancel>,
+    gate: Arc<Notify>,
+}
+
+/// A reply started ahead of its words, to release or discard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Held {
+    /// Its handle.
+    pub id: u64,
+    /// The conversation it would join.
+    pub conversation: String,
+    /// What its model calls are made for, for local usage records; it names
+    /// no conversation, so a discarded reply's charge joins none.
+    pub source: String,
+}
+
+/// The conversation as one reply sees it: the Space's, or a held reply's
+/// own copy.
+struct Seen<'a> {
+    conversation: &'a mut Conversation,
+    replies: &'a mut HashMap<u32, ReplyData>,
+    links: &'a mut HashSet<String>,
+    /// The Space's conversation behind a held reply's copy.
+    base: Option<&'a Live>,
+}
+
+impl Seen<'_> {
+    /// An earlier reply's data.
+    fn earlier(&self, reply: u32) -> Option<&ReplyData> {
+        self.base
+            .map_or(&*self.replies, |base| &base.replies)
+            .get(&reply)
+    }
+
+    /// Admits an address the reply may open; false once the conversation
+    /// holds as many as it may.
+    fn admit_link(&mut self, link: String) -> bool {
+        let known = self.base.map_or(0, |base| base.links.len());
+        if known + self.links.len() >= MAX_LINKS {
+            return false;
+        }
+        if !self.base.is_some_and(|base| base.links.contains(&link)) {
+            self.links.insert(link);
+        }
+        true
+    }
+}
+
 #[derive(Default)]
 struct ReplyData {
     book: CitationBook,
@@ -249,6 +345,10 @@ struct State {
     styles: HashMap<ProfileId, Vec<StoredStyle>>,
     next_style: u64,
     next_conversation: u64,
+    ahead: HashMap<u64, Ahead>,
+    next_ahead: u64,
+    /// Model call sources of released replies, and their conversations.
+    sources: VecDeque<(String, String)>,
 }
 
 struct Shared {
@@ -321,6 +421,15 @@ fn written_links(words: &str) -> impl Iterator<Item = String> + '_ {
         .map(str::to_owned)
 }
 
+/// An ask that passed its checks.
+struct Asking {
+    words: String,
+    profile: ProfileId,
+    admitted: Vec<Admitted>,
+    shown: Vec<PageAssistAttachmentV1>,
+    title: Option<String>,
+}
+
 enum Admitted {
     Page {
         tab: String,
@@ -380,6 +489,96 @@ impl PageAssist {
         let sent = event.is_some();
         self.emit_all(event);
         sent
+    }
+
+    /// Folds an event into a reply that may be held: held, it goes to the
+    /// reply's own copy and waits; releasing, to the conversation and waits
+    /// behind the held ones; released, it is sent.
+    fn apply_as(
+        &self,
+        conversation: &str,
+        reply: u32,
+        ahead: Option<u64>,
+        kind: PageAssistEventV1,
+    ) -> bool {
+        let Some(held) = ahead else {
+            return self.apply(conversation, reply, kind);
+        };
+        let mut state = self.state();
+        let State {
+            ahead: aheads,
+            live,
+            ..
+        } = &mut *state;
+        let Some(entry) = aheads.get_mut(&held) else {
+            return false;
+        };
+        let event = match entry.phase {
+            AheadPhase::Held => entry
+                .shadow
+                .as_mut()
+                .and_then(|shadow| shadow.conversation.apply(reply, kind)),
+            AheadPhase::Releasing => live
+                .get_mut(conversation)
+                .and_then(|live| live.conversation.apply(reply, kind)),
+            AheadPhase::Released => {
+                drop(state);
+                return self.apply(conversation, reply, kind);
+            }
+        };
+        let Some(event) = event else {
+            return false;
+        };
+        if entry.phase == AheadPhase::Held && entry.events.len() >= MAX_AHEAD_EVENTS {
+            if let Some(entry) = aheads.remove(&held) {
+                drop(state);
+                entry.cancel.cancel(CancelReason::Gone);
+                entry.gate.notify_waiters();
+            }
+            return false;
+        }
+        entry.events.push(event);
+        true
+    }
+
+    /// The conversation as a reply sees it; none once it is gone or, held,
+    /// discarded.
+    fn seen<T>(
+        &self,
+        conversation: &str,
+        ahead: Option<u64>,
+        apply: impl FnOnce(Seen<'_>) -> T,
+    ) -> Option<T> {
+        let mut state = self.state();
+        let State {
+            ahead: aheads,
+            live,
+            ..
+        } = &mut *state;
+        if let Some(held) = ahead {
+            let entry = aheads.get_mut(&held)?;
+            if entry.phase == AheadPhase::Held {
+                let shadow = entry.shadow.as_mut()?;
+                return Some(apply(Seen {
+                    conversation: &mut shadow.conversation,
+                    replies: &mut shadow.replies,
+                    links: &mut shadow.links,
+                    base: Some(live.get(conversation)?),
+                }));
+            }
+        }
+        let live = live.get_mut(conversation)?;
+        Some(apply(Seen {
+            conversation: &mut live.conversation,
+            replies: &mut live.replies,
+            links: &mut live.links,
+            base: None,
+        }))
+    }
+
+    /// Where a reply started ahead of its words stands; none once discarded.
+    fn ahead_phase(&self, held: u64) -> Option<AheadPhase> {
+        self.state().ahead.get(&held).map(|entry| entry.phase)
     }
 
     fn conversation_wide(
@@ -709,47 +908,20 @@ impl PageAssist {
         request: PageAssistAskV1,
         delivery: Delivery,
     ) -> Result<(u32, TurnTask), PageAssistFaultV1> {
-        let words = text::clean(&request.text);
-        if request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES
-            || (words.is_empty() && request.suggestion.is_none())
-            || request.attachments.len() > PAGE_ASSIST_MAX_ATTACHMENTS
-        {
-            return Err(PageAssistFaultV1::Invalid);
-        }
+        let Asking {
+            words,
+            profile,
+            admitted,
+            shown,
+            title,
+        } = self.asking(&request).await?;
         let space = request.space.clone();
-        let profile = {
-            let state = self.state();
-            state
-                .current
-                .get(&space)
-                .filter(|id| **id == request.conversation)
-                .and_then(|id| state.live.get(id))
-                .map(|live| live.profile)
-                .ok_or(PageAssistFaultV1::Invalid)?
-        };
-        if !self.ports().settings.ai_enabled(&profile) {
-            return Err(PageAssistFaultV1::AiOff);
-        }
-        if self.ports().models.entry(&profile).await.is_none() {
-            return Err(PageAssistFaultV1::NoModel);
-        }
-        let mut admitted = Vec::new();
-        let mut shown = Vec::new();
-        for attach in &request.attachments {
-            let (inner, view) = self.admit(profile, attach).await?;
-            admitted.push(inner);
-            shown.push(view);
-        }
         let conversation = request.conversation.clone();
         let cancel = Arc::new(Cancel::default());
         let leased = Arc::new(AtomicBool::new(false));
         let took_over = Arc::new(AtomicBool::new(false));
         let redirect = Arc::new(Redirect::default());
         let ended = Arc::new(Notify::new());
-        let title = request
-            .suggestion
-            .filter(|_| words.is_empty())
-            .map(suggest::request_text);
         let (reply, events) = {
             let mut state = self.state();
             // The Space may have moved on while the model and attachments
@@ -768,12 +940,13 @@ impl PageAssist {
                     live.links.insert(link);
                 }
             }
-            let mut events = live
-                .conversation
-                .say(&words, request.suggestion, shown, title);
+            let mut events =
+                live.conversation
+                    .say(&words, request.suggestion, shown, title.as_deref());
             let (reply, started) = live.conversation.begin_reply();
             events.push(started);
             live.replies.insert(reply, ReplyData::default());
+            Self::drop_aheads(&mut state, |ahead| ahead.conversation == conversation);
             state.running.insert(
                 conversation.clone(),
                 Running {
@@ -799,6 +972,7 @@ impl PageAssist {
         }
         let context = agent::Reply {
             service: self.clone(),
+            source: conversation.clone(),
             conversation,
             space,
             profile,
@@ -814,8 +988,332 @@ impl PageAssist {
             glowing: Mutex::new(Vec::new()),
             spent: Mutex::new(None),
             spoken: delivery == Delivery::Spoken,
+            ahead: None,
         };
         Ok((reply, Box::pin(agent::run(context))))
+    }
+
+    /// What every ask checks before it is admitted.
+    async fn asking(&self, request: &PageAssistAskV1) -> Result<Asking, PageAssistFaultV1> {
+        let words = text::clean(&request.text);
+        if request.text.len() > PAGE_ASSIST_MAX_QUESTION_BYTES
+            || (words.is_empty() && request.suggestion.is_none())
+            || request.attachments.len() > PAGE_ASSIST_MAX_ATTACHMENTS
+        {
+            return Err(PageAssistFaultV1::Invalid);
+        }
+        let profile = {
+            let state = self.state();
+            state
+                .current
+                .get(&request.space)
+                .filter(|id| **id == request.conversation)
+                .and_then(|id| state.live.get(id))
+                .map(|live| live.profile)
+                .ok_or(PageAssistFaultV1::Invalid)?
+        };
+        if !self.ports().settings.ai_enabled(&profile) {
+            return Err(PageAssistFaultV1::AiOff);
+        }
+        if self.ports().models.entry(&profile).await.is_none() {
+            return Err(PageAssistFaultV1::NoModel);
+        }
+        let mut admitted = Vec::new();
+        let mut shown = Vec::new();
+        for attach in &request.attachments {
+            let (inner, view) = self.admit(profile, attach).await?;
+            admitted.push(inner);
+            shown.push(view);
+        }
+        let title = request
+            .suggestion
+            .filter(|_| words.is_empty())
+            .map(suggest::request_text)
+            .map(str::to_owned);
+        Ok(Asking {
+            words,
+            profile,
+            admitted,
+            shown,
+            title,
+        })
+    }
+
+    /// Starts a reply on words that are not final yet, unseen. It reads
+    /// the attached pages and calls the model as `ask_as` would, but its
+    /// message, events, page reads' marks and record stay its own and it
+    /// stops before its first tool; [`Self::release`] makes it the reply
+    /// `ask_as` would have started, [`Self::discard`] drops it without a
+    /// trace. Only whole pages may be attached, and nothing may be running.
+    pub async fn ask_ahead(
+        &self,
+        request: PageAssistAskV1,
+        delivery: Delivery,
+    ) -> Result<(Held, TurnTask), PageAssistFaultV1> {
+        if request.suggestion.is_some()
+            || request
+                .attachments
+                .iter()
+                .any(|attach| !matches!(attach, PageAssistAttachV1::Page { .. }))
+        {
+            return Err(PageAssistFaultV1::Invalid);
+        }
+        let Asking {
+            words,
+            profile,
+            admitted,
+            shown,
+            title,
+        } = self.asking(&request).await?;
+        let space = request.space.clone();
+        let conversation = request.conversation.clone();
+        let cancel = Arc::new(Cancel::default());
+        let leased = Arc::new(AtomicBool::new(false));
+        let took_over = Arc::new(AtomicBool::new(false));
+        let redirect = Arc::new(Redirect::default());
+        let ended = Arc::new(Notify::new());
+        let gate = Arc::new(Notify::new());
+        let (held, reply) = {
+            let mut state = self.state();
+            if state.current.get(&space) != Some(&conversation) {
+                return Err(PageAssistFaultV1::Invalid);
+            }
+            if state.running.contains_key(&conversation) {
+                return Err(PageAssistFaultV1::Busy);
+            }
+            Self::drop_aheads(&mut state, |ahead| ahead.conversation == conversation);
+            let Some(live) = state.live.get(&conversation) else {
+                return Err(PageAssistFaultV1::Invalid);
+            };
+            let before = live.conversation.clone();
+            let mut shadow = Shadow {
+                conversation: before.clone(),
+                replies: HashMap::new(),
+                links: HashSet::new(),
+            };
+            for link in written_links(&request.text) {
+                if live.links.len() + shadow.links.len() < MAX_LINKS && !live.links.contains(&link)
+                {
+                    shadow.links.insert(link);
+                }
+            }
+            let mut events =
+                shadow
+                    .conversation
+                    .say(&words, request.suggestion, shown, title.as_deref());
+            let (reply, started) = shadow.conversation.begin_reply();
+            events.push(started);
+            shadow.replies.insert(reply, ReplyData::default());
+            state.next_ahead += 1;
+            let id = state.next_ahead;
+            let source = format!("{conversation}~{id}");
+            state.ahead.insert(
+                id,
+                Ahead {
+                    conversation: conversation.clone(),
+                    space: space.clone(),
+                    profile,
+                    reply,
+                    words: request.text.clone(),
+                    source: source.clone(),
+                    phase: AheadPhase::Held,
+                    before,
+                    shadow: Some(shadow),
+                    events,
+                    running: Some(Running {
+                        reply,
+                        cancel: cancel.clone(),
+                        decision: None,
+                        resume: None,
+                        leased: leased.clone(),
+                        took_over: took_over.clone(),
+                        acting: None,
+                        redirect: redirect.clone(),
+                        ended: ended.clone(),
+                    }),
+                    cancel: cancel.clone(),
+                    gate: gate.clone(),
+                },
+            );
+            let held = Held {
+                id,
+                conversation: conversation.clone(),
+                source,
+            };
+            (held, reply)
+        };
+        let context = agent::Reply {
+            service: self.clone(),
+            source: held.source.clone(),
+            conversation,
+            space,
+            profile,
+            reply,
+            words,
+            suggestion: None,
+            attachments: admitted,
+            cancel,
+            leased,
+            took_over,
+            redirect,
+            ended,
+            glowing: Mutex::new(Vec::new()),
+            spent: Mutex::new(None),
+            spoken: delivery == Delivery::Spoken,
+            ahead: Some((held.id, gate)),
+        };
+        Ok((held, Box::pin(agent::run(context))))
+    }
+
+    /// Releases a held reply for the final words `text`, which must be
+    /// exactly the words it started on: it joins the conversation as the
+    /// reply `ask_as` would have started, its held events are sent in order
+    /// and it runs on. It is released only onto the conversation it started
+    /// from, unchanged, with nothing running, AI on, a model chosen and every
+    /// page it read still on the document it read; otherwise it is discarded
+    /// and nothing was released.
+    pub async fn release(&self, held: u64, text: &str) -> Result<u32, PageAssistFaultV1> {
+        let (profile, reads) = {
+            let state = self.state();
+            let entry = state
+                .ahead
+                .get(&held)
+                .filter(|entry| entry.phase == AheadPhase::Held)
+                .ok_or(PageAssistFaultV1::Invalid)?;
+            let reads: Vec<(String, u64)> = entry
+                .shadow
+                .as_ref()
+                .and_then(|shadow| shadow.replies.get(&entry.reply))
+                .map(|data| {
+                    data.reads
+                        .iter()
+                        .map(|read| (read.tab.clone(), read.epoch))
+                        .collect()
+                })
+                .unwrap_or_default();
+            ((entry.words == text).then_some(entry.profile), reads)
+        };
+        let Some(profile) = profile else {
+            self.discard(held);
+            return Err(PageAssistFaultV1::Invalid);
+        };
+        if !self.ports().settings.ai_enabled(&profile) {
+            self.discard(held);
+            return Err(PageAssistFaultV1::AiOff);
+        }
+        if self.ports().models.entry(&profile).await.is_none() {
+            self.discard(held);
+            return Err(PageAssistFaultV1::NoModel);
+        }
+        let unchanged = reads.iter().all(|(tab, epoch)| {
+            self.ports()
+                .page
+                .facts(tab)
+                .is_some_and(|facts| facts.epoch == *epoch)
+        });
+        if !unchanged {
+            self.discard(held);
+            return Err(PageAssistFaultV1::PageChanged);
+        }
+        let (reply, gate) = {
+            let mut state = self.state();
+            let State {
+                ahead,
+                live,
+                current,
+                running,
+                sources,
+                ..
+            } = &mut *state;
+            let Some(entry) = ahead
+                .get_mut(&held)
+                .filter(|entry| entry.phase == AheadPhase::Held)
+            else {
+                return Err(PageAssistFaultV1::Invalid);
+            };
+            let joins = current.get(&entry.space) == Some(&entry.conversation)
+                && !running.contains_key(&entry.conversation)
+                && entry.shadow.is_some()
+                && entry.running.is_some()
+                && live.get(&entry.conversation).is_some_and(|live| {
+                    live.profile == entry.profile && live.conversation == entry.before
+                });
+            let target = live.get_mut(&entry.conversation).filter(|_| joins);
+            let (Some(target), Some(shadow), Some(run)) = (
+                target,
+                entry.shadow.take().filter(|_| joins),
+                entry.running.take().filter(|_| joins),
+            ) else {
+                drop(state);
+                self.discard(held);
+                return Err(PageAssistFaultV1::Busy);
+            };
+            target.conversation = shadow.conversation;
+            target.replies.extend(shadow.replies);
+            target.links.extend(shadow.links);
+            running.insert(entry.conversation.clone(), run);
+            entry.phase = AheadPhase::Releasing;
+            if sources.len() >= MAX_AHEAD_SOURCES {
+                sources.pop_front();
+            }
+            sources.push_back((entry.source.clone(), entry.conversation.clone()));
+            (entry.reply, entry.gate.clone())
+        };
+        loop {
+            let events = {
+                let mut state = self.state();
+                let Some(entry) = state.ahead.get_mut(&held) else {
+                    break;
+                };
+                if entry.events.is_empty() {
+                    entry.phase = AheadPhase::Released;
+                    break;
+                }
+                std::mem::take(&mut entry.events)
+            };
+            self.emit_all(events);
+        }
+        gate.notify_waiters();
+        Ok(reply)
+    }
+
+    /// Drops a held reply: its model call is cancelled and nothing of it was
+    /// seen. False when it is not held (released, or already gone).
+    pub fn discard(&self, held: u64) -> bool {
+        let entry = {
+            let mut state = self.state();
+            match state.ahead.get(&held) {
+                Some(entry) if entry.phase == AheadPhase::Held => state.ahead.remove(&held),
+                _ => None,
+            }
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        entry.cancel.cancel(CancelReason::Gone);
+        entry.gate.notify_waiters();
+        true
+    }
+
+    /// Drops the held replies `which` picks.
+    fn drop_aheads(state: &mut State, which: impl Fn(&Ahead) -> bool) {
+        let gone: Vec<u64> = state
+            .ahead
+            .iter()
+            .filter(|(_, entry)| entry.phase == AheadPhase::Held && which(entry))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in gone {
+            if let Some(entry) = state.ahead.remove(&id) {
+                entry.cancel.cancel(CancelReason::Gone);
+                entry.gate.notify_waiters();
+            }
+        }
+    }
+
+    /// A reply ended: what it held ahead is forgotten.
+    fn ahead_ended(&self, held: u64) {
+        self.state().ahead.remove(&held);
     }
 
     /// New words for the Space's conversation while a reply may be running.
@@ -1211,6 +1709,9 @@ impl PageAssist {
     fn leave(&self, space: &str) {
         let current = self.state().current.remove(space);
         if let Some(conversation) = current {
+            Self::drop_aheads(&mut self.state(), |ahead| {
+                ahead.conversation == conversation
+            });
             if let Some(running) = self.state().running.remove(&conversation) {
                 running.cancel.cancel(CancelReason::Gone);
             }
@@ -1501,6 +2002,7 @@ impl PageAssist {
                 running.cancel.cancel(CancelReason::Gone);
             }
             state.running.clear();
+            Self::drop_aheads(&mut state, |_| true);
             let events: Vec<PageAssistChangedV1> = state
                 .current
                 .values()
@@ -1526,6 +2028,15 @@ impl PageAssist {
     pub fn settle_hosted(&self, conversation: &str, reply: u32, credits: String) {
         let cost = (|| {
             let mut state = self.state();
+            // A released reply's calls were made for its own source; a
+            // discarded one's join no reply.
+            let conversation = state
+                .sources
+                .iter()
+                .find(|(source, _)| source == conversation)
+                .map_or(conversation, |(_, real)| real.as_str())
+                .to_owned();
+            let conversation = conversation.as_str();
             let live = state.live.get_mut(conversation)?;
             let model = live
                 .conversation

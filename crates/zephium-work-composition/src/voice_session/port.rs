@@ -124,6 +124,16 @@ pub trait AssistantPort: Send + Sync {
         text: String,
         spoken: bool,
     ) -> BoxFuture<'static, Result<Asked, Fault>>;
+    /// Starts a reply on words that are not final yet and holds it unseen:
+    /// nothing of it shows, sounds or takes effect until it is released.
+    /// Resolves to its handle.
+    fn ask_ahead(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<u64, Fault>>;
+    /// Asks with the final words `text` by releasing held reply `held`,
+    /// started on exactly these words; it then runs as an ask's would. An
+    /// error means nothing was released and the held reply is gone.
+    fn release(&self, held: u64, text: String) -> BoxFuture<'static, Result<Asked, Fault>>;
+    /// Discards held reply `held` without a trace.
+    fn discard(&self, held: u64);
     /// Stops `reply` at its next safe point.
     fn stop(&self, conversation: &str, reply: u32);
     /// Answers the confirm at `block` the way a click does.

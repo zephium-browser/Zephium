@@ -1007,6 +1007,38 @@ impl Harness {
         Ok(reply)
     }
 
+    async fn ask_ahead(&self, text: &str) -> Result<Held, PageAssistFaultV1> {
+        let conversation = self.conversation().await;
+        let (held, task) = self
+            .service
+            .ask_ahead(
+                PageAssistAskV1 {
+                    space: SPACE.into(),
+                    conversation,
+                    text: text.into(),
+                    suggestion: None,
+                    attachments: vec![PageAssistAttachV1::Page { tab: TAB.into() }],
+                },
+                Delivery::Spoken,
+            )
+            .await?;
+        tokio::spawn(task);
+        Ok(held)
+    }
+
+    /// Waits until the model was called `calls` times and the reply had
+    /// time to take what it streamed.
+    async fn called(&self, calls: usize) {
+        for _ in 0..400 {
+            if self.requests().len() >= calls {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("the model was never called");
+    }
+
     /// Each reply's state and end, in order.
     async fn ends(&self) -> Vec<(PageAssistReplyStateV1, Option<PageAssistEndV1>)> {
         self.service
@@ -2096,6 +2128,7 @@ async fn model_call_with_timeouts(
     let conversation = h.conversation().await;
     let reply = agent::Reply {
         service: h.service.clone(),
+        source: conversation.clone(),
         conversation,
         space: SPACE.into(),
         profile: profile(),
@@ -2111,6 +2144,7 @@ async fn model_call_with_timeouts(
         glowing: Mutex::new(Vec::new()),
         spent: Mutex::new(None),
         spoken: false,
+        ahead: None,
     };
     let model = ResolvedModel {
         entry: entry(true),
@@ -4342,4 +4376,328 @@ async fn ordinary_saves_run_but_foreign_or_unknown_reads_keep_the_card_and_decli
             assert!(h.tool_result(call).0.contains("declined by the person"));
         }
     }
+}
+
+/// The events sent, with text deltas of one block merged: how text is cut
+/// into deltas depends on when it streamed, not on what it says.
+fn merged(events: &[PageAssistChangedV1]) -> Vec<(u32, PageAssistEventV1)> {
+    let mut merged: Vec<(u32, PageAssistEventV1)> = Vec::new();
+    for event in events {
+        if let (
+            Some((reply, PageAssistEventV1::Text { block, delta })),
+            PageAssistEventV1::Text {
+                block: next,
+                delta: more,
+            },
+        ) = (merged.last_mut(), &event.kind)
+        {
+            if *reply == event.reply && block == next {
+                delta.push_str(more);
+                continue;
+            }
+        }
+        merged.push((event.reply, event.kind.clone()));
+    }
+    merged
+}
+
+fn stored_messages(h: &Harness) -> Vec<PageAssistMessageV1> {
+    h.store
+        .0
+        .lock()
+        .unwrap()
+        .values()
+        .map(|(_, body)| {
+            serde_json::from_str::<PageAssistConversationV1>(body)
+                .unwrap()
+                .messages
+        })
+        .next()
+        .unwrap_or_default()
+}
+
+fn items_turns() -> Vec<Turn> {
+    vec![
+        Turn {
+            deltas: vec!["Three stand out:".into()],
+            tools: vec![(
+                "show_items".into(),
+                json!({"items": [
+                    {"ref": "a1", "title": "eMudhra to exit"},
+                    {"ref": "a3", "title": "Run iOS on Android"}
+                ]}),
+            )],
+            ..Turn::default()
+        },
+        say("Both are on the front page."),
+    ]
+}
+
+#[tokio::test]
+async fn a_held_reply_shows_nothing_and_runs_no_tool_until_released() {
+    let h = harness(items_turns());
+    let held = h.ask_ahead("what is worth reading here").await.unwrap();
+    h.called(1).await;
+    assert!(h.sink.0.lock().unwrap().is_empty(), "no event while held");
+    assert!(h.page.lock().marks.is_empty(), "no tool while held");
+    assert!(h.page.lock().glows.is_empty());
+    assert!(h
+        .service
+        .status(SPACE, Some(TAB))
+        .await
+        .conversation
+        .messages
+        .is_empty());
+    assert!(
+        h.store.0.lock().unwrap().is_empty(),
+        "nothing stored while held"
+    );
+    assert_eq!(h.requests().len(), 1, "it waits before its first tool");
+    assert!(!h.service.stop(SPACE), "a held reply is not running");
+
+    let reply = h
+        .service
+        .release(held.id, "what is worth reading here")
+        .await
+        .unwrap();
+    assert_eq!(reply, 2);
+    h.settle().await;
+    assert_eq!(h.page.lock().marks.len(), 1, "its tool ran once released");
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Done);
+    assert_eq!(stored_messages(&h).len(), 2);
+}
+
+#[tokio::test]
+async fn a_released_reply_is_the_reply_an_ask_would_have_given() {
+    let words = "what is worth reading here";
+    let asked = harness(items_turns());
+    asked.ask(words, true).await.unwrap();
+    asked.settle().await;
+
+    let early = harness(items_turns());
+    let held = early.ask_ahead(words).await.unwrap();
+    early.called(1).await;
+    early.service.release(held.id, words).await.unwrap();
+    early.settle().await;
+
+    let sent = |h: &Harness| merged(&h.sink.0.lock().unwrap());
+    assert_eq!(sent(&early), sent(&asked));
+    let seqs = |h: &Harness| -> Vec<u32> {
+        h.sink
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| event.seq)
+            .collect()
+    };
+    assert!(seqs(&early).windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        early
+            .service
+            .status(SPACE, Some(TAB))
+            .await
+            .conversation
+            .messages,
+        asked
+            .service
+            .status(SPACE, Some(TAB))
+            .await
+            .conversation
+            .messages
+    );
+    assert_eq!(stored_messages(&early), stored_messages(&asked));
+    let requests = |h: &Harness| -> Vec<String> {
+        (0..h.requests().len()).map(|i| h.request_text(i)).collect()
+    };
+    assert_eq!(requests(&early), requests(&asked), "the model saw the same");
+    assert_eq!(early.page.lock().marks, asked.page.lock().marks);
+}
+
+#[tokio::test]
+async fn a_held_reply_that_answers_while_held_ends_only_once_released() {
+    let words = "what does the top story say";
+    let asked = harness(vec![say("eMudhra is leaving [a1].")]);
+    asked.ask(words, true).await.unwrap();
+    asked.settle().await;
+
+    let early = harness(vec![say("eMudhra is leaving [a1].")]);
+    let held = early.ask_ahead(words).await.unwrap();
+    early.called(1).await;
+    assert!(early.sink.0.lock().unwrap().is_empty());
+    assert!(early.store.0.lock().unwrap().is_empty());
+    early.service.release(held.id, words).await.unwrap();
+    early.settle().await;
+    assert_eq!(
+        merged(&early.sink.0.lock().unwrap()),
+        merged(&asked.sink.0.lock().unwrap())
+    );
+    assert_eq!(stored_messages(&early), stored_messages(&asked));
+}
+
+#[tokio::test]
+async fn a_discarded_reply_leaves_nothing_and_cancels_its_call() {
+    let h = harness(vec![
+        Turn {
+            deltas: vec!["Partly ".into()],
+            hang: true,
+            ..Turn::default()
+        },
+        say("Fresh answer."),
+    ]);
+    let held = h.ask_ahead("what is worth reading here").await.unwrap();
+    h.called(1).await;
+    assert!(h.service.discard(held.id));
+    for _ in 0..100 {
+        if h.client.dropped.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        h.client.dropped.load(Ordering::Acquire),
+        "its call was dropped"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(h.sink.0.lock().unwrap().is_empty());
+    assert!(h.store.0.lock().unwrap().is_empty());
+    assert!(h
+        .service
+        .status(SPACE, Some(TAB))
+        .await
+        .conversation
+        .messages
+        .is_empty());
+    assert!(!h.service.discard(held.id));
+    assert_eq!(
+        h.service
+            .release(held.id, "what is worth reading here")
+            .await,
+        Err(PageAssistFaultV1::Invalid)
+    );
+    assert_eq!(h.ask("what is worth reading here", true).await, Ok(2));
+    h.settle().await;
+    assert_eq!(text_of(&h.blocks().await), "Fresh answer.");
+    let first = h.sink.0.lock().unwrap()[0].seq;
+    assert_eq!(
+        first, 1,
+        "the conversation never counted the discarded reply"
+    );
+    h.service.settle_hosted(&held.source, 2, "5".into());
+    assert!(
+        !h.kinds()
+            .iter()
+            .any(|kind| matches!(kind, PageAssistEventV1::Cost { .. })),
+        "a discarded reply's charge joins no reply"
+    );
+}
+
+#[tokio::test]
+async fn a_held_reply_is_released_only_on_its_words_conversation_and_page() {
+    // Other words.
+    let h = harness(vec![say("One.")]);
+    let held = h.ask_ahead("send hello world to Ana").await.unwrap();
+    h.called(1).await;
+    assert_eq!(
+        h.service
+            .release(held.id, "Send: Hello, World! to Ana")
+            .await,
+        Err(PageAssistFaultV1::Invalid)
+    );
+    assert!(!h.service.discard(held.id), "refused, it was discarded");
+
+    // The page moved on.
+    let h = harness(vec![say("One.")]);
+    let held = h.ask_ahead("what does the top story say").await.unwrap();
+    h.called(1).await;
+    h.page.lock().facts.get_mut(TAB).unwrap().epoch += 1;
+    assert_eq!(
+        h.service
+            .release(held.id, "what does the top story say")
+            .await,
+        Err(PageAssistFaultV1::PageChanged)
+    );
+
+    // The conversation changed under it.
+    let h = harness(vec![say("First [a1]."), say("Second.")]);
+    h.ask("what is first", true).await.unwrap();
+    h.settle().await;
+    let before = h.sink.0.lock().unwrap().len();
+    let held = h.ask_ahead("what does the top story say").await.unwrap();
+    h.called(2).await;
+    h.service.navigated(TAB, None);
+    let changed = h.sink.0.lock().unwrap().len();
+    assert_eq!(changed, before + 1, "only the earlier reply turned inert");
+    assert_eq!(
+        h.service
+            .release(held.id, "what does the top story say")
+            .await,
+        Err(PageAssistFaultV1::Busy)
+    );
+    assert_eq!(h.sink.0.lock().unwrap().len(), changed);
+
+    // A typed message takes its place.
+    let h = harness(vec![
+        Turn {
+            hang: true,
+            ..Turn::default()
+        },
+        say("Typed answer."),
+    ]);
+    let held = h.ask_ahead("what does the top story say").await.unwrap();
+    h.called(1).await;
+    assert_eq!(h.ask("typed instead", true).await, Ok(2));
+    assert_eq!(
+        h.service
+            .release(held.id, "what does the top story say")
+            .await,
+        Err(PageAssistFaultV1::Invalid)
+    );
+    h.settle().await;
+    assert_eq!(text_of(&h.blocks().await), "Typed answer.");
+    assert_eq!(
+        h.service
+            .status(SPACE, Some(TAB))
+            .await
+            .conversation
+            .messages
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn ai_off_and_a_running_reply_refuse_or_drop_a_held_one() {
+    let h = harness(vec![
+        Turn {
+            hang: true,
+            ..Turn::default()
+        },
+        say("Never."),
+    ]);
+    let held = h.ask_ahead("what is worth reading here").await.unwrap();
+    h.called(1).await;
+    h.service.end_all();
+    for _ in 0..100 {
+        if h.client.dropped.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    assert!(!h.service.discard(held.id));
+    assert!(!h
+        .kinds()
+        .iter()
+        .any(|kind| !matches!(kind, PageAssistEventV1::Invalidated)));
+
+    let h = harness(vec![Turn {
+        hang: true,
+        ..Turn::default()
+    }]);
+    h.ask("a long question", true).await.unwrap();
+    assert_eq!(
+        h.ask_ahead("what is worth reading here").await,
+        Err(PageAssistFaultV1::Busy)
+    );
 }

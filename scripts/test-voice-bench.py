@@ -155,6 +155,18 @@ while True: time.sleep(0.01)
         rows.append({"scenario": "voice-fact", "voice": {"stt_final": True}})
         self.assertEqual(bench.aggregate(rows)["voice-fact"]["stt"]["n"], 3)
 
+    def test_early_starts_sum_matches_and_lead(self):
+        rows = [{"scenario": "voice-fact", "voice": {"transcripts": [
+            {"early_starts": 2, "early_discards": 1, "early_released": 1, "early_start_to_final_ms": 300, "early_text_matched": "exact"},
+            {"early_starts": 1, "early_discards": 1, "early_released": 0, "early_start_to_final_ms": None, "early_text_matched": "folded"}]}},
+            {"scenario": "voice-count", "voice": {"transcripts": [
+                {"early_starts": 1, "early_released": 1, "early_start_to_final_ms": 500, "early_text_matched": "exact"},
+                {"early_starts": True, "early_text_matched": "other", "early_start_to_final_ms": -1}]}},
+            {"scenario": "voice-stop", "voice": {}}]
+        self.assertEqual(bench.early(rows), {"starts": 4, "discards": 2, "released": 2, "exact": 2,
+                                             "folded": 1, "differs": 0, "lead_median_ms": 400})
+        self.assertIsNone(bench.early([])["lead_median_ms"])
+
     def test_times_parser_and_invalid_repeat_counts(self):
         with patch.object(bench, "run", return_value=0) as run:
             self.assertEqual(bench.main(["voice-bench", "run", "--times", "3", "voice-fact", "voice-count"]), 0)

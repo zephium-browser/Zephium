@@ -341,6 +341,15 @@ pub fn normalize(text: &str) -> String {
     output
 }
 
+/// How many words `text` holds; two CJK characters count as one.
+pub fn words(text: &str) -> usize {
+    let heard = normalize(text);
+    if heard.is_empty() {
+        return 0;
+    }
+    heard.split(' ').count() + heard.chars().filter(|c| cjk(*c)).count() / 2
+}
+
 /// The person's decision when the WHOLE utterance is one of the closed
 /// phrases for `language`; none for anything longer, mixed or unknown.
 pub fn decision(text: &str, language: Language) -> Option<Decision> {
@@ -494,8 +503,7 @@ pub fn ack(text: &str, language: Language) -> Option<Ack> {
     if heard.is_empty() || decision(text, language).is_some() {
         return None;
     }
-    let units = heard.split(' ').count() + heard.chars().filter(|c| cjk(*c)).count() / 2;
-    if units < 4 {
+    if words(text) < 4 {
         return None;
     }
     let seed = heard.bytes().fold(0x811c_9dc5_u32, |hash, byte| {

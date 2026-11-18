@@ -372,6 +372,25 @@ def aggregate(rows):
                        for name, values in stages.items()} for scenario, stages in grouped.items()}
 
 
+def early(rows):
+    """Replies started ahead of the final, summed over every utterance."""
+    total = {"starts": 0, "discards": 0, "released": 0, "exact": 0, "folded": 0, "differs": 0}
+    leads = []
+    for row in rows:
+        for t in row.get("voice", {}).get("transcripts", []):
+            for key in ("starts", "discards", "released"):
+                value = t.get("early_" + key)
+                if type(value) is int and value >= 0:
+                    total[key] += value
+            if t.get("early_text_matched") in ("exact", "folded", "differs"):
+                total[t["early_text_matched"]] += 1
+            lead = t.get("early_start_to_final_ms")
+            if type(lead) is int and lead >= 0:
+                leads.append(lead)
+    total["lead_median_ms"] = statistics.median(leads) if leads else None
+    return total
+
+
 def measured(value):
     return str(value) if value is not None else "-"
 
@@ -397,6 +416,7 @@ def show(run):
         failed = [key for key, value in row.get("checks", {}).items() if not value]
         if failed:
             print(row["scenario"] + f" #{row.get('iteration', 1)} failed checks: " + ", ".join(failed))
+    print("early: " + json.dumps(early(run["rows"]), sort_keys=True))
     print("billing: " + json.dumps(run.get("billing", {}), sort_keys=True))
     if run.get("billing", {}).get("silence_ledger_classified") is False:
         print("silence ledger case is unclassified: the current gateway does not label empty finals")

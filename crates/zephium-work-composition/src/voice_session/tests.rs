@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::*;
 use zephium_ipc::page_assist::PageAssistEventV1 as AssistEvent;
@@ -115,6 +115,11 @@ impl LinkPort for FakeLink {
 struct FakeAssistant {
     log: Log,
     replies: AtomicU32,
+    aheads: AtomicU64,
+    /// Starting ahead fails.
+    ahead_fails: AtomicBool,
+    /// Releasing fails.
+    release_fails: AtomicBool,
 }
 
 impl AssistantPort for FakeAssistant {
@@ -145,6 +150,36 @@ impl AssistantPort for FakeAssistant {
                 reply: next,
             })
         })
+    }
+    fn ask_ahead(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<u64, Fault>> {
+        push(&self.log, format!("ahead:{text}"));
+        assert!(spoken);
+        let held = self.aheads.fetch_add(1, Ordering::SeqCst) + 1;
+        let fails = self.ahead_fails.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if fails {
+                Err(Fault::Busy)
+            } else {
+                Ok(held)
+            }
+        })
+    }
+    fn release(&self, held: u64, text: String) -> BoxFuture<'static, Result<Asked, Fault>> {
+        push(&self.log, format!("release:{held}:{text}"));
+        let fails = self.release_fails.load(Ordering::SeqCst);
+        let reply = (!fails).then(|| self.replies.fetch_add(1, Ordering::SeqCst) + 1);
+        Box::pin(async move {
+            match reply {
+                Some(reply) => Ok(Asked {
+                    conversation: "c1".into(),
+                    reply,
+                }),
+                None => Err(Fault::Busy),
+            }
+        })
+    }
+    fn discard(&self, held: u64) {
+        push(&self.log, format!("discard:{held}"));
     }
     fn stop(&self, _conversation: &str, reply: u32) {
         push(&self.log, format!("stop:{reply}"));
@@ -193,10 +228,13 @@ struct Harness {
     projection: Arc<FakeProjection>,
     audio: Arc<FakeAudio>,
     link: Arc<FakeLink>,
+    assistant: Arc<FakeAssistant>,
     hold_link: bool,
     hold_ask: bool,
+    hold_ahead: bool,
     held: Vec<Input>,
     asks: Vec<Input>,
+    aheads: Vec<Input>,
     generation: u64,
 }
 
@@ -230,13 +268,17 @@ impl Harness {
             refusal: Mutex::new(None),
         });
         let counter = Arc::new(AtomicU64::new(0));
+        let assistant = Arc::new(FakeAssistant {
+            log: log.clone(),
+            replies: AtomicU32::new(0),
+            aheads: AtomicU64::new(0),
+            ahead_fails: AtomicBool::new(false),
+            release_fails: AtomicBool::new(false),
+        });
         let ports = Ports {
             audio: audio.clone(),
             link: link.clone(),
-            assistant: Arc::new(FakeAssistant {
-                log: log.clone(),
-                replies: AtomicU32::new(0),
-            }),
+            assistant: assistant.clone(),
             projection: projection.clone(),
             clock: clock.clone(),
             ids: Arc::new(move || {
@@ -260,10 +302,13 @@ impl Harness {
             projection,
             audio,
             link,
+            assistant,
             hold_link,
             hold_ask: false,
+            hold_ahead: false,
             held: Vec::new(),
             asks: Vec::new(),
+            aheads: Vec::new(),
             generation: 0,
         }
     }
@@ -277,6 +322,8 @@ impl Harness {
                     self.held.push(input);
                 } else if self.hold_ask && matches!(input, Input::Asked(_)) {
                     self.asks.push(input);
+                } else if self.hold_ahead && matches!(input, Input::Ahead { .. }) {
+                    self.aheads.push(input);
                 } else {
                     self.core.input(input);
                 }
@@ -320,6 +367,35 @@ impl Harness {
             self.core.input(input);
         }
         self.settle().await;
+    }
+
+    async fn release_ahead(&mut self) {
+        self.hold_ahead = false;
+        for input in std::mem::take(&mut self.aheads) {
+            self.core.input(input);
+        }
+        self.settle().await;
+    }
+
+    /// Presses, says `before`, releases the key, and hears `after` as a
+    /// later partial; returns the utterance.
+    async fn speak_ahead(&mut self, before: &str, after: &str) -> String {
+        self.send(Command::KeyDown).await;
+        self.frames(1..=5).await;
+        let id = self.utterance();
+        self.link(VoiceEvent::Partial {
+            id: id.clone(),
+            text: before.into(),
+        })
+        .await;
+        self.advance(400).await;
+        self.send(Command::KeyUp).await;
+        self.link(VoiceEvent::Partial {
+            id: id.clone(),
+            text: after.into(),
+        })
+        .await;
+        id
     }
 
     async fn link(&mut self, event: VoiceEvent) {
@@ -909,5 +985,192 @@ async fn words_spoken_while_the_ask_is_admitted_steer_its_reply() {
         VoiceSessionStateV1::Settled {
             outcome: VoiceOutcomeV1::Answered
         }
+    );
+}
+
+const FLIGHT: &str = "open the cheapest flight to Paris";
+
+fn assistant_calls(log: &[String]) -> Vec<String> {
+    log.iter()
+        .filter(|entry| {
+            ["ask:", "ahead:", "release:", "discard:", "steer:", "stop:"]
+                .iter()
+                .any(|call| entry.starts_with(call))
+        })
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_reply_started_ahead_is_released_by_the_same_final_and_spoken() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    let id = h.speak_ahead("open the cheapest", FLIGHT).await;
+    assert_eq!(assistant_calls(&h.take_log()), [format!("ahead:{FLIGHT}")]);
+    assert_eq!(h.view().state, VoiceSessionStateV1::Finalizing);
+    h.link(VoiceEvent::Final {
+        id,
+        text: FLIGHT.into(),
+    })
+    .await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        [format!("release:1:{FLIGHT}")],
+        "released, never asked again"
+    );
+    assert!(matches!(
+        h.view().state,
+        VoiceSessionStateV1::Working { .. }
+    ));
+    h.reply(
+        1,
+        AssistEvent::Text {
+            block: 0,
+            delta: "The cheapest leaves at nine. ".into(),
+        },
+    )
+    .await;
+    h.reply(1, done()).await;
+    let speeches = Harness::speeches(&h.take_log());
+    assert!(
+        speeches
+            .iter()
+            .any(|(_, text)| text.starts_with("The cheapest")),
+        "{speeches:?}"
+    );
+}
+
+#[tokio::test]
+async fn other_final_words_discard_the_held_reply_before_asking() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    let id = h.speak_ahead("send hello", "send hello world to Ana").await;
+    h.take_log();
+    h.link(VoiceEvent::Final {
+        id,
+        text: "Send: Hello, World! to Ana".into(),
+    })
+    .await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        ["discard:1", "ask:Send: Hello, World! to Ana"]
+    );
+}
+
+#[tokio::test]
+async fn a_release_that_cannot_happen_asks_with_the_final_words() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.assistant.release_fails.store(true, Ordering::SeqCst);
+    h.start().await;
+    let id = h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.take_log();
+    h.link(VoiceEvent::Final {
+        id,
+        text: FLIGHT.into(),
+    })
+    .await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        [format!("release:1:{FLIGHT}"), format!("ask:{FLIGHT}")]
+    );
+    assert_eq!(h.view().fault, None);
+
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.assistant.ahead_fails.store(true, Ordering::SeqCst);
+    h.start().await;
+    let id = h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.link(VoiceEvent::Final {
+        id,
+        text: FLIGHT.into(),
+    })
+    .await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        [format!("ahead:{FLIGHT}"), format!("ask:{FLIGHT}")],
+        "a start that failed leaves the final to be asked"
+    );
+}
+
+#[tokio::test]
+async fn a_final_before_the_hold_is_ready_releases_it_once_ready() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    h.hold_ahead = true;
+    let id = h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.link(VoiceEvent::Final {
+        id,
+        text: FLIGHT.into(),
+    })
+    .await;
+    assert_eq!(assistant_calls(&h.take_log()), [format!("ahead:{FLIGHT}")]);
+    h.release_ahead().await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        [format!("release:1:{FLIGHT}")]
+    );
+}
+
+#[tokio::test]
+async fn barge_in_escape_and_dispose_discard_the_held_reply() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.take_log();
+    h.send(Command::KeyDown).await;
+    assert_eq!(assistant_calls(&h.take_log()), ["discard:1"]);
+
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.take_log();
+    h.send(Command::Escape).await;
+    assert_eq!(assistant_calls(&h.take_log()), ["discard:1"]);
+
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    h.hold_ahead = true;
+    h.speak_ahead("open the cheapest", FLIGHT).await;
+    h.take_log();
+    h.send(Command::Dispose).await;
+    assert!(assistant_calls(&h.take_log()).is_empty());
+    h.release_ahead().await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        ["discard:1"],
+        "a hold that comes back after the session ended is discarded"
+    );
+}
+
+#[tokio::test]
+async fn a_hold_that_comes_back_after_its_words_changed_is_discarded() {
+    let mut h = Harness::new(VoiceAvailabilityV1::Available, false);
+    h.start().await;
+    h.hold_ahead = true;
+    let id = h
+        .speak_ahead("open the cheapest", "open the cheapest flight")
+        .await;
+    h.link(VoiceEvent::Partial {
+        id: id.clone(),
+        text: FLIGHT.into(),
+    })
+    .await;
+    h.release_ahead().await;
+    let log = h.take_log();
+    assert_eq!(
+        assistant_calls(&log),
+        [
+            "ahead:open the cheapest flight".to_owned(),
+            format!("ahead:{FLIGHT}"),
+            "discard:1".to_owned(),
+        ]
+    );
+    h.link(VoiceEvent::Final {
+        id,
+        text: FLIGHT.into(),
+    })
+    .await;
+    assert_eq!(
+        assistant_calls(&h.take_log()),
+        [format!("release:2:{FLIGHT}")]
     );
 }

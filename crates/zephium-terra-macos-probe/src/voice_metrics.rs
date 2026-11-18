@@ -38,8 +38,24 @@ pub(super) struct Utterance {
     last_partial: Option<(u64, String)>,
     at_keyup: Option<(u64, String)>,
     late: Vec<(u64, String)>,
+    late_exact: Option<String>,
+    late_before_final: Vec<u64>,
+    last_partial_exact: Option<bool>,
     full_before_final: Option<u64>,
     final_summary: Option<(usize, usize, Option<bool>, Option<i64>)>,
+    early: Early,
+}
+
+/// Replies started ahead of the final for one utterance. The started words
+/// stay in memory only until the final is compared.
+#[derive(Default)]
+struct Early {
+    starts: u32,
+    discards: u32,
+    released: u32,
+    latest: Option<(u64, String)>,
+    released_at: Option<u64>,
+    matched: Option<&'static str>,
 }
 impl Utterance {
     fn partial(&mut self, at: u64, text: &str) {
@@ -48,6 +64,7 @@ impl Utterance {
             self.last_partial = Some((at, normalize(text)));
         } else if self.late.len() < 64 {
             self.late.push((at, normalize(text)));
+            self.late_exact = Some(text.trim().to_owned());
         }
     }
     fn keyup(&mut self, at: u64) {
@@ -69,6 +86,22 @@ impl Utterance {
                 final_text.split_whitespace().count() as i64 - p.split_whitespace().count() as i64
             }),
         ));
+        if let Some((_, started)) = &mut self.early.latest {
+            self.early.matched = Some(if started.trim() == text.trim() {
+                "exact"
+            } else if normalize(started) == final_text {
+                "folded"
+            } else {
+                "differs"
+            });
+            started.clear();
+        }
+        self.late_before_final = self
+            .late
+            .iter()
+            .map(|(arrived, _)| at.saturating_sub(*arrived))
+            .collect();
+        self.last_partial_exact = self.late_exact.take().map(|partial| partial == text.trim());
         // How long before the final the whole transcript was already known.
         self.full_before_final = self
             .at_keyup
@@ -90,7 +123,13 @@ impl Utterance {
             "partials": self.partials,
             "last_partial_before_keyup_ms": self.at_keyup.as_ref().and_then(|(at, _)| self.key_up?.checked_sub(*at)),
             "partial_at_keyup_matches_final": matches, "partial_words_missing": missing_words,
-            "full_partial_before_final_ms": self.full_before_final}))
+            "late_partials_before_final_ms": self.late_before_final,
+            "last_partial_exact": self.last_partial_exact,
+            "full_partial_before_final_ms": self.full_before_final,
+            "early_starts": self.early.starts, "early_discards": self.early.discards,
+            "early_released": self.early.released,
+            "early_start_to_final_ms": between(self.final_at, self.early.released_at),
+            "early_text_matched": self.early.matched}))
     }
 }
 
@@ -103,6 +142,10 @@ pub(super) struct Facts {
     pub utterances: Vec<Utterance>,
     pub reply_utterances: BTreeMap<u32, usize>,
     pub reply_first_text: BTreeMap<u32, u64>,
+    /// When a reply's model first streamed text, by call source, for
+    /// replies started ahead whose events wait for the final.
+    pub source_first_text: BTreeMap<String, u64>,
+    pub reply_sources: BTreeMap<u32, String>,
     pub answer_source: Option<Provenance>,
     pub received_answer_source: Option<Provenance>,
     pub playback: Vec<Value>,
@@ -176,6 +219,38 @@ impl Metrics {
             }
         });
     }
+    pub fn early_start(&self, index: usize, text: &str) {
+        let at = self.now();
+        self.with(|f| {
+            if let Some(u) = f.utterances.get_mut(index) {
+                u.early.starts += 1;
+                u.early.latest = Some((at, text.to_owned()));
+            }
+        });
+    }
+    pub fn early_discard(&self, index: usize) {
+        self.with(|f| {
+            if let Some(u) = f.utterances.get_mut(index) {
+                u.early.discards += 1;
+            }
+        });
+    }
+    pub fn early_release(&self, index: usize, reply: u32, source: String) {
+        self.with(|f| {
+            if let Some(u) = f.utterances.get_mut(index) {
+                u.early.released += 1;
+                u.early.released_at = u.early.latest.as_ref().map(|(at, _)| *at);
+            }
+            f.reply_sources.insert(reply, source);
+        });
+    }
+    pub fn source_text(&self, source: &str, at: u64) {
+        self.with(|f| {
+            if f.source_first_text.len() < 64 || f.source_first_text.contains_key(source) {
+                f.source_first_text.entry(source.to_owned()).or_insert(at);
+            }
+        });
+    }
     pub fn final_transcript(&self, index: usize, text: &str, expected: &[&str]) {
         self.with(|f| {
             let at = self.now();
@@ -211,9 +286,12 @@ impl Metrics {
             let utterance = source.reply.and_then(|r| f.reply_utterances.get(&r)).and_then(|i| f.utterances.get(*i));
             let keyup = utterance.and_then(|u| u.key_up);
             let final_at = utterance.and_then(|u| u.final_at);
-            let first_text = source.reply.and_then(|r| f.reply_first_text.get(&r).copied());
+            let shown = source.reply.and_then(|r| f.reply_first_text.get(&r).copied());
+            let produced = source.reply.and_then(|r| f.reply_sources.get(&r)).and_then(|s| f.source_first_text.get(s).copied());
+            let first_text = produced.or(shown);
             let played = f.times.get("first_answer_audio_played").copied();
             let stages = answer_stages(keyup, final_at, first_text, source.sent, source.received, played);
+            value["first_text_before_final_ms"] = json!(between(final_at, first_text));
             value["keyup_to_answer_audio"] = json!(between(played, keyup));
             for (key, stage) in stages { value[key] = json!(stage); }
             value["answer_utterance"] = json!(source.reply.and_then(|r| f.reply_utterances.get(&r)));
@@ -241,6 +319,9 @@ fn answer_stages(
     received: Option<u64>,
     played: Option<u64>,
 ) -> [(&'static str, Option<u64>); 5] {
+    // A reply started ahead may stream before the final; its stage is a
+    // clamped zero and the lead is `first_text_before_final_ms`.
+    let text = text.map(|text| final_at.map_or(text, |at| text.max(at)));
     [
         ("stt_final", between(final_at, keyup)),
         ("model_first_text", between(text, final_at)),
@@ -353,6 +434,67 @@ mod tests {
         fewer.keyup(2);
         fewer.finish(3, "one more word", &[]);
         assert_eq!(fewer.result().unwrap()["partial_words_missing"], 2);
+    }
+    #[test]
+    fn voice_early_start_counts_and_lead_without_text() {
+        let metrics = Metrics::new(Instant::now());
+        metrics.with(|f| {
+            let mut u = Utterance::default();
+            u.keyup(700);
+            f.utterances = vec![u];
+        });
+        metrics.early_start(0, "what is first here");
+        metrics.early_discard(0);
+        metrics.early_start(0, "What is first here?");
+        metrics.with(|f| {
+            f.utterances[0].early.latest.as_mut().unwrap().0 = 760;
+            f.utterances[0].finish(1100, "What is first here?", &[]);
+        });
+        metrics.early_release(0, 7, "c~2".into());
+        metrics.source_text("c~2", 1000);
+        metrics.with(|f| {
+            f.reply_utterances.insert(7, 0);
+            f.reply_first_text.insert(7, 1110);
+            f.answer_source = Some(Provenance {
+                kind: Kind::Answer,
+                sent: Some(1300),
+                received: Some(1700),
+                reply: Some(7),
+            });
+            f.times.insert("first_answer_audio_played", 1750);
+        });
+        let result = metrics.result();
+        let transcript = &result["transcripts"][0];
+        assert_eq!(transcript["early_starts"], 2);
+        assert_eq!(transcript["early_discards"], 1);
+        assert_eq!(transcript["early_released"], 1);
+        assert_eq!(transcript["early_start_to_final_ms"], 340);
+        assert_eq!(transcript["early_text_matched"], "exact");
+        assert_eq!(result["model_first_text"], 0);
+        assert_eq!(result["first_text_before_final_ms"], 100);
+        assert_eq!(result["sentence_ready"], 200);
+        let sum: u64 = [
+            "stt_final",
+            "model_first_text",
+            "sentence_ready",
+            "tts_first_audio",
+            "playout_start",
+        ]
+        .iter()
+        .map(|key| result[key].as_u64().unwrap())
+        .sum();
+        assert_eq!(sum, result["keyup_to_answer_audio"].as_u64().unwrap());
+        assert!(!result.to_string().contains("first here"));
+
+        let mut folded = Utterance::default();
+        folded.keyup(1);
+        folded.early.latest = Some((2, "send hello world".into()));
+        folded.finish(3, "Send: Hello, World!", &[]);
+        assert_eq!(folded.result().unwrap()["early_text_matched"], "folded");
+        assert_eq!(
+            folded.result().unwrap()["early_start_to_final_ms"],
+            Value::Null
+        );
     }
     #[test]
     fn voice_transcript_checks_strict_whole_words() {

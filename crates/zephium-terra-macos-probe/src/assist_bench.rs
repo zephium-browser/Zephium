@@ -611,6 +611,9 @@ impl Tabs for BenchTabs {
 struct Counted {
     inner: Arc<dyn WorkModelClient>,
     shared: Arc<Shared>,
+    /// The reply's call source, so text a held reply streamed can be timed
+    /// before its release.
+    source: Option<String>,
 }
 
 impl WorkModelClient for Counted {
@@ -630,7 +633,17 @@ impl WorkModelClient for Counted {
             if let Some(metrics) = self.shared.voice_metrics.get() {
                 metrics.model_started();
             }
-            let outcome = self.inner.call(request, events).await;
+            let timed = |event: WorkModelEvent| {
+                if let (WorkModelEvent::Text(text), Some(source), Some(metrics)) =
+                    (&event, &self.source, self.shared.voice_metrics.get())
+                {
+                    if !text.is_empty() {
+                        metrics.source_text(source, self.shared.since());
+                    }
+                }
+                events(event);
+            };
+            let outcome = self.inner.call(request, &timed).await;
             let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut plans_act = false;
             self.shared.count(|c| {
@@ -707,6 +720,12 @@ impl ModelSource for BenchModels {
         source: zephium_app::work_models::WorkCallSource,
     ) -> BoxFuture<'a, Result<ResolvedModel, WorkModelError>> {
         Box::pin(async move {
+            let traced = match &source {
+                zephium_app::work_models::WorkCallSource::Page { conversation, .. } => {
+                    Some(conversation.clone())
+                }
+                _ => None,
+            };
             let (entry, client) = zephium_app::work_models::resolve_entry_for(
                 *profile,
                 WorkModelRole::Page,
@@ -723,6 +742,7 @@ impl ModelSource for BenchModels {
                 client: Arc::new(Counted {
                     inner: client,
                     shared: self.0.clone(),
+                    source: traced,
                 }),
             })
         })

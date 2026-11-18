@@ -29,7 +29,7 @@ use super::port::{
 use super::tools::{self, Call, ItemCall};
 use super::{
     fault, host_of, readout, site_of, Admitted, Cancel, CancelReason, PageAssist, PendingStyle,
-    ReadRecord, MAX_LINKS,
+    ReadRecord,
 };
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
@@ -98,6 +98,12 @@ pub(super) struct Reply {
     /// What its model calls cost so far.
     pub(super) spent: std::sync::Mutex<Option<PageAssistCostV1>>,
     pub(super) spoken: bool,
+    /// What its model calls are made for: the conversation, or a held
+    /// reply's own source.
+    pub(super) source: String,
+    /// Started ahead of its words: its handle, and the gate told when it is
+    /// released or discarded.
+    pub(super) ahead: Option<(u64, Arc<tokio::sync::Notify>)>,
 }
 
 enum End {
@@ -131,7 +137,44 @@ type ToolOutcome = Result<String, String>;
 
 impl Reply {
     fn apply(&self, kind: PageAssistEventV1) -> bool {
-        self.service.apply(&self.conversation, self.reply, kind)
+        self.service
+            .apply_as(&self.conversation, self.reply, self.held(), kind)
+    }
+
+    fn held(&self) -> Option<u64> {
+        self.ahead.as_ref().map(|(held, _)| *held)
+    }
+
+    /// The conversation as this reply sees it.
+    fn seen<T>(&self, apply: impl FnOnce(super::Seen<'_>) -> T) -> Option<T> {
+        self.service.seen(&self.conversation, self.held(), apply)
+    }
+
+    /// Waits until a reply started ahead of its words is released: true
+    /// then, and at once for any other reply; false once it is discarded,
+    /// or held past [`super::AHEAD_HOLD_LIMIT`], when it discards itself.
+    async fn admitted(&self) -> bool {
+        let Some((held, gate)) = &self.ahead else {
+            return true;
+        };
+        let deadline = tokio::time::Instant::now() + super::AHEAD_HOLD_LIMIT;
+        loop {
+            let notified = gate.notified();
+            match self.service.ahead_phase(*held) {
+                Some(super::AheadPhase::Released) => return true,
+                None => return false,
+                Some(super::AheadPhase::Held) => {
+                    if tokio::time::Instant::now() >= deadline && self.service.discard(*held) {
+                        return false;
+                    }
+                    tokio::select! {
+                        () = notified => {}
+                        () = tokio::time::sleep_until(deadline) => {}
+                    }
+                }
+                Some(super::AheadPhase::Releasing) => notified.await,
+            }
+        }
     }
 
     fn note(&self, fact: std::fmt::Arguments<'_>) {
@@ -166,34 +209,25 @@ impl Reply {
     }
 
     fn with_data<T>(&self, apply: impl FnOnce(&mut super::ReplyData) -> T) -> Option<T> {
-        let mut state = self.service.state();
-        state
-            .live
-            .get_mut(&self.conversation)
-            .and_then(|live| live.replies.get_mut(&self.reply))
-            .map(apply)
+        self.seen(|seen| seen.replies.get_mut(&self.reply).map(apply))
+            .flatten()
     }
 
     /// Whether the model has written anything to the person in this reply.
     fn said(&self) -> bool {
-        let state = self.service.state();
-        state
-            .live
-            .get(&self.conversation)
-            .and_then(|live| live.conversation.blocks(self.reply))
-            .is_some_and(|blocks| {
+        self.seen(|seen| {
+            seen.conversation.blocks(self.reply).is_some_and(|blocks| {
                 blocks.iter().any(
                     |block| matches!(block, PageAssistBlockV1::Text { text, .. } if !text.trim().is_empty()),
                 )
             })
+        })
+        .unwrap_or(false)
     }
 
     fn next_block(&self) -> u16 {
-        let state = self.service.state();
-        state
-            .live
-            .get(&self.conversation)
-            .map_or(0, |live| live.conversation.next_block(self.reply))
+        self.seen(|seen| seen.conversation.next_block(self.reply))
+            .unwrap_or(0)
     }
 
     fn add_block(&self, text: &mut Text, value: PageAssistBlockV1) -> u16 {
@@ -211,17 +245,13 @@ impl Reply {
     }
 
     fn admit_links(&self, links: impl IntoIterator<Item = String>) {
-        let mut state = self.service.state();
-        if let Some(live) = state.live.get_mut(&self.conversation) {
+        self.seen(|mut seen| {
             for link in links {
-                if live.links.len() >= MAX_LINKS {
+                if zephium_page_assist::policy::is_web_url(&link) && !seen.admit_link(link) {
                     break;
                 }
-                if zephium_page_assist::policy::is_web_url(&link) {
-                    live.links.insert(link);
-                }
             }
-        }
+        });
     }
 
     fn handle(&self, tab: &str) -> String {
@@ -372,18 +402,17 @@ impl Reply {
             .values()
             .filter_map(|f| f.href.clone())
             .collect();
-        {
-            let mut state = self.service.state();
-            state.traits.insert(tab.to_owned(), (facts.epoch, traits));
-            if let Some(live) = state.live.get_mut(&self.conversation) {
-                for link in links {
-                    if live.links.len() >= MAX_LINKS {
-                        break;
-                    }
-                    live.links.insert(link);
+        self.service
+            .state()
+            .traits
+            .insert(tab.to_owned(), (facts.epoch, traits));
+        self.seen(|mut seen| {
+            for link in links {
+                if !seen.admit_link(link) {
+                    break;
                 }
             }
-        }
+        });
         self.with_data(|data| {
             data.read_sites.insert((tab.to_owned(), site));
             data.reads.push(ReadRecord {
@@ -499,12 +528,8 @@ impl Reply {
     }
 
     fn history(&self) -> Vec<WorkModelMessage> {
-        let messages = {
-            let mut state = self.service.state();
-            let Some(live) = state.live.get_mut(&self.conversation) else {
-                return Vec::new();
-            };
-            let messages = live.conversation.messages().to_vec();
+        let messages = self.seen(|seen| {
+            let messages = seen.conversation.messages().to_vec();
             let mut sites = std::collections::BTreeSet::new();
             let mut unknown = false;
             for message in &messages {
@@ -526,7 +551,7 @@ impl Reply {
                     if *id == self.reply {
                         continue;
                     }
-                    if let Some(data) = live.replies.get(id) {
+                    if let Some(data) = seen.earlier(*id) {
                         sites.extend(data.read_sites.iter().cloned());
                         unknown |= data.unknown_read_sites;
                     } else {
@@ -534,11 +559,14 @@ impl Reply {
                     }
                 }
             }
-            if let Some(data) = live.replies.get_mut(&self.reply) {
+            if let Some(data) = seen.replies.get_mut(&self.reply) {
                 data.read_sites.extend(sites);
                 data.unknown_read_sites |= unknown;
             }
             messages
+        });
+        let Some(messages) = messages else {
+            return Vec::new();
         };
         let mut model = Vec::new();
         for exchange in prompt::history(&messages) {
@@ -679,6 +707,11 @@ pub(super) async fn run(reply: Reply) {
         reason = reply.cancel.cancelled() => End::Cancelled(reason),
         end = body(&reply) => end,
     };
+    // A reply started ahead of its words ends only once released; a
+    // discarded one ends here, having shown, said and stored nothing.
+    if !reply.admitted().await {
+        return;
+    }
     reply.leased.store(false, Ordering::Release);
     reply.unglow();
     reply.note(format_args!(
@@ -719,10 +752,13 @@ pub(super) async fn run(reply: Reply) {
         if state
             .running
             .get(&reply.conversation)
-            .is_some_and(|running| running.reply == reply.reply)
+            .is_some_and(|running| Arc::ptr_eq(&running.cancel, &reply.cancel))
         {
             state.running.remove(&reply.conversation);
         }
+    }
+    if let Some(held) = reply.held() {
+        reply.service.ahead_ended(held);
     }
     reply.ended.notify_waiters();
     reply.service.persist(&reply.conversation);
@@ -731,7 +767,7 @@ pub(super) async fn run(reply: Reply) {
 async fn body(reply: &Reply) -> End {
     let ports = reply.service.ports();
     let source = WorkCallSource::Page {
-        conversation: reply.conversation.clone(),
+        conversation: reply.source.clone(),
         reply: reply.reply,
     };
     reply.phase(Some(PageAssistPhaseV1::Thinking));
@@ -836,6 +872,10 @@ async fn body(reply: &Reply) -> End {
             break;
         }
         reply.flush(&mut text);
+        // A reply started ahead of its words runs no tool until released.
+        if !reply.admitted().await {
+            return End::Cancelled(CancelReason::Gone);
+        }
         let mut results = Vec::with_capacity(calls.len());
         let mut stop = false;
         for call in calls {

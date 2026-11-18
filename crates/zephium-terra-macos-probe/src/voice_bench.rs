@@ -514,6 +514,8 @@ struct Assistant {
     front: String,
     metrics: Arc<Metrics>,
     replies: Arc<Mutex<Vec<vp::Asked>>>,
+    /// Held replies by id: their conversation, call source and utterance.
+    held: Arc<Mutex<BTreeMap<u64, (String, String, usize)>>>,
 }
 impl Assistant {
     fn ask(
@@ -569,6 +571,89 @@ impl vp::AssistantPort for Assistant {
     fn ask(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<vp::Asked, Fault>> {
         self.metrics.count("assistant_asks", 1);
         self.ask(text, false, spoken)
+    }
+    fn ask_ahead(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<u64, Fault>> {
+        let shared = self.shared.clone();
+        let front = self.front.clone();
+        let metrics = self.metrics.clone();
+        let held = self.held.clone();
+        let utterance = metrics.with(|f| f.utterances.len().saturating_sub(1));
+        Box::pin(async move {
+            let service = shared.service.get().ok_or(Fault::Unavailable)?;
+            let status = service.status(&shared.space, Some(&front)).await;
+            let request = PageAssistAskV1 {
+                space: shared.space.clone(),
+                conversation: status.conversation.id,
+                text: text.clone(),
+                suggestion: None,
+                attachments: vec![PageAssistAttachV1::Page { tab: front }],
+            };
+            let delivery = if spoken {
+                Delivery::Spoken
+            } else {
+                Delivery::Shown
+            };
+            let (started, task) = service
+                .ask_ahead(request, delivery)
+                .await
+                .map_err(|fault| Fault::from_assist(&fault))?;
+            metrics.early_start(utterance, &text);
+            held.lock().unwrap_or_else(|p| p.into_inner()).insert(
+                started.id,
+                (started.conversation, started.source, utterance),
+            );
+            tokio::spawn(task);
+            Ok(started.id)
+        })
+    }
+    fn release(&self, id: u64, text: String) -> BoxFuture<'static, Result<vp::Asked, Fault>> {
+        let shared = self.shared.clone();
+        let metrics = self.metrics.clone();
+        let replies = self.replies.clone();
+        let started = self
+            .held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        Box::pin(async move {
+            let service = shared.service.get().ok_or(Fault::Unavailable)?;
+            let (conversation, source, utterance) = started.ok_or(Fault::Unavailable)?;
+            let released = service.release(id, &text).await;
+            let reply = match released {
+                Ok(reply) => reply,
+                Err(fault) => {
+                    metrics.early_discard(utterance);
+                    return Err(Fault::from_assist(&fault));
+                }
+            };
+            metrics.count("assistant_asks", 1);
+            metrics.early_release(utterance, reply, source);
+            let asked = vp::Asked {
+                conversation,
+                reply,
+            };
+            replies
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(asked.clone());
+            metrics.with(|f| {
+                f.reply_utterances.insert(asked.reply, utterance);
+            });
+            Ok(asked)
+        })
+    }
+    fn discard(&self, id: u64) {
+        let started = self
+            .held
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&id);
+        if let Some(service) = self.shared.service.get() {
+            service.discard(id);
+        }
+        if let Some((_, _, utterance)) = started {
+            self.metrics.early_discard(utterance);
+        }
     }
     fn steer(
         &self,
@@ -732,6 +817,7 @@ async fn scenario_run(
                 front,
                 metrics: metrics.clone(),
                 replies: replies.clone(),
+                held: Arc::default(),
             }),
             projection: Arc::new(Projection(metrics.clone())),
             clock: Arc::new(Clock(metrics.clone())),

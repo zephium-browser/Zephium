@@ -59,6 +59,16 @@ mod product {
     });
     /// The Space of the conversation voice last asked in.
     static ASKED: Mutex<Option<(String, String)>> = Mutex::new(None);
+    /// The reply started ahead of its final words, with the Space, tab and
+    /// conversation it was started in.
+    static HELD: Mutex<Option<HeldIn>> = Mutex::new(None);
+
+    struct HeldIn {
+        held: u64,
+        space: String,
+        tab: String,
+        conversation: String,
+    }
 
     fn front() -> std::sync::MutexGuard<'static, Front> {
         FRONT.lock().unwrap_or_else(|p| p.into_inner())
@@ -357,6 +367,102 @@ mod product {
         })
     }
 
+    /// Starts a held reply on words the final transcript has not confirmed
+    /// yet; only a readable front tab qualifies.
+    async fn ask_ahead(text: String, spoken: bool) -> Result<u64, Fault> {
+        let service = crate::page_assist::service().ok_or(Fault::Unavailable)?;
+        let (space, tab) = {
+            let front = front();
+            (
+                front.space.clone().ok_or(Fault::Unavailable)?,
+                front.tab.clone().ok_or(Fault::Unavailable)?,
+            )
+        };
+        let status = service.status(&space, Some(&tab)).await;
+        let conversation = status.conversation.id;
+        if conversation.is_empty() || status.availability != PageAssistAvailabilityV1::Ready {
+            return Err(Fault::Unavailable);
+        }
+        let request = PageAssistAskV1 {
+            space: space.clone(),
+            conversation: conversation.clone(),
+            text,
+            suggestion: None,
+            attachments: vec![PageAssistAttachV1::Page { tab: tab.clone() }],
+        };
+        let delivery = if spoken {
+            Delivery::Spoken
+        } else {
+            Delivery::Shown
+        };
+        let (held, task) = service
+            .ask_ahead(request, delivery)
+            .await
+            .map_err(|fault| Fault::from_assist(&fault))?;
+        tauri::async_runtime::spawn(task);
+        let earlier = HELD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(HeldIn {
+                held: held.id,
+                space,
+                tab,
+                conversation,
+            });
+        if let Some(earlier) = earlier {
+            service.discard(earlier.held);
+        }
+        Ok(held.id)
+    }
+
+    /// Releases a held reply when the front Space and tab are still the ones
+    /// it was started in; otherwise discards it.
+    async fn release(held: u64, text: String) -> Result<Asked, Fault> {
+        let service = crate::page_assist::service().ok_or(Fault::Unavailable)?;
+        let started = {
+            let mut slot = HELD.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.as_ref().is_some_and(|entry| entry.held == held) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        let Some(started) = started else {
+            service.discard(held);
+            return Err(Fault::Unavailable);
+        };
+        let same = {
+            let front = front();
+            front.space.as_deref() == Some(started.space.as_str())
+                && front.tab.as_deref() == Some(started.tab.as_str())
+        };
+        if !same {
+            service.discard(held);
+            return Err(Fault::Unavailable);
+        }
+        let reply = service
+            .release(held, &text)
+            .await
+            .map_err(|fault| Fault::from_assist(&fault))?;
+        *ASKED.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((started.space, started.conversation.clone()));
+        Ok(Asked {
+            conversation: started.conversation,
+            reply,
+        })
+    }
+
+    fn discard(held: u64) {
+        let mut slot = HELD.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.as_ref().is_some_and(|entry| entry.held == held) {
+            *slot = None;
+        }
+        drop(slot);
+        if let Some(service) = crate::page_assist::service() {
+            service.discard(held);
+        }
+    }
+
     fn space_of(conversation: &str) -> Option<String> {
         ASKED
             .lock()
@@ -371,6 +477,18 @@ mod product {
     impl AssistantPort for Assistant {
         fn ask(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<Asked, Fault>> {
             Box::pin(ask(text, false, spoken))
+        }
+
+        fn ask_ahead(&self, text: String, spoken: bool) -> BoxFuture<'static, Result<u64, Fault>> {
+            Box::pin(ask_ahead(text, spoken))
+        }
+
+        fn release(&self, held: u64, text: String) -> BoxFuture<'static, Result<Asked, Fault>> {
+            Box::pin(release(held, text))
+        }
+
+        fn discard(&self, held: u64) {
+            discard(held);
         }
 
         fn steer(
