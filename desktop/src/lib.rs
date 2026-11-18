@@ -83,6 +83,7 @@ mod external_links;
 #[cfg(feature = "work-product")]
 mod favicon_probe;
 mod focus_alerts;
+mod folders;
 mod haptics;
 mod help;
 mod history_menu;
@@ -2093,6 +2094,8 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             tabs_activate,
             tabs_close,
             tabs_set_essential,
+            folders::tabs_folder,
+            folders::folder_menu_popup,
             essentials_keep,
             essentials_release,
             profile_rename,
@@ -4367,7 +4370,7 @@ fn execute_command_or(
             rejected_operation()
         };
     }
-    if id == "split.choose" {
+    if matches!(id, "split.choose" | "tab.group") {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
         } else {
@@ -4379,6 +4382,9 @@ fn execute_command_or(
     }
     if let Some(step) = id.strip_prefix(history_menu::ID_PREFIX) {
         return history_menu::execute(app, step);
+    }
+    if let Some(admission) = folders::execute(app, id) {
+        return admission;
     }
     if let Some(admission) = spaces::execute(app, id) {
         return admission;
@@ -4506,6 +4512,10 @@ fn execute_tab_menu_action(
                 axis: Axis::Row,
             },
         ),
+        action if action.starts_with(TAB_MENU_FOLDER_PREFIX) => {
+            folders::tab_action(app, id, &action[TAB_MENU_FOLDER_PREFIX.len()..])
+                .unwrap_or_else(rejected_operation)
+        }
         action if action.starts_with(spaces::TAB_MENU_MOVE) => {
             spaces::move_tab(app, id, &action[spaces::TAB_MENU_MOVE.len()..])
         }
@@ -6550,7 +6560,16 @@ struct TabMenuContext {
     /// Only what acts on the page's camera, microphone and sound, for the
     /// in-use indicator.
     media_only: bool,
+    /// A web page that may go into a folder.
+    #[serde(default)]
+    fileable: bool,
+    /// The tab is in a folder now.
+    #[serde(default)]
+    in_folder: bool,
 }
+
+/// Tab menu actions about folders, after `tabmenu.`.
+const TAB_MENU_FOLDER_PREFIX: &str = "folders.";
 
 /// `site_protected` is the page's protection standing, absent where site
 /// controls do not apply; the frame owns both actions, and clearing the data
@@ -6749,6 +6768,15 @@ fn build_tab_menu(
     let others = item(8, "Close Other Tabs", context.others)?;
     let below = item(9, "Close Tabs Below", context.below)?;
     let move_to = spaces::tab_menu_section(handle, &format!("tabmenu.{}", spaces::TAB_MENU_MOVE))?;
+    let folder = if context.fileable {
+        folders::tab_menu_section(
+            handle,
+            &format!("tabmenu.{TAB_MENU_FOLDER_PREFIX}"),
+            context.in_folder,
+        )?
+    } else {
+        None
+    };
     let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
         &reload,
         &duplicate,
@@ -6759,6 +6787,9 @@ fn build_tab_menu(
         &keep,
         &split,
     ];
+    if let Some(folder) = &folder {
+        items.push(folder);
+    }
     if let Some(move_to) = &move_to {
         items.push(move_to);
     }
@@ -7351,6 +7382,7 @@ fn finish_browser_setup(
     let operation_ledger = OperationLedger::default();
     app.manage(operation_ledger.clone());
     app.manage(TabMenuTarget::default());
+    app.manage(folders::FolderMenuTarget::default());
     app.manage(history_menu::HistoryMenuTarget::default());
 
     app.manage(keymap::Keymap::load());
@@ -7453,6 +7485,7 @@ fn finish_browser_setup(
             #[cfg(feature = "adblock-qa")]
             blocker_bench::items(&state);
             spaces::follow(&emit_handle, &state);
+            folders::follow(&state);
             page_assist::observe_items(&state);
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
         }

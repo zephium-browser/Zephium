@@ -64,6 +64,7 @@ impl Shell {
             Command::LeaveSplit(id) => self.operation_leave_split(id),
             Command::TabAction { id, action } => self.operation_tab_action(id, action),
             Command::Space(command) => self.operation_space(*command),
+            Command::Folder(command) => self.operation_folder(*command),
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
@@ -610,6 +611,9 @@ impl Shell {
         {
             self.browser_after_return = Some(Box::new(Command::Close(id)));
             return self.request_browser_return();
+        }
+        if self.kept_asleep(id) {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         let discard_closing = matches!(
             self.residency.discard_probes.get(&id),
@@ -1161,6 +1165,11 @@ impl Shell {
         let Some(profile) = self.windows.focused().map(|window| window.profile) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
+        if named.is_none() {
+            if let Some(native) = self.reopen_deleted_folder(profile) {
+                return mutation_result(native);
+            }
+        }
         match self.restore_recently_closed_tab(profile, named) {
             Some((_, native)) => mutation_result(native),
             None => operation_result(OperationOutcome::NoOp, OperationReason::MutationApplied),

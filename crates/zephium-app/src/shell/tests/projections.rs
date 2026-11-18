@@ -186,6 +186,8 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                 section: SidebarSectionView::Favorites,
                 kind: SidebarNodeKindView::Folder {
                     name: "Essentials".into(),
+                    color: None,
+                    collapsed: false,
                 },
             },
             SidebarNodeView {
@@ -210,6 +212,8 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                 section: SidebarSectionView::Pinned,
                 kind: SidebarNodeKindView::Folder {
                     name: "Pinned folder".into(),
+                    color: None,
+                    collapsed: false,
                 },
             },
             SidebarNodeView {
@@ -234,6 +238,8 @@ fn items_projection_is_one_ordered_authoritative_focused_sidebar_snapshot() {
                 section: SidebarSectionView::Today,
                 kind: SidebarNodeKindView::Folder {
                     name: "Today folder".into(),
+                    color: None,
+                    collapsed: false,
                 },
             },
             SidebarNodeView {

@@ -173,6 +173,15 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::File,
     ),
     command("split.choose", "Split View…", Keys::NONE, Group::File),
+    // The selected tabs, else the one in front, into a new folder. Shift
+    // and a letter, as the tool panels are: never Alt, which is AltGr on
+    // many Windows layouts.
+    command(
+        "tab.group",
+        "Group into Folder",
+        Keys::same("CmdOrCtrl+Shift+L"),
+        Group::File,
+    ),
     command(
         "page.save",
         "Save Page As…",

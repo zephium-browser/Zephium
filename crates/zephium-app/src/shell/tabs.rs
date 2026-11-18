@@ -140,6 +140,8 @@ impl TabPreferences {
 
 struct KeptSlot {
     placement: Placement,
+    /// The folder it was kept in; none for an Essential.
+    parent: Option<ItemId>,
     url: url::Url,
     title: String,
     before: Option<ItemId>,
@@ -275,15 +277,25 @@ impl Shell {
     }
 
     pub(super) fn close(&mut self, id: ItemId) -> NativeWork {
+        self.close_tab(id, true)
+    }
+
+    /// Closes a tab; with `keep`, an Essential or a tab in a folder ends its
+    /// page and stays where it was, asleep. Without, it goes either way.
+    pub(super) fn close_tab(&mut self, id: ItemId, keep: bool) -> NativeWork {
         if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
             return NativeWork::default();
         }
+        if keep && self.kept_asleep(id) {
+            return NativeWork::default();
+        }
+        let kept = keep.then(|| self.kept_slot(id)).flatten();
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
         self.native_openers.remove(&id);
-        // An Essential is kept, not closed: the page ends and the site stays.
-        let kept = self.kept_slot(id);
+        // An Essential or a folder's tab is kept, not closed: the page ends
+        // and the site stays.
         let closed = kept
             .is_none()
             .then(|| self.closed_record(id, unix_millis()))
@@ -344,23 +356,40 @@ impl Shell {
         native
     }
 
-    /// Where an Essential sits, so closing it can leave it there unloaded.
+    /// A kept tab already asleep, and not in front: closing it has no page
+    /// to end.
+    pub(super) fn kept_asleep(&self, id: ItemId) -> bool {
+        self.kept_slot(id).is_some()
+            && !self.items.tab(id).is_some_and(TabState::has_view)
+            && self
+                .windows
+                .focused()
+                .is_none_or(|win| win.active != Some(id))
+    }
+
+    /// Where an Essential or a folder's tab sits, so closing it can leave it
+    /// there unloaded.
     fn kept_slot(&self, id: ItemId) -> Option<KeptSlot> {
         let item = self.items.get(id)?;
         let tab = item.tab()?;
-        if item.parent.is_some()
-            || !matches!(item.placement, Placement::Favorites { .. })
-            || tab.content != zephium_core::item::TabContent::Web
-        {
+        let kept = match item.parent {
+            Some(folder) => self.items.is_folder(folder),
+            None => matches!(item.placement, Placement::Favorites { .. }),
+        };
+        if !kept || tab.content != zephium_core::item::TabContent::Web {
             return None;
         }
-        let roots = self.items.roots(item.placement);
-        let at = roots.iter().position(|candidate| *candidate == id)?;
+        let siblings = match item.parent {
+            Some(folder) => self.items.children(folder),
+            None => self.items.roots(item.placement),
+        };
+        let at = siblings.iter().position(|candidate| *candidate == id)?;
         Some(KeptSlot {
             placement: item.placement,
+            parent: item.parent,
             url: tab.url.clone()?,
             title: tab.title.clone(),
-            before: roots.get(at + 1).copied(),
+            before: siblings.get(at + 1).copied(),
         })
     }
 
@@ -369,27 +398,34 @@ impl Shell {
     fn restore_kept_slot(&mut self, kept: KeptSlot) {
         for _ in 0..8 {
             let id = ItemId::generate();
-            if self
-                .items
-                .insert_unloaded_tab(id, kept.placement, kept.url.clone(), &kept.title)
-            {
-                if let Some(before) = kept.before {
-                    self.items
-                        .move_tab_to_root(id, kept.placement, Some(before));
-                }
+            if self.items.insert_unloaded_tab_at(
+                id,
+                kept.placement,
+                kept.parent,
+                kept.before,
+                kept.url.clone(),
+                &kept.title,
+            ) {
                 return;
             }
         }
     }
 
     /// The tabs a closed active one may hand the window to: the space's open
-    /// tabs only, so closing never wakes an Essential or a pinned page. The
-    /// private window has no such sections and keeps walking every tab.
+    /// tabs only, so closing never wakes an Essential, a pinned page or a
+    /// folder's sleeping tab. The private window has no such sections and
+    /// keeps walking every tab.
     pub(super) fn successor_pool(&self, profile: ProfileId, space: SpaceId) -> Vec<ItemId> {
         if self.incognito_profile(profile) {
             self.keyboard_tabs(space)
         } else {
-            self.regular_tabs(space)
+            let mut tabs = self.regular_tabs(space);
+            tabs.retain(|id| {
+                self.items.get(*id).is_some_and(|item| {
+                    item.parent.is_none() || item.tab().is_some_and(TabState::has_view)
+                })
+            });
+            tabs
         }
     }
 

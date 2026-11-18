@@ -64,6 +64,10 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub audio: Option<TabAudioView>,
+    /// A web page whose address is kept but which has no live view: it
+    /// loads when opened.
+    #[serde(default)]
+    pub asleep: bool,
 }
 
 /// The sidebar's player: the media of the tab that most recently started
@@ -631,8 +635,62 @@ pub enum SidebarSectionView {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidebarNodeKindView {
-    Folder { name: String },
-    Tab { tab_id: String },
+    Folder {
+        name: String,
+        color: Option<zephium_core::item::FolderColor>,
+        /// Folded: its rows are hidden, the active tab's excepted.
+        collapsed: bool,
+    },
+    Tab {
+        tab_id: String,
+    },
+}
+
+/// What chrome asks of the sidebar's folders. Every id is one the focused
+/// space projected; native checks each against that space again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FolderIntent {
+    /// A new folder holding `tabs`, in sidebar order. With tabs it takes the
+    /// first one's place; without, it goes into `parent` before `before`.
+    Create {
+        name: String,
+        color: Option<zephium_core::item::FolderColor>,
+        tabs: Vec<String>,
+        parent: Option<String>,
+        before: Option<String>,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    SetColor {
+        id: String,
+        color: Option<zephium_core::item::FolderColor>,
+    },
+    SetCollapsed {
+        id: String,
+        collapsed: bool,
+    },
+    /// A tab or a folder, into `parent` (none: the open tabs) before
+    /// `before` (none: at the end).
+    Move {
+        id: String,
+        parent: Option<String>,
+        before: Option<String>,
+    },
+    /// The folder goes; what it held stays where it was.
+    Ungroup {
+        id: String,
+    },
+    /// Every page in the folder ends; the tabs stay in it, asleep.
+    CloseTabs {
+        id: String,
+    },
+    /// The folder and its tabs close. Reopen Closed Tab brings it back.
+    Delete {
+        id: String,
+    },
 }
 
 /// One pre-order entry in the focused sidebar tree. Parents always precede

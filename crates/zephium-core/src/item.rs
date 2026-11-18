@@ -241,6 +241,7 @@ impl TabState {
 
 /// A folder's colour: one of the interface's soft hues, or none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
 pub enum FolderColor {
     Sky,
