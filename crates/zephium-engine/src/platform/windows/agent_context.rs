@@ -128,6 +128,7 @@ pub(crate) struct AgentOwnedViewCallbacks<
     invariant: Invariant,
     panic: Panic,
     redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    unreachable: Option<Rc<dyn Fn()>>,
     credential_denied: Option<Rc<dyn Fn()>>,
 }
 
@@ -150,6 +151,7 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
             invariant,
             panic,
             redirect: None,
+            unreachable: None,
             credential_denied: None,
         }
     }
@@ -165,6 +167,12 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
         redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
     ) -> Self {
         self.redirect = Some(Rc::new(redirect));
+        self
+    }
+    /// Told, before the document fails, that its main-frame load could not
+    /// reach the site (no connection, unknown host, refused or insecure).
+    pub(crate) fn with_unreachable(mut self, callback: impl Fn() + 'static) -> Self {
+        self.unreachable = Some(Rc::new(callback));
         self
     }
 }
@@ -1708,6 +1716,7 @@ where
         invariant: on_invariant_failure,
         panic: on_callback_panic,
         redirect: on_redirect,
+        unreachable: on_unreachable,
         credential_denied: on_credential_denied,
     } = callbacks;
     let navigation = AgentNavigationController::default();
@@ -1749,6 +1758,7 @@ where
     let renderer_panic = panic_callback.clone();
     let browser_panic = panic_callback.clone();
     let semantic_panic = panic_callback.clone();
+    let unreachable_panic = panic_callback.clone();
     let semantic_navigation = semantic_plan.clone();
     let semantic_policy = semantic_plan.clone();
     let semantic_renderer = semantic_plan.clone();
@@ -1765,6 +1775,14 @@ where
         })
         .with_visible(false)
         .with_focused(false)
+        .with_navigation_failure_handler(move |_, failure, _| {
+            if let Some(unreachable) = on_unreachable
+                .as_ref()
+                .filter(|_| crate::platform::work_document_navigation::unreachable(&failure))
+            {
+                invoke_unit_callback(unreachable.as_ref(), unreachable_panic.as_ref());
+            }
+        })
         .with_devtools(false)
         .with_autoplay(false)
         .with_hotkeys_zoom(false)

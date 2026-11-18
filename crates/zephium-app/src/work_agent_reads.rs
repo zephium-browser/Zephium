@@ -1768,6 +1768,20 @@ mod tests {
             &step,
             &Ok(outcome(read_note::CONSTRUCTION_TIMEOUT, 0))
         ));
+        assert!(!retryable_read(
+            &step,
+            &Ok(outcome(read_note::UNREACHABLE, 0))
+        ));
+        let read = WorkStepKindV1::Read {
+            verbatim: None,
+            url: "https://www.ebay.com/".into(),
+            goal: None,
+            collection: None,
+        };
+        assert!(
+            !retryable_read(&read, &Ok(outcome(read_note::UNREACHABLE, 0))),
+            "a site that could not be reached is not read again"
+        );
     }
 
     #[test]

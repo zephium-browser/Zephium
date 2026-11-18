@@ -2604,6 +2604,7 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Deadline => "The page took too long",
         AgentWorkFailure::ContextLost => zephium_core::work::runtime::read_note::UNSETTLED,
         AgentWorkFailure::Redirected => "The page redirects elsewhere",
+        AgentWorkFailure::Unreachable => zephium_core::work::runtime::read_note::UNREACHABLE,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             "The page needed more steps than one read allows"
         }
@@ -2779,6 +2780,7 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
     use WorkPageOutcomeV1 as Outcome;
     let stage = match failure {
         AgentWorkFailure::Redirected => return Outcome::Redirected,
+        AgentWorkFailure::Unreachable => return Outcome::SiteError,
         AgentWorkFailure::Cancelled => return Outcome::Cancelled,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             return Outcome::TooManySteps;
@@ -2851,6 +2853,18 @@ mod closed_result_tests {
         ] {
             assert_eq!(failure_note(failure), "Work could not bind its decision to the current page state; this does not establish a site loading failure");
         }
+    }
+
+    #[test]
+    fn an_unreachable_site_is_a_site_error_not_an_unsettled_page() {
+        assert_eq!(
+            failure_note(AgentWorkFailure::Unreachable),
+            zephium_core::work::runtime::read_note::UNREACHABLE
+        );
+        assert_eq!(
+            page_failure_outcome(AgentWorkFailure::Unreachable),
+            WorkPageOutcomeV1::SiteError
+        );
     }
 
     #[test]

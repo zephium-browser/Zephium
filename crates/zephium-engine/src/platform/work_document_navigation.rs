@@ -608,6 +608,22 @@ impl State {
     }
 }
 
+/// A main-frame load that never reached the site: no connection, an unknown
+/// host, a refused or dropped connection, no answer, or no secure connection.
+/// Content rules and other failures are not the site's.
+pub(crate) const fn unreachable(failure: &wry::NavigationFailure) -> bool {
+    use wry::NavigationFailure as F;
+    matches!(
+        failure,
+        F::Offline
+            | F::HostNotFound
+            | F::Unreachable
+            | F::TimedOut
+            | F::Insecure
+            | F::Certificate(_)
+    )
+}
+
 /// The construction load of a fresh view: WebKit names the view's own empty
 /// main frame (an opaque origin) as the frame that asked, or no frame.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -1714,6 +1730,23 @@ mod tests {
     use super::*;
     use wry::NavigationEventPhase as E;
     pub(super) const URL: &str = "https://example.test/frozen";
+
+    #[test]
+    fn only_a_load_that_never_reached_the_site_is_unreachable() {
+        use wry::{CertificateProblem, NavigationFailure as F};
+        for failure in [
+            F::Offline,
+            F::HostNotFound,
+            F::Unreachable,
+            F::TimedOut,
+            F::Insecure,
+            F::Certificate(CertificateProblem::Expired),
+        ] {
+            assert!(unreachable(&failure), "{failure:?}");
+        }
+        assert!(!unreachable(&F::Blocked));
+        assert!(!unreachable(&F::Other));
+    }
     fn next_request() -> (ContextJoin, ContextNavigationRequest) {
         next_request_with_policy(zephium_agentic::WorkBrowserDocumentPolicy::Exact)
     }
