@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::FolderCommand;
+use std::collections::HashMap;
 use zephium_core::ids::ClosedSessionId;
 use zephium_core::item::{FolderColor, ItemKind};
 use zephium_core::items::MAX_FOLDER_DEPTH;
@@ -19,6 +20,9 @@ pub(super) struct DeletedFolder {
     node: DeletedNode,
     /// The Recently Closed records its tabs left.
     closed: Vec<ClosedSessionId>,
+    /// Every record Recently Closed held once it was deleted; any other is
+    /// newer and comes back first.
+    known: Vec<ClosedSessionId>,
 }
 
 enum DeletedNode {
@@ -31,7 +35,31 @@ enum DeletedNode {
     Tab {
         url: url::Url,
         title: String,
+        source: ItemId,
+        /// Its Recently Closed record; it comes back only while that is there.
+        record: Option<ClosedSessionId>,
     },
+}
+
+impl DeletedNode {
+    fn link(&mut self, records: &HashMap<ItemId, ClosedSessionId>) {
+        match self {
+            Self::Folder { children, .. } => {
+                children.iter_mut().for_each(|child| child.link(records))
+            }
+            Self::Tab { source, record, .. } => *record = records.get(source).copied(),
+        }
+    }
+
+    /// Items a restore would make: every folder, and each tab still recorded.
+    fn size(&self, live: &[ClosedSessionId]) -> usize {
+        match self {
+            Self::Folder { children, .. } => {
+                1 + children.iter().map(|c| c.size(live)).sum::<usize>()
+            }
+            Self::Tab { record, .. } => usize::from(record.is_some_and(|r| live.contains(&r))),
+        }
+    }
 }
 
 fn rejected(reason: OperationReason) -> OperationDisposition {
@@ -144,7 +172,7 @@ impl Shell {
         // The tabs go in as the sidebar lists them, whatever order they came.
         let order = self.keyboard_tabs(space);
         let mut tabs = tabs.to_vec();
-        tabs.sort_by_key(|tab| order.iter().position(|id| id == tab));
+        tabs.sort_by_cached_key(|tab| order.iter().position(|id| id == tab));
         tabs.dedup();
         let placement = today(space);
         let (mut parent, mut before) = match tabs.iter().find(|tab| {
@@ -309,6 +337,8 @@ impl Shell {
                 .map(|url| DeletedNode::Tab {
                     url,
                     title: tab.title.clone(),
+                    source: id,
+                    record: None,
                 }),
         }
     }
@@ -335,23 +365,25 @@ impl Shell {
             .position(|sibling| *sibling == id)
             .and_then(|at| siblings.get(at + 1).copied());
         let node = self.capture(id);
-        let mut closed = Vec::new();
+        let mut records = HashMap::new();
         let mut native = NativeWork::default();
         for tab in self.items.subtree_tabs(id) {
             let newest = |shell: &Self| shell.recently_closed.last().and_then(|e| e.session_id);
             let previous = newest(self);
             native.merge(self.close_tab(tab, false));
             if self.items.get(tab).is_some() {
-                // The lone New Tab of a space stays; so does its folder.
+                // The lone New Tab of a space stays open, where the folder stood.
+                let _ = self.items.move_item(tab, placement, parent, Some(id));
                 continue;
             }
             if let Some(record) = newest(self).filter(|record| Some(*record) != previous) {
-                closed.push(record);
+                records.insert(tab, record);
             }
         }
         let effects = self.items.remove(id);
         native.merge(self.commit(effects));
-        if let Some(node) = node.filter(|_| !closed.is_empty()) {
+        if let Some(mut node) = node {
+            node.link(&records);
             if self.deleted_folders.len() == MAX_DELETED_FOLDERS {
                 self.deleted_folders.remove(0);
             }
@@ -360,14 +392,21 @@ impl Shell {
                 parent,
                 before,
                 node,
-                closed,
+                closed: records.into_values().collect(),
+                known: self
+                    .recently_closed
+                    .iter()
+                    .filter_map(|entry| entry.session_id)
+                    .collect(),
             });
         }
         mutation_result(native)
     }
 
-    /// Brings back the newest deleted folder of `profile` when what it left
-    /// is still the newest thing in Recently Closed. Its tabs return asleep.
+    /// Brings back the newest deleted folder of `profile` when nothing closed
+    /// after it is still in Recently Closed. Its tabs return asleep, except
+    /// those already reopened on their own; a session without room for all
+    /// of it keeps the deletion for later.
     pub(super) fn reopen_deleted_folder(&mut self, profile: ProfileId) -> Option<NativeWork> {
         let (current, persistent) = self.windows.focused().map(|window| {
             (
@@ -378,16 +417,34 @@ impl Shell {
         if !persistent {
             return None;
         }
-        let newest = self
-            .recently_closed
-            .iter()
-            .rev()
-            .find(|entry| entry.profile == profile)?
-            .session_id?;
         let at = self
             .deleted_folders
             .iter()
-            .rposition(|folder| folder.profile == profile && folder.closed.contains(&newest))?;
+            .rposition(|folder| folder.profile == profile)?;
+        let folder = &self.deleted_folders[at];
+        if let Some(entry) = self
+            .recently_closed
+            .iter()
+            .rev()
+            .find(|entry| entry.profile == profile)
+        {
+            // Closed after it, or not known to be older: the tab comes first.
+            if !entry
+                .session_id
+                .is_some_and(|record| folder.known.contains(&record))
+            {
+                return None;
+            }
+        }
+        let live: Vec<ClosedSessionId> = self
+            .recently_closed
+            .iter()
+            .filter_map(|entry| entry.session_id)
+            .filter(|record| folder.closed.contains(record))
+            .collect();
+        if folder.node.size(&live) > self.items.room() {
+            return None;
+        }
         let deleted = self.deleted_folders.remove(at);
         // Where it was, when that is still the space in front; else here.
         let space = current;
@@ -401,14 +458,11 @@ impl Shell {
                 .get(*before)
                 .is_some_and(|item| item.parent == parent && item.placement == placement)
         });
-        if !self.restore_node(&deleted.node, placement, parent, before) {
+        if !self.restore_node(&deleted.node, &live, placement, parent, before) {
             return None;
         }
-        self.recently_closed.retain(|entry| {
-            entry
-                .session_id
-                .is_none_or(|id| !deleted.closed.contains(&id))
-        });
+        self.recently_closed
+            .retain(|entry| entry.session_id.is_none_or(|id| !live.contains(&id)));
         self.extension_sessions_changed(profile);
         Some(self.commit(Vec::new()))
     }
@@ -416,12 +470,14 @@ impl Shell {
     fn restore_node(
         &mut self,
         node: &DeletedNode,
+        live: &[ClosedSessionId],
         placement: Placement,
         parent: Option<ItemId>,
         before: Option<ItemId>,
     ) -> bool {
         match node {
-            DeletedNode::Tab { url, title } => (0..8).any(|_| {
+            DeletedNode::Tab { record, .. } if !record.is_some_and(|r| live.contains(&r)) => true,
+            DeletedNode::Tab { url, title, .. } => (0..8).any(|_| {
                 self.items.insert_unloaded_tab_at(
                     ItemId::generate(),
                     placement,
@@ -446,8 +502,8 @@ impl Shell {
                 let _ = self.items.set_folder_collapsed(id, *collapsed);
                 for child in children {
                     // A nested folder past the depth limit comes back loose.
-                    if !self.restore_node(child, placement, Some(id), None) {
-                        let _ = self.restore_node(child, placement, parent, before);
+                    if !self.restore_node(child, live, placement, Some(id), None) {
+                        let _ = self.restore_node(child, live, placement, parent, before);
                     }
                 }
                 true
@@ -470,10 +526,16 @@ impl Shell {
         }
         let tabs = self.items.subtree_tabs(id);
         let active = self.windows.focused().and_then(|window| window.active);
+        // Where the front tab stood among the tabs that stay behind.
         let at = active.and_then(|active| {
-            self.successor_pool(profile, space)
-                .iter()
-                .position(|tab| *tab == active)
+            let pool = self.successor_pool(profile, space);
+            let position = pool.iter().position(|tab| *tab == active)?;
+            Some(
+                pool[..position]
+                    .iter()
+                    .filter(|tab| !tabs.contains(tab))
+                    .count(),
+            )
         });
         if !self.items.move_item(id, today(target), None, None) {
             return rejected(OperationReason::InvalidInput);

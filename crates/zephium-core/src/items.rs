@@ -143,6 +143,16 @@ impl Items {
         self.children.get(&id).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Whether the session holds as many items as it may.
+    pub fn is_full(&self) -> bool {
+        self.items.len() >= crate::session::MAX_SESSION_ITEMS
+    }
+
+    /// Room left for items before the session is full.
+    pub fn room(&self) -> usize {
+        crate::session::MAX_SESSION_ITEMS.saturating_sub(self.items.len())
+    }
+
     /// Inserts at the end of its container. Parent (when set) must be an
     /// existing folder with the same placement; otherwise the insert is refused.
     pub fn insert(&mut self, item: Item) -> bool {

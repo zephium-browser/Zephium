@@ -4793,6 +4793,60 @@ fn session_backup_disposal_reports_committed_failure_and_retries() {
 }
 
 #[test]
+fn an_older_schema_backup_of_another_profile_survives_this_ones_disposal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let named = |id: u128| SessionState {
+        profiles: vec![PersistedProfile {
+            id: ProfileId::from(id),
+            name: "P".into(),
+            kind: ProfileKind::Default,
+        }],
+        ..Default::default()
+    };
+    store.save_session(named(1));
+    let discard = |profile: u128| {
+        let (tx, rx) = mpsc::channel();
+        assert!(store.discard_session_backup(
+            ProfileId::from(profile),
+            Box::new(move |ok| {
+                tx.send(ok).unwrap();
+            })
+        ));
+        rx.recv_timeout(REPLY_TIMEOUT).unwrap()
+    };
+    assert!(discard(1));
+    let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    let back_up = |state: &SessionState| {
+        meta.execute(
+            "INSERT INTO session_snapshot_backup VALUES (1, ?1, 2, ?2)",
+            params![
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+                serde_json::to_vec(state).unwrap()
+            ],
+        )
+        .unwrap();
+    };
+    back_up(&named(2));
+    let backups = || {
+        meta.query_row("SELECT count(*) FROM session_snapshot_backup", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert!(discard(1));
+    assert_eq!(backups(), 1, "a schema-2 backup names only profile 2");
+    meta.execute("DELETE FROM session_snapshot_backup", [])
+        .unwrap();
+    back_up(&named(1));
+    assert!(discard(1));
+    assert_eq!(backups(), 0);
+}
+
+#[test]
 fn panicking_session_backup_completion_does_not_stop_store() {
     let store = SqliteStore::in_memory().unwrap();
     let state = sample();

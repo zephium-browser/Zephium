@@ -520,3 +520,236 @@ fn a_folder_moves_to_another_space_with_its_tabs_and_the_window_stays() {
     assert_eq!(space(&shell), home);
     assert_eq!(active_id(&screen), ids[0]);
 }
+
+/// Asleep tabs at the end of the space until only `leave` items fit.
+fn fill(shell: &mut Shell, leave: usize) -> Vec<ItemId> {
+    let place = today(shell);
+    let page = url::Url::parse("https://filler.example/").unwrap();
+    let mut filler = Vec::new();
+    while shell.items.room() > leave {
+        let id = ItemId::generate();
+        assert!(shell
+            .items
+            .insert_unloaded_tab_at(id, place, None, None, page.clone(), "Filler"));
+        filler.push(id);
+    }
+    filler
+}
+
+fn hosts(shell: &Shell, host: &str) -> usize {
+    shell
+        .items
+        .roots(today(shell))
+        .iter()
+        .flat_map(|root| {
+            if shell.items.is_folder(*root) {
+                shell.items.subtree_tabs(*root)
+            } else {
+                vec![*root]
+            }
+        })
+        .filter(|id| {
+            shell
+                .items
+                .tab(*id)
+                .and_then(|tab| tab.url.as_ref())
+                .is_some_and(|url| url.host_str() == Some(host))
+        })
+        .count()
+}
+
+fn named_folder(shell: &Shell, name: &str) -> Option<ItemId> {
+    shell.items.roots(today(shell)).iter().copied().find(|id| {
+        matches!(&shell.items.get(*id).unwrap().kind,
+            ItemKind::Folder { name: made, .. } if made == name)
+    })
+}
+
+#[test]
+fn deleting_the_folder_around_the_lone_new_tab_leaves_that_tab_in_its_place() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let lone = active_id(&screen);
+    assert!(shell.is_untouched_new_tab(lone));
+    let folder = group(&mut shell, "Only", vec![lone]);
+    assert_eq!(shell.items.children(folder), [lone]);
+
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    assert!(shell.items.get(folder).is_none());
+    assert_eq!(shell.items.roots(today(&shell)), [lone]);
+    assert_eq!(shell.items.get(lone).unwrap().parent, None);
+    assert_eq!(active_id(&screen), lone);
+}
+
+#[test]
+fn an_empty_deleted_folder_comes_back_from_reopen_closed_tab() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(&mut shell, &screen, &["a.example"]);
+    let folder = group(&mut shell, "Empty", vec![]);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(shell.items.roots(today(&shell)), [ids[0]]);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Empty").expect("folder back");
+    assert!(shell.items.children(back).is_empty());
+    assert_eq!(active_id(&screen), ids[0]);
+}
+
+#[test]
+fn a_tab_closed_after_a_folder_was_deleted_reopens_before_it() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &["a.example", "b.example", "c.example"],
+    );
+    let folder = group(&mut shell, "Older", vec![ids[1]]);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(
+        op(&mut shell, Command::Close(ids[2])).outcome,
+        OperationOutcome::Applied
+    );
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    assert_eq!(hosts(&shell, "c.example"), 1);
+    assert!(named_folder(&shell, "Older").is_none());
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Older").expect("folder back");
+    assert_eq!(shell.items.children(back).len(), 1);
+    assert_eq!(hosts(&shell, "b.example"), 1);
+}
+
+#[test]
+fn a_tab_reopened_on_its_own_does_not_come_back_twice_with_its_folder() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &["a.example", "b.example", "c.example"],
+    );
+    let folder = group(&mut shell, "Pair", vec![ids[1], ids[2]]);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    let record = shell
+        .recently_closed
+        .iter()
+        .find(|entry| entry.url.contains("b.example"))
+        .and_then(|entry| entry.session_id)
+        .unwrap();
+    assert!(matches!(
+        shell.operation_reopen_closed_tab(Some(record)).outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(hosts(&shell, "b.example"), 1);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Pair").expect("folder back");
+    let held = shell.items.children(back).to_vec();
+    assert_eq!(held.len(), 1);
+    let tab = shell.items.tab(held[0]).unwrap();
+    assert_eq!(tab.url.as_ref().unwrap().host_str(), Some("c.example"));
+    assert_eq!(hosts(&shell, "b.example"), 1);
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn a_deleted_folder_waits_while_the_session_has_no_room_for_it() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &["a.example", "b.example", "c.example"],
+    );
+    let folder = group(&mut shell, "Big", vec![ids[1], ids[2]]);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    // The folder and both tabs need three items.
+    let filler = fill(&mut shell, 2);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    assert!(named_folder(&shell, "Big").is_none());
+    assert_eq!(hosts(&shell, "c.example"), 1);
+
+    for id in filler {
+        let _ = shell.items.remove(id);
+    }
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Big").expect("folder back");
+    assert_eq!(shell.items.children(back).len(), 1);
+    assert_eq!(hosts(&shell, "b.example"), 1);
+    assert_eq!(hosts(&shell, "c.example"), 1);
+}
+
+#[test]
+fn moving_the_front_folder_away_hands_the_window_to_the_tab_after_it() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let home = space(&shell);
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &[
+            "a.example",
+            "b.example",
+            "c.example",
+            "d.example",
+            "e.example",
+        ],
+    );
+    let folder = group(&mut shell, "Away", vec![ids[1], ids[2]]);
+    let created = shell.handle_operation(Command::Space(Box::new(SpaceCommand::Create {
+        name: "Other".into(),
+        look: Default::default(),
+    })));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    let other = space(&shell);
+    let switched = shell.handle_operation(Command::Space(Box::new(SpaceCommand::Switch(home))));
+    assert_ne!(switched.outcome, OperationOutcome::Rejected);
+    assert_ne!(
+        op(&mut shell, Command::Activate(ids[2])).outcome,
+        OperationOutcome::Rejected
+    );
+
+    assert_eq!(
+        folder_op(
+            &mut shell,
+            FolderCommand::MoveToSpace {
+                id: folder,
+                space: other,
+            },
+        )
+        .outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(active_id(&screen), ids[3]);
+}
+
+#[test]
+fn closing_the_front_folder_tab_of_a_full_session_takes_it_out() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(&mut shell, &screen, &["a.example", "b.example"]);
+    let folder = group(&mut shell, "Full", vec![ids[1]]);
+    assert_eq!(active_id(&screen), ids[1]);
+    let _ = fill(&mut shell, 0);
+    assert!(shell.items.is_full());
+    let closed_before = shell.recently_closed.len();
+
+    assert_eq!(
+        op(&mut shell, Command::Close(ids[1])).outcome,
+        OperationOutcome::Applied
+    );
+    assert!(shell.items.children(folder).is_empty());
+    assert_eq!(shell.recently_closed.len(), closed_before + 1);
+    assert_ne!(active_id(&screen), ids[1]);
+}

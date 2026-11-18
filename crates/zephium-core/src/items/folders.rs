@@ -192,8 +192,14 @@ impl Items {
                 if matches!(placement, Placement::Favorites { .. }) {
                     return false;
                 }
-                let base = parent.map_or(0, |parent| self.folder_depth(parent));
-                if parent != item.parent && base + self.folder_height(id) > MAX_FOLDER_DEPTH {
+                // Never deeper than the limit, unless a restored tree that is
+                // already past it gets shallower by the move.
+                let depth = |at: Option<ItemId>| at.map_or(0, |at| self.folder_depth(at));
+                let reach = depth(parent) + self.folder_height(id);
+                if parent != item.parent
+                    && reach > MAX_FOLDER_DEPTH
+                    && reach >= depth(item.parent) + self.folder_height(id)
+                {
                     return false;
                 }
             }
@@ -434,6 +440,37 @@ mod tests {
         assert_eq!(items.folder_depth(inner), 3);
         let space = SpaceId::from(1);
         assert!(!items.move_item(other, Placement::Favorites { space }, None, None));
+    }
+
+    #[test]
+    fn a_tree_restored_past_the_depth_limit_may_still_move_shallower() {
+        let mut items = Items::default();
+        let mut parent = None;
+        let mut chain = Vec::new();
+        // Written by an older build with no limit: five folders deep.
+        for n in 1..=5 {
+            assert!(items.insert(Item {
+                id: id(n),
+                parent,
+                placement: today(),
+                kind: ItemKind::Folder {
+                    name: "F".into(),
+                    color: None,
+                    collapsed: false,
+                },
+            }));
+            parent = Some(id(n));
+            chain.push(id(n));
+        }
+        let (second, fourth) = (chain[1], chain[3]);
+        // Four levels reach to five today; inside the second they reach four.
+        assert!(items.move_item(fourth, today(), Some(second), None));
+        assert_eq!(items.folder_depth(chain[4]), 4);
+        // Never deeper than where it stood.
+        assert!(!items.move_item(fourth, today(), Some(chain[2]), None));
+        assert!(items.move_item(fourth, today(), None, None));
+        assert_eq!(items.folder_depth(chain[4]), 2);
+        assert!(!items.move_item(fourth, today(), Some(chain[2]), None));
     }
 
     #[test]

@@ -365,11 +365,12 @@ pub(super) fn discard_profile_backup(
                 .map(|removed| removed > 0);
         }
     };
-    let state = (version == SESSION_SCHEMA_VERSION)
+    // An older schema still names its profiles, so it is read the same way.
+    let state = readable_session_version(version)
         .then_some(data)
         .flatten()
         .and_then(|data| String::from_utf8(data).ok())
-        .and_then(|data| decode_authoritative_snapshot(&data));
+        .and_then(|data| decode_snapshot(&data, version));
     if state
         .as_ref()
         .is_some_and(|state| !snapshot_names_profile(state, profile))
