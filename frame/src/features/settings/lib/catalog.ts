@@ -313,8 +313,9 @@ export const fields = {
     section: "tabs",
     label: m.tabs_external,
     description: m.tabs_external_help,
-    initial: "new-tab",
+    initial: "mini",
     options: [
+      { value: "mini", label: m.tabs_external_option_mini },
       { value: "new-tab", label: m.tabs_external_option_same },
       { value: "end", label: m.tabs_external_option_end },
       { value: "after-current", label: m.tabs_external_option_next },

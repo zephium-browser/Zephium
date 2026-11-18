@@ -559,7 +559,8 @@ pub fn run_windows_agentic_semantic_probe(
 pub use platform::windows::{
     browser_process_record, detach_privileged_environment_update,
     finalize_privileged_environment_registrations, generation_report_lines,
-    install_privileged_environment_registration, WindowsLeftoverProcesses,
+    install_privileged_environment_registration, privileged_environment_process,
+    WindowsLeftoverProcesses,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -1829,6 +1830,20 @@ impl WebviewEngine {
         let _ = self.run(|| {
             let _ = host::try_with(|host| host.store_buttons_foreground());
         });
+    }
+
+    /// Gives `window` its own native window, such as a mini window, on the
+    /// main thread before its first layout. `false` leaves it without one.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn attach_window(&self, window: WindowId, handle: RawWindowHandle) -> bool {
+        #[cfg(target_os = "macos")]
+        if objc2_foundation::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let result = attached.clone();
+        host::try_with(move |host| result.set(host.attach_window(window, handle)));
+        attached.get()
     }
 
     /// Installs the profile-scoped download service before raw views are made.
@@ -3304,6 +3319,46 @@ impl Engine for WebviewEngine {
                 }
                 NativeDispatch::from_scheduled(scheduled)
             }
+        }
+    }
+
+    fn hosts_mini_windows(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "windows"))
+    }
+
+    fn focus_page(&self, id: ItemId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| {
+                    if !host.focus_page(id) {
+                        eprintln!("engine: a page was in no window to take the keyboard");
+                    }
+                });
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.stage_motion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&window);
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| host.release_window(window));
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = window;
+            NativeDispatch::Unsupported
         }
     }
 

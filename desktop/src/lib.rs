@@ -102,6 +102,7 @@ mod material;
 mod media;
 mod memory_pressure;
 mod menu_text;
+mod mini;
 mod notes;
 #[cfg(target_os = "windows")]
 mod onboarding_host;
@@ -1784,6 +1785,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 struct TabChanged(zephium_ipc::TabView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct MiniChanged(zephium_ipc::MiniView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct FaviconsChanged(zephium_ipc::FaviconsView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -2250,7 +2254,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             divider_grab,
             divider_drag,
             divider_release,
-            swipe::swipe_region
+            swipe::swipe_region,
+            mini::mini_ready,
+            mini::mini_action,
+            mini::mini_space_menu
         ])
         .events(collect_events![
             keymap::KeymapChanged,
@@ -2272,6 +2279,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
+            MiniChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionActionShortcut,
@@ -2666,6 +2674,9 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     // Only consumed settings wake the hidden launcher WebView.
     if launcher_follows_ui_command(id) {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
+        for label in mini::labels(app) {
+            emit_to_privileged(app, &label, EVENT_UI, &id);
+        }
     }
 }
 
@@ -2775,6 +2786,10 @@ enum CallerPolicy {
     Main,
     Panel,
     Both,
+    /// A mini window's toolbar; the command acts on that window alone.
+    Mini,
+    /// Any privileged chrome, for read-only appearance and language state.
+    AnyChrome,
 }
 
 // `WebviewWindow` is injected from Tauri's invoke message (and omitted by
@@ -2784,6 +2799,10 @@ fn caller_allowed(policy: CallerPolicy, label: &str) -> bool {
         CallerPolicy::Main => label == MAIN_LABEL,
         CallerPolicy::Panel => label == overlay::PANEL_LABEL,
         CallerPolicy::Both => matches!(label, MAIN_LABEL | overlay::PANEL_LABEL),
+        CallerPolicy::Mini => mini::window_of(label).is_some(),
+        CallerPolicy::AnyChrome => {
+            matches!(label, MAIN_LABEL | overlay::PANEL_LABEL) || mini::window_of(label).is_some()
+        }
     }
 }
 
@@ -4191,6 +4210,9 @@ fn execute_command_or(
     if id == "tab.close" && tab_switcher::close_selected(app) {
         return accepted_ui_operation();
     }
+    if mini::route(app, id) {
+        return accepted_ui_operation();
+    }
     if matches!(id, "tab.recent.next" | "tab.recent.previous") {
         return if tab_switcher::step(app, id == "tab.recent.previous", true) {
             accepted_ui_operation()
@@ -4359,6 +4381,13 @@ fn execute_command_or(
             .map_or_else(rejected_operation, |shell| {
                 dispatch_operation(app, &shell, Command::ShowBrowserPage(page))
             });
+    }
+    if id == "window.newMini" {
+        return if overlay::request(app, |panel| panel.toggle_mini()) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
     }
     if id == "launcher.toggle" {
         return if overlay::request(app, |panel| panel.toggle()) {
@@ -4569,6 +4598,7 @@ fn newtab_search(
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        mini: false,
     });
     if accepted {
         search_providers::schedule(caller, app, shell.inner().clone(), query, context);
@@ -4634,6 +4664,7 @@ fn newtab_run(
             action,
             background: false,
             replace: None,
+            new_mini: false,
         },
     )
 }
@@ -4652,16 +4683,18 @@ fn launcher_search(
     {
         return false;
     }
-    let Some(context) = app
-        .try_state::<overlay::Overlay>()
-        .and_then(|overlay| overlay.search_context(&request_id))
-    else {
+    let Some((context, mini)) = app.try_state::<overlay::Overlay>().and_then(|overlay| {
+        overlay
+            .search_context(&request_id)
+            .map(|context| (context, overlay.mini()))
+    }) else {
         diagnostic!("launcher: search refused outside a presented session");
         return false;
     };
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        mini,
     });
     if !accepted {
         diagnostic!("launcher: search refused by a full actor queue");
@@ -4685,6 +4718,10 @@ fn launcher_run(
     {
         return rejected_operation();
     }
+    // Offered as a command, it turns this launcher into the one it opens.
+    if matches!(&action, zephium_ipc::SearchAction::RunCommand { id } if id == "window.newMini") {
+        return execute_command(&app, "window.newMini");
+    }
     let (Some(shell), Some(overlay), Some(ledger)) = (
         app.try_state::<Handle>(),
         app.try_state::<overlay::Overlay>(),
@@ -4703,7 +4740,9 @@ fn launcher_run(
     }
     // Only an address can be sent behind the current tab; every other action
     // is about where the user is going next.
-    let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    let background = background
+        && !overlay.mini()
+        && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
     // Armed before either path runs, so one action at a time reaches the
     // launcher's outcome, wherever it is carried out.
     if !overlay.arm_action(&operation_id, &context, background) {
@@ -4807,6 +4846,7 @@ fn run_in_shell(
             action,
             background,
             replace: overlay.editing_tab(),
+            new_mini: overlay.mini(),
         },
     );
     if !accepted {
@@ -4823,7 +4863,7 @@ struct UiInfo {
 #[tauri::command]
 #[specta::specta]
 fn ui_info(caller: WebviewWindow) -> UiInfo {
-    if !authorize(&caller, CallerPolicy::Both, "ui_info") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "ui_info") {
         return UiInfo {
             material: material::Material::None,
         };
@@ -5456,7 +5496,7 @@ fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> 
 #[tauri::command]
 #[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
-    if !authorize(&caller, CallerPolicy::Both, "setting_get") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "setting_get") {
         return None;
     }
     if !SETTING_KEYS.contains(&key.as_str()) {
@@ -5938,7 +5978,7 @@ fn launcher_edit(
     {
         return false;
     }
-    overlay::request(&app, move |panel| panel.edit(tab_id, url))
+    overlay::request(&app, move |panel| panel.edit(tab_id, url, false))
 }
 
 #[tauri::command]
@@ -6293,6 +6333,7 @@ fn build_menu(
     let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
+        .item(&item("window.newMini")?)
         .item(&item("note.new")?)
         .item(&item("split.choose")?)
         .separator()
@@ -7304,10 +7345,12 @@ fn finish_browser_setup(
             if zephium_engine::foreground_rendering_policy_event(&event) {
                 return;
             }
-            if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { command, .. } =
+            if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { item, command } =
                 &event
             {
-                let _ = execute_command(&sink_app, command);
+                if !mini::route_page_key(&sink_app, &item.to_string(), command) {
+                    let _ = execute_command(&sink_app, command);
+                }
                 return;
             }
             if let Some(shell) = sink_slot.get() {
@@ -7361,7 +7404,10 @@ fn finish_browser_setup(
     #[cfg(target_os = "macos")]
     install_menu_bar(&handle, &keymap, false)?;
     app.on_menu_event(|app, event| {
-        let _ = execute_command(app, event.id().0.as_str());
+        let id = event.id().0.as_str();
+        if !mini::on_menu(app, id) {
+            let _ = execute_command(app, id);
+        }
     });
     let keys_engine = engine.clone();
     app.state::<keymap::Keymap>()
@@ -7631,6 +7677,13 @@ fn finish_browser_setup(
         Projection::MediaPlayer(player) => {
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
         }
+        Projection::MiniOpened(opened) => {
+            external_links::forward_handled();
+            mini::open(&emit_handle, opened)
+        }
+        Projection::Mini(view) => mini::project(&emit_handle, &view),
+        Projection::MiniClosed(closed) => mini::close(&emit_handle, closed),
+        Projection::ExternalTabsOpened => external_links::forward_pending(&emit_handle),
     });
 
     let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
@@ -7795,6 +7848,13 @@ fn finish_browser_setup(
     }
     #[cfg(feature = "work-product")]
     page_assist::install(app, engine.clone(), store.clone());
+    mini::install(
+        app,
+        engine.clone(),
+        privileged_app_url(app, &tauri::WebviewUrl::App("mini.html".into()))?,
+        #[cfg(target_os = "windows")]
+        privileged_runtime.panel.clone(),
+    );
     notes::install(app, &data_dir, store.clone(), &shell);
     external_links::adopt(app);
     #[cfg(feature = "work-product")]
@@ -8099,7 +8159,7 @@ fn finish_browser_setup(
             platform::imp::harden_privileged(
                 &panel_window,
                 &privileged_runtime.panel,
-                runtime_update_notifier.clone(),
+                platform::imp::PrivilegedEnvironment::Own(runtime_update_notifier.clone()),
             )?;
             platform::imp::apply_material(&panel_window, true);
         }
@@ -8366,7 +8426,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(|webview| {
         let label = webview.label().to_owned();
-        if !renderer_recovery::owns(&label) {
+        if !renderer_recovery::owns(&label) && mini::window_of(&label).is_none() {
             let _ = webview.reload();
             return;
         }
@@ -9369,6 +9429,7 @@ mod tests {
         for html in [
             crate::frame_sources::INDEX_HTML,
             crate::frame_sources::PANEL_HTML,
+            crate::frame_sources::MINI_HTML,
             crate::frame_sources::ONBOARDING_HTML,
         ] {
             assert!(
@@ -9379,6 +9440,7 @@ mod tests {
         for css in [
             include_str!("../../frame/src/styles/global.css"),
             include_str!("../../frame/src/styles/panel.css"),
+            include_str!("../../frame/src/styles/mini.css"),
         ] {
             assert!(css.starts_with("@import \"./axes/bootstrap.css\";"));
         }

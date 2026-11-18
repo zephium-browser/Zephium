@@ -472,6 +472,8 @@ export const commands = {
 	seed: string | null,
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
+	/**  An address chosen in this presentation opens in a new mini window. */
+	mini: boolean,
 } | null>("panel_ready"),
 	tabSwitcherOpen: () => __TAURI_INVOKE<boolean>("tab_switcher_open"),
 	tabSwitcherAction: (sessionId: string, intent: TabSwitcherAction) => __TAURI_INVOKE<boolean>("tab_switcher_action", { sessionId, intent }),
@@ -702,6 +704,17 @@ export const commands = {
 	width: number | null,
 	height: number | null,
 } | null) => __TAURI_INVOKE<boolean>("swipe_region", { region }),
+	/**
+	 *  The toolbar finished its first render: the window shows, and the shell
+	 *  lays its page out and lets it be verified.
+	 */
+	miniReady: () => __TAURI_INVOKE<boolean>("mini_ready"),
+	miniAction: (action: MiniIntent) => __TAURI_INVOKE<boolean>("mini_action", { action }),
+	/**
+	 *  Pops the spaces "Open in Zephium" can put the page in, under the
+	 *  toolbar's button at `x`, `y`.
+	 */
+	miniSpaceMenu: (x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("mini_space_menu", { x, y }),
 };
 
 /** Events */
@@ -718,6 +731,7 @@ export const events = {
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	mediaPlayerChanged: makeEvent<MediaPlayerChanged>("media-player-changed"),
+	miniChanged: makeEvent<MiniChanged>("mini-changed"),
 	noteOpenRequested: makeEvent<NoteOpenRequested>("note-open-requested"),
 	notesChanged: makeEvent<NotesChanged>("notes-changed"),
 	operationProcessed: makeEvent<OperationProcessed>("operation-processed"),
@@ -1888,6 +1902,40 @@ export type MediaPlayerView = {
 	can_mute: boolean,
 };
 
+export type MiniChanged = MiniView;
+
+/**  What a mini window's toolbar may ask of its page or its window. */
+export type MiniIntent = "back" | "forward" | "reload" | "open_in_main" | "close" |
+/**  Opens the launcher on the page's address. */
+"edit_address" |
+/**  Keeps the window above other windows, or stops. */
+"keep_on_top" |
+/**  Windows only: the toolbar carries the window's own controls. */
+"minimize";
+
+export type MiniSpaceView = {
+	id: string,
+	name: string,
+};
+
+/**
+ *  A mini window's chrome: its window and the one page in it, if any yet.
+ *  The page's URL and title are untrusted and only ever shown as text.
+ */
+export type MiniView = {
+	window: number | null,
+	tab: TabView | null,
+	/**
+	 *  Where "Open in Zephium" can put the page: its profile's spaces, in
+	 *  sidebar order.
+	 */
+	spaces: MiniSpaceView[],
+	/**  The space "Open in Zephium" uses unless the person picks another. */
+	space: string | null,
+	/**  The window stays above other applications' windows. */
+	pinned: boolean,
+};
+
 export type NoteCall = { kind: "list"; query: NoteQuery } | { kind: "get"; id: string } | { kind: "create"; request_id: string; markdown: string } |
 /**
  *  Replaces the file only if it still holds `base_revision`. Replaying the
@@ -2038,7 +2086,9 @@ export type OperationProcessed = OperationDisposition;
  *  enum prevents native errors, URLs, or attacker-controlled strings from
  *  becoming an unbounded privileged IPC/logging surface.
  */
-export type OperationReason = "mutation_applied" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
+export type OperationReason = "mutation_applied" |
+/**  The address went to a mini window, so the main window stays behind. */
+"opened_in_mini" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
 /**  Work and AI features are switched off. */
 "feature_disabled";
 
@@ -2634,6 +2684,8 @@ export type PanelState = {
 	seed: string | null,
 	/**  The tab whose address is being edited; it is no destination of its own. */
 	seed_tab: string | null,
+	/**  An address chosen in this presentation opens in a new mini window. */
+	mini: boolean,
 };
 
 export type PersonalHideView = {

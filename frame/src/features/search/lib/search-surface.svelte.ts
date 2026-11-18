@@ -54,6 +54,8 @@ export function createSearchSurface(options: {
   /** Saves the typed line as a task; resolves to the title saved, or null. */
   onCapture?: (text: string) => Promise<string | null>;
   captureKeys?: string[];
+  /** The presentation offers only sites: no destinations and no capture. */
+  sitesOnly?: () => boolean;
 }) {
   const anchored = options.tabId !== null;
 
@@ -114,7 +116,7 @@ export function createSearchSurface(options: {
   // At rest the host offers destinations on their own; typing their name
   // brings them into the list.
   const matchingTools = $derived(
-    anchored || !query.trim()
+    anchored || options.sitesOnly?.() || !query.trim()
       ? []
       : options.destinations.filter((destination) =>
           destination.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -174,7 +176,7 @@ export function createSearchSurface(options: {
     })),
     // Anything typed can become a task, last so it never displaces the page or
     // search the line most often means.
-    ...(query.trim() && !anchored && options.onCapture
+    ...(query.trim() && !anchored && !options.sitesOnly?.() && options.onCapture
       ? [
           {
             id: CAPTURE_ID,
@@ -203,7 +205,7 @@ export function createSearchSurface(options: {
 
   async function capture() {
     const text = query.trim();
-    if (running || !text || !options.onCapture) return;
+    if (running || !text || !options.onCapture || options.sitesOnly?.()) return;
     running = true;
     failed = false;
     try {
@@ -637,7 +639,13 @@ export function createSearchSurface(options: {
       return rows.find((row) => row.id === selectedId) ?? null;
     },
     get capturable() {
-      return !anchored && !!options.onCapture && !!query.trim() && query !== seededQuery;
+      return (
+        !anchored &&
+        !options.sitesOnly?.() &&
+        !!options.onCapture &&
+        !!query.trim() &&
+        query !== seededQuery
+      );
     },
     get failed() {
       return failed;

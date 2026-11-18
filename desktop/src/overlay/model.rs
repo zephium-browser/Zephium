@@ -28,6 +28,9 @@ pub struct Model {
     /// The tab whose address this presentation edits, and that address.
     editing: Option<(String, String)>,
     pub switcher: Option<zephium_ipc::TabSwitcherState>,
+    /// This presentation chooses a page for a mini window: a new one, or
+    /// the one whose address it edits.
+    mini: bool,
 }
 impl Model {
     pub fn session(&self) -> String {
@@ -36,6 +39,10 @@ impl Model {
     /// The tab whose address this presentation edits.
     pub fn editing_tab(&self) -> Option<String> {
         self.editing.as_ref().map(|(tab, _)| tab.clone())
+    }
+    /// Whether this presentation chooses a page for a mini window.
+    pub fn mini(&self) -> bool {
+        self.mini
     }
     pub fn snapshot(&self) -> PanelState {
         PanelState {
@@ -51,6 +58,7 @@ impl Model {
             corner_radius: RADIUS,
             seed: self.editing.as_ref().map(|(_, url)| url.clone()),
             seed_tab: self.editing_tab(),
+            mini: self.mini,
         }
     }
     pub fn reject(&mut self) {
@@ -96,6 +104,12 @@ impl Model {
         self.error = false;
         self.editing = None;
         self.switcher = None;
+        self.mini = false;
+    }
+    /// Opens to choose the address of a new mini window.
+    pub fn search_mini(&mut self) {
+        self.search();
+        self.mini = self.presented;
     }
     /// Opens on a tab's address, so a chosen result replaces that tab's page.
     pub fn edit(&mut self, tab: String, url: String) {
@@ -111,6 +125,11 @@ impl Model {
         self.publication = self.publication.saturating_add(1);
         self.switcher = Some(switcher);
     }
+    /// Opens on the address of a mini window's page.
+    pub fn edit_mini(&mut self, tab: String, url: String) {
+        self.edit(tab, url);
+        self.mini = self.presented;
+    }
     pub fn hide(&mut self) {
         if !self.advance() {
             return;
@@ -119,6 +138,7 @@ impl Model {
         self.error = false;
         self.editing = None;
         self.switcher = None;
+        self.mini = false;
     }
     pub fn record_focus_change(&mut self) -> FocusChange {
         self.focus_change = FocusChange {
@@ -324,6 +344,29 @@ mod tests {
         m.set_owner(Some(owner("two", "p", "s")));
         assert!(!m.admits(&request));
         assert!(!m.snapshot().visible);
+    }
+
+    #[test]
+    fn editing_a_mini_page_is_a_mini_presentation() {
+        let mut m = Model::default();
+        m.edit_mini("tab".into(), "https://example.com/".into());
+        assert!(m.presented && m.mini() && m.editing_tab().is_some());
+        m.edit("tab".into(), "https://example.com/".into());
+        assert!(m.presented && !m.mini());
+    }
+    #[test]
+    fn a_mini_presentation_ends_with_its_session() {
+        let mut m = Model::default();
+        m.search_mini();
+        assert!(m.presented && m.mini() && m.snapshot().mini);
+        m.hide();
+        assert!(!m.mini());
+        m.search_mini();
+        m.search();
+        assert!(m.presented && !m.mini());
+        m.search_mini();
+        m.edit("tab".into(), "https://example.com/".into());
+        assert!(!m.mini());
     }
 
     #[test]

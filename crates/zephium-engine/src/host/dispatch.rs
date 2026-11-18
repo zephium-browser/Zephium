@@ -513,6 +513,8 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             next_fullscreen_retirement: 0,
             stages: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            window_parents: HashMap::new(),
             native_terminal_failure,
             #[cfg(not(target_os = "windows"))]
             shutdown_completion: None,

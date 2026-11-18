@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use wry::WebView;
 
 use zephium_core::geometry::Rect;
@@ -18,7 +18,7 @@ use super::dispatch::try_with_stage_failure;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_renderer_exit;
 use super::EngineHost;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::ParentHandle;
 
 #[cfg(target_os = "macos")]
@@ -267,7 +267,11 @@ impl EngineHost {
             }
             return applied;
         };
-        if !stage_set_frame(&stage, &self.parent, r, motion) {
+        let Some(parent) = self.parent_for(window) else {
+            stage.abort_content_update(update_epoch);
+            return false;
+        };
+        if !stage_set_frame(&stage, parent, r, motion) {
             stage.abort_content_update(update_epoch);
             return false;
         }
@@ -287,6 +291,17 @@ impl EngineHost {
             };
             let mut inserted = false;
             if !stage.has_view(*id) {
+                // A page moving between windows, as a mini window's page
+                // does when it opens in the main window, leaves its old stage
+                // first so no two stages ever claim one native view.
+                for (other, previous) in &self.stages {
+                    if *other != window && previous.has_view(*id) {
+                        previous.remove_view(*id);
+                    }
+                }
+                if !stage.content_update_is_current(update_epoch) {
+                    return !stage.has_terminal_failure();
+                }
                 if let Some(native_view) = webview_nsview(view) {
                     if !stage.insert_view(*id, native_view, view.presentation_permit.clone()) {
                         stage.abort_content_update(update_epoch);
@@ -410,6 +425,13 @@ impl EngineHost {
                     let Some(generation) = view.event_permit.active_token() else {
                         return false;
                     };
+                    // A page moving between windows, as a mini window's page
+                    // does when it opens in the main window, leaves its old
+                    // stage and moves under this stage's window first, so no
+                    // two stages ever claim one native view.
+                    if !self.move_view_to_stage(window, *id, view, &stage) {
+                        return false;
+                    }
                     if !stage.insert_view(*id, view, generation, view.presentation_permit.clone()) {
                         return false;
                     }
@@ -502,10 +524,7 @@ impl EngineHost {
         if let Some(stage) = self.stages.get(&window) {
             return Some(stage.clone());
         }
-        let RawWindowHandle::Win32(h) = self.parent.0 else {
-            return None;
-        };
-        let parent = HWND(h.hwnd.get() as *mut _);
+        let parent = win32_parent(self.parent_for(window)?)?;
         let native_terminal_failure = self.native_terminal_failure.clone();
         let stage = Stage::new(parent, GAP, move |id, generation| {
             let admitted = with_renderer_exit(id, move |host| {
@@ -584,7 +603,7 @@ impl EngineHost {
             return Some(stage.clone());
         }
         let mtm = MainThreadMarker::new()?;
-        let content = content_view(&self.parent)?;
+        let content = content_view(self.parent_for(window)?)?;
         let native_terminal_failure = self.native_terminal_failure.clone();
         let stage = ContentStage::new(
             mtm,
@@ -611,6 +630,142 @@ impl EngineHost {
         stage.cover_pointer();
         self.stages.insert(window, stage.clone());
         Some(stage)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl EngineHost {
+    /// `None` for a window already released: a late layout for it must not
+    /// build a stage in the main window instead.
+    fn parent_for(&self, window: WindowId) -> Option<&ParentHandle> {
+        match self.window_parents.get(&window) {
+            Some(parent) => parent.as_ref(),
+            None => Some(&self.parent),
+        }
+    }
+
+    /// Gives `window` its own native window. Its stage is built inside that
+    /// window on its first layout. The main window, a window already given
+    /// one, and a handle of another platform's kind are refused.
+    pub(crate) fn attach_window(&mut self, window: WindowId, handle: RawWindowHandle) -> bool {
+        if self.window_parents.contains_key(&window)
+            || self.stages.contains_key(&window)
+            || !native_window_handle(&handle)
+            || same_native_window(&handle, &self.parent.0)
+        {
+            return false;
+        }
+        self.window_parents
+            .insert(window, Some(ParentHandle(handle)));
+        true
+    }
+
+    /// Retires the stage of a window that is going away. A page still on it
+    /// leaves with the stage and joins another window on its next layout;
+    /// until then it is kept, hidden, by the main window, so it never goes
+    /// with the native window it was shown in.
+    pub(crate) fn release_window(&mut self, window: WindowId) {
+        if !self
+            .window_parents
+            .get(&window)
+            .is_some_and(Option::is_some)
+        {
+            return;
+        }
+        if let Some(stage) = self.stages.remove(&window) {
+            #[cfg(target_os = "macos")]
+            {
+                for id in stage.attached_items().unwrap_or_default() {
+                    stage.remove_view(id);
+                }
+                stage.retire();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                use wry::WebViewExtWindows;
+                let main = win32_parent(&self.parent);
+                for id in stage.attached_items() {
+                    stage.remove_view(id);
+                    if let (Some(view), Some(main)) = (self.views.get(&id), main) {
+                        let _ = view.set_visible(false);
+                        if view.reparent(main.0 as isize).is_err() {
+                            eprintln!("engine: a released window's page stayed in place");
+                        }
+                    }
+                }
+                if let Some(parent) = stage.parent_window() {
+                    crate::platform::imp::forget_window_caption_offset(parent.0 as isize);
+                }
+            }
+        }
+        self.window_parents.insert(window, None);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn native_window_handle(handle: &RawWindowHandle) -> bool {
+    if cfg!(target_os = "macos") {
+        matches!(handle, RawWindowHandle::AppKit(_))
+    } else {
+        matches!(handle, RawWindowHandle::Win32(_))
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn same_native_window(left: &RawWindowHandle, right: &RawWindowHandle) -> bool {
+    match (left, right) {
+        (RawWindowHandle::AppKit(left), RawWindowHandle::AppKit(right)) => {
+            left.ns_view == right.ns_view
+        }
+        (RawWindowHandle::Win32(left), RawWindowHandle::Win32(right)) => left.hwnd == right.hwnd,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn win32_parent(parent: &ParentHandle) -> Option<HWND> {
+    let RawWindowHandle::Win32(h) = parent.0 else {
+        return None;
+    };
+    Some(HWND(h.hwnd.get() as *mut _))
+}
+
+#[cfg(target_os = "windows")]
+impl EngineHost {
+    /// Takes `id` off every other window's stage and puts its native window
+    /// under `stage`'s window. False when the move was refused natively; the
+    /// page then stays where it was and the layout is not applied.
+    fn move_view_to_stage(
+        &self,
+        window: WindowId,
+        id: ItemId,
+        view: &WebView,
+        stage: &Stage,
+    ) -> bool {
+        use wry::WebViewExtWindows;
+        for (other, previous) in &self.stages {
+            if *other != window && previous.has_view(id) {
+                previous.remove_view(id);
+            }
+        }
+        let Some(parent) = stage.parent_window() else {
+            return false;
+        };
+        // A page already under this window, as every main-window tab is,
+        // is left alone: only a page crossing windows is reparented.
+        let mut current = HWND::default();
+        // SAFETY: the controller belongs to this live view and this runs on
+        // its UI thread.
+        if unsafe { view.controller().ParentWindow(&mut current) }.is_ok() && current == parent {
+            return true;
+        }
+        match view.reparent(parent.0 as isize) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("engine: a page could not move to its window: {error}");
+                false
+            }
+        }
     }
 }
 

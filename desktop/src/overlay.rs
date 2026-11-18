@@ -16,8 +16,8 @@ use tauri::{LogicalSize, Manager, WebviewWindow};
 #[cfg(target_os = "macos")]
 use zephium_core::ports::store::Store;
 use zephium_ipc::{
-    OperationDisposition, OperationOutcome, PanelIntent, PanelLayout, PanelOwner, PanelState,
-    SearchContext, ToolKind,
+    OperationDisposition, OperationOutcome, OperationReason, PanelIntent, PanelLayout, PanelOwner,
+    PanelState, SearchContext, ToolKind,
 };
 pub const PANEL_LABEL: &str = "panel";
 pub const PANEL_SIZE: (f64, f64) = (geometry::WIDTH, geometry::INITIAL_HEIGHT);
@@ -249,9 +249,9 @@ impl Overlay {
                 }
                 PanelIntent::Search => this.state().begin(),
                 PanelIntent::Dismiss => {
+                    let editing = this.state().model.editing_tab();
                     this.state().model.hide();
-                    #[cfg(target_os = "macos")]
-                    crate::panel::return_to_previous();
+                    this.return_from(editing);
                 }
                 PanelIntent::Open { tool } => {
                     this.state().model.hide();
@@ -267,7 +267,7 @@ impl Overlay {
         });
     }
     /// Opens on the current page's address, the way an address bar would.
-    pub fn edit(&self, tab: String, url: String) {
+    pub fn edit(&self, tab: String, url: String, mini: bool) {
         self.on_main(move |this| {
             crate::tab_switcher::cancel(this.window_app());
             if crate::resource_close::is_closing() {
@@ -280,7 +280,11 @@ impl Overlay {
                 if state.model.switcher.is_some() {
                     state.content_height = geometry::INITIAL_HEIGHT;
                 }
-                state.model.edit(tab, url);
+                if mini {
+                    state.model.edit_mini(tab, url);
+                } else {
+                    state.model.edit(tab, url);
+                }
             }
             this.cancel_search(old);
             this.present();
@@ -330,6 +334,61 @@ impl Overlay {
     pub fn editing_tab(&self) -> Option<String> {
         self.state().model.editing_tab()
     }
+    /// Whether this presentation chooses a page for a mini window.
+    pub fn mini(&self) -> bool {
+        self.state().model.mini()
+    }
+    /// Opens to choose the address of a new mini window, or puts that away.
+    /// A private session in front keeps its own launcher: what it searches
+    /// must not leave for a regular profile's window.
+    pub fn toggle_mini(&self) {
+        self.on_main(|this| {
+            if crate::resource_close::is_closing() {
+                return;
+            }
+            let old = this.state().model.session();
+            let dismissing = {
+                let state = this.state();
+                state.model.mini() && state.model.editing_tab().is_none()
+            };
+            {
+                let mut state = this.state();
+                state.pending = None;
+                if dismissing {
+                    state.model.hide();
+                } else if state
+                    .model
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.private)
+                {
+                    state.begin();
+                } else {
+                    state.model.search_mini();
+                }
+            }
+            this.cancel_search(old);
+            this.present();
+            #[cfg(target_os = "macos")]
+            if dismissing {
+                crate::panel::return_to_previous();
+            }
+        });
+    }
+    /// Gives focus back after the launcher is put away: to the mini window
+    /// whose address it was editing, else to where it was before.
+    fn return_from(&self, editing: Option<String>) {
+        let mini =
+            editing.is_some_and(|tab| crate::mini::focus_page(self.window.app_handle(), &tab));
+        #[cfg(target_os = "macos")]
+        if mini {
+            crate::panel::forget_previous();
+        } else {
+            crate::panel::return_to_previous();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = mini;
+    }
     pub fn toggle(&self) {
         self.on_main(|this| {
             crate::tab_switcher::cancel(this.window_app());
@@ -341,6 +400,7 @@ impl Overlay {
                 let state = this.state();
                 state.model.presented && state.model.switcher.is_none()
             };
+            let editing = this.state().model.editing_tab();
             if dismissing {
                 this.state().model.hide();
             } else {
@@ -348,12 +408,9 @@ impl Overlay {
             }
             this.cancel_search(old);
             this.present();
-            #[cfg(target_os = "macos")]
             if dismissing {
-                crate::panel::return_to_previous();
+                this.return_from(editing);
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = dismissing;
         });
     }
     #[cfg(target_os = "linux")]
@@ -607,11 +664,22 @@ impl Overlay {
             if pending.background {
                 return;
             }
+            let editing = state.model.editing_tab();
             state.model.hide();
             drop(state);
             this.cancel_search(old_session);
             this.present();
-            this.raise_browser();
+            // The page is in a mini window: that window is what comes
+            // forward, and the main window stays where it is.
+            if result.reason == OperationReason::OpenedInMini {
+                #[cfg(target_os = "macos")]
+                crate::panel::forget_previous();
+                if let Some(tab) = editing {
+                    crate::mini::focus_page(this.window.app_handle(), &tab);
+                }
+            } else {
+                this.raise_browser();
+            }
         });
     }
     pub fn focus_changed(&self) {
@@ -650,11 +718,14 @@ impl Overlay {
                     return;
                 }
                 let panel_focused = this.window.is_focused().unwrap_or(false);
+                // A mini window is a browser window like the main one:
+                // moving to it puts the launcher away.
                 let main_focused = this
                     .window
                     .app_handle()
                     .get_webview_window(crate::MAIN_LABEL)
-                    .is_some_and(|window| window.is_focused().unwrap_or(false));
+                    .is_some_and(|window| window.is_focused().unwrap_or(false))
+                    || crate::mini::focused(this.window.app_handle()).is_some();
                 let app_active = application_active(panel_focused, main_focused);
                 let old = this.snapshot();
                 let old_session = this.state().model.session();

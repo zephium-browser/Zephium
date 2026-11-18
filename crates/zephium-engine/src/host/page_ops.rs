@@ -244,6 +244,34 @@ impl EngineHost {
         }
     }
 
+    /// Gives the page the keyboard inside the window that shows it. False
+    /// when it is in no window yet.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn focus_page(&self, id: ItemId) -> bool {
+        let Some(view) = self.views.get(&id) else {
+            return false;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let page = crate::platform::imp::native_webview(view);
+            page.window()
+                .is_some_and(|window| window.makeFirstResponder(Some(&page)))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+            use wry::WebViewExtWindows;
+            // SAFETY: the controller belongs to this live view and this runs
+            // on its UI thread.
+            unsafe {
+                view.view
+                    .controller()
+                    .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+            }
+            .is_ok()
+        }
+    }
+
     /// One step of finding text in `id`. Results travel the view's own event
     /// permit, so a result from a view since replaced is never delivered.
     pub(crate) fn find(&mut self, id: ItemId, request: Option<FindRequest>) {
