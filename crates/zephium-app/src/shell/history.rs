@@ -79,7 +79,7 @@ impl Shell {
             HistoryCall::Clear { range } => Some(
                 range
                     .window_seconds()
-                    .map(|window| chrono::Utc::now().timestamp() - window),
+                    .map(|window| jiff::Timestamp::now().as_second() - window),
             ),
             HistoryCall::ClearSince { since } => Some(Some(*since)),
             _ => None,

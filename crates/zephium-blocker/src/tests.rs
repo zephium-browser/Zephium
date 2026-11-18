@@ -1529,6 +1529,13 @@ fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
         r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|lactmilli|inline|yahi|eafg|yaf4)\b/"\,"replacement":""}))"#,
     ]
     .join("\n");
+    // uBO's quick fixes from 2026-11-17 on: lactmilli gave way to oaeb.
+    let edits_now = [
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent*="oaeb"]+={"params":"oAEBogYBLg"})"#,
+        r##"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.attestationRequest][?.context.client.userAgent=/adunit|channel|inline|yahi|oaeb|eafg|yaf4/].playbackContext.contentPlaybackContext.referer=repl({"regex":"(?:#reloadxhr)?$"\,"replacement":"#reloadxhr"}))"##,
+        r#"www.youtube.com##+js(trusted-edit-inbound-object, JSON.stringify, 0, [?.createCommentParams].context.client.userAgent=repl({"regex":"/; (adunit|channel|inline|yahi|oaeb|eafg|yaf4)\b/"\,"replacement":""}))"#,
+    ]
+    .join("\n");
     let targets = [
         #[cfg(feature = "runtime-exact")]
         CompileTarget::Runtime,
@@ -1536,7 +1543,7 @@ fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
         CompileTarget::WebKit,
     ];
     for target in targets {
-        let program = |trusted: bool| {
+        let program = |trusted: bool, edits: &str| {
             let quick_fixes = FilterSource::new(
                 id("ublock-quick-fixes"),
                 SourceFormat::Standard,
@@ -1554,14 +1561,21 @@ fn the_built_in_marker_runs_beside_the_quick_fixes_edits() {
                 .cosmetic_policy()
                 .and_then(|policy| policy.scriptlet_program().map(str::to_owned))
         };
-        let marked = program(true).unwrap();
+        let marked = program(true, &edits).unwrap();
         assert!(
             marked.contains(r#"zephiumPlayerMarker("lactmilli channel yahi inline", "#),
             "{target:?}"
         );
         assert!(marked.contains(r#"baseUrl*=reloadxhr", "onSnackbarMessage")"#));
         assert!(marked.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
-        assert!(program(false).is_none_or(|script| !script.contains("zephiumPlayerMarker(\"")));
+        assert!(
+            program(false, &edits).is_none_or(|script| !script.contains("zephiumPlayerMarker(\""))
+        );
+        let marked = program(true, &edits_now).unwrap();
+        assert!(
+            marked.contains(r#"zephiumPlayerMarker("oaeb channel yahi inline", "#),
+            "{target:?}"
+        );
     }
 }
 

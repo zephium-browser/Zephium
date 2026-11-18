@@ -78,7 +78,7 @@ fn cookies_and_cache_reach_the_engine_for_the_focused_profile_and_range() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, _screen, _queue) = browsed(store);
     let profile = focused_profile(&shell);
-    let before = chrono::Utc::now().timestamp();
+    let before = jiff::Timestamp::now().as_second();
 
     let answer = dispatch(
         &mut shell,
@@ -87,7 +87,7 @@ fn cookies_and_cache_reach_the_engine_for_the_focused_profile_and_range() {
     );
 
     assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
-    let after = chrono::Utc::now().timestamp();
+    let after = jiff::Timestamp::now().as_second();
     let fake = &engine;
     let calls = fake.data_calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 1);
@@ -153,7 +153,7 @@ fn a_ranged_clear_dates_the_download_list_too() {
         panic!("a ranged clear forgets only the downloads inside it");
     };
     assert_eq!(partition.profile(), profile);
-    assert!(since > chrono::Utc::now().timestamp() - 24 * 3600 - 5);
+    assert!(since > jiff::Timestamp::now().as_second() - 24 * 3600 - 5);
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn a_four_week_history_clear_reaches_the_store_with_its_date() {
     let (mut shell, _engine, screen, queue) = browsed(store.clone());
     visit(&mut shell, &screen, "visited.example");
     let profile = focused_profile(&shell);
-    let before = chrono::Utc::now().timestamp();
+    let before = jiff::Timestamp::now().as_second();
 
     let answer = dispatch(
         &mut shell,
@@ -490,7 +490,7 @@ fn a_four_week_history_clear_reaches_the_store_with_its_date() {
     drain_reads(&mut shell, store.clone(), queue);
 
     assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
-    let after = chrono::Utc::now().timestamp();
+    let after = jiff::Timestamp::now().as_second();
     let window = 28 * 24 * 3600;
     let clears = store.chat_clears.lock().unwrap().clone();
     let [(cleared, Some(since))] = clears[..] else {
@@ -510,7 +510,7 @@ fn clearing_history_takes_the_closed_tabs_of_the_range_out_of_recently_closed() 
     let recent = visit(&mut shell, &screen, "recent.example");
     shell.handle(Command::Close(old));
     shell.handle(Command::Close(recent));
-    let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+    let now_ms = u64::try_from(jiff::Timestamp::now().as_millisecond()).unwrap();
     for entry in &mut shell.recently_closed {
         entry.closed_at_ms = Some(if entry.url.contains("old.example") {
             now_ms - 3 * 3600 * 1000
