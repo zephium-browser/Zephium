@@ -2282,6 +2282,144 @@ async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
     }
 }
 
+/// A research part placing a sheet while a page is still loading: the
+/// lead's read in the same turn, or (`.0`) the helper's own read beside it.
+struct HelperBesideRead(bool);
+impl WorkModelClient for HelperBesideRead {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        // The lead reads with web_fetch, a helper with read.
+        let fetch = |tool: &str| call("f", tool, json!({"url": "https://example.test/pricing"}));
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let lead = request
+                .system
+                .iter()
+                .any(|b| b.text.contains("You are the Work agent"));
+            let assistant = match (lead, turn) {
+                (true, 0) => {
+                    let mut calls = vec![call(
+                        "p",
+                        "start_part",
+                        json!({"title": "Plans", "helper": "research",
+                        "goal": "The plans on the pricing page"}),
+                    )];
+                    if !self.0 {
+                        calls.push(fetch("web_fetch"));
+                    }
+                    calls
+                }
+                (true, _) => vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call("d", "finish", json!({"say": "It didn't open."})),
+                ],
+                (false, 0) => {
+                    let sheet = call(
+                        "t",
+                        "create",
+                        json!({"kind": "sheet", "title": "Pricing", "data": {
+                        "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+                        "rows": [{"cells": ["Hobby", "Free"]}, {"cells": ["Pro", "$20"]}]}}),
+                    );
+                    if self.0 {
+                        vec![fetch("read"), sheet]
+                    } else {
+                        vec![sheet]
+                    }
+                }
+                (false, _) => vec![call(
+                    "h",
+                    "finish",
+                    json!({"summary": "No plans", "digest": "Nothing was read.", "found": false}),
+                )],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_helpers_sheet_waits_for_the_reads_begun_before_it() {
+    for own in [false, true] {
+        helper_sheet_beside_a_failed_read(own).await;
+    }
+}
+
+async fn helper_sheet_beside_a_failed_read(own: bool) {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Price the plans on https://example.test/pricing".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(HelperBesideRead(own)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, _| async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Ok(WorkBrowserOutcome {
+                    status: WorkStepStatus::Failed,
+                    note: Some("The page could not be read".into()),
+                    ..outcome(None, vec![])
+                })
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    assert!(
+        !run.artifacts
+            .iter()
+            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        "a sheet on no page read stood (helper's own read: {own})"
+    );
+}
+
 /// A read batch that ends the run (here its time runs out) ends the turn:
 /// the object created beside it is never stored for the ending run.
 #[tokio::test]

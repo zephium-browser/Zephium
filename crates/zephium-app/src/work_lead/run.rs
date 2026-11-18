@@ -79,6 +79,9 @@ struct State {
     /// Page reads this run asked for, and those that read their page.
     pages_tried: u16,
     pages_read: u16,
+    /// Read batches in flight, by the order they began.
+    reads_next: u64,
+    reads_open: Vec<u64>,
 }
 
 pub(crate) struct LeadRun {
@@ -105,7 +108,21 @@ pub(crate) struct LeadRun {
     /// the run's page lane will not take another, so later pages fail at
     /// once instead of each waiting as long again.
     browser_down: std::sync::atomic::AtomicBool,
+    /// Woken whenever a read batch settles.
+    reads_settled: tokio::sync::Notify,
     diagnostic: Option<fn(super::WorkLeadDiagnostic)>,
+}
+
+/// A read batch in flight; settling it wakes the objects waiting on it.
+pub(crate) struct Reading<'a> {
+    run: &'a LeadRun,
+    id: u64,
+}
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        self.run.state().reads_open.retain(|id| *id != self.id);
+        self.run.reads_settled.notify_waiters();
+    }
 }
 
 /// Stands still the run's deadline while it lives: the person is deciding.
@@ -170,11 +187,37 @@ impl LeadRun {
                 unreadable: 0,
                 pages_tried: 0,
                 pages_read: 0,
+                reads_next: 0,
+                reads_open: Vec::new(),
             }),
             accepted: Mutex::new(Vec::new()),
             routing: tokio::sync::Mutex::new(()),
             browser_down: std::sync::atomic::AtomicBool::new(false),
+            reads_settled: tokio::sync::Notify::new(),
             diagnostic,
+        }
+    }
+    /// Marks a read batch in flight until the returned guard drops.
+    pub(crate) fn begin_reads(&self) -> Reading<'_> {
+        let mut state = self.state();
+        let id = state.reads_next;
+        state.reads_next += 1;
+        state.reads_open.push(id);
+        Reading { run: self, id }
+    }
+    /// Waits until every read batch begun before this call has settled, so
+    /// an object is judged on what those reads found: a page that later
+    /// failed counts against it. Batches begun after it are not waited for.
+    pub(crate) async fn reads_begun_settled(&self) {
+        let before = self.state().reads_next;
+        loop {
+            let settled = self.reads_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if !self.state().reads_open.iter().any(|id| *id < before) {
+                return;
+            }
+            settled.await;
         }
     }
     pub(crate) fn browser_down(&self) -> bool {
