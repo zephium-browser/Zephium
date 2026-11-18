@@ -58,10 +58,12 @@ export function loadedView<P extends Record<string, unknown>>(
 const RETRY_MS = [500, 2000] as const;
 
 /**
- * Stylesheets whose load failed. Vite never requests one again, so a retried
- * view would load without its styles; a retry requests them itself first.
+ * Stylesheets that failed while a view's module was importing, by view. Vite
+ * never requests one again, so a retried view would load without its styles;
+ * its retry requests its own failed stylesheets first.
  */
-const failedSheets = new Set<HTMLLinkElement>();
+const failedSheets = new Map<() => Promise<unknown>, Set<HTMLLinkElement>>();
+const importing = new Set<() => Promise<unknown>>();
 let watchingSheets = false;
 
 function watchSheets(): void {
@@ -71,22 +73,30 @@ function watchSheets(): void {
     "error",
     (event) => {
       const link = event.target;
-      if (link instanceof HTMLLinkElement && link.rel === "stylesheet") failedSheets.add(link);
+      if (!(link instanceof HTMLLinkElement) || link.rel !== "stylesheet") return;
+      for (const loader of importing) {
+        const sheets = failedSheets.get(loader) ?? new Set();
+        sheets.add(link);
+        failedSheets.set(loader, sheets);
+      }
     },
     true,
   );
 }
 
-function reloadSheets(): Promise<unknown> {
+function reloadSheets(loader: () => Promise<unknown>): Promise<unknown> {
+  const sheets = failedSheets.get(loader);
+  if (!sheets) return Promise.resolve();
   return Promise.all(
-    [...failedSheets].map(
+    [...sheets].map(
       (failed) =>
         new Promise<void>((resolve, reject) => {
           const link = failed.cloneNode() as HTMLLinkElement;
           link.addEventListener(
             "load",
             () => {
-              failedSheets.delete(failed);
+              sheets.delete(failed);
+              if (sheets.size === 0) failedSheets.delete(loader);
               failed.remove();
               resolve();
             },
@@ -95,7 +105,6 @@ function reloadSheets(): Promise<unknown> {
           link.addEventListener(
             "error",
             () => {
-              failedSheets.delete(link);
               link.remove();
               reject(new Error(`Unable to load ${link.href}`));
             },
@@ -118,8 +127,9 @@ export function loadView<P extends Record<string, unknown>>(loader: Loader<P> | 
   loading.add(loader);
   const attempt = async (tries: number): Promise<void> => {
     try {
-      const module = await loader();
-      if (tries > 0) await reloadSheets();
+      importing.add(loader);
+      const module = await loader().finally(() => importing.delete(loader));
+      if (tries > 0) await reloadSheets(loader);
       loading.delete(loader);
       loaded.set(loader, module.default);
     } catch (error) {
