@@ -8,9 +8,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::{NSError, NSString};
-use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionPermission, WKWebExtensionPermissionClipboardWrite,
-};
+use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionPermission};
 use serde_json::Value;
 
 use crate::runtime::Shared;
@@ -180,7 +178,10 @@ pub(crate) fn handle(
         Some("runtime.contexts") => Ok(contexts(shared, context)),
         Some("offscreen.has") => Ok(Value::Bool(offscreen::has(shared, &extension(context)))),
         Some("clipboard.write")
-            if permitted(context, unsafe { WKWebExtensionPermissionClipboardWrite }) =>
+            if permitted(
+                crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite"),
+                |permission| unsafe { context.hasPermission(permission) },
+            ) =>
         {
             let text = message
                 .get("text")
@@ -274,10 +275,10 @@ fn extension(context: &WKWebExtensionContext) -> String {
 }
 
 fn permitted(
-    context: &WKWebExtensionContext,
     permission: Option<&WKWebExtensionPermission>,
+    has_permission: impl FnOnce(&WKWebExtensionPermission) -> bool,
 ) -> bool {
-    permission.is_some_and(|permission| unsafe { context.hasPermission(permission) })
+    permission.is_some_and(has_permission)
 }
 
 /// Whether the manifest asks for `permission`, for permissions WebKit
@@ -293,4 +294,23 @@ fn declares(context: &WKWebExtensionContext, permission: &str) -> bool {
                 .iter()
                 .any(|entry| entry.as_str() == Some(permission))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_clipboard_write_permission_denies_without_querying_context() {
+        crate::without_webkit_string(c"WKWebExtensionPermissionClipboardWrite", || {
+            assert!(!permitted(
+                crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite"),
+                |_| panic!("an unresolved permission must not query a WebKit context"),
+            ));
+        });
+        if let Some(permission) = crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite") {
+            assert!(permitted(Some(permission), |_| true));
+            assert!(!permitted(Some(permission), |_| false));
+        }
+    }
 }
