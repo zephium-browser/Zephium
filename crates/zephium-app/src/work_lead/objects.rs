@@ -624,16 +624,30 @@ pub(crate) fn propose(
             ));
         }
     }
+    // A retry leaves out a key that is no source of this run rather than
+    // refusing the object again: the object then claims less, not more.
+    let mut unknown_keys: Vec<String> = Vec::new();
+    let mut known = |key: &str| {
+        let known = !lenient || run.source(key).is_some();
+        if !known && !unknown_keys.iter().any(|k| k == key) {
+            unknown_keys.push(key.to_owned());
+        }
+        known
+    };
     let mut keys: Vec<String> = Vec::new();
     for key in sources.iter().chain(&value_sources) {
         let key = key.trim().to_owned();
-        if !keys.contains(&key) {
+        if known(&key) && !keys.contains(&key) {
             keys.push(key);
         }
     }
     items_mut(&mut data, |item| {
         if let Some(Value::String(key)) = item.get("source") {
             let key = key.trim().to_owned();
+            if !known(&key) {
+                item.remove("source");
+                return;
+            }
             if !keys.contains(&key) {
                 keys.push(key.clone());
             }
@@ -666,6 +680,12 @@ pub(crate) fn propose(
         let index = keys.iter().position(|candidate| candidate == key).unwrap();
         item.insert("record_source".into(), Value::from(index as u64));
     });
+    if !unknown_keys.is_empty() {
+        left_out.push(format!(
+            "the sources {} (not sources of this run)",
+            unknown_keys.join(", ")
+        ));
+    }
     let mut evidence = Vec::new();
     let mut unknown = None;
     for key in &keys {
