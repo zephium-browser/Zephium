@@ -89,7 +89,8 @@
       selectionEscapeBlocked ||
       event.defaultPrevented ||
       event.key !== "Escape" ||
-      event.isComposing
+      event.isComposing ||
+      event.keyCode === 229
     )
       return;
     const selected = selection.value.ids.length > 0;
