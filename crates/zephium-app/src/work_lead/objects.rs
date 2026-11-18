@@ -980,15 +980,17 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                 .next()
                 .unwrap_or("");
             let clause = clause.rsplit(" but ").next().unwrap_or(clause);
-            // "and" or "or" starts another claim unless this one follows it
-            // at once: "No issues found and pricing checked" claims, "could
-            // not be checked or verified" does not.
+            // "and" or "or" starts another claim unless only modifiers come
+            // between it and this one: "No issues found and pricing checked"
+            // claims, "could not be checked or independently verified" does
+            // not. A doubtful case is read as a claim: a refusal costs a
+            // retry, a missed claim publishes a false one.
             let joined = clause
                 .rfind(" and ")
                 .map(|at| at + 5)
                 .max(clause.rfind(" or ").map(|at| at + 4));
             let clause = match joined {
-                Some(start) if !clause[start..].trim().is_empty() => &clause[start..],
+                Some(start) if !modifiers(&clause[start..]) => &clause[start..],
                 _ => clause,
             };
             let denied = negation
@@ -998,6 +1000,28 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                     .any(|w| NEGATIONS.contains(&w) || matches!(w, "nothing" | "none"));
             whole && !denied
         })
+    })
+}
+
+/// Words that only modify a predicate they continue: "fully", "yet",
+/// "been".
+fn modifiers(text: &str) -> bool {
+    text.split_whitespace().all(|word| {
+        (word.len() > 4 && word.ends_with("ly"))
+            || matches!(
+                word,
+                "be" | "been"
+                    | "being"
+                    | "is"
+                    | "was"
+                    | "were"
+                    | "are"
+                    | "yet"
+                    | "all"
+                    | "also"
+                    | "even"
+                    | "still"
+            )
     })
 }
 
@@ -1688,12 +1712,15 @@ mod tests {
         for headline in [
             "Pricing could not be checked",
             "Pricing could not be checked or verified",
+            "Pricing could not be checked or independently verified",
+            "Nothing was read, so pricing is not yet fully confirmed",
         ] {
             assert!(!claims_done(headline), "{headline}");
         }
         for headline in [
             "Slack was not read, but the plan is complete",
             "No issues found and pricing checked",
+            "No issues found and pricing fully checked",
         ] {
             let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
                 "kind": "reply", "headline": headline, "text": "The plan stands."
