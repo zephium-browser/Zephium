@@ -58,28 +58,78 @@ export function loadedView<P extends Record<string, unknown>>(
 const RETRY_MS = [500, 2000] as const;
 
 /**
+ * Stylesheets whose load failed. Vite never requests one again, so a retried
+ * view would load without its styles; a retry requests them itself first.
+ */
+const failedSheets = new Set<HTMLLinkElement>();
+let watchingSheets = false;
+
+function watchSheets(): void {
+  if (watchingSheets || typeof document === "undefined") return;
+  watchingSheets = true;
+  document.addEventListener(
+    "error",
+    (event) => {
+      const link = event.target;
+      if (link instanceof HTMLLinkElement && link.rel === "stylesheet") failedSheets.add(link);
+    },
+    true,
+  );
+}
+
+function reloadSheets(): Promise<unknown> {
+  return Promise.all(
+    [...failedSheets].map(
+      (failed) =>
+        new Promise<void>((resolve, reject) => {
+          const link = failed.cloneNode() as HTMLLinkElement;
+          link.addEventListener(
+            "load",
+            () => {
+              failedSheets.delete(failed);
+              failed.remove();
+              resolve();
+            },
+            { once: true },
+          );
+          link.addEventListener(
+            "error",
+            () => {
+              failedSheets.delete(link);
+              link.remove();
+              reject(new Error(`Unable to load ${link.href}`));
+            },
+            { once: true },
+          );
+          document.head.append(link);
+        }),
+    ),
+  );
+}
+
+/**
  * Starts loading a view, once. A failed load is retried on its own, since a
  * mounted row asks again only when its loader changes; after the last retry a
  * later row can try again.
  */
 export function loadView<P extends Record<string, unknown>>(loader: Loader<P> | null): void {
   if (!loader || loaded.has(loader) || loading.has(loader)) return;
+  watchSheets();
   loading.add(loader);
-  const attempt = (tries: number): void => {
-    void loader().then(
-      (module) => {
+  const attempt = async (tries: number): Promise<void> => {
+    try {
+      const module = await loader();
+      if (tries > 0) await reloadSheets();
+      loading.delete(loader);
+      loaded.set(loader, module.default);
+    } catch (error) {
+      const wait = RETRY_MS[tries];
+      if (wait === undefined) {
         loading.delete(loader);
-        loaded.set(loader, module.default);
-      },
-      (error: unknown) => {
-        const wait = RETRY_MS[tries];
-        if (wait === undefined) {
-          loading.delete(loader);
-          throw error;
-        }
-        setTimeout(() => attempt(tries + 1), wait);
-      },
-    );
+        throw error;
+      }
+      setTimeout(() => void attempt(tries + 1), wait);
+    }
   };
-  attempt(0);
+  void attempt(0);
 }

@@ -23,24 +23,27 @@ it("a view whose load fails is retried while its row stays mounted", async () =>
 });
 
 it("a load that keeps failing gives up after its retries and can be started again", async () => {
-  const errors: unknown[] = [];
-  const onError = (error: unknown) => errors.push(error);
+  const reported: unknown[] = [];
+  const onError = (error: unknown) => reported.push(error);
   process.on("unhandledRejection", onError);
   try {
+    const thrown: Error[] = [];
     const loader = vi.fn(async (): Promise<{ default: typeof view }> => {
-      throw new Error("gone");
+      const error = new Error(`gone ${thrown.length}`);
+      thrown.push(error);
+      throw error;
     });
     loadView(loader);
     await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(reported).toEqual([thrown[2]]));
     expect(loader).toHaveBeenCalledTimes(3);
     expect(loadedView(loader)).toBeNull();
+
     loadView(loader);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(loader).toHaveBeenCalledTimes(4);
     await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(reported).toEqual([thrown[2], thrown[5]]));
+    expect(loader).toHaveBeenCalledTimes(6);
   } finally {
-    await Promise.resolve();
     process.off("unhandledRejection", onError);
   }
-  expect(errors.length).toBeGreaterThan(0);
 });
