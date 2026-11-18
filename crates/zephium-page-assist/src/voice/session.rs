@@ -10,8 +10,9 @@ use crate::ipc::{
     PageAssistBlockV1 as Block, PageAssistDecisionV1 as Decision, PageAssistEndV1 as End,
     PageAssistEventV1 as AssistEvent, PageAssistFaultV1 as AssistFault,
     PageAssistMessageV1 as Message, PageAssistPhaseV1 as Phase,
-    PageAssistReplyStateV1 as ReplyState, PageAssistStepStateV1 as StepState,
-    WorkModelFaultV1 as ModelFault, PAGE_ASSIST_MAX_QUESTION_BYTES,
+    PageAssistReplyStateV1 as ReplyState, PageAssistStepReasonV1 as StepReason,
+    PageAssistStepStateV1 as StepState, WorkModelFaultV1 as ModelFault,
+    PAGE_ASSIST_MAX_QUESTION_BYTES,
 };
 use crate::text;
 
@@ -1109,6 +1110,19 @@ impl Session {
             Closing::NeedsYou { step: Some(step) } if reply.prompted.contains(&step) => {}
             line => {
                 self.speak(Speech::Line(Line::Closing(line)), fx);
+                // A step that ran but could not be credited leaves the page's
+                // own value as the useful news: one sentence of it, after
+                // the line that says it is unconfirmed.
+                let unconfirmed = facts.state == ReplyState::Done
+                    && matches!(line, Closing::NotConfirmed { step: Some(step) }
+                        if facts.steps.iter().any(|fact| fact.step == step
+                            && fact.reason == Some(StepReason::Unconfirmed)));
+                let value = std::mem::take(&mut reply.held)
+                    .into_iter()
+                    .find(|chunk| chunk.chars().any(char::is_numeric));
+                if let (true, Some(chunk)) = (unconfirmed, value) {
+                    self.speak(Speech::Text(chunk), fx);
+                }
             }
         }
     }
@@ -2593,6 +2607,59 @@ mod tests {
             }))]
         ));
         assert_eq!(run.state(), State::Settled(Outcome::NotConfirmed));
+    }
+
+    #[test]
+    fn an_unconfirmed_step_adds_one_sentence_with_the_pages_value() {
+        let unconfirmed = |spoken: &[Speech]| {
+            matches!(
+                spoken.first(),
+                Some(Speech::Line(Line::Closing(Closing::NotConfirmed {
+                    step: Some(_)
+                })))
+            )
+        };
+        let done = AssistEvent::Done {
+            cost: None,
+            end: None,
+        };
+
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Failed, Some(Reason::Unconfirmed))]);
+        run.text(
+            2,
+            "I pressed the button. The recipe now serves 5. Tell me if that is wrong.\n",
+        );
+        let said = spoken(&run.reply(done.clone()));
+        assert!(unconfirmed(&said));
+        assert_eq!(said[1..], [says("The recipe now serves 5.")]);
+
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Failed, Some(Reason::Unconfirmed))]);
+        run.text(2, "The button did not seem to respond.\n");
+        let said = spoken(&run.reply(done.clone()));
+        assert!(unconfirmed(&said));
+        assert_eq!(said.len(), 1, "a sentence without a value adds nothing");
+
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Failed, Some(Reason::NoEffect))]);
+        run.text(2, "Nothing changed; the cart still has 0 items.\n");
+        let said = spoken(&run.reply(done.clone()));
+        assert!(unconfirmed(&said));
+        assert_eq!(said.len(), 1, "nothing changed: only the typed line");
+
+        let mut run = Run::new();
+        run.working();
+        run.steps(&[(StepState::Failed, Some(Reason::PageChanged))]);
+        run.text(2, "It shows 5 now.\n");
+        let said = spoken(&run.reply(done));
+        assert!(matches!(
+            said[..],
+            [Speech::Line(Line::Closing(Closing::Failed { .. }))]
+        ));
     }
 
     struct Driver {
