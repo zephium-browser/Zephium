@@ -901,6 +901,11 @@ pub(crate) fn says_not_found(text: &str) -> bool {
     says(text, &NOT_FOUND)
 }
 
+/// The text calls a result finished or checked.
+pub(crate) fn claims_done(text: &str) -> bool {
+    affirms(text, &CLAIMS, true)
+}
+
 fn says(text: &str, words: &[&str]) -> bool {
     affirms(text, words, false)
 }
@@ -985,7 +990,7 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if (!run.failed.is_empty() || run.unread) && affirms(headline, &CLAIMS, true) {
+            if (!run.failed.is_empty() || run.unread) && claims_done(headline) {
                 return Err("reply: the headline calls the result finished or checked while a part could not do its job or no page could be read; say what was found".into());
             }
         }

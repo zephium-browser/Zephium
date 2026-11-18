@@ -1657,6 +1657,37 @@ impl WorkModelClient for Turns {
     }
 }
 
+/// Turns whose tool calls stream before the turn ends, as a provider's do.
+struct StreamedTurns(fn(usize, &str) -> Vec<WorkModelPart>);
+impl WorkModelClient for StreamedTurns {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let assistant = (self.0)(turn, &results(&request));
+            for part in &assistant {
+                if let WorkModelPart::ToolCall(tool) = part {
+                    events(WorkModelEvent::ToolCall(tool.clone()));
+                }
+            }
+            // Room for a streamed reply to be published before the turn ends.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage::default(),
+                assistant,
+            })
+        })
+    }
+}
+
 async fn scripted(
     objective: &str,
     turns: fn(usize, &str) -> Vec<WorkModelPart>,
@@ -1787,6 +1818,15 @@ async fn scripted_search(
     search: &dyn WorkPublicSearchProvider,
     browse: fn(WorkAgentBrowseRequest) -> WorkBrowserOutcome,
 ) -> WorkExecutionFact {
+    scripted_on(objective, Arc::new(Turns(turns)), search, browse).await
+}
+
+async fn scripted_on(
+    objective: &str,
+    client: Arc<dyn WorkModelClient>,
+    search: &dyn WorkPublicSearchProvider,
+    browse: fn(WorkAgentBrowseRequest) -> WorkBrowserOutcome,
+) -> WorkExecutionFact {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
     let (mut shell, queue, handle, profile) = fixture(store);
     let create = handle
@@ -1797,7 +1837,7 @@ async fn scripted_search(
     let work = create.work_id().unwrap();
     drive(&mut shell, &queue, create).await.unwrap();
     let lead = LeadModel {
-        client: Arc::new(Turns(turns)),
+        client,
         ..model(Arc::new(Script {
             calls: Mutex::new(Vec::new()),
         }))
@@ -2124,6 +2164,93 @@ async fn a_sheet_made_beside_a_read_that_fails_waits_for_it_and_is_refused() {
         .artifacts
         .iter()
         .any(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. })));
+}
+
+#[tokio::test]
+async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
+    fn claim(turn: usize, seen: &str, claiming: WorkModelPart) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![
+                call(
+                    "f",
+                    "web_fetch",
+                    json!({"url": "https://example.test/pricing"}),
+                ),
+                claiming,
+            ],
+            1 => {
+                assert!(
+                    seen.contains("headline calls the result finished or checked")
+                        || seen.contains("Not finished"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "It didn't open.", "title": "Pricing"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn created(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing", "data": {
+                "headline": "Pricing checked", "text": "Pro is $20 a month."}}),
+            ),
+        )
+    }
+    fn finished(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "finish",
+                json!({"say": "Done.", "title": "Pricing", "reply": {
+                "headline": "Pricing checked", "text": "Pro is $20 a month."}}),
+            ),
+        )
+    }
+    fn browse(_: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        WorkBrowserOutcome {
+            status: WorkStepStatus::Failed,
+            note: Some("The page could not be read".into()),
+            ..outcome(None, vec![])
+        }
+    }
+    for turns in [created as fn(usize, &str) -> Vec<WorkModelPart>, finished] {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = scripted_on(
+            "Price the plans",
+            Arc::new(StreamedTurns(turns)),
+            &browser_search(&asked),
+            browse,
+        )
+        .await;
+        let headlines: Vec<_> = run
+            .artifacts
+            .iter()
+            .filter_map(|a| match &a.data {
+                WorkArtifactDataV1::Reply { headline, .. } => Some(headline.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headlines, ["I couldn't read the pricing page"]);
+    }
 }
 
 /// A read whose first load the page's server redirected: the browser read

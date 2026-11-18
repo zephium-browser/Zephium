@@ -99,7 +99,7 @@ struct EarlyReply {
 }
 
 fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
-    if tool.name == "create"
+    let args = if tool.name == "create"
         && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
         && tool.arguments.get("part").is_none_or(Value::is_null)
     {
@@ -108,7 +108,11 @@ fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
         finish_reply_args(&tool.arguments)
     } else {
         None
-    }
+    }?;
+    // A reply that calls the result finished or checked waits for this
+    // turn's reads, so its honesty knows whether they could be read.
+    let headline = args.pointer("/data/headline").and_then(Value::as_str);
+    (!headline.is_some_and(objects::claims_done)).then_some(args)
 }
 
 fn finish_reply_args(args: &Value) -> Option<Value> {
