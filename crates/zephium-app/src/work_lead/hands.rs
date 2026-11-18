@@ -332,6 +332,7 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let _reading = self.run.begin_reads();
         let projection = self
             .run
             .probe

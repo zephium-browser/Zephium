@@ -672,6 +672,9 @@ where
         early_reply: Option<&EarlyReply>,
     ) -> Result<(Vec<WorkModelToolResult>, bool, bool), WorkAttemptStatus> {
         let mut terminal = None;
+        // Set with `terminal` by the read batch: the run is ending, so this
+        // turn's objects are never placed.
+        let ended = std::sync::atomic::AtomicBool::new(false);
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
         let mut requests: Vec<(usize, Request)> = Vec::new();
         let mut pending: Vec<Pending<'_>> = Vec::new();
@@ -840,6 +843,7 @@ where
         if !requests.is_empty() {
             let hands = &self.hands;
             let terminal = &mut terminal;
+            let ended = &ended;
             let batch = requests;
             reads.push(Box::pin(async move {
                 let order: Vec<(usize, String)> =
@@ -856,14 +860,18 @@ where
                         .collect(),
                     Err(status) => {
                         *terminal = Some(status);
+                        ended.store(true, std::sync::atomic::Ordering::SeqCst);
                         Vec::new()
                     }
                 }
             }));
         }
+        let ended = &ended;
         pending.push(Box::pin(async move {
             let mut answers: Vec<Answer> = join_all(reads).await.into_iter().flatten().collect();
-            answers.extend(join_all(objects).await.into_iter().flatten());
+            if !ended.load(std::sync::atomic::Ordering::SeqCst) {
+                answers.extend(join_all(objects).await.into_iter().flatten());
+            }
             answers
         }));
         for (index, content, error) in join_all(pending).await.into_iter().flatten() {

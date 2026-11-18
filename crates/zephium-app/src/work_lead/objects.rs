@@ -983,16 +983,21 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
             // "and" or "or" starts another claim unless only modifiers come
             // between it and this one: "No issues found and pricing checked"
             // claims, "could not be checked or independently verified" does
-            // not. A doubtful case is read as a claim: a refusal costs a
-            // retry, a missed claim publishes a false one.
-            let joined = clause
-                .rfind(" and ")
-                .map(|at| at + 5)
-                .max(clause.rfind(" or ").map(|at| at + 4));
-            let clause = match joined {
-                Some(start) if !modifiers(&clause[start..]) => &clause[start..],
-                _ => clause,
-            };
+            // not. Walking back, the nearest joint that opens a predicate of
+            // its own bounds the claim. A doubtful case is read as a claim:
+            // a refusal costs a retry, a missed claim publishes a false one.
+            let mut joints: Vec<usize> = clause
+                .match_indices(" and ")
+                .map(|(at, _)| at + 5)
+                .chain(clause.match_indices(" or ").map(|(at, _)| at + 4))
+                .collect();
+            joints.sort_unstable();
+            let clause = joints
+                .iter()
+                .rev()
+                .map(|&start| &clause[start..])
+                .find(|claim| !modifiers(claim))
+                .unwrap_or(clause);
             let denied = negation
                 && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
@@ -1721,7 +1726,9 @@ mod tests {
             "Slack was not read, but the plan is complete",
             "No issues found and pricing checked",
             "No issues found and pricing fully checked",
+            "No issues found and pricing reviewed and independently verified",
         ] {
+            assert!(claims_done(headline), "{headline}");
             let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
                 "kind": "reply", "headline": headline, "text": "The plan stands."
             }))
