@@ -661,16 +661,20 @@
   }
 }
 /* Rows inside folders: a hairline down the indent for each folder around
-   them, in its colour. It sits behind the row, so a lit or hovered row
-   covers it and the lines read as joining the rows between. */
+   them, in its colour. A lit, hovered or lifted row stands over it, so the
+   lines break there and read as joining the rows between. */
 .browser-sidebar [data-spined]::before {
   content: "";
   position: absolute;
   inset-block: calc(var(--sidebar-row-gap) / -2);
   inset-inline: 0;
-  z-index: -1;
   background: var(--spines);
   pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.browser-sidebar
+  [data-spined]:is(:hover, [data-selected="true"], [data-multi-selected], [data-lifted])::before {
+  opacity: 0;
 }
 .browser-sidebar [data-spined]:dir(rtl)::before {
   transform: scaleX(-1);

@@ -117,6 +117,8 @@ test("a folder folds through native and, folded, shows what it holds", async () 
   flushSync();
   expect(button.getAttribute("aria-expanded")).toBe("false");
   expect(row("b").classList.contains("hidden")).toBe(true);
+  expect(row("b").getClientRects()).toHaveLength(0);
+  expect(row("c").getClientRects()).toHaveLength(0);
   expect(screen.container.querySelectorAll(".folder-face")).toHaveLength(2);
 });
 

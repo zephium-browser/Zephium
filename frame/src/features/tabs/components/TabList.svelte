@@ -438,6 +438,12 @@
     flex: 0 0 calc((100% - (var(--dock-columns) - 1) * var(--dock-gap)) / var(--dock-columns));
   }
 
+  /* Rows a folded folder holds are not drawn; the rows' own display would
+     otherwise win over the utility. */
+  .tab-list-rows > :global(li.hidden) {
+    display: none;
+  }
+
   /* One pixel between rows read as a stack of stripes rather than a list. */
   .tab-list-rows {
     gap: var(--sidebar-row-gap);
