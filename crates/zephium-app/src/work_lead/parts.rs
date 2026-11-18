@@ -812,6 +812,7 @@ where
         let honesty = objects::Honesty {
             sourced: !proposed.evidence.is_empty(),
             failed: Vec::new(),
+            unread: false,
         };
         if objects::honest(&proposed.data, &honesty).is_err() {
             proposed.data = objects::mend(&proposed.data, &honesty)?.0;
@@ -1187,6 +1188,7 @@ where
             idle = 0;
             let mut results: Vec<Option<WorkModelToolResult>> = vec![None; calls.len()];
             let mut requests = Vec::new();
+            let mut creates = Vec::new();
             let mut finished: Option<(String, String, bool, Option<WorkPartNeedV1>)> = None;
             let mut enough: Option<bool> = None;
             for (index, tool_call) in calls.iter().enumerate() {
@@ -1252,18 +1254,8 @@ where
                             Err(fault) => results[index] = Some(answer(fault, true)),
                         }
                     }
-                    "create" => {
-                        let (content, error) =
-                            self.create(&tool_call.arguments, Some(part), true).await;
-                        if !error {
-                            if let Some(id) =
-                                content.split_whitespace().find_map(WorkArtifactId::parse)
-                            {
-                                placed.push(id);
-                            }
-                        }
-                        results[index] = Some(answer(content, error));
-                    }
+                    // Placed once the reads settle, this turn's and the run's.
+                    "create" => creates.push(index),
                     "finish" => {
                         let summary = text_arg(&tool_call.arguments, "summary").unwrap_or_default();
                         let digest = text_arg(&tool_call.arguments, "digest").unwrap_or_default();
@@ -1352,6 +1344,23 @@ where
                         )
                     }
                 }
+            }
+            if !creates.is_empty() {
+                self.run.reads_begun_settled().await;
+            }
+            for index in creates {
+                let tool_call = &calls[index];
+                let (content, error) = self.create(&tool_call.arguments, Some(part), true).await;
+                if !error {
+                    if let Some(id) = content.split_whitespace().find_map(WorkArtifactId::parse) {
+                        placed.push(id);
+                    }
+                }
+                results[index] = Some(WorkModelToolResult {
+                    call: tool_call.id.clone(),
+                    content,
+                    is_error: error,
+                });
             }
             let results: Vec<WorkModelToolResult> = results
                 .into_iter()
