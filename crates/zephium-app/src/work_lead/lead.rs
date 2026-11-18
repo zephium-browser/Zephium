@@ -103,7 +103,7 @@ fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
         && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
         && tool.arguments.get("part").is_none_or(Value::is_null)
     {
-        Some(tool.arguments.clone())
+        Some(unquoted_data(&tool.arguments))
     } else if tool.name == "finish" {
         finish_reply_args(&tool.arguments)
     } else {

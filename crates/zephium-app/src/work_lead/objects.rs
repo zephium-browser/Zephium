@@ -944,6 +944,17 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                 .next()
                 .unwrap_or("");
             let clause = clause.rsplit(" but ").next().unwrap_or(clause);
+            // "and" or "or" starts another claim unless this one follows it
+            // at once: "No issues found and pricing checked" claims, "could
+            // not be checked or verified" does not.
+            let joined = clause
+                .rfind(" and ")
+                .map(|at| at + 5)
+                .max(clause.rfind(" or ").map(|at| at + 4));
+            let clause = match joined {
+                Some(start) if !clause[start..].trim().is_empty() => &clause[start..],
+                _ => clause,
+            };
             let denied = negation
                 && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
@@ -1638,11 +1649,22 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
-        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
-            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
-        }))
-        .unwrap();
-        assert!(honest(&claimed, &honest_run).is_err());
+        for headline in [
+            "Pricing could not be checked",
+            "Pricing could not be checked or verified",
+        ] {
+            assert!(!claims_done(headline), "{headline}");
+        }
+        for headline in [
+            "Slack was not read, but the plan is complete",
+            "No issues found and pricing checked",
+        ] {
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The plan stands."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &honest_run).is_err(), "{headline}");
+        }
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))

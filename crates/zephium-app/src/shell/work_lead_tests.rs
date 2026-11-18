@@ -2213,6 +2213,30 @@ async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
             ),
         )
     }
+    fn quoted(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing",
+                "data": "{\"headline\": \"Pricing checked\", \"text\": \"Pro is $20 a month.\"}"}),
+            ),
+        )
+    }
+    fn beside(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing",
+                "headline": "No issues found and pricing checked", "text": "Pro is $20 a month."}),
+            ),
+        )
+    }
     fn finished(turn: usize, seen: &str) -> Vec<WorkModelPart> {
         claim(
             turn,
@@ -2232,7 +2256,12 @@ async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
             ..outcome(None, vec![])
         }
     }
-    for turns in [created as fn(usize, &str) -> Vec<WorkModelPart>, finished] {
+    for turns in [
+        created as fn(usize, &str) -> Vec<WorkModelPart>,
+        quoted,
+        beside,
+        finished,
+    ] {
         let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let run = scripted_on(
             "Price the plans",
