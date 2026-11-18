@@ -568,8 +568,8 @@ async fn a_cached_line_plays_before_the_streamed_text_that_follows_it() {
     let warm = Harness::speeches(&h.log.lock().unwrap().clone());
     assert_eq!(
         warm.len(),
-        4,
-        "the acknowledgments and the done line warm at the first utterance"
+        5,
+        "the acknowledgments, the done line and the stopped line warm at the first utterance"
     );
     let id = h.utterance();
     h.warm_up().await;

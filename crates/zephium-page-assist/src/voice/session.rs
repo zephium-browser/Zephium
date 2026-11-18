@@ -882,6 +882,13 @@ impl Session {
                         return;
                     }
                 }
+                if phrases::halt(&text, language) {
+                    fx.push(Effect::StopAssistant { reply: reply.id });
+                    reply.muted = true;
+                    reply.halted = true;
+                    self.flush(fx);
+                    return;
+                }
                 fx.push(Effect::Steer {
                     reply: reply.id,
                     text: text.clone(),
@@ -889,6 +896,10 @@ impl Session {
                 reply.steering = true;
                 reply.awaiting = reply.awaiting.saturating_add(1);
                 reply.muted = true;
+            }
+            None if phrases::halt(&text, language) => {
+                self.retract(acked, fx);
+                return;
             }
             None => {
                 fx.push(Effect::Ask { text: text.clone() });
@@ -912,15 +923,18 @@ impl Session {
         reply.awaiting -= 1;
         if reply.awaiting == 0 {
             let muted = reply.muted && !reply.steering;
+            let halted = reply.halted && !reply.steering;
             if reply.id == Some(id) {
                 reply.restart();
             } else {
                 *reply = Reply::default();
             }
             reply.muted = muted;
+            reply.halted = halted;
         } else if reply.id != Some(id) {
             *reply = Reply {
                 muted: reply.muted,
+                halted: reply.halted,
                 steering: reply.steering,
                 awaiting: reply.awaiting,
                 ..Reply::default()
@@ -1065,6 +1079,9 @@ impl Session {
             Some(End::Asked) => Some(Outcome::NeedsYou),
             None => Some(closing::outcome(&facts)),
         };
+        if reply.halted && closing::closing(&facts) == Closing::Cancelled {
+            self.speak(Speech::Line(Line::Closing(Closing::Cancelled)), fx);
+        }
         if reply.muted || reply.end == Some(End::Redirected) {
             return;
         }
@@ -1207,6 +1224,9 @@ struct Reply {
     held: Vec<String>,
     end: Option<End>,
     muted: bool,
+    /// The person said stop: nothing more of this reply is spoken except
+    /// the line that it stopped.
+    halted: bool,
     steering: bool,
     awaiting: u8,
     ended: bool,
@@ -2062,6 +2082,92 @@ mod tests {
             [Effect::FlushSpeech, Effect::CancelSpeech]
         );
         assert!(!run.session.view().speaking);
+    }
+
+    #[test]
+    fn a_spoken_stop_halts_the_reply_without_asking_the_model() {
+        let quiet = |fx: &[Effect]| {
+            !has(fx, |e| {
+                matches!(
+                    e,
+                    Effect::Ask { .. } | Effect::Steer { .. } | Effect::Speak { .. }
+                )
+            })
+        };
+        let stopped = [Speech::Line(Line::Closing(Closing::Cancelled))];
+
+        let mut run = Run::new();
+        run.working();
+        run.text(0, "One. Two. Three");
+        let fx = run.say("Stop.", 500);
+        assert!(has(&fx, |e| *e == Effect::StopAssistant { reply: Some(7) }));
+        assert!(quiet(&fx));
+        assert!(spoken(&run.text(0, " Four. Five. ")).is_empty());
+        assert_eq!(spoken(&run.reply(AssistEvent::Cancelled)), stopped);
+        assert_eq!(run.state(), State::Settled(Outcome::Cancelled));
+
+        let mut run = Run::new();
+        run.working();
+        run.text(0, "Sunny all day.\n");
+        assert!(quiet(&run.say("never mind", 500)));
+        let fx = run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        assert!(spoken(&fx).is_empty(), "it had finished: nothing stopped");
+
+        let mut run = Run::new();
+        run.working();
+        run.text(0, "Sunny all day.\n");
+        run.reply(AssistEvent::Done {
+            cost: None,
+            end: None,
+        });
+        let fx = run.say("Stop.", 500);
+        assert!(quiet(&fx), "nothing is running");
+        assert!(!has(&fx, |e| matches!(e, Effect::StopAssistant { .. })));
+        assert_eq!(run.state(), State::Idle);
+
+        let mut run = Run::new();
+        run.working();
+        let fx = run.say("stop the video", 500);
+        assert!(has(&fx, |e| matches!(e, Effect::Steer { .. })));
+        assert!(!has(&fx, |e| matches!(e, Effect::StopAssistant { .. })));
+
+        let mut run = Run::new();
+        run.say("open the cheapest flight to Lisbon", 500);
+        let fx = run.say("cancel", 500);
+        assert!(has(&fx, |e| *e == Effect::StopAssistant { reply: None }));
+        run.at(10, Event::Admitted { reply: 7 });
+        assert!(spoken(&run.text(0, "Looking for flights. ")).is_empty());
+        assert_eq!(spoken(&run.reply(AssistEvent::Cancelled)), stopped);
+    }
+
+    #[test]
+    fn a_request_after_a_spoken_stop_is_answered_aloud_again() {
+        let mut run = Run::new();
+        run.working();
+        run.text(0, "One. Two. Three");
+        run.say("stop", 500);
+        let fx = run.say("make it a window seat", 500);
+        assert!(has(&fx, |e| *e
+            == Effect::Steer {
+                reply: Some(7),
+                text: "make it a window seat".into()
+            }));
+        assert!(spoken(&run.reply(AssistEvent::Cancelled)).is_empty());
+        run.at(10, Event::Admitted { reply: 8 });
+        let fx = run.at(
+            10,
+            Event::Reply {
+                reply: 8,
+                event: AssistEvent::Text {
+                    block: 0,
+                    delta: "Window seat it is.\n".into(),
+                },
+            },
+        );
+        assert_eq!(spoken(&fx), [says("Window seat it is.")]);
     }
 
     fn is_ack(effect: &Effect) -> bool {

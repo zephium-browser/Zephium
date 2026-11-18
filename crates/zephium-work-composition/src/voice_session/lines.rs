@@ -254,11 +254,12 @@ fn translated(line: Generic, language: Language) -> Option<&'static str> {
 }
 
 /// The lines worth having on the device before the first key release.
-pub const WARM: [Line; 4] = [
+pub const WARM: [Line; 5] = [
     Line::Ack(Ack::OnIt),
     Line::Ack(Ack::Looking),
     Line::Ack(Ack::OneMoment),
     Line::Closing(Closing::Done),
+    Line::Closing(Closing::Cancelled),
 ];
 
 #[cfg(test)]

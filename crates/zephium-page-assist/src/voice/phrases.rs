@@ -357,6 +357,136 @@ pub fn decision(text: &str, language: Language) -> Option<Decision> {
     }
 }
 
+/// The closed phrases that mean "stop what you are doing" in `language`.
+fn stops(language: Language) -> &'static [&'static str] {
+    match language {
+        Language::En => &[
+            "stop",
+            "stop it",
+            "stop that",
+            "stop talking",
+            "please stop",
+            "cancel",
+            "cancel it",
+            "cancel that",
+            "never mind",
+            "nevermind",
+            "forget it",
+            "enough",
+            "that's enough",
+            "quiet",
+            "be quiet",
+            "shut up",
+        ],
+        Language::Es => &[
+            "para",
+            "detente",
+            "cancela",
+            "cancelar",
+            "basta",
+            "ya basta",
+            "silencio",
+            "déjalo",
+            "olvídalo",
+        ],
+        Language::De => &[
+            "stopp",
+            "stop",
+            "halt",
+            "abbrechen",
+            "hör auf",
+            "aufhören",
+            "genug",
+            "das reicht",
+            "ruhe",
+            "sei still",
+            "vergiss es",
+        ],
+        Language::Fr => &[
+            "stop",
+            "arrête",
+            "arrêtez",
+            "annule",
+            "annuler",
+            "ça suffit",
+            "silence",
+            "tais-toi",
+            "laisse tomber",
+        ],
+        Language::Pl => &[
+            "stop",
+            "przestań",
+            "anuluj",
+            "wystarczy",
+            "dość",
+            "cisza",
+            "nieważne",
+        ],
+        Language::Pt => &[
+            "para",
+            "pare",
+            "cancela",
+            "cancelar",
+            "chega",
+            "já chega",
+            "silêncio",
+            "esquece",
+            "deixa pra lá",
+        ],
+        Language::Ru => &[
+            "стоп",
+            "хватит",
+            "отмена",
+            "отмени",
+            "остановись",
+            "прекрати",
+            "тихо",
+            "замолчи",
+            "неважно",
+        ],
+        Language::It => &[
+            "stop",
+            "fermati",
+            "ferma",
+            "annulla",
+            "basta",
+            "silenzio",
+            "zitto",
+            "lascia stare",
+        ],
+        Language::Ja => &[
+            "止めて",
+            "やめて",
+            "止まって",
+            "ストップ",
+            "キャンセル",
+            "もういい",
+            "静かに",
+        ],
+        Language::Zh => &[
+            "停",
+            "停止",
+            "停下",
+            "取消",
+            "别说了",
+            "够了",
+            "安静",
+            "算了",
+        ],
+    }
+}
+
+/// Whether the WHOLE utterance asks to stop, by the closed phrases for
+/// `language`; a longer sentence that merely contains one is a request.
+pub fn halt(text: &str, language: Language) -> bool {
+    let heard = normalize(text);
+    !heard.is_empty()
+        && heard.chars().count() <= 40
+        && stops(language)
+            .iter()
+            .any(|phrase| normalize(phrase) == heard)
+}
+
 /// A neutral acknowledgment for a request; none for very short follow-ups
 /// and for approvals or refusals.
 pub fn ack(text: &str, language: Language) -> Option<Ack> {
@@ -423,6 +553,46 @@ mod tests {
             ("yes", Language::De, None),
         ] {
             assert_eq!(decision(text, language), expected, "{text:?} {language:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_whole_stop_phrase_halts() {
+        for (text, language, expected) in [
+            ("Stop.", Language::En, true),
+            ("  STOP talking! ", Language::En, true),
+            ("Never mind.", Language::En, true),
+            ("That's enough", Language::En, true),
+            ("stop the video", Language::En, false),
+            ("cancel my order", Language::En, false),
+            ("no", Language::En, false),
+            ("don't", Language::En, false),
+            ("", Language::En, false),
+            ("Basta.", Language::Es, true),
+            ("Hör auf!", Language::De, true),
+            ("Ça suffit", Language::Fr, true),
+            ("Przestań", Language::Pl, true),
+            ("Chega", Language::Pt, true),
+            ("Хватит.", Language::Ru, true),
+            ("Fermati", Language::It, true),
+            ("やめて。", Language::Ja, true),
+            ("停下", Language::Zh, true),
+            ("stop", Language::Ru, false),
+            ("basta", Language::En, false),
+        ] {
+            assert_eq!(halt(text, language), expected, "{text:?} {language:?}");
+        }
+        for language in ALL {
+            let (approve, _) = phrases(language);
+            for phrase in stops(language) {
+                assert!(halt(phrase, language), "{phrase} {language:?}");
+                assert!(
+                    !approve
+                        .iter()
+                        .any(|yes| normalize(yes) == normalize(phrase)),
+                    "{phrase} {language:?}"
+                );
+            }
         }
     }
 
