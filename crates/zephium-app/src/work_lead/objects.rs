@@ -604,9 +604,25 @@ pub(crate) fn propose(
     normalize(kind, &mut data);
     let mut value_sources = Vec::new();
     if kind == "sheet" {
-        value_sources =
-            super::value_sources::ground_sheet(&mut data, sources, &run.source_previews())
-                .map_err(|error| (error, ObjectRefusal::Source))?;
+        let mut uncited = Vec::new();
+        value_sources = super::value_sources::ground_sheet(
+            &mut data,
+            sources,
+            &run.source_previews(),
+            lenient,
+            &mut uncited,
+        )
+        .map_err(|error| (error, ObjectRefusal::Source))?;
+        if !uncited.is_empty() {
+            let rows = uncited
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            left_out.push(format!(
+                "the citation of rows {rows} (their values are not on the page they cited)"
+            ));
+        }
     }
     let mut keys: Vec<String> = Vec::new();
     for key in sources.iter().chain(&value_sources) {
