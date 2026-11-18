@@ -1,5 +1,5 @@
-//! The browser side of the WebKit extension runtime: one runtime per durable
-//! profile, attached to every tab of that profile from its first view.
+//! The browser side of the WebKit extension runtime: on macOS 15.4 or later,
+//! one runtime per durable profile, attached from that profile's first view.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -46,7 +46,11 @@ pub(crate) struct WebextHost {
     // back on, an update) gets no startup event to wake its worker.
     loaded_before: std::collections::HashSet<(ProfileId, String)>,
     pages: HashMap<ItemId, Page>,
+    #[cfg(test)]
+    unsupported: bool,
 }
+
+const UNSUPPORTED: &str = "Extensions need macOS 15.4 or later";
 
 /// An extension page shown in an extension-owned tab.
 struct Page {
@@ -69,7 +73,7 @@ pub(crate) enum BrowserRequestOutcome {
 }
 
 struct ProfileRuntime {
-    runtime: Runtime,
+    runtime: Option<Runtime>,
     store: Retained<WKWebsiteDataStore>,
     bridge: Rc<Bridge>,
     downloads: Rc<RefCell<super::webext_downloads::DownloadNumbers>>,
@@ -82,7 +86,10 @@ impl ProfileRuntime {
     /// Chrome closes an extension's own pages when it is turned off or
     /// removed; left open they would also keep its process running.
     fn close_pages(&self, extension_id: &str) {
-        for tab in self.runtime.tabs_showing(extension_id) {
+        let Some(runtime) = &self.runtime else {
+            return;
+        };
+        for tab in runtime.tabs_showing(extension_id) {
             if let Some(item) = self.bridge.item(tab) {
                 self.bridge.request(
                     ExtensionBrowserRequestAction::CloseTab { tab: item },
@@ -103,6 +110,14 @@ struct Install {
 }
 
 impl WebextHost {
+    fn supported(&self) -> bool {
+        #[cfg(test)]
+        if self.unsupported {
+            return false;
+        }
+        zephium_webext_macos::supported()
+    }
+
     pub(super) fn downloads_runtime(
         &self,
         profile: ProfileId,
@@ -112,12 +127,12 @@ impl WebextHost {
     )> {
         self.profiles
             .get(&profile)
-            .map(|entry| (&entry.runtime, entry.downloads.clone()))
+            .and_then(|entry| Some((entry.runtime.as_ref()?, entry.downloads.clone())))
     }
 
     /// A fresh configuration for one of the profile's tabs, attached to its
-    /// runtime. The runtime is created with the profile's first view, so
-    /// every tab can run content scripts.
+    /// runtime when supported. The runtime is created with the profile's
+    /// first view, so every tab can run content scripts on macOS 15.4 or later.
     pub(crate) fn configuration(
         &mut self,
         profile: ProfileId,
@@ -127,7 +142,16 @@ impl WebextHost {
         let entry = self.profile(profile, sink);
         let configuration = unsafe { WKWebViewConfiguration::new(mtm) };
         unsafe { configuration.setWebsiteDataStore(&entry.store) };
-        entry.runtime.configure(&configuration);
+        if let Some(runtime) = &entry.runtime {
+            runtime.configure(&configuration);
+        } else {
+            // SAFETY: configuration was made on the main thread here; the NSString outlives the call.
+            unsafe {
+                configuration.setApplicationNameForUserAgent(Some(&NSString::from_str(
+                    zephium_webext_macos::application_name(),
+                )));
+            }
+        }
         configuration
     }
 
@@ -146,12 +170,13 @@ impl WebextHost {
             .filter_map(|entry| entry.page_script.as_ref())
     }
 
-    /// Makes the profile's runtime ahead of its first view.
+    /// Prepares the profile and, when supported, its runtime before its first view.
     pub(super) fn prepare(&mut self, profile: ProfileId, sink: &Sink) {
         self.profile(profile, sink);
     }
 
     fn profile(&mut self, profile: ProfileId, sink: &Sink) -> &mut ProfileRuntime {
+        let supported = self.supported();
         self.profiles.entry(profile).or_insert_with(|| {
             let mtm = MainThreadMarker::new().expect("engine host runs on the main thread");
             let identifier = profile_uuid(profile);
@@ -172,9 +197,11 @@ impl WebextHost {
                 data: RefCell::new(HashMap::new()),
             });
             *bridge.self_weak.borrow_mut() = Rc::downgrade(&bridge);
-            let runtime = Runtime::new(mtm, &store, Some(&identifier), bridge.clone());
-            let page_script = zephium_webext_macos::PageScript::supported()
-                .then(|| zephium_webext_macos::PageScript::new(runtime.controller(), false));
+            let runtime =
+                supported.then(|| Runtime::new(mtm, &store, Some(&identifier), bridge.clone()));
+            let page_script = runtime
+                .as_ref()
+                .map(|runtime| zephium_webext_macos::PageScript::new(runtime.controller(), false));
             ProfileRuntime {
                 runtime,
                 store,
@@ -188,6 +215,15 @@ impl WebextHost {
     }
 
     pub(crate) fn load(&mut self, profile: ProfileId, load: WebExtensionLoad, sink: &Sink) {
+        if !self.supported() {
+            sink.emit(EngineEvent::WebExtensionSettled {
+                profile,
+                install: load.install,
+                result: Err(UNSUPPORTED.into()),
+            });
+            sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+            return;
+        }
         let reloaded = !self
             .loaded_before
             .insert((profile, load.extension_id.clone()));
@@ -207,7 +243,9 @@ impl WebextHost {
             cancel_extension_auth_flows(profile, &install.extension_id);
             // Their views belong to the context being replaced.
             entry.close_pages(&install.extension_id);
-            entry.runtime.unload(&install.extension_id);
+            if let Some(runtime) = &entry.runtime {
+                runtime.unload(&install.extension_id);
+            }
         }
         let generation = entry
             .installs
@@ -240,7 +278,16 @@ impl WebextHost {
         let install = load.install;
         let start_background = load.start_background || reloaded;
         let sink = sink.clone();
-        entry.runtime.load(spec, move |result| {
+        let Some(runtime) = &entry.runtime else {
+            sink.emit(EngineEvent::WebExtensionSettled {
+                profile,
+                install,
+                result: Err(UNSUPPORTED.into()),
+            });
+            sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+            return;
+        };
+        runtime.load(spec, move |result| {
             let result = result.map(|loaded| {
                 let extension_id = loaded.id.clone();
                 super::dispatch::best_effort_with(move |host| {
@@ -257,7 +304,9 @@ impl WebextHost {
                                 .borrow_mut()
                                 .insert(extension_id.clone());
                             if start_background {
-                                entry.runtime.start_background(&extension_id, |_| {});
+                                if let Some(runtime) = &entry.runtime {
+                                    runtime.start_background(&extension_id, |_| {});
+                                }
                             }
                         }
                     }
@@ -289,7 +338,9 @@ impl WebextHost {
                     .remove(&install.extension_id);
                 cancel_extension_auth_flows(profile, &install.extension_id);
                 entry.close_pages(&install.extension_id);
-                entry.runtime.unload(&install.extension_id);
+                if let Some(runtime) = &entry.runtime {
+                    runtime.unload(&install.extension_id);
+                }
                 sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
             }
         }
@@ -312,8 +363,11 @@ impl WebextHost {
         sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
         let id = load.extension_id;
         entry.close_pages(&id);
-        if entry.runtime.context(&id).is_some() {
-            return entry.runtime.erase(&id, || {});
+        let Some(runtime) = &entry.runtime else {
+            return;
+        };
+        if runtime.context(&id).is_some() {
+            return runtime.erase(&id, || {});
         }
         let spec = ExtensionSpec {
             id: id.clone(),
@@ -326,10 +380,12 @@ impl WebextHost {
             native_messaging_grantable: false,
             inspectable: false,
         };
-        entry.runtime.load(spec, move |_| {
+        runtime.load(spec, move |_| {
             super::dispatch::best_effort_with(move |host| {
                 if let Some(entry) = host.webext.profiles.get(&profile) {
-                    entry.runtime.erase(&id, || {});
+                    if let Some(runtime) = &entry.runtime {
+                        runtime.erase(&id, || {});
+                    }
                 }
             });
         });
@@ -343,6 +399,9 @@ impl WebextHost {
         window_for: impl Fn(WindowId) -> Option<Retained<objc2_app_kit::NSWindow>>,
     ) {
         let Some(entry) = self.profiles.get_mut(&surface.profile()) else {
+            return;
+        };
+        let Some(runtime) = &entry.runtime else {
             return;
         };
         let windows: Vec<WindowSnapshot> = {
@@ -372,19 +431,17 @@ impl WebextHost {
         let focused = surface
             .focused()
             .map(|window| entry.bridge.ids.borrow_mut().window(window));
-        entry.runtime.publish(&windows, focused);
+        runtime.publish(&windows, focused);
         for window in surface
             .windows()
             .iter()
             .filter(|window| !window.is_private())
         {
             let id = entry.bridge.ids.borrow_mut().window(window.id());
-            entry
-                .runtime
-                .bind_window(id, window_for(window.id()).as_deref());
+            runtime.bind_window(id, window_for(window.id()).as_deref());
             for tab in window.tabs() {
                 let id = entry.bridge.ids.borrow_mut().tab(tab.id());
-                entry.runtime.set_audio(id, tab.muted(), tab.audible());
+                runtime.set_audio(id, tab.muted(), tab.audible());
             }
         }
         let open: std::collections::HashSet<ItemId> = surface.tabs().map(|tab| tab.id()).collect();
@@ -413,9 +470,7 @@ impl WebextHost {
             }
             views.push((id, view));
         }
-        entry
-            .runtime
-            .bind_views(views.iter().map(|(id, view)| (*id, view.as_deref())));
+        runtime.bind_views(views.iter().map(|(id, view)| (*id, view.as_deref())));
         entry.surface = Some(surface.clone());
     }
 
@@ -427,8 +482,12 @@ impl WebextHost {
         details: zephium_webext_macos::AuthDetails,
         done: Box<dyn FnOnce(Option<zephium_webext_macos::AuthAnswer>)>,
     ) {
-        match self.profiles.get(&profile) {
-            Some(entry) => entry.runtime.auth_required(details, done),
+        match self
+            .profiles
+            .get(&profile)
+            .and_then(|entry| entry.runtime.as_ref())
+        {
+            Some(runtime) => runtime.auth_required(details, done),
             None => done(None),
         }
     }
@@ -442,8 +501,10 @@ impl WebextHost {
             );
         }
         if let Some(entry) = self.profiles.get_mut(&profile) {
-            let id = entry.bridge.ids.borrow_mut().tab(tab);
-            entry.runtime.bind_view(id, view);
+            if let Some(runtime) = &entry.runtime {
+                let id = entry.bridge.ids.borrow_mut().tab(tab);
+                runtime.bind_view(id, view);
+            }
         }
     }
 
@@ -476,14 +537,19 @@ impl WebextHost {
                 ExtensionActionRejection::RuntimeUnavailable,
             );
         };
+        let Some(runtime) = &entry.runtime else {
+            return ExtensionActionSnapshotSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            );
+        };
         let tab_id = entry.bridge.ids.borrow_mut().tab(tab);
-        let tab_object = entry.runtime.tab_object(tab_id);
+        let tab_object = runtime.tab_object(tab_id);
         let mut actions = Vec::new();
         for (install_id, install) in &entry.installs {
             if !install.loaded {
                 continue;
             }
-            let Some(context) = entry.runtime.context(&install.extension_id) else {
+            let Some(context) = runtime.context(&install.extension_id) else {
                 continue;
             };
             let Some(action) = (unsafe { context.actionForTab(tab_object.as_deref()) }) else {
@@ -537,10 +603,13 @@ impl WebextHost {
     /// The browser's own menu shortcuts keep precedence. `_execute_action`
     /// goes through the toolbar so its popup hangs from the button.
     pub(crate) fn perform_command(&self, event: &objc2_app_kit::NSEvent) -> bool {
-        let Some((profile, entry, surface)) = self.profiles.iter().find_map(|(profile, entry)| {
-            let surface = entry.surface.as_ref().filter(|s| s.focused().is_some())?;
-            Some((*profile, entry, surface))
-        }) else {
+        let Some((profile, entry, runtime, surface)) =
+            self.profiles.iter().find_map(|(profile, entry)| {
+                let runtime = entry.runtime.as_ref()?;
+                let surface = entry.surface.as_ref().filter(|s| s.focused().is_some())?;
+                Some((*profile, entry, runtime, surface))
+            })
+        else {
             return false;
         };
         let mut found: Option<(ExtensionInstallId, _, _, _)> = None;
@@ -548,7 +617,7 @@ impl WebextHost {
             if !install.loaded || found.as_ref().is_some_and(|(id, ..)| id < install_id) {
                 continue;
             }
-            let Some(context) = entry.runtime.context(&install.extension_id) else {
+            let Some(context) = runtime.context(&install.extension_id) else {
                 continue;
             };
             if let Some(command) = unsafe { context.commandForEvent(event) } {
@@ -604,6 +673,11 @@ impl WebextHost {
                 ExtensionActionRejection::RuntimeUnavailable,
             );
         };
+        let Some(runtime) = &entry.runtime else {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            );
+        };
         let Some(install) = entry.installs.get(&request.runtime().install_id()) else {
             return ExtensionActionSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
@@ -611,15 +685,14 @@ impl WebextHost {
         };
         let extension_id = install.extension_id.clone();
         let tab = entry.bridge.ids.borrow_mut().tab(request.tab());
-        if entry.runtime.context(&extension_id).is_none() {
+        if runtime.context(&extension_id).is_none() {
             return ExtensionActionSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
             );
         }
         if request.is_menu() {
-            let tab_object = entry.runtime.tab_object(tab);
-            let Some(action) = entry
-                .runtime
+            let tab_object = runtime.tab_object(tab);
+            let Some(action) = runtime
                 .context(&extension_id)
                 .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
             else {
@@ -636,22 +709,24 @@ impl WebextHost {
         // WebKit drops what a popup sends while the worker sleeps, and the
         // popup then waits forever; wake it first (immediate when running).
         let waking = extension_id.clone();
-        entry.runtime.wake_then(&waking, move || {
+        runtime.wake_then(&waking, move || {
             super::dispatch::best_effort_with(move |host| {
                 if let Some(entry) = host.webext.profiles.get(&profile) {
+                    let Some(runtime) = &entry.runtime else {
+                        return;
+                    };
                     // Only a popup consumes the anchor; left behind, it would
                     // retain the button and place a later action.openPopup
                     // on it, perhaps in a window since closed.
-                    let tab_object = entry.runtime.tab_object(tab);
-                    let popup = entry
-                        .runtime
+                    let tab_object = runtime.tab_object(tab);
+                    let popup = runtime
                         .context(&extension_id)
                         .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
                         .is_some_and(|action| unsafe { action.presentsPopup() });
                     if !popup {
                         entry.bridge.popup.borrow_mut().take();
                     }
-                    entry.runtime.perform_action(&extension_id, Some(tab));
+                    runtime.perform_action(&extension_id, Some(tab));
                 }
             });
         });
@@ -670,6 +745,12 @@ impl WebextHost {
             return BrowserRequestOutcome::NotOurs;
         };
         if let Some(page) = entry.bridge.pending_pages.borrow_mut().remove(&request) {
+            if entry.runtime.is_none() {
+                if let Some(done) = page.done {
+                    done(Err(UNSUPPORTED.into()));
+                }
+                return BrowserRequestOutcome::Settled;
+            }
             return match settlement {
                 ExtensionBrowserRequestSettlement::Applied(
                     ExtensionBrowserRequestResult::ExtensionPageAuthorized { .. },
@@ -689,6 +770,10 @@ impl WebextHost {
         let Some(done) = entry.bridge.pending.borrow_mut().remove(&request) else {
             return BrowserRequestOutcome::NotOurs;
         };
+        if entry.runtime.is_none() {
+            done(Err(UNSUPPORTED.into()));
+            return BrowserRequestOutcome::Settled;
+        }
         match settlement {
             ExtensionBrowserRequestSettlement::Applied(
                 ExtensionBrowserRequestResult::CreatedTab(tab),
@@ -722,6 +807,8 @@ impl WebextHost {
             .ok_or("no runtime for this profile")?;
         let context = entry
             .runtime
+            .as_ref()
+            .ok_or(UNSUPPORTED)?
             .context(extension_id)
             .ok_or("the extension is not running")?;
         let configuration = unsafe { context.webViewConfiguration() }
@@ -752,7 +839,9 @@ impl WebextHost {
         unsafe { view.loadRequest(&NSURLRequest::requestWithURL(&url)) };
         let _ = stage.set_ready(tab);
         let id = entry.bridge.ids.borrow_mut().tab(tab);
-        entry.runtime.bind_view(id, Some(&view));
+        if let Some(runtime) = &entry.runtime {
+            runtime.bind_view(id, Some(&view));
+        }
         self.pages.insert(
             tab,
             Page {
@@ -783,8 +872,10 @@ impl WebextHost {
         }
         page.stage.remove_view(tab);
         if let Some(entry) = self.profiles.get(&page.profile) {
-            let id = entry.bridge.ids.borrow_mut().tab(tab);
-            entry.runtime.bind_view(id, None);
+            if let Some(runtime) = &entry.runtime {
+                let id = entry.bridge.ids.borrow_mut().tab(tab);
+                runtime.bind_view(id, None);
+            }
         }
         true
     }
@@ -1841,8 +1932,13 @@ impl super::EngineHost {
     }
 
     pub(crate) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: &str) {
-        if let Some(entry) = self.webext.profiles.get(&profile) {
-            entry.runtime.open_options(extension_id);
+        if let Some(runtime) = self
+            .webext
+            .profiles
+            .get(&profile)
+            .and_then(|entry| entry.runtime.as_ref())
+        {
+            runtime.open_options(extension_id);
         }
     }
 
@@ -1853,7 +1949,9 @@ impl super::EngineHost {
         allowed: bool,
     ) {
         if let Some(entry) = self.webext.profiles.get(&profile) {
-            entry.bridge.answer_access(request, allowed);
+            entry
+                .bridge
+                .answer_access(request, allowed && entry.runtime.is_some());
         }
     }
 
@@ -1869,7 +1967,14 @@ impl super::EngineHost {
         reply: ExtensionDataReply,
     ) {
         if let Some(entry) = self.webext.profiles.get(&profile) {
-            entry.bridge.answer_data(request, reply);
+            entry.bridge.answer_data(
+                request,
+                if entry.runtime.is_some() {
+                    reply
+                } else {
+                    ExtensionDataReply::Unavailable
+                },
+            );
         }
     }
 
@@ -1878,8 +1983,13 @@ impl super::EngineHost {
         profile: ProfileId,
         change: ExtensionDataChange,
     ) {
-        if let Some(entry) = self.webext.profiles.get(&profile) {
-            entry.runtime.data_changed(change);
+        if let Some(runtime) = self
+            .webext
+            .profiles
+            .get(&profile)
+            .and_then(|entry| entry.runtime.as_ref())
+        {
+            runtime.data_changed(change);
         }
     }
 }
@@ -2060,6 +2170,80 @@ impl PageDelegate {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsupported_load_and_action_settle_without_a_runtime() {
+        use zephium_core::extensions::{ExtensionActionRequestId, ExtensionPopupAnchor};
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let sink = Sink::new(Arc::new(move |event| {
+            observed.lock().unwrap().push(event.event);
+        }));
+        let mut host = WebextHost {
+            unsupported: true,
+            ..WebextHost::default()
+        };
+        let profile = ProfileId::from(1);
+        let install = ExtensionInstallId::from(2);
+        let tab = ItemId::from(3);
+        host.load(
+            profile,
+            WebExtensionLoad {
+                install,
+                extension_id: AUTH_EXTENSION.into(),
+                root: "/nonexistent-extension".into(),
+                permissions: Vec::new(),
+                external_native_messaging: false,
+                native_messaging_grantable: false,
+                match_patterns: Vec::new(),
+                start_background: true,
+            },
+            &sink,
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], EngineEvent::WebExtensionSettled {
+            profile: actual_profile, install: actual_install, result: Err(reason),
+        } if *actual_profile == profile && *actual_install == install && reason == UNSUPPORTED));
+        assert!(
+            matches!(events[1], EngineEvent::ExtensionActionsInvalidated { profile: p } if p == profile)
+        );
+        assert!(host.profiles.is_empty());
+        assert!(host.loaded_before.is_empty());
+
+        let surface = ExtensionBrowserSurfaceGeneration::new(1).unwrap();
+        let request = ExtensionActionRequest::new(
+            ExtensionActionRequestId::new(1).unwrap(),
+            ExtensionRuntimeInstance::new(
+                profile,
+                install,
+                ExtensionRuntimeGeneration::new(1).unwrap(),
+            ),
+            tab,
+            surface,
+            ExtensionActionRevision::INITIAL,
+            ExtensionPopupAnchor::new(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            })
+            .unwrap(),
+        );
+        assert_eq!(
+            host.invoke(request, None),
+            ExtensionActionSettlement::Rejected(ExtensionActionRejection::RuntimeUnavailable,)
+        );
+        assert_eq!(
+            host.actions(profile, tab, surface),
+            ExtensionActionSnapshotSettlement::Rejected(
+                ExtensionActionRejection::RuntimeUnavailable,
+            )
+        );
+        assert!(host.downloads_runtime(profile).is_none());
+        assert!(host.page_script(profile).is_none());
+    }
+
     #[test]
     fn an_action_shortcut_acts_on_the_focused_window_unless_it_is_private() {
         use zephium_core::extensions::{ExtensionBrowserTab, ExtensionBrowserWindow};

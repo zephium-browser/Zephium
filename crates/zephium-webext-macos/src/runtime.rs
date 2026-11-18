@@ -13,9 +13,8 @@ use objc2_foundation::{NSArray, NSError, NSSet, NSString, NSURL, NSUUID};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
     WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebExtensionDataRecord,
-    WKWebExtensionDataType, WKWebExtensionDataTypeLocal, WKWebExtensionDataTypeSession,
-    WKWebExtensionDataTypeSynchronized, WKWebExtensionMatchPattern, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWebExtensionDataType, WKWebExtensionMatchPattern, WKWebView, WKWebViewConfiguration,
+    WKWebsiteDataStore,
 };
 
 use crate::delegate::Delegate;
@@ -844,15 +843,13 @@ fn unload(shared: &Rc<Shared>, controller: &WKWebExtensionController, id: &str) 
 
 /// Deletes an unloaded extension's `chrome.storage` areas.
 fn erase_storage(controller: &Retained<WKWebExtensionController>, host: &Rc<dyn Host>, id: &str) {
-    let types: Vec<&WKWebExtensionDataType> = unsafe {
-        [
-            WKWebExtensionDataTypeLocal,
-            WKWebExtensionDataTypeSession,
-            WKWebExtensionDataTypeSynchronized,
-        ]
-    }
+    let types: Vec<&WKWebExtensionDataType> = [
+        c"WKWebExtensionDataTypeLocal",
+        c"WKWebExtensionDataTypeSession",
+        c"WKWebExtensionDataTypeSynchronized",
+    ]
     .into_iter()
-    .flatten()
+    .filter_map(crate::webkit_string)
     .collect();
     let types = NSSet::from_slice(&types);
     let removal_types = types.clone();
