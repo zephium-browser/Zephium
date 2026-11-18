@@ -81,6 +81,7 @@ impl Shell {
                 menu,
             } => self.operation_invoke_extension_action(runtime, revision, anchor, menu),
             Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
+            Command::Mini { window, action } => self.mini_action(window, action),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             #[cfg(feature = "work-planning")]
             Command::SetWorkScreenshots(change) => self.operation_set_work_screenshots(change),

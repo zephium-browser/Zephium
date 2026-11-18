@@ -110,6 +110,8 @@ pub(crate) use dispatch::try_perform_extension_command;
 ))]
 pub(crate) use dispatch::try_with_agent_context_terminal;
 pub(crate) use dispatch::try_with_discard_state_erasure;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use dispatch::try_with_window_release;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 #[cfg(target_os = "macos")]

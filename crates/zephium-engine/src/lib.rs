@@ -3352,7 +3352,11 @@ impl Engine for WebviewEngine {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&window);
             NativeDispatch::from_scheduled(self.run(move || {
-                let _ = host::try_with(move |host| host.release_window(window));
+                // Refused only once the host is sealed or gone, when every
+                // native window and page is being torn down with it.
+                if !host::try_with_window_release(move |host| host.release_window(window)) {
+                    eprintln!("engine: window {window} released after the host stopped");
+                }
             }))
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]

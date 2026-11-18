@@ -1448,7 +1448,9 @@ impl Shell {
         // id-only close here could be reordered behind recovery and destroy
         // the replacement generation.
         let active = self.windows.focused().and_then(|window| window.active);
-        let visible = active == Some(id) || self.work_pane_shows(id);
+        // A mini window shows its page whatever the main window shows.
+        let visible =
+            active == Some(id) || self.work_pane_shows(id) || self.mini_window_of(id).is_some();
         self.retire_crashed_view(id, visible);
         self.items.set_loading(id, false);
         let recent = self
@@ -1478,7 +1480,9 @@ impl Shell {
             .visible_tree()
             .map(|tree| tree.tabs())
             .unwrap_or_default();
-        let visible: std::collections::HashSet<ItemId> = visible_order.iter().copied().collect();
+        let mut visible: std::collections::HashSet<ItemId> =
+            visible_order.iter().copied().collect();
+        visible.extend(self.mini_pages());
         let mut suppressed_visible = std::collections::HashSet::new();
         let mut effects = Vec::new();
         for id in ids {

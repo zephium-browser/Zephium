@@ -40,26 +40,23 @@ pub(crate) fn hand_off(
         waiting.extend(urls.into_iter().take(room));
         return;
     };
-    if forward {
-        FORWARD.store(true, Ordering::Release);
-    }
+    // Each batch says afresh whether it wants the main window forward, so a
+    // batch that opened only mini windows leaves nothing behind for the next.
+    FORWARD.store(forward, Ordering::Release);
     if !shell.dispatch(Command::OpenExternal(urls)) {
         FORWARD.store(false, Ordering::Release);
     }
 }
 
-/// Links opened as tabs: the main window comes forward to show them.
+/// Links opened as tabs: the main window comes forward to show them. A
+/// link that opened a mini window leaves the request in place, since that
+/// window comes forward on its own and a later link of the same batch may
+/// still open as a tab; the shell reports tabs once per batch.
 pub(crate) fn forward_pending(app: &tauri::AppHandle) {
     if FORWARD.swap(false, Ordering::AcqRel) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || bring_forward(&handle));
     }
-}
-
-/// A link opened in a mini window, which comes forward on its own; the
-/// main window stays where it is.
-pub(crate) fn forward_handled() {
-    FORWARD.store(false, Ordering::Release);
 }
 
 /// Runs once the shell is managed: what arrived early, then this launch's own

@@ -164,6 +164,12 @@ impl Shell {
             adoption.finish(false);
             return;
         }
+        // Past the cap the page is kept, as a background tab in the space
+        // the mini window belongs to, rather than closed.
+        if self.mini.windows.len() >= MAX_MINI_WINDOWS {
+            self.adopt_mini_link_as_tab(source, child, space, adoption);
+            return;
+        }
         if self
             .open_mini_page(profile, space, MiniSeed::Adopt { child, adoption })
             .is_none()
@@ -178,6 +184,40 @@ impl Shell {
                 activate_when_presentable: foreground,
             },
         );
+    }
+
+    fn adopt_mini_link_as_tab(
+        &mut self,
+        source: ItemId,
+        child: ItemId,
+        space: SpaceId,
+        adoption: zephium_core::ports::engine::NativeTabAdoption,
+    ) {
+        let placement = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
+        if !self.items.insert_tab(child, placement) {
+            adoption.finish(false);
+            return;
+        }
+        if !self.items.adopt_native_view(child) {
+            let _ = self.items.remove(child);
+            adoption.finish(false);
+            return;
+        }
+        self.record_view_creation(child);
+        self.items.clear_blocked_popup(source);
+        // A popup that closes itself, as a sign-in window does, still goes.
+        self.native_openers.insert(
+            child,
+            NativeOpener {
+                source,
+                activate_when_presentable: false,
+            },
+        );
+        self.commit(Vec::new());
+        adoption.finish(true);
     }
 
     /// The profile and space of the mini window showing `source`.
@@ -251,7 +291,7 @@ impl Shell {
             MiniSeed::Adopt { adoption, .. } => {
                 if !self.items.adopt_native_view(page) {
                     adoption.finish(false);
-                    self.close_mini(window);
+                    let _ = self.close_mini(window);
                     return None;
                 }
                 self.record_view_creation(page);
@@ -423,16 +463,18 @@ impl Shell {
         true
     }
 
-    pub(super) fn mini_action(&mut self, window: WindowId, action: crate::MiniAction) {
+    pub(super) fn mini_action(
+        &mut self,
+        window: WindowId,
+        action: crate::MiniAction,
+    ) -> OperationDisposition {
         let Some(page) = self.mini.windows.get(&window).map(|mini| mini.page) else {
-            return;
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         match action {
             crate::MiniAction::Close => self.close_mini(window),
             crate::MiniAction::OpenInMain => self.open_mini_in_main(window, None),
-            crate::MiniAction::OpenInSpace(space) => {
-                self.open_mini_in_main(window, Some(space));
-            }
+            crate::MiniAction::OpenInSpace(space) => self.open_mini_in_main(window, Some(space)),
             // The desktop could not build the window: the page still opens,
             // as a tab, rather than being lost.
             crate::MiniAction::Unbuilt => {
@@ -442,19 +484,30 @@ impl Shell {
                     .get(&window)
                     .is_some_and(|mini| mini.attached)
                 {
-                    return;
+                    return operation_result(
+                        OperationOutcome::NoOp,
+                        OperationReason::StateUnchanged,
+                    );
                 }
-                self.open_mini_in_main(window, None);
+                self.open_mini_in_main(window, None)
             }
             crate::MiniAction::KeepOnTop(pinned) => {
                 let Some(mini) = self.mini.windows.get_mut(&window) else {
-                    return;
+                    return operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::InvalidScope,
+                    );
                 };
                 let pinned = pinned.unwrap_or(!mini.pinned);
-                if mini.pinned != pinned {
-                    mini.pinned = pinned;
-                    self.project_mini(window);
+                if mini.pinned == pinned {
+                    return operation_result(
+                        OperationOutcome::NoOp,
+                        OperationReason::StateUnchanged,
+                    );
                 }
+                mini.pinned = pinned;
+                self.project_mini(window);
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
             }
             crate::MiniAction::Back | crate::MiniAction::Forward => {
                 let forward = action == crate::MiniAction::Forward;
@@ -467,48 +520,53 @@ impl Shell {
                         }
                 });
                 if !available {
-                    return;
+                    return operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::HistoryUnavailable,
+                    );
                 }
                 self.cancel_discard_probe(page);
                 self.cancel_page_permission_for_item(page);
-                let _ = if forward {
+                native_result(if forward {
                     self.engine.go_forward(page)
                 } else {
                     self.engine.go_back(page)
-                };
+                })
             }
             crate::MiniAction::Reload => {
                 self.cancel_discard_probe(page);
                 self.cancel_page_permission_for_item(page);
                 if self.items.tab(page).is_some_and(TabState::has_view) {
-                    let _ = self.engine.reload(page);
+                    native_result(self.engine.reload(page))
                 } else {
                     let effects = self.items.ensure_view(page);
-                    self.commit(effects);
+                    mutation_result(self.commit(effects))
                 }
             }
         }
     }
 
     /// Ends a mini window and the page in it.
-    pub(super) fn close_mini(&mut self, window: WindowId) {
+    pub(super) fn close_mini(&mut self, window: WindowId) -> OperationDisposition {
         let Some(mini) = self.mini.windows.remove(&window) else {
-            return;
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         self.windows.remove(window);
         // The page is ended before the stage that holds it is released, so
         // its view goes back to the main window's keeping, never with the
         // native window.
+        let mut native = NativeWork::default();
         if self.items.tab(mini.page).is_some() {
             self.forget_mini_page(mini.page);
             let effects = self.items.remove(mini.page);
-            self.commit(effects);
+            native = self.commit(effects);
         }
         let _ = self.engine.release_window(window);
         (self.emit)(Projection::MiniClosed(zephium_ipc::MiniClosedView {
             window,
             reveal_main: false,
         }));
+        mutation_result(native)
     }
 
     fn forget_mini_page(&mut self, id: ItemId) {
@@ -536,30 +594,36 @@ impl Shell {
     /// Moves the page into the main window as a tab in front of `target`, or
     /// of the default space, keeping the live page, and closes the mini
     /// window. A space of another profile is ignored.
-    pub(super) fn open_mini_in_main(&mut self, window: WindowId, target: Option<SpaceId>) {
+    pub(super) fn open_mini_in_main(
+        &mut self,
+        window: WindowId,
+        target: Option<SpaceId>,
+    ) -> OperationDisposition {
         let Some(mini) = self.mini.windows.get(&window) else {
-            return;
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         let id = mini.page;
         let origin = mini.space;
-        if self.items.tab(id).is_none() {
-            self.close_mini(window);
-            return;
-        }
-        let Some(profile) = self.profile_of_item(id) else {
-            self.close_mini(window);
-            return;
+        let Some(profile) = self.items.tab(id).and_then(|_| self.profile_of_item(id)) else {
+            return self.close_mini(window);
         };
         let target = target.filter(|space| {
             self.spaces
                 .get(*space)
                 .is_some_and(|known| known.profile == profile)
         });
+        // A browser page in front returns first; the whole handoff runs
+        // again once it has, and the mini window stays until then.
+        if self.active_browser_page().is_some() && !self.browser_return_ready {
+            let action = target.map_or(
+                crate::MiniAction::OpenInMain,
+                crate::MiniAction::OpenInSpace,
+            );
+            self.browser_after_return = Some(Box::new(Command::Mini { window, action }));
+            return self.operation_show_browser_page(None);
+        }
         if self.private_shown() {
             let _ = self.operation_leave_private();
-        }
-        if self.active_browser_page().is_some() {
-            let _ = self.operation_show_browser_page(None);
         }
         if self
             .windows
@@ -567,6 +631,14 @@ impl Shell {
             .is_some_and(|main| main.profile != profile)
         {
             let _ = self.operation_switch_profile(profile);
+        }
+        // A switch that did not land leaves the page where it is.
+        if self
+            .windows
+            .focused()
+            .is_none_or(|main| main.profile != profile)
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         let Some(space) = target
             .or_else(|| {
@@ -582,7 +654,7 @@ impl Shell {
                     .map(|_| origin)
             })
         else {
-            return;
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
         if self
             .windows
@@ -590,6 +662,13 @@ impl Shell {
             .is_some_and(|main| main.space != space)
         {
             let _ = self.operation_space(crate::SpaceCommand::Switch(space));
+        }
+        if self
+            .windows
+            .focused()
+            .is_none_or(|main| main.space != space)
+        {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         let before = self.today_tabs(space).into_iter().next();
         if !self.items.move_tab_to_root(
@@ -600,7 +679,7 @@ impl Shell {
             },
             before,
         ) {
-            return;
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         self.mini.windows.remove(&window);
         self.windows.remove(window);
@@ -608,11 +687,12 @@ impl Shell {
         // layout takes it, both on the native thread in this order.
         let _ = self.engine.release_window(window);
         let effects = self.focus_tab(id);
-        self.commit(effects);
+        let native = self.commit(effects);
         (self.emit)(Projection::MiniClosed(zephium_ipc::MiniClosedView {
             window,
             reveal_main: true,
         }));
+        mutation_result(native)
     }
 
     /// Closes mini windows whose page went away underneath them, as a
@@ -626,9 +706,15 @@ impl Shell {
             .map(|(window, _)| *window)
             .collect();
         for window in orphaned {
-            self.close_mini(window);
+            let _ = self.close_mini(window);
         }
     }
+}
+
+fn native_result(admission: NativeDispatch) -> OperationDisposition {
+    let mut native = NativeWork::default();
+    native.record(admission);
+    mutation_result(native)
 }
 
 #[cfg(test)]

@@ -2949,7 +2949,7 @@ fn finish_operation_admission(
     }
 }
 
-fn dispatch_operation(
+pub(crate) fn dispatch_operation(
     app: &tauri::AppHandle,
     shell: &Handle,
     command: Command,
@@ -4162,6 +4162,15 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     reinstall_native_materials(app);
 }
 
+/// A UI-only admission: no shell operation settles it.
+pub(crate) fn ui_admission(accepted: bool) -> zephium_ipc::OperationAdmission {
+    if accepted {
+        accepted_ui_operation()
+    } else {
+        rejected_operation()
+    }
+}
+
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
     zephium_ipc::OperationAdmission {
         operation_id: None,
@@ -4210,8 +4219,10 @@ fn execute_command_or(
     if id == "tab.close" && tab_switcher::close_selected(app) {
         return accepted_ui_operation();
     }
-    if mini::route(app, id) {
-        return accepted_ui_operation();
+    // A command a mini window answers never falls through to the main
+    // window, refused or not.
+    if let Some(admission) = mini::route(app, id) {
+        return admission;
     }
     if matches!(id, "tab.recent.next" | "tab.recent.previous") {
         return if tab_switcher::step(app, id == "tab.recent.previous", true) {
@@ -7348,7 +7359,7 @@ fn finish_browser_setup(
             if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { item, command } =
                 &event
             {
-                if !mini::route_page_key(&sink_app, &item.to_string(), command) {
+                if mini::route_page_key(&sink_app, &item.to_string(), command).is_none() {
                     let _ = execute_command(&sink_app, command);
                 }
                 return;
@@ -7677,10 +7688,7 @@ fn finish_browser_setup(
         Projection::MediaPlayer(player) => {
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
         }
-        Projection::MiniOpened(opened) => {
-            external_links::forward_handled();
-            mini::open(&emit_handle, opened)
-        }
+        Projection::MiniOpened(opened) => mini::open(&emit_handle, opened),
         Projection::Mini(view) => mini::project(&emit_handle, &view),
         Projection::MiniClosed(closed) => mini::close(&emit_handle, closed),
         Projection::ExternalTabsOpened => external_links::forward_pending(&emit_handle),

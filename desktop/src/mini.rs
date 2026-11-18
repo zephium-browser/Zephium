@@ -18,7 +18,7 @@ use zephium_app::{
     MiniAction,
 };
 use zephium_core::geometry::Size;
-use zephium_ipc::{MiniClosedView, MiniOpenedView, MiniView};
+use zephium_ipc::{MiniClosedView, MiniOpenedView, MiniView, OperationAdmission};
 
 use crate::{authorize, emit_to_privileged, shutdown_started, CallerPolicy};
 
@@ -91,35 +91,40 @@ fn routed(id: &str) -> Option<Routed> {
 /// Carries out `id` for the mini window in front, when one is and the
 /// command is one it answers. Menu key equivalents and the browser's own
 /// keys reach whichever window is in front, so without this Cmd+W in a mini
-/// window would close the main window's tab.
-pub(crate) fn route(app: &tauri::AppHandle, id: &str) -> bool {
-    let Some(route) = routed(id) else {
-        return false;
-    };
-    let Some(window) = focused(app) else {
-        return false;
-    };
-    carry_out(app, window, route)
+/// window would close the main window's tab. `None` when no mini window
+/// answers `id`; otherwise whether it took the command. A refusal is final:
+/// the command never falls through to the main window.
+pub(crate) fn route(app: &tauri::AppHandle, id: &str) -> Option<OperationAdmission> {
+    let route = routed(id)?;
+    let window = focused(app)?;
+    Some(carry_out(app, window, route))
 }
 
 /// The same for a key a page pressed: it acts on that page's own mini
 /// window, wherever focus is reported.
-pub(crate) fn route_page_key(app: &tauri::AppHandle, page: &str, id: &str) -> bool {
-    let Some(route) = routed(id) else {
-        return false;
-    };
-    let Some(window) = window_showing(page) else {
-        return false;
-    };
-    carry_out(app, window, route)
+pub(crate) fn route_page_key(
+    app: &tauri::AppHandle,
+    page: &str,
+    id: &str,
+) -> Option<OperationAdmission> {
+    let route = routed(id)?;
+    let window = window_showing(page)?;
+    Some(carry_out(app, window, route))
 }
 
-fn carry_out(app: &tauri::AppHandle, window: u64, route: Routed) -> bool {
+fn carry_out(app: &tauri::AppHandle, window: u64, route: Routed) -> OperationAdmission {
     match route {
-        Routed::EditAddress => edit_address(app, window),
-        Routed::Act(action) => app
-            .try_state::<Handle>()
-            .is_some_and(|shell| shell.dispatch(Command::Mini { window, action })),
+        Routed::EditAddress => crate::ui_admission(edit_address(app, window)),
+        Routed::Act(action) => act(app, window, action),
+    }
+}
+
+/// Sends `action` through the operation ledger, so its settlement reaches
+/// the caller like any other shell operation.
+fn act(app: &tauri::AppHandle, window: u64, action: MiniAction) -> OperationAdmission {
+    match app.try_state::<Handle>() {
+        Some(shell) => crate::dispatch_operation(app, &shell, Command::Mini { window, action }),
+        None => crate::ui_admission(false),
     }
 }
 
@@ -138,11 +143,8 @@ pub(crate) fn on_menu(app: &tauri::AppHandle, id: &str) -> bool {
     if !id.starts_with(SPACE_MENU) {
         return false;
     }
-    if let (Some((window, space)), Some(shell)) = (space_choice(id), app.try_state::<Handle>()) {
-        shell.dispatch(Command::Mini {
-            window,
-            action: MiniAction::OpenInSpace(space),
-        });
+    if let Some((window, space)) = space_choice(id) {
+        let _ = act(app, window, MiniAction::OpenInSpace(space));
     }
     true
 }
@@ -426,6 +428,15 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
                     let _ = shell.dispatch(Command::MiniResized { window: id, size });
                 }
             }
+            // WebView2 places popups, IME and accessibility by the parent's
+            // position, so a move lays the page out again, as in the main
+            // window. A minimized window reports no size and is skipped.
+            #[cfg(target_os = "windows")]
+            tauri::WindowEvent::Moved(_) if !events.is_minimized().unwrap_or(false) => {
+                if let Some(size) = content_size(&events) {
+                    let _ = shell.dispatch(Command::MiniResized { window: id, size });
+                }
+            }
             _ => {}
         }
     });
@@ -678,20 +689,18 @@ pub(crate) fn mini_ready(caller: WebviewWindow, shell: State<'_, Handle>) -> boo
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn mini_action(
-    caller: WebviewWindow,
-    shell: State<'_, Handle>,
-    action: MiniIntent,
-) -> bool {
+pub(crate) fn mini_action(caller: WebviewWindow, action: MiniIntent) -> OperationAdmission {
     if !authorize(&caller, CallerPolicy::Mini, "mini_action") {
-        return false;
+        return crate::ui_admission(false);
     }
     let Some(window) = window_of(caller.label()) else {
-        return false;
+        return crate::ui_admission(false);
     };
     let action = match action {
-        MiniIntent::EditAddress => return edit_address(caller.app_handle(), window),
-        MiniIntent::Minimize => return caller.minimize().is_ok(),
+        MiniIntent::EditAddress => {
+            return crate::ui_admission(edit_address(caller.app_handle(), window));
+        }
+        MiniIntent::Minimize => return crate::ui_admission(caller.minimize().is_ok()),
         MiniIntent::Back => MiniAction::Back,
         MiniIntent::Forward => MiniAction::Forward,
         MiniIntent::Reload => MiniAction::Reload,
@@ -699,7 +708,7 @@ pub(crate) fn mini_action(
         MiniIntent::Close => MiniAction::Close,
         MiniIntent::KeepOnTop => MiniAction::KeepOnTop(None),
     };
-    shell.dispatch(Command::Mini { window, action })
+    act(caller.app_handle(), window, action)
 }
 
 #[cfg(test)]

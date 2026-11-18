@@ -134,9 +134,9 @@ impl EngineHost {
     fn reconcile_new_view_with_stages(&self, id: ItemId) -> bool {
         let expected = self
             .stages
-            .values()
-            .filter(|stage| stage.contains_item(id))
-            .cloned()
+            .iter()
+            .filter(|(_, stage)| stage.contains_item(id))
+            .map(|(window, stage)| (*window, stage.clone()))
             .collect::<Vec<_>>();
         if expected.is_empty() {
             // The controller and its child HWND were constructed hidden.
@@ -153,8 +153,10 @@ impl EngineHost {
         let presentable = view.presentable && view.presentation_permit.load(Ordering::Acquire);
         let presentation_permit = view.presentation_permit.clone();
         let mut reconciled = true;
-        for stage in expected {
-            if !stage.has_view(id) {
+        for (window, stage) in expected {
+            // A page built after its layout arrived was made under the main
+            // window; a mini window's stage takes it under its own first.
+            if !stage.has_view(id) && self.move_view_to_stage(window, id, view, &stage) {
                 stage.insert_view(id, view, generation.clone(), presentation_permit.clone());
             }
             if !stage.has_view(id) {

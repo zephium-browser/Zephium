@@ -253,7 +253,8 @@ export function createSearchSurface(options: {
     }
     const expected = controller?.context();
     if (!row.result || !expected) return;
-    background = background && !anchored && !!addressOf(row);
+    // A mini window's launcher opens only in the foreground, as native does.
+    background = background && !anchored && !options.sitesOnly?.() && !!addressOf(row);
     running = true;
     failed = false;
     try {

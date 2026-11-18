@@ -1389,6 +1389,7 @@ impl Shell {
             } => self.on_page_permission_timeout(profile, item, request),
             Command::Search(query) => {
                 self.search.context = None;
+                self.search.mini = false;
                 self.search(&query);
             }
             Command::SearchSupplementaryFinished { context, query } => {
@@ -1425,7 +1426,9 @@ impl Shell {
             Command::OpenExternal(urls) => self.open_external(urls),
             Command::MiniAttached { window, size } => self.mini_attached(window, size),
             Command::MiniResized { window, size } => self.mini_resized(window, size),
-            Command::Mini { window, action } => self.mini_action(window, action),
+            Command::Mini { window, action } => {
+                let _ = self.mini_action(window, action);
+            }
             Command::Find(request) => self.find_in_page(request),
             Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
             Command::SetAppSetting { key, value } => {

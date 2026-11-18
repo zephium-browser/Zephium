@@ -709,7 +709,7 @@ export const commands = {
 	 *  lays its page out and lets it be verified.
 	 */
 	miniReady: () => __TAURI_INVOKE<boolean>("mini_ready"),
-	miniAction: (action: MiniIntent) => __TAURI_INVOKE<boolean>("mini_action", { action }),
+	miniAction: (action: MiniIntent) => __TAURI_INVOKE<OperationAdmission>("mini_action", { action }),
 	/**
 	 *  Pops the spaces "Open in Zephium" can put the page in, under the
 	 *  toolbar's button at `x`, `y`.

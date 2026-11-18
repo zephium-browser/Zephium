@@ -276,10 +276,10 @@ fn a_mini_window_lays_out_only_once_its_native_window_exists() {
         .lock()
         .unwrap()
         .contains(&Some(Rect::new(
-            0.0,
+            crate::MINI_PAGE_INSET,
             crate::MINI_TOOLBAR_HEIGHT,
-            720.0,
-            640.0 - crate::MINI_TOOLBAR_HEIGHT,
+            720.0 - 2.0 * crate::MINI_PAGE_INSET,
+            640.0 - crate::MINI_TOOLBAR_HEIGHT - crate::MINI_PAGE_INSET,
         ))));
 }
 
@@ -647,6 +647,36 @@ fn keep_on_top_is_the_shells_to_toggle_and_project() {
 }
 
 #[test]
+fn mini_actions_settle_through_the_operation_ledger() {
+    let mut mini = mini(true);
+    let (window, _) = mini.open_shown("https://example.com/");
+    let mut act = |action| {
+        mini.shell
+            .handle_operation(Command::Mini { window, action })
+    };
+
+    let pinned = act(crate::MiniAction::KeepOnTop(Some(true)));
+    assert_eq!(pinned.outcome, OperationOutcome::Applied);
+    let again = act(crate::MiniAction::KeepOnTop(Some(true)));
+    assert_eq!(again.outcome, OperationOutcome::NoOp);
+    let back = act(crate::MiniAction::Back);
+    assert_eq!(back.outcome, OperationOutcome::Rejected);
+    assert_eq!(back.reason, OperationReason::HistoryUnavailable);
+    assert_ne!(
+        act(crate::MiniAction::Reload).outcome,
+        OperationOutcome::Rejected
+    );
+    assert_ne!(
+        act(crate::MiniAction::Close).outcome,
+        OperationOutcome::Rejected
+    );
+    assert_eq!(
+        act(crate::MiniAction::Close).outcome,
+        OperationOutcome::Rejected
+    );
+}
+
+#[test]
 fn the_page_takes_focus_once_its_window_is_built() {
     let mut mini = mini(true);
     let (window, page) = mini.open_shown("https://example.com/");
@@ -767,10 +797,12 @@ fn actions_for_a_window_that_is_not_a_mini_window_do_nothing() {
             crate::MiniAction::KeepOnTop(None),
             crate::MiniAction::Unbuilt,
         ] {
-            mini.shell.handle(Command::Mini {
+            let result = mini.shell.handle_operation(Command::Mini {
                 window: target,
                 action,
             });
+            assert_eq!(result.outcome, OperationOutcome::Rejected);
+            assert_eq!(result.reason, OperationReason::InvalidScope);
         }
     }
 
@@ -829,4 +861,116 @@ fn past_the_window_limit_a_mini_pages_link_opens_as_a_background_tab() {
     assert_eq!(mini.opened().len(), super::super::mini::MAX_MINI_WINDOWS);
     assert_eq!(last(&mini.screen).tabs.len(), tabs_before + 1);
     assert_eq!(mini.shell.windows.focused().unwrap().active, active);
+}
+
+#[test]
+fn a_mini_page_that_crashes_gets_a_new_view_while_another_tab_is_in_front() {
+    let mut mini = mini(true);
+    let (_, page) = mini.open_shown("https://example.com/");
+    assert_ne!(active_id(&mini.screen), page);
+
+    mini.shell
+        .handle(Command::Engine(EngineEvent::Crashed { id: page }));
+
+    let create = format!("create {page} ");
+    assert_eq!(
+        mini.engine
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with(&create))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn past_the_window_limit_a_popup_a_mini_page_opened_is_kept_as_a_background_tab() {
+    let mut mini = mini(true);
+    let urls: Vec<String> = (0..super::super::mini::MAX_MINI_WINDOWS)
+        .map(|index| format!("https://site{index}.example/"))
+        .collect();
+    mini.shell.handle(Command::OpenExternal(urls));
+    let window = mini.opened()[0].window;
+    mini.shell.handle(Command::MiniAttached {
+        window,
+        size: Size::new(720.0, 640.0),
+    });
+    let page = mini.page(window);
+    commit_url(&mut mini.shell, page, "https://site0.example/");
+    let active = mini.shell.windows.focused().unwrap().active;
+    let child = ItemId::generate();
+    let (send, receive) = std::sync::mpsc::channel();
+
+    mini.shell
+        .handle(Command::Engine(EngineEvent::NativeTabOpened {
+            id: page,
+            child,
+            foreground: true,
+            adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |ok| {
+                send.send(ok).unwrap()
+            }),
+        }));
+
+    assert!(receive.recv().unwrap());
+    assert_eq!(mini.opened().len(), super::super::mini::MAX_MINI_WINDOWS);
+    assert!(mini.shell.items.tab(child).is_some_and(TabState::has_view));
+    assert!(matches!(
+        mini.shell.items.get(child).map(|item| item.placement),
+        Some(Placement::Space { .. })
+    ));
+    assert_eq!(mini.shell.windows.focused().unwrap().active, active);
+}
+
+#[test]
+fn open_in_zephium_waits_for_a_browser_page_to_return_first() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    engine
+        .hosts_mini_windows
+        .store(true, std::sync::atomic::Ordering::Release);
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.external-position".into(),
+        value: "mini".into(),
+    });
+    let main = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: main,
+        input: "main.example".into(),
+    });
+    shell.handle(Command::Engine(EngineEvent::UrlChanged {
+        id: main,
+        url: "https://main.example/".into(),
+    }));
+    present_committed(&mut shell, main, "https://main.example/");
+    shell.handle(Command::OpenExternal(vec!["https://example.com/".into()]));
+    let (window, page) = shell
+        .mini
+        .windows
+        .iter()
+        .map(|(window, mini)| (*window, mini.page))
+        .next()
+        .expect("a mini window");
+    shell.handle(Command::MiniAttached {
+        window,
+        size: Size::new(720.0, 640.0),
+    });
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    let release = format!("release@{window}");
+
+    shell.handle(Command::Mini {
+        window,
+        action: crate::MiniAction::OpenInMain,
+    });
+
+    // The window and its page stay until the browser page has gone.
+    assert_eq!(shell.mini.windows[&window].page, page);
+    assert!(!engine.calls().contains(&release));
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_eq!(shell.active_browser_page(), None);
+    assert!(!shell.mini.windows.contains_key(&window));
+    assert!(engine.calls().contains(&release));
+    assert_eq!(active_id(&screen), page);
 }

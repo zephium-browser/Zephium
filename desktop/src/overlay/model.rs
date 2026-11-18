@@ -179,6 +179,8 @@ impl Model {
         self.presented = false;
         self.owner = owner;
         self.switcher = None;
+        self.editing = None;
+        self.mini = false;
     }
     pub fn context(&self, request_id: &str) -> Option<SearchContext> {
         if self.switcher.is_some()
@@ -384,5 +386,19 @@ mod tests {
         m.search();
         assert_eq!(m.snapshot().seed, None);
         assert_eq!(m.editing_tab(), None);
+    }
+
+    #[test]
+    fn a_new_owner_ends_mini_mode_so_the_next_request_opens_again() {
+        let mut model = Model::default();
+        model.set_owner(Some(owner("one", "p", "s")));
+        model.search_mini();
+        assert!(model.mini());
+        model.set_owner(Some(owner("two", "p", "s")));
+        assert!(!model.mini());
+        assert!(!model.snapshot().visible);
+        model.search_mini();
+        assert!(model.mini());
+        assert!(model.snapshot().visible);
     }
 }

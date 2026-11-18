@@ -994,6 +994,16 @@ fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
     false
 }
 
+/// Admits the release of a window that is going away in the close band, so
+/// a busy reentrant queue never drops it the way it can drop ordinary work.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn try_with_window_release<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::Close, None, f)
+}
+
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
