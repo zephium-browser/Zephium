@@ -2487,11 +2487,15 @@ pub(super) async fn lead_workflow(
                 result = running => result,
                 _ = account.person(handle, composition, profile, work) => Err(WorkError::Unavailable),
             }
-        } else {
+        } else if std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some() {
             tokio::select! {
                 result = running => result,
                 () = super::work_account::present_human_pages(composition, profile, work) => Err(WorkError::Unavailable),
             }
+        } else {
+            // Nobody sits at the window: a check stays unopened, as in the
+            // app until the person opens it, and its own short wait applies.
+            running.await
         };
         let projection = match result {
             Ok(projection) => projection,
