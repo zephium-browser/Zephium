@@ -1,0 +1,138 @@
+{
+  "caseId": "i18n-placeholders",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "named.array:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "named.array:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "Hello, Ada! Price: $ 12."
+      }
+    },
+    {
+      "label": "named.string:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "named.string:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "Hello, Ada! Price: $ ."
+      }
+    },
+    {
+      "label": "named.omitted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "named.omitted:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "Hello, ! Price: $ ."
+      }
+    },
+    {
+      "label": "named.caseInsensitive:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "named.caseInsensitive:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "Hello, Ada! Price: $ 12."
+      }
+    },
+    {
+      "label": "positional:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "positional:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "First one, second two, repeat one."
+      }
+    },
+    {
+      "label": "nested:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "nested:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "[prefix:value:suffix]"
+      }
+    },
+    {
+      "label": "dollars:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "dollars:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "One $, two $$$, substitution $literal."
+      }
+    },
+    {
+      "label": "missing:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": ""
+      }
+    },
+    {
+      "label": "invalid.missingName:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "invalid.missingName:error",
+      "value": {
+        "lastError": null,
+        "message": "Error in invocation of i18n.getMessage(string messageName, optional any substitutions, optional object options): No matching signature."
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

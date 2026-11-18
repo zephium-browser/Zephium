@@ -1,0 +1,6 @@
+{
+  "id": "scripting-execute-sync-async",
+  "title": "Function arguments, synchronous results, and awaited promises",
+  "apis": ["scripting.executeScript"],
+  "permissions": ["scripting"]
+}

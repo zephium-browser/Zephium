@@ -155,7 +155,13 @@ def main() -> int:
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
 
-    sections = []
+    chromium = ROOT / "vendor/chromium-extension-api"
+    sections = [section(
+        "Chromium extension API schemas", "(pinned snapshot; see UPSTREAM.md)",
+        "BSD-3-Clause", "https://chromium.googlesource.com/chromium/src/",
+        [("LICENSE", (chromium / "LICENSE").read_text(encoding="utf-8").strip()),
+         ("UPSTREAM.md", (chromium / "UPSTREAM.md").read_text(encoding="utf-8").strip())],
+    )]
     for (name, version), package in sorted(rust_packages().items()):
         directory = Path(package["manifest_path"]).parent
         sections.append(section(name, version, package.get("license") or "",

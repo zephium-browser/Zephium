@@ -1,0 +1,15 @@
+{
+  "welcome": {
+    "message": "Hello, $PERSON$! Price: $$ $AMOUNT$.",
+    "placeholders": {
+      "person": { "content": "$1", "example": "Ada" },
+      "amount": { "content": "$2", "example": "12" }
+    }
+  },
+  "positional": { "message": "First $1, second $2, repeat $1." },
+  "nested": {
+    "message": "[$WRAPPED$]",
+    "placeholders": { "wrapped": { "content": "prefix:$1:suffix" } }
+  },
+  "dollars": { "message": "One $$, two $$$$, substitution $1." }
+}

@@ -1,0 +1,118 @@
+{
+  "caseId": "scripting-execute-errors",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "function throws:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "function throws:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "function rejects:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "function rejects:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": null
+          }
+        ]
+      }
+    },
+    {
+      "label": "unknown frame:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "unknown frame:error",
+      "value": {
+        "lastError": null,
+        "message": "No frame with id 2147483647 in tab with id <tab:1>"
+      }
+    },
+    {
+      "label": "files and function conflict:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "files and function conflict:error",
+      "value": {
+        "lastError": null,
+        "message": "Exactly one of 'func' and 'files' must be specified"
+      }
+    },
+    {
+      "label": "frameIds and allFrames conflict:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "frameIds and allFrames conflict:error",
+      "value": {
+        "lastError": null,
+        "message": "Cannot specify 'allFrames' if either 'frameIds' or 'documentIds' is specified."
+      }
+    },
+    {
+      "label": "missing file:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "missing file:error",
+      "value": {
+        "lastError": null,
+        "message": "Could not load file: 'missing.js'."
+      }
+    },
+    {
+      "label": "closed tab:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "closed tab:error",
+      "value": {
+        "lastError": null,
+        "message": "No tab with id: <tab:1>"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

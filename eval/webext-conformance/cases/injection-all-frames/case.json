@@ -1,0 +1,6 @@
+{
+  "id": "injection-all-frames",
+  "title": "Manifest all_frames controls top versus HTTP subframe injection",
+  "apis": ["manifest.content_scripts", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

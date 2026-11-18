@@ -1,0 +1,8 @@
+{
+  "shared": { "message": "default English value" },
+  "default_only": { "message": "fallback from default catalog" },
+  "default_placeholder": {
+    "message": "Default greets $PERSON$.",
+    "placeholders": { "person": { "content": "$1" } }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "id": "alarms-clamp",
+  "title": "Subminimum alarm periods and exact API diagnostics",
+  "apis": ["alarms.create", "alarms.get", "runtime.lastError"],
+  "permissions": ["alarms"]
+}

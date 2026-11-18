@@ -1,0 +1,91 @@
+{
+  "caseId": "injection-run-at",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "isolated stages:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "isolated stages:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": [
+              {
+                "pageGlobal": "undefined",
+                "pageMarker": null,
+                "parsed": false,
+                "stage": "start"
+              },
+              {
+                "pageGlobal": "undefined",
+                "pageMarker": "ran",
+                "parsed": true,
+                "stage": "end"
+              },
+              {
+                "pageGlobal": "undefined",
+                "pageMarker": "ran",
+                "parsed": true,
+                "stage": "idle"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "label": "main stages:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "main stages:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": [
+              {
+                "pageGlobal": "undefined",
+                "pageMarker": null,
+                "parsed": false,
+                "stage": "start"
+              },
+              {
+                "pageGlobal": "boolean",
+                "pageMarker": "ran",
+                "parsed": true,
+                "stage": "end"
+              },
+              {
+                "pageGlobal": "boolean",
+                "pageMarker": "ran",
+                "parsed": true,
+                "stage": "idle"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

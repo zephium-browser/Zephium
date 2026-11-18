@@ -1,0 +1,75 @@
+{
+  "caseId": "navigation-document",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "navigate:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "navigate:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "requested": true
+        }
+      }
+    },
+    {
+      "label": "navigation events",
+      "value": [
+        {
+          "documentLifecycle": "active",
+          "event": "onBeforeNavigate",
+          "frameId": 0,
+          "frameType": "outermost_frame",
+          "parentFrameId": -1,
+          "tabId": "<tab:1>",
+          "url": "<origin:a>/page.html?navigation"
+        },
+        {
+          "documentId": "<document:1>",
+          "documentLifecycle": "active",
+          "event": "onCommitted",
+          "frameId": 0,
+          "frameType": "outermost_frame",
+          "parentFrameId": -1,
+          "tabId": "<tab:1>",
+          "transitionQualifiers": [],
+          "transitionType": "link",
+          "url": "<origin:a>/page.html?navigation"
+        },
+        {
+          "documentId": "<document:1>",
+          "documentLifecycle": "active",
+          "event": "onDOMContentLoaded",
+          "frameId": 0,
+          "frameType": "outermost_frame",
+          "parentFrameId": -1,
+          "tabId": "<tab:1>",
+          "url": "<origin:a>/page.html?navigation"
+        },
+        {
+          "documentId": "<document:1>",
+          "documentLifecycle": "active",
+          "event": "onCompleted",
+          "frameId": 0,
+          "frameType": "outermost_frame",
+          "parentFrameId": -1,
+          "tabId": "<tab:1>",
+          "url": "<origin:a>/page.html?navigation"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

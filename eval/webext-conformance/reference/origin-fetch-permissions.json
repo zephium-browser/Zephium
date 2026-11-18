@@ -1,0 +1,46 @@
+{
+  "caseId": "origin-fetch-permissions",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "fetch granted host:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "fetch granted host:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "body": {
+            "ok": true
+          },
+          "status": 200,
+          "type": "basic"
+        }
+      }
+    },
+    {
+      "label": "fetch ungranted host:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "fetch ungranted host:error",
+      "value": {
+        "lastError": null,
+        "message": "Failed to fetch"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

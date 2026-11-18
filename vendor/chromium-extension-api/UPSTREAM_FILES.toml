@@ -1,0 +1,242 @@
+[upstream]
+repository = "https://chromium.googlesource.com/chromium/src"
+tag = "157.0.8103.78"
+commit = "4b3d0dabb8250b6f152d2d85d79e7706e309d087"
+tree = "1390557da6bf6cb630528eac294f338b887ad81a"
+license = "BSD-3-Clause"
+retrieved = "2026-11-14"
+
+[[files]]
+path = "LICENSE"
+sha256 = "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b"
+bytes = 1536
+
+[[files]]
+path = "chrome/common/extensions/api/_api_features.json"
+sha256 = "f4b7fb88a2f7fd91d9e8c453cf362aeef2af35d9d53027920ca816440cb3132b"
+bytes = 31365
+
+[[files]]
+path = "chrome/common/extensions/api/_api_features.override.json"
+sha256 = "d9b6ca011bffb30b3e6e22c9e0cbc2a7da55907f6102a0e4bb7bc3780830a214"
+bytes = 1512
+
+[[files]]
+path = "chrome/common/extensions/api/_manifest_features.json"
+sha256 = "bb7ac1a56f963a2c09f7f531a9f0751b5e47d24918e9a985bc4160f1515b9722"
+bytes = 1719
+
+[[files]]
+path = "chrome/common/extensions/api/_manifest_features.override.json"
+sha256 = "6daa867304d55e98b0224b3ae7837ecbe058c6bbc32a1f4839646ebe9aa80293"
+bytes = 576
+
+[[files]]
+path = "chrome/common/extensions/api/_permission_features.json"
+sha256 = "c14bd0e35e89096f68358f95a9118b9d7dd60d026a6cc2fea4c6c1c3ef5fd8f9"
+bytes = 43437
+
+[[files]]
+path = "chrome/common/extensions/api/_permission_features.override.json"
+sha256 = "09c45add6f653cfd086d9cfa114ba196b8f0444aec3dc411284f41c6563eb39d"
+bytes = 578
+
+[[files]]
+path = "chrome/common/extensions/api/action.json"
+sha256 = "b7ae92c0449c015f3990939b2aff7be545523a8bd9ccc40ede378e8e5cca90b7"
+bytes = 15102
+
+[[files]]
+path = "chrome/common/extensions/api/bookmarks.json"
+sha256 = "a7c3baa648467c8b83d0fd57ed785f31f9c31769f6ff6bf12790c20a51bcc98b"
+bytes = 18322
+
+[[files]]
+path = "chrome/common/extensions/api/commands.json"
+sha256 = "8c1cc11b75b8c4ee922a3a6d71ebabeeb17b7ec24cbe5b822ce68fd3521d907b"
+bytes = 2249
+
+[[files]]
+path = "chrome/common/extensions/api/context_menus.json"
+sha256 = "8ce169f56f255ed41cb51ae821e113434183da3b866b46ef6c33aeb3e2f0ae48"
+bytes = 14622
+
+[[files]]
+path = "chrome/common/extensions/api/downloads.webidl"
+sha256 = "d62d30d1ab4407bdea1d1c600d076313183fe3aa82bf3641d4e5a426018cbb13"
+bytes = 25750
+
+[[files]]
+path = "chrome/common/extensions/api/extension.json"
+sha256 = "89de731501c370420c3d9964dd5d0876e0ecb09383ffa4ed5dc1cb19ce987294"
+bytes = 9448
+
+[[files]]
+path = "chrome/common/extensions/api/font_settings.json"
+sha256 = "d38b8aa2debe69c7b528a0f55d11e36c7c1027f14645d2fc04da7590437a1781"
+bytes = 16177
+
+[[files]]
+path = "chrome/common/extensions/api/history.json"
+sha256 = "292fccf51cbf57e57274db659b5a82df55785572f3b82c863c53c114f39fddc0"
+bytes = 9893
+
+[[files]]
+path = "chrome/common/extensions/api/notifications.webidl"
+sha256 = "fd6665813b27959ada75e68c6691fd1ca8c47b025d574f48a1f09eb8608aeced"
+bytes = 9210
+
+[[files]]
+path = "chrome/common/extensions/api/privacy.json"
+sha256 = "540ed37792ef41d4440bc19704e23eba7ded3363f651bcb952717b066e3cef3a"
+bytes = 12159
+
+[[files]]
+path = "chrome/common/extensions/api/search.idl"
+sha256 = "e0643988ce8dce3f968f03bdba046abbd6ff1a686031d60281b2fb55af5ba0b4"
+bytes = 1232
+
+[[files]]
+path = "chrome/common/extensions/api/sessions.json"
+sha256 = "a81c446b0d4768e572c39eb5ea2834ef3dc2bb6f762bde85c273e82f52cca52a"
+bytes = 4813
+
+[[files]]
+path = "chrome/common/extensions/api/side_panel.idl"
+sha256 = "92e7591b8f4560567978002066b24ae36293890947c4a2207eb2e9e83ad5bfa5"
+bytes = 7716
+
+[[files]]
+path = "chrome/common/extensions/api/tabs.json"
+sha256 = "5380b79db1c0078e99ca5f97f55bde46d357e07d76d3afcf886020c69a8c4b23"
+bytes = 61413
+
+[[files]]
+path = "chrome/common/extensions/api/top_sites.json"
+sha256 = "163c6ed6731e9fbb8f671cacbe8e4a5517abdd47a57581db8b9f257a887bc5a0"
+bytes = 1213
+
+[[files]]
+path = "chrome/common/extensions/api/web_navigation.json"
+sha256 = "fc55f4b97176d7c45e0dfcd59bb67753eecc37d664eb0d1aefe3045d31c1727b"
+bytes = 24234
+
+[[files]]
+path = "chrome/common/extensions/api/windows.json"
+sha256 = "8825ea2a367f892ce76c58931b1d2da3c2408bbbed751ec3ce727d1f9597e8de"
+bytes = 18268
+
+[[files]]
+path = "extensions/common/api/_api_features.json"
+sha256 = "6157faf0bdd37519175567875a004f4a848d54d6a05d4c55a2b19490ba7f3324"
+bytes = 34390
+
+[[files]]
+path = "extensions/common/api/_api_features.override.json"
+sha256 = "d16cb4b617a23a186216cb24dd8ad0aabc6fd62c67e7fb169d5aefd0cd07a427"
+bytes = 571
+
+[[files]]
+path = "extensions/common/api/_behavior_features.json"
+sha256 = "4b2e8c3a5eaa954f084ca153f9c830c33a6594982deb772117e01260cad6d081"
+bytes = 12254
+
+[[files]]
+path = "extensions/common/api/_manifest_features.json"
+sha256 = "9f0c66dd258c5a5ff01956c11dc240065f1878a591ffa64ebbc6fbbe73ecc123"
+bytes = 20359
+
+[[files]]
+path = "extensions/common/api/_manifest_features.override.json"
+sha256 = "6daa867304d55e98b0224b3ae7837ecbe058c6bbc32a1f4839646ebe9aa80293"
+bytes = 576
+
+[[files]]
+path = "extensions/common/api/_permission_features.json"
+sha256 = "cd185b5ea3321ed87e0ec8774b2379e402dbb829adb31982f4b2c99cc4904ae2"
+bytes = 36287
+
+[[files]]
+path = "extensions/common/api/_permission_features.override.json"
+sha256 = "09c45add6f653cfd086d9cfa114ba196b8f0444aec3dc411284f41c6563eb39d"
+bytes = 578
+
+[[files]]
+path = "extensions/common/api/alarms.webidl"
+sha256 = "d3ceb0f00b78663ed503da2c25774b3ac2a82c7857190b60969def5d96a79d9d"
+bytes = 4508
+
+[[files]]
+path = "extensions/common/api/declarative_net_request.webidl"
+sha256 = "7f91a8526b3aa87c6900b4e70d76ba1127a2d9a600214e0e0df15214a2f0c53f"
+bytes = 36791
+
+[[files]]
+path = "extensions/common/api/dom.json"
+sha256 = "83b6fcf8f0298a69ff2d4ad0b2e07ab3bb97f2547e9757a98a7f91fba69308d1"
+bytes = 1096
+
+[[files]]
+path = "extensions/common/api/events.json"
+sha256 = "ed719a83acd3042bdb62190fe6a9ea02364f6b848e747231e9b7eaa75b44f9f6"
+bytes = 14353
+
+[[files]]
+path = "extensions/common/api/extension_types.json"
+sha256 = "ab82c757dde2e8539141f117edce8fe8d2141a1b1b4ffdbcb55c7e80cddb9671"
+bytes = 9719
+
+[[files]]
+path = "extensions/common/api/i18n.json"
+sha256 = "eb56cdf3ee3d264bbb00feae4b78f1b3e632cfaee80ca005acc8012a2049379e"
+bytes = 5307
+
+[[files]]
+path = "extensions/common/api/idle.json"
+sha256 = "bfdac0618ed2aaa6a01c775936153c5093ecbc6ec0861410cd31dd33a6aafa66"
+bytes = 3038
+
+[[files]]
+path = "extensions/common/api/management.json"
+sha256 = "fd25144ed2050443643497099e65b3b978f415dd09d89c4e78119e59801b7c2d"
+bytes = 16639
+
+[[files]]
+path = "extensions/common/api/offscreen.webidl"
+sha256 = "a3c64f457d0d6deb2f754beffba141c239afd0164f558d350aa59e179045c25a"
+bytes = 3805
+
+[[files]]
+path = "extensions/common/api/permissions.json"
+sha256 = "56266a7c00ea2d65264971f71188bb105744b8182ba31883572bb20cc1acd697"
+bytes = 8390
+
+[[files]]
+path = "extensions/common/api/runtime.json"
+sha256 = "3ff17ed602ccf647d2200a2f7cd1cbcbb5bfcc35f41cd58ce68de484c1fb2f81"
+bytes = 46933
+
+[[files]]
+path = "extensions/common/api/scripting.webidl"
+sha256 = "066b2f352aa71d1816dee6c0ab98a12a7013e6bd117c01b9f8373bc6b8f15b76"
+bytes = 10478
+
+[[files]]
+path = "extensions/common/api/storage.json"
+sha256 = "54a24ce3f49d14121b8df9aaac18ad72ce3d88dd5ff8b748c483577a706c3a9e"
+bytes = 13760
+
+[[files]]
+path = "extensions/common/api/types.json"
+sha256 = "e0eed741e4b912d1ef1e8c38781b5bbe3f9c2aef96293ce609d416e11244660f"
+bytes = 6984
+
+[[files]]
+path = "extensions/common/api/user_scripts.webidl"
+sha256 = "44e4717d50ae5a9bbf88903d89aa087928cfc10812ce9009237df4f4f5d1a6bc"
+bytes = 9524
+
+[[files]]
+path = "extensions/common/api/web_request.json"
+sha256 = "329b698fbfb894853f1ecd7120ffd3b845d9f1d0fdb82aeef05affcf78d6c12d"
+bytes = 50082

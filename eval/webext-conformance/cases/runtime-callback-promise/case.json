@@ -1,0 +1,10 @@
+{
+  "id": "runtime-callback-promise",
+  "title": "Callback and promise results and no-receiver errors",
+  "apis": [
+    "runtime.getPlatformInfo",
+    "runtime.sendMessage",
+    "runtime.lastError"
+  ],
+  "permissions": []
+}

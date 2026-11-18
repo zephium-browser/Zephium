@@ -1,0 +1,6 @@
+{
+  "id": "commands-inventory",
+  "title": "Commands enumerate action and named shortcut metadata",
+  "apis": ["commands.getAll"],
+  "permissions": []
+}

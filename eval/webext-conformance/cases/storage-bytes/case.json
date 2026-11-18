@@ -1,0 +1,6 @@
+{
+  "id": "storage-bytes",
+  "title": "Bytes in use for ASCII, Unicode, objects, and selected keys",
+  "apis": ["storage.StorageArea.getBytesInUse"],
+  "permissions": ["storage"]
+}

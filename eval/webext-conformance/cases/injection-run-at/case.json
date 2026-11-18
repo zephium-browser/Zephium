@@ -1,0 +1,10 @@
+{
+  "id": "injection-run-at",
+  "title": "Document start, end, and idle ordering against inline page scripts",
+  "apis": [
+    "manifest.content_scripts",
+    "scripting.executeScript",
+    "runtime.onMessage"
+  ],
+  "permissions": ["scripting"]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "storage-on-changed",
+  "title": "Storage onChanged insert, replacement, removal, and clear payloads",
+  "apis": [
+    "storage.onChanged",
+    "storage.StorageArea.set",
+    "storage.StorageArea.remove",
+    "storage.StorageArea.clear"
+  ],
+  "permissions": ["storage"]
+}

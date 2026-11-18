@@ -1,0 +1,6 @@
+{
+  "id": "scripting-execute-errors",
+  "title": "Thrown and rejected injected functions versus argument and target errors",
+  "apis": ["scripting.executeScript"],
+  "permissions": ["scripting"]
+}

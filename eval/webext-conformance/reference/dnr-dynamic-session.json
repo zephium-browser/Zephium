@@ -1,0 +1,216 @@
+{
+  "caseId": "dnr-dynamic-session",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "initial dynamic rules:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "initial dynamic rules:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "add dynamic rule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "add dynamic rule:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "dynamic rule round trip:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "dynamic rule round trip:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "action": {
+              "type": "block"
+            },
+            "condition": {
+              "resourceTypes": [
+                "xmlhttprequest"
+              ],
+              "urlFilter": "||localhost/never-requested"
+            },
+            "id": 1,
+            "priority": 1
+          }
+        ]
+      }
+    },
+    {
+      "label": "duplicate IDs reject atomically:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "duplicate IDs reject atomically:error",
+      "value": {
+        "lastError": null,
+        "message": "Rule with id 2 does not have a unique ID."
+      }
+    },
+    {
+      "label": "dynamic rules after rejection:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "dynamic rules after rejection:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "action": {
+              "type": "block"
+            },
+            "condition": {
+              "resourceTypes": [
+                "xmlhttprequest"
+              ],
+              "urlFilter": "||localhost/never-requested"
+            },
+            "id": 1,
+            "priority": 1
+          }
+        ]
+      }
+    },
+    {
+      "label": "add session rule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "add session rule:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "session rule round trip:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session rule round trip:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "action": {
+              "type": "block"
+            },
+            "condition": {
+              "resourceTypes": [
+                "xmlhttprequest"
+              ],
+              "urlFilter": "||localhost/never-requested"
+            },
+            "id": 3,
+            "priority": 1
+          }
+        ]
+      }
+    },
+    {
+      "label": "remove dynamic rule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove dynamic rule:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "remove session rule:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "remove session rule:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "final dynamic rules:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "final dynamic rules:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "final session rules:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "final session rules:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

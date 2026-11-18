@@ -1,0 +1,12 @@
+{
+  "id": "navigation-document",
+  "title": "Main-document navigation event sequence and payloads",
+  "apis": [
+    "webNavigation.onBeforeNavigate",
+    "webNavigation.onCommitted",
+    "webNavigation.onDOMContentLoaded",
+    "webNavigation.onCompleted",
+    "webNavigation.onErrorOccurred"
+  ],
+  "permissions": ["webNavigation"]
+}

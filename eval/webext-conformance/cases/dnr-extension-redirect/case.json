@@ -1,0 +1,9 @@
+{
+  "id": "dnr-extension-redirect",
+  "title": "Network requests redirect to a declared extension resource",
+  "apis": [
+    "declarativeNetRequest.updateDynamicRules",
+    "declarativeNetRequest.getDynamicRules"
+  ],
+  "permissions": ["declarativeNetRequest"]
+}

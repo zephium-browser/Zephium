@@ -1,0 +1,83 @@
+{
+  "caseId": "injection-lexical-entries",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "lexical binding shared across entries:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "lexical binding shared across entries:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": {
+              "values": [
+                "start",
+                "end"
+              ],
+              "windowProperty": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "label": "later file injection:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "later file injection:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": 3
+          }
+        ]
+      }
+    },
+    {
+      "label": "lexical binding seen after later injection:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "lexical binding seen after later injection:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "documentId": "<document:1>",
+            "frameId": 0,
+            "result": [
+              "start",
+              "end",
+              "executeScript"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

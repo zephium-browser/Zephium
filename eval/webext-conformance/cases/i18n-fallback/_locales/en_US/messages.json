@@ -1,0 +1,4 @@
+{
+  "shared": { "message": "regional US English value" },
+  "regional_only": { "message": "available in the regional catalog" }
+}

@@ -1,0 +1,10 @@
+{
+  "id": "injection-match-origin-fallback",
+  "title": "Origin fallback injects into related about, data, and blob frames",
+  "apis": [
+    "manifest.content_scripts",
+    "runtime.onMessage",
+    "scripting.executeScript"
+  ],
+  "permissions": ["scripting"]
+}

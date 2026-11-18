@@ -1,0 +1,129 @@
+{
+  "caseId": "storage-quota",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "quota.constants",
+      "value": {
+        "local": 10485760,
+        "session": 10485760,
+        "sync": 102400,
+        "syncPerItem": 8192
+      }
+    },
+    {
+      "label": "local.overTotal.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.overTotal.promise:error",
+      "value": {
+        "lastError": null,
+        "message": "Resource::kQuotaBytes quota exceeded"
+      }
+    },
+    {
+      "label": "sync.overItem.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.overItem.callback:callback",
+      "value": {
+        "args": [],
+        "lastError": "Resource::kQuotaBytesPerItem quota exceeded",
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "sync.overItem.callback:after",
+      "value": {
+        "lastError": "Resource::kQuotaBytesPerItem quota exceeded"
+      }
+    },
+    {
+      "label": "sync.overItem.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "sync.overTotal.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.overTotal.promise:error",
+      "value": {
+        "lastError": null,
+        "message": "Resource::kQuotaBytes quota exceeded"
+      }
+    },
+    {
+      "label": "session.overTotal.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.overTotal.promise:error",
+      "value": {
+        "lastError": null,
+        "message": "Session storage quota bytes exceeded. Values were not stored."
+      }
+    },
+    {
+      "label": "local.afterRejectedWrites:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "local.afterRejectedWrites:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {}
+      }
+    },
+    {
+      "label": "sync.afterRejectedWrites:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "sync.afterRejectedWrites:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {}
+      }
+    },
+    {
+      "label": "session.afterRejectedWrites:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "session.afterRejectedWrites:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {}
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

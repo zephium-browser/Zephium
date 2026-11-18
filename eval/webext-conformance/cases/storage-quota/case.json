@@ -1,0 +1,11 @@
+{
+  "id": "storage-quota",
+  "title": "Local, sync item and total, and session quota failures",
+  "apis": [
+    "storage.local.set",
+    "storage.sync.set",
+    "storage.session.set",
+    "runtime.lastError"
+  ],
+  "permissions": ["storage"]
+}

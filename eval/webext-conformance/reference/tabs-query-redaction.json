@@ -1,0 +1,129 @@
+{
+  "caseId": "tabs-query-redaction",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "get permitted:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get permitted:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": false,
+          "id": "<tab:1>",
+          "index": 2,
+          "pinned": false,
+          "status": "complete",
+          "title": "Fixture",
+          "url": "<origin:a>/page.html?tab=permitted",
+          "windowId": "<window:1>"
+        }
+      }
+    },
+    {
+      "label": "get denied:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "get denied:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "active": false,
+          "id": "<tab:2>",
+          "index": 3,
+          "pinned": false,
+          "status": "complete",
+          "windowId": "<window:1>"
+        }
+      }
+    },
+    {
+      "label": "query permitted URL:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query permitted URL:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "active": false,
+            "id": "<tab:1>",
+            "index": 2,
+            "pinned": false,
+            "status": "complete",
+            "title": "Fixture",
+            "url": "<origin:a>/page.html?tab=permitted",
+            "windowId": "<window:1>"
+          }
+        ]
+      }
+    },
+    {
+      "label": "query denied URL:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query denied URL:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": []
+      }
+    },
+    {
+      "label": "query pinned false:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "query pinned false:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          {
+            "active": false,
+            "id": "<tab:1>",
+            "index": 2,
+            "pinned": false,
+            "status": "complete",
+            "title": "Fixture",
+            "url": "<origin:a>/page.html?tab=permitted",
+            "windowId": "<window:1>"
+          },
+          {
+            "active": false,
+            "id": "<tab:2>",
+            "index": 3,
+            "pinned": false,
+            "status": "complete",
+            "windowId": "<window:1>"
+          }
+        ]
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

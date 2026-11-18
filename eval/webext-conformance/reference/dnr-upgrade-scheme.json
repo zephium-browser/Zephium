@@ -1,0 +1,55 @@
+{
+  "caseId": "dnr-upgrade-scheme",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "install upgrade:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "install upgrade:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "$undefined": true
+        }
+      }
+    },
+    {
+      "label": "navigate to HTTP fixture:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "navigate to HTTP fixture:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": {
+          "tabId": "<tab:1>"
+        }
+      }
+    },
+    {
+      "label": "navigation failure on HTTP-only fixture",
+      "value": {
+        "error": "net::ERR_SSL_PROTOCOL_ERROR",
+        "frameId": 0,
+        "tabId": "<tab:1>",
+        "upgraded": true,
+        "url": "<origin:a:https>/page.html?dnr-upgrade"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

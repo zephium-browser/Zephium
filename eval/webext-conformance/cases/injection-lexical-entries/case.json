@@ -1,0 +1,6 @@
+{
+  "id": "injection-lexical-entries",
+  "title": "Lexical bindings span manifest entries and later file injections",
+  "apis": ["manifest.content_scripts", "scripting.executeScript"],
+  "permissions": ["scripting"]
+}

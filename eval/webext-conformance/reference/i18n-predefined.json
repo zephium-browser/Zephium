@@ -1,0 +1,159 @@
+{
+  "caseId": "i18n-predefined",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "@@ui_locale:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "@@ui_locale:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "en_US"
+      }
+    },
+    {
+      "label": "@@bidi_dir:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "@@bidi_dir:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "ltr"
+      }
+    },
+    {
+      "label": "@@bidi_reversed_dir:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "@@bidi_reversed_dir:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "rtl"
+      }
+    },
+    {
+      "label": "@@bidi_start_edge:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "@@bidi_start_edge:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "left"
+      }
+    },
+    {
+      "label": "@@bidi_end_edge:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "@@bidi_end_edge:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "right"
+      }
+    },
+    {
+      "label": "@@extension_id",
+      "value": {
+        "matchesRuntimeId": true
+      }
+    },
+    {
+      "label": "getUILanguage:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getUILanguage:result",
+      "value": {
+        "lastError": null,
+        "timing": "synchronous",
+        "value": "en-US"
+      }
+    },
+    {
+      "label": "getAcceptLanguages.callback:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getAcceptLanguages.callback:callback",
+      "value": {
+        "args": [
+          [
+            "en-US",
+            "en"
+          ]
+        ],
+        "lastError": null,
+        "timing": "asynchronous"
+      }
+    },
+    {
+      "label": "getAcceptLanguages.callback:after",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "getAcceptLanguages.callback:afterTask",
+      "value": {
+        "lastError": null
+      }
+    },
+    {
+      "label": "getAcceptLanguages.promise:call",
+      "value": {
+        "timing": "synchronous"
+      }
+    },
+    {
+      "label": "getAcceptLanguages.promise:result",
+      "value": {
+        "lastError": null,
+        "timing": "promise",
+        "value": [
+          "en-US",
+          "en"
+        ]
+      }
+    },
+    {
+      "label": "manifest.localized",
+      "value": {
+        "defaultLocale": "en",
+        "description": "Description from the message catalog",
+        "name": "Localized conformance extension"
+      }
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

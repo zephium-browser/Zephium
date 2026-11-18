@@ -1,0 +1,316 @@
+{
+  "caseId": "navigation-frames",
+  "engine": {
+    "chromiumRevision": "1243",
+    "name": "chromium",
+    "playwrightVersion": "1.63.0",
+    "version": "153.0.8010.12"
+  },
+  "observations": [
+    {
+      "label": "frames",
+      "value": [
+        {
+          "documentId": "<document:1>",
+          "documentLifecycle": "active",
+          "errorOccurred": false,
+          "frameId": 0,
+          "frameType": "outermost_frame",
+          "parentFrameId": -1,
+          "processId": "<process:1>",
+          "url": "<origin:a>/frames.html"
+        },
+        {
+          "documentId": "<document:2>",
+          "documentLifecycle": "active",
+          "errorOccurred": false,
+          "frameId": "<frame:1>",
+          "frameType": "sub_frame",
+          "parentDocumentId": "<document:1>",
+          "parentFrameId": 0,
+          "processId": "<process:1>",
+          "url": "about:blank"
+        },
+        {
+          "documentId": "<document:3>",
+          "documentLifecycle": "active",
+          "errorOccurred": false,
+          "frameId": "<frame:2>",
+          "frameType": "sub_frame",
+          "parentDocumentId": "<document:1>",
+          "parentFrameId": 0,
+          "processId": "<process:1>",
+          "url": "about:srcdoc"
+        },
+        {
+          "documentId": "<document:4>",
+          "documentLifecycle": "active",
+          "errorOccurred": false,
+          "frameId": "<frame:3>",
+          "frameType": "sub_frame",
+          "parentDocumentId": "<document:1>",
+          "parentFrameId": 0,
+          "processId": "<process:1>",
+          "url": "<origin:a>/frame.html?kind=same"
+        },
+        {
+          "documentId": "<document:5>",
+          "documentLifecycle": "active",
+          "errorOccurred": false,
+          "frameId": "<frame:4>",
+          "frameType": "sub_frame",
+          "parentDocumentId": "<document:1>",
+          "parentFrameId": 0,
+          "processId": "<process:2>",
+          "url": "<origin:b>/frame.html?kind=cross"
+        }
+      ]
+    },
+    {
+      "label": "per-frame event sequences",
+      "value": [
+        {
+          "events": [
+            {
+              "documentLifecycle": "active",
+              "event": "onBeforeNavigate",
+              "frameId": 0,
+              "frameType": "outermost_frame",
+              "parentFrameId": -1,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frames.html"
+            },
+            {
+              "documentId": "<document:1>",
+              "documentLifecycle": "active",
+              "event": "onCommitted",
+              "frameId": 0,
+              "frameType": "outermost_frame",
+              "parentFrameId": -1,
+              "tabId": "<tab:1>",
+              "transitionQualifiers": [],
+              "transitionType": "link",
+              "url": "<origin:a>/frames.html"
+            },
+            {
+              "documentId": "<document:1>",
+              "documentLifecycle": "active",
+              "event": "onDOMContentLoaded",
+              "frameId": 0,
+              "frameType": "outermost_frame",
+              "parentFrameId": -1,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frames.html"
+            },
+            {
+              "documentId": "<document:1>",
+              "documentLifecycle": "active",
+              "event": "onCompleted",
+              "frameId": 0,
+              "frameType": "outermost_frame",
+              "parentFrameId": -1,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frames.html"
+            }
+          ],
+          "frameId": 0,
+          "url": "<origin:a>/frames.html"
+        },
+        {
+          "events": [
+            {
+              "documentLifecycle": "active",
+              "event": "onBeforeNavigate",
+              "frameId": "<frame:1>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:blank"
+            },
+            {
+              "documentId": "<document:2>",
+              "documentLifecycle": "active",
+              "event": "onCommitted",
+              "frameId": "<frame:1>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "transitionQualifiers": [],
+              "transitionType": "auto_subframe",
+              "url": "about:blank"
+            },
+            {
+              "documentId": "<document:2>",
+              "documentLifecycle": "active",
+              "event": "onDOMContentLoaded",
+              "frameId": "<frame:1>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:blank"
+            },
+            {
+              "documentId": "<document:2>",
+              "documentLifecycle": "active",
+              "event": "onCompleted",
+              "frameId": "<frame:1>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:blank"
+            }
+          ],
+          "frameId": "<frame:1>",
+          "url": "about:blank"
+        },
+        {
+          "events": [
+            {
+              "documentLifecycle": "active",
+              "event": "onBeforeNavigate",
+              "frameId": "<frame:2>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:srcdoc"
+            },
+            {
+              "documentId": "<document:3>",
+              "documentLifecycle": "active",
+              "event": "onCommitted",
+              "frameId": "<frame:2>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "transitionQualifiers": [],
+              "transitionType": "auto_subframe",
+              "url": "about:srcdoc"
+            },
+            {
+              "documentId": "<document:3>",
+              "documentLifecycle": "active",
+              "event": "onDOMContentLoaded",
+              "frameId": "<frame:2>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:srcdoc"
+            },
+            {
+              "documentId": "<document:3>",
+              "documentLifecycle": "active",
+              "event": "onCompleted",
+              "frameId": "<frame:2>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "about:srcdoc"
+            }
+          ],
+          "frameId": "<frame:2>",
+          "url": "about:srcdoc"
+        },
+        {
+          "events": [
+            {
+              "documentLifecycle": "active",
+              "event": "onBeforeNavigate",
+              "frameId": "<frame:3>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frame.html?kind=same"
+            },
+            {
+              "documentId": "<document:4>",
+              "documentLifecycle": "active",
+              "event": "onCommitted",
+              "frameId": "<frame:3>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "transitionQualifiers": [],
+              "transitionType": "auto_subframe",
+              "url": "<origin:a>/frame.html?kind=same"
+            },
+            {
+              "documentId": "<document:4>",
+              "documentLifecycle": "active",
+              "event": "onDOMContentLoaded",
+              "frameId": "<frame:3>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frame.html?kind=same"
+            },
+            {
+              "documentId": "<document:4>",
+              "documentLifecycle": "active",
+              "event": "onCompleted",
+              "frameId": "<frame:3>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:a>/frame.html?kind=same"
+            }
+          ],
+          "frameId": "<frame:3>",
+          "url": "<origin:a>/frame.html?kind=same"
+        },
+        {
+          "events": [
+            {
+              "documentLifecycle": "active",
+              "event": "onBeforeNavigate",
+              "frameId": "<frame:4>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:b>/frame.html?kind=cross"
+            },
+            {
+              "documentId": "<document:5>",
+              "documentLifecycle": "active",
+              "event": "onCommitted",
+              "frameId": "<frame:4>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "transitionQualifiers": [],
+              "transitionType": "auto_subframe",
+              "url": "<origin:b>/frame.html?kind=cross"
+            },
+            {
+              "documentId": "<document:5>",
+              "documentLifecycle": "active",
+              "event": "onDOMContentLoaded",
+              "frameId": "<frame:4>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:b>/frame.html?kind=cross"
+            },
+            {
+              "documentId": "<document:5>",
+              "documentLifecycle": "active",
+              "event": "onCompleted",
+              "frameId": "<frame:4>",
+              "frameType": "sub_frame",
+              "parentFrameId": 0,
+              "tabId": "<tab:1>",
+              "url": "<origin:b>/frame.html?kind=cross"
+            }
+          ],
+          "frameId": "<frame:4>",
+          "url": "<origin:b>/frame.html?kind=cross"
+        }
+      ]
+    },
+    {
+      "label": "parent committed before child committed",
+      "value": true
+    }
+  ],
+  "schemaVersion": 1,
+  "status": "complete"
+}

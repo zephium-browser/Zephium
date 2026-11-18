@@ -1,0 +1,6 @@
+{
+  "id": "worker-install-activate",
+  "title": "Service worker install and activate events precede message handling",
+  "apis": ["runtime.onInstalled", "runtime.sendMessage"],
+  "permissions": []
+}
