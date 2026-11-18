@@ -612,6 +612,8 @@ where
         }
         let mut used_steps = BTreeSet::new();
         let mut results = Vec::new();
+        // Reads the driver ran; one never dispatched is not a page tried.
+        let mut ran = Vec::new();
         for request in &requests {
             let step = new.iter().find(|step| {
                 !used_steps.contains(&step.id) && same_request(&request.kind, &step.kind)
@@ -638,6 +640,7 @@ where
             let (content, error) = match (step, &execution) {
                 (Some(step), Some(execution)) => {
                     used_steps.insert(step.id);
+                    ran.push(request.call.clone());
                     let asked = new
                         .iter()
                         .filter(|s| {
@@ -679,7 +682,7 @@ where
             }
         }
         for (request, (_, _, error)) in requests.iter().zip(&results) {
-            if matches!(request.kind, WorkStepKindV1::Read { .. }) {
+            if matches!(request.kind, WorkStepKindV1::Read { .. }) && ran.contains(&request.call) {
                 self.run.note_page_read(!*error);
             }
         }

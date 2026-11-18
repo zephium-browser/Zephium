@@ -876,9 +876,11 @@ const REDO: [&str; 9] = [
     "give access",
 ];
 /// Words that claim a finished or checked result.
-const CLAIMS: [&str; 7] = [
+const CLAIMS: [&str; 9] = [
     "complete",
+    "finished",
     "verified",
+    "checked",
     "confirmed",
     "all set",
     "ready",
@@ -984,7 +986,7 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
             if (!run.failed.is_empty() || run.unread) && affirms(headline, &CLAIMS, true) {
-                return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
+                return Err("reply: the headline calls the result finished or checked while a part could not do its job or no page could be read; say what was found".into());
             }
         }
         WorkArtifactDataV1::Picks { items, .. } => {
@@ -1698,6 +1700,18 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&claimed, &unread).is_err());
+        for headline in ["Pricing checked", "Pricing finished"] {
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The table is on the canvas."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &unread).is_err(), "{headline}");
+        }
+        let negated: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Pricing could not be checked", "text": "The pages didn't open."
+        }))
+        .unwrap();
+        assert!(honest(&negated, &unread).is_ok());
         let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "reply", "headline": "I couldn't read the pricing pages",
             "text": "Vercel, Cloudflare and Hetzner's pages didn't open. Try again."

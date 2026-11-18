@@ -2065,6 +2065,67 @@ async fn a_challenged_results_page_falls_back_to_the_models_own_search() {
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn a_sheet_made_beside_a_read_that_fails_waits_for_it_and_is_refused() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![
+                call(
+                    "f",
+                    "web_fetch",
+                    json!({"url": "https://example.test/pricing"}),
+                ),
+                call(
+                    "t",
+                    "create",
+                    json!({"kind": "sheet", "title": "Pricing", "data": {
+                    "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+                    "rows": [{"cells": ["Hobby", "Free"]}, {"cells": ["Pro", "$20"]}]}}),
+                ),
+            ],
+            1 => {
+                assert!(
+                    seen.contains("no page you tried to read could be read"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "It didn't open.", "title": "Pricing"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn browse(_: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        WorkBrowserOutcome {
+            status: WorkStepStatus::Failed,
+            note: Some("The page could not be read".into()),
+            ..outcome(None, vec![])
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search("Price the plans", turns, &browser_search(&asked), browse).await;
+    assert!(
+        !run.artifacts
+            .iter()
+            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        "no sheet stands on a page that could not be read"
+    );
+    assert!(run
+        .artifacts
+        .iter()
+        .any(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. })));
+}
+
 /// A read whose first load the page's server redirected: the browser read
 /// failed naming where, as the composition reports it.
 fn redirected(to: &str) -> WorkBrowserOutcome {

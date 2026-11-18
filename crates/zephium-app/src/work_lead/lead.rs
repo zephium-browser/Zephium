@@ -671,6 +671,10 @@ where
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
         let mut requests: Vec<(usize, Request)> = Vec::new();
         let mut pending: Vec<Pending<'_>> = Vec::new();
+        // Pages and parts of this turn settle before its objects are judged,
+        // so an object knows whether any page the turn read could be read.
+        let mut reads: Vec<Pending<'_>> = Vec::new();
+        let mut objects: Vec<Pending<'_>> = Vec::new();
         let mut finish_at = None;
         let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
@@ -750,7 +754,7 @@ where
                 "start_part" => match parts::spec(args) {
                     Ok(spec) => {
                         ran[index] = true;
-                        pending.push(Box::pin(async move {
+                        reads.push(Box::pin(async move {
                             let (content, error) = self.part(spec).await;
                             vec![(index, content, error)]
                         }))
@@ -759,7 +763,7 @@ where
                 },
                 "create" => {
                     let args = unquoted_data(args);
-                    pending.push(Box::pin(async move {
+                    objects.push(Box::pin(async move {
                         let part = args
                             .get("part")
                             .and_then(Value::as_str)
@@ -770,7 +774,7 @@ where
                 }
                 "revise" => {
                     let args = unquoted_data(args);
-                    pending.push(Box::pin(async move {
+                    objects.push(Box::pin(async move {
                         let (content, error) = self.revise(&args).await;
                         vec![(index, content, error)]
                     }))
@@ -833,7 +837,7 @@ where
             let hands = &self.hands;
             let terminal = &mut terminal;
             let batch = requests;
-            pending.push(Box::pin(async move {
+            reads.push(Box::pin(async move {
                 let order: Vec<(usize, String)> =
                     batch.iter().map(|(i, r)| (*i, r.call.clone())).collect();
                 match hands.run(batch.into_iter().map(|(_, r)| r).collect()).await {
@@ -853,6 +857,11 @@ where
                 }
             }));
         }
+        pending.push(Box::pin(async move {
+            let mut answers: Vec<Answer> = join_all(reads).await.into_iter().flatten().collect();
+            answers.extend(join_all(objects).await.into_iter().flatten());
+            answers
+        }));
         for (index, content, error) in join_all(pending).await.into_iter().flatten() {
             answers[index] = Some((content, error));
         }
