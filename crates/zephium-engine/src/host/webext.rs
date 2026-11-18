@@ -145,6 +145,7 @@ impl WebextHost {
         if let Some(runtime) = &entry.runtime {
             runtime.configure(&configuration);
         } else {
+            // SAFETY: configuration was made on the main thread here; the NSString outlives the call.
             unsafe {
                 configuration.setApplicationNameForUserAgent(Some(&NSString::from_str(
                     zephium_webext_macos::application_name(),

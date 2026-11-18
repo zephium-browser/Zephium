@@ -18,16 +18,36 @@ def job(text, name):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_macos_checks_binary_imports_immediately_after_build(self):
-        macos = job(WORKFLOW.read_text(), 'macos')
-        build = macos.split('      - name: Build, sign and notarize\n', 1)[1]
-        check = build.split('\n      - name: ', 1)[1]
-        self.assertTrue(check.startswith('Check macOS WebKit imports\n'))
-        check = check.split('\n      - name: ', 1)[0]
+    def assert_macos_import_check(self, workflow):
+        macos = job(workflow, 'macos')
+        steps = re.split(r'^      - ', macos, flags=re.M)[1:]
+        build = next(i for i, step in enumerate(steps)
+                     if step.startswith('name: Build, sign and notarize\n'))
+        check = steps[build + 1]
+        self.assertTrue(check.startswith('name: Check macOS WebKit imports\n'))
         self.assertIn('cargo run --locked -p xtask -- check-macos-imports', check)
         self.assertIn('target/aarch64-apple-darwin/release/bundle/macos/'
                       'Zephium.app/Contents/MacOS/zephium-desktop', check)
+        self.assertNotRegex(check, r'(?m)^        if:')
         self.assertNotIn('continue-on-error:', check)
+
+    def test_macos_checks_binary_imports_immediately_after_build(self):
+        self.assert_macos_import_check(WORKFLOW.read_text())
+
+    def test_macos_import_check_rejects_every_intervening_step_form(self):
+        marker = '      - name: Check macOS WebKit imports\n'
+        for step in ['name: Intervening\n        run: true',
+                     'run: true', 'uses: ./local-action']:
+            with self.subTest(step=step), self.assertRaises(AssertionError):
+                self.assert_macos_import_check(WORKFLOW.read_text().replace(
+                    marker, f'      - {step}\n' + marker, 1))
+
+    def test_macos_import_check_rejects_optional_gates(self):
+        marker = '      - name: Check macOS WebKit imports\n'
+        for field in ['if: false', 'continue-on-error: true']:
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                self.assert_macos_import_check(WORKFLOW.read_text().replace(
+                    marker, marker + f'        {field}\n', 1))
 
     def test_release_guide_keeps_betas_off_stable_clients_after_bootstrap(self):
         guide = (ROOT / '.github/RELEASE.md').read_text()
