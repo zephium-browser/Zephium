@@ -327,6 +327,7 @@ impl AgentWorkController {
                 None
             };
             consent_dismissed |= consent.is_some();
+            let pressing_consent = consent.is_some() && rows_scroll.is_none();
             let proposed = match consent {
                 Some(consent) => Some(consent),
                 None if actionable => answers
@@ -570,6 +571,34 @@ impl AgentWorkController {
                         .emit(AgentWorkEventKind::DecisionPlanner(
                             AgentWorkDecisionRoute::NativeRefused,
                         ))?;
+                    observation = Box::pin(Self::observe(state, worker, browser)).await?;
+                    captured_at = SemanticCaptureInstant::from_millis(
+                        state
+                            .session
+                            .as_mut()
+                            .ok_or_else(|| crate::contract!())?
+                            .policy_now()
+                            .map_err(AgentWorkFailure::Browser)?
+                            .millis(),
+                    );
+                    progress = state.task_progress(&observation)?;
+                    break;
+                }
+                // A consent press commits nothing: the page that saved the
+                // choice and loaded itself again under it is looked at anew.
+                Err(AgentWorkFailure::Browser(
+                    error @ (AgentBrowserProviderError::Action(_)
+                    | AgentBrowserProviderError::ActionRejected(_)
+                    | AgentBrowserProviderError::ActionUnverified),
+                )) if pressing_consent => {
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+                    let _ = session.take_rejected_refusal();
+                    if !session
+                        .close_failed_owned_action()
+                        .map_err(AgentWorkFailure::Browser)?
+                    {
+                        return Err(AgentWorkFailure::Browser(error));
+                    }
                     observation = Box::pin(Self::observe(state, worker, browser)).await?;
                     captured_at = SemanticCaptureInstant::from_millis(
                         state

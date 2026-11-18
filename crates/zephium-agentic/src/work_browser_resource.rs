@@ -245,6 +245,7 @@ struct ConstructionSettings {
     anonymous_session: Option<crate::WorkBrowserSession>,
     work_website_data: bool,
     redirect: Option<crate::WorkBrowserRedirect>,
+    unreachable: Option<crate::WorkBrowserUnreachable>,
     window: Option<(WorkBrowserConstructionAttempt, std::time::Instant)>,
 }
 
@@ -356,6 +357,28 @@ impl WorkBrowserResourceRequest {
             .get_or_insert_with(Default::default)
             .redirect = Some(redirect);
         Ok(self)
+    }
+    /// Where the native view says its main-frame load could not reach the
+    /// site, for any construction.
+    pub fn with_unreachable(
+        mut self,
+        unreachable: crate::WorkBrowserUnreachable,
+    ) -> Result<Self, Box<Self>> {
+        if self.operation() != WorkBrowserResourceOperation::Construct
+            || self.unreachable().is_some()
+        {
+            return Err(Box::new(self));
+        }
+        self.construction
+            .get_or_insert_with(Default::default)
+            .unreachable = Some(unreachable);
+        Ok(self)
+    }
+    /// The unreachable slot of a construction, if one was bound.
+    pub fn unreachable(&self) -> Option<&crate::WorkBrowserUnreachable> {
+        self.construction
+            .as_ref()
+            .and_then(|settings| settings.unreachable.as_ref())
     }
     /// The refused-redirect slot of a public construction, if one was bound.
     pub fn redirect(&self) -> Option<&crate::WorkBrowserRedirect> {

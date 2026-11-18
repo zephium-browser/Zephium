@@ -7644,6 +7644,9 @@ pub enum AgentWorkFailure {
     /// The public page's first load was redirected before it was ready.
     /// The gate refused it; the destination stays with the read's owner.
     Redirected,
+    /// The page's main-frame load never reached its site: no connection, an
+    /// unknown host, a refused or insecure connection.
+    Unreachable,
     /// Provider or action authority returned a closed refusal.
     Browser(AgentBrowserProviderError),
     /// A progress/receipt/metric join was refused.
