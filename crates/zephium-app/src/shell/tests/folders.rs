@@ -192,7 +192,7 @@ fn a_folder_is_renamed_coloured_and_folded_and_keeps_that_across_a_restart() {
 }
 
 #[test]
-fn closing_a_folder_tab_keeps_it_asleep_in_its_place_and_never_wakes_another() {
+fn closing_a_folder_tab_keeps_it_asleep_once_then_takes_it_out() {
     let (mut shell, _engine, screen, _store) = browsed();
     let ids = tabs(
         &mut shell,
@@ -220,12 +220,14 @@ fn closing_a_folder_tab_keeps_it_asleep_in_its_place_and_never_wakes_another() {
     assert!(shell.items.tab(next).unwrap().has_view());
     assert_ne!(next, held[2]);
 
-    // An asleep tab out of the window has nothing to end.
+    // Closing it again, asleep, takes it out of the folder for good.
     assert_eq!(
         op(&mut shell, Command::Close(held[2])).outcome,
-        OperationOutcome::NoOp
+        OperationOutcome::Applied
     );
-    assert_eq!(shell.items.children(folder), held);
+    assert_eq!(shell.items.children(folder), &held[..2]);
+    assert_eq!(shell.recently_closed.len(), closed_before + 1);
+    let held = shell.items.children(folder).to_vec();
 
     // Closing the folder's tabs ends every page and keeps every tab.
     assert_eq!(
@@ -233,7 +235,7 @@ fn closing_a_folder_tab_keeps_it_asleep_in_its_place_and_never_wakes_another() {
         OperationOutcome::Applied
     );
     let held = shell.items.children(folder).to_vec();
-    assert_eq!(held.len(), 3);
+    assert_eq!(held.len(), 2);
     assert!(held
         .iter()
         .all(|id| !shell.items.tab(*id).unwrap().has_view()));

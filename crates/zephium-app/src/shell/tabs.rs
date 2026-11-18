@@ -286,6 +286,9 @@ impl Shell {
         if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
             return NativeWork::default();
         }
+        // Closing a folder's tab that is already asleep removes it; an
+        // asleep Essential has nothing to end and stays.
+        let keep = keep && !self.asleep_in_folder(id);
         if keep && self.kept_asleep(id) {
             return NativeWork::default();
         }
@@ -365,6 +368,16 @@ impl Shell {
                 .windows
                 .focused()
                 .is_none_or(|win| win.active != Some(id))
+    }
+
+    /// A folder's tab already asleep: closing it again takes it out.
+    pub(super) fn asleep_in_folder(&self, id: ItemId) -> bool {
+        self.kept_asleep(id)
+            && self
+                .items
+                .get(id)
+                .and_then(|item| item.parent)
+                .is_some_and(|parent| self.items.is_folder(parent))
     }
 
     /// Where an Essential or a folder's tab sits, so closing it can leave it

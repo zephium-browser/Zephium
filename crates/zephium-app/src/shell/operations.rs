@@ -612,7 +612,7 @@ impl Shell {
             self.browser_after_return = Some(Box::new(Command::Close(id)));
             return self.request_browser_return();
         }
-        if self.kept_asleep(id) {
+        if self.kept_asleep(id) && !self.asleep_in_folder(id) {
             return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
         }
         let discard_closing = matches!(
