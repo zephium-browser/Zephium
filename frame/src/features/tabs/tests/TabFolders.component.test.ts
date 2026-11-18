@@ -175,6 +175,8 @@ test("double-click renames in place; Escape keeps the name", async () => {
   flushSync();
   expect(row("F").querySelector("input")).toBeNull();
   expect(native.folder).not.toHaveBeenCalled();
+  // The keyboard goes back to the row it renamed.
+  await expect.poll(() => document.activeElement).toBe(row("F").querySelector("button"));
 
   row("F")
     .querySelector<HTMLButtonElement>("button")!
@@ -184,6 +186,21 @@ test("double-click renames in place; Escape keeps the name", async () => {
   await userEvent.keyboard("{Enter}");
   await expect.poll(() => native.folder.mock.calls.length).toBe(1);
   expect(native.folder).toHaveBeenCalledWith({ type: "rename", id: "F", name: "Reading" });
+  await expect.poll(() => document.activeElement).toBe(row("F").querySelector("button"));
+});
+
+test("a rename left by clicking elsewhere keeps the focus where the click put it", async () => {
+  const { row } = await list();
+  row("F")
+    .querySelector<HTMLButtonElement>("button")!
+    .dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+  flushSync();
+  const elsewhere = row("d").querySelector<HTMLElement>(".tab-open")!;
+  elsewhere.focus();
+  flushSync();
+  await expect.poll(() => row("F").querySelector("input")).toBeNull();
+  await frame();
+  expect(document.activeElement).toBe(elsewhere);
 });
 
 test("the folder menu opens from the keyboard with what the folder can offer", async () => {
@@ -246,6 +263,20 @@ test("a tab dragged to the end of a folder and set in goes into it", async () =>
   await expect.poll(() => native.folder.mock.calls.length).toBe(1);
   expect(native.folder).toHaveBeenCalledWith({ type: "move", id: "d", parent: "F", before: null });
   expect(native.setEssential).not.toHaveBeenCalled();
+});
+
+test("in a right-to-left list a tab is set into a folder by moving left", async () => {
+  const { row, screen } = await list();
+  screen.container.setAttribute("dir", "rtl");
+  const handle = row("d").querySelector<HTMLElement>(".tab-open")!;
+  const start = handle.getBoundingClientRect();
+  const { up } = drag(handle, { x: start.left + 20 - 16, y: start.top + start.height / 2 });
+  await frame();
+  expect(row("F").hasAttribute("data-drop-into")).toBe(true);
+  expect(row("d").style.transform).toContain("translate(-13px");
+  up();
+  await expect.poll(() => native.folder.mock.calls.length).toBe(1);
+  expect(native.folder).toHaveBeenCalledWith({ type: "move", id: "d", parent: "F", before: null });
 });
 
 test("a folder drags with what it holds and lands at the top level", async () => {

@@ -32,6 +32,7 @@
   import { TabRail } from "$features/tabs";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
+  import { groupable } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
   import * as folderEdit from "$session/folder-edit.svelte";
   import { requestTab } from "$session/work-tab.svelte";
@@ -338,7 +339,10 @@
     handledCommand = command.seq;
     untrack(() => {
       if (command.id === "split.choose") chooseSplit();
-      if (command.id === "tab.group") folderEdit.askGroup();
+      if (command.id === "tab.group" && !folderEdit.askGroup()) {
+        const ids = groupable([tabs.activeId()], tabs.tabs(), tabs.sidebarNodes());
+        if (ids.length > 0) void folderEdit.create(m.folder_default_name(), { tabs: ids });
+      }
       if (command.id === "tab.newFolder") {
         const tab = tabs.takeMenuTarget();
         if (tab) void folderEdit.create(m.folder_default_name(), { tabs: [tab] });

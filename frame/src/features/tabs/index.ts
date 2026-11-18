@@ -4,5 +4,6 @@ export { default as TabRail } from "./components/TabRail.svelte";
 export const loadTabCapacityState = () => import("./components/TabCapacityState.svelte");
 export const loadNavigationError = () => import("./components/NavigationError.svelte");
 export { sidebarTree } from "./lib/sidebar-model";
+export { groupable } from "./lib/folder-group";
 export * as selectionGlide from "./lib/selection-glide";
 export { applySpaceTheme, spaceThemeValues } from "./lib/space-theme";

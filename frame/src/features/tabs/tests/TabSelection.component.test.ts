@@ -3,10 +3,11 @@ import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import { flushSync } from "svelte";
 import "$styles/global.css";
-import type { ItemsState, SidebarNodeView, TabView } from "$shared/ipc/bindings";
+import type { FolderIntent, ItemsState, SidebarNodeView, TabView } from "$shared/ipc/bindings";
 import { emitNativeEvent } from "$shared/testing/native-events";
 import { revision, spaceFixture, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
+import * as folderEdit from "$session/folder-edit.svelte";
 import TabList from "../components/TabList.svelte";
 import SidebarBody from "../components/SidebarBody.svelte";
 import { sidebarTree } from "../lib/sidebar-model";
@@ -20,6 +21,7 @@ const native = vi.hoisted(() => ({
   })),
   mute: vi.fn(async (_id: string, _muted: boolean) => ({ accepted: true, operation_id: null })),
   move: vi.fn(async (_id: string, _space: string) => ({ accepted: true, operation_id: null })),
+  folder: vi.fn(async (_intent: FolderIntent) => ({ accepted: true, operation_id: null })),
 }));
 
 vi.mock("$shared/platform", () => ({ IS_MAC: false, IS_WINDOWS: true }));
@@ -32,12 +34,16 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsSetEssential: native.essential,
     tabSetMuted: native.mute,
     spacesMoveTab: native.move,
+    tabsFolder: native.folder,
     tabDragOver: async () => {},
     swipeRegion: async () => false,
   });
 });
 
 afterEach(() => {
+  // A create still waiting for its folder lets the next one go.
+  folderEdit.rename("");
+  folderEdit.stopRenaming("");
   tabs.dispose();
   vi.clearAllMocks();
 });
@@ -246,6 +252,65 @@ test("Close settles a command for every selected ID", async () => {
   await screen.getByRole("button", { name: "Close selected tabs" }).click();
   await expect.poll(() => native.close.mock.calls).toEqual([["a"], ["b"], ["c"]]);
   expect(native.activate).not.toHaveBeenCalled();
+});
+
+const created = (ids: string[]) => ({
+  type: "create",
+  name: "New folder",
+  color: null,
+  tabs: ids,
+  parent: null,
+  before: null,
+});
+
+test("Group puts the selected tabs into a new folder and clears the selection", async () => {
+  const { click, screen, selected } = await list();
+  click("c", { shiftKey: true });
+  await screen.getByRole("button", { name: "Group selected tabs into a folder" }).click();
+  await expect.poll(() => native.folder.mock.calls.length).toBe(1);
+  expect(native.folder).toHaveBeenCalledWith(created(["a", "b", "c"]));
+  expect(selected()).toEqual([]);
+});
+
+test("Group into Folder from a command takes the selection, else the tab in front", async () => {
+  const { click, selected, publish, snapshot } = await list();
+  click("b", { ctrlKey: true });
+  expect(folderEdit.askGroup()).toBe(true);
+  await expect.poll(() => native.folder.mock.calls.length).toBe(1);
+  expect(native.folder).toHaveBeenLastCalledWith(created(["a", "b"]));
+  expect(selected()).toEqual([]);
+  // Its folder arrives and its row takes it for naming.
+  publish({
+    nodes: [
+      ...snapshot.nodes,
+      {
+        id: "N",
+        parent_id: null,
+        section: "today",
+        kind: { type: "folder", name: "New folder", color: null, collapsed: false },
+      },
+    ],
+  });
+  await expect.poll(() => folderEdit.fresh("N")).toBe(true);
+  folderEdit.claim("N");
+  folderEdit.stopRenaming("N");
+  native.folder.mockClear();
+  expect(folderEdit.askGroup()).toBe(true);
+  await expect.poll(() => native.folder.mock.calls.length).toBe(1);
+  expect(native.folder).toHaveBeenLastCalledWith(created(["a"]));
+});
+
+test("Group into Folder leaves Essentials where they are", async () => {
+  const nodes: SidebarNodeView[] = open.map((tab) => ({
+    id: tab.id,
+    parent_id: null,
+    section: tab.id === "a" ? "favorites" : "today",
+    kind: { type: "tab", tab_id: tab.id },
+  }));
+  await list({ nodes });
+  expect(folderEdit.askGroup()).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(native.folder).not.toHaveBeenCalled();
 });
 
 test("Close skips pinned rows while Ctrl-click can seed across sections", async () => {

@@ -10,9 +10,11 @@ import type { FolderColor } from "$shared/ipc/bindings";
  */
 
 let renaming = $state<string | null>(null);
-// The folders there were before a create, so the new one is the one not
-// among them; given up if the projection never brings one.
-let awaiting = $state.raw<ReadonlySet<string> | null>(null);
+// The folders there were before a create, in the space it was made in, so
+// the new one is the one not among them; given up if the projection never
+// brings one.
+type Awaiting = { known: ReadonlySet<string>; scope: string; settled: () => void };
+let awaiting = $state.raw<Awaiting | null>(null);
 let awaitTimer: ReturnType<typeof setTimeout> | undefined;
 const folds = $state<Record<string, boolean>>({});
 
@@ -24,22 +26,30 @@ const folderIds = () =>
       .map((node) => node.id),
   );
 
+const scope = () => `${tabs.profile()?.id ?? ""}/${tabs.activeSpaceId() ?? ""}`;
+
+function settle() {
+  const was = awaiting;
+  clearTimeout(awaitTimer);
+  awaiting = null;
+  was?.settled();
+}
+
 export const renamingId = () => renaming;
 
 /** Whether this folder is the one a create just made, so it should open for renaming. */
-export const fresh = (id: string) => awaiting !== null && !awaiting.has(id);
+export const fresh = (id: string) =>
+  awaiting !== null && awaiting.scope === scope() && !awaiting.known.has(id);
 
 export function rename(id: string) {
-  awaiting = null;
+  settle();
   renaming = id;
 }
 
 /** The fresh folder's row has opened for renaming. */
 export function claim(id: string) {
   if (!fresh(id)) return;
-  clearTimeout(awaitTimer);
-  awaiting = null;
-  renaming = id;
+  rename(id);
 }
 
 export function stopRenaming(id: string) {
@@ -53,11 +63,21 @@ export async function commitName(id: string, name: string, current: string) {
   await tabs.folder({ type: "rename", id, name: trimmed });
 }
 
+type CreateOptions = { tabs?: string[]; parent?: string | null; color?: FolderColor | null };
+
+// One create at a time, each until its folder is found, so two never take
+// each other's row.
+let creating: Promise<void> = Promise.resolve();
+
 /** A new folder, holding `tabs` or empty inside `parent`; it opens for its name. */
-export async function create(
-  name: string,
-  options: { tabs?: string[]; parent?: string | null; color?: FolderColor | null } = {},
-) {
+export function create(name: string, options: CreateOptions = {}): Promise<void> {
+  const run = creating.then(() => createNow(name, options));
+  creating = run.catch(() => {});
+  return run;
+}
+
+async function createNow(name: string, options: CreateOptions) {
+  const where = scope();
   const known = folderIds();
   const result = await tabs.folder({
     type: "create",
@@ -68,14 +88,18 @@ export async function create(
     before: null,
   });
   if (result.outcome !== "applied" && result.outcome !== "deferred") return;
+  // Another space is in front now; its folders are not this one.
+  if (scope() !== where) return;
   const made = [...folderIds()].find((id) => !known.has(id));
   if (made !== undefined) {
     rename(made);
     return;
   }
-  awaiting = known;
-  clearTimeout(awaitTimer);
-  awaitTimer = setTimeout(() => (awaiting = null), 2000);
+  await new Promise<void>((settled) => {
+    settle();
+    awaiting = { known, scope: where, settled };
+    awaitTimer = setTimeout(settle, 2000);
+  });
 }
 
 /** A fold as the sidebar draws it: the one asked for until native answers. */
@@ -111,9 +135,21 @@ $effect.root(() => {
   });
 });
 
-// Group into Folder asks the sidebar, which knows the selection.
-let groupAsks = $state(0);
-export const groupAsked = () => groupAsks;
-export function askGroup() {
-  groupAsks += 1;
+// Group into Folder asks the sidebar, which knows the selection. With no
+// sidebar drawn the caller groups the tab in front itself.
+let grouper: (() => void) | null = null;
+
+/** The sidebar takes Group into Folder while it is drawn; returns its release. */
+export function handleGroup(handler: () => void) {
+  grouper = handler;
+  return () => {
+    if (grouper === handler) grouper = null;
+  };
+}
+
+/** Whether a sidebar took the ask. */
+export function askGroup(): boolean {
+  if (grouper === null) return false;
+  grouper();
+  return true;
 }

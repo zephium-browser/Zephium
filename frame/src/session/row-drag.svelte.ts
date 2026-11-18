@@ -88,6 +88,8 @@ export class RowDrag {
   #page = false;
   #folder = false;
   #startX = 0;
+  /** Which way is deeper: +1 left to right, -1 in a right-to-left list. */
+  #inward = 1;
   #block: (TreeBlock & { place: TreePlace }) | null = null;
   #place: TreePlace | null = null;
   #into: HTMLElement | null = null;
@@ -126,6 +128,8 @@ export class RowDrag {
       const reorder = this.#options.reorder();
       this.#essential = reorder?.essential ?? false;
       this.#startX = event.clientX;
+      const list = this.#options.list();
+      this.#inward = list && getComputedStyle(list).direction === "rtl" ? -1 : 1;
       this.#block = this.#options.tree?.block(this.#id) ?? null;
       this.#place = null;
       this.#reorder = reorder
@@ -258,12 +262,13 @@ export class RowDrag {
     const block = this.#block;
     if (!reorder || !block || !this.#options.tree) return;
     const gap = inPlace ? reorder.gap() : null;
-    const place = gap ? treePlace(treeRows(gap.rows), gap.index, block, x - this.#startX) : null;
+    const inward = (x - this.#startX) * this.#inward;
+    const place = gap ? treePlace(treeRows(gap.rows), gap.index, block, inward) : null;
     const level = place?.depth ?? block.depth;
     if (inPlace && this.#place !== null && place !== null && level !== this.#place.depth)
       haptic("align");
     this.#place = place;
-    reorder.indent((level - block.depth) * INDENT);
+    reorder.indent((level - block.depth) * INDENT * this.#inward);
     const into =
       place?.parent && gap
         ? (gap.rows.find((row) => row.dataset.nodeId === place.parent) ?? null)

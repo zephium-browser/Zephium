@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import * as m from "$shared/i18n/messages";
   import { Folder01Icon, FolderOpenIcon, VolumeHighIcon } from "@hugeicons/core-free-icons";
   import Icon from "$shared/ui/Icon";
@@ -66,11 +67,15 @@
     input.select();
   });
 
-  function finish(commit: boolean) {
+  // From the keyboard, focus goes back to the row once it is a button again;
+  // a click elsewhere keeps its own focus.
+  async function finish(commit: boolean, refocus: boolean) {
     if (done) return;
     done = true;
     onrenamed(commit ? (input?.value ?? null) : null);
-    row?.querySelector<HTMLButtonElement>(".folder-row")?.focus();
+    if (!refocus) return;
+    await tick();
+    row?.querySelector<HTMLButtonElement>("button.folder-row")?.focus();
   }
 
   // The rows are siblings drawn at depths, so the tree is walked by depth.
@@ -146,14 +151,14 @@
           if (event.isComposing) return;
           if (event.key === "Enter") {
             event.preventDefault();
-            finish(true);
+            void finish(true, true);
           } else if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
-            finish(false);
+            void finish(false, true);
           }
         }}
-        onblur={() => finish(true)}
+        onblur={() => void finish(true, false)}
       />
     </div>
   {:else}

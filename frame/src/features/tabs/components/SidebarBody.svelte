@@ -39,19 +39,15 @@
   }
 
   // Group into Folder: the selected tabs, or the one in front.
-  let groupHandled = folderEdit.groupAsked();
-  $effect(() => {
-    const asked = folderEdit.groupAsked();
-    if (asked === groupHandled) return;
-    groupHandled = asked;
-    untrack(() => {
+  $effect(() =>
+    folderEdit.handleGroup(() => {
       const chosen = selection.value.ids.length > 0 ? selection.value.ids : [tabs.activeId()];
       const ids = groupable(chosen, tabs.tabs(), tabs.sidebarNodes());
       if (ids.length === 0) return;
       selection.clear();
       void folderEdit.create(m.folder_default_name(), { tabs: ids });
-    });
-  });
+    }),
+  );
 
   let pinnedOrder = $state.raw<string[]>([]);
   let todayOrder = $state.raw<string[]>([]);
