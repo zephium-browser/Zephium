@@ -6,6 +6,9 @@ import type { KeymapEntry, LauncherTrigger } from "$shared/ipc/bindings";
 import { keymap } from "$domain/keymap";
 import KeyboardPage from "../components/sections/KeyboardPage.svelte";
 
+// These tests read the macOS keycaps (⌘, ⌥, ⇧); Windows spells its shortcuts out.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
+
 const entry = (id: string, title: string, accelerator: string | null, customized = false) =>
   ({
     id,

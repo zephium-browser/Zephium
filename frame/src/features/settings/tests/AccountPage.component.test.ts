@@ -7,6 +7,9 @@ import { accountFixture as account, usageFixture } from "$shared/testing/account
 import { preferences } from "$domain/preferences";
 import AccountPage from "../components/sections/AccountPage.svelte";
 
+// These tests read the macOS Keychain wording; Windows words the vault fault its own way.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
+
 const native = vi.hoisted(() => ({
   get: vi.fn(),
   send: vi.fn(),
