@@ -2282,6 +2282,92 @@ async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
     }
 }
 
+/// A read batch that ends the run (here its time runs out) ends the turn:
+/// the object created beside it is never stored for the ending run.
+#[tokio::test]
+async fn an_object_beside_a_read_that_ends_the_run_is_never_placed() {
+    fn turns(turn: usize, _: &str) -> Vec<WorkModelPart> {
+        assert_eq!(turn, 0, "the run ends with its first turn");
+        vec![
+            call(
+                "f",
+                "web_fetch",
+                json!({"url": "https://vercel.com/pricing"}),
+            ),
+            call(
+                "g",
+                "web_fetch",
+                json!({"url": "https://en.wikipedia.org/wiki/Vercel"}),
+            ),
+            call(
+                "r",
+                "create",
+                json!({"kind": "reply", "title": "Pricing", "data": {
+                "headline": "Vercel Pro is $20 a month", "text": "Hobby is free."}}),
+            ),
+        ]
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective:
+                "Price Vercel from https://vercel.com/pricing and https://en.wikipedia.org/wiki/Vercel"
+                    .into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let mut begin = command(work, WorkRevision::INITIAL);
+    let WorkRuntimeIntent::BeginAgent { limits, .. } = &mut begin.intent else {
+        unreachable!()
+    };
+    limits.timeout_seconds = 1;
+    limits.max_workers = 1;
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let opened = &opened;
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            begin,
+            None,
+            models,
+            &Search,
+            // The attempt's time runs out while its first page loads, so the
+            // second is never opened and the run ends.
+            |_, _| async move {
+                opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+                Ok(outcome(None, vec![]))
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_ne!(run.status, WorkExecutionStatus::Running);
+    assert!(run.artifacts.is_empty(), "{:?}", run.artifacts);
+    assert!(run
+        .steps
+        .iter()
+        .all(|step| !matches!(step.kind, WorkStepKindV1::Publish)));
+}
+
 /// A read whose first load the page's server redirected: the browser read
 /// failed naming where, as the composition reports it.
 fn redirected(to: &str) -> WorkBrowserOutcome {
