@@ -76,6 +76,9 @@ struct State {
     waiting_since: Option<Instant>,
     stopped: Option<WorkCancelCause>,
     unreadable: u8,
+    /// Page reads this run asked for, and those that read their page.
+    pages_tried: u16,
+    pages_read: u16,
 }
 
 pub(crate) struct LeadRun {
@@ -165,6 +168,8 @@ impl LeadRun {
                 waiting_since: None,
                 stopped: None,
                 unreadable: 0,
+                pages_tried: 0,
+                pages_read: 0,
             }),
             accepted: Mutex::new(Vec::new()),
             routing: tokio::sync::Mutex::new(()),
@@ -791,6 +796,16 @@ impl LeadRun {
     /// read, so `admit_address` holds the ones nobody gave it.
     pub(crate) fn mark_private(&self) {
         self.state().private = true;
+    }
+    pub(crate) fn note_page_read(&self, read: bool) {
+        let mut state = self.state();
+        state.pages_tried = state.pages_tried.saturating_add(1);
+        state.pages_read = state.pages_read.saturating_add(u16::from(read));
+    }
+    /// The run tried to read pages and none of them could be read.
+    pub(crate) fn no_page_read(&self) -> bool {
+        let state = self.state();
+        state.pages_tried > 0 && state.pages_read == 0
     }
     pub(crate) fn is_private(&self) -> bool {
         let private = self.state().private;

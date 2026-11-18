@@ -678,6 +678,11 @@ where
                 content.push_str(notice);
             }
         }
+        for (request, (_, _, error)) in requests.iter().zip(&results) {
+            if matches!(request.kind, WorkStepKindV1::Read { .. }) {
+                self.run.note_page_read(!*error);
+            }
+        }
         let count = |search: bool| {
             requests
                 .iter()

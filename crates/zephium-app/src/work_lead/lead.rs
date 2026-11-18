@@ -1034,7 +1034,7 @@ where
                 }
             }
         }
-        let run_honesty = honesty(&projection, execution, &proposed);
+        let run_honesty = honesty(&projection, execution, &proposed, self.run.no_page_read());
         if let Err(fault) = objects::honest(&proposed.data, &run_honesty) {
             match objects::mend(&proposed.data, &run_honesty).filter(|_| lenient) {
                 Some((data, words)) => {
@@ -1207,7 +1207,12 @@ where
         }
         if let Err(fault) = objects::honest(
             &proposed.data,
-            &honesty(&projection, self.run.probe.execution(), &proposed),
+            &honesty(
+                &projection,
+                self.run.probe.execution(),
+                &proposed,
+                self.run.no_page_read(),
+            ),
         ) {
             return self.refuse(&key, ObjectRefusal::Honesty, fault);
         }
@@ -1935,12 +1940,14 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
     }
 }
 
-/// What a proposed object is checked against: its sources, and the parts
-/// of this request that could not do their job.
+/// What a proposed object is checked against: its sources, the parts of
+/// this request that could not do their job, and whether every page it
+/// tried to read failed.
 fn honesty(
     projection: &WorkRuntimeProjection,
     execution: WorkExecutionId,
     proposed: &objects::Proposed,
+    unread: bool,
 ) -> objects::Honesty {
     let mut failed = Vec::new();
     if let Some(run) = projection.executions.iter().find(|e| e.id == execution) {
@@ -1971,6 +1978,7 @@ fn honesty(
     objects::Honesty {
         sourced: !proposed.evidence.is_empty(),
         failed,
+        unread,
     }
 }
 

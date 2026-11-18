@@ -954,13 +954,24 @@ pub(crate) struct Honesty {
     /// Names of this request's parts that could not do their job, and
     /// their services, in lower case: "slack", "flights".
     pub failed: Vec<String>,
+    /// The request tried to read pages and could read none of them.
+    pub unread: bool,
 }
 
 /// Refuses an object that stands for a failure or claims more than the run
 /// found: a figure or pick that says it was not found, a to-do to retry the
-/// agent's own work, a recommended pick without sources, or a headline that
-/// calls the result complete while a part failed.
+/// agent's own work, a recommended pick without sources, a headline that
+/// calls the result complete while a part failed, or a table or picks
+/// when no page the request tried to read could be read.
 pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), String> {
+    if run.unread
+        && matches!(
+            data,
+            WorkArtifactDataV1::Sheet { .. } | WorkArtifactDataV1::Picks { .. }
+        )
+    {
+        return Err("no page you tried to read could be read, so a table or picks would rest on search snippets alone. Publish none: reply with what could not be read, and offer to try again".into());
+    }
     match data {
         WorkArtifactDataV1::Reply {
             headline, figures, ..
@@ -972,7 +983,7 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if !run.failed.is_empty() && affirms(headline, &CLAIMS, true) {
+            if (!run.failed.is_empty() || run.unread) && affirms(headline, &CLAIMS, true) {
                 return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
             }
         }
@@ -1577,6 +1588,7 @@ mod tests {
         let honest_run = Honesty {
             sourced: true,
             failed: vec!["slack".into(), "flights".into()],
+            unread: false,
         };
         let reply: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "reply", "headline": "Airfare recheck complete", "text": "The lookup failed.",
@@ -1595,7 +1607,8 @@ mod tests {
             &headline,
             &Honesty {
                 sourced: true,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_ok());
@@ -1649,7 +1662,8 @@ mod tests {
             &unsourced,
             &Honesty {
                 sourced: false,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_err());
@@ -1658,6 +1672,43 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&tagged, &honest_run).is_err());
+    }
+
+    #[test]
+    fn no_table_when_no_page_could_be_read() {
+        let unread = Honesty {
+            sourced: true,
+            failed: vec![],
+            unread: true,
+        };
+        let sheet: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "sheet", "columns": [{"label": "Provider", "kind": "text"}, {"label": "Price", "kind": "text"}],
+            "rows": [{"cells": ["Hetzner", "CX23 from $6.49/mo"]}, {"cells": ["Vercel", ""]}]
+        }))
+        .unwrap();
+        assert!(honest(&sheet, &unread).unwrap_err().contains("no page"));
+        assert!(mend(&sheet, &unread).is_none());
+        let picks: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "service", "items": [{"name": "Hetzner"}]
+        }))
+        .unwrap();
+        assert!(honest(&picks, &unread).is_err());
+        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Comparison complete", "text": "The table is on the canvas."
+        }))
+        .unwrap();
+        assert!(honest(&claimed, &unread).is_err());
+        let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "I couldn't read the pricing pages",
+            "text": "Vercel, Cloudflare and Hetzner's pages didn't open. Try again."
+        }))
+        .unwrap();
+        assert!(honest(&plain, &unread).is_ok());
+        let read = Honesty {
+            unread: false,
+            ..unread
+        };
+        assert!(honest(&sheet, &read).is_ok());
     }
 }
 

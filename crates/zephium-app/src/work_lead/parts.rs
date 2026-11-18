@@ -812,6 +812,7 @@ where
         let honesty = objects::Honesty {
             sourced: !proposed.evidence.is_empty(),
             failed: Vec::new(),
+            unread: false,
         };
         if objects::honest(&proposed.data, &honesty).is_err() {
             proposed.data = objects::mend(&proposed.data, &honesty)?.0;
