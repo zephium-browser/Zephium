@@ -95,8 +95,10 @@ function reloadSheets(loader: () => Promise<unknown>): Promise<unknown> {
           link.addEventListener(
             "load",
             () => {
-              sheets.delete(failed);
-              if (sheets.size === 0) failedSheets.delete(loader);
+              for (const [owner, owned] of failedSheets) {
+                owned.delete(failed);
+                if (owned.size === 0) failedSheets.delete(owner);
+              }
               failed.remove();
               resolve();
             },
