@@ -11,6 +11,7 @@ import TabList from "../components/TabList.svelte";
 import { sidebarTree } from "../lib/sidebar-model";
 
 const native = vi.hoisted(() => ({
+  leaveSplit: vi.fn(async () => ({ accepted: true, operation_id: null })),
   setEssential: vi.fn(async () => ({ accepted: true, operation_id: null })),
   split: vi.fn(async () => ({ accepted: true, operation_id: null })),
 }));
@@ -19,6 +20,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     tabsBootstrap: async () => {},
+    tabsLeaveSplit: native.leaveSplit,
     tabsSetEssential: native.setEssential,
     tabsSplit: native.split,
     tabDragOver: async () => undefined,
@@ -32,12 +34,13 @@ vi.mock("$domain/operations", () => ({
 
 afterEach(() => {
   tabs.dispose();
+  native.leaveSplit.mockClear();
   native.setEssential.mockClear();
 });
 
 const open = ["a", "b", "c", "d"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
 
-async function list(section: "today" | "pinned" = "today") {
+async function list(section: "today" | "pinned" = "today", split: string[] = []) {
   await page.viewport(400, 400);
   await tabs.init();
   const nodes: SidebarNodeView[] = open.map((tab) => ({
@@ -54,7 +57,7 @@ async function list(section: "today" | "pinned" = "today") {
     nodes,
     tabs: open,
     active: "a",
-    split_group: null,
+    split_group: split.length > 0 ? { members: split } : null,
   });
   flushSync();
   const tree = sidebarTree(nodes, open);
@@ -142,6 +145,20 @@ test("letting go in the room below the last row drops the tab at the end", async
   expect(row("d").style.transform).toContain("translateY(-");
 
   handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenCalledWith("a", false, null);
+});
+
+test("dropping a split member below the list detaches it and moves it to the end", async () => {
+  const { row, screen } = await list("today", ["a", "b"]);
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const room = screen.container.getBoundingClientRect();
+  const to = { x: room.left + 40, y: room.bottom - 8 };
+  const { init } = drag(handle, to);
+  await frame();
+
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  expect(native.leaveSplit).toHaveBeenCalledExactlyOnceWith("a");
   await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
   expect(native.setEssential).toHaveBeenCalledWith("a", false, null);
 });
