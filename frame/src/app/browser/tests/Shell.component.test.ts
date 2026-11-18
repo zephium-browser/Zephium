@@ -14,6 +14,8 @@ const native = vi.hoisted(() => ({
   activate: vi.fn(async (_id: string) => ({ accepted: true, operation_id: null })),
 }));
 
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
 
 vi.mock("$shared/ipc/bindings", async () => {

@@ -3,6 +3,9 @@ import { render } from "vitest-browser-svelte";
 import { preferences } from "$domain/preferences";
 import ProxyRows from "../components/ProxyRows.svelte";
 
+// These tests read the macOS wording; on Windows a proxy applies after a restart.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
+
 const state = vi.hoisted(() => ({ values: {} as Record<string, string>, failed: false }));
 
 vi.mock("$domain/preferences", () => ({

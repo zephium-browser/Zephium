@@ -128,15 +128,15 @@ mod tests {
     fn exact_production_release_seed_is_admitted_by_the_runtime_loader() {
         let seed = bundled_release_seed().unwrap();
         let identity = seed.identity();
-        assert_eq!(identity.revision, 202_611_071_631);
+        assert_eq!(identity.revision, 202_611_172_316);
         assert_eq!(identity.source_count, 9);
-        assert_eq!(identity.source_bytes, 6_243_441);
+        assert_eq!(identity.source_bytes, 6_236_712);
         assert_eq!(
             identity.manifest_sha256,
             [
-                0xfc, 0xbe, 0xff, 0x37, 0x5b, 0xf8, 0xc8, 0x7b, 0x24, 0xce, 0xf3, 0x5b, 0x37, 0x27,
-                0xec, 0x44, 0x0a, 0x32, 0xda, 0xb5, 0x02, 0xe9, 0x5e, 0xcc, 0xd7, 0x33, 0x7f, 0x2f,
-                0x0c, 0xf8, 0xe3, 0x7a
+                0x8f, 0xe2, 0x05, 0x7e, 0x62, 0xb8, 0x58, 0xa1, 0x7d, 0xfd, 0x91, 0x59, 0x1b, 0x42,
+                0xcf, 0xb6, 0xad, 0x3d, 0xc9, 0xc7, 0xff, 0x2f, 0xd5, 0x94, 0x21, 0x14, 0x80, 0xd7,
+                0x85, 0x34, 0x74, 0xe4
             ]
         );
     }
@@ -164,7 +164,7 @@ mod tests {
 
         assert_eq!(snapshot.phase, BlockerCatalogPhase::Fresh);
         assert_eq!(snapshot.package_stale, Some(false));
-        assert_eq!(snapshot.package_revision, Some(202_611_071_631));
+        assert_eq!(snapshot.package_revision, Some(202_611_172_316));
         assert_eq!(
             snapshot.package_provenance,
             Some(BlockerCatalogProvenance::ReleaseBundle)
@@ -216,11 +216,11 @@ mod tests {
         let own = 8;
         let marker = 1;
         let accepted = if cfg!(target_os = "windows") {
-            117_862
+            117_028
         } else {
-            117_894
+            117_060
         };
-        assert_eq!(rules.coverage().source_rules, 169_498 + own + marker);
+        assert_eq!(rules.coverage().source_rules, 168_731 + own + marker);
         assert_eq!(rules.coverage().accepted_rules, accepted + own);
         // The quick fixes keep their trust: the marker and the edits it is
         // keyed on both reach the page.
@@ -228,7 +228,7 @@ mod tests {
             .cosmetics()
             .and_then(|cosmetics| cosmetics.scriptlet_program())
             .expect("the bundled lists have scriptlets");
-        assert!(program.contains("zephiumPlayerMarker(\"lactmilli channel yahi inline\""));
+        assert!(program.contains("zephiumPlayerMarker(\"oaeb channel yahi inline\""));
         assert!(program.contains("zephiumTrustedEditInboundObject(\"JSON.stringify\""));
         assert_eq!(
             service.shutdown_until(Instant::now() + Duration::from_secs(10)),
