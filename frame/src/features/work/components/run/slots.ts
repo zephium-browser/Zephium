@@ -54,18 +54,32 @@ export function loadedView<P extends Record<string, unknown>>(
   return loader ? ((loaded.get(loader) as Component<P> | undefined) ?? null) : null;
 }
 
-/** Starts loading a view, once; a failed load can be tried again. */
+/** How long a failed load waits before each retry; after the last it gives up. */
+const RETRY_MS = [500, 2000] as const;
+
+/**
+ * Starts loading a view, once. A failed load is retried on its own, since a
+ * mounted row asks again only when its loader changes; after the last retry a
+ * later row can try again.
+ */
 export function loadView<P extends Record<string, unknown>>(loader: Loader<P> | null): void {
   if (!loader || loaded.has(loader) || loading.has(loader)) return;
   loading.add(loader);
-  void loader().then(
-    (module) => {
-      loading.delete(loader);
-      loaded.set(loader, module.default);
-    },
-    (error: unknown) => {
-      loading.delete(loader);
-      throw error;
-    },
-  );
+  const attempt = (tries: number): void => {
+    void loader().then(
+      (module) => {
+        loading.delete(loader);
+        loaded.set(loader, module.default);
+      },
+      (error: unknown) => {
+        const wait = RETRY_MS[tries];
+        if (wait === undefined) {
+          loading.delete(loader);
+          throw error;
+        }
+        setTimeout(() => attempt(tries + 1), wait);
+      },
+    );
+  };
+  attempt(0);
 }
