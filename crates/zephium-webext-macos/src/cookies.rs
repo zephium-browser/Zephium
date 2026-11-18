@@ -14,10 +14,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSArray, NSHTTPCookie, NSObjectProtocol, NSString, NSTimer, NSURL};
-use objc2_web_kit::{
-    WKHTTPCookieStore, WKHTTPCookieStoreObserver, WKWebExtensionPermission,
-    WKWebExtensionPermissionCookies,
-};
+use objc2_web_kit::{WKHTTPCookieStore, WKHTTPCookieStoreObserver, WKWebExtensionPermission};
 use serde_json::{json, Value};
 
 use crate::events;
@@ -201,7 +198,8 @@ fn deliver(shared: &Rc<Shared>, previous: &HashMap<Key, Value>, current: &HashMa
         .filter(|(id, _)| events::listened(shared, id, EVENT))
         .map(|(id, loaded)| (id.clone(), loaded.context.clone()))
         .collect();
-    let permission: Option<&WKWebExtensionPermission> = unsafe { WKWebExtensionPermissionCookies };
+    let permission: Option<&WKWebExtensionPermission> =
+        crate::webkit_string(c"WKWebExtensionPermissionCookies");
     for (id, context) in listeners {
         if !permission.is_some_and(|permission| unsafe { context.hasPermission(permission) }) {
             continue;

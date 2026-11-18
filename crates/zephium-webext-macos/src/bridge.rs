@@ -8,9 +8,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
 use objc2_foundation::{NSError, NSString};
-use objc2_web_kit::{
-    WKWebExtensionContext, WKWebExtensionPermission, WKWebExtensionPermissionClipboardWrite,
-};
+use objc2_web_kit::{WKWebExtensionContext, WKWebExtensionPermission};
 use serde_json::Value;
 
 use crate::runtime::Shared;
@@ -180,7 +178,10 @@ pub(crate) fn handle(
         Some("runtime.contexts") => Ok(contexts(shared, context)),
         Some("offscreen.has") => Ok(Value::Bool(offscreen::has(shared, &extension(context)))),
         Some("clipboard.write")
-            if permitted(context, unsafe { WKWebExtensionPermissionClipboardWrite }) =>
+            if permitted(
+                context,
+                crate::webkit_string(c"WKWebExtensionPermissionClipboardWrite"),
+            ) =>
         {
             let text = message
                 .get("text")

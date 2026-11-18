@@ -12,11 +12,10 @@ use std::rc::Rc;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message};
-use objc2_foundation::{NSError, NSOperatingSystemVersion, NSProcessInfo, NSString, NSURL};
+use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextError,
-    WKWebExtensionContextErrorDomain, WKWebExtensionContextPermissionStatus,
-    WKWebExtensionController, WKWebExtensionMatchPattern,
+    WKWebExtensionContextPermissionStatus, WKWebExtensionController, WKWebExtensionMatchPattern,
 };
 
 use crate::runtime::describe;
@@ -56,11 +55,7 @@ struct State {
 impl PageScript {
     /// Main-world content scripts need macOS 15.4.
     pub fn supported() -> bool {
-        NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
-            majorVersion: 15,
-            minorVersion: 4,
-            patchVersion: 0,
-        })
+        crate::supported()
     }
 
     /// `private_data` lets the program run in private browsing views, and
@@ -247,9 +242,8 @@ fn unload(
         Ok(()) => Ok(()),
         Err(error)
             if error.code() == WKWebExtensionContextError::NotLoaded.0
-                && error
-                    .domain()
-                    .isEqualToString(unsafe { WKWebExtensionContextErrorDomain }) =>
+                && crate::webkit_string(c"WKWebExtensionContextErrorDomain")
+                    .is_some_and(|domain| error.domain().isEqualToString(domain)) =>
         {
             Ok(())
         }

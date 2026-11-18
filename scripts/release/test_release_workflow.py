@@ -18,6 +18,17 @@ def job(text, name):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_macos_checks_binary_imports_immediately_after_build(self):
+        macos = job(WORKFLOW.read_text(), 'macos')
+        build = macos.split('      - name: Build, sign and notarize\n', 1)[1]
+        check = build.split('\n      - name: ', 1)[1]
+        self.assertTrue(check.startswith('Check macOS WebKit imports\n'))
+        check = check.split('\n      - name: ', 1)[0]
+        self.assertIn('cargo run --locked -p xtask -- check-macos-imports', check)
+        self.assertIn('target/aarch64-apple-darwin/release/bundle/macos/'
+                      'Zephium.app/Contents/MacOS/zephium-desktop', check)
+        self.assertNotIn('continue-on-error:', check)
+
     def test_release_guide_keeps_betas_off_stable_clients_after_bootstrap(self):
         guide = (ROOT / '.github/RELEASE.md').read_text()
         self.assertIn('After a stable release exists, publish betas with "Set as a pre-release"\n   checked and "Set as the latest release" unchecked', guide)
