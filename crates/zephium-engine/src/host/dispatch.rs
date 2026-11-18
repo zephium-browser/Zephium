@@ -265,6 +265,10 @@ enum HostTaskKey {
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
     #[cfg(target_os = "macos")]
     Scriptlets(ProfileId),
+    // A closed page's answer deadline: a full queue of ordinary work must not
+    // drop it and leave a hung process running.
+    #[cfg(target_os = "macos")]
+    ClosingDeadline(u64),
 }
 
 struct QueuedHostTask {
@@ -504,6 +508,8 @@ pub(crate) fn install(
             fullscreen: crate::fullscreen::FullscreenLedger::default(),
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            closing: Default::default(),
             #[cfg(target_os = "macos")]
             next_fullscreen_retirement: 0,
             stages: HashMap::new(),
@@ -1284,6 +1290,18 @@ pub(super) fn with_temporary_spare_release<F>(
         // Never close inline. Leave the spare for a later release, reuse, or shutdown.
         eprintln!("engine: temporary page release could not be deferred");
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn with_closing_deadline<F>(token: u64, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ClosingDeadline(token)),
+        f,
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -2242,6 +2260,51 @@ mod tests {
                 .count(),
             AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn closed_page_deadlines_are_admitted_where_ordinary_work_is_refused() {
+        let mut pending = VecDeque::new();
+        for _ in 0..NORMAL_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::Normal)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::Normal)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, HostTaskKey::ClosingDeadline(1))
+        ));
+
+        // At the band's ceiling each deadline displaces lower work, and two
+        // closed pages never coalesce into one deadline.
+        for _ in pending.len()..NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::Observation)
+            ));
+        }
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, HostTaskKey::ClosingDeadline(2))
+        ));
+        assert_eq!(
+            pending.len(),
+            NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY
+        );
+        let deadlines = pending
+            .iter()
+            .filter_map(|task| match task.key {
+                Some(HostTaskKey::ClosingDeadline(token)) => Some(token),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deadlines, [1, 2]);
     }
 
     #[test]
