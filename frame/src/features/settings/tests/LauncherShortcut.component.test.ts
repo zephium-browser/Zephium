@@ -5,6 +5,9 @@ import "$styles/global.css";
 import type { LauncherTrigger } from "$shared/ipc/bindings";
 import LauncherShortcut from "../components/LauncherShortcut.svelte";
 
+// These tests read the macOS keycaps (⌘, ⌥, ⇧); Windows spells its shortcuts out.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
+
 const trigger = (shortcut: string): LauncherTrigger => ({
   shortcut,
   default_shortcut: "CmdOrCtrl+Shift+Space",

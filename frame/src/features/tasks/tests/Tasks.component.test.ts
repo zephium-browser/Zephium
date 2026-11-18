@@ -432,6 +432,8 @@ test("typing in a task says nothing about saving unless a save is slow", async (
   const screen = await render(TaskHost, { profile });
   await screen.getByText("Call mom").click();
   const title = screen.getByRole("textbox", { name: "Rename", exact: true });
+  // The detail is imported on first open, so it can land after the click returns.
+  await expect.poll(() => screen.container.querySelector(".detail-save")).toBeTruthy();
   const status = screen.container.querySelector(".detail-save")!;
 
   const seen: string[] = [];

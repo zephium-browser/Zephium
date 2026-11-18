@@ -1010,6 +1010,8 @@ impl EngineHost {
         for id in ids {
             self.close(id);
         }
+        #[cfg(target_os = "macos")]
+        self.release_closing_views(profile);
         if self
             .spare
             .as_ref()

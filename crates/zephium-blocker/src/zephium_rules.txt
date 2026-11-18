@@ -54,4 +54,9 @@
 ! first. The player raised onSnackbarMessage at every hold the listener was on
 ! in time (7 of 9 loads, the other 2 before it attached), about 1.5 s before
 ! the poll acted, and never on a load that played.
-www.youtube.com##+js(zephium-player-marker, lactmilli channel yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019, playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr, onSnackbarMessage)
+! 2026-11-17: the quick fixes replaced lactmilli with oaeb, and channel, yahi
+! and inline were all held (macOS, 3 runs, main: every first video held
+! 16.5 to 18.3 s); oaeb comes next, so either list's working marker is first.
+! With it, 18 of 18 videos played on oaeb with no other marker tried, the
+! first one after a consent answer with no hold.
+www.youtube.com##+js(zephium-player-marker, lactmilli oaeb channel yahi inline, buffer_health_seconds=0.00 s|resolution=0x0, debug_info^=SSAP\, AD, 1000, ytInitialData.topbar.desktopTopbarRenderer.logo.topbarLogoRenderer.iconImage.iconType=YOUTUBE_PREMIUM_LOGO, support.google.com/youtube/answer/3037019, playbackTracking.videostatsPlaybackUrl.baseUrl*=reloadxhr, onSnackbarMessage)

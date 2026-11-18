@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use chrono::{Datelike, Duration, NaiveDate};
+use jiff::civil::Date;
+use jiff::ToSpan;
 use zephium_core::ids::ProfileId;
 use zephium_core::notes::{NoteCall, NoteQuery, NoteReply, NoteResponse, NoteSummary};
 use zephium_core::resources::{
@@ -113,18 +114,18 @@ fn day_due<'a>(item: &'a ResourceSummary, meta: Option<&'a TaskMetadata>) -> Opt
     }
 }
 
-fn due_word(today: NaiveDate, due: &str) -> Option<String> {
-    let due = NaiveDate::parse_from_str(due, "%Y-%m-%d").ok()?;
-    let days = (due - today).num_days();
+fn due_word(today: Date, due: &str) -> Option<String> {
+    let due = Date::strptime("%Y-%m-%d", due).ok()?;
+    let days = due.since(today).ok()?.get_days();
     let word = if days < 0 {
         "Overdue"
     } else if days == 0 {
         "Today"
     } else if days == 1 {
         "Tomorrow"
-    } else if due.iso_week() == today.iso_week() {
+    } else if week(due) == week(today) {
         "This week"
-    } else if due.iso_week() == (today + Duration::days(7)).iso_week() {
+    } else if week(due) == week(today.saturating_add(7.days())) {
         "Next week"
     } else {
         "Later"
@@ -132,11 +133,16 @@ fn due_word(today: NaiveDate, due: &str) -> Option<String> {
     Some(word.to_owned())
 }
 
+fn week(date: Date) -> (i16, i8) {
+    let week = date.iso_week_date();
+    (week.year(), week.week())
+}
+
 /// The open task whose title has the most of the words; of equals, the one
 /// due soonest.
 fn best_task(
     words: &Words,
-    today: NaiveDate,
+    today: Date,
     items: &[ResourceSummary],
     metadata: &[TaskMetadata],
 ) -> Option<TaskMatch> {
@@ -190,7 +196,7 @@ impl Handle {
     /// their own timeout.
     pub async fn find_task(&self, profile: ProfileId, words: &str) -> Option<TaskMatch> {
         let words = Words::new(words)?;
-        let today = chrono::Local::now().date_naive();
+        let today = jiff::Zoned::now().date();
         let asked: Vec<_> = words
             .needles()
             .into_iter()
@@ -201,7 +207,7 @@ impl Handle {
                         query: TaskQuery {
                             list: None,
                             view: TaskView::All,
-                            today: today.format("%Y-%m-%d").to_string(),
+                            today: today.strftime("%Y-%m-%d").to_string(),
                             search: needle,
                             after: None,
                             limit: HITS_PER_WORD,
@@ -357,8 +363,8 @@ mod tests {
         Words::new(text).expect("words that say something")
     }
 
-    fn day(text: &str) -> NaiveDate {
-        NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    fn day(text: &str) -> Date {
+        Date::strptime("%Y-%m-%d", text).unwrap()
     }
 
     fn pick(
