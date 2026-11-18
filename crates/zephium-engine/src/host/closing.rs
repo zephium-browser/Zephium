@@ -4,6 +4,8 @@
 //! time is ended. The tab itself is gone from every map and window at once.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use zephium_core::ids::ProfileId;
@@ -13,11 +15,25 @@ use super::EngineHost;
 /// How long a closed page's web process has to answer before it is ended.
 const ANSWER_DEADLINE: Duration = Duration::from_secs(10);
 
+/// A closed page's answer, recorded before its host task is queued: a reply
+/// whose task a full queue refuses still spares the process its deadline.
+#[derive(Clone)]
+struct Answer {
+    token: u64,
+    given: Arc<AtomicBool>,
+}
+
+impl Answer {
+    fn record(&self) {
+        self.given.store(true, Ordering::Release);
+    }
+}
+
 /// Held by a token of their own, never by tab, so a reused tab id cannot
 /// reach one. Each view keeps its deadline `D`, which ends with it.
 pub(super) struct ClosingViews<V, D> {
     next: u64,
-    held: HashMap<u64, (ProfileId, V, D)>,
+    held: HashMap<u64, (ProfileId, V, D, Arc<AtomicBool>)>,
 }
 
 impl<V, D> Default for ClosingViews<V, D> {
@@ -37,7 +53,7 @@ impl<V, D> ClosingViews<V, D> {
         &mut self,
         profile: Option<ProfileId>,
         view: V,
-        ask: impl FnOnce(&V, u64) -> bool,
+        ask: impl FnOnce(&V, Answer) -> bool,
         deadline: impl FnOnce(u64) -> Option<D>,
     ) -> Option<V> {
         let Some(profile) = profile else {
@@ -45,19 +61,31 @@ impl<V, D> ClosingViews<V, D> {
         };
         self.next = self.next.wrapping_add(1);
         let token = self.next;
-        if !ask(&view, token) {
+        let given = Arc::new(AtomicBool::new(false));
+        let answer = Answer {
+            token,
+            given: given.clone(),
+        };
+        if !ask(&view, answer) {
             return Some(view);
         }
         let Some(deadline) = deadline(token) else {
             return Some(view);
         };
-        self.held.insert(token, (profile, view, deadline));
+        self.held.insert(token, (profile, view, deadline, given));
         None
     }
 
     /// The view held under `token`, once: its answer and its deadline race.
     fn take(&mut self, token: u64) -> Option<V> {
-        self.held.remove(&token).map(|(_, view, _)| view)
+        self.held.remove(&token).map(|(_, view, _, _)| view)
+    }
+
+    /// At the deadline: the view whose process never answered, to be ended.
+    /// One that answered is released here instead, its process left alone.
+    fn expire(&mut self, token: u64) -> Option<V> {
+        let (_, view, _, given) = self.held.remove(&token)?;
+        (!given.load(Ordering::Acquire)).then_some(view)
     }
 
     /// Every view of `profile`, whose store WebKit removes only once nothing
@@ -66,7 +94,7 @@ impl<V, D> ClosingViews<V, D> {
         let tokens: Vec<u64> = self
             .held
             .iter()
-            .filter_map(|(token, (owner, _, _))| (*owner == profile).then_some(*token))
+            .filter_map(|(token, (owner, ..))| (*owner == profile).then_some(*token))
             .collect();
         tokens
             .into_iter()
@@ -89,17 +117,19 @@ impl EngineHost {
         view: super::ObservedView,
     ) {
         let profile = profile.filter(|_| self.shutdown_completion.is_none());
-        let ask = |view: &super::ObservedView, token: u64| {
+        let ask = |view: &super::ObservedView, answer: Answer| {
             view.event_permit.revoke();
             view.navigation.revoke();
             crate::platform::imp::ask_web_process(&view.view, move || {
+                answer.record();
+                let token = answer.token;
                 let _ = super::dispatch::try_with(move |host| drop(host.closing.take(token)));
             })
         };
         let deadline = |token: u64| {
             crate::platform::imp::schedule_presentation_timeout(ANSWER_DEADLINE, move || {
                 let _ = super::dispatch::with_closing_deadline(token, move |host| {
-                    if let Some(view) = host.closing.take(token) {
+                    if let Some(view) = host.closing.expire(token) {
                         eprintln!("engine: ended a closed page's web process that did not answer");
                         crate::platform::imp::end_web_process(&view.view);
                     }
@@ -141,13 +171,13 @@ mod tests {
         profile: ProfileId,
         view: Counted,
         deadline: Counted,
-    ) -> u64 {
+    ) -> Answer {
         let mut asked = None;
         let left = closing.defer(
             Some(profile),
             view,
-            |_, token| {
-                asked = Some(token);
+            |_, answer| {
+                asked = Some(answer);
                 true
             },
             |_| Some(deadline),
@@ -186,8 +216,8 @@ mod tests {
         let left = closing.defer(
             Some(profile),
             made("no timer"),
-            |_, token| {
-                asked = Some(token);
+            |_, answer: Answer| {
+                asked = Some(answer.token);
                 true
             },
             |_| None,
@@ -209,17 +239,44 @@ mod tests {
         // the deadline, if it still fires, finds nothing to end.
         let answers = hold(&mut closing, profile, made("answers"), made("timer"));
         assert_eq!(drops.get(), 0, "held until the answer");
-        assert_eq!(closing.take(answers).map(|view| view.0), Some("answers"));
+        answers.record();
+        assert_eq!(
+            closing.take(answers.token).map(|view| view.0),
+            Some("answers")
+        );
         assert_eq!(drops.get(), 2);
-        assert!(closing.take(answers).is_none());
+        assert!(closing.expire(answers.token).is_none());
 
         // One that never answers is there for the deadline to end, and a late
         // answer, as WebKit sends when the process exits, finds nothing.
         let hung = hold(&mut closing, profile, made("hung"), made("timer"));
         assert_eq!(drops.get(), 2);
-        assert_eq!(closing.take(hung).map(|view| view.0), Some("hung"));
-        assert!(closing.take(hung).is_none());
+        assert_eq!(closing.expire(hung.token).map(|view| view.0), Some("hung"));
+        hung.record();
+        assert!(closing.take(hung.token).is_none());
         assert_eq!(drops.get(), 4);
+    }
+
+    #[test]
+    fn an_answer_whose_task_is_refused_still_spares_its_process() {
+        let (drops, made) = counter();
+        let mut closing = ClosingViews::default();
+        // The reply records its answer, then its host task is refused by a
+        // full queue, so nothing takes the view before the deadline.
+        let answered = hold(
+            &mut closing,
+            ProfileId::from(1),
+            made("shared"),
+            made("timer"),
+        );
+        answered.record();
+
+        assert!(
+            closing.expire(answered.token).is_none(),
+            "an answered process is not ended"
+        );
+        assert_eq!(drops.get(), 2, "the deadline still releases the view");
+        assert!(closing.held.is_empty());
     }
 
     #[test]
@@ -227,9 +284,9 @@ mod tests {
         let (drops, made) = counter();
         let (one, two) = (ProfileId::from(1), ProfileId::from(2));
         let mut closing = ClosingViews::default();
-        let first = hold(&mut closing, one, made("first"), made("timer"));
-        let second = hold(&mut closing, two, made("second"), made("timer"));
-        let third = hold(&mut closing, one, made("third"), made("timer"));
+        let first = hold(&mut closing, one, made("first"), made("timer")).token;
+        let second = hold(&mut closing, two, made("second"), made("timer")).token;
+        let third = hold(&mut closing, one, made("third"), made("timer")).token;
         assert!(first != second && second != third);
 
         let mut erased: Vec<_> = closing
@@ -244,7 +301,7 @@ mod tests {
         assert_eq!(closing.take(second).map(|view| view.0), Some("second"));
         assert_eq!(drops.get(), 6);
 
-        let late = hold(&mut closing, one, made("late"), made("timer"));
+        let late = hold(&mut closing, one, made("late"), made("timer")).token;
         closing.clear();
         assert_eq!(drops.get(), 8, "clear releases what is left");
         assert!(closing.take(late).is_none());
