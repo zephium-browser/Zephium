@@ -29,18 +29,20 @@ const EVENT_CAPACITY: usize = 192;
 const MAX_SPEECHES: usize = 64;
 const MAX_REQUESTS: usize = 4096;
 
-/// A pinned Cloud voice endpoint.
+/// The voice endpoint of the account's Cloud root.
 #[derive(Clone)]
 pub struct VoiceTarget {
     url: Url,
 }
 
 impl VoiceTarget {
-    /// Builds the production `wss` endpoint from the Cloud HTTPS root.
+    /// Builds the endpoint under the account's Cloud root, admitted as every
+    /// other Cloud target is: `wss` under an https root, `ws` only under a
+    /// loopback http root. The credential belongs to that root.
     pub fn cloud(root: &Url) -> Result<Self, WorkModelError> {
-        if root.scheme() != "https"
-            || root.host_str() != Some("api.zephium.app")
-            || root.port().is_some()
+        let local = root.scheme() == "http" && super::is_loopback(root);
+        if (root.scheme() != "https" && !local)
+            || root.host_str().is_none()
             || !root.username().is_empty()
             || root.password().is_some()
             || root.query().is_some()
@@ -50,7 +52,7 @@ impl VoiceTarget {
             return Err(WorkModelError::BadRequest);
         }
         let mut url = super::join(root, "v1/voice")?;
-        url.set_scheme("wss")
+        url.set_scheme(if local { "ws" } else { "wss" })
             .map_err(|()| WorkModelError::BadRequest)?;
         Ok(Self { url })
     }

@@ -171,14 +171,28 @@ fn quick() -> Timings {
 }
 
 #[test]
-fn production_target_is_pinned_and_diagnostics_redact_payloads() {
-    let target = VoiceTarget::cloud(&Url::parse("https://api.zephium.app").unwrap()).unwrap();
-    assert!(target.url.as_str() == "wss://api.zephium.app/v1/voice");
+fn the_target_follows_the_account_root_and_diagnostics_redact_payloads() {
+    for (root, endpoint) in [
+        ("https://api.zephium.app", "wss://api.zephium.app/v1/voice"),
+        (
+            "https://staging-api.zephium.app",
+            "wss://staging-api.zephium.app/v1/voice",
+        ),
+        (
+            "https://cloud.example.com:8443",
+            "wss://cloud.example.com:8443/v1/voice",
+        ),
+        ("http://127.0.0.1:8787", "ws://127.0.0.1:8787/v1/voice"),
+        ("http://localhost:8787", "ws://localhost:8787/v1/voice"),
+    ] {
+        let target = VoiceTarget::cloud(&Url::parse(root).unwrap()).unwrap();
+        assert_eq!(target.url.as_str(), endpoint);
+    }
     for bad in [
         "http://api.zephium.app",
-        "https://127.0.0.1",
-        "https://example.com",
-        "https://api.zephium.app:444",
+        "http://192.168.1.10:8787",
+        "ws://127.0.0.1:8787",
+        "ftp://api.zephium.app",
         "https://user@api.zephium.app",
         "https://api.zephium.app?token=secret",
         "https://api.zephium.app/#a",

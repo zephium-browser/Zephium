@@ -5602,6 +5602,7 @@ fn validate_voice_transport(lead: &str, voice: &str) -> Result<(), String> {
         ".referer(false)",
         ".https_only(!local)",
         "http_builder(local).build().ok()",
+        "fnis_loopback(url:&Url)->bool{matches!(url.host_str(),Some(\"localhost\"|\"127.0.0.1\"|\"[::1]\"))}",
         "pubmodvoice;",
     ] {
         if !lead.contains(required) {
@@ -5609,16 +5610,16 @@ fn validate_voice_transport(lead: &str, voice: &str) -> Result<(), String> {
         }
     }
     for required in [
-        "root.scheme()!=\"https\"",
-        "root.host_str()!=Some(\"api.zephium.app\")",
-        "root.port().is_some()",
+        "letlocal=root.scheme()==\"http\"&&super::is_loopback(root);",
+        "(root.scheme()!=\"https\"&&!local)",
+        "root.host_str().is_none()",
         "!root.username().is_empty()",
         "root.password().is_some()",
         "root.query().is_some()",
         "root.fragment().is_some()",
         "root.path()!=\"/\"",
         "super::join(root,\"v1/voice\")?",
-        "url.set_scheme(\"wss\")",
+        "url.set_scheme(iflocal{\"ws\"}else{\"wss\"})",
         "super::http_builder(local).http1_only()",
         "WebSocketStream::from_raw_socket(upgraded,Role::Client,Some(config))",
         "super::refused(status,&headers,&body,true)",
@@ -13113,7 +13114,8 @@ mod tests {
             include_str!("../../crates/zephium-agentic/src/provider_transport/lead/voice/mod.rs");
         validate_voice_transport(lead, voice).expect("voice boundary");
         for (pin, drift) in [
-            ("api.zephium.app", "example.com"),
+            ("super::is_loopback(root)", "true"),
+            ("(root.scheme() != \"https\" && !local)", "false"),
             ("v1/voice", "v1/other"),
             (".http1_only()", ""),
             (
