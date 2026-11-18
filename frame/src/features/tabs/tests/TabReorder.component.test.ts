@@ -13,6 +13,7 @@ import { sidebarTree } from "../lib/sidebar-model";
 const native = vi.hoisted(() => ({
   setEssential: vi.fn(async () => ({ accepted: true, operation_id: null })),
   split: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  dragOver: vi.fn(async () => undefined),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -21,7 +22,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsBootstrap: async () => {},
     tabsSetEssential: native.setEssential,
     tabsSplit: native.split,
-    tabDragOver: async () => undefined,
+    tabDragOver: native.dragOver,
     tabDrop: async () => ({ accepted: true, operation_id: null }),
   });
 });
@@ -33,6 +34,7 @@ vi.mock("$domain/operations", () => ({
 afterEach(() => {
   tabs.dispose();
   native.setEssential.mockClear();
+  native.dragOver.mockClear();
 });
 
 const open = ["a", "b", "c", "d"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
@@ -173,4 +175,70 @@ test("a tab carried out of its list shows a card with its title, and the far hal
   );
   await expect.poll(() => native.setEssential.mock.calls.length).toBe(2);
   expect(native.setEssential).toHaveBeenLastCalledWith("a", false, null);
+});
+
+test("window blur, Escape, and lost capture clear the drag card and native overlay", async () => {
+  const { row } = await list();
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const target = row("c").getBoundingClientRect();
+  drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  window.dispatchEvent(new Event("blur"));
+  await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+  expect(document.body.style.cursor).toBe("");
+  expect(row("a").hasAttribute("data-lifted")).toBe(false);
+  expect(native.setEssential).not.toHaveBeenCalled();
+  expect(native.dragOver).toHaveBeenLastCalledWith(null, null);
+
+  native.dragOver.mockClear();
+  drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+  expect(native.dragOver).toHaveBeenLastCalledWith(null, null);
+
+  native.dragOver.mockClear();
+  drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  handle.dispatchEvent(new PointerEvent("lostpointercapture", { pointerId: 1 }));
+  await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+  expect(native.dragOver).toHaveBeenLastCalledWith(null, null);
+});
+
+test("releasing outside the row before crossing the drag threshold cancels the press", async () => {
+  const { row } = await list();
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const from = handle.getBoundingClientRect();
+  const init = { bubbles: true, pointerId: 1, button: 0, isPrimary: true };
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { ...init, clientX: from.left + 20, clientY: from.top + 10 }),
+  );
+  window.dispatchEvent(
+    new PointerEvent("pointerup", { ...init, clientX: from.right + 40, clientY: from.top + 10 }),
+  );
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", { ...init, clientX: from.left + 20, clientY: from.top + 40 }),
+  );
+  await frame();
+  expect(document.querySelector(".drag-card")).toBeNull();
+});
+
+test("unmounting the tab list while dragging cleans up the floating card and cursor", async () => {
+  const { row, screen } = await list();
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const target = row("c").getBoundingClientRect();
+  drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  await screen.unmount();
+  expect(document.querySelector(".drag-card")).toBeNull();
+  expect(document.body.style.cursor).toBe("");
+  expect(native.dragOver).toHaveBeenLastCalledWith(null, null);
 });
