@@ -937,6 +937,11 @@ pub(crate) fn says_not_found(text: &str) -> bool {
     says(text, &NOT_FOUND)
 }
 
+/// The text calls a result finished or checked.
+pub(crate) fn claims_done(text: &str) -> bool {
+    affirms(text, &CLAIMS, true)
+}
+
 fn says(text: &str, words: &[&str]) -> bool {
     affirms(text, words, false)
 }
@@ -975,6 +980,17 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                 .next()
                 .unwrap_or("");
             let clause = clause.rsplit(" but ").next().unwrap_or(clause);
+            // "and" or "or" starts another claim unless this one follows it
+            // at once: "No issues found and pricing checked" claims, "could
+            // not be checked or verified" does not.
+            let joined = clause
+                .rfind(" and ")
+                .map(|at| at + 5)
+                .max(clause.rfind(" or ").map(|at| at + 4));
+            let clause = match joined {
+                Some(start) if !clause[start..].trim().is_empty() => &clause[start..],
+                _ => clause,
+            };
             let denied = negation
                 && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
@@ -1021,7 +1037,7 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if (!run.failed.is_empty() || run.unread) && affirms(headline, &CLAIMS, true) {
+            if (!run.failed.is_empty() || run.unread) && claims_done(headline) {
                 return Err("reply: the headline calls the result finished or checked while a part could not do its job or no page could be read; say what was found".into());
             }
         }
@@ -1669,11 +1685,22 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
-        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
-            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
-        }))
-        .unwrap();
-        assert!(honest(&claimed, &honest_run).is_err());
+        for headline in [
+            "Pricing could not be checked",
+            "Pricing could not be checked or verified",
+        ] {
+            assert!(!claims_done(headline), "{headline}");
+        }
+        for headline in [
+            "Slack was not read, but the plan is complete",
+            "No issues found and pricing checked",
+        ] {
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The plan stands."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &honest_run).is_err(), "{headline}");
+        }
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))
