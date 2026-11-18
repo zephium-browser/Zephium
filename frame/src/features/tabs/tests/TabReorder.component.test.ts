@@ -39,7 +39,10 @@ afterEach(() => {
 
 const open = ["a", "b", "c", "d"].map((id) => tabFixture({ id, title: `Tab ${id}` }));
 
-async function list(section: "today" | "pinned" = "today") {
+async function list(
+  section: "today" | "pinned" = "today",
+  onSelect: (id: string) => void = () => {},
+) {
   await page.viewport(400, 400);
   await tabs.init();
   const nodes: SidebarNodeView[] = open.map((tab) => ({
@@ -65,7 +68,7 @@ async function list(section: "today" | "pinned" = "today") {
     section,
     label: "Open tabs",
     splitting: false,
-    onSelect: () => {},
+    onSelect,
   });
   const row = (id: string) =>
     screen.container.querySelector<HTMLElement>(`.browse-tab[data-zephium-tab-id="${id}"]`)!;
@@ -241,4 +244,78 @@ test("unmounting the tab list while dragging cleans up the floating card and cur
   expect(document.querySelector(".drag-card")).toBeNull();
   expect(document.body.style.cursor).toBe("");
   expect(native.dragOver).toHaveBeenLastCalledWith(null, null);
+});
+
+test("Escape-cancelled drag suppresses the trailing click without consuming a later press", async () => {
+  const onSelect = vi.fn();
+  const { row } = await list("today", onSelect);
+  const handle = row("b").querySelector<HTMLElement>(".tab-open")!;
+  const target = row("c").getBoundingClientRect();
+  const { init } = drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: 20, clientY: 20 }));
+  handle.click();
+  expect(onSelect).not.toHaveBeenCalled();
+
+  const home = handle.getBoundingClientRect();
+  handle.dispatchEvent(
+    new PointerEvent("pointerdown", { ...init, clientX: home.left + 10, clientY: home.top + 10 }),
+  );
+  handle.dispatchEvent(
+    new PointerEvent("pointerup", { ...init, clientX: home.left + 10, clientY: home.top + 10 }),
+  );
+  handle.click();
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith("b");
+});
+
+test("movement from another pointer does not hijack or cancel an active drag", async () => {
+  const { row } = await list();
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const target = row("c").getBoundingClientRect();
+  const { init } = drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  handle.dispatchEvent(
+    new PointerEvent("pointermove", {
+      ...init,
+      pointerId: 2,
+      clientX: target.left + 20,
+      clientY: target.top,
+    }),
+  );
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+
+  handle.dispatchEvent(
+    new PointerEvent("pointerup", {
+      ...init,
+      clientX: target.left + 20,
+      clientY: target.bottom - 4,
+    }),
+  );
+});
+
+test("unmounting an idle list does not clear another list's active drag", async () => {
+  const active = await list();
+  const idle = await list("pinned");
+  const handle = active.row("a").querySelector<HTMLElement>(".tab-open")!;
+  const target = active.row("c").getBoundingClientRect();
+  drag(handle, { x: target.left + 20, y: target.bottom - 4 });
+  await frame();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+  native.dragOver.mockClear();
+
+  await idle.screen.unmount();
+  expect(document.querySelector(".drag-card")).not.toBeNull();
+  expect(document.body.style.cursor).toBe("grabbing");
+  expect(native.dragOver).not.toHaveBeenCalledWith(null, null);
+
+  await active.screen.unmount();
+  expect(document.querySelector(".drag-card")).toBeNull();
+  expect(document.body.style.cursor).toBe("");
 });

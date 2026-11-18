@@ -107,6 +107,7 @@ export class RowDrag {
     if (!this.#dragging || event.key !== "Escape") return;
     event.preventDefault();
     event.stopPropagation();
+    this.#swallow = true;
     this.abandon();
   };
 
@@ -132,6 +133,7 @@ export class RowDrag {
 
   down(event: PointerEvent, id: string) {
     if (event.button !== 0) return;
+    this.#swallow = false;
     if (this.#dragging || this.#down !== null) this.abandon();
     this.#down = { x: event.clientX, y: event.clientY };
     this.#id = id;
@@ -143,6 +145,7 @@ export class RowDrag {
   move(event: PointerEvent) {
     const start = this.#down;
     if (start === null) return;
+    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
     if (event.isTrusted && event.pointerType === "mouse" && (event.buttons & 1) === 0) {
       this.abandon();
       return;
@@ -315,6 +318,7 @@ export class RowDrag {
   }
 
   #reset() {
+    const wasDragging = this.#dragging;
     this.#detachWindowListeners();
     this.#releaseCapture();
     if (this.#frame !== 0) {
@@ -327,7 +331,9 @@ export class RowDrag {
     this.#dragging = false;
     this.#reorder = null;
     this.ghost = null;
-    document.body.style.cursor = "";
-    tabDrag.end();
+    if (wasDragging) {
+      document.body.style.cursor = "";
+      tabDrag.end();
+    }
   }
 }
