@@ -77,9 +77,11 @@ existing install on its current version.
      assets/blocker-seed/v1/compile-report.json
    ```
 
-   Update the pinned revision, source bytes, manifest digest and rule counts in
-   `desktop/src/blocker_service.rs` from the refreshed catalog and compile report,
-   then verify the production loader and worker:
+   The tests in `desktop/src/blocker_service.rs` pin the seed's revision, source
+   bytes, manifest digest, rule counts (runtime `accepted_rules` on Windows,
+   WebKit's on macOS) and the YouTube marker its quick fixes key on. Update them
+   from the refreshed catalog and compile report, then verify the production
+   loader and worker:
 
    ```sh
    cargo test -p zephium-desktop --lib --locked blocker_service::tests
