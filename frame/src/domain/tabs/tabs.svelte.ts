@@ -1,7 +1,14 @@
 import { listenAll } from "$shared/lib/lifecycle";
 import { forgetDrafts } from "$shared/lib/drafts";
 import { flushSync } from "svelte";
-import type { ItemsState, SpaceLookInputV1, TabMenuContext, TabView } from "$shared/ipc/bindings";
+import type {
+  FolderIntent,
+  FolderMenuContext,
+  ItemsState,
+  SpaceLookInputV1,
+  TabMenuContext,
+  TabView,
+} from "$shared/ipc/bindings";
 import { settle } from "$domain/operations";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
@@ -168,7 +175,11 @@ function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
     .map(tabOf)
     .filter((candidate) => candidate !== null);
   const at = open.indexOf(id);
+  const node = state.nodes.find((candidate) => tabOf(candidate) === id);
   return {
+    fileable:
+      (tab?.content ?? "web") === "web" && node !== undefined && node.section !== "favorites",
+    in_folder: node?.parent_id != null,
     page: (tab?.content ?? "web") === "web" && (tab?.url ?? null) !== null,
     can_split: canSplitWith(id),
     essential: state.nodes.some((node) => tabOf(node) === id && node.section === "favorites"),
@@ -178,6 +189,13 @@ function tabMenuContext(id: string, mediaOnly = false): TabMenuContext {
     capture: tab?.capture?.navigation_id ?? null,
     media_only: mediaOnly,
   };
+}
+
+/** The tab the menu was opened on, taken once: its New Folder… files it. */
+export function takeMenuTarget(): string | null {
+  const id = menuTarget;
+  menuTarget = null;
+  return id;
 }
 
 export function openTabMenu(id: string, x: number, y: number) {
@@ -224,6 +242,29 @@ function copyLink(url: string | null | undefined): Promise<boolean> {
     // A denied clipboard is a user-visible no-op, never a chrome failure.
     () => false,
   );
+}
+
+/** Folder intents settle on native's answer; the projection carries the result. */
+export const folder = (intent: FolderIntent) => settle(commands.tabsFolder(intent));
+
+let folderMenuTarget: string | null = null;
+
+/** A folder's own menu; native names its spaces and checks every action. */
+export function openFolderMenu(
+  id: string,
+  x: number | null,
+  y: number | null,
+  context: FolderMenuContext,
+) {
+  folderMenuTarget = id;
+  void commands.folderMenuPopup(id, x, y, context);
+}
+
+/** The folder its menu was opened on, taken once by Rename or New Folder Inside. */
+export function takeFolderMenuTarget(): string | null {
+  const id = folderMenuTarget;
+  folderMenuTarget = null;
+  return id;
 }
 
 /** Space intents settle on native's answer; the projection carries the result. */

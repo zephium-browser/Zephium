@@ -6,7 +6,9 @@
 
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Cancel01Icon } from "@hugeicons/core-free-icons";
+  import { Cancel01Icon, MinusSignIcon } from "@hugeicons/core-free-icons";
+  import type { FolderColor } from "$shared/ipc/bindings";
+  import { spineLayers } from "../lib/folder-look";
   import { tabFallbackIcon } from "../lib/tab-icon";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
@@ -25,6 +27,7 @@
     selected = false,
     multiSelecting = false,
     depth = 0,
+    spines,
     closable = true,
     class: className = "",
     splitCandidate,
@@ -44,6 +47,8 @@
     selected?: boolean;
     multiSelecting?: boolean;
     depth?: number;
+    /** The colour of each folder around it, outermost first. */
+    spines?: (FolderColor | null)[];
     closable?: boolean;
     class?: string;
     splitCandidate: boolean;
@@ -65,12 +70,26 @@
   // supplies no icon, and the row should say which.
   let fallback = $derived(tabFallbackIcon(tab.content));
   let indent = $derived(grouped ? 8 : 8 + Math.min(depth, 8) * 13);
+  // A folder keeps its tabs: closing one ends its page and leaves it asleep
+  // in place, and closing it asleep takes it out.
+  let kept = $derived(!grouped && depth > 0 && (tab.content ?? "web") === "web");
+  let closeLabel = $derived.by(() => {
+    const title = tab.title || m.untitled_tab();
+    if (!kept) return { named: m.close_named_tab({ title }), short: m.close_tab() };
+    return tab.asleep
+      ? { named: m.folder_tab_remove_named({ title }), short: m.folder_tab_remove() }
+      : { named: m.folder_tab_sleep_named({ title }), short: m.folder_tab_sleep() };
+  });
 </script>
 
 <li
   data-motion-key={`tab:${tab.id}`}
   data-plate
   data-zephium-tab-id={tab.id}
+  data-node-id={grouped ? undefined : tab.id}
+  data-depth={grouped ? undefined : depth}
+  data-spined={spines?.length ? "" : undefined}
+  style:--spines={spines?.length ? spineLayers(spines) : undefined}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
   data-audio-host
@@ -127,12 +146,12 @@
   {#if closable}
     <button
       type="button"
-      aria-label={m.close_named_tab({ title: tab.title || m.untitled_tab() })}
-      title={m.close_tab()}
+      aria-label={closeLabel.named}
+      title={closeLabel.short}
       class="tab-close"
       onclick={closeTab}
     >
-      <Icon icon={Cancel01Icon} size={12} />
+      <Icon icon={kept && !tab.asleep ? MinusSignIcon : Cancel01Icon} size={12} />
     </button>
   {/if}
 </li>

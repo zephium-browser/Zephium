@@ -6,7 +6,10 @@
     VolumeHighIcon,
     VolumeOffIcon,
     FolderTransferIcon,
+    FolderAddIcon,
   } from "@hugeicons/core-free-icons";
+  import * as folderEdit from "$session/folder-edit.svelte";
+  import { groupable } from "../lib/folder-group";
   import { tabs } from "$domain/tabs";
   import { settle, type Settlement } from "$domain/operations";
   import { commands } from "$shared/ipc/bindings";
@@ -41,6 +44,13 @@
   const keepable = $derived(selected.filter((tab) => tab.url && (tab.content ?? "web") === "web"));
   const audio = $derived(selected.filter((tab) => tab.audio?.can_mute));
   const unmute = $derived(audio.length > 0 && audio.every((tab) => tab.audio?.muted));
+  const grouping = $derived(
+    groupable(
+      selected.map((tab) => tab.id),
+      tabs.tabs(),
+      tabs.sidebarNodes(),
+    ),
+  );
   const spaces = $derived(tabs.spaces().filter((space) => space.id !== tabs.activeSpaceId()));
 
   async function run(ids: readonly string[], action: (id: string) => Promise<Settlement>) {
@@ -129,6 +139,22 @@
       >
         <Icon icon={unmute ? VolumeHighIcon : VolumeOffIcon} size={16} />
       </button>
+      {#if tabs.activeSpace() !== undefined}
+        <button
+          type="button"
+          class="selection-action"
+          title={m.tab_selection_group()}
+          aria-label={m.tab_selection_group()}
+          disabled={grouping.length === 0}
+          onclick={() => {
+            const ids = grouping;
+            selection.clear();
+            void folderEdit.create(m.folder_default_name(), { tabs: ids });
+          }}
+        >
+          <Icon icon={FolderAddIcon} size={16} />
+        </button>
+      {/if}
       {#if tabs.spaces().length > 1 && spaces.length > 0}
         <label class="selection-move">
           <Icon icon={FolderTransferIcon} size={16} />

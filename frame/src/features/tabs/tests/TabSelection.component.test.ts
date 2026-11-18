@@ -400,21 +400,26 @@ test("pinned rows and split members support selection in displayed order", async
 test("collapsing a folder prunes its children from selection and bulk actions", async () => {
   const nodes: SidebarNodeView[] = [
     { id: "a", parent_id: null, section: "today", kind: { type: "tab", tab_id: "a" } },
-    { id: "folder", parent_id: null, section: "today", kind: { type: "folder", name: "Folder" } },
+    {
+      id: "folder",
+      parent_id: null,
+      section: "today",
+      kind: { type: "folder", name: "Folder", color: null, collapsed: false },
+    },
     { id: "b", parent_id: "folder", section: "today", kind: { type: "tab", tab_id: "b" } },
     { id: "c", parent_id: null, section: "today", kind: { type: "tab", tab_id: "c" } },
   ];
   const { click, selected, screen } = await list({ nodes, all: open.slice(0, 3) });
   click("c", { shiftKey: true });
   expect(selected()).toEqual(["a", "b", "c"]);
-  await screen.getByRole("button", { name: "Folder" }).click();
+  await screen.getByRole("button", { name: /^Folder, folder/ }).click();
   expect(selected()).toEqual(["a", "c"]);
   expect(screen.container.textContent).toContain("2 tabs selected");
   await screen.getByRole("button", { name: "Close selected tabs" }).click();
   await expect.poll(() => native.close.mock.calls).toEqual([["a"], ["c"]]);
   click("c", { shiftKey: true });
   expect(selected()).toEqual(["a", "c"]);
-  await screen.getByRole("button", { name: "Folder" }).click();
+  await screen.getByRole("button", { name: /^Folder, folder/ }).click();
   expect(selected()).toEqual(["a", "c"]);
 });
 

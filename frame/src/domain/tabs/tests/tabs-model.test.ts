@@ -119,7 +119,7 @@ describe("tab projection admission", () => {
           id: "folder",
           parent_id: null,
           section: "pinned",
-          kind: { type: "folder", name: "Project" },
+          kind: { type: "folder", name: "Project", color: null, collapsed: false },
         },
         {
           id: "b",

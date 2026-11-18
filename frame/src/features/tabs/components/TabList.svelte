@@ -1,6 +1,7 @@
 <script lang="ts">
   import * as tabDrag from "$session/tab-drag.svelte";
-  import { SvelteSet } from "svelte/reactivity";
+  import * as folderEdit from "$session/folder-edit.svelte";
+  import { FOLDER_LEVELS } from "$session/tree-drop";
   import type { SidebarSectionView, TabView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
@@ -10,7 +11,10 @@
   import {
     sidebarDisplayUnits,
     collapsedSidebarUnits,
+    folderContext,
+    type SidebarDisplayUnit,
     type SidebarEntry,
+    type SidebarFolderEntry,
   } from "../lib/sidebar-model";
   import SplitGroupRow from "./SplitGroupRow.svelte";
   import TabRow from "./TabRow.svelte";
@@ -56,7 +60,17 @@
   } = $props();
 
   let displayUnits = $derived(sidebarDisplayUnits(section, entries, tabs.splitGroup()));
-  const folded = new SvelteSet<string>();
+  // A fold is native's; one just asked for is drawn until native answers.
+  let folded = $derived(
+    new Set(
+      displayUnits.flatMap((unit) =>
+        unit.kind === "folder" && folderEdit.folded(unit.node.id, unit.node.kind.collapsed)
+          ? [unit.key]
+          : [],
+      ),
+    ),
+  );
+  let context = $derived(folderContext(displayUnits));
   let hiddenUnits = $derived(collapsedSidebarUnits(displayUnits, folded, tabs.activeId()));
 
   const selectable = $derived(selection !== undefined && variant === "list" && !splitting);
@@ -103,7 +117,47 @@
 
   const modified = (event: MouseEvent) => selectable && isSelectionModifier(event, IS_MAC);
 
+  const nodeOf = (unit: SidebarDisplayUnit) =>
+    unit.kind === "split" ? (unit.tabs[0]?.node.id ?? "") : unit.node.id;
+  const tree = () => variant === "list" && section === "today";
+
   const drag = new RowDrag({
+    tree: {
+      block: (id) => {
+        if (!tree()) return null;
+        const at = displayUnits.findIndex((unit) => unit.kind !== "split" && nodeOf(unit) === id);
+        const unit = displayUnits[at];
+        if (unit === undefined || unit.kind === "split") return null;
+        let next = at + 1;
+        while (next < displayUnits.length && displayUnits[next]!.depth > unit.depth) next += 1;
+        const after = displayUnits[next];
+        return {
+          depth: unit.depth,
+          folder: unit.kind === "folder",
+          levels: context.summaries.get(unit.key)?.levels ?? 1,
+          fileable: unit.kind === "folder" || (unit.tab.content ?? "web") === "web",
+          place: {
+            depth: unit.depth,
+            parent: unit.node.parent_id,
+            before: after !== undefined && after.depth === unit.depth ? nodeOf(after) : null,
+          },
+        };
+      },
+      commit: async (id, place) => {
+        // A tab to the top level goes as every open-tab reorder does.
+        if (place.parent === null && tabs.tabs().some((tab) => tab.id === id)) {
+          await tabDrag.move(id, false, place.before);
+          return !tabDrag.moveFailed();
+        }
+        const result = await tabs.folder({
+          type: "move",
+          id,
+          parent: place.parent,
+          before: place.before,
+        });
+        return result.outcome === "applied" || result.outcome === "deferred";
+      },
+    },
     list: () => list,
     region: () => list?.closest<HTMLElement>("[data-tabs-drop]") ?? undefined,
     // Only open tabs reorder in place; native places anything dropped in
@@ -127,7 +181,14 @@
       // Dropping onto a row does not pair the two; that is Split View's job,
       // from the menu or by dropping onto the page.
       if (over?.closest("[data-tabs-drop]") && section !== "today") {
-        void tabDrag.move(id, false, before);
+        // Into the open tabs at the top level; a folder takes only what is
+        // already among them.
+        const row = before
+          ? over
+              .closest("[data-tabs-drop]")
+              ?.querySelector<HTMLElement>(`[data-node-id="${CSS.escape(before)}"]`)
+          : null;
+        void tabDrag.move(id, false, row && row.dataset.depth !== "0" ? null : before);
         return;
       }
       if (page) tabs.dropTab(id, x, y);
@@ -168,10 +229,34 @@
     untrack(() => motion.play(list));
   });
 
-  function toggleFolder(key: string) {
-    if (folded.has(key)) folded.delete(key);
-    else folded.add(key);
+  function toggleFolder(unit: SidebarFolderEntry) {
+    void folderEdit.setFolded(unit.node.id, !folded.has(unit.key));
   }
+
+  function folderMenu(unit: SidebarFolderEntry, x: number | null, y: number | null) {
+    drag.abandon();
+    tabs.openFolderMenu(unit.node.id, x, y, {
+      color: unit.node.kind.color,
+      can_nest: unit.depth + 1 < FOLDER_LEVELS,
+      awake: (context.summaries.get(unit.key)?.awake ?? 0) > 0,
+    });
+  }
+
+  // A folder just made opens for its name once it is drawn.
+  $effect(() => {
+    for (const unit of displayUnits)
+      if (unit.kind === "folder" && folderEdit.fresh(unit.node.id))
+        untrack(() => folderEdit.claim(unit.node.id));
+  });
+
+  const emptySummary = {
+    count: 0,
+    faces: [],
+    audible: false,
+    loading: false,
+    awake: 0,
+    levels: 1,
+  };
 
   function handleContextMenu(event: MouseEvent, tab: TabView) {
     // A DOM menu cannot reach past the chrome WebView, so the tab menu is a
@@ -193,17 +278,6 @@
     if (drag.swallowClick()) return;
     selection?.plain(id);
     onSelect(id);
-  }
-
-  // A folded folder still shows as open while one of its own rows is shown;
-  // only its subtree is looked at, which ends at the next row as shallow.
-  function showsChild(position: number, depth: number): boolean {
-    for (let next = position + 1; next < displayUnits.length; next++) {
-      const child = displayUnits[next]!;
-      if (child.depth <= depth) return false;
-      if (!hiddenUnits.has(child.key)) return true;
-    }
-    return false;
   }
 </script>
 
@@ -234,11 +308,22 @@
     {#each displayUnits as unit, index (unit.key)}
       {#if unit.kind === "folder"}
         <FolderRow
-          motionKey={unit.key}
-          expanded={!folded.has(unit.key) || showsChild(index, unit.depth)}
-          ontoggle={() => toggleFolder(unit.key)}
-          name={unit.node.kind.name}
-          depth={unit.depth}
+          entry={unit}
+          summary={context.summaries.get(unit.key) ?? emptySummary}
+          spines={context.spines.get(unit.key)}
+          expanded={!folded.has(unit.key)}
+          editing={folderEdit.renamingId() === unit.node.id}
+          ontoggle={() => toggleFolder(unit)}
+          onrename={() => folderEdit.rename(unit.node.id)}
+          onrenamed={(name) =>
+            name === null
+              ? folderEdit.stopRenaming(unit.node.id)
+              : void folderEdit.commitName(unit.node.id, name, unit.node.kind.name)}
+          onmenu={(x, y) => folderMenu(unit, x, y)}
+          onPointerDown={(event) => drag.down(event, unit.node.id, true)}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           class={[
             variant === "essentials" ? "col-span-full" : "",
             hiddenUnits.has(unit.key) ? "hidden" : "",
@@ -247,6 +332,7 @@
       {:else if unit.kind === "split"}
         <SplitGroupRow
           motionKey={unit.key}
+          depth={unit.depth}
           tabs={unit.tabs.map((entry) => entry.tab)}
           activeId={tabs.activeId()}
           {selectedIds}
@@ -284,6 +370,7 @@
           selected={selectedIds.includes(unit.tab.id)}
           multiSelecting={selectedIds.length >= 2}
           depth={unit.depth}
+          spines={context.spines.get(unit.key)}
           closable={section === "today" && !tabs.loneNewTab(unit.tab.id)}
           class={[
             variant === "essentials" ? "col-span-full" : "",
@@ -305,12 +392,17 @@
 
 {#if drag.ghost !== null}{@const held = tabs
     .tabs()
-    .find((tab) => tab.id === drag.ghost?.id)}<DragMark
+    .find((tab) => tab.id === drag.ghost?.id)}{@const folder = held
+    ? undefined
+    : displayUnits.find(
+        (unit): unit is SidebarFolderEntry =>
+          unit.kind === "folder" && unit.node.id === drag.ghost?.id,
+      )}<DragMark
     x={drag.ghost.x}
     y={drag.ghost.y}
     image={favicons.image(held?.icon)}
     tone={favicons.tone(held?.icon)}
-    title={held?.title}
+    title={held?.title ?? folder?.node.kind.name}
   />{/if}
 
 <style>

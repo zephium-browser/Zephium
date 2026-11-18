@@ -33,6 +33,7 @@
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
+  import * as folderEdit from "$session/folder-edit.svelte";
   import { requestTab } from "$session/work-tab.svelte";
   import { expanded as sidebarWidth, expandBriefly } from "$session/sidebar-mode.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -337,6 +338,22 @@
     handledCommand = command.seq;
     untrack(() => {
       if (command.id === "split.choose") chooseSplit();
+      if (command.id === "tab.group") folderEdit.askGroup();
+      if (command.id === "tab.newFolder") {
+        const tab = tabs.takeMenuTarget();
+        if (tab) void folderEdit.create(m.folder_default_name(), { tabs: [tab] });
+      }
+      if (command.id === "folder.rename") {
+        const folder = tabs.takeFolderMenuTarget();
+        if (folder) folderEdit.rename(folder);
+      }
+      if (command.id === "folder.newSubfolder") {
+        const folder = tabs.takeFolderMenuTarget();
+        if (folder) {
+          void folderEdit.setFolded(folder, false);
+          void folderEdit.create(m.folder_default_name(), { parent: folder });
+        }
+      }
       if (command.id === "tab.copyLink") void tabs.copyMenuTargetLink().then(linkCopied);
       if (command.id === "page.copyLink") void tabs.copyActiveLink().then(linkCopied);
       if (command.id === "tab.clearSiteData") clearRequest.ask(tabs.takeMenuTargetUrl());

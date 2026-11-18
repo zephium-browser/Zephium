@@ -2,6 +2,7 @@ import { tabs } from "$domain/tabs";
 import * as tabDrag from "./tab-drag.svelte";
 import { haptic } from "$shared/lib/haptic";
 import { Reorder } from "./reorder";
+import { INDENT, treePlace, treeRows, type TreeBlock, type TreePlace } from "./tree-drop";
 
 /** Where a drag was let go, for the list to decide what that means. */
 type Drop = {
@@ -26,7 +27,15 @@ type Options = {
   region?: () => HTMLElement | undefined;
   /** A drop anywhere but back into the list's own order. */
   drop: (drop: Drop) => void;
+  /** A list of nested rows: a drop among them lands at a place in the tree,
+   *  which the list commits; it answers whether native took it. */
+  tree?: {
+    block: (id: string) => (TreeBlock & { place: TreePlace }) | null;
+    commit: (id: string, place: TreePlace) => Promise<boolean>;
+  };
 };
+
+const samePlace = (a: TreePlace, b: TreePlace) => a.parent === b.parent && a.before === b.before;
 
 /** The tab a drop goes before: the one under the pointer, or the one after it
  *  when the pointer is past its middle, so the end of a row or a list can be
@@ -77,15 +86,22 @@ export class RowDrag {
   #native = false;
   #slot = -1;
   #page = false;
+  #folder = false;
+  #startX = 0;
+  #block: (TreeBlock & { place: TreePlace }) | null = null;
+  #place: TreePlace | null = null;
+  #into: HTMLElement | null = null;
 
   constructor(options: Options) {
     this.#options = options;
   }
 
-  down(event: PointerEvent, id: string) {
+  /** A press on a row; `folder` when the row is a folder rather than a tab. */
+  down(event: PointerEvent, id: string, folder = false) {
     if (event.button !== 0) return;
     this.#down = { x: event.clientX, y: event.clientY };
     this.#id = id;
+    this.#folder = folder;
     this.#dragging = false;
   }
 
@@ -99,7 +115,7 @@ export class RowDrag {
       const target = event.currentTarget;
       if (target instanceof HTMLElement) target.setPointerCapture(event.pointerId);
       this.#dragging = true;
-      tabDrag.begin(this.#id);
+      if (!this.#folder) tabDrag.begin(this.#id);
       document.body.style.cursor = "grabbing";
       const sidebar = target instanceof Element ? target.closest(".browser-sidebar") : null;
       this.#bounds = sidebar?.getBoundingClientRect() ?? null;
@@ -109,10 +125,13 @@ export class RowDrag {
       this.#page = false;
       const reorder = this.#options.reorder();
       this.#essential = reorder?.essential ?? false;
+      this.#startX = event.clientX;
+      this.#block = this.#options.tree?.block(this.#id) ?? null;
+      this.#place = null;
       this.#reorder = reorder
         ? Reorder.begin(
             this.#options.list(),
-            `tab:${this.#id}`,
+            `${this.#folder ? "folder" : "tab"}:${this.#id}`,
             event.clientY,
             this.#options.region?.(),
           )
@@ -126,8 +145,10 @@ export class RowDrag {
       this.#frame = 0;
       const { x, y } = this.#pointer;
       const inPlace = this.#reorder?.update(x, y) ?? false;
+      this.#nest(inPlace, x);
       this.#feel(inPlace, x);
       this.ghost = { id: this.#id, x, y };
+      if (this.#folder) return;
       tabDrag.hover(x, y);
       if (this.#onPage(x, y)) {
         this.#native = true;
@@ -146,17 +167,33 @@ export class RowDrag {
     const id = this.#id;
     const reorder = this.#reorder;
     const essential = this.#essential;
-    if (reorder && this.#frame !== 0) reorder.update(event.clientX, event.clientY);
+    const folder = this.#folder;
+    const tree = this.#options.tree;
+    const block = this.#block;
+    if (reorder && this.#frame !== 0) {
+      const inPlace = reorder.update(event.clientX, event.clientY);
+      this.#nest(inPlace, event.clientX);
+    }
+    const place = this.#place;
     this.#release(event);
     this.#reset();
     if (!dragged) return;
     this.#swallow = true;
 
-    const placed = reorder?.target();
-    if (reorder && placed?.changed) {
+    // Among nested rows the drop lands at a place in the tree; elsewhere it
+    // goes before the tab at its slot.
+    let commit: (() => Promise<boolean>) | null = null;
+    if (reorder?.inside && tree && block) {
+      if (place && !samePlace(place, block.place)) commit = () => tree.commit(id, place);
+    } else {
+      const placed = reorder?.target();
+      if (placed?.changed)
+        commit = () => tabDrag.move(id, essential, placed.before).then(() => !tabDrag.moveFailed());
+    }
+    if (reorder && commit) {
       this.#landing?.clear();
       this.#landing = reorder;
-      void tabDrag.move(id, essential, placed.before).then(() => {
+      void commit().then((taken) => {
         if (this.#landing !== reorder) return;
         // Refused: slide home at once. Accepted: the reordered list is on
         // its way and lands the rows itself; if it never comes, slide home.
@@ -165,12 +202,13 @@ export class RowDrag {
           this.#landing = null;
           reorder.release();
         };
-        if (tabDrag.moveFailed()) home();
+        if (!taken) home();
         else setTimeout(home, 600);
       });
       return;
     }
     reorder?.release();
+    if (folder) return;
     this.#options.drop({
       id,
       x: event.clientX,
@@ -213,6 +251,30 @@ export class RowDrag {
     this.#landing = null;
   }
 
+  /** Among nested rows: how deep a drop here would go, shown by setting the
+   *  row in by that many indents and lighting the folder it would go into. */
+  #nest(inPlace: boolean, x: number) {
+    const reorder = this.#reorder;
+    const block = this.#block;
+    if (!reorder || !block || !this.#options.tree) return;
+    const gap = inPlace ? reorder.gap() : null;
+    const place = gap ? treePlace(treeRows(gap.rows), gap.index, block, x - this.#startX) : null;
+    const level = place?.depth ?? block.depth;
+    if (inPlace && this.#place !== null && place !== null && level !== this.#place.depth)
+      haptic("align");
+    this.#place = place;
+    reorder.indent((level - block.depth) * INDENT);
+    const into =
+      place?.parent && gap
+        ? (gap.rows.find((row) => row.dataset.nodeId === place.parent) ?? null)
+        : null;
+    if (into !== this.#into) {
+      if (this.#into) delete this.#into.dataset.dropInto;
+      if (into) into.dataset.dropInto = "";
+      this.#into = into;
+    }
+  }
+
   /** A tick as the row snaps into a new slot, and a firmer one on reaching the page. */
   #feel(inPlace: boolean, x: number) {
     const slot = this.#reorder?.slot ?? -1;
@@ -241,8 +303,13 @@ export class RowDrag {
     this.#id = "";
     this.#dragging = false;
     this.#reorder = null;
+    this.#block = null;
+    this.#place = null;
+    if (this.#into) delete this.#into.dataset.dropInto;
+    this.#into = null;
     this.ghost = null;
     document.body.style.cursor = "";
-    tabDrag.end();
+    if (!this.#folder) tabDrag.end();
+    this.#folder = false;
   }
 }

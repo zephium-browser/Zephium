@@ -450,6 +450,30 @@ mod tests {
     }
 
     #[test]
+    fn every_folder_menu_label_has_an_english_message() {
+        let english: std::collections::HashMap<String, String> =
+            serde_json::from_str(include_str!("../../frame/messages/en.json")).unwrap();
+        let entries = include_str!("folders.rs")
+            .split("entry(handle, \"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("\", \"")?.1.split_once('"'))
+            .map(|(label, _)| label);
+        let labels: Vec<&str> = COLORS
+            .iter()
+            .map(|(_, _, title)| *title)
+            .chain(entries)
+            .collect();
+        assert_eq!(labels.len(), 12);
+        for label in labels {
+            assert_eq!(
+                english.get(&menu_text::key(label)).map(String::as_str),
+                Some(label),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
     fn the_tab_menu_lists_the_projected_folders_by_depth() {
         let node = |id: &str, parent: Option<&str>, name: &str| zephium_ipc::SidebarNodeView {
             id: id.into(),

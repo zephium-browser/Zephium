@@ -98,7 +98,8 @@ test("the row names the space and its plus opens a tab, with no pager beside the
   await screen.getByRole("button", { name: "New tab", exact: true }).click();
   expect(native.open).toHaveBeenCalledOnce();
   expect(screen.container.querySelector(".space-dots, .space-dot")).toBeNull();
-  expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(2);
+  expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(3);
+  await expect.element(screen.getByRole("button", { name: "New folder" })).toBeVisible();
 });
 
 test("middle-click opens a tab only on the empty list background", async () => {
