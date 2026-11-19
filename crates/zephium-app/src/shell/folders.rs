@@ -45,9 +45,19 @@ impl DeletedNode {
     fn link(&mut self, records: &HashMap<ItemId, ClosedSessionId>) {
         match self {
             Self::Folder { children, .. } => {
-                children.iter_mut().for_each(|child| child.link(records))
+                children.iter_mut().for_each(|child| child.link(records));
+                // A tab Recently Closed does not hold can never come back.
+                children.retain(|child| !matches!(child, Self::Tab { record: None, .. }));
             }
             Self::Tab { source, record, .. } => *record = records.get(source).copied(),
+        }
+    }
+
+    #[cfg(test)]
+    fn tabs(&self) -> usize {
+        match self {
+            Self::Folder { children, .. } => children.iter().map(Self::tabs).sum(),
+            Self::Tab { .. } => 1,
         }
     }
 
@@ -383,6 +393,12 @@ impl Shell {
         let effects = self.items.remove(id);
         native.merge(self.commit(effects));
         if let Some(mut node) = node {
+            // A large folder can push its own first records out again.
+            records.retain(|_, record| {
+                self.recently_closed
+                    .iter()
+                    .any(|entry| entry.session_id == Some(*record))
+            });
             node.link(&records);
             if self.deleted_folders.len() == MAX_DELETED_FOLDERS {
                 self.deleted_folders.remove(0);
@@ -401,6 +417,12 @@ impl Shell {
             });
         }
         mutation_result(native)
+    }
+
+    /// The addresses every deleted folder still holds.
+    #[cfg(test)]
+    pub(super) fn held_deleted_tabs(&self) -> usize {
+        self.deleted_folders.iter().map(|f| f.node.tabs()).sum()
     }
 
     /// Brings back the newest deleted folder of `profile` when nothing closed

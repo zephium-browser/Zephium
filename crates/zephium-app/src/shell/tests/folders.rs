@@ -753,3 +753,27 @@ fn closing_the_front_folder_tab_of_a_full_session_takes_it_out() {
     assert_eq!(shell.recently_closed.len(), closed_before + 1);
     assert_ne!(active_id(&screen), ids[1]);
 }
+
+#[test]
+fn a_deleted_folder_holds_only_the_tabs_recently_closed_still_has() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let limit = zephium_core::session::MAX_RECENTLY_CLOSED_TABS;
+    let pages: Vec<String> = (0..=limit + 2).map(|n| format!("p{n}.example")).collect();
+    let pages: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let ids = tabs(&mut shell, &screen, &pages);
+    let folder = group(&mut shell, "Large", ids[1..].to_vec());
+    assert_eq!(shell.items.children(folder).len(), limit + 2);
+
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    // The first two records were pushed out by the folder's own later ones.
+    assert_eq!(shell.held_deleted_tabs(), limit);
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Large").expect("folder back");
+    assert_eq!(shell.items.children(back).len(), limit);
+    assert_eq!(hosts(&shell, "p1.example"), 0);
+    assert_eq!(hosts(&shell, &format!("p{}.example", limit + 2)), 1);
+    assert_eq!(shell.held_deleted_tabs(), 0);
+}
