@@ -498,11 +498,20 @@ impl Shell {
                 .get(*before)
                 .is_some_and(|item| item.parent == parent && item.placement == placement)
         });
-        if !self.restore_node(&deleted.node, &live, placement, parent, before) {
+        let mut restored = Vec::new();
+        if !self.restore_node(
+            &deleted.node,
+            &live,
+            &mut restored,
+            placement,
+            parent,
+            before,
+        ) {
             return None;
         }
+        // A tab that could not come back keeps its record for a plain reopen.
         self.recently_closed
-            .retain(|entry| entry.session_id.is_none_or(|id| !live.contains(&id)));
+            .retain(|entry| entry.session_id.is_none_or(|id| !restored.contains(&id)));
         self.extension_sessions_changed(profile);
         Some(self.commit(Vec::new()))
     }
@@ -511,22 +520,31 @@ impl Shell {
         &mut self,
         node: &DeletedNode,
         live: &[ClosedSessionId],
+        restored: &mut Vec<ClosedSessionId>,
         placement: Placement,
         parent: Option<ItemId>,
         before: Option<ItemId>,
     ) -> bool {
         match node {
             DeletedNode::Tab { record, .. } if !record.is_some_and(|r| live.contains(&r)) => true,
-            DeletedNode::Tab { url, title, .. } => (0..8).any(|_| {
-                self.items.insert_unloaded_tab_at(
-                    ItemId::generate(),
-                    placement,
-                    parent,
-                    before,
-                    url.clone(),
-                    title,
-                )
-            }),
+            DeletedNode::Tab {
+                url, title, record, ..
+            } => {
+                let back = (0..8).any(|_| {
+                    self.items.insert_unloaded_tab_at(
+                        ItemId::generate(),
+                        placement,
+                        parent,
+                        before,
+                        url.clone(),
+                        title,
+                    )
+                });
+                if back {
+                    restored.extend(*record);
+                }
+                back
+            }
             DeletedNode::Folder {
                 name,
                 color,
@@ -542,8 +560,8 @@ impl Shell {
                 let _ = self.items.set_folder_collapsed(id, *collapsed);
                 for child in children {
                     // A nested folder past the depth limit comes back loose.
-                    if !self.restore_node(child, live, placement, Some(id), None) {
-                        let _ = self.restore_node(child, live, placement, parent, before);
+                    if !self.restore_node(child, live, restored, placement, Some(id), None) {
+                        let _ = self.restore_node(child, live, restored, placement, parent, before);
                     }
                 }
                 true

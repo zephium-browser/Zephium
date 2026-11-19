@@ -929,3 +929,31 @@ fn a_deleted_folder_comes_back_whole_under_the_nearest_folder_with_room() {
     assert_eq!(shell.items.subtree_tabs(back[0]).len(), 1);
     assert!(shell.items.children(outer).is_empty());
 }
+
+#[test]
+fn a_tab_folder_undo_cannot_bring_back_keeps_its_recently_closed_record() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &["a.example", "b.example", "c.example"],
+    );
+    let folder = group(&mut shell, "Mixed", vec![ids[1], ids[2]]);
+    let page = url::Url::parse("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html")
+        .unwrap();
+    shell.items.set_committed_url(ids[2], page);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(shell.recently_closed.len(), 2);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back = named_folder(&shell, "Mixed").expect("folder back");
+    assert_eq!(shell.items.children(back).len(), 1);
+    assert_eq!(hosts(&shell, "b.example"), 1);
+    assert_eq!(shell.recently_closed.len(), 1);
+    assert!(shell.recently_closed[0]
+        .url
+        .starts_with("chrome-extension://"));
+}
