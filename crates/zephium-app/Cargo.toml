@@ -33,7 +33,7 @@ sha2 = { version = "=0.10.9", optional = true }
 sha1 = { version = "=0.10.6", optional = true }
 flate2 = { version = "=1.1.9", default-features = false, features = ["rust_backend"], optional = true }
 tokio = { workspace = true, optional = true, features = ["time", "process", "io-util", "net"] }
-jiff = { version = "=0.2.39", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
+jiff = { version = "=0.2.43", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "tzdb-bundle-platform"] }
 zephium-agentic = { workspace = true, optional = true }
 zephium-agent-controller = { workspace = true, optional = true, features = ["provider-transport"] }
 zephium-agent-runtime = { workspace = true, optional = true }
