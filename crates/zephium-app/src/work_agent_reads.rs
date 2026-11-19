@@ -1476,7 +1476,8 @@ fn starts_over(outcome: &WorkBrowserOutcome) -> bool {
             || (outcome.helped
                 && outcome.status == WorkStepStatus::Failed
                 && outcome.committed.is_empty()
-                && !outcome.held_back))
+                && !outcome.held_back
+                && outcome.note.as_deref() != Some(read_note::UNREACHABLE)))
 }
 
 /// A page lost before it called a model or acted: its usage is unknown only
@@ -1760,6 +1761,12 @@ mod tests {
         assert!(!starts_over(&lost), "unknown usage after a model call");
         helped.committed = vec!["Sent on the page: hi".into()];
         assert!(!starts_over(&helped), "never twice once it sent something");
+        let mut unreachable = outcome(read_note::UNREACHABLE, 0);
+        unreachable.helped = true;
+        assert!(
+            !starts_over(&unreachable),
+            "a site that could not be reached is not read again after a sign-in"
+        );
         assert!(!retryable_read(
             &step,
             &Ok(outcome(read_note::UNSETTLED, 1))
