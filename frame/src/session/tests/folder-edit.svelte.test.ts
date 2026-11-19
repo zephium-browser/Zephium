@@ -102,3 +102,15 @@ it("lets the next create go when a refused one never brings a folder", async () 
   await next;
   expect(edit.renamingId()).toBe("yes");
 });
+
+it("drops a queued create when the space changed while it waited", async () => {
+  const edit = await import("../folder-edit.svelte");
+  const first = edit.create("Here");
+  const queued = edit.create("Also here");
+  await settled();
+  view.space = "s2";
+  view.answers.shift()!("rejected");
+  await first;
+  await queued;
+  expect(view.folder).toHaveBeenCalledTimes(1);
+});

@@ -71,13 +71,16 @@ let creating: Promise<void> = Promise.resolve();
 
 /** A new folder, holding `tabs` or empty inside `parent`; it opens for its name. */
 export function create(name: string, options: CreateOptions = {}): Promise<void> {
-  const run = creating.then(() => createNow(name, options));
+  // Native files it in the space in front when it is sent, so it is meant
+  // for the space in front now.
+  const where = scope();
+  const run = creating.then(() => createNow(name, options, where));
   creating = run.catch(() => {});
   return run;
 }
 
-async function createNow(name: string, options: CreateOptions) {
-  const where = scope();
+async function createNow(name: string, options: CreateOptions, where: string) {
+  if (scope() !== where) return;
   const known = folderIds();
   const result = await tabs.folder({
     type: "create",
