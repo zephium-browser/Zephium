@@ -777,3 +777,35 @@ fn a_deleted_folder_holds_only_the_tabs_recently_closed_still_has() {
     assert_eq!(hosts(&shell, &format!("p{}.example", limit + 2)), 1);
     assert_eq!(shell.held_deleted_tabs(), 0);
 }
+
+#[test]
+fn closing_the_front_essential_of_a_full_session_keeps_it_asleep() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(&mut shell, &screen, &["a.example", "kept.example"]);
+    let essential = ids[1];
+    assert!(matches!(
+        shell
+            .handle_operation(Command::SetTabEssential {
+                id: essential,
+                essential: true,
+                before: None,
+            })
+            .outcome,
+        OperationOutcome::Applied | OperationOutcome::Deferred
+    ));
+    assert_eq!(active_id(&screen), essential);
+    let _ = fill(&mut shell, 0);
+
+    assert_eq!(
+        op(&mut shell, Command::Close(essential)).outcome,
+        OperationOutcome::Applied
+    );
+    let favorites = Placement::Favorites {
+        space: space(&shell),
+    };
+    let kept = shell.items.roots(favorites).to_vec();
+    assert_eq!(kept.len(), 1);
+    let tab = shell.items.tab(kept[0]).unwrap();
+    assert_eq!(tab.url.as_ref().unwrap().host_str(), Some("kept.example"));
+    assert!(!tab.has_view());
+}

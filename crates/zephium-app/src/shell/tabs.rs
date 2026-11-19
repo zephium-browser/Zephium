@@ -292,16 +292,18 @@ impl Shell {
         if keep && self.kept_asleep(id) {
             return NativeWork::default();
         }
-        // A full session has no room for both the kept tab and a New Tab
-        // taking the front, so the front tab goes to Recently Closed instead.
+        // A full session has no room for both a folder's kept tab and a New
+        // Tab taking the front, so that tab goes to Recently Closed instead.
+        // An Essential has no Recently Closed record, so it is always kept.
         let front = self
             .windows
             .focused()
             .is_some_and(|window| window.active == Some(id));
+        let full = front && self.items.is_full();
         let kept = keep
             .then(|| self.kept_slot(id))
             .flatten()
-            .filter(|_| !(front && self.items.is_full()));
+            .filter(|slot| slot.parent.is_none() || !full);
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
