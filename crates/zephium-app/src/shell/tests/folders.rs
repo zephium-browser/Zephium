@@ -831,3 +831,34 @@ fn a_folder_tab_whose_page_cannot_be_loaded_back_goes_to_recently_closed() {
     assert_eq!(shell.items.children(folder), [ids[1]]);
     assert_eq!(shell.recently_closed.len(), closed_before + 1);
 }
+
+#[test]
+fn a_deleted_folder_reopens_before_a_record_from_an_older_build() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(&mut shell, &screen, &["a.example"]);
+    let window = shell.windows.focused().unwrap();
+    let (profile, home) = (window.profile, window.space);
+    // Read back from an older snapshot: no id and no close time.
+    shell
+        .recently_closed
+        .push(zephium_core::session::PersistedClosedTab {
+            profile,
+            space: home,
+            url: "https://old.example/".into(),
+            title: "Old".into(),
+            zoom: 1.0,
+            session_id: None,
+            closed_at_ms: None,
+            position: None,
+        });
+    let folder = group(&mut shell, "Empty", vec![]);
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(folder)).outcome,
+        OperationOutcome::Applied
+    );
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    assert!(named_folder(&shell, "Empty").is_some());
+    assert_eq!(hosts(&shell, "old.example"), 0);
+    assert_eq!(shell.items.roots(today(&shell))[0], ids[0]);
+}

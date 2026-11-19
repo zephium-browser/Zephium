@@ -450,10 +450,12 @@ impl Shell {
             .rev()
             .find(|entry| entry.profile == profile)
         {
-            // Closed after it, or not known to be older: the tab comes first.
-            if !entry
+            // Closed after it: the tab comes first. A record with no id was
+            // written by an older build or without a clock, before any
+            // deletion this run could know of, so the folder goes before it.
+            if entry
                 .session_id
-                .is_some_and(|record| folder.known.contains(&record))
+                .is_some_and(|record| !folder.known.contains(&record))
             {
                 return None;
             }
