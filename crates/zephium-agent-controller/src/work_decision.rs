@@ -571,16 +571,9 @@ impl AgentWorkController {
                         .emit(AgentWorkEventKind::DecisionPlanner(
                             AgentWorkDecisionRoute::NativeRefused,
                         ))?;
+                    let looked = Self::look_begins(state)?;
                     observation = Box::pin(Self::observe(state, worker, browser)).await?;
-                    captured_at = SemanticCaptureInstant::from_millis(
-                        state
-                            .session
-                            .as_mut()
-                            .ok_or_else(|| crate::contract!())?
-                            .policy_now()
-                            .map_err(AgentWorkFailure::Browser)?
-                            .millis(),
-                    );
+                    captured_at = SemanticCaptureInstant::from_millis(looked.millis());
                     progress = state.task_progress(&observation)?;
                     break;
                 }
@@ -599,16 +592,10 @@ impl AgentWorkController {
                     {
                         return Err(AgentWorkFailure::Browser(error));
                     }
-                    observation = Box::pin(Self::observe_settled(state, worker, browser)).await?;
-                    captured_at = SemanticCaptureInstant::from_millis(
-                        state
-                            .session
-                            .as_mut()
-                            .ok_or_else(|| crate::contract!())?
-                            .policy_now()
-                            .map_err(AgentWorkFailure::Browser)?
-                            .millis(),
-                    );
+                    let looked;
+                    (observation, looked) =
+                        Box::pin(Self::observe_settled(state, worker, browser)).await?;
+                    captured_at = SemanticCaptureInstant::from_millis(looked.millis());
                     progress = state.task_progress(&observation)?;
                     break;
                 }
@@ -1033,13 +1020,15 @@ impl AgentWorkController {
 
     /// Looks at a page that may still be replacing its document: a stale or
     /// replaced look is taken again, briefly, instead of ending the read.
+    /// The look is dated by when it began.
     async fn observe_settled(
         state: &mut WorkState,
         worker: &mut AgentRuntimeWorker,
         browser: &WorkBrowser<'_>,
-    ) -> Result<SemanticObservation, AgentWorkFailure> {
+    ) -> Result<(SemanticObservation, AgentPolicyInstant), AgentWorkFailure> {
         let mut waits = 0u8;
         loop {
+            let looked = Self::look_begins(state)?;
             match Self::observe(state, worker, browser).await {
                 Err(AgentWorkFailure::Observation(
                     SemanticRuntimePortFailure::Stale
@@ -1048,7 +1037,7 @@ impl AgentWorkController {
                     waits += 1;
                     Self::settle_pause(state, worker, browser).await?;
                 }
-                result => return result,
+                result => return Ok((result?, looked)),
             }
         }
     }
