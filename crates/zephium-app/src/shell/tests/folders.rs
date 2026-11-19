@@ -809,3 +809,25 @@ fn closing_the_front_essential_of_a_full_session_keeps_it_asleep() {
     assert_eq!(tab.url.as_ref().unwrap().host_str(), Some("kept.example"));
     assert!(!tab.has_view());
 }
+
+#[test]
+fn a_folder_tab_whose_page_cannot_be_loaded_back_goes_to_recently_closed() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(
+        &mut shell,
+        &screen,
+        &["a.example", "b.example", "c.example"],
+    );
+    let folder = group(&mut shell, "Pages", vec![ids[1], ids[2]]);
+    let page = url::Url::parse("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html")
+        .unwrap();
+    shell.items.set_committed_url(ids[2], page);
+    let closed_before = shell.recently_closed.len();
+
+    assert_eq!(
+        op(&mut shell, Command::Close(ids[2])).outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(shell.items.children(folder), [ids[1]]);
+    assert_eq!(shell.recently_closed.len(), closed_before + 1);
+}

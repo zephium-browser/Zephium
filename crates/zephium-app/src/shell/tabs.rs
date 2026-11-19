@@ -295,6 +295,7 @@ impl Shell {
         // A full session has no room for both a folder's kept tab and a New
         // Tab taking the front, so that tab goes to Recently Closed instead.
         // An Essential has no Recently Closed record, so it is always kept.
+        // A page that could not be loaded back is never kept.
         let front = self
             .windows
             .focused()
@@ -303,7 +304,7 @@ impl Shell {
         let kept = keep
             .then(|| self.kept_slot(id))
             .flatten()
-            .filter(|slot| slot.parent.is_none() || !full);
+            .filter(|slot| navigation::is_allowed(&slot.url) && (slot.parent.is_none() || !full));
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
