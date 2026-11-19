@@ -1337,6 +1337,24 @@ by the installed native engine. Zephium does not reimplement them and must not d
 them. Its only certificate bypass is the per-profile exception for hosts on the person's
 own network described under Certificate errors.
 
+On macOS, `desktop/Info.plist` enables `NSAllowsArbitraryLoadsInWebContent`
+so WebKit can render HTTP pages already admitted by the navigation policy. This
+is application-wide across web views, not a human-tab-only exception. It does
+not enable `NSAllowsArbitraryLoads` for native networking. Privileged application
+views still use the exact navigation lock and CSP; agent/Work views still use
+their exact navigation grants; extension views retain their origin and permission
+gates. None of those gates delegates authorization to ATS. The exception does
+not add a certificate challenge override or change HSTS or mixed-content policy.
+
+Validation of this setting must distinguish the source plist, the final packaged
+plist, and live engine behavior. Check the final bundle's `NSAppTransportSecurity`
+dictionary for only `NSAllowsArbitraryLoadsInWebContent = true`. With synthetic
+fixtures, verify HTTP rendering in WKWebView, ATS rejection of disallowed HTTP
+through native URLSession, and rejection of an untrusted HTTPS certificate
+without an existing user-approved local certificate exception. HSTS and
+mixed-content checks remain native-engine qualification, not claims established
+by the source-configuration regression test.
+
 These inherited properties must not be overstated:
 
 - Zephium does **not** guarantee a renderer process per origin or Chromium-equivalent
