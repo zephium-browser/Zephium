@@ -175,11 +175,12 @@ pub const REGISTRY: &[CommandSpec] = &[
     command("split.choose", "Split View…", Keys::NONE, Group::File),
     // The selected tabs, else the one in front, into a new folder. Shift
     // and a letter, as the tool panels are: never Alt, which is AltGr on
-    // many Windows layouts.
+    // many Windows layouts. Not L: a note keeps that for its checklist, and
+    // a menu key would take it first on macOS.
     command(
         "tab.group",
         "Group into Folder",
-        Keys::same("CmdOrCtrl+Shift+L"),
+        Keys::same("CmdOrCtrl+Shift+M"),
         Group::File,
     ),
     command(
