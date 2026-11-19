@@ -2140,6 +2140,45 @@ fn main_window_frame_roundtrip_and_settings_migration() {
 }
 
 #[test]
+fn main_window_frame_fractional_monitor_identity_survives_store_roundtrip() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    // Windows supplies physical geometry divided by the display scale. At
+    // 175%, these logical bounds cannot be represented by terminating decimals.
+    let monitor = WindowMonitor {
+        name: Some("External at 175%".into()),
+        bounds: WindowRect {
+            x: -1920.0 / 1.75,
+            y: 120.0 / 1.75,
+            width: 1920.0 / 1.75,
+            height: 1080.0 / 1.75,
+        },
+    };
+    let mut frame = WindowFrame {
+        bounds: WindowRect {
+            x: -1000.0,
+            y: 100.0,
+            width: 900.0,
+            height: 500.0,
+        },
+        monitor: monitor.clone(),
+        maximized: false,
+    };
+    for width in [
+        800, 900, 1024, 1080, 1200, 1280, 1366, 1440, 1600, 1920, 2560, 3440, 3840,
+    ] {
+        frame.monitor.bounds.width = f64::from(width) / 1.75;
+        assert!(store.save_main_window_frame(&frame));
+        assert!(store.flush());
+        assert_eq!(store.main_window_frame().unwrap().monitor, frame.monitor);
+    }
+    drop(store);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(store.main_window_frame().unwrap().monitor, frame.monitor);
+}
+
+#[test]
 fn main_window_frame_rejects_malformed_records_and_non_finite_writes() {
     use crate::{WindowFrame, WindowMonitor, WindowRect};
     let store = SqliteStore::in_memory().unwrap();

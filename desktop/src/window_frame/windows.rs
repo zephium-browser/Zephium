@@ -70,6 +70,10 @@ pub(super) fn apply(
     let rect = plan.bounds;
     // Set the outer frame, including any nonclient border, without showing or
     // activating it. Maximization is deferred to the trusted first reveal.
+    // SAFETY: acquire this Tauri window's HWND for this synchronous call only;
+    // never retain or dereference it. SetWindowPos permits a non-owner thread
+    // and validates the OS handle if destruction races. Coordinates and flags
+    // are passed by value; there is no output buffer.
     unsafe {
         SetWindowPos(
             window.hwnd().map_err(|e| e.to_string())?,
@@ -96,13 +100,23 @@ pub(super) fn capture(window: &WebviewWindow) -> Option<WindowFrame> {
     let mut bounds = windows::Win32::Foundation::RECT::default();
     // Native state is queried directly: Tao's cached maximized flag can lag
     // WM_SIZE delivery during maximize/restore.
+    // SAFETY: HWND was just acquired from Tauri and is used only during this
+    // capture. IsZoomed accepts an opaque OS handle from any thread, including
+    // the shutdown worker; it retains no pointer and has no output buffer.
     let maximized = unsafe { IsZoomed(hwnd).as_bool() };
+    // SAFETY: use the same transient Tauri HWND; GetWindowRect may run on the
+    // event thread or the shutdown worker. Its output buffer is an initialized,
+    // exclusively borrowed RECT, live for the synchronous call and not retained.
     unsafe { GetWindowRect(hwnd, &mut bounds) }.ok()?;
     if maximized && !fullscreen {
         let mut placement = WINDOWPLACEMENT {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
         };
+        // SAFETY: use the same transient Tauri HWND on the event or shutdown
+        // thread. The output buffer is an initialized, exclusively borrowed
+        // WINDOWPLACEMENT with length set to its exact size; it remains live
+        // throughout the synchronous call, which does not retain the pointer.
         unsafe { GetWindowPlacement(hwnd, &mut placement) }.ok()?;
         // WINDOWPLACEMENT uses workspace coordinates. Convert to screen
         // coordinates when a taskbar occupies the left or top display edge.

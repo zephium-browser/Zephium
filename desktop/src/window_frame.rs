@@ -86,8 +86,12 @@ fn placement(
     Some(Placement {
         monitor: index,
         bounds: WindowRect {
-            x: frame.x.clamp(work.x, work.x + work.width - width),
-            y: frame.y.clamp(work.y, work.y + work.height - height),
+            x: frame
+                .x
+                .clamp(work.x, (work.x + (work.width - width)).max(work.x)),
+            y: frame
+                .y
+                .clamp(work.y, (work.y + (work.height - height)).max(work.y)),
             width,
             height,
         },
@@ -97,6 +101,7 @@ fn placement(
 
 struct Pending {
     frame: Option<WindowFrame>,
+    revision: u64,
     recording: bool,
     due: Instant,
     running: bool,
@@ -107,6 +112,7 @@ impl Pending {
     fn new() -> Self {
         Self {
             frame: None,
+            revision: 0,
             recording: false,
             due: Instant::now(),
             running: false,
@@ -134,6 +140,17 @@ impl Pending {
 
     fn can_record(&self) -> bool {
         self.recording && !self.closed
+    }
+
+    fn finish(&mut self, captured: Option<WindowFrame>, revision: u64) {
+        // A move/resize delivered during capture has already remembered a
+        // newer frame. Keep that frame for the final persistence barrier.
+        if self.revision == revision {
+            if let Some(frame) = captured {
+                remember(self, frame);
+            }
+        }
+        self.closed = true;
     }
 }
 
@@ -226,14 +243,9 @@ pub(crate) fn activate(window: &WebviewWindow, after_onboarding: bool) {
         restored.as_ref().is_ok_and(|frame| frame.maximized),
         std::sync::atomic::Ordering::Release,
     );
+    let default = restored.is_err().then(|| native::capture(window)).flatten();
     let mut pending = owner.pending.lock().unwrap_or_else(|e| e.into_inner());
-    pending.start(restored, || native::capture(window));
-}
-
-fn update(window: &WebviewWindow, pending: &mut Pending) {
-    if let Some(frame) = native::capture(window) {
-        remember(pending, frame);
-    }
+    pending.start(restored, || default);
 }
 
 fn remember(pending: &mut Pending, mut frame: WindowFrame) {
@@ -250,6 +262,7 @@ fn remember(pending: &mut Pending, mut frame: WindowFrame) {
     }
     if frame.is_valid() {
         pending.frame = Some(frame);
+        pending.revision = pending.revision.wrapping_add(1);
     }
 }
 
@@ -257,11 +270,22 @@ fn changed(window: &WebviewWindow) {
     let Some(owner) = window.try_state::<FrameOwner>() else {
         return;
     };
+    if !owner
+        .pending
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .can_record()
+    {
+        return;
+    }
+    let captured = native::capture(window);
     let mut pending = owner.pending.lock().unwrap_or_else(|e| e.into_inner());
     if !pending.can_record() {
         return;
     }
-    update(window, &mut pending);
+    if let Some(frame) = captured {
+        remember(&mut pending, frame);
+    }
     pending.due = Instant::now() + DEBOUNCE;
     if pending.running {
         return;
@@ -296,13 +320,18 @@ fn save_now(window: &WebviewWindow) {
     let Some(owner) = window.app_handle().try_state::<FrameOwner>() else {
         return;
     };
+    let (revision, can_record) = {
+        let pending = owner.pending.lock().unwrap_or_else(|e| e.into_inner());
+        (pending.revision, pending.can_record())
+    };
+    // Tauri getters may wait for the main thread; never hold Pending here.
+    let captured = if can_record {
+        native::capture(window)
+    } else {
+        None
+    };
     let mut pending = owner.pending.lock().unwrap_or_else(|e| e.into_inner());
-    if !pending.can_record() {
-        pending.closed = true;
-        return;
-    }
-    update(window, &mut pending);
-    pending.closed = true;
+    pending.finish(captured, revision);
     if pending
         .frame
         .as_ref()
@@ -617,6 +646,108 @@ mod tests {
             placement(Some(&external), &monitors[..1], 0, 0, (680.0, 480.0), false),
             Some(fallback)
         );
+    }
+
+    #[test]
+    fn main_window_frame_clamps_fractional_work_area_without_panicking() {
+        let mut monitors = monitors();
+        monitors[0].work = rect(2.0 / 1.5, 2.0 / 1.5, 1280.0, 720.0);
+        let saved = WindowFrame {
+            bounds: monitors[0].work,
+            monitor: monitors[0].identity.clone(),
+            maximized: false,
+        };
+        assert_eq!(
+            placement(Some(&saved), &monitors, 0, 0, (680.0, 480.0), false),
+            Some(Placement {
+                monitor: 0,
+                bounds: monitors[0].work,
+                maximized: false,
+            })
+        );
+    }
+
+    #[test]
+    fn main_window_frame_captures_before_locking_pending() {
+        let production = include_str!("window_frame.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(!production.contains("fn update("));
+        for (start, end) in [
+            ("pub(crate) fn activate(", "fn remember("),
+            ("fn changed(", "fn save_now("),
+            ("fn save_now(", "pub(crate) fn closing("),
+        ] {
+            let callback = production
+                .split(start)
+                .nth(1)
+                .and_then(|body| body.split(end).next())
+                .unwrap();
+            assert!(
+                callback.find("native::capture(window)").unwrap()
+                    < callback
+                        .find("let mut pending = owner.pending.lock()")
+                        .unwrap(),
+                "{start} must capture without holding Pending across native getters"
+            );
+        }
+    }
+
+    #[test]
+    fn main_window_frame_final_capture_keeps_latest_frame() {
+        let normal = WindowFrame {
+            bounds: rect(100.0, 100.0, 1000.0, 700.0),
+            monitor: monitors()[0].identity.clone(),
+            maximized: false,
+        };
+        let moved = WindowFrame {
+            bounds: rect(200.0, 150.0, 1100.0, 750.0),
+            ..normal.clone()
+        };
+        for concurrent_move in [false, true] {
+            for captured in [Some(moved.clone()), None] {
+                let mut pending = Pending::new();
+                pending.start(Ok(normal.clone()), || panic!("placement succeeded"));
+                let revision = pending.revision;
+                if concurrent_move {
+                    remember(&mut pending, moved.clone());
+                }
+                // An older in-flight capture must not overwrite the newer event.
+                let capture = if concurrent_move {
+                    Some(normal.clone())
+                } else {
+                    captured.clone()
+                };
+                pending.finish(capture, revision);
+                assert!(!pending.can_record());
+                assert_eq!(
+                    pending.frame,
+                    Some(if concurrent_move || captured.is_some() {
+                        moved.clone()
+                    } else {
+                        normal.clone()
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn main_window_frame_windows_calls_document_safety() {
+        let source = include_str!("window_frame/windows.rs");
+        for (offset, _) in source.match_indices("unsafe {") {
+            let comment = source[..offset]
+                .lines()
+                .rev()
+                .skip(1)
+                .take_while(|line| line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for required in ["SAFETY:", "HWND", "thread", "buffer"] {
+                assert!(comment.contains(required), "missing {required} at {offset}");
+            }
+        }
     }
 
     #[test]
