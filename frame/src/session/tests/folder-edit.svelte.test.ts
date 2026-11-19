@@ -114,3 +114,32 @@ it("drops a queued create when the space changed while it waited", async () => {
   await queued;
   expect(view.folder).toHaveBeenCalledTimes(1);
 });
+
+it("keeps the newest fold asked for while an older one with the same value is answered", async () => {
+  const edit = await import("../folder-edit.svelte");
+  const node = (collapsed: boolean): SidebarNodeView => ({
+    ...folder("f"),
+    kind: { type: "folder", name: "Folder", color: null, collapsed },
+  });
+  view.nodes = [node(false)];
+  const first = edit.setFolded("f", true);
+  const second = edit.setFolded("f", false);
+  const third = edit.setFolded("f", true);
+  await settled();
+  expect(view.folder).toHaveBeenCalledTimes(3);
+
+  // The first is answered and shown; the third, the same value, still waits.
+  view.nodes = [node(true)];
+  view.answers.shift()!("applied");
+  await first;
+  expect(edit.folded("f", false)).toBe(true);
+  view.nodes = [node(false)];
+  view.answers.shift()!("applied");
+  await second;
+  expect(edit.folded("f", false)).toBe(true);
+  view.nodes = [node(true)];
+  view.answers.shift()!("applied");
+  await third;
+  // Answered and shown: the override gives way to the projection.
+  expect(edit.folded("f", false)).toBe(false);
+});

@@ -1,5 +1,5 @@
 import { untrack } from "svelte";
-import { SvelteSet } from "svelte/reactivity";
+import { SvelteMap } from "svelte/reactivity";
 import { tabs } from "$domain/tabs";
 import type { FolderColor } from "$shared/ipc/bindings";
 
@@ -108,15 +108,18 @@ async function createNow(name: string, options: CreateOptions, where: string) {
 /** A fold as the sidebar draws it: the one asked for until native answers. */
 export const folded = (id: string, projected: boolean) => folds[id] ?? projected;
 
-// Asked folds not yet answered; an answered one gives way once the
-// projection shows it, or at once if native refused it.
-const asking = new SvelteSet<string>();
+// The newest fold asked of each folder and not yet answered; only its own
+// answer lets it give way, once the projection shows it, or at once if
+// native refused it.
+const asking = new SvelteMap<string, number>();
+let asks = 0;
 
 export async function setFolded(id: string, collapsed: boolean) {
+  const ask = ++asks;
   folds[id] = collapsed;
-  asking.add(id);
+  asking.set(id, ask);
   const result = await tabs.folder({ type: "set_collapsed", id, collapsed });
-  if (folds[id] !== collapsed) return;
+  if (asking.get(id) !== ask) return;
   asking.delete(id);
   if (result.outcome !== "applied" && result.outcome !== "deferred") delete folds[id];
   else settleFolds();
