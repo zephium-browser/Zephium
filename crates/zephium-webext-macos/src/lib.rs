@@ -32,16 +32,63 @@ mod socket;
 mod surface;
 mod top_sites;
 
+use std::ffi::CStr;
 use std::sync::OnceLock;
 
 use objc2::rc::Retained;
-use objc2_foundation::{NSError, NSLocalizedDescriptionKey, NSMutableDictionary, NSString};
+use objc2_foundation::{
+    NSError, NSLocalizedDescriptionKey, NSMutableDictionary, NSOperatingSystemVersion,
+    NSProcessInfo, NSString,
+};
 
 pub use api::BROWSER_PERMISSIONS;
 pub use auth::{AuthAnswer, AuthDetails};
 pub use downloads::{DownloadAnswer, DownloadItem, DownloadRequest};
 pub use page_script::PageScript;
 pub use runtime::{ExtensionSpec, Grants, LoadedExtension, Runtime};
+
+/// WebKit's extension runtime requires macOS 15.4 or later.
+pub fn supported() -> bool {
+    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 15,
+        minorVersion: 4,
+        patchVersion: 0,
+    })
+}
+
+/// Looks up an NSString constant exported by the loaded system WebKit.
+/// Missing symbols and null constants are unavailable on older systems.
+fn webkit_string(name: &CStr) -> Option<&'static NSString> {
+    #[cfg(test)]
+    if MISSING_WEBKIT_STRING.with(|missing| missing.get() == Some(name)) {
+        return None;
+    }
+    // SAFETY: callers pass only names of WebKit's process-lifetime NSString
+    // constants. dlsym returns the address of the pointer, not the object.
+    unsafe {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()).cast::<*const NSString>();
+        symbol.as_ref().and_then(|value| value.as_ref())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MISSING_WEBKIT_STRING: std::cell::Cell<Option<&'static CStr>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn without_webkit_string<T>(name: &'static CStr, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static CStr>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MISSING_WEBKIT_STRING.with(|missing| missing.set(self.0));
+        }
+    }
+    let _restore = Restore(MISSING_WEBKIT_STRING.with(|missing| missing.replace(Some(name))));
+    run()
+}
 
 /// A readable message for any error WebKit reports.
 pub fn describe_error(error: &NSError) -> String {
@@ -270,5 +317,29 @@ pub(crate) fn error(message: &str) -> Retained<NSError> {
             1,
             Some(&info),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_constants_resolve_on_supported_hosts_and_missing_names_do_not() {
+        assert!(webkit_string(c"WKZephiumMadeUpConstant").is_none());
+        if !supported() {
+            return;
+        }
+        for name in [
+            c"WKWebExtensionContextErrorDomain",
+            c"WKWebExtensionDataTypeLocal",
+            c"WKWebExtensionDataTypeSession",
+            c"WKWebExtensionDataTypeSynchronized",
+            c"WKWebExtensionPermissionClipboardWrite",
+            c"WKWebExtensionPermissionCookies",
+        ] {
+            let value = webkit_string(name).unwrap_or_else(|| panic!("missing {name:?}"));
+            assert!(!value.is_empty(), "empty {name:?}");
+        }
     }
 }

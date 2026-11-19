@@ -9,7 +9,7 @@
     File01Icon,
     Search01Icon,
   } from "../../lib/icons";
-  import { askCard, partContent } from "./slots";
+  import { askCard, loadedView, loadView, partContent } from "./slots";
   import { needWords } from "../../lib/run/need";
   import { getContext, untrack } from "svelte";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
@@ -77,6 +77,14 @@
   /** A helper's own view of its work, when its stream has built one. */
   const content = $derived(shape === "helper" ? partContent(part.helper) : null);
   const asking = $derived(part.ask ? askCard() : null);
+  // Each view loads once and is drawn as soon as it is there, so a measure of the
+  // row never takes it down.
+  const Content = $derived(loadedView(content));
+  const Asking = $derived(loadedView(asking));
+  $effect(() => {
+    loadView(content);
+    loadView(asking);
+  });
   const LINE = {
     read: File01Icon,
     write: FileEditIcon,
@@ -183,18 +191,18 @@
   {#if shape === "ask" && part.ask}
     <div class="slot" style:inset-inline-start="{partLead}px" data-part-ask={item.id}>
       <div bind:this={workBody}>
-        {#if asking}{#await asking() then view}<view.default {...part.ask.props} />{/await}{/if}
+        {#if Asking}<Asking {...part.ask.props} />{/if}
       </div>
     </div>
   {:else if shape === "helper"}
     <div class="slot" style:inset-inline-start="{partLead}px">
       <div bind:this={workBody}>
-        {#if content}{#await content() then view}<view.default
+        {#if content}{#if Content}<Content
               id={item.id}
               {part}
               objective={part.objective ?? ""}
               steps={part.steps ?? []}
-            />{/await}
+            />{/if}
         {:else}<ul class="lines">
             {#each lines.slice(0, PART.helperLines) as line, index (index)}<li class={line.kind}>
                 <Icon icon={LINE[line.kind]} size={13} /><span>{line.text}</span>
