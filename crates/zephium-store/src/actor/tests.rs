@@ -2087,6 +2087,108 @@ fn app_settings_roundtrip() {
 }
 
 #[test]
+fn main_window_frame_roundtrip_and_settings_migration() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let dir = tempfile::tempdir().unwrap();
+    // The record uses the existing settings schema, including databases from
+    // before the latest metadata migration; no parallel file is introduced.
+    let mut meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    migrations::apply(&mut meta, &migrations::META[..migrations::META.len() - 1]).unwrap();
+    meta.execute("INSERT INTO settings VALUES ('appearance', 'dark')", [])
+        .unwrap();
+    let frame = WindowFrame {
+        bounds: WindowRect {
+            x: -1400.0,
+            y: 40.0,
+            width: 1000.0,
+            height: 700.0,
+        },
+        monitor: WindowMonitor {
+            name: Some("External".into()),
+            bounds: WindowRect {
+                x: -1920.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+        },
+        maximized: true,
+    };
+    meta.execute(
+        "INSERT INTO settings VALUES ('window.main.frame.v1', ?1)",
+        [serde_json::to_string(&frame).unwrap()],
+    )
+    .unwrap();
+    drop(meta);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.main_window_frame(),
+        Some(frame.clone()),
+        "metadata migration preserves the frame setting"
+    );
+    let frame = WindowFrame {
+        maximized: false,
+        ..frame
+    };
+    assert!(store.save_main_window_frame(&frame));
+    assert!(store.flush());
+    assert_eq!(store.main_window_frame(), Some(frame.clone()));
+    drop(store);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(store.main_window_frame(), Some(frame));
+    assert_eq!(store.app_setting("appearance").as_deref(), Some("dark"));
+}
+
+#[test]
+fn main_window_frame_rejects_malformed_records_and_non_finite_writes() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let store = SqliteStore::in_memory().unwrap();
+    assert_eq!(
+        store.main_window_frame(),
+        None,
+        "first run has no invented frame"
+    );
+    for value in [
+        "{",
+        "{}",
+        r#"{"bounds":{"x":null}}"#,
+        r#"{"bounds":{"x":1e999}}"#,
+    ] {
+        assert!(store.set_app_setting("window.main.frame.v1".into(), value.into()));
+        assert!(store.flush());
+        assert_eq!(store.main_window_frame(), None);
+    }
+    let bounds = WindowRect {
+        x: 0.0,
+        y: 0.0,
+        width: 1200.0,
+        height: 800.0,
+    };
+    let mut frame = WindowFrame {
+        bounds,
+        monitor: WindowMonitor { name: None, bounds },
+        maximized: false,
+    };
+    for bad in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        0.0,
+        10_000_001.0,
+    ] {
+        frame.bounds.width = bad;
+        assert!(
+            !store.save_main_window_frame(&frame),
+            "accepted width {bad}"
+        );
+    }
+    frame.bounds = bounds;
+    frame.monitor.name = Some("x".repeat(1025));
+    assert!(!store.save_main_window_frame(&frame));
+}
+
+#[test]
 fn app_setting_cardinality_is_bounded_but_existing_keys_remain_updatable() {
     let store = SqliteStore::in_memory().unwrap();
     for index in 0..hub::MAX_APP_SETTINGS {
