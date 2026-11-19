@@ -777,6 +777,7 @@ where
     let renderer_events = navigation.clone();
     let work_policy = work_navigation.clone();
     let work_events = work_navigation.clone();
+    let work_failures = work_navigation.clone();
     let work_renderer = work_navigation.clone();
     let navigation_callback = Rc::new(on_navigation);
     let location_callback = Rc::new(on_location);
@@ -838,11 +839,15 @@ where
         })
         .with_visible(false)
         .with_focused(false)
-        .with_navigation_failure_handler(move |_, failure, _| {
-            if let Some(unreachable) = on_unreachable
+        .with_navigation_failure_handler(move |id, failure, _| {
+            // Only the construction load's own failure: a load it replaced or
+            // one after the document was ready leaves the slot unchanged.
+            let construction = work_failures
                 .as_ref()
-                .filter(|_| crate::platform::work_document_navigation::unreachable(&failure))
-            {
+                .is_some_and(|gate| gate.construction_failure(id));
+            if let Some(unreachable) = on_unreachable.as_ref().filter(|_| {
+                construction && crate::platform::work_document_navigation::unreachable(&failure)
+            }) {
                 invoke_owned_unit_callback(
                     unreachable.as_ref(),
                     unreachable_callback_panicked.as_ref(),
