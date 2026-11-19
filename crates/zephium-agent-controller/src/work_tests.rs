@@ -1301,6 +1301,7 @@ impl AgentBrowserPort for Port {
                 ));
             }
         }
+        let reloading = reloading_look(self.fault, &lock(&self.calls));
         self.send(ContextNativeEvent::SemanticRuntimeSettled(Box::new(
             SemanticRuntimeSettlement::try_new(
                 correlation,
@@ -1318,7 +1319,7 @@ impl AgentBrowserPort for Port {
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
                 {
                     Err(SemanticRuntimePortFailure::NotReady)
-                } else if let Some(failure) = reloading_look(self.fault, &lock(&self.calls)) {
+                } else if let Some(failure) = reloading {
                     Err(failure)
                 } else if (self.fault == Fault::TimedOutLook
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 2)
