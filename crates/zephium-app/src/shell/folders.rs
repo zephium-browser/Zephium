@@ -595,10 +595,22 @@ impl Shell {
                     .count(),
             )
         });
+        let was_active = active.filter(|active| tabs.contains(active));
+        // The front tab leaves: something must take its place, a tab that
+        // stays or a New Tab there is room for.
+        if was_active.is_some()
+            && self.items.is_full()
+            && !self.incognito_profile(profile)
+            && self
+                .successor_pool(profile, space)
+                .iter()
+                .all(|tab| tabs.contains(tab))
+        {
+            return rejected(OperationReason::ItemLimitReached);
+        }
         if !self.items.move_item(id, today(target), None, None) {
             return rejected(OperationReason::InvalidInput);
         }
-        let was_active = active.filter(|active| tabs.contains(active));
         if let Some(window) = self.windows.focused_mut() {
             if let Some(tree) = window.splits.take() {
                 window.splits = tabs.iter().try_fold(tree, |tree, tab| tree.remove(*tab));

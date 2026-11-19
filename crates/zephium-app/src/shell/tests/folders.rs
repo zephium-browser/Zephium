@@ -524,6 +524,10 @@ fn a_folder_moves_to_another_space_with_its_tabs_and_the_window_stays() {
 /// Asleep tabs at the end of the space until only `leave` items fit.
 fn fill(shell: &mut Shell, leave: usize) -> Vec<ItemId> {
     let place = today(shell);
+    fill_in(shell, place, leave)
+}
+
+fn fill_in(shell: &mut Shell, place: Placement, leave: usize) -> Vec<ItemId> {
     let page = url::Url::parse("https://filler.example/").unwrap();
     let mut filler = Vec::new();
     while shell.items.room() > leave {
@@ -956,4 +960,47 @@ fn a_tab_folder_undo_cannot_bring_back_keeps_its_recently_closed_record() {
     assert!(shell.recently_closed[0]
         .url
         .starts_with("chrome-extension://"));
+}
+
+#[test]
+fn the_front_folder_stays_when_nothing_could_take_the_window_from_it() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let home = space(&shell);
+    let ids = tabs(&mut shell, &screen, &["only.example"]);
+    let folder = group(&mut shell, "All", vec![ids[0]]);
+    let created = shell.handle_operation(Command::Space(Box::new(SpaceCommand::Create {
+        name: "Other".into(),
+        look: Default::default(),
+    })));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    let other = space(&shell);
+    let switched = shell.handle_operation(Command::Space(Box::new(SpaceCommand::Switch(home))));
+    assert_ne!(switched.outcome, OperationOutcome::Rejected);
+    assert_eq!(active_id(&screen), ids[0]);
+    let elsewhere = Placement::Space {
+        space: other,
+        section: SpaceSection::Today,
+    };
+    let filler = fill_in(&mut shell, elsewhere, 0);
+
+    let away = FolderCommand::MoveToSpace {
+        id: folder,
+        space: other,
+    };
+    let refused = folder_op(&mut shell, away);
+    assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.items.get(folder).unwrap().placement, today(&shell));
+    assert_eq!(active_id(&screen), ids[0]);
+
+    // With room for a New Tab it goes.
+    let _ = shell.items.remove(filler[0]);
+    let away = FolderCommand::MoveToSpace {
+        id: folder,
+        space: other,
+    };
+    assert_eq!(
+        folder_op(&mut shell, away).outcome,
+        OperationOutcome::Applied
+    );
+    assert_ne!(active_id(&screen), ids[0]);
 }
