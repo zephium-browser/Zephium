@@ -672,7 +672,14 @@ impl Engine for FakeEngine {
         *self.runtime_security_advisories.lock().unwrap()
     }
 
-    fn create_view(&self, id: ItemId, partition: Partition, url: &str, _bounds: Rect) -> bool {
+    fn create_view_with_media_policy(
+        &self,
+        id: ItemId,
+        partition: Partition,
+        url: &str,
+        _bounds: Rect,
+        hold_media: bool,
+    ) -> bool {
         if self
             .reject_create_dispatch
             .load(std::sync::atomic::Ordering::Acquire)
@@ -685,7 +692,14 @@ impl Engine for FakeEngine {
             Partition::Ephemeral(_) => "ephemeral",
         };
         self.log(format!("create {id} {url} [{kind}]"));
+        if hold_media {
+            self.log(format!("hold initial media {id}"));
+        }
         true
+    }
+    fn activate_tab_media(&self, id: ItemId) -> NativeDispatch {
+        self.log(format!("activate initial media {id}"));
+        NativeDispatch::Scheduled
     }
     fn set_extension_browser_surface(&self, surface: ExtensionBrowserSurface) -> NativeDispatch {
         let admission = self.native_admission();
@@ -2389,9 +2403,16 @@ fn setup() -> (Shell, Arc<FakeEngine>, Screen) {
 /// A running actor with its first window shown: the handle and the profile,
 /// space and tab it opened with.
 pub(super) fn started(store: Arc<FakeStore>) -> (Handle, ProfileId, SpaceId, ItemId) {
+    started_with_engine(store, Arc::new(FakeEngine::default()))
+}
+
+fn started_with_engine(
+    store: Arc<FakeStore>,
+    engine: Arc<FakeEngine>,
+) -> (Handle, ProfileId, SpaceId, ItemId) {
     let (tx, rx) = std::sync::mpsc::channel();
     let handle = spawn(
-        Arc::new(FakeEngine::default()),
+        engine,
         store,
         Arc::new(ImmediateAllowAllCompiler),
         Box::new(|_| {}),

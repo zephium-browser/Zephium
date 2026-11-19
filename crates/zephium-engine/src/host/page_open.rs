@@ -203,7 +203,11 @@ impl EngineHost {
             url,
             Rect::default(),
             EventPermit::bound(&active),
-            NativeViewPurpose::NativeTab(features.opener),
+            NativeViewPurpose::NativeTab {
+                opener: features.opener,
+                #[cfg(target_os = "macos")]
+                hold_media: !foreground,
+            },
         );
         self.native_tab_download_ask = None;
         let Some(view) = built else {

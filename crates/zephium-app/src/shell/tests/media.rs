@@ -57,6 +57,110 @@ fn watches(engine: &FakeEngine, id: ItemId) -> usize {
 }
 
 #[test]
+fn background_media_hold_is_per_view_in_regular_and_private_windows() {
+    for private in [false, true] {
+        let (mut shell, engine, screen, original) = ready();
+        if private {
+            shell.handle(Command::Run("window.newPrivate".into()));
+        }
+        let front = active_id(&screen);
+        if private {
+            navigate_and_commit(&mut shell, front, "https://private.example/");
+        } else {
+            assert_eq!(front, original);
+        }
+
+        shell.operation_open_url_background("https://background.example/".into());
+        let background = shell
+            .items
+            .view_ids()
+            .into_iter()
+            .find(|id| *id != original && *id != front)
+            .expect("background view");
+        let hold = format!("hold initial media {background}");
+        let release = format!("activate initial media {background}");
+        let calls = engine.calls();
+        assert!(calls.contains(&hold));
+        assert!(!calls.contains(&release));
+        assert!(!calls.contains(&format!("hold initial media {front}")));
+
+        for id in [background, front, background] {
+            shell.handle(Command::Activate(id));
+        }
+        let calls = engine.calls();
+        assert_eq!(calls.iter().filter(|call| **call == hold).count(), 1);
+        assert_eq!(calls.iter().filter(|call| **call == release).count(), 1);
+        assert!(!calls.contains(&format!("activate initial media {front}")));
+    }
+}
+
+#[test]
+fn the_actor_releases_only_background_native_tabs_once() {
+    for foreground in [false, true] {
+        let engine = Arc::new(FakeEngine::default());
+        let (handle, profile, _, source) =
+            started_with_engine(Arc::new(FakeStore::default()), engine.clone());
+        let child = ItemId::generate();
+        let (send, receive) = std::sync::mpsc::channel();
+        assert!(
+            handle.dispatch(Command::Engine(EngineEvent::NativeTabOpened {
+                id: source,
+                child,
+                foreground,
+                adoption: zephium_core::ports::engine::NativeTabAdoption::new(move |accepted| {
+                    send.send(accepted).unwrap();
+                }),
+            }))
+        );
+        assert!(receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap());
+        let release = format!("activate initial media {child}");
+        assert!(!engine.calls().contains(&release));
+        for id in [child, source, child] {
+            assert!(handle.dispatch(Command::Activate(id)));
+        }
+        // Barrier after the queued activation commands.
+        handle.window_tabs(profile).recv().unwrap();
+        assert_eq!(
+            engine
+                .calls()
+                .iter()
+                .filter(|call| **call == release)
+                .count(),
+            usize::from(!foreground)
+        );
+    }
+}
+
+#[test]
+fn closing_a_held_native_tab_retires_its_media_activation() {
+    let (mut shell, engine, _screen, source) = ready();
+    let child = ItemId::generate();
+    shell.handle(Command::Engine(EngineEvent::NativeTabOpened {
+        id: source,
+        child,
+        foreground: false,
+        adoption: zephium_core::ports::engine::NativeTabAdoption::new(|accepted| assert!(accepted)),
+    }));
+    assert!(shell
+        .residency
+        .awaiting_media_activation
+        .borrow()
+        .contains(&child));
+    shell.handle(Command::Close(child));
+    assert!(!shell
+        .residency
+        .awaiting_media_activation
+        .borrow()
+        .contains(&child));
+    shell.handle(Command::Activate(child));
+    let calls = engine.calls();
+    assert!(calls.contains(&format!("close {child}")));
+    assert!(!calls.contains(&format!("activate initial media {child}")));
+}
+
+#[test]
 fn a_tab_is_watched_when_it_starts_making_sound_and_not_on_every_sound() {
     let (mut shell, engine, _screen, item) = ready();
     assert_eq!(watches(&engine, item), 0);

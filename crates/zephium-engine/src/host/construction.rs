@@ -58,8 +58,15 @@ fn admit_native_url_refusal(
 
 pub(super) enum NativeViewPurpose {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    NativeTab(wry::NewWindowOpener),
-    Tab,
+    NativeTab {
+        opener: wry::NewWindowOpener,
+        #[cfg(target_os = "macos")]
+        hold_media: bool,
+    },
+    Tab {
+        #[cfg(target_os = "macos")]
+        hold_media: bool,
+    },
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     WarmSpare,
 }
@@ -67,16 +74,27 @@ pub(super) enum NativeViewPurpose {
 impl NativeViewPurpose {
     const fn resource_class(&self) -> NativeResourceClass {
         match self {
-            Self::Tab => NativeResourceClass::Tab,
+            Self::Tab { .. } => NativeResourceClass::Tab,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            Self::NativeTab(_) => NativeResourceClass::Tab,
+            Self::NativeTab { .. } => NativeResourceClass::Tab,
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             Self::WarmSpare => NativeResourceClass::WarmSpare,
         }
     }
 
     const fn reports_failure(&self) -> bool {
-        matches!(self, Self::Tab)
+        matches!(self, Self::Tab { .. })
+    }
+
+    #[cfg(target_os = "macos")]
+    const fn holds_media(&self) -> bool {
+        match self {
+            Self::Tab { hold_media } => *hold_media,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            Self::NativeTab { hold_media, .. } => *hold_media,
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            Self::WarmSpare => false,
+        }
     }
 }
 
@@ -114,6 +132,7 @@ impl EngineHost {
         url: &str,
         bounds: Rect,
         event_token: Arc<AtomicBool>,
+        #[cfg(target_os = "macos")] hold_media: bool,
     ) {
         if !event_token.load(Ordering::Acquire) {
             // This closure may have waited in the reentrant host queue after
@@ -284,6 +303,11 @@ impl EngineHost {
                 }
             }
             #[cfg(target_os = "macos")]
+            if hold_media {
+                crate::platform::imp::set_media_suspended(&spare.view, true);
+                spare.view.initial_media_held.set(true);
+            }
+            #[cfg(target_os = "macos")]
             let restored = self.restore_discarded_state(
                 id,
                 partition,
@@ -341,7 +365,10 @@ impl EngineHost {
             url,
             bounds,
             event_permit,
-            NativeViewPurpose::Tab,
+            NativeViewPurpose::Tab {
+                #[cfg(target_os = "macos")]
+                hold_media,
+            },
         ) {
             if !event_token.load(Ordering::Acquire)
                 || !view.event_permit.matches_token(&event_token)
@@ -637,9 +664,11 @@ impl EngineHost {
         purpose: NativeViewPurpose,
     ) -> Option<ObservedView> {
         let report_failure = purpose.reports_failure();
+        #[cfg(target_os = "macos")]
+        let hold_media = purpose.holds_media();
         let popup_opener = match purpose {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            NativeViewPurpose::NativeTab(opener) => Some(opener),
+            NativeViewPurpose::NativeTab { opener, .. } => Some(opener),
             _ => None::<wry::NewWindowOpener>,
         };
         let native_popup = popup_opener.is_some();
@@ -2852,6 +2881,10 @@ impl EngineHost {
             return None;
         };
         #[cfg(target_os = "macos")]
+        if hold_media {
+            crate::platform::imp::set_media_suspended(&view, true);
+        }
+        #[cfg(target_os = "macos")]
         let restored = self.restore_discarded_state(
             id.get(),
             partition,
@@ -2895,6 +2928,10 @@ impl EngineHost {
             #[cfg(target_os = "macos")]
             insecure_autofill: Cell::new(None),
             media_watch: Cell::new((0, false)),
+            #[cfg(target_os = "macos")]
+            initial_media_held: Cell::new(hold_media),
+            #[cfg(target_os = "macos")]
+            focus_media_suspended: Cell::new(false),
             #[cfg(target_os = "windows")]
             _favicon_observer: favicon_observer,
             #[cfg(target_os = "macos")]

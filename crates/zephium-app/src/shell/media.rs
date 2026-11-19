@@ -10,6 +10,21 @@ use zephium_core::ports::engine::MediaAction;
 use zephium_ipc::{MediaPlayerAction, MediaPlayerView};
 
 impl Shell {
+    pub(super) fn activate_selected_tab_media(&self) {
+        let mut held = self.residency.awaiting_media_activation.borrow_mut();
+        if held.is_empty() || self.browser_return_hidden {
+            return;
+        }
+        // Selection can precede presentation, especially when a first load
+        // needs to replace navigation failure chrome.
+        for id in self.discard_protected_leaves() {
+            if held.contains(&id) && self.engine.activate_tab_media(id) == NativeDispatch::Scheduled
+            {
+                held.remove(&id);
+            }
+        }
+    }
+
     /// A tab began making sound: its media may be worth a player.
     pub(super) fn watch_tab_media(&self, id: ItemId) {
         if self
