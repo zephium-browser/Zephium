@@ -640,6 +640,30 @@ impl AgentWorkController {
         Ok((observation, captured_at, progress, false))
     }
 
+    /// Looks at a page that may still be replacing its document: a stale or
+    /// replaced look is taken again, briefly, instead of ending the read.
+    /// The look is dated by when it began.
+    async fn observe_settled(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(SemanticObservation, AgentPolicyInstant), AgentWorkFailure> {
+        let mut waits = 0u8;
+        loop {
+            let looked = Self::look_begins(state)?;
+            match Self::observe(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::Stale
+                    | SemanticRuntimePortFailure::DocumentReplaced,
+                )) if waits < MAX_SETTLING_LOOKS => {
+                    waits += 1;
+                    Self::settle_pause(state, worker, browser).await?;
+                }
+                result => return Ok((result?, looked)),
+            }
+        }
+    }
+
     /// A catalog read's records: one cell batch locates their text columns
     /// when any are requested, then Rust copies every value from inside its
     /// record. False when nothing could be copied, leaving the planner.
@@ -1015,30 +1039,6 @@ impl AgentWorkController {
                 Err(AgentWorkFailure::Mailbox)
             }
             () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => Ok(()),
-        }
-    }
-
-    /// Looks at a page that may still be replacing its document: a stale or
-    /// replaced look is taken again, briefly, instead of ending the read.
-    /// The look is dated by when it began.
-    async fn observe_settled(
-        state: &mut WorkState,
-        worker: &mut AgentRuntimeWorker,
-        browser: &WorkBrowser<'_>,
-    ) -> Result<(SemanticObservation, AgentPolicyInstant), AgentWorkFailure> {
-        let mut waits = 0u8;
-        loop {
-            let looked = Self::look_begins(state)?;
-            match Self::observe(state, worker, browser).await {
-                Err(AgentWorkFailure::Observation(
-                    SemanticRuntimePortFailure::Stale
-                    | SemanticRuntimePortFailure::DocumentReplaced,
-                )) if waits < MAX_SETTLING_LOOKS => {
-                    waits += 1;
-                    Self::settle_pause(state, worker, browser).await?;
-                }
-                result => return Ok((result?, looked)),
-            }
         }
     }
 
