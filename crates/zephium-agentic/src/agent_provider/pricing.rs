@@ -30,6 +30,15 @@ const TOKENS_PER_RATE_UNIT: u128 = 1_000_000;
 /// catalog entry may raise this bound.
 pub const MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS: u64 = 272_000;
 
+/// Highest input range supported by model-reported reservation.
+///
+/// This path reserves the whole request before dispatch and settles on usage
+/// the provider reports, so it can admit a larger request than provider-exact
+/// counting without manufacturing a local token count. A catalog entry must
+/// still price at the highest applicable long-context rate; a flat rate then
+/// over-reserves below a tier boundary and never under-reserves above it.
+pub const MAX_AGENT_PROVIDER_REPORTED_INPUT_TOKENS: u64 = 500_000;
+
 /// Hard ceiling for one token-class rate in micro-USD per million tokens.
 ///
 /// At this rate a single token consumes the complete hard per-run cost ceiling,
@@ -883,7 +892,7 @@ mod tests {
 
     #[test]
     fn provider_reported_config_never_takes_an_exact_or_counted_path() {
-        let schedule = model_reported_schedule(MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS);
+        let schedule = model_reported_schedule(MAX_AGENT_PROVIDER_REPORTED_INPUT_TOKENS);
         let reported = schedule
             .try_provider_reported_call_config(64, AgentProviderStreamBudget::STANDARD)
             .expect("reported config");
@@ -921,7 +930,7 @@ mod tests {
             Err(super::super::AgentProviderContractError::InputAccountingMode)
         ));
         assert!(matches!(
-            model_reported_schedule(MAX_AGENT_PROVIDER_EXACT_COUNTED_INPUT_TOKENS + 1)
+            model_reported_schedule(MAX_AGENT_PROVIDER_REPORTED_INPUT_TOKENS + 1)
                 .try_provider_reported_call_config(64, AgentProviderStreamBudget::STANDARD),
             Err(super::super::AgentProviderContractError::InputAccountingMode)
         ));
