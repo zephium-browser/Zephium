@@ -1813,6 +1813,7 @@ impl NativeWorkComposition {
                                     construction_note(
                                         snapshot.construction_timed_out,
                                         construction_attempt,
+                                        snapshot.failure,
                                     )
                                 })
                                 .or_else(|| intervention_note(intervention.as_ref()))
@@ -2335,7 +2336,7 @@ impl NativeWorkComposition {
                 }
                 let note = match disposition {
                     _ if snapshot.construction_timed_out => {
-                        construction_note(true, construction_attempt)
+                        construction_note(true, construction_attempt, snapshot.failure)
                     }
                     _ if storage_note(&snapshot).is_some() => storage_note(&snapshot),
                     _ if not_ready => Some("The browser was not ready for this page"),
@@ -2564,10 +2565,15 @@ fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'stat
     })
 }
 /// Closed words for a page read that ended in failure; never page or model text.
+/// A site found unreachable after the load timed out says so.
 fn construction_note(
     timed_out: bool,
     attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    failure: Option<AgentWorkFailure>,
 ) -> Option<&'static str> {
+    if timed_out && failure == Some(AgentWorkFailure::Unreachable) {
+        return Some(zephium_core::work::runtime::read_note::UNREACHABLE);
+    }
     timed_out.then_some(match attempt {
         zephium_agentic::WorkBrowserConstructionAttempt::Initial => {
             zephium_core::work::runtime::read_note::CONSTRUCTION_TIMEOUT
@@ -3098,16 +3104,35 @@ mod closed_result_tests {
     fn construction_notes_require_native_timeout_and_distinguish_the_retry() {
         use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
         use zephium_core::work::runtime::read_note;
-        assert_eq!(construction_note(false, Attempt::Initial), None);
-        assert_eq!(construction_note(false, Attempt::SlowPageRetry), None);
-        assert_eq!(
-            construction_note(true, Attempt::Initial),
-            Some(read_note::CONSTRUCTION_TIMEOUT)
-        );
-        assert_eq!(
-            construction_note(true, Attempt::SlowPageRetry),
-            Some(read_note::SLOW_SITE)
-        );
+        for failure in [None, Some(AgentWorkFailure::Deadline)] {
+            assert_eq!(construction_note(false, Attempt::Initial, failure), None);
+            assert_eq!(
+                construction_note(false, Attempt::SlowPageRetry, failure),
+                None
+            );
+            assert_eq!(
+                construction_note(true, Attempt::Initial, failure),
+                Some(read_note::CONSTRUCTION_TIMEOUT)
+            );
+            assert_eq!(
+                construction_note(true, Attempt::SlowPageRetry, failure),
+                Some(read_note::SLOW_SITE)
+            );
+        }
+    }
+
+    #[test]
+    fn a_site_found_unreachable_after_a_timeout_says_it_could_not_be_reached() {
+        use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
+        use zephium_core::work::runtime::read_note;
+        let unreachable = Some(AgentWorkFailure::Unreachable);
+        for attempt in [Attempt::Initial, Attempt::SlowPageRetry] {
+            assert_eq!(
+                construction_note(true, attempt, unreachable),
+                Some(read_note::UNREACHABLE)
+            );
+            assert_eq!(construction_note(false, attempt, unreachable), None);
+        }
     }
 
     #[test]

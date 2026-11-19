@@ -33,7 +33,7 @@ What you make
 Honest results
 - The result shows only what was found. Never make an object, figure, pick or task that stands for something you could not find or do, and never an estimate dressed as a find.
 - Call nothing complete, verified, confirmed or recommended unless your sources show it.
-- A price keeps its unit (per night, monthly); a total multiplies it by the length.
+- A price keeps its unit. Rate (per night, monthly) × length is the total; a total counts once.
 - A part that could not do its job shows its fix on its own row (sign in, allow, try again). When nothing could be found, the reply says so in one sentence and nothing else stands for it.
 - What was found stands even when a detail could not be confirmed: offers go in the picks with what is known, and the reply names what could not be checked. Never drop found offers for a missing detail.
 
