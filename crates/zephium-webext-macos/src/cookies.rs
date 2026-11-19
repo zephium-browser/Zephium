@@ -14,10 +14,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_foundation::{NSArray, NSHTTPCookie, NSObjectProtocol, NSString, NSTimer, NSURL};
-use objc2_web_kit::{
-    WKHTTPCookieStore, WKHTTPCookieStoreObserver, WKWebExtensionPermission,
-    WKWebExtensionPermissionCookies,
-};
+use objc2_web_kit::{WKHTTPCookieStore, WKHTTPCookieStoreObserver, WKWebExtensionPermission};
 use serde_json::{json, Value};
 
 use crate::events;
@@ -172,6 +169,35 @@ fn deliver(shared: &Rc<Shared>, previous: &HashMap<Key, Value>, current: &HashMa
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());
+    let changes = changes(previous, current, now);
+    if changes.is_empty() {
+        return;
+    }
+    let listeners: Vec<(String, Retained<objc2_web_kit::WKWebExtensionContext>)> = shared
+        .loaded
+        .borrow()
+        .iter()
+        .filter(|(id, _)| events::listened(shared, id, EVENT))
+        .map(|(id, loaded)| (id.clone(), loaded.context.clone()))
+        .collect();
+    let permission: Option<&WKWebExtensionPermission> =
+        crate::webkit_string(c"WKWebExtensionPermissionCookies");
+    for (id, context) in listeners {
+        deliver_changes(
+            &changes,
+            permission,
+            |permission| unsafe { context.hasPermission(permission) },
+            |url| unsafe { context.hasAccessToURL(url) },
+            |args| events::emit(shared, &id, EVENT, args, None),
+        );
+    }
+}
+
+fn changes<'a>(
+    previous: &'a HashMap<Key, Value>,
+    current: &'a HashMap<Key, Value>,
+    now: f64,
+) -> Vec<(&'a Value, bool, &'static str)> {
     let mut changes = Vec::new();
     for (key, old) in previous {
         match current.get(key) {
@@ -191,36 +217,96 @@ fn deliver(shared: &Rc<Shared>, previous: &HashMap<Key, Value>, current: &HashMa
             changes.push((new, false, "explicit"));
         }
     }
-    if changes.is_empty() {
+    changes
+}
+
+fn deliver_changes(
+    changes: &[(&Value, bool, &str)],
+    permission: Option<&WKWebExtensionPermission>,
+    has_permission: impl FnOnce(&WKWebExtensionPermission) -> bool,
+    mut has_access: impl FnMut(&NSURL) -> bool,
+    mut emit: impl FnMut(Value),
+) {
+    if !permission.is_some_and(has_permission) {
         return;
     }
-    let listeners: Vec<(String, Retained<objc2_web_kit::WKWebExtensionContext>)> = shared
-        .loaded
-        .borrow()
-        .iter()
-        .filter(|(id, _)| events::listened(shared, id, EVENT))
-        .map(|(id, loaded)| (id.clone(), loaded.context.clone()))
-        .collect();
-    let permission: Option<&WKWebExtensionPermission> = unsafe { WKWebExtensionPermissionCookies };
-    for (id, context) in listeners {
-        if !permission.is_some_and(|permission| unsafe { context.hasPermission(permission) }) {
+    for (cookie, removed, cause) in changes {
+        let host = cookie["domain"]
+            .as_str()
+            .unwrap_or("")
+            .trim_start_matches('.');
+        let path = cookie["path"].as_str().unwrap_or("/");
+        let Some(url) = NSURL::URLWithString(&NSString::from_str(&format!("https://{host}{path}")))
+        else {
             continue;
+        };
+        if has_access(&url) {
+            emit(json!([{ "removed": removed, "cookie": cookie, "cause": cause }]));
         }
-        for (cookie, removed, cause) in &changes {
-            let host = cookie["domain"]
-                .as_str()
-                .unwrap_or("")
-                .trim_start_matches('.');
-            let path = cookie["path"].as_str().unwrap_or("/");
-            let Some(url) =
-                NSURL::URLWithString(&NSString::from_str(&format!("https://{host}{path}")))
-            else {
-                continue;
-            };
-            if unsafe { context.hasAccessToURL(&url) } {
-                let args = json!([{ "removed": removed, "cookie": cookie, "cause": cause }]);
-                events::emit(shared, &id, EVENT, args, None);
-            }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cookie_snapshot_changes_require_resolved_and_granted_permission() {
+        let key = ("session".into(), ".example.test".into(), "/".into());
+        let old =
+            json!({"name": "session", "domain": ".example.test", "path": "/", "value": "old"});
+        let mut new = old.clone();
+        new["value"] = json!("new");
+        let previous = HashMap::from([(key.clone(), old.clone())]);
+        let current = HashMap::from([(key, new.clone())]);
+        let changes = changes(&previous, &current, 1.0);
+        assert_eq!(changes.len(), 2);
+
+        crate::without_webkit_string(c"WKWebExtensionPermissionCookies", || {
+            deliver_changes(
+                &changes,
+                crate::webkit_string(c"WKWebExtensionPermissionCookies"),
+                |_| panic!("an unresolved permission must not query a WebKit context"),
+                |_| panic!("an unresolved permission must not check cookie access"),
+                |_| panic!("an unresolved permission must not emit cookies.onChanged"),
+            );
+        });
+        if let Some(permission) = crate::webkit_string(c"WKWebExtensionPermissionCookies") {
+            deliver_changes(
+                &changes,
+                Some(permission),
+                |_| false,
+                |_| panic!("a denied permission must not check cookie access"),
+                |_| panic!("a denied permission must not emit cookies.onChanged"),
+            );
+            let mut emitted = Vec::new();
+            deliver_changes(
+                &changes,
+                Some(permission),
+                |_| true,
+                |url| {
+                    assert_eq!(
+                        url.absoluteString().unwrap().to_string(),
+                        "https://example.test/"
+                    );
+                    true
+                },
+                |args| emitted.push(args),
+            );
+            assert_eq!(
+                emitted,
+                vec![
+                    json!([{"removed": true, "cookie": old, "cause": "overwrite"}]),
+                    json!([{"removed": false, "cookie": new, "cause": "explicit"}]),
+                ]
+            );
+            deliver_changes(
+                &changes,
+                Some(permission),
+                |_| true,
+                |_| false,
+                |_| panic!("a cookie without host access must not emit cookies.onChanged"),
+            );
         }
     }
 }

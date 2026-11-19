@@ -604,20 +604,50 @@ pub(crate) fn propose(
     normalize(kind, &mut data);
     let mut value_sources = Vec::new();
     if kind == "sheet" {
-        value_sources =
-            super::value_sources::ground_sheet(&mut data, sources, &run.source_previews())
-                .map_err(|error| (error, ObjectRefusal::Source))?;
+        let mut uncited = Vec::new();
+        value_sources = super::value_sources::ground_sheet(
+            &mut data,
+            sources,
+            &run.source_previews(),
+            lenient,
+            &mut uncited,
+        )
+        .map_err(|error| (error, ObjectRefusal::Source))?;
+        if !uncited.is_empty() {
+            let rows = uncited
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            left_out.push(format!(
+                "the citation of rows {rows} (their values are not on the page they cited)"
+            ));
+        }
     }
+    // A retry leaves out a key that is no source of this run rather than
+    // refusing the object again: the object then claims less, not more.
+    let mut unknown_keys: Vec<String> = Vec::new();
+    let mut known = |key: &str| {
+        let known = !lenient || run.source(key).is_some();
+        if !known && !unknown_keys.iter().any(|k| k == key) {
+            unknown_keys.push(key.to_owned());
+        }
+        known
+    };
     let mut keys: Vec<String> = Vec::new();
     for key in sources.iter().chain(&value_sources) {
         let key = key.trim().to_owned();
-        if !keys.contains(&key) {
+        if known(&key) && !keys.contains(&key) {
             keys.push(key);
         }
     }
     items_mut(&mut data, |item| {
         if let Some(Value::String(key)) = item.get("source") {
             let key = key.trim().to_owned();
+            if !known(&key) {
+                item.remove("source");
+                return;
+            }
             if !keys.contains(&key) {
                 keys.push(key.clone());
             }
@@ -650,6 +680,12 @@ pub(crate) fn propose(
         let index = keys.iter().position(|candidate| candidate == key).unwrap();
         item.insert("record_source".into(), Value::from(index as u64));
     });
+    if !unknown_keys.is_empty() {
+        left_out.push(format!(
+            "the sources {} (not sources of this run)",
+            unknown_keys.join(", ")
+        ));
+    }
     let mut evidence = Vec::new();
     let mut unknown = None;
     for key in &keys {
@@ -876,9 +912,11 @@ const REDO: [&str; 9] = [
     "give access",
 ];
 /// Words that claim a finished or checked result.
-const CLAIMS: [&str; 7] = [
+const CLAIMS: [&str; 9] = [
     "complete",
+    "finished",
     "verified",
+    "checked",
     "confirmed",
     "all set",
     "ready",
@@ -897,6 +935,11 @@ const PICK_TAGS: [&str; 5] = [
 /// The value says it was not found rather than giving it.
 pub(crate) fn says_not_found(text: &str) -> bool {
     says(text, &NOT_FOUND)
+}
+
+/// The text calls a result finished or checked.
+pub(crate) fn claims_done(text: &str) -> bool {
+    affirms(text, &CLAIMS, true)
 }
 
 fn says(text: &str, words: &[&str]) -> bool {
@@ -937,6 +980,24 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
                 .next()
                 .unwrap_or("");
             let clause = clause.rsplit(" but ").next().unwrap_or(clause);
+            // "and" or "or" starts another claim unless only modifiers come
+            // between it and this one: "No issues found and pricing checked"
+            // claims, "could not be checked or independently verified" does
+            // not. Walking back, the nearest joint that opens a predicate of
+            // its own bounds the claim. A doubtful case is read as a claim:
+            // a refusal costs a retry, a missed claim publishes a false one.
+            let mut joints: Vec<usize> = clause
+                .match_indices(" and ")
+                .map(|(at, _)| at + 5)
+                .chain(clause.match_indices(" or ").map(|(at, _)| at + 4))
+                .collect();
+            joints.sort_unstable();
+            let clause = joints
+                .iter()
+                .rev()
+                .map(|&start| &clause[start..])
+                .find(|claim| !modifiers(claim))
+                .unwrap_or(clause);
             let denied = negation
                 && clause
                     .split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’'))
@@ -947,6 +1008,28 @@ fn affirms(text: &str, words: &[&str], negation: bool) -> bool {
     })
 }
 
+/// Words that only modify a predicate they continue: "fully", "yet",
+/// "been".
+fn modifiers(text: &str) -> bool {
+    text.split_whitespace().all(|word| {
+        (word.len() > 4 && word.ends_with("ly"))
+            || matches!(
+                word,
+                "be" | "been"
+                    | "being"
+                    | "is"
+                    | "was"
+                    | "were"
+                    | "are"
+                    | "yet"
+                    | "all"
+                    | "also"
+                    | "even"
+                    | "still"
+            )
+    })
+}
+
 /// What the run knows when an object is proposed.
 pub(crate) struct Honesty {
     /// The object rests on sources.
@@ -954,13 +1037,24 @@ pub(crate) struct Honesty {
     /// Names of this request's parts that could not do their job, and
     /// their services, in lower case: "slack", "flights".
     pub failed: Vec<String>,
+    /// The request tried to read pages and could read none of them.
+    pub unread: bool,
 }
 
 /// Refuses an object that stands for a failure or claims more than the run
 /// found: a figure or pick that says it was not found, a to-do to retry the
-/// agent's own work, a recommended pick without sources, or a headline that
-/// calls the result complete while a part failed.
+/// agent's own work, a recommended pick without sources, a headline that
+/// calls the result complete while a part failed, or a table or picks
+/// when no page the request tried to read could be read.
 pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), String> {
+    if run.unread
+        && matches!(
+            data,
+            WorkArtifactDataV1::Sheet { .. } | WorkArtifactDataV1::Picks { .. }
+        )
+    {
+        return Err("no page you tried to read could be read, so a table or picks would rest on search snippets alone. Publish none: reply with what could not be read, and offer to try again".into());
+    }
     match data {
         WorkArtifactDataV1::Reply {
             headline, figures, ..
@@ -972,8 +1066,8 @@ pub(crate) fn honest(data: &WorkArtifactDataV1, run: &Honesty) -> Result<(), Str
             }) {
                 return Err(format!("reply: figure {} stands for something that was not found; a figure shows a value that was found. Leave it out and say what is missing in the text", at + 1));
             }
-            if !run.failed.is_empty() && affirms(headline, &CLAIMS, true) {
-                return Err("reply: the headline calls the result finished or checked while a part could not do its job; say what was found".into());
+            if (!run.failed.is_empty() || run.unread) && claims_done(headline) {
+                return Err("reply: the headline calls the result finished or checked while a part could not do its job or no page could be read; say what was found".into());
             }
         }
         WorkArtifactDataV1::Picks { items, .. } => {
@@ -1577,6 +1671,7 @@ mod tests {
         let honest_run = Honesty {
             sourced: true,
             failed: vec!["slack".into(), "flights".into()],
+            unread: false,
         };
         let reply: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "reply", "headline": "Airfare recheck complete", "text": "The lookup failed.",
@@ -1595,7 +1690,8 @@ mod tests {
             &headline,
             &Honesty {
                 sourced: true,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_ok());
@@ -1618,11 +1714,27 @@ mod tests {
             .unwrap();
             assert!(honest(&plain, &honest_run).is_ok(), "{headline}");
         }
-        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
-            "kind": "reply", "headline": "Slack was not read, but the plan is complete", "text": "The plan stands."
-        }))
-        .unwrap();
-        assert!(honest(&claimed, &honest_run).is_err());
+        for headline in [
+            "Pricing could not be checked",
+            "Pricing could not be checked or verified",
+            "Pricing could not be checked or independently verified",
+            "Nothing was read, so pricing is not yet fully confirmed",
+        ] {
+            assert!(!claims_done(headline), "{headline}");
+        }
+        for headline in [
+            "Slack was not read, but the plan is complete",
+            "No issues found and pricing checked",
+            "No issues found and pricing fully checked",
+            "No issues found and pricing reviewed and independently verified",
+        ] {
+            assert!(claims_done(headline), "{headline}");
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The plan stands."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &honest_run).is_err(), "{headline}");
+        }
         let todo: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
             "kind": "list", "style": "todo", "items": [{"title": "Retry the Slack check"}]
         }))
@@ -1649,7 +1761,8 @@ mod tests {
             &unsourced,
             &Honesty {
                 sourced: false,
-                failed: vec![]
+                failed: vec![],
+                unread: false,
             }
         )
         .is_err());
@@ -1658,6 +1771,55 @@ mod tests {
         }))
         .unwrap();
         assert!(honest(&tagged, &honest_run).is_err());
+    }
+
+    #[test]
+    fn no_table_when_no_page_could_be_read() {
+        let unread = Honesty {
+            sourced: true,
+            failed: vec![],
+            unread: true,
+        };
+        let sheet: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "sheet", "columns": [{"label": "Provider", "kind": "text"}, {"label": "Price", "kind": "text"}],
+            "rows": [{"cells": ["Hetzner", "CX23 from $6.49/mo"]}, {"cells": ["Vercel", ""]}]
+        }))
+        .unwrap();
+        assert!(honest(&sheet, &unread).unwrap_err().contains("no page"));
+        assert!(mend(&sheet, &unread).is_none());
+        let picks: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "picks", "facet": "service", "items": [{"name": "Hetzner"}]
+        }))
+        .unwrap();
+        assert!(honest(&picks, &unread).is_err());
+        let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Comparison complete", "text": "The table is on the canvas."
+        }))
+        .unwrap();
+        assert!(honest(&claimed, &unread).is_err());
+        for headline in ["Pricing checked", "Pricing finished"] {
+            let claimed: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+                "kind": "reply", "headline": headline, "text": "The table is on the canvas."
+            }))
+            .unwrap();
+            assert!(honest(&claimed, &unread).is_err(), "{headline}");
+        }
+        let negated: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "Pricing could not be checked", "text": "The pages didn't open."
+        }))
+        .unwrap();
+        assert!(honest(&negated, &unread).is_ok());
+        let plain: WorkArtifactDataV1 = serde_json::from_value(serde_json::json!({
+            "kind": "reply", "headline": "I couldn't read the pricing pages",
+            "text": "Vercel, Cloudflare and Hetzner's pages didn't open. Try again."
+        }))
+        .unwrap();
+        assert!(honest(&plain, &unread).is_ok());
+        let read = Honesty {
+            unread: false,
+            ..unread
+        };
+        assert!(honest(&sheet, &read).is_ok());
     }
 }
 
