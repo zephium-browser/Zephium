@@ -1970,7 +1970,7 @@ async fn a_lead_search_reads_the_engines_results_then_the_page_it_picks() {
                     ),
                 ]
             }
-            _ => panic!("the run finished at turn 2"),
+            _ => panic!("the run finished at turn 2: {seen}"),
         }
     }
     fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
@@ -2164,6 +2164,55 @@ async fn a_sheet_made_beside_a_read_that_fails_waits_for_it_and_is_refused() {
         .artifacts
         .iter()
         .any(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. })));
+}
+
+#[tokio::test]
+async fn a_retried_sheet_leaves_out_keys_that_are_no_source_of_the_run() {
+    fn sheet() -> WorkModelPart {
+        call(
+            "t",
+            "create",
+            json!({"kind": "sheet", "title": "Pricing", "sources": ["s9"], "data": {
+            "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+            "rows": [{"cells": ["Hobby", "Free"], "source": "s8"}]}}),
+        )
+    }
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![sheet()],
+            1 => {
+                assert!(seen.contains("s9 is not a source of this run"), "{seen}");
+                vec![sheet()]
+            }
+            2 => {
+                assert!(
+                    seen.contains("the sources s9, s8 (not sources of this run)"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "Hobby is free", "text": "Pro was not priced."}}),
+                    ),
+                    call("d", "finish", json!({"say": "Done.", "title": "Pricing"})),
+                ]
+            }
+            _ => panic!("the run finished at turn 2"),
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search("Price the plans", turns, &browser_search(&asked), |_| {
+        panic!("no page is read")
+    })
+    .await;
+    let sheet = run
+        .artifacts
+        .iter()
+        .find(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. }))
+        .expect("the retried sheet is placed");
+    assert!(sheet.evidence.is_empty(), "{:?}", sheet.evidence);
 }
 
 #[tokio::test]

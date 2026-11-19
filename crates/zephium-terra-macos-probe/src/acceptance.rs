@@ -1292,7 +1292,7 @@ fn export_eval(
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 26] = [
     LeadScenario { name: "blocks-checklist", requests: &["In this checklist, mark Pack passport done and append Book taxi due 2026-11-21. Preserve the other dates and completion flags. Update the existing block."], answer:"", folder:false, site:None },
     LeadScenario { name: "blocks-table", requests: &["In this table, update the row named Item120 so Status is Ready, then append Item200 with Owner Ada and Status Todo. Preserve every existing column and all other rows. Update the existing block."], answer:"", folder:false, site:None },
     LeadScenario { name: "blocks-calendar", requests: &["In my calendar, move Lunch to 2026-11-22 at 13:00 and append Walk on 2026-11-23 at 09:00. Preserve Train unchanged. Update the existing block."], answer:"", folder:false, site:None },
@@ -1416,6 +1416,30 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
         name: "compare",
         requests: &["Compare AWS, Vercel, Hetzner, Cloudflare for an AI SaaS"],
         answer: "A B2B SaaS with chat over the customer's documents, about 5,000 users in the first year.",
+        folder: false,
+        site: None,
+    },
+    // The owner's own request: official pricing pages on three sites.
+    LeadScenario {
+        name: "hosting",
+        requests: &["Compare current pricing, free tier limits, and regions for Vercel, Cloudflare and Hetzner"],
+        answer: "Use your judgment.",
+        folder: false,
+        site: None,
+    },
+    // A research question answered from pages read and cited.
+    LeadScenario {
+        name: "sources",
+        requests: &["What did the Rust 2024 edition change? Cite the official sources"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
+    // One task across several sites, ending in one object.
+    LeadScenario {
+        name: "sites",
+        requests: &["Find the latest stable release of Python, Node.js and Go and when each came out"],
+        answer: "",
         folder: false,
         site: None,
     },
@@ -2463,11 +2487,15 @@ pub(super) async fn lead_workflow(
                 result = running => result,
                 _ = account.person(handle, composition, profile, work) => Err(WorkError::Unavailable),
             }
-        } else {
+        } else if std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some() {
             tokio::select! {
                 result = running => result,
                 () = super::work_account::present_human_pages(composition, profile, work) => Err(WorkError::Unavailable),
             }
+        } else {
+            // Nobody sits at the window: a check stays unopened, as in the
+            // app until the person opens it, and its own short wait applies.
+            running.await
         };
         let projection = match result {
             Ok(projection) => projection,

@@ -4,10 +4,15 @@ use zephium_core::work::artifact::WorkEvidenceSourceV1;
 
 use super::run::LeadSource;
 
+/// A row whose values are not on the page it cites is refused; on the
+/// lead's retry of the same object it stands without that citation instead,
+/// its words its own, and is named in `uncited` (1-based rows).
 pub(super) fn ground_sheet(
     data: &mut Value,
     declared: &[String],
     sources: &[LeadSource],
+    lenient: bool,
+    uncited: &mut Vec<usize>,
 ) -> Result<Vec<String>, String> {
     let mut used = Vec::new();
     let Some(rows) = data.get_mut("rows").and_then(Value::as_array_mut) else {
@@ -38,6 +43,8 @@ pub(super) fn ground_sheet(
         // The first column identifies the fact or record; the remaining cells
         // contain its values. A one-column table contains the value itself.
         let mut primary = None;
+        let mut supported = Vec::new();
+        let mut unsupported = false;
         for (column, value) in cells.iter().enumerate().skip(usize::from(cells.len() > 1)) {
             let Some(value) = value.as_str().filter(|s| !s.is_empty()) else {
                 continue;
@@ -62,11 +69,27 @@ pub(super) fn ground_sheet(
                 }
             };
             let Some(chosen) = chosen else {
+                if lenient {
+                    unsupported = true;
+                    break;
+                }
                 return Err(format!("sheet row {}, cell {}: no unambiguous observed value supports its citation; copy the exact page value with its source, use native record keys, or explain the uncertainty in the reply", index + 1, column + 1));
             };
             primary.get_or_insert_with(|| chosen.key.clone());
-            if !used.contains(&chosen.key) {
-                used.push(chosen.key.clone());
+            if !supported.contains(&chosen.key) {
+                supported.push(chosen.key.clone());
+            }
+        }
+        if unsupported {
+            if let Value::Object(row) = row {
+                row.remove("source");
+            }
+            uncited.push(index + 1);
+            continue;
+        }
+        for key in supported {
+            if !used.contains(&key) {
+                used.push(key);
             }
         }
         if let Some(primary) = primary {
@@ -138,7 +161,10 @@ mod tests {
             {"cells":["Launch date","25 December 2021"],"source":"s1"},
             {"cells":["Launch vehicle","Ariane 5 ECA+"],"source":0},
             {"cells":["Diameter","6.5 m"],"source":"s1"}]});
-        let used = ground_sheet(&mut table, &["s1".into()], &sources()).unwrap();
+        let mut uncited = Vec::new();
+        let used =
+            ground_sheet(&mut table, &["s1".into()], &sources(), false, &mut uncited).unwrap();
+        assert!(uncited.is_empty());
         assert_eq!(used, ["s2", "s3", "s4"]);
         for (i, key) in used.iter().enumerate() {
             assert_eq!(table["rows"][i]["source"], *key);
@@ -168,10 +194,27 @@ mod tests {
             }
             let mut table = json!({"rows":[{"cells":["Date",value],"source":"s1"}]});
             assert!(
-                ground_sheet(&mut table, &[], &sources).is_err(),
+                ground_sheet(&mut table, &[], &sources, false, &mut Vec::new()).is_err(),
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn a_retried_sheet_keeps_its_own_words_without_the_pages_citation() {
+        let mut table = json!({"rows":[
+            {"cells":["Launch date","25 December 2021"],"source":"s1"},
+            {"cells":["Launch vehicle","Heavy lift rocket"],"source":"s1"},
+            {"cells":["Diameter","6.5 m"],"source":"s1"}]});
+        assert!(ground_sheet(&mut table.clone(), &[], &sources(), false, &mut Vec::new()).is_err());
+        let mut uncited = Vec::new();
+        let used = ground_sheet(&mut table, &[], &sources(), true, &mut uncited).unwrap();
+        assert_eq!(uncited, [2]);
+        assert_eq!(used, ["s2", "s4"]);
+        assert_eq!(table["rows"][0]["source"], "s2");
+        assert!(table["rows"][1].get("source").is_none());
+        assert_eq!(table["rows"][1]["cells"][1], "Heavy lift rocket");
+        assert_eq!(table["rows"][2]["source"], "s4");
     }
 
     #[test]
