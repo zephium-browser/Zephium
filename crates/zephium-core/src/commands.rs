@@ -176,11 +176,11 @@ pub const REGISTRY: &[CommandSpec] = &[
     // The selected tabs, else the one in front, into a new folder. Shift
     // and a letter, as the tool panels are: never Alt, which is AltGr on
     // many Windows layouts. Not L: a note keeps that for its checklist, and
-    // a menu key would take it first on macOS.
+    // a menu key would take it first on macOS. Not M: the mini window has it.
     command(
         "tab.group",
         "Group into Folder",
-        Keys::same("CmdOrCtrl+Shift+M"),
+        Keys::same("CmdOrCtrl+Shift+A"),
         Group::File,
     ),
     command(
@@ -843,11 +843,11 @@ mod tests {
     fn a_saved_override_keeps_its_key_when_a_new_default_lands_on_it() {
         for platform in PLATFORMS {
             let mut overrides = HashMap::new();
-            overrides.insert("tab.new".into(), "CmdOrCtrl+Shift+M".into());
+            overrides.insert("tab.new".into(), "CmdOrCtrl+Shift+A".into());
             // A stored keymap edited by hand: a second override on that key.
-            overrides.insert("nav.reload".into(), "CmdOrCtrl+Shift+M".into());
+            overrides.insert("nav.reload".into(), "CmdOrCtrl+Shift+A".into());
             let resolved = resolve_on(&overrides, platform);
-            let key = Accelerator::parse("CmdOrCtrl+Shift+M", platform)
+            let key = Accelerator::parse("CmdOrCtrl+Shift+A", platform)
                 .unwrap()
                 .format(platform);
             let owners: Vec<_> = resolved
