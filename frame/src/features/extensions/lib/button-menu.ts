@@ -19,7 +19,7 @@ const CHOICES: readonly ExtensionButtonChoice[] = ["pin", "unpin", "options", "m
  * the extension's own items where the platform lists them. Every platform
  * draws this one list; native only draws it and relays the choice.
  */
-export function buttonMenuEntries(
+function buttonMenuEntries(
   extension: WebExtensionView,
   roomToPin: boolean,
 ): ExtensionButtonMenuEntry[] {
