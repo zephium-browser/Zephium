@@ -862,3 +862,70 @@ fn a_deleted_folder_reopens_before_a_record_from_an_older_build() {
     assert_eq!(hosts(&shell, "old.example"), 0);
     assert_eq!(shell.items.roots(today(&shell))[0], ids[0]);
 }
+
+#[test]
+fn a_deleted_folder_comes_back_whole_under_the_nearest_folder_with_room() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let ids = tabs(&mut shell, &screen, &["a.example", "g.example"]);
+    let create = |shell: &mut Shell, name: &str, parent: Option<ItemId>| {
+        let made = folder_op(
+            shell,
+            FolderCommand::Create {
+                name: name.into(),
+                color: None,
+                tabs: vec![],
+                parent,
+                before: None,
+            },
+        );
+        assert_eq!(made.outcome, OperationOutcome::Applied, "{made:?}");
+    };
+    let outer = group(&mut shell, "P", vec![]);
+    create(&mut shell, "F", Some(outer));
+    let middle = shell.items.children(outer)[0];
+    create(&mut shell, "G", Some(middle));
+    let inner = shell.items.children(middle)[0];
+    let moved = FolderCommand::Move {
+        id: ids[1],
+        parent: Some(inner),
+        before: None,
+    };
+    assert_eq!(
+        folder_op(&mut shell, moved).outcome,
+        OperationOutcome::Applied
+    );
+    assert_eq!(
+        folder_op(&mut shell, FolderCommand::Delete(middle)).outcome,
+        OperationOutcome::Applied
+    );
+    // P goes one level down: F and G no longer both fit inside it.
+    let holder = group(&mut shell, "Q", vec![]);
+    let nest = FolderCommand::Move {
+        id: outer,
+        parent: Some(holder),
+        before: None,
+    };
+    assert_eq!(
+        folder_op(&mut shell, nest).outcome,
+        OperationOutcome::Applied
+    );
+
+    shell.handle(Command::Run("tab.reopen".into()));
+    let back: Vec<_> = shell
+        .items
+        .children(holder)
+        .iter()
+        .copied()
+        .filter(|id| *id != outer)
+        .collect();
+    assert_eq!(back.len(), 1);
+    assert!(matches!(
+        &shell.items.get(back[0]).unwrap().kind,
+        ItemKind::Folder { name, .. } if name == "F"
+    ));
+    let g = shell.items.children(back[0]);
+    assert_eq!(g.len(), 1);
+    assert!(shell.items.is_folder(g[0]));
+    assert_eq!(shell.items.subtree_tabs(back[0]).len(), 1);
+    assert!(shell.items.children(outer).is_empty());
+}

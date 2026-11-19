@@ -61,6 +61,16 @@ impl DeletedNode {
         }
     }
 
+    /// Folder levels it holds, itself counted.
+    fn height(&self) -> usize {
+        match self {
+            Self::Folder { children, .. } => {
+                1 + children.iter().map(Self::height).max().unwrap_or(0)
+            }
+            Self::Tab { .. } => 0,
+        }
+    }
+
     /// Items a restore would make: every folder, and each tab still recorded.
     fn size(&self, live: &[ClosedSessionId]) -> usize {
         match self {
@@ -473,10 +483,16 @@ impl Shell {
         // Where it was, when that is still the space in front; else here.
         let space = current;
         let placement = today(space);
-        let parent = deleted
+        // The nearest folder it came from that still has room for all of it.
+        let height = deleted.node.height();
+        let mut parent = deleted
             .parent
-            .filter(|parent| self.folder_in_space(*parent, space))
-            .filter(|parent| self.items.folder_depth(*parent) < MAX_FOLDER_DEPTH);
+            .filter(|parent| self.folder_in_space(*parent, space));
+        while let Some(at) =
+            parent.filter(|at| self.items.folder_depth(*at) + height > MAX_FOLDER_DEPTH)
+        {
+            parent = self.items.get(at).and_then(|item| item.parent);
+        }
         let before = deleted.before.filter(|before| {
             self.items
                 .get(*before)
