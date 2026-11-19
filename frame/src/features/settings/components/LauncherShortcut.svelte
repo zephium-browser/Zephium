@@ -13,6 +13,8 @@
 
   let trigger = $state<LauncherTrigger | null>(null);
   let recording = $state(false);
+  let applying = $state(false);
+  let disposed = false;
   let held = $state<string[]>([]);
   let rejection = $state<Rejection | null>(null);
   let failed = $state(false);
@@ -49,7 +51,7 @@
   }
 
   async function begin() {
-    if (!trigger?.editable) return;
+    if (!trigger?.editable || applying) return;
     rejection = null;
     failed = false;
     recording = true;
@@ -67,24 +69,35 @@
   }
 
   async function apply(accelerator: string) {
+    if (applying) return;
     const listening = recording;
-    recording = false;
+    applying = true;
     held = [];
     try {
       const change = await commands.launcherSetShortcut(accelerator);
+      if (disposed) return;
       if (!change) {
         failed = true;
+        await end();
         return;
       }
       trigger = change.trigger;
-      rejection = change.type === "rejected" ? change.reason : null;
+      if (change.type === "applied") {
+        recording = false;
+        rejection = null;
+      } else if (!listening || recording) {
+        rejection = change.reason;
+        // A refusal can take native out of recording mode. Resume only
+        // while this recorder still owns the capture.
+        if (recording) await commands.launcherRecordShortcut(true).catch(() => {});
+      }
     } catch {
-      failed = true;
-    }
-    // Keep listening after a refusal, so the next try is one key press away.
-    if (rejection && listening) {
-      recording = true;
-      await commands.launcherRecordShortcut(true).catch(() => {});
+      if (!disposed) {
+        failed = true;
+        await end();
+      }
+    } finally {
+      applying = false;
     }
   }
 
@@ -96,6 +109,7 @@
       void end();
       return;
     }
+    if (applying) return;
     const accelerator = acceleratorFrom(event, IS_MAC);
     if (accelerator) {
       rejection = null;
@@ -104,7 +118,7 @@
   }
 
   function keyup(event: KeyboardEvent) {
-    if (recording) held = heldModifiers(event, IS_MAC);
+    if (recording && !applying) held = heldModifiers(event, IS_MAC);
   }
 
   async function setDoubleTap(mode: DoubleTap) {
@@ -118,6 +132,7 @@
   onMount(() => {
     void refresh();
     return () => {
+      disposed = true;
       if (recording) void commands.launcherRecordShortcut(false).catch(() => {});
     };
   });
