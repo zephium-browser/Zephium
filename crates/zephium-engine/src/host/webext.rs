@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSPopoverBehavior, NSView};
+use objc2_app_kit::{NSMenu, NSMenuItem, NSPopoverBehavior, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSRectEdge, NSSize, NSString};
 use objc2_web_kit::{WKWebExtensionAction, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
 use zephium_core::extension_data::{
@@ -22,7 +22,7 @@ use zephium_core::extensions::{
     ExtensionActionSnapshotSettlement, ExtensionActionState, ExtensionBrowserRequest,
     ExtensionBrowserRequestAction, ExtensionBrowserRequestId, ExtensionBrowserRequestResult,
     ExtensionBrowserRequestSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
-    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
+    ExtensionButtonMenuRow, ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::Rect;
 use zephium_core::ids::{ExtensionInstallId, ItemId, ProfileId, WindowId};
@@ -690,8 +690,9 @@ impl WebextHost {
                 ExtensionActionRejection::RuntimeUnavailable,
             );
         }
-        if request.is_menu() {
+        if let Some(rows) = request.menu_rows() {
             let tab_object = runtime.tab_object(tab);
+            // SAFETY: the context and tab object are live on the WebKit main thread.
             let Some(action) = runtime
                 .context(&extension_id)
                 .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
@@ -701,7 +702,16 @@ impl WebextHost {
                 );
             };
             if let Some(parent) = parent {
-                present_action_menu(&action, parent, request.anchor().rect());
+                let sink = entry.bridge.sink.clone();
+                present_action_menu(
+                    &action,
+                    parent,
+                    request.anchor().rect(),
+                    rows.clone(),
+                    move |command| {
+                        sink.emit(EngineEvent::ExtensionActionMenuSelected { profile, command });
+                    },
+                );
             }
             return ExtensionActionSettlement::Dispatched;
         }
@@ -913,32 +923,87 @@ fn shortcut_tab(
 /// Chrome's `contextMenus.ACTION_MENU_TOP_LEVEL_LIMIT`.
 const ACTION_MENU_TOP_LEVEL_LIMIT: usize = 6;
 
-/// Pops up an action's `contexts: ["action"]` items under its button. WebKit's
-/// items run `contextMenus.onClicked` and grant activeTab themselves. The menu
-/// tracks in a run loop of its own, so it opens after the host is released.
-fn present_action_menu(action: &WKWebExtensionAction, parent: Retained<NSView>, anchor: Rect) {
+objc2::define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ZephiumExtensionMenuTarget"]
+    #[ivars = Cell<Option<usize>>]
+    struct ExtensionMenuTarget;
+
+    impl ExtensionMenuTarget {
+        #[unsafe(method(chooseExtensionMenuItem:))]
+        fn choose(&self, item: &NSMenuItem) {
+            if item.isEnabled() {
+                self.ivars().set(usize::try_from(item.tag()).ok());
+            }
+        }
+    }
+);
+
+/// Pops up WebKit's action items followed by the browser's rows. WebKit's items
+/// run `contextMenus.onClicked` and grant activeTab themselves. The menu tracks
+/// in a run loop of its own, so it opens after the host is released.
+fn present_action_menu(
+    action: &WKWebExtensionAction,
+    parent: Retained<NSView>,
+    anchor: Rect,
+    rows: Arc<[ExtensionButtonMenuRow]>,
+    relay: impl FnOnce(String) + Send + 'static,
+) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    // SAFETY: the retained WebKit action is live on the main thread.
     let items: Vec<_> = unsafe { action.menuItems() }
         .iter()
         .take(ACTION_MENU_TOP_LEVEL_LIMIT)
         .collect();
-    if items.is_empty() {
-        return;
-    }
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
     let bound = dispatch2::MainThreadBound::new((items, parent), mtm);
     dispatch2::DispatchQueue::main().exec_async(move || {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
         let (items, parent) = bound.into_inner(mtm);
-        let menu = objc2_app_kit::NSMenu::new(mtm);
+        let target = ExtensionMenuTarget::alloc(mtm).set_ivars(Cell::new(None));
+        // SAFETY: the target was allocated on the main thread and its Rust
+        // ivars were set before calling NSObject's initializer.
+        let target: Retained<ExtensionMenuTarget> =
+            unsafe { objc2::msg_send![super(target), init] };
+        let menu = NSMenu::new(mtm);
         menu.setAutoenablesItems(false);
+        let mut needs_separator = false;
         for item in &items {
+            // SAFETY: item is retained and inspected on AppKit's main thread.
             if unsafe { item.menu() }.is_none() {
                 menu.addItem(item);
+                needs_separator = !item.isSeparatorItem();
             }
+        }
+        let browser_rows = || ExtensionButtonMenuRow::after_extension_items(&rows, needs_separator);
+        for (index, row) in browser_rows().enumerate() {
+            match row {
+                ExtensionButtonMenuRow::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
+                ExtensionButtonMenuRow::Item { label, enabled, .. } => {
+                    // SAFETY: the selector takes the NSMenuItem sender. The
+                    // target stays retained until AppKit finishes tracking.
+                    let item = unsafe {
+                        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(mtm),
+                            &NSString::from_str(label),
+                            Some(objc2::sel!(chooseExtensionMenuItem:)),
+                            objc2_foundation::ns_string!(""),
+                        );
+                        item.setTarget(Some(&target));
+                        item
+                    };
+                    item.setTag(index as isize);
+                    item.setEnabled(*enabled);
+                    menu.addItem(&item);
+                }
+            }
+        }
+        if menu.numberOfItems() == 0 {
+            return;
         }
         let y = if parent.isFlipped() {
             anchor.y + anchor.height
@@ -950,6 +1015,15 @@ fn present_action_menu(action: &WKWebExtensionAction, parent: Retained<NSView>, 
             NSPoint::new(anchor.x, y),
             Some(&parent),
         );
+        if let Some(ExtensionButtonMenuRow::Item {
+            id, enabled: true, ..
+        }) = target
+            .ivars()
+            .get()
+            .and_then(|index| browser_rows().nth(index))
+        {
+            relay(id.clone());
+        }
     });
 }
 

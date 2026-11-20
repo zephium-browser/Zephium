@@ -283,7 +283,7 @@ impl Shell {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         revision: zephium_core::extensions::ExtensionActionRevision,
         anchor: zephium_core::extensions::ExtensionPopupAnchor,
-        menu: bool,
+        menu: Option<std::sync::Arc<[zephium_core::extensions::ExtensionButtonMenuRow]>>,
     ) -> OperationDisposition {
         match self.dispatch_extension_action(runtime, revision, anchor, menu) {
             Ok(_) => operation_result(

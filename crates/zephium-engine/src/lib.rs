@@ -1117,7 +1117,8 @@ impl RetirementGate {
             event @ EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
-            event @ EngineEvent::ExtensionActionSettled { profile, .. } => {
+            event @ (EngineEvent::ExtensionActionSettled { profile, .. }
+            | EngineEvent::ExtensionActionMenuSelected { profile, .. }) => {
                 self.profile_is_active(profile).then_some(event)
             }
             event @ EngineEvent::ExtensionActionsInvalidated { profile } => {

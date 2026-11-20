@@ -20,9 +20,17 @@ const CHOICES: readonly ExtensionButtonChoice[] = ["pin", "unpin", "options", "m
  * draws this one list; native only draws it and relays the choice.
  */
 function buttonMenuEntries(
-  extension: WebExtensionView,
+  extension: WebExtensionView | null,
   roomToPin: boolean,
 ): ExtensionButtonMenuEntry[] {
+  const manage = {
+    kind: "item",
+    choice: "manage",
+    label: m.webext_manage(),
+    enabled: extension !== null,
+  } satisfies ExtensionButtonMenuEntry;
+  // The action snapshot can reach the tray before the install catalog.
+  if (!extension) return [manage];
   return [
     extension.pinned
       ? { kind: "item", choice: "unpin", label: m.webext_unpin(), enabled: true }
@@ -43,7 +51,7 @@ function buttonMenuEntries(
         ]
       : []),
     { kind: "separator" },
-    { kind: "item", choice: "manage", label: m.webext_manage(), enabled: true },
+    manage,
     { kind: "item", choice: "remove", label: `${m.webext_remove()}…`, enabled: true },
   ];
 }
@@ -54,16 +62,15 @@ export function openButtonMenu(
   action: ExtensionActionView,
   anchor: DOMRect,
 ): void {
-  // macOS lists the extension's own `contexts: ["action"]` items natively.
-  if (IS_MAC) {
-    extensions.menu(profileId, action, anchor);
-    return;
-  }
-  // WebView2 does not expose those items, so Windows shows the browser's own.
   const install = action.runtime.install_id;
   const extension = webext.byInstall(install);
-  if (!extension) return;
+  if (!extension && !IS_MAC) return;
   const entries = buttonMenuEntries(extension, webext.pinnedCount() < webext.MAX_PINNED);
+  // WebKit adds the extension's own `contexts: ["action"]` items.
+  if (IS_MAC) {
+    extensions.menu(profileId, action, anchor, entries);
+    return;
+  }
   void commands
     .extensionButtonMenuPopup(install, entries, anchor.left, anchor.bottom)
     .catch(() => {});
