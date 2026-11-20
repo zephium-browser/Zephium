@@ -181,7 +181,7 @@ pub(crate) fn lead_tools() -> Vec<WorkModelTool> {
                             "return": {"type": "string"},
                             "cabin": {"type": "string", "enum": ["economy","premium","business","first"]},
                             "query": {"type": "string", "description": "Words to search a store for: star wars millennium falcon."},
-                            "currency": {"type": "string", "description": "ISO code of the person's budget or prices (USD); pass it whenever they gave one, or the site shows its local currency."}
+                            "currency": {"type": "string", "description": "ISO code of the currency the person's budget or own prices use (USD); pass it whenever they gave one, never a guess."}
                         },
                         "additionalProperties": false
                     }
