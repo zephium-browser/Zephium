@@ -1672,6 +1672,11 @@ pub enum EngineEvent {
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
     },
+    /// A browser-owned row was chosen from a native extension action menu.
+    ExtensionActionMenuSelected {
+        profile: ProfileId,
+        command: String,
+    },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the
     /// Shell responds by requesting a fresh exact replacement cohort.

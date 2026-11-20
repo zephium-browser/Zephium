@@ -99,16 +99,20 @@ struct EarlyReply {
 }
 
 fn early_reply_args(tool: &WorkModelToolCall) -> Option<Value> {
-    if tool.name == "create"
+    let args = if tool.name == "create"
         && tool.arguments.get("kind").and_then(Value::as_str) == Some("reply")
         && tool.arguments.get("part").is_none_or(Value::is_null)
     {
-        Some(tool.arguments.clone())
+        Some(unquoted_data(&tool.arguments))
     } else if tool.name == "finish" {
         finish_reply_args(&tool.arguments)
     } else {
         None
-    }
+    }?;
+    // A reply that calls the result finished or checked waits for this
+    // turn's reads, so its honesty knows whether they could be read.
+    let headline = args.pointer("/data/headline").and_then(Value::as_str);
+    (!headline.is_some_and(objects::claims_done)).then_some(args)
 }
 
 fn finish_reply_args(args: &Value) -> Option<Value> {
@@ -668,9 +672,16 @@ where
         early_reply: Option<&EarlyReply>,
     ) -> Result<(Vec<WorkModelToolResult>, bool, bool), WorkAttemptStatus> {
         let mut terminal = None;
+        // Set with `terminal` by the read batch: the run is ending, so this
+        // turn's objects are never placed.
+        let ended = std::sync::atomic::AtomicBool::new(false);
         let mut answers: Vec<Option<(String, bool)>> = vec![None; calls.len()];
         let mut requests: Vec<(usize, Request)> = Vec::new();
         let mut pending: Vec<Pending<'_>> = Vec::new();
+        // Pages and parts of this turn settle before its objects are judged,
+        // so an object knows whether any page the turn read could be read.
+        let mut reads: Vec<Pending<'_>> = Vec::new();
+        let mut objects: Vec<Pending<'_>> = Vec::new();
         let mut finish_at = None;
         let mut ran = vec![false; calls.len()];
         for (index, tool_call) in calls.iter().enumerate() {
@@ -750,7 +761,7 @@ where
                 "start_part" => match parts::spec(args) {
                     Ok(spec) => {
                         ran[index] = true;
-                        pending.push(Box::pin(async move {
+                        reads.push(Box::pin(async move {
                             let (content, error) = self.part(spec).await;
                             vec![(index, content, error)]
                         }))
@@ -759,7 +770,7 @@ where
                 },
                 "create" => {
                     let args = unquoted_data(args);
-                    pending.push(Box::pin(async move {
+                    objects.push(Box::pin(async move {
                         let part = args
                             .get("part")
                             .and_then(Value::as_str)
@@ -770,7 +781,7 @@ where
                 }
                 "revise" => {
                     let args = unquoted_data(args);
-                    pending.push(Box::pin(async move {
+                    objects.push(Box::pin(async move {
                         let (content, error) = self.revise(&args).await;
                         vec![(index, content, error)]
                     }))
@@ -832,8 +843,9 @@ where
         if !requests.is_empty() {
             let hands = &self.hands;
             let terminal = &mut terminal;
+            let ended = &ended;
             let batch = requests;
-            pending.push(Box::pin(async move {
+            reads.push(Box::pin(async move {
                 let order: Vec<(usize, String)> =
                     batch.iter().map(|(i, r)| (*i, r.call.clone())).collect();
                 match hands.run(batch.into_iter().map(|(_, r)| r).collect()).await {
@@ -848,11 +860,20 @@ where
                         .collect(),
                     Err(status) => {
                         *terminal = Some(status);
+                        ended.store(true, std::sync::atomic::Ordering::SeqCst);
                         Vec::new()
                     }
                 }
             }));
         }
+        let ended = &ended;
+        pending.push(Box::pin(async move {
+            let mut answers: Vec<Answer> = join_all(reads).await.into_iter().flatten().collect();
+            if !ended.load(std::sync::atomic::Ordering::SeqCst) {
+                answers.extend(join_all(objects).await.into_iter().flatten());
+            }
+            answers
+        }));
         for (index, content, error) in join_all(pending).await.into_iter().flatten() {
             answers[index] = Some((content, error));
         }
@@ -1034,7 +1055,7 @@ where
                 }
             }
         }
-        let run_honesty = honesty(&projection, execution, &proposed);
+        let run_honesty = honesty(&projection, execution, &proposed, self.run.no_page_read());
         if let Err(fault) = objects::honest(&proposed.data, &run_honesty) {
             match objects::mend(&proposed.data, &run_honesty).filter(|_| lenient) {
                 Some((data, words)) => {
@@ -1207,7 +1228,12 @@ where
         }
         if let Err(fault) = objects::honest(
             &proposed.data,
-            &honesty(&projection, self.run.probe.execution(), &proposed),
+            &honesty(
+                &projection,
+                self.run.probe.execution(),
+                &proposed,
+                self.run.no_page_read(),
+            ),
         ) {
             return self.refuse(&key, ObjectRefusal::Honesty, fault);
         }
@@ -1935,12 +1961,14 @@ fn part_words(part: &zephium_core::work::parts::WorkPartFactV1) -> String {
     }
 }
 
-/// What a proposed object is checked against: its sources, and the parts
-/// of this request that could not do their job.
+/// What a proposed object is checked against: its sources, the parts of
+/// this request that could not do their job, and whether every page it
+/// tried to read failed.
 fn honesty(
     projection: &WorkRuntimeProjection,
     execution: WorkExecutionId,
     proposed: &objects::Proposed,
+    unread: bool,
 ) -> objects::Honesty {
     let mut failed = Vec::new();
     if let Some(run) = projection.executions.iter().find(|e| e.id == execution) {
@@ -1971,6 +1999,7 @@ fn honesty(
     objects::Honesty {
         sourced: !proposed.evidence.is_empty(),
         failed,
+        unread,
     }
 }
 
