@@ -8464,6 +8464,10 @@ pub fn run() {
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
     platform::imp::open_startup_log(&context.config().identifier);
+    #[cfg(target_os = "windows")]
+    if zephium_credentials::set_windows_identity(&context.config().identifier).is_err() {
+        diagnostic!("security: could not initialize the Windows credential namespace");
+    }
     #[cfg(target_os = "macos")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,

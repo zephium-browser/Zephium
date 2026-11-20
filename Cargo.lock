@@ -7746,6 +7746,7 @@ dependencies = [
  "zephium-blocker",
  "zephium-blocker-service",
  "zephium-core",
+ "zephium-credentials",
  "zephium-engine",
  "zephium-import",
  "zephium-ipc",
