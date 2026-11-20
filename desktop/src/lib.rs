@@ -5703,6 +5703,8 @@ pub enum ExtensionButtonMenuEntry {
 
 const EXTENSION_MENU_COMMAND: &str = "extension.menu=";
 const EXTENSION_BUTTON_MENU_ENTRIES: usize = 8;
+/// Far above any localized entry; refused before the label is normalized.
+const EXTENSION_MENU_LABEL_BYTES: usize = 256;
 
 #[derive(Debug, Eq, PartialEq)]
 enum ExtensionButtonMenuRow {
@@ -5716,7 +5718,7 @@ enum ExtensionButtonMenuRow {
 
 /// The rows to draw, each choice named `extension.menu=<choice>:<install>`.
 /// None for a list the frame could not have built: a malformed install, no
-/// choice, too many rows, or a choice offered twice.
+/// choice, too many rows, a choice offered twice, or an oversized label.
 fn extension_button_menu_rows(
     install_id: &str,
     entries: &[ExtensionButtonMenuEntry],
@@ -5735,7 +5737,7 @@ fn extension_button_menu_rows(
                 label,
                 enabled,
             } => {
-                if offered.contains(choice) {
+                if offered.contains(choice) || label.len() > EXTENSION_MENU_LABEL_BYTES {
                     return None;
                 }
                 offered.push(*choice);
@@ -9370,6 +9372,24 @@ mod tests {
             .chain([item(Choice::Manage)])
             .collect();
         assert!(!rows(&install, &long));
+        // A label is bounded before it is normalized; a localized one fits.
+        let labelled = |label: String| Entry::Item {
+            choice: Choice::Options,
+            label,
+            enabled: true,
+        };
+        assert!(rows(
+            &install,
+            &[labelled("Erweiterungsoptionen öffnen".into())]
+        ));
+        assert!(rows(
+            &install,
+            &[labelled("é".repeat(super::EXTENSION_MENU_LABEL_BYTES / 2))]
+        ));
+        assert!(!rows(
+            &install,
+            &[labelled(" ".repeat(super::EXTENSION_MENU_LABEL_BYTES + 1))]
+        ));
     }
 
     #[test]
