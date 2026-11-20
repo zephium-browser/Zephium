@@ -181,8 +181,8 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
-    ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 #[cfg(not(target_os = "macos"))]
@@ -3655,8 +3655,16 @@ fn extension_action_invoke(
             &action_revision,
         ],
         [anchor_x, anchor_y, anchor_width, anchor_height],
-        false,
+        None,
     )
+}
+
+#[derive(Deserialize, specta::Type)]
+struct ExtensionActionMenuAnchor {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 /// The context menu of an extension's toolbar button, under the button.
@@ -3670,10 +3678,8 @@ fn extension_action_menu(
     install_id: String,
     runtime_generation: String,
     action_revision: String,
-    anchor_x: f64,
-    anchor_y: f64,
-    anchor_width: f64,
-    anchor_height: f64,
+    anchor: ExtensionActionMenuAnchor,
+    entries: Vec<ExtensionButtonMenuEntry>,
 ) -> zephium_ipc::OperationAdmission {
     extension_action(
         &caller,
@@ -3685,8 +3691,8 @@ fn extension_action_menu(
             &runtime_generation,
             &action_revision,
         ],
-        [anchor_x, anchor_y, anchor_width, anchor_height],
-        true,
+        [anchor.x, anchor.y, anchor.width, anchor.height],
+        Some(&entries),
     )
 }
 
@@ -3696,7 +3702,7 @@ fn extension_action(
     command: &'static str,
     [profile_id, install_id, runtime_generation, action_revision]: [&str; 4],
     [anchor_x, anchor_y, anchor_width, anchor_height]: [f64; 4],
-    menu: bool,
+    menu_entries: Option<&[ExtensionButtonMenuEntry]>,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(caller, CallerPolicy::Main, command)
         || shutdown_started(caller.app_handle())
@@ -3714,6 +3720,14 @@ fn extension_action(
         ExtensionInstallId::parse(install_id).filter(|install| install.to_string() == install_id)
     else {
         return rejected_extension_action("install-identity");
+    };
+    let menu = if let Some(entries) = menu_entries {
+        let Some(rows) = extension_button_menu_rows(install_id, entries, false) else {
+            return rejected_extension_action("invalid-menu-entries");
+        };
+        Some(Arc::from(rows))
+    } else {
+        None
     };
     let Some(generation) =
         fixed_nonzero_hex(runtime_generation).and_then(ExtensionRuntimeGeneration::new)
@@ -5629,14 +5643,17 @@ fn extension_menu_id(id: &str) -> Option<String> {
 }
 
 fn extension_menu_label(label: &str) -> String {
+    // A bare `&` would become a Windows mnemonic.
+    plain_extension_menu_label(label).replace('&', "&&")
+}
+
+fn plain_extension_menu_label(label: &str) -> String {
     let label: String = label
         .trim()
         .chars()
         .filter(|c| !c.is_control())
         .take(64)
         .collect();
-    // A bare `&` would become a Windows mnemonic.
-    let label = label.replace('&', "&&");
     if label.is_empty() {
         "Extension".into()
     } else {
@@ -5693,22 +5710,13 @@ const EXTENSION_BUTTON_MENU_ENTRIES: usize = 8;
 /// Far above any localized entry; refused before the label is normalized.
 const EXTENSION_MENU_LABEL_BYTES: usize = 256;
 
-#[derive(Debug, Eq, PartialEq)]
-enum ExtensionButtonMenuRow {
-    Item {
-        id: String,
-        label: String,
-        enabled: bool,
-    },
-    Separator,
-}
-
 /// The rows to draw, each choice named `extension.menu=<choice>:<install>`.
 /// None for a list the frame could not have built: a malformed install, no
 /// choice, too many rows, a choice offered twice, or an oversized label.
 fn extension_button_menu_rows(
     install_id: &str,
     entries: &[ExtensionButtonMenuEntry],
+    windows_mnemonics: bool,
 ) -> Option<Vec<ExtensionButtonMenuRow>> {
     let install = ExtensionInstallId::parse(install_id)
         .filter(|install| install.to_string() == install_id)?;
@@ -5730,7 +5738,11 @@ fn extension_button_menu_rows(
                 offered.push(*choice);
                 rows.push(ExtensionButtonMenuRow::Item {
                     id: format!("{EXTENSION_MENU_COMMAND}{}:{install}", choice.name()),
-                    label: extension_menu_label(label),
+                    label: if windows_mnemonics {
+                        extension_menu_label(label)
+                    } else {
+                        plain_extension_menu_label(label)
+                    },
                     enabled: *enabled,
                 });
             }
@@ -5803,7 +5815,7 @@ fn extension_button_menu_popup(
     ) else {
         return false;
     };
-    let Some(rows) = extension_button_menu_rows(&install_id, &entries) else {
+    let Some(rows) = extension_button_menu_rows(&install_id, &entries, true) else {
         return false;
     };
     let Ok(menu) = build_extension_button_menu(&app, &rows) else {
@@ -7463,8 +7475,9 @@ fn finish_browser_setup(
             if zephium_engine::foreground_rendering_policy_event(&event) {
                 return;
             }
-            if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { command, .. } =
-                &event
+            use zephium_core::ports::engine::EngineEvent;
+            if let EngineEvent::ShortcutPressed { command, .. }
+            | EngineEvent::ExtensionActionMenuSelected { command, .. } = &event
             {
                 let _ = execute_command(&sink_app, command);
                 return;
@@ -9310,6 +9323,7 @@ mod tests {
                 item(Choice::Remove, "Remove & forget…", false),
                 Entry::Separator,
             ],
+            true,
         )
         .unwrap();
         let row = |choice: &str, label: &str, enabled| Row::Item {
@@ -9336,6 +9350,52 @@ mod tests {
     }
 
     #[test]
+    fn macos_extension_button_rows_follow_webkit_items_with_one_separator() {
+        use super::{
+            ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry,
+            ExtensionButtonMenuRow as Row,
+        };
+        let install = super::ExtensionInstallId::generate().to_string();
+        let entries = [
+            Entry::Separator,
+            Entry::Item {
+                choice: Choice::Options,
+                label: " Settings & privacy ".into(),
+                enabled: true,
+            },
+            Entry::Separator,
+            Entry::Separator,
+            Entry::Item {
+                choice: Choice::Pin,
+                label: "Unpin one to pin another".into(),
+                enabled: false,
+            },
+            Entry::Separator,
+        ];
+        let rows = super::extension_button_menu_rows(&install, &entries, false).unwrap();
+        assert_eq!(
+            rows,
+            [
+                Row::Item {
+                    id: format!("extension.menu=options:{install}"),
+                    label: "Settings & privacy".into(),
+                    enabled: true,
+                },
+                Row::Separator,
+                Row::Item {
+                    id: format!("extension.menu=pin:{install}"),
+                    label: "Unpin one to pin another".into(),
+                    enabled: false,
+                },
+            ]
+        );
+        assert!(
+            Row::after_extension_items(&rows, true).eq([&Row::Separator].into_iter().chain(&rows))
+        );
+        assert!(Row::after_extension_items(&rows, false).eq(&rows));
+    }
+
+    #[test]
     fn an_extension_button_menu_the_frame_could_not_have_built_is_refused() {
         use super::{ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry};
         let install = super::ExtensionInstallId::generate().to_string();
@@ -9345,7 +9405,10 @@ mod tests {
             enabled: true,
         };
         let rows = |install: &str, entries: &[Entry]| {
-            super::extension_button_menu_rows(install, entries).is_some()
+            let windows = super::extension_button_menu_rows(install, entries, true).is_some();
+            let macos = super::extension_button_menu_rows(install, entries, false).is_some();
+            assert_eq!(windows, macos);
+            windows
         };
         assert!(rows(&install, &[item(Choice::Pin)]));
         // A malformed or differently spelled install never names a choice.

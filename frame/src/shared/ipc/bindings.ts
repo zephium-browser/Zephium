@@ -316,7 +316,7 @@ export const commands = {
 	chromeMenuPopup: (x: number | null, y: number | null, page: boolean, canSplit: boolean) => __TAURI_INVOKE<boolean>("chrome_menu_popup", { x, y, page, canSplit }),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**  The context menu of an extension's toolbar button, under the button. */
-	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchor: ExtensionActionMenuAnchor, entries: ExtensionButtonMenuEntry[]) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchor, entries }),
 	/**
 	 *  The menu of an extension's toolbar button, pinned or in the tray, where
 	 *  the engine lists none of the extension's own items (Windows).
@@ -1478,6 +1478,13 @@ export type ExtensionActionFailedView = {
  *  forwarded through this transient user-notice channel.
  */
 export type ExtensionActionFailure = "invalid_request" | "runtime_unavailable" | "runtime_superseded" | "tab_unavailable" | "tab_discarded" | "action_unavailable" | "action_disabled" | "capacity_exceeded" | "popup_unavailable" | "popup_capacity_exceeded" | "native_admission_failed" | "shutting_down" | "unsupported_platform";
+
+export type ExtensionActionMenuAnchor = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
 
 /**
  *  Non-authorizing identity for one live extension runtime. Privileged chrome
