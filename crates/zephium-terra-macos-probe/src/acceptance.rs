@@ -1783,10 +1783,19 @@ async fn stand_in(
                 WorkStepKindV1::Ask { options, .. } => {
                     let reply = if public_eval {
                         match &step.kind {
+                            // A request with no scripted answer takes the
+                            // question's first option, as the bench mode does.
                             WorkStepKindV1::Ask {
                                 purpose: Some(WorkAskPurposeV1::Question),
                                 ..
-                            } => answer.to_owned(),
+                            } if !answer.is_empty() => answer.to_owned(),
+                            WorkStepKindV1::Ask {
+                                purpose: Some(WorkAskPurposeV1::Question),
+                                ..
+                            } => options
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "Go ahead".into()),
                             _ => options
                                 .iter()
                                 .find(|option| {
