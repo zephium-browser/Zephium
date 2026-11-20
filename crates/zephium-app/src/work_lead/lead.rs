@@ -2119,6 +2119,13 @@ const USED_BATCH_CHARS: usize = 12_000;
 /// Tool results the model still works from: the newest ones stay whole.
 const FRESH_RESULTS: usize = 2;
 const STUB: &str = "[Used; dropped to keep the conversation small.";
+/// Reads nothing was placed from yet stay whole up to this much together;
+/// past it the oldest give way to excerpts of their figures.
+const UNPLACED_CHARS: usize = 60_000;
+/// An unplaced read's excerpt: its first line and the lines that carry a
+/// figure (prices, limits, dates), each with its source key.
+const EXCERPT_CHARS: usize = 2_400;
+const EXCERPT: &str = "[Excerpt: the lines with figures; read again for the rest.]";
 
 /// Why the model stopped, as the closing reply says it.
 fn model_stop(error: WorkModelError) -> &'static str {
@@ -2229,6 +2236,36 @@ pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize, rule: Us
             }
         }
     }
+    // Unplaced reads stay whole only up to their ceiling: the oldest are cut
+    // to their figures, which a refused object's retry still cites.
+    let unplaced: Vec<usize> = results[..results.len().saturating_sub(FRESH_RESULTS)]
+        .iter()
+        .copied()
+        .filter(|index| *index >= placed)
+        .collect();
+    let whole =
+        |result: &WorkModelToolResult| droppable(result) && !result.content.ends_with(EXCERPT);
+    let mut held: usize = unplaced
+        .iter()
+        .filter_map(|i| match &messages[*i] {
+            WorkModelMessage::ToolResults(results) => Some(results),
+            _ => None,
+        })
+        .flatten()
+        .filter(|r| whole(r))
+        .map(|r| r.content.len())
+        .sum();
+    for index in &unplaced {
+        if held <= UNPLACED_CHARS {
+            break;
+        }
+        if let WorkModelMessage::ToolResults(results) = &mut messages[*index] {
+            for result in results.iter_mut().filter(|r| whole(r)) {
+                held = held.saturating_sub(result.content.len());
+                result.content = excerpt(&result.content);
+            }
+        }
+    }
     let mut total: usize = messages.iter().map(size).sum();
     let keep = messages.len().saturating_sub(6);
     for message in messages[..keep].iter_mut() {
@@ -2270,6 +2307,29 @@ fn last_placement(messages: &[WorkModelMessage]) -> Option<usize> {
         matches!(m, WorkModelMessage::ToolResults(results)
             if results.iter().any(|r| !r.is_error && placing.contains(&r.call.as_str())))
     })
+}
+
+/// An unplaced read cut to its first line and the lines with a figure.
+fn excerpt(content: &str) -> String {
+    let mut lines = content.lines();
+    let mut out = format!("{}\n", clip(lines.next().unwrap_or(""), 160));
+    let figure = |line: &&str| {
+        let text = line
+            .strip_prefix("[s")
+            .and_then(|rest| rest.split_once(']'))
+            .map_or(*line, |(_, rest)| rest);
+        text.chars().any(|c| c.is_ascii_digit())
+    };
+    for line in lines.filter(figure) {
+        let line = clip(line, 240);
+        if out.len() + line.len() + 1 > EXCERPT_CHARS {
+            break;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str(EXCERPT);
+    out
 }
 
 /// A used result's stub: its first line and the keys of its sources.
@@ -2513,6 +2573,71 @@ mod compact_tests {
         };
         assert!(first[0].content.starts_with(STUB), "{}", first[0].content);
         assert!(first[0].content.contains("[s1]"), "{}", first[0].content);
+    }
+
+    #[test]
+    fn many_unplaced_reads_stay_bounded_and_keep_their_figures() {
+        let read = |n: usize| {
+            [
+                WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                    id: format!("read{n}"),
+                    name: "web_fetch".into(),
+                    arguments: serde_json::json!({}),
+                })]),
+                WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                    call: format!("read{n}"),
+                    content: format!(
+                        "Pricing page {n}\n[s{n}] Pro plan ${n}/month\n{}",
+                        format!("[s{n}] a plan for teams that grow with the product\n").repeat(300)
+                    ),
+                    is_error: false,
+                }]),
+            ]
+        };
+        let refused = [
+            WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                id: "sheet".into(),
+                name: "create".into(),
+                arguments: serde_json::json!({}),
+            })]),
+            WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                call: "sheet".into(),
+                content:
+                    "sheet: rows[0].cells[1] (row 1, cell 2) has no unambiguous observed value"
+                        .into(),
+                is_error: true,
+            }]),
+        ];
+        let results = |messages: &[WorkModelMessage]| -> Vec<String> {
+            messages
+                .iter()
+                .filter_map(|m| match m {
+                    WorkModelMessage::ToolResults(r) => Some(r[0].content.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut messages: Vec<WorkModelMessage> = (1..=10).flat_map(read).collect();
+        messages.extend(refused.clone());
+        compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
+        let kept = results(&messages);
+        // The oldest reads give way first, to excerpts the retry still cites.
+        assert!(kept[0].ends_with(EXCERPT), "{}", kept[0]);
+        assert!(kept[0].contains("[s1] Pro plan $1/month"), "{}", kept[0]);
+        assert!(kept[0].len() <= EXCERPT_CHARS + EXCERPT.len());
+        let whole: usize = kept[..9]
+            .iter()
+            .filter(|r| !r.ends_with(EXCERPT))
+            .map(String::len)
+            .sum();
+        assert!(whole <= UNPLACED_CHARS, "{whole}");
+        assert!(!kept[9].ends_with(EXCERPT), "the newest read stays whole");
+
+        let mut messages: Vec<WorkModelMessage> = (1..=200).flat_map(read).collect();
+        messages.extend(refused);
+        compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
+        assert!(messages.iter().map(size).sum::<usize>() <= CONVERSATION_CHARS);
     }
 
     #[test]
