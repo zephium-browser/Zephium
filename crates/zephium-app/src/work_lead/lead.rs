@@ -2335,6 +2335,16 @@ mod compact_tests {
             ),
             "steps[3].detail"
         );
+        assert_eq!(
+            format!(
+                "{:?}",
+                schema_path(
+                    "sheet: rows[1].cells[1] (row 2, cell 2) has no unambiguous observed value"
+                )
+                .unwrap()
+            ),
+            "rows[1].cells[1]"
+        );
         assert!(schema_path("The canvas could not be read").is_none());
     }
 

@@ -73,7 +73,7 @@ pub(super) fn ground_sheet(
                     unsupported = true;
                     break;
                 }
-                return Err(format!("sheet row {}, cell {}: no unambiguous observed value supports its citation; copy the exact page value with its source, use native record keys, or explain the uncertainty in the reply", index + 1, column + 1));
+                return Err(format!("sheet: rows[{index}].cells[{column}] (row {}, cell {}) has no unambiguous observed value behind its citation; copy the exact page value with its source, use native record keys, or explain the uncertainty in the reply", index + 1, column + 1));
             };
             primary.get_or_insert_with(|| chosen.key.clone());
             if !supported.contains(&chosen.key) {
@@ -206,7 +206,12 @@ mod tests {
             {"cells":["Launch date","25 December 2021"],"source":"s1"},
             {"cells":["Launch vehicle","Heavy lift rocket"],"source":"s1"},
             {"cells":["Diameter","6.5 m"],"source":"s1"}]});
-        assert!(ground_sheet(&mut table.clone(), &[], &sources(), false, &mut Vec::new()).is_err());
+        let refused =
+            ground_sheet(&mut table.clone(), &[], &sources(), false, &mut Vec::new()).unwrap_err();
+        assert!(
+            refused.starts_with("sheet: rows[1].cells[1] (row 2, cell 2) "),
+            "{refused}"
+        );
         let mut uncited = Vec::new();
         let used = ground_sheet(&mut table, &[], &sources(), true, &mut uncited).unwrap();
         assert_eq!(uncited, [2]);
