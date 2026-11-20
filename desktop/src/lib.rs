@@ -141,6 +141,8 @@ mod webext;
     feature = "adblock-qa"
 ))]
 mod webext_qa;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod window_frame;
 mod windows_privacy;
 #[cfg(feature = "work-product")]
 mod work_activity;
@@ -759,6 +761,16 @@ impl UiStartupGate {
         renderer_recovery::restart_settled(window.app_handle());
         let _ = window.set_resizable(true);
         let _ = window.set_maximizable(true);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        window_frame::activate(window, true);
+        #[cfg(target_os = "windows")]
+        if let Err(error) = window_frame::show(window) {
+            request_startup_failure(
+                window.app_handle(),
+                format_args!("could not show the browser after onboarding: {error}"),
+            );
+            return;
+        }
         if !platform::imp::set_chrome_hidden(window, false) {
             request_startup_failure(
                 window.app_handle(),
@@ -822,41 +834,14 @@ fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         #[cfg(target_os = "windows")]
-        fit_to_work_area(window);
-        window.show().map_err(|error| error.to_string())
+        {
+            window_frame::show(window)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window.show().map_err(|error| error.to_string())
+        }
     }
-}
-
-/// The default size is taller than a scaled 1080p screen's work area, which
-/// would leave the window under the taskbar; it shrinks to fit and is centred.
-#[cfg(target_os = "windows")]
-fn fit_to_work_area(window: &WebviewWindow) {
-    let (Ok(Some(monitor)), Ok(outer), Ok(inner)) = (
-        window.current_monitor(),
-        window.outer_size(),
-        window.inner_size(),
-    ) else {
-        return;
-    };
-    let work = monitor.work_area();
-    if outer.width <= work.size.width && outer.height <= work.size.height {
-        return;
-    }
-    let width = outer.width.min(work.size.width);
-    let height = outer.height.min(work.size.height);
-    let frame = (
-        outer.width.saturating_sub(inner.width),
-        outer.height.saturating_sub(inner.height),
-    );
-    let _ = window.set_size(tauri::PhysicalSize::new(
-        width.saturating_sub(frame.0),
-        height.saturating_sub(frame.1),
-    ));
-    let offset = |room: u32, used: u32| i32::try_from(room.saturating_sub(used) / 2).unwrap_or(0);
-    let _ = window.set_position(tauri::PhysicalPosition::new(
-        work.position.x + offset(work.size.width, width),
-        work.position.y + offset(work.size.height, height),
-    ));
 }
 
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
@@ -1372,6 +1357,8 @@ impl ShutdownCoordinator {
 /// A closed browser leaves the screen at once; the windows themselves stay
 /// alive until native teardown destroys them in order.
 fn hide_windows_for_shutdown(app: &tauri::AppHandle) {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    window_frame::closing(app);
     for window in app.webview_windows().into_values() {
         if let Err(error) = window.hide() {
             write_diagnostic(format_args!(
@@ -7338,6 +7325,16 @@ fn finish_browser_setup(
             }
         })
         .build()?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    window_frame::install(
+        &window,
+        store.clone(),
+        (
+            main_config.min_width.unwrap_or(680.0),
+            main_config.min_height.unwrap_or(480.0),
+        ),
+        onboarding,
+    );
     // Onboarding composes for one size; the browser takes the window
     // back resizable once it has replaced onboarding.
     if onboarding {
@@ -10296,6 +10293,27 @@ mod tests {
             .find("set_chrome_hidden(window, false)")
             .expect("recovered chrome reveal");
         assert!(facts < recovery_reveal);
+
+        let setup = production.split("fn finish_browser_setup(").nth(1).unwrap();
+        let install = setup
+            .split("window_frame::install(")
+            .nth(1)
+            .and_then(|body| body.split("// Onboarding composes").next())
+            .expect("main frame owner installation");
+        assert!(install.contains("onboarding,"));
+        assert!(!install.contains("map_err"));
+        let reveal = production
+            .split("fn reveal_browser(&self, window: &WebviewWindow)")
+            .nth(1)
+            .and_then(|body| body.split("fn is_visible").next())
+            .unwrap();
+        let resizable = reveal.find("set_resizable(true)").unwrap();
+        let maximizable = reveal.find("set_maximizable(true)").unwrap();
+        let placement = reveal.find("window_frame::activate(window, true)").unwrap();
+        let show = reveal.find("window_frame::show(window)").unwrap();
+        let chrome = reveal.find("set_chrome_hidden(window, false)").unwrap();
+        assert!(resizable < placement && maximizable < placement);
+        assert!(placement < show && show < chrome);
 
         for command in [
             "onboarding_play_intro",
