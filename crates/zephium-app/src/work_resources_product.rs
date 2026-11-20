@@ -1022,6 +1022,7 @@ impl ProductWork {
             self.fail();
             return;
         };
+        let unreachable = zephium_agentic::WorkBrowserUnreachable::default();
         match owner.construct_isolated(
             WorkBrowserResourceId::generate(),
             prepared.spec.identity.id(),
@@ -1033,6 +1034,7 @@ impl ProductWork {
             prepared.spec.anonymous_read_authority.clone(),
             prepared.anonymous_session,
             prepared.redirect.clone(),
+            Some(unreachable.clone()),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
             now,
         ) {
@@ -1047,10 +1049,11 @@ impl ProductWork {
                     prepared.journal,
                     prepared.audit,
                 ));
-                if let (Some(redirect), Some(coordinator)) =
-                    (prepared.redirect, self.coordinator.as_mut())
-                {
-                    coordinator.set_redirect(redirect);
+                if let Some(coordinator) = self.coordinator.as_mut() {
+                    coordinator.set_unreachable(unreachable);
+                    if let Some(redirect) = prepared.redirect {
+                        coordinator.set_redirect(redirect);
+                    }
                 }
                 if let Some(group) = self.runtime_group.take() {
                     if let Some(coordinator) = self.coordinator.as_mut() {
