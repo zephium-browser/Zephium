@@ -2118,6 +2118,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             chrome_menu_popup,
             extension_action_invoke,
             extension_action_menu,
+            extension_button_menu_popup,
             webext::web_extension_prepare,
             webext::web_extension_store_button,
             webext::web_extension_confirm,
@@ -4304,6 +4305,7 @@ fn execute_command_or(
         id,
         PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND | PAGE_CLEAR_SITE_DATA_COMMAND
     ) || id.starts_with(EXTENSION_ACTION_COMMAND)
+        || id.starts_with(EXTENSION_MENU_COMMAND)
     {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
@@ -5661,6 +5663,166 @@ fn extension_menu_icon(icon: Option<&str>) -> Option<Vec<u8>> {
         .decode(icon?)
         .ok()?;
     (rgba.len() == 32 * 32 * 4).then_some(rgba)
+}
+
+/// A browser entry on an extension's toolbar button menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionButtonChoice {
+    Pin,
+    Unpin,
+    Options,
+    Manage,
+    Remove,
+}
+
+impl ExtensionButtonChoice {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pin => "pin",
+            Self::Unpin => "unpin",
+            Self::Options => "options",
+            Self::Manage => "manage",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+/// One row of an extension's toolbar button menu. The frame builds the list,
+/// the same on every platform; native only draws it and relays the choice.
+#[derive(Clone, Debug, serde::Deserialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtensionButtonMenuEntry {
+    Item {
+        choice: ExtensionButtonChoice,
+        label: String,
+        enabled: bool,
+    },
+    Separator,
+}
+
+const EXTENSION_MENU_COMMAND: &str = "extension.menu=";
+const EXTENSION_BUTTON_MENU_ENTRIES: usize = 8;
+/// Far above any localized entry; refused before the label is normalized.
+const EXTENSION_MENU_LABEL_BYTES: usize = 256;
+
+#[derive(Debug, Eq, PartialEq)]
+enum ExtensionButtonMenuRow {
+    Item {
+        id: String,
+        label: String,
+        enabled: bool,
+    },
+    Separator,
+}
+
+/// The rows to draw, each choice named `extension.menu=<choice>:<install>`.
+/// None for a list the frame could not have built: a malformed install, no
+/// choice, too many rows, a choice offered twice, or an oversized label.
+fn extension_button_menu_rows(
+    install_id: &str,
+    entries: &[ExtensionButtonMenuEntry],
+) -> Option<Vec<ExtensionButtonMenuRow>> {
+    let install = ExtensionInstallId::parse(install_id)
+        .filter(|install| install.to_string() == install_id)?;
+    if entries.len() > EXTENSION_BUTTON_MENU_ENTRIES {
+        return None;
+    }
+    let mut offered = Vec::new();
+    let mut rows = Vec::new();
+    for entry in entries {
+        match entry {
+            ExtensionButtonMenuEntry::Item {
+                choice,
+                label,
+                enabled,
+            } => {
+                if offered.contains(choice) || label.len() > EXTENSION_MENU_LABEL_BYTES {
+                    return None;
+                }
+                offered.push(*choice);
+                rows.push(ExtensionButtonMenuRow::Item {
+                    id: format!("{EXTENSION_MENU_COMMAND}{}:{install}", choice.name()),
+                    label: extension_menu_label(label),
+                    enabled: *enabled,
+                });
+            }
+            // A rule only between rows.
+            ExtensionButtonMenuEntry::Separator => {
+                if matches!(rows.last(), Some(ExtensionButtonMenuRow::Item { .. })) {
+                    rows.push(ExtensionButtonMenuRow::Separator);
+                }
+            }
+        }
+    }
+    if rows.last() == Some(&ExtensionButtonMenuRow::Separator) {
+        rows.pop();
+    }
+    (!offered.is_empty()).then_some(rows)
+}
+
+fn build_extension_button_menu(
+    handle: &tauri::AppHandle,
+    rows: &[ExtensionButtonMenuRow],
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let menu = Menu::new(handle)?;
+    for row in rows {
+        match row {
+            ExtensionButtonMenuRow::Item { id, label, enabled } => menu.append(
+                &MenuItemBuilder::with_id(id.as_str(), label)
+                    .enabled(*enabled)
+                    .build(handle)?,
+            )?,
+            ExtensionButtonMenuRow::Separator => {
+                menu.append(&PredefinedMenuItem::separator(handle)?)?;
+            }
+        }
+    }
+    Ok(menu)
+}
+
+/// The menu of an extension's toolbar button, pinned or in the tray, where
+/// the engine lists none of the extension's own items (Windows).
+#[tauri::command]
+#[specta::specta]
+fn extension_button_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    install_id: String,
+    entries: Vec<ExtensionButtonMenuEntry>,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "extension_button_menu_popup")
+        || !bounded(&install_id, MAX_ITEM_ID_BYTES)
+    {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let Some(rows) = extension_button_menu_rows(&install_id, &entries) else {
+        return false;
+    };
+    let Ok(menu) = build_extension_button_menu(&app, &rows) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
 #[tauri::command]
@@ -8449,6 +8611,13 @@ pub fn run() {
                 );
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
+                // A profile behind a junction (#447): build everything on the
+                // directory it really is, so nothing below it may redirect.
+                #[cfg(target_os = "windows")]
+                let data_dir = {
+                    std::fs::create_dir_all(&data_dir)?;
+                    zephium_core::webview2::resolve_data_root(&data_dir)?
+                };
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
                 let qa_session = webext_qa::session_label("--webext-qa-session=")?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
@@ -9118,6 +9287,131 @@ mod tests {
         assert!(!super::launcher_follows_ui_command(
             "preference.search.shortcuts-extra=[]"
         ));
+    }
+
+    #[test]
+    fn an_extension_button_menu_draws_the_frames_list_and_names_each_choice() {
+        use super::{
+            ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry,
+            ExtensionButtonMenuRow as Row,
+        };
+        let install = super::ExtensionInstallId::generate().to_string();
+        let item = |choice, label: &str, enabled| Entry::Item {
+            choice,
+            label: label.into(),
+            enabled,
+        };
+        let rows = super::extension_button_menu_rows(
+            &install,
+            &[
+                Entry::Separator,
+                item(Choice::Unpin, "Unpin from sidebar", true),
+                item(Choice::Options, "Options", true),
+                Entry::Separator,
+                Entry::Separator,
+                item(Choice::Manage, "Manage extensions", true),
+                item(Choice::Remove, "Remove & forget…", false),
+                Entry::Separator,
+            ],
+        )
+        .unwrap();
+        let row = |choice: &str, label: &str, enabled| Row::Item {
+            id: format!("extension.menu={choice}:{install}"),
+            label: label.into(),
+            enabled,
+        };
+        assert_eq!(
+            rows,
+            [
+                row("unpin", "Unpin from sidebar", true),
+                row("options", "Options", true),
+                Row::Separator,
+                row("manage", "Manage extensions", true),
+                // A bare `&` would be a Windows mnemonic.
+                row("remove", "Remove && forget…", false),
+            ]
+        );
+        // Every id relays to the frame, which acts on the choice.
+        assert!(rows.iter().all(|row| match row {
+            Row::Item { id, .. } => id.starts_with(super::EXTENSION_MENU_COMMAND),
+            Row::Separator => true,
+        }));
+    }
+
+    #[test]
+    fn an_extension_button_menu_the_frame_could_not_have_built_is_refused() {
+        use super::{ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry};
+        let install = super::ExtensionInstallId::generate().to_string();
+        let item = |choice| Entry::Item {
+            choice,
+            label: "Entry".into(),
+            enabled: true,
+        };
+        let rows = |install: &str, entries: &[Entry]| {
+            super::extension_button_menu_rows(install, entries).is_some()
+        };
+        assert!(rows(&install, &[item(Choice::Pin)]));
+        // A malformed or differently spelled install never names a choice.
+        for malformed in [
+            "",
+            "not-an-install",
+            &install.to_lowercase(),
+            &format!("{install}:x"),
+        ] {
+            assert!(!rows(malformed, &[item(Choice::Pin)]), "{malformed:?}");
+        }
+        // Nothing to choose, a choice offered twice, or more than any list.
+        assert!(!rows(&install, &[]));
+        assert!(!rows(&install, &[Entry::Separator]));
+        assert!(!rows(
+            &install,
+            &[item(Choice::Remove), item(Choice::Remove)]
+        ));
+        let long: Vec<_> = std::iter::repeat_with(|| Entry::Separator)
+            .take(super::EXTENSION_BUTTON_MENU_ENTRIES)
+            .chain([item(Choice::Manage)])
+            .collect();
+        assert!(!rows(&install, &long));
+        // A label is bounded before it is normalized; a localized one fits.
+        let labelled = |label: String| Entry::Item {
+            choice: Choice::Options,
+            label,
+            enabled: true,
+        };
+        assert!(rows(
+            &install,
+            &[labelled("Erweiterungsoptionen öffnen".into())]
+        ));
+        assert!(rows(
+            &install,
+            &[labelled("é".repeat(super::EXTENSION_MENU_LABEL_BYTES / 2))]
+        ));
+        assert!(!rows(
+            &install,
+            &[labelled(" ".repeat(super::EXTENSION_MENU_LABEL_BYTES + 1))]
+        ));
+    }
+
+    #[test]
+    fn extension_button_menu_pops_up_at_its_anchor_and_relays_choices_to_the_frame() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn extension_button_menu_popup(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("extension_button_menu_popup");
+        assert!(command.contains("authorize(&caller, CallerPolicy::Main"));
+        assert!(command.contains("caller.popup_menu_at(&menu, anchor)"));
+        assert!(!command.contains("popup_menu(&menu)"));
+        let relay = source
+            .split("|| id.starts_with(EXTENSION_ACTION_COMMAND)")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI")
+                    .next()
+            })
+            .expect("extension menu relay");
+        assert!(relay.contains("id.starts_with(EXTENSION_MENU_COMMAND)"));
     }
 
     #[test]
