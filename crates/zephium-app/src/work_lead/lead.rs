@@ -302,7 +302,11 @@ where
             }
             self.run.activity(WorkActivityV1::Planning);
             self.steers(&mut messages).await;
-            compact(&mut messages, conversation_budget(&self.models.lead.entry));
+            compact(
+                &mut messages,
+                conversation_budget(&self.models.lead.entry),
+                Used::Placed,
+            );
             let (call_system, call_tools, call_messages) = (&system, &tools, &messages);
             let sizes = Sections::of(call_system, call_tools, call_messages);
             let model = &self.models.lead;
@@ -2116,10 +2120,6 @@ const USED_BATCH_CHARS: usize = 12_000;
 const FRESH_RESULTS: usize = 2;
 const STUB: &str = "[Used; dropped to keep the conversation small.";
 
-/// Keeps the conversation small without moving the cached prefix every
-/// turn: large tool results the model has moved past are replaced together
-/// by a stub with their source keys, and past the hard budget the older
-/// results are shortened too. The canvas keeps everything.
 /// Why the model stopped, as the closing reply says it.
 fn model_stop(error: WorkModelError) -> &'static str {
     match error {
@@ -2177,14 +2177,36 @@ pub(crate) fn conversation_budget(entry: &WorkModelEntry) -> usize {
     CONVERSATION_CHARS.min(entry.context_window as usize * 2)
 }
 
-pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize) {
+/// When a large tool result counts as moved past.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Used {
+    /// Behind the newest results.
+    Behind,
+    /// Behind the newest results and behind an object placed after it, so a
+    /// read stays whole until the canvas holds what was taken from it.
+    Placed,
+}
+
+/// Keeps the conversation small without moving the cached prefix every
+/// turn: large tool results the model has moved past are replaced together
+/// by a stub with their source keys, and past the hard budget the older
+/// results are shortened too. The canvas keeps everything.
+pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize, rule: Used) {
     let results: Vec<usize> = messages
         .iter()
         .enumerate()
         .filter(|(_, m)| matches!(m, WorkModelMessage::ToolResults(_)))
         .map(|(i, _)| i)
         .collect();
-    let used = &results[..results.len().saturating_sub(FRESH_RESULTS)];
+    let placed = match rule {
+        Used::Behind => messages.len(),
+        Used::Placed => last_placement(messages).unwrap_or(0),
+    };
+    let used: Vec<usize> = results[..results.len().saturating_sub(FRESH_RESULTS)]
+        .iter()
+        .copied()
+        .filter(|index| *index < placed)
+        .collect();
     let droppable = |result: &WorkModelToolResult| {
         result.content.len() > USED_RESULT_CHARS && !result.content.starts_with(STUB)
     };
@@ -2199,7 +2221,7 @@ pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize) {
         .map(|r| r.content.len())
         .sum();
     if waiting >= USED_BATCH_CHARS {
-        for index in used {
+        for index in &used {
             if let WorkModelMessage::ToolResults(results) = &mut messages[*index] {
                 for result in results.iter_mut().filter(|r| droppable(r)) {
                     result.content = stub(&result.content);
@@ -2226,6 +2248,28 @@ pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize) {
             }
         }
     }
+}
+
+/// The newest tool results that hold an object the canvas accepted.
+fn last_placement(messages: &[WorkModelMessage]) -> Option<usize> {
+    let placing: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| match m {
+            WorkModelMessage::Assistant(parts) => Some(parts),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            WorkModelPart::ToolCall(call) if matches!(call.name.as_str(), "create" | "revise") => {
+                Some(call.id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    messages.iter().rposition(|m| {
+        matches!(m, WorkModelMessage::ToolResults(results)
+            if results.iter().any(|r| !r.is_error && placing.contains(&r.call.as_str())))
+    })
 }
 
 /// A used result's stub: its first line and the keys of its sources.
@@ -2403,6 +2447,65 @@ mod compact_tests {
     }
 
     #[test]
+    fn reads_stay_whole_until_an_object_is_placed_from_them() {
+        let call = |id: &str, name: &str| {
+            WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments: serde_json::json!({}),
+            })])
+        };
+        let result = |id: &str, content: String, is_error: bool| {
+            WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                call: id.into(),
+                content,
+                is_error,
+            }])
+        };
+        let page = |n: usize| format!("[s{n}] pricing page {n}\n{}", "$20/month ".repeat(800));
+        let mut messages: Vec<WorkModelMessage> = (1..=3)
+            .flat_map(|n| {
+                [
+                    call(&format!("read{n}"), "web_fetch"),
+                    result(&format!("read{n}"), page(n), false),
+                ]
+            })
+            .collect();
+        messages.push(call("sheet", "create"));
+        messages.push(result(
+            "sheet",
+            "sources: s12 is not a source of this run".into(),
+            true,
+        ));
+        let whole = |messages: &[WorkModelMessage]| {
+            messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::ToolResults(r) if r[0].content.starts_with("[s")))
+                .count()
+        };
+
+        // A refused object holds nothing yet: every read stays for the retry.
+        compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
+        assert_eq!(whole(&messages), 3);
+        let mut behind = messages.clone();
+        compact(&mut behind, CONVERSATION_CHARS, Used::Behind);
+        assert_eq!(whole(&behind), 1, "a part still drops what is behind it");
+
+        messages.push(call("sheet2", "create"));
+        messages.push(result("sheet2", "Placed the sheet.".into(), false));
+        messages.push(call("read4", "web_fetch"));
+        messages.push(result("read4", page(4), false));
+        compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
+        // What the placed sheet was taken from gives way to stubs with its keys.
+        assert_eq!(whole(&messages), 1);
+        let WorkModelMessage::ToolResults(first) = &messages[1] else {
+            panic!("first read");
+        };
+        assert!(first[0].content.starts_with(STUB), "{}", first[0].content);
+        assert!(first[0].content.contains("[s1]"), "{}", first[0].content);
+    }
+
+    #[test]
     fn a_small_context_window_shortens_older_results_sooner() {
         assert_eq!(conversation_budget(&entry(1_000_000)), CONVERSATION_CHARS);
         assert_eq!(conversation_budget(&entry(32_768)), 65_536);
@@ -2411,9 +2514,17 @@ mod compact_tests {
         let total = |messages: &[WorkModelMessage]| messages.iter().map(size).sum::<usize>();
 
         let mut large = conversation.clone();
-        compact(&mut large, conversation_budget(&entry(1_000_000)));
+        compact(
+            &mut large,
+            conversation_budget(&entry(1_000_000)),
+            Used::Behind,
+        );
         let mut small = conversation;
-        compact(&mut small, conversation_budget(&entry(32_768)));
+        compact(
+            &mut small,
+            conversation_budget(&entry(32_768)),
+            Used::Behind,
+        );
         assert_eq!(
             total(&large),
             total(&(0..80).flat_map(|i| turn(i, 1_100)).collect::<Vec<_>>())
