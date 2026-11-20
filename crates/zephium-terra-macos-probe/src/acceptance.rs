@@ -1560,12 +1560,16 @@ async fn seed_tasks(
     Ok(())
 }
 
+/// Where the probe's throwaway folders live under home. Work refuses any
+/// folder named `app.zephium…` as the app's own data, so the name avoids it.
+pub(super) const PROBE_FOLDERS: &str = "Library/Caches/zephium-work-probe";
+
 /// A small throwaway repository under the home folder: a web app with a
 /// manifest, sources, a README and one uncommitted change.
 fn project_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("tidepool-{}", std::process::id()));
     let write = |path: &str, text: &str| {
         let path = folder.join(path);
@@ -1639,7 +1643,7 @@ test('tides', () => {});
 fn save_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-save-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "save_folder")?;
     Ok(folder)
@@ -1648,7 +1652,7 @@ fn save_folder() -> Result<std::path::PathBuf, &'static str> {
 fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-bug-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "bug_folder")?;
     std::fs::write(

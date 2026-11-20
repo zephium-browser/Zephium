@@ -2867,12 +2867,12 @@ fn provider_fixture_with_discovery_account(
                                         .filter_map(|line| {
                                             line.split_whitespace().nth(1).map(str::to_owned)
                                         })
-                                        .last(),
+                                        .next_back(),
                                     serde_json::Value::Array(items) => {
-                                        items.iter().filter_map(reference).last()
+                                        items.iter().filter_map(reference).next_back()
                                     }
                                     serde_json::Value::Object(items) => {
-                                        items.values().filter_map(reference).last()
+                                        items.values().filter_map(reference).next_back()
                                     }
                                     _ => None,
                                 }
@@ -3006,9 +3006,8 @@ fn provider_fixture_with_discovery_account(
         ProviderFault::ActionRepair
             | ProviderFault::ActionRepairRepeated
             | ProviderFault::ActionRepairCancelled
-    ) {
-        input_with_effects(&[SemanticEffectClass::Read])
-    } else if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
+    ) || matches!(fault, ProviderFault::Native(native) if native.unissued_human())
+    {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
         input()
