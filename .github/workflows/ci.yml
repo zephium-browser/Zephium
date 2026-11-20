@@ -191,9 +191,17 @@ jobs:
       - name: Report flaky tests
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
-      # The desktop tests regenerate the TypeScript IPC bindings.
+      # The desktop export test regenerates all three IPC contracts.
       - name: Bindings drift
-        run: git diff --exit-code frame/src/shared/ipc/bindings.ts
+        run: |
+          drift="$(git status --porcelain --untracked-files=all -- \
+            frame/src/shared/ipc/bindings.ts \
+            frame/src/shared/ipc/work-constants.ts \
+            frame/src/shared/ipc/theme-presets.json)"
+          if [ -n "$drift" ]; then
+            printf '%s\n' "$drift"
+            exit 1
+          fi
       # Proves the bundled seed lists compile in the real
       # WKContentRuleListStore, which a seed refresh can break.
       - name: Prove the exact bundled blocker seed compiles in native WKContentRuleListStore
