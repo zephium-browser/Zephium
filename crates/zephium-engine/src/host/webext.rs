@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
-use objc2::MainThreadMarker;
+use objc2::{MainThreadMarker, Message};
 use objc2_app_kit::{NSMenu, NSMenuItem, NSPopoverBehavior, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSRectEdge, NSSize, NSString};
 use objc2_web_kit::{WKWebExtensionAction, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore};
@@ -958,12 +958,19 @@ fn present_action_menu(
         .iter()
         .take(ACTION_MENU_TOP_LEVEL_LIMIT)
         .collect();
-    let bound = dispatch2::MainThreadBound::new((items, parent), mtm);
+    let bound = dispatch2::MainThreadBound::new((action.retain(), items, parent), mtm);
     dispatch2::DispatchQueue::main().exec_async(move || {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
-        let (items, parent) = bound.into_inner(mtm);
+        let (action, items, parent) = bound.into_inner(mtm);
+        // The profile may retire or the view close while this waits.
+        // SAFETY: the retained action and its context are read on the main thread.
+        let loaded = unsafe { action.webExtensionContext() }
+            .is_some_and(|context| unsafe { context.isLoaded() });
+        if !loaded || parent.window().is_none() {
+            return;
+        }
         let target = ExtensionMenuTarget::alloc(mtm).set_ivars(Cell::new(None));
         // SAFETY: the target was allocated on the main thread and its Rust
         // ivars were set before calling NSObject's initializer.
