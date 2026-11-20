@@ -20,6 +20,25 @@ pub(crate) struct CanvasObject {
     pub part_title: Option<String>,
 }
 
+/// The pages behind this run's current objects: what a reply that names no
+/// sources of its own rests on. Empty when they are general knowledge too.
+pub(crate) fn run_evidence(objects: &[CanvasObject]) -> Vec<WorkEvidenceLink> {
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in objects
+        .iter()
+        .filter(|object| object.current && object.in_this_run)
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
+}
+
 /// Objects the runs of this work placed, oldest first; records a page gave
 /// a part are sources, not objects.
 pub(crate) fn canvas(
@@ -1597,6 +1616,56 @@ mod tests {
             items[0].image_candidates,
             ["https://img.example.com/loft.jpg"]
         );
+    }
+
+    #[test]
+    fn a_reply_without_its_own_sources_rests_on_this_runs_sourced_objects() {
+        let object = |id: &str, evidence: serde_json::Value, in_this_run: bool| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Sets", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "product", "items": [{"name": "Paris"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run,
+            part_title: None,
+        };
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let general = object("01M3RV9DBTWYS7770BES8YYKT3", serde_json::json!([]), true);
+        assert!(run_evidence(std::slice::from_ref(&general)).is_empty());
+        let earlier = object(
+            "01M3RV9DBTWYS7770BES8YYKT4",
+            serde_json::json!([link(7)]),
+            false,
+        );
+        let picks = object(
+            "01M3RV9DBTWYS7770BES8YYKT5",
+            serde_json::json!([link(1), link(2)]),
+            true,
+        );
+        let sheet = object(
+            "01M3RV9DBTWYS7770BES8YYKT6",
+            serde_json::json!([link(2), link(3)]),
+            true,
+        );
+        let links = run_evidence(&[earlier, general, picks, sheet]);
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        let many: Vec<_> = (0..MAX_ARTIFACT_EVIDENCE as u16 + 8)
+            .map(|i| {
+                object(
+                    "01M3RV9DBTWYS7770BES8YYKT7",
+                    serde_json::json!([link(i)]),
+                    true,
+                )
+            })
+            .collect();
+        assert_eq!(run_evidence(&many).len(), MAX_ARTIFACT_EVIDENCE);
     }
 
     #[test]

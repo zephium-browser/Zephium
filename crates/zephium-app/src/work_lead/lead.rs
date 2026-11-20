@@ -1030,11 +1030,17 @@ where
         if let Some(records) = self.as_records(kind, &data) {
             data = records;
         }
-        let mut proposed =
-            match objects::propose(self.run, &canvas, kind, title, data, &sources, &[], lenient) {
-                Ok(proposed) => proposed,
-                Err((fault, reason)) => return self.refuse(&key, reason, fault),
-            };
+        let inherited = if kind == "reply" {
+            objects::run_evidence(&canvas)
+        } else {
+            Vec::new()
+        };
+        let mut proposed = match objects::propose(
+            self.run, &canvas, kind, title, data, &sources, &inherited, lenient,
+        ) {
+            Ok(proposed) => proposed,
+            Err((fault, reason)) => return self.refuse(&key, reason, fault),
+        };
         if args.pointer("/data/records").is_none() {
             objects::hydrate_record_media(
                 &mut proposed,
