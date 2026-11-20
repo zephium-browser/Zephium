@@ -66,6 +66,8 @@ pub struct Ivars {
     /// Full screen hands the controls to the menu-bar reveal, where they must
     /// be visible the moment it slides down.
     suspended: Cell<bool>,
+    /// The hidden sidebar's card keeps the controls one card inset inward.
+    in_card: Cell<bool>,
     observers: RefCell<Vec<Retained<ProtocolObject<dyn NSObjectProtocol>>>>,
     /// The browser window's chrome, told the moment fullscreen begins or
     /// ends so the room it keeps for the controls follows them at once.
@@ -162,6 +164,7 @@ impl WindowControls {
             lit: Cell::new(false),
             settled: Cell::new(false),
             suspended: Cell::new(false),
+            in_card: Cell::new(false),
             observers: RefCell::new(Vec::new()),
             chrome: RefCell::new(None),
         });
@@ -251,6 +254,14 @@ impl WindowControls {
         let Some(window) = self.window() else {
             return;
         };
+        // AppKit can restore its default titlebar layout as a window gains
+        // or loses focus. Reapply the configured inset before reading the
+        // hover rect or fading the controls at their new position.
+        if !self.ivars().suspended.get() {
+            if let Some(chrome) = self.ivars().chrome.borrow().as_ref() {
+                set_in_card(chrome, self.ivars().in_card.get());
+            }
+        }
         let point = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
         let inside = self.hot_rect().is_some_and(|hot| NSPointInRect(point, hot));
         self.light(inside, animate);
@@ -557,6 +568,7 @@ pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
         .find_map(|view| view.downcast_ref::<WindowControls>().map(|c| c.retain()));
     // From Tao's own inset each time, so asking twice moves them once.
     if let Some(controls) = controls.as_ref() {
+        controls.ivars().in_card.set(in_card);
         controls.reinset();
         controls.setNeedsDisplay(true);
     }
