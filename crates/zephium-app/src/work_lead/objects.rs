@@ -802,12 +802,41 @@ pub(crate) fn propose(
             ));
         }
     }
+    if evidence.is_empty() {
+        evidence = pick_evidence(objects, &data);
+    }
     Ok(Proposed {
         title: title.to_owned(),
         data,
         evidence,
         left_out,
     })
+}
+
+/// The pages behind the picks a plan's steps point to: what a plan that
+/// names no sources of its own rests on.
+pub(crate) fn pick_evidence(
+    objects: &[CanvasObject],
+    data: &WorkArtifactDataV1,
+) -> Vec<WorkEvidenceLink> {
+    let WorkArtifactDataV1::Plan { steps, .. } = data else {
+        return Vec::new();
+    };
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in steps
+        .iter()
+        .filter_map(|step| step.pick.as_ref())
+        .filter_map(|pick| objects.iter().find(|o| o.artifact.id == pick.artifact))
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
 }
 
 /// What a second try left out, for the model: the place and why.
@@ -1666,6 +1695,44 @@ mod tests {
             })
             .collect();
         assert_eq!(run_evidence(&many).len(), MAX_ARTIFACT_EVIDENCE);
+    }
+
+    #[test]
+    fn a_plan_without_its_own_sources_rests_on_the_picks_it_points_to() {
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let picks = |id: &str, evidence: serde_json::Value| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Flights", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "flight", "items": [{"name": "LOT"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run: true,
+            part_title: None,
+        };
+        let flights = picks(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            serde_json::json!([link(1), link(2)]),
+        );
+        let other = picks("01M3RV9DBTWYS7770BES8YYKT4", serde_json::json!([link(5)]));
+        let plan = |pick: Option<&str>| -> WorkArtifactDataV1 {
+            serde_json::from_value(serde_json::json!({"kind": "plan", "steps": [
+                {"kind": "travel", "title": "Fly to San Francisco", "pick": pick.map(|id| serde_json::json!({"artifact": id, "index": 0}))},
+                {"kind": "task", "title": "Apply for ESTA"}
+            ]}))
+            .unwrap()
+        };
+        let objects = [flights, other];
+        let links = pick_evidence(&objects, &plan(Some("01M3RV9DBTWYS7770BES8YYKT3")));
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        // A plan that points to no pick stays general knowledge.
+        assert!(pick_evidence(&objects, &plan(None)).is_empty());
     }
 
     #[test]
