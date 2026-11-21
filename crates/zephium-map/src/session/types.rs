@@ -7,6 +7,7 @@ pub const MAX_FETCHES: usize = 24;
 pub const MAX_HOST_FETCHES: usize = 12;
 pub const MAX_CONCURRENT: usize = 4;
 pub const MAX_HOST_CONCURRENT: usize = 2;
+pub const MAX_TOTAL_BYTES: u64 = 6 * 1024 * 1024;
 pub const MAX_HTML_BYTES: usize = DocLimits::SITE_PAGE.input_bytes as usize;
 pub const MAX_TEXT_BYTES: usize = crate::site::MAX_LLMS_BYTES;
 pub const MAX_XML_BYTES: usize = 512 * 1024;
@@ -28,6 +29,7 @@ pub struct Config {
     pub host_fetches: u32,
     pub concurrent: u32,
     pub host_concurrent: u32,
+    pub total_bytes: u64,
     pub html_bytes: u32,
     pub xml_bytes: u32,
     pub text_bytes: u32,
@@ -48,6 +50,7 @@ impl Default for Config {
             host_fetches: MAX_HOST_FETCHES as u32,
             concurrent: MAX_CONCURRENT as u32,
             host_concurrent: MAX_HOST_CONCURRENT as u32,
+            total_bytes: MAX_TOTAL_BYTES,
             html_bytes: MAX_HTML_BYTES as u32,
             xml_bytes: MAX_XML_BYTES as u32,
             text_bytes: MAX_TEXT_BYTES as u32,
@@ -65,6 +68,7 @@ impl Config {
         self.host_fetches = self.host_fetches.min(MAX_HOST_FETCHES as u32);
         self.concurrent = self.concurrent.min(MAX_CONCURRENT as u32);
         self.host_concurrent = self.host_concurrent.min(MAX_HOST_CONCURRENT as u32);
+        self.total_bytes = self.total_bytes.min(MAX_TOTAL_BYTES);
         self.html_bytes = self.html_bytes.min(MAX_HTML_BYTES as u32);
         self.xml_bytes = self.xml_bytes.min(MAX_XML_BYTES as u32);
         self.text_bytes = self.text_bytes.min(MAX_TEXT_BYTES as u32);
@@ -143,6 +147,7 @@ pub enum Budget {
     HostFetches,
     Concurrent,
     HostConcurrent,
+    TotalBytes,
     HtmlBytes,
     XmlBytes,
     TextBytes,
@@ -338,6 +343,7 @@ mod tests {
             host_concurrent: u32::MAX,
             fetches: u32::MAX,
             host_fetches: u32::MAX,
+            total_bytes: u64::MAX,
             html_bytes: u32::MAX,
             xml_bytes: u32::MAX,
             text_bytes: u32::MAX,
@@ -349,6 +355,7 @@ mod tests {
             ..Default::default()
         };
         cfg.tighten();
+        assert_eq!(cfg.total_bytes, MAX_TOTAL_BYTES);
         assert_eq!(
             (
                 cfg.concurrent,

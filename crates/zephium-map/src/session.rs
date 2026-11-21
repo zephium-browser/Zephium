@@ -573,7 +573,7 @@ impl Session {
             }
         }
         let candidates: BTreeSet<_> = place
-            .fetch_sections(false)
+            .fetch_sections()
             .into_iter()
             .map(|e| e.id.clone())
             .collect();
@@ -607,9 +607,8 @@ impl Session {
         let Some(place) = state.place.as_ref() else {
             return;
         };
-        let fresh = matches!(self.query.kind(), QueryKind::Place { fresh: true, .. });
         let keys: Vec<_> = place
-            .fetch_sections(fresh)
+            .fetch_sections()
             .into_iter()
             .filter(|e| e.read == Some(ReadState::Queued))
             .map(|e| e.key.clone())

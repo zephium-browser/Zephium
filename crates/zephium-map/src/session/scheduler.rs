@@ -1,6 +1,14 @@
 use super::*;
 
 impl Session {
+    fn section_rank(&self, job: &Job) -> Option<(bool, bool)> {
+        let Work::Section(i, key) = &job.work else {
+            return None;
+        };
+        let place = self.sites[*i].as_ref()?.place.as_ref()?;
+        let entry = place.sections.iter().find(|e| e.key.page_match() == *key)?;
+        Some(place.read_priority(entry))
+    }
     pub(super) fn schedule(&mut self, out: &mut Vec<Effect>) {
         if self.elapsed >= self.cfg.elapsed {
             self.budget(Budget::Elapsed);
@@ -43,41 +51,25 @@ impl Session {
                 .iter()
                 .map(|j| (origin(&j.url), j.work == Work::Robots))
                 .collect();
-            let fresh = matches!(self.query.kind(), QueryKind::Place { fresh: true, .. });
-            let news_job = |job: &Job| match &job.work {
-                Work::Section(i, key) => self.sites[*i]
-                    .as_ref()
-                    .and_then(|s| s.place.as_ref())
-                    .is_some_and(|p| {
-                        p.sections.iter().any(|e| {
-                            &e.key.page_match() == key
-                                && matches!(
-                                    e.role,
-                                    Some(
-                                        SectionRole::Changelog
-                                            | SectionRole::News
-                                            | SectionRole::Releases
-                                    )
-                                )
-                        })
-                    }),
-                _ => false,
-            };
-            let priority = if fresh {
-                self.queue
-                    .iter()
-                    .find(|j| news_job(j))
-                    .map(|j| j.work.clone())
-            } else {
-                None
-            };
+            let priority = self
+                .queue
+                .iter()
+                .filter_map(|job| self.section_rank(job))
+                .min();
+            let received = self
+                .stats
+                .phases
+                .values()
+                .fold(0u64, |bytes, phase| bytes.saturating_add(phase.bytes));
             let mut progressed = false;
             for _ in 0..self.queue.len() {
                 let Some(job) = self.queue.pop_front() else {
                     break;
                 };
-                if matches!(job.work, Work::Section(..))
-                    && priority.as_ref().is_some_and(|p| p != &job.work)
+                if self
+                    .section_rank(&job)
+                    .zip(priority)
+                    .is_some_and(|(rank, best)| rank > best)
                 {
                     self.queue.push_back(job);
                     continue;
@@ -85,7 +77,13 @@ impl Session {
                 let host = origin(&job.url);
                 let hostname = job.url.host_str().unwrap_or_default();
                 let phase = job.work.phase();
-                let blocked = if self.started >= self.cfg.fetches {
+                let blocked = if received >= self.cfg.total_bytes
+                    && matches!(
+                        job.work,
+                        Work::Section(..) | Work::Sitemap(_) | Work::Llms(_) | Work::Passage(_)
+                    ) {
+                    Some(Budget::TotalBytes)
+                } else if self.started >= self.cfg.fetches {
                     Some(Budget::Fetches)
                 } else if self.hosts.get(hostname).copied().unwrap_or_default()
                     >= self.cfg.host_fetches

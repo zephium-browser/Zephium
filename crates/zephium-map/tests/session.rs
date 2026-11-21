@@ -1282,3 +1282,140 @@ fn qualified_section_focus_requires_the_named_subject_and_fresh_focus_uses_edito
         assert_eq!(entry.map(|e| e.key.as_url().path()), expected, "{q}");
     }
 }
+
+#[test]
+fn total_bytes_stops_new_reads_at_the_boundary_and_preserves_focus_order() {
+    let query = "acme news";
+    let small = run(cfg(), query, RESULT, |_| None);
+    assert!(!small.stats.budgets.contains(&Budget::TotalBytes));
+    let section_bytes = include_str!("fixtures/section-changes.html").len();
+    let boundary = (NAV.len() + section_bytes) as u64;
+    let capped = run(
+        Config {
+            total_bytes: boundary,
+            ..cfg()
+        },
+        query,
+        RESULT,
+        |_| None,
+    );
+    assert_eq!(capped.stats.phases[&Phase::Section].started, 1);
+    assert!(capped.trace.contains(&"fetch acme.com/news".into()));
+    assert!(!capped.trace.contains(&"fetch acme.com/pricing".into()));
+    assert!(capped.places.last().unwrap().sections.iter().any(|e| e.read
+        == Some(ReadState::Skipped {
+            budget: Budget::TotalBytes
+        })));
+    assert!(capped.stats.budgets.contains(&Budget::TotalBytes));
+    let above = run(
+        Config {
+            total_bytes: boundary + 1,
+            ..cfg()
+        },
+        query,
+        RESULT,
+        |_| None,
+    );
+    assert_eq!(above.stats.phases[&Phase::Section].started, 2);
+    let zero = run(
+        Config {
+            total_bytes: 0,
+            ..cfg()
+        },
+        query,
+        RESULT,
+        |_| None,
+    );
+    assert_eq!(zero.stats.phases[&Phase::Entry].completed, 1);
+    assert_eq!(zero.stats.phases[&Phase::Robots].completed, 1);
+    for phase in [Phase::Section, Phase::Llms, Phase::Sitemap] {
+        assert_eq!(zero.stats.phases[&phase].started, 0);
+    }
+}
+
+#[test]
+fn reads_already_in_flight_finish_after_the_total_byte_limit() {
+    let result = run(
+        Config {
+            total_bytes: NAV.len() as u64 + 1,
+            concurrent: 2,
+            host_concurrent: 2,
+            ..cfg()
+        },
+        "acme news",
+        RESULT,
+        |_| None,
+    );
+    assert_eq!(result.stats.phases[&Phase::Section].completed, 2);
+    assert_eq!(result.stats.phases[&Phase::Llms].started, 0);
+    assert!(result.stats.budgets.contains(&Budget::TotalBytes));
+}
+
+#[test]
+fn explicit_focus_precedes_earlier_role_sections_even_for_a_nonfresh_search() {
+    let result = run(
+        Config {
+            section_pages: 1,
+            ..cfg()
+        },
+        "acme pricing",
+        RESULT,
+        |effect| {
+            if let Effect::Fetch { id, url, .. } = effect {
+                if url.path() == "/" {
+                    return Some(response(*id,url,"text/html", "<title>Acme</title><nav><a href='/docs'>Documentation</a><a href='/pricing'>Pricing</a></nav>"));
+                }
+            }
+            None
+        },
+    );
+    assert!(result.trace.contains(&"fetch acme.com/pricing".into()));
+    assert!(!result.trace.contains(&"fetch acme.com/docs".into()));
+}
+
+#[test]
+fn a_passage_read_observes_the_decoded_size_of_robots() {
+    let result = run(
+        Config {
+            total_bytes: 1,
+            ..cfg()
+        },
+        "how to reset timer",
+        include_str!("fixtures/engine-groups.html"),
+        |effect| {
+            if let Effect::Fetch { id, url, .. } = effect {
+                if url.path() == "/robots.txt" {
+                    return Some(response(*id, url, "text/plain", "\n"));
+                }
+            }
+            None
+        },
+    );
+    assert_eq!(result.stats.phases[&Phase::Passage].started, 0);
+    assert!(result.stats.budgets.contains(&Budget::TotalBytes));
+}
+
+#[test]
+fn unusable_bodies_still_spend_the_default_six_mib() {
+    assert_eq!(cfg().total_bytes, MAX_TOTAL_BYTES);
+    let mut remaining = MAX_TOTAL_BYTES as usize - NAV.len();
+    let result = run(cfg(), "acme news", RESULT, |effect| {
+        if let Effect::Fetch { id, url, .. } = effect {
+            if matches!(url.path(), "/news" | "/pricing") {
+                let bytes = remaining.min(MAX_HTML_BYTES);
+                remaining -= bytes;
+                return Some(response(
+                    *id,
+                    url,
+                    "application/octet-stream",
+                    &" ".repeat(bytes),
+                ));
+            }
+        }
+        None
+    });
+    assert_eq!(remaining, 0);
+    assert_eq!(result.stats.phases[&Phase::Section].completed, 2);
+    assert_eq!(result.stats.phases[&Phase::Llms].started, 0);
+    assert!(result.stats.budgets.contains(&Budget::TotalBytes));
+}

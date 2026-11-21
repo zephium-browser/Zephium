@@ -372,3 +372,161 @@ fn an_unmarked_contents_list_cannot_answer_a_how_to() {
         "Use the dial on the timer to select a duration."
     );
 }
+
+#[test]
+fn task_prefers_the_first_command_in_the_matching_heading_path() {
+    let page = doc("guide", "<title>Loom handbook</title><main><h1>Workshop guide</h1>
+      <p>Loom can create a spool of yarn.</p>
+      <h2>Creating spools</h2><h3>From a sample</h3>
+      <p><a class='reference internal' href='#spool'><em>Run</em></a> the <code>loom</code> command:</p>
+      <pre>loom weave sample</pre><p>Inspect the result:</p><pre>loom inspect spool</pre>
+      <h2>Cleaning</h2><pre>loom clean</pre></main>");
+    let answers = read_passages(&read_query("loom create spool").unwrap(), &[&page]);
+    assert_eq!(answers[0].text, "Run the loom command:\nloom weave sample");
+    assert!(answers[0].locator.resolve(&page).is_some());
+}
+
+#[test]
+fn a_command_and_its_introduction_can_supply_different_subject_terms() {
+    let page = doc(
+        "guide",
+        "<main><h2>Utilities</h2><p>To generate a ceramic sample, run:</p>
+        <pre>press --porcelain</pre><h2>Another task</h2><pre>press --earthenware</pre></main>",
+    );
+    let read = |q| read_passages(&read_query(q).unwrap(), &[&page]);
+    assert_eq!(
+        read("generate porcelain sample")[0].text,
+        "To generate a ceramic sample, run:\npress --porcelain"
+    );
+    assert!(read("generate earthenware sample").is_empty());
+}
+
+#[test]
+fn port_values_keep_their_heading_and_whole_row_or_item() {
+    let q = read_query("loom relay port").unwrap();
+    let page = doc(
+        "guide",
+        "<title>Loom</title><main><h2>Spool relay</h2><h3>Settings</h3>
+        <ul><li>Port 9955 or 9956</li></ul></main>",
+    );
+    assert_eq!(
+        read_passages(&q, &[&page])[0].text,
+        "Spool relay\nPort 9955 or 9956"
+    );
+    let page = doc("guide", "<title>Loom</title><main><h2>Relay</h2>
+        <table><tr><th>Setting</th><th>Value</th></tr><tr><td><p>Port</p></td><td><code>4455</code></td></tr></table></main>");
+    assert_eq!(
+        read_passages(&q, &[&page])[0].text,
+        "Setting\tValue\nPort\t4455"
+    );
+}
+
+#[test]
+fn a_reference_returns_the_matching_option_and_its_own_description() {
+    let q = read_query("loom rename spool").unwrap();
+    let page = doc("reference", "<title>Loom reference</title><div><div><p>Dense unrelated prose describing a different subject.</p></div>
+        <dl><dt>--drop</dt><dd>Remove a spool.</dd><dt>-r</dt><dt>--retitle</dt><dd><p>Renames a spool, keeping its color.</p></dd></dl></div>");
+    assert_eq!(
+        read_passages(&q, &[&page])[0].text,
+        "-r --retitle\nRenames a spool, keeping its color."
+    );
+    let page = doc(
+        "reference",
+        "<title>Loom reference</title><main><h2>--retitle</h2><p>Renames a spool.</p></main>",
+    );
+    assert_eq!(
+        read_passages(&q, &[&page])[0].text,
+        "--retitle\nRenames a spool."
+    );
+}
+
+#[test]
+fn comparison_requires_evidence_for_both_sides() {
+    let q = read_query("difference between 471 and 472").unwrap();
+    let a = doc(
+        "a",
+        "<title>471 Empty</title><main><p>Code 471 means the box is empty.</p></main>",
+    );
+    let b = doc(
+        "b",
+        "<main><h1>472 Full</h1><p>Code 472 means the box is full.</p></main>",
+    );
+    assert!(read_passages(&q, &[&a, &a]).is_empty());
+    let pair = read_passages(&q, &[&b, &a]);
+    assert_eq!(
+        pair.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+        [
+            "Code 471 means the box is empty.",
+            "Code 472 means the box is full."
+        ]
+    );
+    let both = doc(
+        "c",
+        "<main><p>Code 471 means empty, while 472 means full.</p></main>",
+    );
+    assert_eq!(
+        read_passages(&q, &[&a, &both])[0].text,
+        "Code 471 means empty, while 472 means full."
+    );
+}
+
+#[test]
+fn narrower_examples_do_not_answer_unqualified_tasks() {
+    let page = doc("guide", "<title>Loom guide</title><main><h2>Examples</h2><p>Example output:</p>
+        <pre>$ loom purge\nThis will remove all spools without thread.</pre>
+        <dl><dt>Undo winding permanently</dt><dd>Undo the last three winding operations.</dd></dl></main>");
+    for q in ["loom remove all spools", "how to undo last winding"] {
+        assert!(read_passages(&read_query(q).unwrap(), &[&page]).is_empty());
+    }
+}
+
+#[test]
+fn structured_values_are_refused_whole_when_they_exceed_the_prose_limit() {
+    let query = read_query("loom port").unwrap();
+    for extra in [0, 1] {
+        let value = format!(
+            "Port 123. {}",
+            "v".repeat(MAX_PROSE_CHARS - "Port 123. ".len() + extra)
+        );
+        let page = doc(
+            "ports",
+            &format!("<title>Loom</title><main><ul><li>{value}</li></ul></main>"),
+        );
+        assert_eq!(!read_passages(&query, &[&page]).is_empty(), extra == 0);
+    }
+}
+
+#[test]
+fn a_platform_in_the_title_supplies_context_but_cannot_supply_the_task() {
+    let page = doc("screen", "<title>Print a stencil on Loom</title><main><h2>Using paper</h2><p>To print a stencil, press the green key.</p></main>");
+    assert_eq!(
+        read_passages(
+            &read_query("how to print a stencil on loom").unwrap(),
+            &[&page]
+        )[0]
+        .text,
+        "To print a stencil, press the green key."
+    );
+    assert!(read_passages(
+        &read_query("how to fold a stencil on loom").unwrap(),
+        &[&page]
+    )
+    .is_empty());
+}
+
+#[test]
+fn plural_query_matches_a_singular_subject_and_gerund_heading() {
+    let page = doc("guide", "<title>Atlas</title><main><h2>Renaming a branch</h2><p>Run this command:</p><pre>atlas mv old new</pre></main>");
+    assert_eq!(
+        read_passages(&read_query("atlas rename branches").unwrap(), &[&page])[0].text,
+        "Run this command:\natlas mv old new"
+    );
+}
+
+#[test]
+fn textual_list_values_keep_inline_content_and_the_subject_heading() {
+    let page = doc("guide","<title>Loom settings</title><main><h2>Storage</h2><h3>Settings</h3>
+        <ul><li><p><a class='reference external' href='/modes'><code>Default</code></a> mode</p><em>Read only</em></li></ul></main>");
+    let answers = read_passages(&read_query("loom storage default").unwrap(), &[&page]);
+    assert_eq!(answers[0].text, "Storage\nDefault mode Read only");
+}

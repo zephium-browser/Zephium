@@ -1,3 +1,4 @@
+mod question;
 use crate::{
     ancestors,
     doc::{Landmark, Marks, Role},
@@ -65,6 +66,10 @@ struct Block<'a> {
     accepted: bool,
     suggested: bool,
     terms: u64,
+    subject_heading: Option<usize>,
+    quote_offset: usize,
+    path_terms: u64,
+    structured: bool,
     opening: u64,
     heading_terms: u64,
 }
@@ -76,6 +81,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             Role::Paragraph
                 | Role::CodeBlock
                 | Role::ListItem
+                | Role::Definition
                 | Role::Row
                 | Role::Text
                 | Role::Document
@@ -148,7 +154,9 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             .filter_map(|t| terms.get(&t).copied())
             .fold(0u64, |mask, i| mask | (1 << i))
     };
-    let mut headings = BTreeMap::new();
+    let mut headings = BTreeMap::<_, Vec<(u8, usize, u64)>>::new();
+    let mut definitions = BTreeMap::<_, (String, bool)>::new();
+    let mut headers = BTreeMap::<_, (String, usize)>::new();
     let mut out = Vec::new();
     for (i, n) in nodes.iter().enumerate() {
         if excluded[i] {
@@ -164,13 +172,34 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             )
         });
         if has_main && scope.is_none()
-            || !has_main && dense.is_some_and(|d| !ancestors(nodes, i).any(|a| a == d))
+            || !has_main
+                && !matches!(n.role, Role::Term | Role::Definition)
+                && dense.is_some_and(|d| !ancestors(nodes, i).any(|a| a == d))
         {
             continue;
         }
-        if matches!(n.role, Role::Heading { level: _ }) {
-            headings.insert(scope, (i, relevant(&n.text)));
+        let path = headings.entry(scope).or_default();
+        if let Role::Heading { level } = n.role {
+            let level = level.unwrap_or(1);
+            path.retain(|(prior, _, _)| *prior < level);
+            path.push((level, i, relevant(&n.text)));
             continue;
+        }
+        let heading = path.last().map(|(_, h, terms)| (*h, *terms));
+        let parent = n.parent_index();
+        if n.role == Role::Term {
+            let (label, consumed) = definitions.entry(parent).or_default();
+            if *consumed {
+                label.clear();
+                *consumed = false;
+            }
+            if !label.is_empty() {
+                label.push(' ');
+            }
+            label.push_str(n.text.trim());
+            continue;
+        } else if n.role != Role::Definition {
+            definitions.remove(&parent);
         }
         if !selected(n.role)
             || (link_text[i] > 0
@@ -183,20 +212,59 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         {
             continue;
         }
-        let text = if n.role == Role::Row {
+        let mut quote_offset = 0;
+        let mut text = if n.role == Role::Definition {
+            let Some((label, consumed)) = definitions.get_mut(&parent) else {
+                continue;
+            };
+            *consumed = true;
+            if label.is_empty() || n.text.trim().is_empty() {
+                continue;
+            }
+            if label.chars().take(MAX_PROSE_CHARS + 1).count() > MAX_PROSE_CHARS {
+                continue;
+            }
+            quote_offset = label.len() + 1;
+            Cow::Owned(format!("{label}\n{}", n.text.trim()))
+        } else if n.role == Role::Row {
             let cells = nodes[i + 1..]
                 .iter()
                 .enumerate()
                 .take_while(|(_, n)| n.parent_index().is_some_and(|p| p >= i))
                 .filter(|(offset, n)| {
-                    visible(nodes, i + 1 + offset)
+                    !excluded[i + 1 + offset]
                         && n.parent_index() == Some(i)
                         && matches!(n.role, Role::Cell | Role::CellHeader)
                 })
-                .map(|(_, n)| n.text.as_str())
+                .map(|(_, n)| n)
+                .collect::<Vec<_>>();
+            let table = ancestors(nodes, i).find(|&a| nodes[a].role == Role::Table);
+            let row = cells
+                .iter()
+                .map(|c| c.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\t");
-            Cow::Owned(cells)
+            if cells.iter().all(|c| c.text.trim().is_empty()) {
+                continue;
+            }
+            if cells.iter().all(|c| c.role == Role::CellHeader) {
+                if let Some(table) = table {
+                    headers.remove(&table);
+                    if row.chars().count() <= MAX_PROSE_CHARS {
+                        headers.insert(table, (row, cells.len()));
+                    }
+                }
+                continue;
+            }
+            if let Some((header, _)) = table
+                .and_then(|table| headers.get(&table))
+                .filter(|(_, count)| *count == cells.len())
+            {
+                quote_offset = header.len() + 1;
+                Cow::Owned(format!("{header}\n{row}"))
+            } else {
+                Cow::Owned(row)
+            }
         } else {
             Cow::Borrowed(if n.role == Role::CodeBlock {
                 n.text.as_str()
@@ -210,12 +278,16 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         if excerpt.trim().is_empty() {
             continue;
         }
-        let heading = headings.get(&scope).copied();
+        let structured = matches!(n.role, Role::Definition | Role::Row | Role::ListItem);
+        if structured && excerpt.len() != text.len() {
+            continue;
+        }
 
         let ancillary = |s: &str| {
             matches!(
                 s.trim().trim_end_matches(':').to_ascii_lowercase().as_str(),
                 "see also"
+                    | "comments"
                     | "references"
                     | "citations"
                     | "contents"
@@ -224,7 +296,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
                     | "external links"
             )
         };
-        if heading.is_some_and(|(h, _)| ancillary(&nodes[h].text))
+        if path.iter().any(|(_, h, _)| ancillary(&nodes[*h].text))
             || [
                 "main article:",
                 "see also:",
@@ -236,14 +308,32 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         {
             continue;
         }
+        let length = excerpt.len();
+        let opening = tokens(excerpt)
+            .take(SUBJECT_START_WORDS)
+            .filter_map(|t| terms.get(&t))
+            .fold(0, |mask, i| mask | (1 << i));
+        let matched = relevant(excerpt);
+        match &mut text {
+            Cow::Borrowed(s) => *s = &s[..length],
+            Cow::Owned(s) => s.truncate(length),
+        }
         out.push(Block {
             doc: page,
             node: i,
-            terms: relevant(excerpt),
-            opening: tokens(excerpt)
-                .take(SUBJECT_START_WORDS)
-                .filter_map(|t| terms.get(&t))
-                .fold(0, |mask, i| mask | (1 << i)),
+            quote_offset,
+            subject_heading: path
+                .iter()
+                .filter(|(level, _, mask)| *level > 1 && *mask != 0)
+                .max_by_key(|(_, _, mask)| mask.count_ones())
+                .map(|(_, index, _)| *index),
+            path_terms: path
+                .iter()
+                .filter(|(level, _, _)| *level != 1)
+                .fold(0, |m, (_, _, t)| m | t),
+            structured,
+            terms: matched,
+            opening,
             heading_terms: heading.map_or(0, |(_, mask)| mask),
             text,
             scope,
@@ -287,7 +377,7 @@ fn make(b: &Block<'_>, doc: &Doc) -> Option<Passage> {
     let locator = Locator::for_text(
         doc,
         b.node,
-        text,
+        text.get(b.quote_offset..)?,
         heading.and_then(|n| n.element_id.as_deref()),
     )?;
     Some(Passage {
@@ -347,13 +437,23 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
         return Vec::new();
     }
     let terms: BTreeMap<_, _> = terms.into_iter().enumerate().map(|(i, t)| (t, i)).collect();
+    let vocabulary = if *kind == PassageKind::Question {
+        question::vocabulary(&terms)
+    } else {
+        terms.clone()
+    };
     let blocks: Vec<_> = docs
         .iter()
         .take(MAX_RESULT_PAGES)
         .enumerate()
         .filter(|(_, d)| !challenge(d))
-        .flat_map(|(i, d)| blocks(i, d, &terms))
+        .flat_map(|(i, d)| blocks(i, d, &vocabulary))
         .collect();
+    if *kind == PassageKind::Question {
+        if let Some(sides) = question::comparison(q) {
+            return question::contrast(sides, docs, &blocks);
+        }
+    }
     let mut freq = [0usize; MAX_CONTENT_TERMS];
     for b in &blocks {
         for i in bits(b.terms) {
@@ -524,8 +624,15 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
             .enumerate()
             .filter(|(i, b)| b.doc == page && scores[*i] > 0)
             .max_by_key(|(i, _)| (scores[*i], std::cmp::Reverse(*i)));
-        let selected = canonical.or_else(|| {
+        let question = question::Question::new(q, &vocabulary, terms.len(), doc);
+        let targeted = (*kind == PassageKind::Question && !definition)
+            .then(|| question.best(&local, doc, &vocabulary))
+            .flatten();
+        let selected = canonical.or(targeted).or_else(|| {
             let (i, b) = best?;
+            if *kind == PassageKind::Question && !question.permits(&b.text) {
+                return None;
+            }
             if definition && numbers != 0 && !numbered_reference && b.heading_terms == 0 {
                 return None;
             }

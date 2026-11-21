@@ -240,7 +240,7 @@ fn pasted(text: &str, terms: &[String]) -> bool {
         || (text.len() >= PUNCTUATED_BYTES && punct >= PUNCTUATION_MARKS && punct >= text.len() / 8)
 }
 
-const ACTIONS: &[&str] = &[
+pub(crate) const ACTIONS: &[&str] = &[
     "create", "rename", "remove", "delete", "convert", "generate", "list", "clone", "undo",
     "reset", "enable", "disable", "change", "set", "get", "find", "fix", "update", "merge",
     "revert", "install", "download", "login",

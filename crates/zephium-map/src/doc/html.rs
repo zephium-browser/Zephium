@@ -254,19 +254,27 @@ impl DocBuilder {
         let mut captured = false;
         let mut inline = false;
         let mut prose = false;
+        let mut inside_list_or_code = false;
         while let Some(at) = ancestor {
             let n = &self.doc.nodes[at];
             ancestor = n.parent_index();
             let takes_prose = matches!(
                 n.role,
                 Role::Paragraph
+                    | Role::Term
+                    | Role::Definition
                     | Role::ListItem
                     | Role::Document
                     | Role::Cell
                     | Role::CellHeader
                     | Role::CodeBlock
             );
-            if n.role == Role::Text && !inline
+            if n.role == Role::ListItem && !inside_list_or_code
+                || n.role == Role::Text && !inline
+                || matches!(
+                    n.role,
+                    Role::Term | Role::Definition | Role::Cell | Role::CellHeader
+                )
                 || !prose && takes_prose
                 || matches!(
                     n.role,
@@ -276,6 +284,10 @@ impl DocBuilder {
                 captured = true;
                 self.append(at, &words, verbatim);
             }
+            inside_list_or_code |= matches!(
+                self.doc.nodes[at].role,
+                Role::ListItem | Role::CodeBlock | Role::Table
+            );
             inline |= self.doc.nodes[at].role == Role::Text;
             prose |= takes_prose;
             if self.doc.nodes[at].marks.has(Marks::ANCILLARY)
@@ -352,6 +364,8 @@ impl DocBuilder {
                             | Role::Link
                             | Role::Button
                             | Role::Paragraph
+                            | Role::Term
+                            | Role::Definition
                             | Role::ListItem
                             | Role::Document
                             | Role::CodeBlock
@@ -374,11 +388,13 @@ impl DocBuilder {
                                 | "toc"
                                 | "reflist"
                                 | "references"
-                                | "reference"
                                 | "doc-noteref"
                                 | "doc-bibliography"
                                 | "thumbcaption"
-                        )
+                        ) || s == "reference"
+                            && !(n.tag() == "a"
+                                && n.has_attr("href")
+                                && !n.attr("href").is_some_and(|v| v.starts_with("#cite")))
                     });
             let role = if ancillary {
                 Some(Role::Group)
@@ -506,6 +522,8 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 "none" | "presentation" => return None,
                 "group" | "figure" => Group,
                 "document" | "article" => Document,
+                "term" => Term,
+                "definition" => Definition,
                 "heading" => Heading {
                     level: Some(
                         n.attr("aria-level")
@@ -613,7 +631,10 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Heading {
             level: tag[1..].parse().ok(),
         },
-        "p" | "blockquote" | "dt" | "dd" => Paragraph,
+        "p" | "blockquote" => Paragraph,
+        "dl" => Group,
+        "dt" => Term,
+        "dd" => Definition,
         "pre" | "code" => CodeBlock,
         "a" if n.has_attr("href") => Link,
         "img" => Image,

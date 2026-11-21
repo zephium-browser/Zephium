@@ -133,6 +133,8 @@ pub enum Role {
     Landmark { landmark: Option<Landmark> },
     Heading { level: Option<u8> },
     Paragraph,
+    Term,
+    Definition,
     Text,
     CodeBlock,
     Link,

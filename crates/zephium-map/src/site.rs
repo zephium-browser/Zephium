@@ -712,7 +712,15 @@ impl Place {
             }
         }
     }
-    pub(crate) fn fetch_sections(&self, fresh: bool) -> Vec<&Entry> {
+    fn focuses(&self, entry: &Entry) -> bool {
+        self.focus.as_ref().is_some_and(|focus| {
+            entry.id == *focus || entry.children.iter().any(|child| child.id == *focus)
+        })
+    }
+    pub(crate) fn read_priority(&self, entry: &Entry) -> (bool, bool) {
+        (!self.focuses(entry), entry.role.is_none())
+    }
+    pub(crate) fn fetch_sections(&self) -> Vec<&Entry> {
         let mut entries: Vec<_> = self
             .sections
             .iter()
@@ -742,14 +750,7 @@ impl Place {
                     )
             })
             .collect();
-        if fresh {
-            entries.sort_by_key(|e| {
-                !matches!(
-                    e.role,
-                    Some(SectionRole::News | SectionRole::Changelog | SectionRole::Releases)
-                )
-            });
-        }
+        entries.sort_by_key(|e| self.read_priority(e));
         entries
     }
 }
@@ -1015,7 +1016,7 @@ pub(crate) fn read_site_for(
     place.stats.section_page_truncated |= inputs.pages.len() > MAX_SECTION_PAGES;
     if let Some(robots) = inputs.robots {
         place.stats.robots_truncated = robots.truncated || robots.outcome == RobotsOutcome::Limit;
-        place.notes.robots_disallowed = place.fetch_sections(false).iter().any(|e| {
+        place.notes.robots_disallowed = place.fetch_sections().iter().any(|e| {
             e.key.as_url().origin() == doc.page().origin()
                 && !robots.allows(&e.key.as_url()[url::Position::BeforePath..])
         });
