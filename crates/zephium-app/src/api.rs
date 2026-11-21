@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
@@ -626,8 +626,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
-        /// Opens the action's context menu rather than clicking it.
-        menu: bool,
+        /// Browser rows included when opening the action's context menu.
+        menu: Option<Arc<[ExtensionButtonMenuRow]>>,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.

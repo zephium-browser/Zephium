@@ -318,7 +318,12 @@ export const commands = {
 	chromeMenuPopup: (x: number | null, y: number | null, page: boolean, canSplit: boolean) => __TAURI_INVOKE<boolean>("chrome_menu_popup", { x, y, page, canSplit }),
 	extensionActionInvoke: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_invoke", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
 	/**  The context menu of an extension's toolbar button, under the button. */
-	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchorX: number | null, anchorY: number | null, anchorWidth: number | null, anchorHeight: number | null) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchorX, anchorY, anchorWidth, anchorHeight }),
+	extensionActionMenu: (profileId: string, installId: string, runtimeGeneration: string, actionRevision: string, anchor: ExtensionActionMenuAnchor, entries: ExtensionButtonMenuEntry[]) => __TAURI_INVOKE<OperationAdmission>("extension_action_menu", { profileId, installId, runtimeGeneration, actionRevision, anchor, entries }),
+	/**
+	 *  The menu of an extension's toolbar button, pinned or in the tray, where
+	 *  the engine lists none of the extension's own items (Windows).
+	 */
+	extensionButtonMenuPopup: (installId: string, entries: ExtensionButtonMenuEntry[], x: number | null, y: number | null) => __TAURI_INVOKE<boolean>("extension_button_menu_popup", { installId, entries, x, y }),
 	/**
 	 *  Downloads and verifies the extension on the active store page, and
 	 *  returns what the user is asked to approve.
@@ -1476,6 +1481,13 @@ export type ExtensionActionFailedView = {
  */
 export type ExtensionActionFailure = "invalid_request" | "runtime_unavailable" | "runtime_superseded" | "tab_unavailable" | "tab_discarded" | "action_unavailable" | "action_disabled" | "capacity_exceeded" | "popup_unavailable" | "popup_capacity_exceeded" | "native_admission_failed" | "shutting_down" | "unsupported_platform";
 
+export type ExtensionActionMenuAnchor = {
+	x: number | null,
+	y: number | null,
+	width: number | null,
+	height: number | null,
+};
+
 /**
  *  Non-authorizing identity for one live extension runtime. Privileged chrome
  *  may echo this value only as part of an action gesture; the Shell rejoins it
@@ -1539,6 +1551,15 @@ export type ExtensionActionsView = {
 	tab_id: string | null,
 	actions: ExtensionActionView[],
 };
+
+/**  A browser entry on an extension's toolbar button menu. */
+export type ExtensionButtonChoice = "pin" | "unpin" | "options" | "manage" | "remove";
+
+/**
+ *  One row of an extension's toolbar button menu. The frame builds the list,
+ *  the same on every platform; native only draws it and relays the choice.
+ */
+export type ExtensionButtonMenuEntry = { kind: "item"; choice: ExtensionButtonChoice; label: string; enabled: boolean } | { kind: "separator" };
 
 /**
  *  One site icon: canonical base64 of exactly 32x32 RGBA bytes. Chrome never

@@ -24,7 +24,7 @@
   import { mediaPlayer } from "$domain/media-player";
   import { UpdateNotice } from "$features/updates";
   import { EssentialsRail } from "$features/essentials";
-  import { ExtensionsSection, PinnedExtensions } from "$features/extensions";
+  import { chooseFromButtonMenu, ExtensionsSection, PinnedExtensions } from "$features/extensions";
   import { loadWebExtensionManager, StoreInstallRail } from "$features/webext";
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
@@ -370,6 +370,7 @@
         toolHost.open("bookmarks");
       }
       if (command.id === "extensions.manage") void browserPage.open("extensions");
+      chooseFromButtonMenu(command.id, () => void browserPage.open("extensions"));
       if (command.id === "protection.site") void toggleSiteProtection();
       if (command.id === "protection.hide") void hideElements();
       if (command.id.startsWith("focus.shut="))

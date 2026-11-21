@@ -17,6 +17,16 @@
     const value = preferences.value("network.proxy-address");
     if (!editing) draft = value;
   });
+
+  async function save(event: SubmitEvent) {
+    event.preventDefault();
+    const submitted = draft;
+    if (preferences.saving() || submitted.trim() === saved) return;
+    await preferences.set("network.proxy-address", submitted.trim());
+    if (draft !== submitted) return;
+    invalid = preferences.saveFailed();
+    if (!invalid) editing = false;
+  }
 </script>
 
 <SettingsRow
@@ -43,15 +53,7 @@
     title={m.pref_network_proxy_address()}
     description={m.pref_network_proxy_address_help()}
   >
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        void preferences.set("network.proxy-address", draft.trim()).then(() => {
-          invalid = preferences.saveFailed();
-          if (!invalid) editing = false;
-        });
-      }}
-    >
+    <form onsubmit={save}>
       <Field
         label={m.pref_network_proxy_address()}
         labelHidden

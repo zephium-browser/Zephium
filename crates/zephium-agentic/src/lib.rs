@@ -56,7 +56,7 @@ mod work_browser_resource;
 mod work_browser_session;
 pub use work_browser_document::{
     registrable_site, same_site as same_work_site, site_scheme as work_site_scheme,
-    WorkBrowserDocumentPolicy, WorkBrowserRedirect,
+    WorkBrowserDocumentPolicy, WorkBrowserRedirect, WorkBrowserUnreachable,
 };
 pub use work_browser_resource::WorkBrowserConstructionAttempt;
 pub use work_browser_resource::{

@@ -164,6 +164,7 @@ tauri = { workspace = true, features = ["unstable"] }
 windows = { version = "0.61", features = ["Win32_Graphics_Gdi"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+zephium-credentials.workspace = true
 zephium-work-composition = { workspace = true, optional = true }
 zephium-blocker = { workspace = true, features = ["runtime", "runtime-exact"] }
 raw-window-handle.workspace = true

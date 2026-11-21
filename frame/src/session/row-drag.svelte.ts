@@ -72,6 +72,9 @@ export class RowDrag {
   #options: Options;
   #down: { x: number; y: number } | null = null;
   #id = "";
+  #pointerId: number | null = null;
+  #captured: HTMLElement | null = null;
+  #listening = false;
   #dragging = false;
   #pointer = { x: 0, y: 0 };
   #frame = 0;
@@ -98,24 +101,87 @@ export class RowDrag {
     this.#options = options;
   }
 
+  #onLostCapture = (event: PointerEvent) => {
+    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    this.abandon();
+  };
+
+  #onWindowBlur = () => {
+    this.abandon();
+  };
+
+  #onWindowPointerEnd = (event: PointerEvent) => {
+    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    this.abandon();
+  };
+
+  #onContextMenu = () => {
+    if (this.#dragging) this.abandon();
+  };
+
+  #onKeyDown = (event: KeyboardEvent) => {
+    if (!this.#dragging || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.#swallow = true;
+    this.abandon();
+  };
+
+  #attachWindowListeners() {
+    if (this.#listening || typeof window === "undefined") return;
+    this.#listening = true;
+    window.addEventListener("blur", this.#onWindowBlur);
+    window.addEventListener("pointerup", this.#onWindowPointerEnd);
+    window.addEventListener("pointercancel", this.#onWindowPointerEnd);
+    window.addEventListener("contextmenu", this.#onContextMenu, true);
+    window.addEventListener("keydown", this.#onKeyDown, true);
+  }
+
+  #detachWindowListeners() {
+    if (!this.#listening || typeof window === "undefined") return;
+    this.#listening = false;
+    window.removeEventListener("blur", this.#onWindowBlur);
+    window.removeEventListener("pointerup", this.#onWindowPointerEnd);
+    window.removeEventListener("pointercancel", this.#onWindowPointerEnd);
+    window.removeEventListener("contextmenu", this.#onContextMenu, true);
+    window.removeEventListener("keydown", this.#onKeyDown, true);
+  }
+
   /** A press on a row; `folder` when the row is a folder rather than a tab. */
   down(event: PointerEvent, id: string, folder = false) {
     if (event.button !== 0) return;
+    this.#swallow = false;
+    if (this.#dragging || this.#down !== null) this.abandon();
     this.#down = { x: event.clientX, y: event.clientY };
     this.#id = id;
     this.#folder = folder;
+    this.#pointerId = event.pointerId;
     this.#dragging = false;
+    this.#attachWindowListeners();
   }
 
   move(event: PointerEvent) {
     const start = this.#down;
     if (start === null) return;
+    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    if (event.isTrusted && event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      this.abandon();
+      return;
+    }
     if (
       !this.#dragging &&
       Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 4
     ) {
       const target = event.currentTarget;
-      if (target instanceof HTMLElement) target.setPointerCapture(event.pointerId);
+      if (target instanceof HTMLElement) {
+        try {
+          target.setPointerCapture(event.pointerId);
+          this.#captured = target;
+          target.addEventListener("lostpointercapture", this.#onLostCapture);
+        } catch {
+          // Synthetic pointer events in tests may not map to an active pointer.
+        }
+      }
       this.#dragging = true;
       if (!this.#folder) tabDrag.begin(this.#id);
       document.body.style.cursor = "grabbing";
@@ -292,20 +358,43 @@ export class RowDrag {
     this.#page = page;
   }
 
+  #releaseCapture(pointerId = this.#pointerId) {
+    const target = this.#captured;
+    if (!target) return;
+    this.#captured = null;
+    target.removeEventListener("lostpointercapture", this.#onLostCapture);
+    if (pointerId !== null && target.hasPointerCapture(pointerId)) {
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        // Ignore if capture was already released.
+      }
+    }
+  }
+
   #release(event: PointerEvent) {
+    this.#releaseCapture(event.pointerId);
     const target = event.currentTarget;
     if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
+      try {
+        target.releasePointerCapture(event.pointerId);
+      } catch {
+        // Ignore if capture was already released.
+      }
     }
   }
 
   #reset() {
+    const wasDragging = this.#dragging;
+    this.#detachWindowListeners();
+    this.#releaseCapture();
     if (this.#frame !== 0) {
       cancelAnimationFrame(this.#frame);
       this.#frame = 0;
     }
     this.#down = null;
     this.#id = "";
+    this.#pointerId = null;
     this.#dragging = false;
     this.#reorder = null;
     this.#block = null;
@@ -313,8 +402,10 @@ export class RowDrag {
     if (this.#into) delete this.#into.dataset.dropInto;
     this.#into = null;
     this.ghost = null;
-    document.body.style.cursor = "";
-    if (!this.#folder) tabDrag.end();
+    if (wasDragging) {
+      document.body.style.cursor = "";
+      if (!this.#folder) tabDrag.end();
+    }
     this.#folder = false;
   }
 }

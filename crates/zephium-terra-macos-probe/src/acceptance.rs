@@ -1560,12 +1560,16 @@ async fn seed_tasks(
     Ok(())
 }
 
+/// Where the probe's throwaway folders live under home. Work refuses any
+/// folder named `app.zephium…` as the app's own data, so the name avoids it.
+pub(super) const PROBE_FOLDERS: &str = "Library/Caches/zephium-work-probe";
+
 /// A small throwaway repository under the home folder: a web app with a
 /// manifest, sources, a README and one uncommitted change.
 fn project_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("tidepool-{}", std::process::id()));
     let write = |path: &str, text: &str| {
         let path = folder.join(path);
@@ -1639,7 +1643,7 @@ test('tides', () => {});
 fn save_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-save-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "save_folder")?;
     Ok(folder)
@@ -1648,7 +1652,7 @@ fn save_folder() -> Result<std::path::PathBuf, &'static str> {
 fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-bug-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "bug_folder")?;
     std::fs::write(
@@ -1783,10 +1787,19 @@ async fn stand_in(
                 WorkStepKindV1::Ask { options, .. } => {
                     let reply = if public_eval {
                         match &step.kind {
+                            // A request with no scripted answer takes the
+                            // question's first option, as the bench mode does.
                             WorkStepKindV1::Ask {
                                 purpose: Some(WorkAskPurposeV1::Question),
                                 ..
-                            } => answer.to_owned(),
+                            } if !answer.is_empty() => answer.to_owned(),
+                            WorkStepKindV1::Ask {
+                                purpose: Some(WorkAskPurposeV1::Question),
+                                ..
+                            } => options
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "Go ahead".into()),
                             _ => options
                                 .iter()
                                 .find(|option| {

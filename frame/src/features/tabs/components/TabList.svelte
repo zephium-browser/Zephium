@@ -228,6 +228,7 @@
     void shape;
     untrack(() => motion.play(list));
   });
+  $effect(() => () => drag.abandon());
 
   function toggleFolder(unit: SidebarFolderEntry) {
     void folderEdit.setFolded(unit.node.id, !folded.has(unit.key));
