@@ -17,6 +17,7 @@
 
   let importing = $state(false);
   let resetting = $state(false);
+  let destinationReset = $state(0);
   let failure = $state("");
   let live = true;
   onDestroy(() => {
@@ -71,7 +72,10 @@
     failure = "";
     try {
       if (!(await preferences.resetNewTab())) failure = m.about_reset_failed();
-      else retryImage();
+      else {
+        destinationReset += 1;
+        retryImage();
+      }
     } finally {
       resetting = false;
     }
@@ -81,7 +85,7 @@
 </script>
 
 <SettingsGroup title={m.ntp_destination()}>
-  <NewTabPageRow />
+  {#key destinationReset}<NewTabPageRow />{/key}
 </SettingsGroup>
 
 <SettingsGroup title={m.ntp_background()}>
