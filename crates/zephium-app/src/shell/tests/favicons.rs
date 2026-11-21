@@ -516,22 +516,151 @@ type ProbeLog = Arc<Mutex<Vec<String>>>;
 type PageLog = Arc<Mutex<Vec<(u64, crate::FaviconPageSource)>>>;
 
 fn attach_probers(shell: &mut Shell) -> (ProbeLog, PageLog) {
+    attach_probers_with_cancel(shell, || {})
+}
+
+fn attach_probers_with_cancel(
+    shell: &mut Shell,
+    cancel_network: impl Fn() + Send + Sync + 'static,
+) -> (ProbeLog, PageLog) {
     let origins: ProbeLog = Arc::new(Mutex::new(Vec::new()));
     let pages: PageLog = Arc::new(Mutex::new(Vec::new()));
     let (origin_sink, page_sink) = (origins.clone(), pages.clone());
     shell.handle(Command::AttachFaviconProber(
-        crate::FaviconProberAttachment(Arc::new(move |request| match request {
-            crate::FaviconProbe::Origin { origin, .. } => origin_sink.lock().unwrap().push(origin),
-            crate::FaviconProbe::Page { ticket, source, .. } => {
-                page_sink.lock().unwrap().push((ticket, source))
-            }
-        })),
+        crate::FaviconProberAttachment {
+            probe: Arc::new(move |request| match request {
+                crate::FaviconProbe::Origin { origin, .. } => {
+                    origin_sink.lock().unwrap().push(origin)
+                }
+                crate::FaviconProbe::Page { ticket, source, .. } => {
+                    page_sink.lock().unwrap().push((ticket, source))
+                }
+            }),
+            cancel_network: Arc::new(cancel_network),
+        },
     ));
     (origins, pages)
 }
 
 fn attach_prober(shell: &mut Shell) -> ProbeLog {
     attach_probers(shell).0
+}
+
+#[test]
+fn a_configured_proxy_uses_cached_and_native_icons_without_anonymous_requests() {
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("network.proxy".into(), "socks5".into()),
+        ("network.proxy-address".into(), "proxy.example:1080".into()),
+    ]);
+    store
+        .icons
+        .lock()
+        .unwrap()
+        .push(("https://cached.example".into(), raster(5)));
+    store.icon_ages.lock().unwrap().insert(
+        "https://cached.example".into(),
+        FAVICON_CACHE_MAX_AGE_SECONDS + 1,
+    );
+    let (mut shell, engine, screen, icons) = setup_with_icon_log(store);
+    shell.handle(Command::Bootstrap);
+    let (origins, pages) = attach_probers(&mut shell);
+    let profile = shell.windows.focused().unwrap().profile;
+    let request = Command::ProbeFavicons {
+        profile,
+        origins: vec![
+            "https://cached.example".into(),
+            "https://missing.example".into(),
+        ],
+    };
+    shell.handle(request.clone());
+    assert!(origins.lock().unwrap().is_empty());
+    assert_eq!(delivered_origins(&icons), ["https://cached.example"]);
+
+    let id = active_id(&screen);
+    let page = "https://page.example/";
+    let icon = "https://page.example/icon.png";
+    navigate_and_commit(&mut shell, id, page);
+    report(&mut shell, id, page, true, vec![png(icon, 32)]);
+    assert!(pages.lock().unwrap().is_empty());
+    assert_eq!(
+        calls_matching(&engine, &format!("rasterize {id} {icon}")),
+        1
+    );
+
+    shell.handle(Command::Engine(EngineEvent::FaviconImage {
+        id,
+        page_url: page.into(),
+        png: vec![1, 2, 3],
+    }));
+    assert_eq!(
+        pages.lock().unwrap()[0].1,
+        crate::FaviconPageSource::Encoded(vec![1, 2, 3])
+    );
+
+    shell.handle(Command::SetAppSetting {
+        key: "network.proxy".into(),
+        value: "system".into(),
+    });
+    shell.handle(request);
+    assert_eq!(
+        origins.lock().unwrap().as_slice(),
+        ["https://missing.example"]
+    );
+}
+
+#[test]
+fn enabling_a_proxy_cancels_active_probes_and_refuses_queued_network_work() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("network.proxy-address".into(), "proxy.example:3128".into());
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancellation = cancelled.clone();
+    let (origins, pages) = attach_probers_with_cancel(&mut shell, move || {
+        cancellation.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    let profile = shell.windows.focused().unwrap().profile;
+    let requested: Vec<String> = (0..5)
+        .map(|i| format!("https://origin{i}.example"))
+        .collect();
+    shell.handle(Command::ProbeFavicons {
+        profile,
+        origins: requested.clone(),
+    });
+    assert_eq!(origins.lock().unwrap().as_slice(), &requested[..4]);
+
+    let id = active_id(&screen);
+    let page = "https://page.example/";
+    let icon = "https://page.example/icon.png";
+    navigate_and_commit(&mut shell, id, page);
+    report(&mut shell, id, page, true, vec![png(icon, 32)]);
+    assert!(pages.lock().unwrap().is_empty());
+    assert_eq!(
+        calls_matching(&engine, &format!("rasterize {id} {icon}")),
+        0
+    );
+
+    shell.handle(Command::SetAppSetting {
+        key: "network.proxy".into(),
+        value: "http".into(),
+    });
+    assert!(cancelled.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(
+        calls_matching(&engine, &format!("rasterize {id} {icon}")),
+        1
+    );
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: requested[0].clone(),
+        rgba: None,
+    });
+    assert!(pages.lock().unwrap().is_empty());
+    assert_eq!(origins.lock().unwrap().as_slice(), &requested[..4]);
 }
 
 #[test]
