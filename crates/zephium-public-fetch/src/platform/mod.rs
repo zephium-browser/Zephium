@@ -29,6 +29,7 @@ pub(crate) struct MacProxies {
     pub(crate) https_port: Option<i64>,
     pub(crate) socks: bool,
     pub(crate) scoped: Scoped,
+    pub(crate) supplemental: bool,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -85,7 +86,11 @@ impl Scoped {
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn mac_route(proxies: &MacProxies) -> Route {
-    if proxies.auto_config || proxies.auto_discovery || proxies.scoped.enables_anything() {
+    if proxies.auto_config
+        || proxies.auto_discovery
+        || proxies.supplemental
+        || proxies.scoped.enables_anything()
+    {
         return Route::Unsupported;
     }
     if proxies.https {
@@ -242,6 +247,22 @@ mod tests {
             ..https.clone()
         };
         assert_eq!(mac_route(&both), http("proxy.corp.example", 8080));
+    }
+
+    #[test]
+    fn per_domain_proxy_settings_are_unsupported() {
+        let supplemental = MacProxies {
+            supplemental: true,
+            ..MacProxies::default()
+        };
+        assert_eq!(mac_route(&supplemental), Route::Unsupported);
+        let with_proxy = MacProxies {
+            https: true,
+            https_host: Some("proxy.corp.example".into()),
+            https_port: Some(8080),
+            ..supplemental
+        };
+        assert_eq!(mac_route(&with_proxy), Route::Unsupported);
     }
 
     #[test]
