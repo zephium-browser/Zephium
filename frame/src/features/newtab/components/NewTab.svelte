@@ -897,7 +897,27 @@
   }
 
   .custom .figure {
-    background: var(--color-surface);
+    background: var(--figure-surface, var(--color-surface));
+    color: var(--color-label-secondary);
+    backdrop-filter: var(--figure-filter, none);
+  }
+
+  .custom .figure .foot:not(.late) {
+    color: var(--color-label-secondary);
+  }
+
+  /* Frost only the capsules; the wash keeps arbitrary wallpaper legible. */
+  :global(:root:not([data-material="none"])[data-material]) .newtab.custom {
+    --figure-surface: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    --figure-filter: blur(24px);
+  }
+
+  .custom button.figure:hover {
+    background: color-mix(
+      in srgb,
+      var(--color-text) 9%,
+      var(--figure-surface, var(--color-surface))
+    );
   }
 
   /* A narrow pane keeps each figure to its icon and value on one row; the
@@ -968,6 +988,13 @@
   @media (forced-colors: active) {
     .sky {
       display: none;
+    }
+
+    .custom .figure,
+    .custom button.figure:hover {
+      background: Canvas;
+      color: CanvasText;
+      backdrop-filter: none;
     }
 
     .name {
