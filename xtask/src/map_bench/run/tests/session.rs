@@ -338,7 +338,7 @@ fn session_handles_robots_denial_and_render_unavailability() {
     let result = run_session(root.path(), &query, &mut denied);
     assert_eq!(
         (result.score.verdict, result.score.reason),
-        (Verdict::Blocked, Reason::RobotsBlocksAll)
+        (Verdict::Blocked, Reason::RobotsDenied)
     );
     assert_eq!(denied.calls.len(), 1);
     assert_eq!(
@@ -506,14 +506,16 @@ This run used synthetic results pages. Group checks and first-layer latency were
 
 | Metric | Samples | p50 | p90 | Max |
 | --- | ---: | ---: | ---: | ---: |
-| children_per_place | 1 | 3 | 3 | 3 |
+| children_per_place | 1 | 2 | 2 | 2 |
 | cpu_ns | 0 | — | — | — |
 | decoded_bytes | 2 | 0 | 0 | 0 |
 | first_place_ns | 1 | 5 | 5 | 5 |
 | full_ns | 1 | 10 | 10 | 10 |
 | memo_bytes | 1 | 256 | — | 256 |
 | peak_rss_delta_bytes | 0 | — | — | — |
+| primary_sections_per_place | 1 | 3 | 3 | 3 |
 | requests | 2 | 0 | 0 | 0 |
+| secondary_sections_per_place | 1 | 2 | 2 | 2 |
 | sections_per_place | 1 | 5 | 5 | 5 |
 | wall_ns | 2 | 0 | 0 | 0 |
 | wire_bytes | 2 | 0 | 0 | 0 |
@@ -563,6 +565,12 @@ Places with at least 3 sections — 1 of 1 place and compare sites.
 | answered_wrong | 0 |
 | nothing_returned | 0 |
 | page_could_not_be_read | 0 |
+
+Destinations scored as matched_locale — 0.
+
+| Section query | Within two levels | Focus right |
+| --- | --- | --- |
+| `site` | true | false |
 
 | Query ID | Verdict | Reason |
 | --- | --- | --- |

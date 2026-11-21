@@ -168,6 +168,12 @@ impl SessionTotals {
                     self.places_with_three_sections += u64::from(sections >= 3);
                     samples.sections.push(sections);
                     samples
+                        .primary
+                        .extend(outcome.stats.get(&format!("place.{index}.primary")));
+                    samples
+                        .secondary
+                        .extend(outcome.stats.get(&format!("place.{index}.secondary")));
+                    samples
                         .children
                         .push(count(&format!("place.{index}.children")));
                     for source in PLACE_SOURCES {
@@ -281,6 +287,8 @@ struct Samples {
     decoded_bytes: Vec<u64>,
     cpu: Vec<u64>,
     memory: Vec<u64>,
+    primary: Vec<u64>,
+    secondary: Vec<u64>,
     sections: Vec<u64>,
     children: Vec<u64>,
     memos: Vec<u64>,
@@ -304,6 +312,14 @@ impl Samples {
         .map(|(label, samples, p90)| (label, distribution(samples, p90)))
         .collect();
         if session {
+            metrics.insert(
+                "primary_sections_per_place",
+                distribution(self.primary, true),
+            );
+            metrics.insert(
+                "secondary_sections_per_place",
+                distribution(self.secondary, true),
+            );
             metrics.insert("sections_per_place", distribution(self.sections, true));
             metrics.insert("children_per_place", distribution(self.children, true));
             metrics.insert("memo_bytes", distribution(self.memos, false));
@@ -561,6 +577,8 @@ impl Summary {
                         | "first_place_ns"
                         | "full_ns"
                         | "requests"
+                        | "primary_sections_per_place"
+                        | "secondary_sections_per_place"
                         | "sections_per_place"
                         | "children_per_place"
                         | "memo_bytes"
@@ -592,6 +610,36 @@ impl Summary {
                 ("robots_blocks_all", probe.robots_blocks_all),
             ] {
                 let _ = writeln!(markdown, "| {label} | {count} |");
+            }
+        }
+        let locale = self
+            .queries
+            .iter()
+            .filter(|q| {
+                q.score
+                    .destination
+                    .as_ref()
+                    .is_some_and(|d| d.matched_locale)
+            })
+            .count();
+        let _ = writeln!(
+            markdown,
+            "\nDestinations scored as matched_locale — {locale}."
+        );
+        if self.queries.iter().any(|q| q.score.focus_right.is_some()) {
+            markdown.push_str(
+                "\n| Section query | Within two levels | Focus right |\n| --- | --- | --- |\n",
+            );
+            for q in &self.queries {
+                if let Some(right) = q.score.focus_right {
+                    let _ = writeln!(
+                        markdown,
+                        "| `{}` | {} | {} |",
+                        q.query.id,
+                        q.score.destination.is_some(),
+                        right
+                    );
+                }
             }
         }
         markdown.push_str("\n| Query ID | Verdict | Reason |\n| --- | --- | --- |\n");

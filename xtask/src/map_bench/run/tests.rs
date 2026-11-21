@@ -148,6 +148,7 @@ impl Engine for Script<'_> {
             assert_eq!(body.timings.total, Duration::from_millis(3));
             assert!(body.truncated);
             outcome.entries.push(Entry {
+                focus: false,
                 url: body.final_url,
                 depth: Depth::One,
                 source: "test_source".into(),
@@ -370,6 +371,7 @@ fn engine_panic_and_limits_checkpoint_query_failures_and_continue() {
                 "invalid-source" => {
                     let mut outcome = Outcome::empty(Kind::Place);
                     outcome.entries.push(Entry {
+                        focus: false,
                         url: Url::parse("https://example.com/").unwrap(),
                         depth: Depth::One,
                         source: "x".repeat(crate::map_bench::engine::MAX_SOURCE_BYTES + 1),
@@ -653,6 +655,8 @@ fn report_matches_golden_and_hides_private_inputs() {
 | Sitemap answered | 0 |
 | Blocked | 0 |
 | robots_blocks_all | 0 |
+
+Destinations scored as matched_locale — 0.
 
 | Query ID | Verdict | Reason |
 | --- | --- | --- |

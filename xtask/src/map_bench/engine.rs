@@ -187,6 +187,8 @@ pub(super) struct Entry {
     #[serde(with = "url_text")]
     pub(super) url: Url,
     pub(super) depth: Depth,
+    #[serde(default)]
+    pub(super) focus: bool,
     pub(super) source: String,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(super) tags: BTreeSet<String>,

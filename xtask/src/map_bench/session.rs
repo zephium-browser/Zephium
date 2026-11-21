@@ -572,6 +572,7 @@ fn source_tag(source: Source) -> &'static str {
     match source {
         Source::PrimaryNav => "primary_nav",
         Source::MenuGroup => "menu_group",
+        Source::LinkCluster => "link_cluster",
         Source::Footer => "footer",
         Source::EngineResult => "engine_result",
         Source::EngineSitelink => "engine_sitelink",
@@ -595,6 +596,13 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
     ] {
         put(key, u64::from(value));
     }
+    let primary = place
+        .sections
+        .iter()
+        .filter(|e| e.tier == zephium_map::Tier::Primary)
+        .count();
+    put("primary", primary as u64);
+    put("secondary", (place.sections.len() - primary) as u64);
     put("sections", place.sections.len() as u64);
     put(
         "children",
@@ -625,6 +633,7 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
             outcome.entries.push(Entry {
                 url,
                 depth,
+                focus: place.focus.as_ref() == Some(&entry.id),
                 source: entry
                     .sources
                     .first()
@@ -636,6 +645,13 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .sources
                     .iter()
                     .map(|&source| source_tag(source).into())
+                    .chain(std::iter::once(
+                        match entry.tier {
+                            zephium_map::Tier::Primary => "primary",
+                            zephium_map::Tier::Secondary => "secondary",
+                        }
+                        .into(),
+                    ))
                     .collect(),
             });
         }

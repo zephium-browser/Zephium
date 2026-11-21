@@ -63,7 +63,8 @@ pub(super) enum Reason {
     WrongAnswerShown,
     AnswerFromUnlistedSource,
     ReaderBlocked,
-    RobotsBlocksAll,
+    #[serde(alias = "robots_blocks_all")]
+    RobotsDenied,
     RobotsServer,
     RobotsTimeout,
     RecordingMissing,
@@ -94,7 +95,7 @@ impl Reason {
             Self::WrongAnswerShown => "wrong_answer_shown",
             Self::AnswerFromUnlistedSource => "answer_from_unlisted_source",
             Self::ReaderBlocked => "reader_blocked",
-            Self::RobotsBlocksAll => "robots_blocks_all",
+            Self::RobotsDenied => "robots_denied",
             Self::RobotsServer => "robots_server",
             Self::RobotsTimeout => "robots_timeout",
             Self::RecordingMissing => "recording_missing",
@@ -116,6 +117,8 @@ impl Reason {
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct DestinationMatch {
     pub(super) depth: u8,
+    #[serde(default)]
+    pub(super) matched_locale: bool,
     pub(super) source: String,
 }
 
@@ -135,6 +138,8 @@ pub(super) struct Score {
     pub(super) reason: Reason,
     pub(super) kind_matched: bool,
     pub(super) destination: Option<DestinationMatch>,
+    #[serde(default)]
+    pub(super) focus_right: Option<bool>,
     pub(super) passage: Option<PassageScore>,
     pub(super) missing_groups: Option<Vec<Group>>,
     pub(super) stayed_out: Option<bool>,
@@ -147,6 +152,7 @@ impl Score {
             reason,
             kind_matched: false,
             destination: None,
+            focus_right: None,
             passage: None,
             missing_groups: None,
             stayed_out: None,
@@ -162,19 +168,44 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
     let missing_groups: Option<Vec<_>> = (!outcome.synthetic_results)
         .then(|| query.group.difference(&outcome.groups).copied().collect());
     let missing_count = missing_groups.as_ref().map_or(0, Vec::len);
+    let matched = |entry: &super::engine::Entry| {
+        query
+            .want
+            .iter()
+            .filter_map(|w| w.matched_locale(&entry.url))
+            .min()
+    };
     let destination = matches!(query.label.kind, Kind::Place | Kind::Compare)
         .then(|| {
             outcome
                 .entries
                 .iter()
-                .filter(|entry| query.want.iter().any(|want| want.matches(&entry.url)))
-                .min_by_key(|entry| u8::from(entry.depth))
-                .map(|entry| DestinationMatch {
-                    depth: u8::from(entry.depth),
+                .filter_map(|e| Some((e, matched(e)?)))
+                .min_by_key(|(e, locale)| (u8::from(e.depth), *locale))
+                .map(|(entry, matched_locale)| DestinationMatch {
+                    depth: entry.depth.into(),
                     source: entry.source.clone(),
+                    matched_locale,
                 })
         })
         .flatten();
+    let focus_right = (query.label.kind == Kind::Place
+        && !query.want.is_empty()
+        && zephium_map::read_query(&query.text).is_ok_and(|q| {
+            matches!(
+                q.kind(),
+                zephium_map::QueryKind::Place {
+                    section: Some(_),
+                    ..
+                }
+            )
+        }))
+    .then(|| {
+        outcome
+            .entries
+            .iter()
+            .any(|e| e.focus && matched(e).is_some())
+    });
     let passage = query
         .answer
         .as_deref()
@@ -231,6 +262,7 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
         reason,
         kind_matched,
         destination,
+        focus_right,
         passage,
         missing_groups,
         stayed_out,
@@ -287,7 +319,7 @@ fn blocked(outcome: &Outcome, activity: &Activity) -> Option<Reason> {
                     > 0
             })
         {
-            return Some(Reason::RobotsBlocksAll);
+            return Some(Reason::RobotsDenied);
         }
         return (outcome.entries.is_empty() && outcome.passages.is_empty() && activity.blocked())
             .then_some(Reason::ReaderBlocked);
@@ -297,7 +329,7 @@ fn blocked(outcome: &Outcome, activity: &Activity) -> Option<Reason> {
     }
     Some(
         match outcome.probe.first().and_then(|site| site.robots_stop) {
-            Some(RobotsStop::BlocksAll) => Reason::RobotsBlocksAll,
+            Some(RobotsStop::BlocksAll) => Reason::RobotsDenied,
             Some(RobotsStop::Server) => Reason::RobotsServer,
             Some(RobotsStop::Timeout) => Reason::RobotsTimeout,
             Some(RobotsStop::Interrupted) | None => Reason::ReaderBlocked,
@@ -325,6 +357,7 @@ mod tests {
             url: Url::parse(url).unwrap(),
             depth,
             source: source.into(),
+            focus: false,
             tags: Default::default(),
         }
     }
@@ -360,9 +393,42 @@ mod tests {
             score(&place(), &outcome, &Activity::default()).destination,
             Some(DestinationMatch {
                 depth: 1,
+                matched_locale: false,
                 source: "nav".into()
             }),
         );
+    }
+
+    #[test]
+    fn locale_added_by_site_and_focus_are_independent_scores() {
+        let q = fixture("[[query]]\nid='a'\ntext='Example docs'\nkind='place'\nsite='example.com'\nwant=['example.com/docs']");
+        for (path, expected) in [
+            ("en/docs", Some(true)),
+            ("en-pl/docs/start", Some(true)),
+            ("zh-Hant/docs", Some(true)),
+            ("es-419/docs", Some(true)),
+            ("docs", Some(false)),
+            ("eng/docs", None),
+            ("en-x/docs", None),
+            ("en-abcde/docs", None),
+            ("en/gb/docs", None),
+            ("es-4_9/docs", None),
+        ] {
+            let mut outcome = Outcome::empty(Kind::Place);
+            outcome.entries.push(entry(
+                &format!("https://example.com/{path}"),
+                Depth::Two,
+                "footer",
+            ));
+            let s = score(&q, &outcome, &Activity::default());
+            assert_eq!(s.destination.map(|d| d.matched_locale), expected);
+            assert_eq!(s.focus_right, Some(false));
+            outcome.entries[0].focus = true;
+            assert_eq!(
+                score(&q, &outcome, &Activity::default()).focus_right,
+                Some(expected.is_some())
+            );
+        }
     }
 
     #[test]

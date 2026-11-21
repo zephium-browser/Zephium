@@ -120,19 +120,39 @@ impl Destination {
         })
     }
 
-    pub(super) fn matches(&self, url: &Url) -> bool {
+    pub(super) fn matched_locale(&self, url: &Url) -> Option<bool> {
         let host = self.host.trim_end_matches('.');
         let actual = url.host_str().unwrap_or_default().trim_end_matches('.');
         let expected = host.strip_prefix("www.").unwrap_or(host);
         let actual = actual.strip_prefix("www.").unwrap_or(actual);
-        actual == expected
-            && url.path().strip_prefix(&self.path).is_some_and(|tail| {
-                tail.is_empty() || self.path.ends_with('/') || tail.starts_with('/')
-            })
-            && self
+        if actual != expected
+            || self
                 .fragment
                 .as_deref()
-                .is_none_or(|fragment| url.fragment() == Some(fragment))
+                .is_some_and(|f| url.fragment() != Some(f))
+        {
+            return None;
+        }
+        let matches = |path: &str| {
+            path.strip_prefix(&self.path).is_some_and(|tail| {
+                tail.is_empty() || self.path.ends_with('/') || tail.starts_with('/')
+            })
+        };
+        if matches(url.path()) {
+            return Some(false);
+        }
+        let path = url.path().strip_prefix('/')?;
+        let (segment, _) = path.split_once('/')?;
+        let (lang, region) = segment
+            .split_once('-')
+            .map_or((segment, None), |(l, r)| (l, Some(r)));
+        (lang.len() == 2
+            && lang.bytes().all(|b| b.is_ascii_alphabetic())
+            && region.is_none_or(|r| {
+                (2..=4).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            && matches(&path[segment.len()..]))
+        .then_some(true)
     }
 }
 
