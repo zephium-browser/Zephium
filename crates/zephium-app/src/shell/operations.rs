@@ -950,7 +950,12 @@ impl Shell {
         }
         self.tab_preferences.apply(&key, &value);
         if self.proxy.apply(&key, &value) {
-            self.engine.set_proxy(self.proxy.server());
+            let server = self.proxy.server();
+            let enabled = server.is_some();
+            self.engine.set_proxy(server);
+            if enabled {
+                self.stop_network_favicon_probes();
+            }
         }
         if key == "tabs.automatic-pip" && value == "false" {
             self.engine.cancel_automatic_pip();

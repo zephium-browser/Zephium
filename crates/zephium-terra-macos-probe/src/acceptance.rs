@@ -1474,7 +1474,7 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 26] = [
     LeadScenario {
         name: "exam",
         requests: &["Help me prepare for my algorithms final (MIT 6.006)"],
-        answer: "The exam is on 16 October 2026; 2 to 3 hours a day.",
+        answer: "The exam is in four weeks; 2 to 3 hours a day.",
         folder: false,
         site: None,
     },

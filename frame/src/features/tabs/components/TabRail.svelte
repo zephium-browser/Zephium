@@ -124,6 +124,7 @@
     void shape;
     untrack(() => motion.play(list));
   });
+  $effect(() => () => drag.abandon());
 </script>
 
 <!--

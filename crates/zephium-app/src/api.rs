@@ -982,7 +982,11 @@ pub enum FaviconProbe {
 pub type FaviconProber = Arc<dyn Fn(FaviconProbe) + Send + Sync>;
 
 #[derive(Clone)]
-pub struct FaviconProberAttachment(pub FaviconProber);
+pub struct FaviconProberAttachment {
+    pub probe: FaviconProber,
+    /// Cancels active network requests, which still send their ordinary replies.
+    pub cancel_network: Arc<dyn Fn() + Send + Sync>,
+}
 impl fmt::Debug for FaviconProberAttachment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FaviconProberAttachment")
