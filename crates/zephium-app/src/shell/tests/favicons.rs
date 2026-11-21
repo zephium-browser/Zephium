@@ -610,6 +610,41 @@ fn a_configured_proxy_uses_cached_and_native_icons_without_anonymous_requests() 
 }
 
 #[test]
+fn a_probe_cancelled_by_a_proxy_is_not_remembered_as_failed_after_the_proxy_goes() {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("network.proxy-address".into(), "proxy.example:3128".into());
+    let (mut shell, _engine, _screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let (origins, _pages) = attach_probers(&mut shell);
+    let profile = shell.windows.focused().unwrap().profile;
+    let origin = "https://origin.example".to_owned();
+    let request = Command::ProbeFavicons {
+        profile,
+        origins: vec![origin.clone()],
+    };
+    shell.handle(request.clone());
+    assert_eq!(origins.lock().unwrap().len(), 1);
+
+    for mode in ["http", "system"] {
+        shell.handle(Command::SetAppSetting {
+            key: "network.proxy".into(),
+            value: mode.into(),
+        });
+    }
+    shell.handle(Command::FaviconProbed {
+        profile,
+        origin: origin.clone(),
+        rgba: None,
+    });
+    shell.handle(request);
+    assert_eq!(origins.lock().unwrap().as_slice(), [origin.clone(), origin]);
+}
+
+#[test]
 fn enabling_a_proxy_cancels_active_probes_and_refuses_queued_network_work() {
     let store = Arc::new(FakeStore::default());
     store

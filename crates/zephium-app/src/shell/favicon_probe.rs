@@ -29,6 +29,8 @@ pub(super) struct FaviconProbeState {
     prober: Option<FaviconProberAttachment>,
     queued: std::collections::VecDeque<ProbeKey>,
     in_flight: std::collections::HashSet<ProbeKey>,
+    /// In flight when a proxy stopped the prober; their replies are not failures.
+    cancelled: std::collections::HashSet<ProbeKey>,
     failed: FailedIcons,
     lookups: std::collections::BTreeMap<u64, ProfileId>,
     lookup_generation: u64,
@@ -49,6 +51,7 @@ impl Default for FaviconProbeState {
             prober: None,
             queued: Default::default(),
             in_flight: Default::default(),
+            cancelled: Default::default(),
             failed: FailedIcons::with_limits(
                 TRACKED_ICON_ORIGIN_CAPACITY,
                 FAVICON_PROBE_FAILURE_TTL,
@@ -133,6 +136,7 @@ impl Shell {
         if let Some(prober) = &probe.prober {
             (prober.cancel_network)();
         }
+        probe.cancelled.extend(probe.in_flight.iter().cloned());
         for key in probe.queued.drain(..) {
             probe.wanted.remove(&key);
         }
@@ -391,6 +395,7 @@ impl Shell {
         if !self.favicons.probe.in_flight.remove(&key) {
             return;
         }
+        let cancelled = self.favicons.probe.cancelled.remove(&key);
         let admitted = self.profiles.get(profile).is_some()
             && rgba
                 .as_deref()
@@ -400,7 +405,7 @@ impl Shell {
             self.publish_icons();
         } else {
             self.favicons.probe.wanted.remove(&key);
-            if self.proxy.server().is_none() {
+            if !cancelled && self.proxy.server().is_none() {
                 self.remember_failed_probe(key);
             }
         }
