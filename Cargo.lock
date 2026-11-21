@@ -7546,6 +7546,7 @@ dependencies = [
  "zephium-core",
  "zephium-credentials",
  "zephium-decision",
+ "zephium-public-fetch",
  "zeroize",
 ]
 
@@ -7897,6 +7898,25 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-normalization",
  "windows",
+]
+
+[[package]]
+name = "zephium-public-fetch"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "brotli-decompressor",
+ "flate2",
+ "proptest",
+ "psl",
+ "reqwest",
+ "system-configuration",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "url",
+ "winreg 0.56.0",
+ "zephium-core",
 ]
 
 [[package]]
