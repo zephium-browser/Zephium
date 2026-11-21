@@ -13,13 +13,15 @@ mod platform;
 mod probe;
 mod reader;
 mod route;
+mod source;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub use limits::*;
 pub use reader::{CounterSnapshot, PublicReader, ReadSession, USER_AGENT};
-pub use route::{public_route, PublicRoute};
+pub use route::PublicRoute;
+pub use source::RouteSource;
 pub use types::{
     Expect, PublicBody, ReadRefusal, ReadRequest, SizeLimit, StatusClass, StatusRefusal,
     TimeoutPhase, Timings,

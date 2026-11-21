@@ -10,7 +10,6 @@ pub const MAX_READS_PER_HOST: usize = 4;
 pub const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const MAX_READ_DURATION: Duration = Duration::from_secs(30);
-pub const MAX_SESSION_LIFETIME: Duration = Duration::from_secs(60);
 pub const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SESSION_IDLE_PER_HOST: usize = 2;
 pub const MAX_BROTLI_WINDOW_BITS: u8 = 22;
@@ -19,6 +18,12 @@ pub const SNIFF_BYTES: usize = 512;
 pub const MAX_MEDIA_TYPE_BYTES: usize = 127;
 pub const MAX_CHARSET_BYTES: usize = 40;
 pub const RESOLVER_SLOTS_PER_READ: usize = 2;
+/// How often the operating system's proxy setting is read again.
+pub const SYSTEM_ROUTE_REFRESH: Duration = Duration::from_secs(30);
+/// A system read slower than this leaves the route unsupported until it returns.
+pub const SYSTEM_ROUTE_TIMEOUT: Duration = Duration::from_secs(2);
+/// The least time between the starts of two system reads a reader asked for.
+pub const SYSTEM_ROUTE_MIN_GAP: Duration = Duration::from_secs(5);
 
 /// The reader's own bounds. Each field is clamped to its ceiling above and to
 /// at least one unit, so a caller can only make the reader stricter.

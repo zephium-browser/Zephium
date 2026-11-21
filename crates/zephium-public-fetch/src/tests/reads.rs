@@ -166,7 +166,10 @@ async fn a_url_with_credentials_is_refused_before_any_connection() {
 
 #[tokio::test]
 async fn the_product_policy_refuses_what_the_fixture_alone_admits() {
-    let product = PublicReader::new(limits());
+    let product = PublicReader::new(
+        limits(),
+        crate::RouteSource::new(&tokio::runtime::Handle::current()),
+    );
     let server = Server::start(|_| ok("text/html", PAGE));
     for url in [
         server.url("/").to_string(),
@@ -897,10 +900,12 @@ async fn through_the_persons_proxy_the_destination_is_never_resolved_or_reached_
         "docs.example.com".into(),
         vec!["127.0.0.1".parse().unwrap()],
     );
-    reader.set_proxy(zephium_core::proxy::from_settings(
-        "http",
-        &format!("127.0.0.1:{}", proxy.port),
-    ));
+    reader
+        .routes()
+        .set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            &format!("127.0.0.1:{}", proxy.port),
+        ));
     assert_eq!(
         reader
             .read(html(parse("https://docs.example.com/pricing")))
@@ -922,10 +927,12 @@ async fn a_proxy_that_never_answers_is_a_connect_timeout() {
         connect_timeout: Duration::from_millis(300),
         ..limits()
     });
-    reader.set_proxy(zephium_core::proxy::from_settings(
-        "http",
-        &format!("127.0.0.1:{}", proxy.port),
-    ));
+    reader
+        .routes()
+        .set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            &format!("127.0.0.1:{}", proxy.port),
+        ));
     let started = Instant::now();
     assert_eq!(
         reader.read(html(parse("https://docs.example.com/"))).await,
@@ -938,22 +945,26 @@ async fn a_proxy_that_never_answers_is_a_connect_timeout() {
 async fn a_proxy_setting_that_cannot_be_reproduced_sends_nothing() {
     let server = Server::start(|_| ok("text/html", PAGE));
     let (reader, fixture) = reader();
-    reader.set_proxy(zephium_core::proxy::from_settings(
-        "socks5",
-        "127.0.0.1:9050",
-    ));
+    reader
+        .routes()
+        .set_app_proxy(zephium_core::proxy::from_settings(
+            "socks5",
+            "127.0.0.1:9050",
+        ));
     assert_eq!(
         reader.read(html(server.url("/"))).await,
         Err(ReadRefusal::ProxyUnsupported)
     );
-    reader.set_proxy(None);
+    reader.routes().set_app_proxy(None);
     *fixture.system.lock().unwrap() = Some(Route::Unsupported);
+    reader.routes().reread().await;
     assert_eq!(
         reader.read(html(server.url("/"))).await,
         Err(ReadRefusal::ProxyUnsupported)
     );
     assert_eq!(server.connections.load(Ordering::Acquire), 0);
     *fixture.system.lock().unwrap() = Some(Route::Direct);
+    reader.routes().reread().await;
     assert!(reader.read(html(server.url("/"))).await.is_ok());
     assert_eq!(reader.counters().refused(ReadRefusal::ProxyUnsupported), 2);
 }
@@ -972,15 +983,79 @@ async fn changing_the_proxy_refuses_reads_in_flight_and_reroutes_the_session() {
         tokio::spawn(async move { session.read(html(url)).await })
     };
     wait_for(|| !hang.seen().is_empty()).await;
-    reader.set_proxy(zephium_core::proxy::from_settings(
-        "http",
-        &format!("127.0.0.1:{}", proxy.port),
-    ));
+    reader
+        .routes()
+        .set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            &format!("127.0.0.1:{}", proxy.port),
+        ));
     assert_eq!(in_flight.await.unwrap(), Err(ReadRefusal::RouteChanged));
     wait_for(|| hang.closed.load(Ordering::Acquire) == 1).await;
     let _ = session.read(html(parse("https://docs.example.com/"))).await;
     assert_eq!(proxy.seen().len(), 1);
     assert_eq!(reader.counters().refused(ReadRefusal::RouteChanged), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_system_route_change_at_a_refresh_refuses_reads_in_flight() {
+    let hang = Server::start(|_| Reply::Hang);
+    let server = Server::start(|_| ok("text/html", PAGE));
+    let (reader, fixture) = reader();
+    let session = Arc::new(reader.session());
+    let in_flight = {
+        let session = session.clone();
+        let url = hang.url("/");
+        tokio::spawn(async move { session.read(html(url)).await })
+    };
+    wait_for(|| !hang.seen().is_empty()).await;
+    *fixture.system.lock().unwrap() = Some(Route::Unsupported);
+    reader.routes().reread().await;
+    assert_eq!(in_flight.await.unwrap(), Err(ReadRefusal::RouteChanged));
+    assert_eq!(
+        session.read(html(server.url("/"))).await,
+        Err(ReadRefusal::ProxyUnsupported)
+    );
+    assert_eq!(server.connections.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_before_the_route_is_known_is_refused_without_connecting() {
+    let server = Server::start(|_| ok("text/html", PAGE));
+    let (answer, gate) = std::sync::mpsc::channel::<()>();
+    let gate = std::sync::Mutex::new(gate);
+    let routes = crate::RouteSource::unread(
+        Arc::new(move || {
+            let _ = gate.lock().unwrap().recv();
+            Route::Direct
+        }),
+        crate::RouteSource::FIXTURE,
+    );
+    let reader = PublicReader::fixture_with(limits(), Arc::new(Fixture::default()), routes.clone());
+    routes.set_app_proxy(None);
+    assert_eq!(
+        reader.read(html(server.url("/"))).await,
+        Err(ReadRefusal::ProxyUnsupported)
+    );
+    assert_eq!(server.connections.load(Ordering::Acquire), 0);
+    answer.send(()).unwrap();
+    routes.settled().await;
+    assert!(reader.read(html(server.url("/"))).await.is_ok());
+}
+
+#[tokio::test]
+async fn a_connection_that_fails_asks_for_a_system_read() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let (reader, _) = reader();
+    assert_eq!(reader.routes().reads(), 0);
+    assert_eq!(
+        reader
+            .read(html(parse(&format!("http://127.0.0.1:{port}/"))))
+            .await,
+        Err(ReadRefusal::Transport)
+    );
+    wait_for(|| reader.routes().reads() == 1).await;
 }
 
 #[tokio::test]

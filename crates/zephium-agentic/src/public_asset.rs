@@ -1,9 +1,12 @@
 //! One bounded, cookie-free fetch of a public image for media admission.
 //! The bytes are data for the store's own sniffing and decoding; nothing
 //! here trusts a server's declared type beyond a coarse `image/*` gate.
-use reqwest::{redirect::Policy, Client};
+//! Every fetch connects directly, and only while the shared route is direct:
+//! it never goes around the person's proxy.
+use reqwest::{dns::Resolve, redirect::Policy, Client};
 use std::{sync::Arc, time::Duration};
 pub use zephium_public_fetch::guard::{public_address, public_https, public_resolver};
+pub use zephium_public_fetch::{PublicRoute, RouteSource};
 
 /// Largest public image body accepted before decoding; admission scales a
 /// large photo down to display size before it is stored.
@@ -23,6 +26,15 @@ pub enum PublicAssetError {
     TooLarge,
     /// The server did not answer with an image body.
     NotAnImage,
+    /// The route is proxied or not known: a direct fetch would go around it.
+    RouteRefused,
+}
+
+fn direct(route: PublicRoute) -> Result<(), PublicAssetError> {
+    match route {
+        PublicRoute::Direct => Ok(()),
+        PublicRoute::Proxied | PublicRoute::Unsupported => Err(PublicAssetError::RouteRefused),
+    }
 }
 
 /// The same picture at display size, when its CDN takes size parameters in
@@ -126,12 +138,24 @@ pub fn display_variant(url: &str) -> Option<String> {
 /// HTTPS redirects, and returns at most [`MAX_PUBLIC_IMAGE_BYTES`]. A CDN
 /// that serves display sizes is asked for one first; the address as given is
 /// the fallback.
-pub async fn fetch_public_image(url: &str) -> Result<Vec<u8>, PublicAssetError> {
+pub async fn fetch_public_image(
+    routes: &RouteSource,
+    url: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
+    image(routes.route(), public_resolver(), url).await
+}
+
+async fn image(
+    route: PublicRoute,
+    resolver: Arc<dyn Resolve>,
+    url: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
     let parsed = url::Url::parse(url).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(&parsed) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    let client = public_client(public_resolver())?;
+    direct(route)?;
+    let client = public_client(resolver)?;
     if let Some(variant) = display_variant(url).and_then(|v| url::Url::parse(&v).ok()) {
         if let Ok(bytes) = fetch_with(&client, variant).await {
             return Ok(bytes);
@@ -142,13 +166,25 @@ pub async fn fetch_public_image(url: &str) -> Result<Vec<u8>, PublicAssetError> 
 
 /// Exact anonymous record-source retrieval: no URL variants, credentials or redirects.
 /// The caller owns the original short deadline and must drop this future on cancellation.
-pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAssetError> {
+pub async fn fetch_public_record_image(
+    routes: &RouteSource,
+    raw: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
+    record_image(routes.route(), public_resolver(), raw).await
+}
+
+async fn record_image(
+    route: PublicRoute,
+    resolver: Arc<dyn Resolve>,
+    raw: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
     let target =
         crate::ContextNavigationTarget::parse(raw).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(target.as_url()) || !crate::semantic_wire::model_safe_public_url(&target) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    let client = public_client_builder(public_resolver())
+    direct(route)?;
+    let client = public_client_builder(resolver)
         .redirect(Policy::none())
         .build()
         .map_err(|_| PublicAssetError::Unavailable)?;
@@ -162,7 +198,11 @@ pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAsset
 
 /// A client for one small anonymous JSON lookup: no redirects, a short
 /// deadline, the same public-address resolver as image fetches.
-pub(crate) fn lookup_client(timeout: Duration) -> Result<Client, PublicAssetError> {
+pub(crate) fn lookup_client(
+    route: PublicRoute,
+    timeout: Duration,
+) -> Result<Client, PublicAssetError> {
+    direct(route)?;
     public_client_builder(public_resolver())
         .redirect(Policy::none())
         .timeout(timeout)
@@ -171,12 +211,12 @@ pub(crate) fn lookup_client(timeout: Duration) -> Result<Client, PublicAssetErro
         .map_err(|_| PublicAssetError::Unavailable)
 }
 
-fn public_client(resolver: Arc<dyn reqwest::dns::Resolve>) -> Result<Client, PublicAssetError> {
+fn public_client(resolver: Arc<dyn Resolve>) -> Result<Client, PublicAssetError> {
     public_client_builder(resolver)
         .build()
         .map_err(|_| PublicAssetError::Unavailable)
 }
-fn public_client_builder(resolver: Arc<dyn reqwest::dns::Resolve>) -> reqwest::ClientBuilder {
+fn public_client_builder(resolver: Arc<dyn Resolve>) -> reqwest::ClientBuilder {
     Client::builder()
         .no_proxy()
         .dns_resolver(resolver)
@@ -263,7 +303,7 @@ mod tests {
             "https://images.example.com/a.png?access_token=secret",
         ] {
             assert_eq!(
-                fetch_public_record_image(url).await,
+                record_image(PublicRoute::Direct, public_resolver(), url).await,
                 Err(PublicAssetError::InvalidUrl)
             );
         }
@@ -324,6 +364,84 @@ mod tests {
             let address = self.0;
             Box::pin(async move { Ok(public_addresses([address].into_iter())?) })
         }
+    }
+
+    #[derive(Default)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+    impl reqwest::dns::Resolve for CountingResolver {
+        fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let loopback = SocketAddr::from(([127, 0, 0, 1], 443));
+            Box::pin(async move { Ok(public_addresses([loopback].into_iter())?) })
+        }
+    }
+
+    #[tokio::test]
+    async fn every_fetch_refuses_unless_the_route_is_direct_before_any_lookup() {
+        let image_url = "https://images.example.com/a.png";
+        for route in [PublicRoute::Proxied, PublicRoute::Unsupported] {
+            let resolver = Arc::new(CountingResolver::default());
+            assert_eq!(
+                image(route, resolver.clone(), image_url).await,
+                Err(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(
+                record_image(route, resolver.clone(), image_url).await,
+                Err(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(
+                lookup_client(route, Duration::from_secs(1)).err(),
+                Some(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 0);
+        }
+        let resolver = Arc::new(CountingResolver::default());
+        assert_eq!(
+            image(PublicRoute::Direct, resolver.clone(), image_url).await,
+            Err(PublicAssetError::Unavailable)
+        );
+        assert_eq!(
+            record_image(PublicRoute::Direct, resolver.clone(), image_url).await,
+            Err(PublicAssetError::Unavailable)
+        );
+        assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 2);
+        assert!(lookup_client(PublicRoute::Direct, Duration::from_secs(1)).is_ok());
+        assert_eq!(
+            image(
+                PublicRoute::Proxied,
+                resolver,
+                "http://images.example.com/a.png"
+            )
+            .await,
+            Err(PublicAssetError::InvalidUrl)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shared_route_source_gates_the_public_entry_points() {
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        let url = "https://images.example.com/a.png";
+        assert_eq!(
+            fetch_public_image(&routes, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(routes.route(), PublicRoute::Proxied);
+        assert_eq!(
+            fetch_public_image(&routes, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        assert_eq!(
+            fetch_public_record_image(&routes, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        assert_eq!(
+            crate::youtube_oembed::fetch(&routes, "https://youtu.be/dQw4w9WgXcQ").await,
+            Err(PublicAssetError::RouteRefused)
+        );
     }
     #[tokio::test]
     async fn a_public_hostname_resolving_to_loopback_never_connects() {

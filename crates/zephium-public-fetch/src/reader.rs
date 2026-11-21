@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, Mutex, PoisonError,
     },
     time::Instant,
 };
@@ -10,18 +10,18 @@ use std::{
 use reqwest::header::{
     HeaderMap, ACCEPT, ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, LOCATION,
 };
-use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
-use zephium_core::proxy::ProxyServer;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::content::{self, Admission};
 use crate::decode::{Coding, Pipeline};
 use crate::guard::{self, ResolverSlots};
 use crate::limits::{
-    ReaderLimits, MAX_LOCATION_BYTES, MAX_REDIRECTS, MAX_SESSION_LIFETIME, RESOLVER_SLOTS_PER_READ,
+    ReaderLimits, MAX_LOCATION_BYTES, MAX_REDIRECTS, RESOLVER_SLOTS_PER_READ,
     SESSION_IDLE_PER_HOST, SESSION_IDLE_TIMEOUT, SNIFF_BYTES,
 };
 use crate::probe::{ConnectTiming, ReadProbe};
-use crate::route::{self, Route};
+use crate::route::Route;
+use crate::source::RouteSource;
 use crate::types::{
     Expect, PublicBody, ReadRefusal, ReadRequest, SizeLimit, StatusClass, StatusRefusal,
     TimeoutPhase, Timings,
@@ -51,14 +51,6 @@ impl Policy {
             Policy::Product => true,
             #[cfg(test)]
             Policy::Fixture(_) => false,
-        }
-    }
-
-    fn system_route(&self) -> Route {
-        match self {
-            Policy::Product => crate::platform::system_route(),
-            #[cfg(test)]
-            Policy::Fixture(fixture) => fixture.system_route(),
         }
     }
 
@@ -111,8 +103,7 @@ struct Inner {
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
     resolver_slots: Arc<ResolverSlots>,
     counters: Counters,
-    manual: RwLock<(u64, Option<ProxyServer>)>,
-    route_changed: Notify,
+    routes: RouteSource,
 }
 
 /// The only way the map touches the network: anonymous, bounded reads of
@@ -123,16 +114,36 @@ pub struct PublicReader {
 }
 
 impl PublicReader {
-    pub fn new(limits: ReaderLimits) -> Self {
-        Self::with_policy(limits, Policy::Product)
+    /// Reads take `routes`' route; a change refuses reads in flight.
+    pub fn new(limits: ReaderLimits, routes: RouteSource) -> Self {
+        Self::with_policy(limits, Policy::Product, routes)
     }
 
     #[cfg(test)]
     pub(crate) fn fixture(limits: ReaderLimits, fixture: Arc<crate::fixture::Fixture>) -> Self {
-        Self::with_policy(limits, Policy::Fixture(fixture))
+        let system = fixture.clone();
+        let routes = RouteSource::primed(
+            Arc::new(move || system.system_route()),
+            RouteSource::FIXTURE,
+        );
+        Self::fixture_with(limits, fixture, routes)
     }
 
-    fn with_policy(limits: ReaderLimits, policy: Policy) -> Self {
+    #[cfg(test)]
+    pub(crate) fn fixture_with(
+        limits: ReaderLimits,
+        fixture: Arc<crate::fixture::Fixture>,
+        routes: RouteSource,
+    ) -> Self {
+        Self::with_policy(limits, Policy::Fixture(fixture), routes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn routes(&self) -> &RouteSource {
+        &self.inner.routes
+    }
+
+    fn with_policy(limits: ReaderLimits, policy: Policy, routes: RouteSource) -> Self {
         let limits = limits.clamped();
         Self {
             inner: Arc::new(Inner {
@@ -144,29 +155,13 @@ impl PublicReader {
                     limits.max_concurrent * RESOLVER_SLOTS_PER_READ,
                 )),
                 counters: Counters::default(),
-                manual: RwLock::new((0, None)),
-                route_changed: Notify::new(),
+                routes,
             }),
         }
     }
 
     pub fn limits(&self) -> ReaderLimits {
         self.inner.limits
-    }
-
-    /// The proxy the person chose in Zephium, or `None` for the system's.
-    /// Reads in flight are refused and later ones take the new route.
-    pub fn set_proxy(&self, proxy: Option<ProxyServer>) {
-        {
-            let mut manual = self
-                .inner
-                .manual
-                .write()
-                .unwrap_or_else(PoisonError::into_inner);
-            manual.0 = manual.0.wrapping_add(1);
-            manual.1 = proxy;
-        }
-        self.inner.route_changed.notify_waiters();
     }
 
     /// A short-lived session that may reuse connections between its own
@@ -204,7 +199,6 @@ impl PublicReader {
 struct SessionClient {
     client: reqwest::Client,
     generation: u64,
-    built: Instant,
 }
 
 pub struct ReadSession {
@@ -422,24 +416,19 @@ fn send_refusal(error: &reqwest::Error, probe: &ReadProbe) -> ReadRefusal {
 impl ReadSession {
     fn client(&self) -> Result<reqwest::Client, ReadRefusal> {
         let inner = &self.reader.inner;
-        let (generation, manual) = inner
-            .manual
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
+        let (generation, route) = inner.routes.current();
         let mut slot = self.client.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(current) = slot.as_ref().filter(|current| {
-            current.generation == generation && current.built.elapsed() < MAX_SESSION_LIFETIME
-        }) {
+        if let Some(current) = slot
+            .as_ref()
+            .filter(|current| current.generation == generation)
+        {
             return Ok(current.client.clone());
         }
         *slot = None;
-        let route = route::route(manual.as_ref(), || inner.policy.system_route());
         let client = build_client(inner, &route)?;
         *slot = Some(SessionClient {
             client: client.clone(),
             generation,
-            built: Instant::now(),
         });
         Ok(client)
     }
@@ -449,22 +438,23 @@ impl ReadSession {
         inner.counters.reads.fetch_add(1, Ordering::AcqRel);
         let started = Instant::now();
         let probe = Arc::new(ReadProbe::default());
-        let changed = inner.route_changed.notified();
-        tokio::pin!(changed);
-        changed.as_mut().enable();
+        let mut changed = inner.routes.changed();
         let deadline = request.deadline.min(started + inner.limits.max_duration);
         let outcome = if deadline <= started {
             Err(ReadRefusal::Timeout(TimeoutPhase::Queue))
         } else {
             tokio::select! {
                 biased;
-                () = &mut changed => Err(ReadRefusal::RouteChanged),
+                Ok(()) = changed.changed() => Err(ReadRefusal::RouteChanged),
                 result = tokio::time::timeout_at(
                     tokio::time::Instant::from_std(deadline),
                     self.attempt(&request, &probe, started),
                 ) => result.unwrap_or_else(|_| Err(probe.timeout())),
             }
         };
+        if matches!(outcome, Err(ReadRefusal::Timeout(TimeoutPhase::Connect))) {
+            inner.routes.request_refresh();
+        }
         let counters = &inner.counters;
         counters
             .connections
@@ -528,7 +518,13 @@ impl ReadSession {
                 ))
                 .await
                 .map_err(|_| probe.timeout())?
-                .map_err(|error| send_refusal(&error, probe))?;
+                .map_err(|error| {
+                    let refusal = send_refusal(&error, probe);
+                    if error.is_connect() && refusal == ReadRefusal::Transport {
+                        inner.routes.request_refresh();
+                    }
+                    refusal
+                })?;
             let first_byte = started.elapsed();
             let headers = response.headers();
             let size = header_bytes(headers);

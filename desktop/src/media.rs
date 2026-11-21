@@ -1084,7 +1084,10 @@ pub(crate) async fn link_describe(
         if title.trim_start_matches("www.") != host.trim_start_matches("www.") {
             return Ok(false);
         }
-        let Some(details) = zephium_agentic::youtube_oembed::fetch(url).await else {
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return Ok(false);
+        };
+        let Ok(details) = zephium_agentic::youtube_oembed::fetch(&routes, url).await else {
             return Ok(false);
         };
         let title = format!("{}\n{}", details.title, details.channel);
@@ -1179,9 +1182,14 @@ async fn admit_remote(
             profile,
             environment,
         };
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return refused(ResourceError::Unavailable);
+        };
         let resource = {
             let bytes =
-                match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
+                match zephium_agentic::public_asset::fetch_public_image(&routes, parsed.as_str())
+                    .await
+                {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         trace.fetch = Some(error);

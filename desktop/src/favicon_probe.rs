@@ -97,7 +97,12 @@ fn client(policy: ProbePolicy) -> Option<Client> {
 }
 
 /// Attaches the prober to the shell. Each request answers exactly once.
-pub(crate) fn install(shell: &zephium_app::Handle) {
+/// `_routes` is the route every anonymous reader shares; the prober does not
+/// consult it yet.
+pub(crate) fn install(
+    shell: &zephium_app::Handle,
+    _routes: zephium_agentic::public_asset::RouteSource,
+) {
     let Some(client) = client(ProbePolicy::Product) else {
         crate::write_diagnostic(format_args!("favicon: probe client did not build"));
         return;

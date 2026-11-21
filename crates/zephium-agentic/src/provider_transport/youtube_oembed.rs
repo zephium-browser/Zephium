@@ -1,7 +1,7 @@
 //! A pasted YouTube link's real title and channel, from YouTube's public
 //! oEmbed endpoint. The address asked is built from a video ID parsed here,
 //! never from the pasted string, and only two plain-text fields are kept.
-use crate::public_asset::lookup_client;
+use crate::public_asset::{lookup_client, PublicAssetError, RouteSource};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,31 +96,35 @@ pub fn details(body: &[u8]) -> Option<YoutubeDetails> {
     })
 }
 
-/// One anonymous request; any failure is simply `None`.
-pub async fn fetch(raw: &str) -> Option<YoutubeDetails> {
-    let endpoint = oembed_url(&video_id(raw)?)?;
-    let client = lookup_client(TIMEOUT).ok()?;
+/// One anonymous request, refused unless `routes` is direct; every other
+/// failure is `Unavailable`.
+pub async fn fetch(routes: &RouteSource, raw: &str) -> Result<YoutubeDetails, PublicAssetError> {
+    let endpoint = video_id(raw)
+        .and_then(|id| oembed_url(&id))
+        .ok_or(PublicAssetError::InvalidUrl)?;
+    let client = lookup_client(routes.route(), TIMEOUT)?;
+    let unavailable = |_| PublicAssetError::Unavailable;
     let mut response = client
         .get(endpoint)
         .header(reqwest::header::ACCEPT, "application/json")
         .send()
         .await
-        .ok()?;
+        .map_err(unavailable)?;
     if response.status() != reqwest::StatusCode::OK
         || response
             .content_length()
             .is_some_and(|length| length > MAX_BODY_BYTES as u64)
     {
-        return None;
+        return Err(PublicAssetError::Unavailable);
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
+    while let Some(chunk) = response.chunk().await.map_err(unavailable)? {
         if body.len() + chunk.len() > MAX_BODY_BYTES {
-            return None;
+            return Err(PublicAssetError::Unavailable);
         }
         body.extend_from_slice(&chunk);
     }
-    details(&body)
+    details(&body).ok_or(PublicAssetError::Unavailable)
 }
 
 #[cfg(test)]

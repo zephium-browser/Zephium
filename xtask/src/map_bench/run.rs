@@ -8,7 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::task::{Id as TaskId, JoinSet};
 use url::Url;
-use zephium_public_fetch::{PublicReader, ReadRefusal, ReadRequest, ReadSession, ReaderLimits};
+use zephium_public_fetch::{
+    PublicReader, ReadRefusal, ReadRequest, ReadSession, ReaderLimits, RouteSource,
+};
 
 use super::corpus::{Corpus, CorpusQuery, QueryLabel, MAX_CORPUS_FILES, MAX_QUERIES};
 use super::engine::{
@@ -229,7 +231,10 @@ impl PublicSource {
             .enable_all()
             .build()
             .map_err(|error| BenchError::io("reader_runtime", &error))?;
-        let reader = PublicReader::new(ReaderLimits::default());
+        let routes = RouteSource::new(runtime.handle());
+        routes.set_app_proxy(None);
+        runtime.block_on(routes.settled());
+        let reader = PublicReader::new(ReaderLimits::default(), routes);
         let session = Arc::new(reader.session());
         Ok(Self {
             reader,
