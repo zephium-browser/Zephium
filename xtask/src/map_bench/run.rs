@@ -182,6 +182,25 @@ pub(super) struct Measure {
     pub(super) refusals: BTreeMap<String, u64>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub(super) struct ReplayMeasure {
+    pub(super) wall: Duration,
+    pub(super) wall_replayed: bool,
+    pub(super) cpu_ns: Option<u64>,
+    pub(super) peak_rss_delta_bytes: Option<u64>,
+}
+
+fn process_delta(before: Option<platform::ProcessSample>) -> (Option<u64>, Option<u64>) {
+    let Some((before, after)) = before.and_then(|before| Some((before, platform::sample()?)))
+    else {
+        return (None, None);
+    };
+    (
+        after.cpu_ns.checked_sub(before.cpu_ns),
+        after.peak_rss_bytes.checked_sub(before.peak_rss_bytes),
+    )
+}
+
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct QueryResult {
     pub(super) outcome: Option<Outcome>,
@@ -668,14 +687,10 @@ fn record_query(
     io.query_index = query.index;
     let output = execute(engine, query, &mut io);
     let wall = prior_elapsed.saturating_add(started.elapsed());
-    let process_after = (!resumed).then(platform::sample).flatten();
+    let cost = process_delta(process_before);
     let mut measure = source.counts().delta(&before);
     measure.wall = wall;
-    if let (Some(before), Some(after)) = (process_before, process_after) {
-        measure.cpu_ns = Some(after.cpu_ns.saturating_sub(before.cpu_ns));
-        measure.peak_rss_delta_bytes =
-            Some(after.peak_rss_bytes.saturating_sub(before.peak_rss_bytes));
-    }
+    (measure.cpu_ns, measure.peak_rss_delta_bytes) = cost;
     measure.requests += prior_reads;
     measure.wire_bytes += prior_wire;
     measure.decoded_bytes += prior_decoded;
@@ -848,11 +863,24 @@ pub(super) fn replay(
             .iter()
             .position(|label| label.id == query.label.id)
             .unwrap_or(query.index);
+        let before = platform::sample();
+        let started = Instant::now();
         let result = replay_query(root, query, engine, recorded.clock(), index, Some(&path))
             .unwrap_or_else(|error| {
                 eprintln!("map bench: {}", error.for_query(&query.label.id));
                 QueryResult::unavailable(Verdict::Fail, Reason::ArtifactError, Activity::default())
             });
+        let wall = started.elapsed();
+        let (cpu_ns, peak_rss_delta_bytes) = process_delta(before);
+        write_json(
+            &path.join(MEASURE),
+            &ReplayMeasure {
+                wall,
+                wall_replayed: true,
+                cpu_ns,
+                peak_rss_delta_bytes,
+            },
+        )?;
         save_outcome(&path.join(OUTCOME), result)?;
     }
     let manifest = ReplayManifest {

@@ -8,7 +8,9 @@ use zephium_public_fetch::ReadRefusal;
 
 use super::corpus::{Kind, QueryLabel};
 use super::engine::{EngineFailure, EngineKind, FetchRefusal, ProbeFetch, RobotsStop};
-use super::run::{latest_replay, Measure, QueryResult, RunManifest, MEASURE, OUTCOME};
+use super::run::{
+    latest_replay, Measure, QueryResult, ReplayMeasure, RunManifest, MEASURE, OUTCOME,
+};
 use super::score::{Reason, Score, Verdict};
 use super::session::{MAX_PLACES, PHASES, PLACE_SOURCES};
 use super::store::{self, optional_json, query_dir, read_json, write_blob, write_json};
@@ -21,6 +23,10 @@ struct Distribution {
     #[serde(skip_serializing_if = "Option::is_none")]
     p90: Option<u64>,
     max: Option<u64>,
+}
+
+fn ns(time: std::time::Duration) -> u64 {
+    u64::try_from(time.as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn distribution(mut samples: Vec<u64>, p90: bool) -> Distribution {
@@ -147,6 +153,7 @@ impl SessionTotals {
             Budget::HostFetches,
             Budget::Concurrent,
             Budget::HostConcurrent,
+            Budget::TotalBytes,
             Budget::HtmlBytes,
             Budget::XmlBytes,
             Budget::TextBytes,
@@ -395,12 +402,21 @@ impl Accumulator {
             .entry(label.slice.clone().unwrap_or_else(|| "(unsliced)".into()))
             .or_insert_with(counts);
         *slice.entry(verdict).or_default() += 1;
-        let ns = |time: std::time::Duration| u64::try_from(time.as_nanos()).unwrap_or(u64::MAX);
         if let Some(session) = &mut self.summary.session {
             session.collect(label, &result, &mut self.samples);
         }
         let mut engine_failure = None;
         if let Some(outcome) = result.outcome {
+            if replay
+                && self.summary.session.is_some()
+                && (outcome.stats.contains_key("cancelled") || outcome.needs_results_page)
+            {
+                let bytes = PHASES
+                    .iter()
+                    .filter_map(|phase| outcome.stats.get(&format!("phase.{phase:?}.bytes")))
+                    .fold(0u64, |total, bytes| total.saturating_add(*bytes));
+                self.samples.decoded_bytes.push(bytes);
+            }
             self.summary.synthetic_results += usize::from(outcome.synthetic_results);
             engine_failure = outcome.failure;
             self.samples
@@ -516,6 +532,11 @@ impl Report {
                 for query in &manifest.queries {
                     let path = query_dir(&path, &query.id, false)?;
                     let result = read_json(&path.join(OUTCOME))?;
+                    if let Some(measure) = optional_json::<ReplayMeasure>(&path.join(MEASURE))? {
+                        replay.samples.wall.push(ns(measure.wall));
+                        replay.samples.cpu.extend(measure.cpu_ns);
+                        replay.samples.memory.extend(measure.peak_rss_delta_bytes);
+                    }
                     replay.push(query, result, None, true);
                 }
                 Ok(replay.finish())
@@ -583,6 +604,10 @@ impl Summary {
                         | "first_place_ns"
                         | "full_ns"
                         | "requests"
+                        | "decoded_bytes"
+                        | "wall_ns"
+                        | "peak_rss_delta_bytes"
+                        | "cpu_ns"
                         | "primary_sections_per_place"
                         | "secondary_sections_per_place"
                         | "sections_per_place"
@@ -592,7 +617,11 @@ impl Summary {
             {
                 continue;
             }
-            metric_row(markdown, metric, values);
+            if replay && matches!(*metric, "wall_ns" | "cpu_ns" | "peak_rss_delta_bytes") {
+                metric_row(markdown, &format!("replay_{metric}"), values);
+            } else {
+                metric_row(markdown, metric, values);
+            }
         }
         markdown.push_str("\n| Refusal class | Count |\n| --- | ---: |\n");
         if self.refusals.is_empty() {

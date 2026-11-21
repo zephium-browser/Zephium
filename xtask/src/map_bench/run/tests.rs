@@ -234,6 +234,11 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
     let replayed =
         store::read_json::<QueryResult>(&first_replay.join("queries/a/outcome.json")).unwrap();
     assert_eq!(captured, replayed);
+    let cost: ReplayMeasure =
+        store::read_json(&first_replay.join("queries/a/measure.json")).unwrap();
+    assert!(cost.wall_replayed && !cost.wall.is_zero());
+    assert_eq!(cost.cpu_ns.is_some(), platform::sample().is_some());
+    assert_eq!(cost.peak_rss_delta_bytes.is_some(), cost.cpu_ns.is_some());
 
     for (path, expect) in [
         ("/changed", Expectation::Text),
@@ -690,6 +695,9 @@ Destinations scored as matched_locale — 0.
     report::write(root.path(), Some(&custom)).unwrap();
     let markdown = fs::read_to_string(custom).unwrap();
     assert!(markdown.contains("## Latest replay\n\nUnrecorded requests: 1"));
+    assert!(markdown.contains("| replay_cpu_ns |"));
+    assert!(markdown.contains("| replay_peak_rss_delta_bytes |"));
+    assert!(markdown.contains("| replay_wall_ns |"));
     assert!(!markdown.contains("https://") && !markdown.contains(TEXT));
 }
 
