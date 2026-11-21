@@ -305,14 +305,15 @@ impl Shell {
         if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
             return NativeWork::default();
         }
+        // A stand-in New Tab leaves nothing worth reopening.
+        let stand_in = self.is_new_tab_stand_in(id);
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
-        let closed = kept
-            .is_none()
+        let closed = (kept.is_none() && !stand_in)
             .then(|| self.closed_record(id, unix_millis()))
             .flatten();
         self.cancel_page_permission_for_item(id);
@@ -492,11 +493,13 @@ impl Shell {
     }
 
     pub(super) fn new_tab_destination_is_current(&self, id: ItemId) -> bool {
-        self.new_tab_destinations.get(&id).is_some_and(|destination| {
-            self.items
-                .pending_navigation_url(id)
-                .is_none_or(|target| new_tab_destination_matches(destination, target))
-        })
+        self.new_tab_destinations
+            .get(&id)
+            .is_some_and(|destination| {
+                self.items
+                    .pending_navigation_url(id)
+                    .is_none_or(|target| new_tab_destination_matches(destination, target))
+            })
     }
 
     pub(super) fn update_new_tab_destination(&mut self, id: ItemId, url: &url::Url, adopt: bool) {
