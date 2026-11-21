@@ -47,7 +47,6 @@ fn query_corpus() {
                 "me or you",
                 "the best library",
                 "something to do",
-                "cheap shoes near me",
                 "amazon and ebay",
                 "find a way to learn rust",
                 "an or the",
@@ -61,6 +60,7 @@ fn query_corpus() {
                 "blue green",
             ],
         ),
+        ("list", &["cheap shoes near me"]),
         (
             "question",
             &[
@@ -133,6 +133,8 @@ fn query_corpus() {
         for &input in queries {
             let read = read_query(input).unwrap();
             let actual = match read.kind() {
+                QueryKind::List => "list",
+                QueryKind::Instant => "instant",
                 QueryKind::Place { .. } if read.confidence() == Confidence::Low => "uncertain",
                 QueryKind::Place { .. } => "place",
                 QueryKind::Passage(Question) => "question",
@@ -161,7 +163,10 @@ fn carries_normalized_terms_and_sections() {
     assert_eq!(shared.unwrap().role, SectionRole::Pricing);
     for &(word, role) in SECTION_WORDS {
         let q = read_query(&format!("GitHub Actions {word}")).unwrap();
-        let QueryKind::Place { entity, section } = q.kind() else {
+        let QueryKind::Place {
+            entity, section, ..
+        } = q.kind()
+        else {
             panic!()
         };
         assert_eq!(entity, &["github", "actions"]);
@@ -181,4 +186,104 @@ fn query_budgets() {
         Err(QueryError::Terms)
     ));
     assert!(matches!(read_query(" \t\n"), Err(QueryError::Empty)));
+}
+
+#[test]
+fn instant_listing_fresh_and_entity_boundaries() {
+    let groups: &[(&str, &[&str])] = &[
+        (
+            "instant",
+            &[
+                "san francisco time",
+                "time in cape town",
+                "weather london",
+                "weather in athens",
+                "tokyo weather",
+                "utc time",
+                "100 usd to eur",
+                "42 eur in pln",
+                "5 miles in km",
+                "1 kg to lb",
+                "15% of 240",
+                "5% of 12",
+                "12 * 7",
+                "(2+3)*4",
+                "translate thank you to japanese",
+                "translate hello to french",
+                "define ephemeral",
+                "define stack frame",
+                "timer 10 minutes",
+                "30 seconds timer",
+            ],
+        ),
+        (
+            "list",
+            &[
+                "best laptop for programming",
+                "best noise cancelling headphones",
+                "noise cancelling headphones",
+                "pizza near me",
+                "coffee near me",
+                "tech news today",
+                "flights to tokyo",
+                "cheap flights to london",
+                "hotels in lisbon",
+                "easy dinner recipes",
+                "tomato soup recipes",
+                "analytics icon",
+                "calendar icon",
+                "remote rust jobs",
+                "part time design jobs",
+                "recipes for dinner",
+            ],
+        ),
+        (
+            "fresh",
+            &[
+                "new openai model",
+                "latest claude model",
+                "chrome latest version",
+                "svelte 5 whats new",
+                "safari release notes",
+                "webkit news",
+                "tauri announcements",
+                "raycast latest",
+                "firefox releases",
+                "stripe announcement",
+            ],
+        ),
+        (
+            "place",
+            &[
+                "zoom download",
+                "github status",
+                "weather.com",
+                "weather underground",
+                "time magazine",
+                "best buy",
+                "timer app docs",
+                "google translate",
+                "google flights",
+                "new york times",
+                "steve jobs",
+                "hilton hotels",
+                "spotify wrapped",
+                "weatherkit api",
+                "linear integrations",
+            ],
+        ),
+    ];
+    for (group, cases) in groups {
+        for &query in *cases {
+            let q = read_query(query).unwrap();
+            let actual = match q.kind() {
+                QueryKind::Place { fresh: true, .. } => "fresh",
+                QueryKind::Place { .. } => "place",
+                QueryKind::List => "list",
+                QueryKind::Instant => "instant",
+                _ => "other",
+            };
+            assert_eq!(actual, *group, "{query}");
+        }
+    }
 }

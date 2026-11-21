@@ -339,3 +339,16 @@ fn one_level_arena_keeps_visible_roles() {
         .any(|n| n.role == Role::Heading(Some(2)) && n.text == "two"));
     assert!(doc.nodes().iter().all(|n| !n.text.contains("private")));
 }
+
+#[test]
+fn large_inline_attributes_allow_later_content() {
+    let payload = "Z".repeat(300 * 1024);
+    let html = format!("<p>before</p><img src='data:image/png;base64,{payload}'><div data-state='{payload}'></div><p>after</p>");
+    let doc = document(html.as_bytes(), DocLimits::RESULTS);
+    assert!(!doc.truncated());
+    assert!(doc.nodes().iter().any(|n| n.text == "after"));
+    assert!(doc
+        .nodes()
+        .iter()
+        .all(|n| n.image_source.is_none() && !n.text.contains('Z')));
+}

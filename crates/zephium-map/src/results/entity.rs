@@ -165,7 +165,7 @@ const PROFILE_HOSTS: &[(Network, &[&str])] = &[
     (Network::Facebook, &["facebook.com"]),
 ];
 
-fn profile(url: &Url, title: &str, entity: &Entity) -> Option<Network> {
+fn profile(url: &Url, title: &str, entity: Option<&Entity>) -> Option<Network> {
     let host = url.host_str()?;
     let (net, _) = PROFILE_HOSTS
         .iter()
@@ -194,7 +194,11 @@ fn profile(url: &Url, title: &str, entity: &Entity) -> Option<Network> {
         (net, section),
         (Network::YouTube, "channel") | (Network::Discord, _)
     );
-    (entity.matches(handle) || opaque && title.split_whitespace().any(|word| entity.matches(word)))
+    entity
+        .is_none_or(|entity| {
+            entity.matches(handle)
+                || opaque && title.split_whitespace().any(|word| entity.matches(word))
+        })
         .then_some(*net)
 }
 
@@ -273,7 +277,7 @@ impl Page<'_> {
         let mut panel = Vec::new();
         for (at, n) in self.nodes.iter().enumerate() {
             let ctx = self.context[at];
-            if ctx.hidden || ctx.paid || excluded[at] {
+            if ctx.hidden || ctx.paid || ctx.widget || excluded[at] {
                 continue;
             }
             if n.role == Role::Link {
@@ -323,7 +327,9 @@ impl Page<'_> {
                     }
                 }
                 if layer.social.len() < MAX_SOCIAL {
-                    if let Some(network) = entity.as_ref().and_then(|e| profile(&url, words(n), e))
+                    if let Some(network) = entity
+                        .as_ref()
+                        .and_then(|e| profile(&url, words(n), Some(e)))
                     {
                         if !layer.social.iter().any(|p| p.network == network) {
                             layer.social.push(Profile { network, url });
@@ -368,9 +374,13 @@ impl Page<'_> {
             {
                 if best.is_none_or(|prior| score > prior) {
                     best = Some(score);
-                    layer.official = Some(official);
+                    layer.official = Some(Box::new(official));
                 }
             }
         }
     }
+}
+
+pub(crate) fn site_profile(url: &Url) -> Option<Network> {
+    profile(url, "", None)
 }

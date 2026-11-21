@@ -252,6 +252,15 @@ impl Arena {
             let Some(key) = ATTRIBUTE_NAMES.iter().position(|&k| k == name) else {
                 continue;
             };
+            if name == "src"
+                && attr
+                    .value
+                    .trim_start()
+                    .get(..5)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("data:"))
+            {
+                continue;
+            }
             if self.node(id).has_attr(name) {
                 continue;
             }

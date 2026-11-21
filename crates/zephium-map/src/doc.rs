@@ -159,6 +159,22 @@ pub enum Role {
     FrameBoundary,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Marks(u8);
+impl Marks {
+    pub const SPONSORED: Self = Self(1);
+    pub const ACCEPTED: Self = Self(2);
+    pub const SUGGESTED: Self = Self(4);
+    pub const GENERATED: Self = Self(8);
+    pub const FEATURED: Self = Self(16);
+    pub const WIDGET: Self = Self(32);
+    pub fn has(self, mark: Self) -> bool {
+        self.0 & mark.0 != 0
+    }
+    pub fn insert(&mut self, mark: Self) {
+        self.0 |= mark.0;
+    }
+}
 pub struct Node {
     pub role: Role,
     pub parent: Option<usize>,
@@ -167,7 +183,8 @@ pub struct Node {
     pub destination: Option<Url>,
     pub image_source: Option<Url>,
     pub hidden: bool,
-    pub sponsored: bool,
+    pub marks: Marks,
+    pub language: Option<String>,
     pub element_id: Option<String>,
 }
 impl Node {
@@ -188,7 +205,8 @@ impl Node {
             destination: None,
             image_source: None,
             hidden: false,
-            sponsored: false,
+            marks: Marks::default(),
+            language: None,
             element_id: None,
         }
     }
@@ -282,6 +300,10 @@ impl DocBuilder {
         if matches!(node.role, Role::Heading(Some(n)) if !(1..=6).contains(&n))
             || node.destination.is_some() && node.role != Role::Link
             || node.image_source.is_some() && node.role != Role::Image
+            || node
+                .language
+                .as_ref()
+                .is_some_and(|l| node.role != Role::CodeBlock || !valid_language(l))
         {
             return Err(DocError::Role);
         }
@@ -295,6 +317,7 @@ impl DocBuilder {
             .name
             .len()
             .saturating_add(node.text.len())
+            .saturating_add(node.language.as_deref().map_or(0, str::len))
             .saturating_add(node.element_id.as_deref().map_or(0, str::len));
         if size > self.limits.node_text_bytes || size > self.limits.text_bytes - self.text_bytes {
             return Err(DocError::Text);
@@ -306,7 +329,42 @@ impl DocBuilder {
         Ok(index)
     }
 
-    pub fn finish(self) -> Doc {
+    pub fn finish(mut self) -> Doc {
+        crate::linked::mark_answers(&mut self.doc.nodes, &self.doc.head);
         self.doc
     }
 }
+
+impl Marks {
+    pub(crate) fn from_label(value: &str) -> Option<Self> {
+        let v = value.trim().to_ascii_lowercase();
+        Some(match v.rsplit('/').next()? {
+            "acceptedanswer" | "accepted-answer" => Self::ACCEPTED,
+            "suggestedanswer" | "suggested-answer" => Self::SUGGESTED,
+            "sponsored" | "sponsoredcontent" => Self::SPONSORED,
+            "ai overview"
+            | "ai overviews"
+            | "ai-overview"
+            | "generated overview"
+            | "ai-generated answer"
+            | "ai-generated overview"
+            | "ai answer"
+            | "ai-answer"
+            | "generative answer" => Self::GENERATED,
+            "featured snippet" | "featured-snippet" | "b_ansfs" => Self::FEATURED,
+            "calculator" | "converter" | "currency converter" | "unit converter" | "weather"
+            | "weather card" | "translation" | "translator" | "map pack" | "local pack"
+            | "clock" => Self::WIDGET,
+            _ => return None,
+        })
+    }
+}
+
+pub const MAX_LANGUAGE_BYTES: usize = 32;
+fn valid_language(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_LANGUAGE_BYTES
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+#_-".contains(&b))
+}
+pub use html::MAX_CHARSET_LABEL_BYTES;

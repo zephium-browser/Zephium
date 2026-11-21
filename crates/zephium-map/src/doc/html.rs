@@ -187,6 +187,7 @@ impl DocBuilder {
     fn append(&mut self, at: usize, raw: &str, verbatim: bool) {
         let node = &self.doc.nodes[at];
         let room = self.limits.node_text_bytes
+            - node.language.as_deref().map_or(0, str::len)
             - node.text.len()
             - node.name.len()
             - node.element_id.as_deref().map_or(0, str::len);
@@ -273,6 +274,11 @@ impl DocBuilder {
             }
             inline |= self.doc.nodes[at].role == Role::Text;
             prose |= takes_prose;
+            if self.doc.nodes[at].marks.has(Marks::GENERATED)
+                || self.doc.nodes[at].marks.has(Marks::SPONSORED)
+            {
+                break;
+            }
         }
         if !captured {
             let (parent, _) = self.fit_parent(parent, level);
@@ -311,6 +317,16 @@ impl DocBuilder {
                 self.mark_truncated();
                 continue;
             }
+            if tag_is(&n, "script")
+                && !hidden(&n)
+                && n.attr("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/ld+json"))
+            {
+                let body_loss = std::mem::take(&mut self.doc.truncated);
+                self.head_element(&n, base);
+                self.doc.head.truncated |= std::mem::replace(&mut self.doc.truncated, body_loss);
+                continue;
+            }
             if hidden(&n)
                 || matches!(
                     n.tag(),
@@ -340,7 +356,7 @@ impl DocBuilder {
             let (parent, level) = if let Some(role) = role {
                 let (parent, level) = self.fit_parent(parent, level);
                 let mut node = Node::new(role, parent);
-                node.sponsored = ["data-layout", "data-type", "data-testid"]
+                if ["data-layout", "data-type", "data-testid"]
                     .iter()
                     .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
                     || n.attr("rel").is_some_and(|v| {
@@ -348,8 +364,11 @@ impl DocBuilder {
                             .any(|w| w.eq_ignore_ascii_case("sponsored"))
                     })
                     || n.attr("class")
-                        .is_some_and(|v| v.split_ascii_whitespace().any(|w| w == "b_ad"));
-
+                        .is_some_and(|v| v.split_ascii_whitespace().any(|w| w == "b_ad"))
+                {
+                    node.marks.insert(Marks::SPONSORED);
+                }
+                node.marks.insert(marks(&n));
                 if role == Role::Link {
                     node.destination = self.resolve(&n, "href", base);
                 }
@@ -377,6 +396,27 @@ impl DocBuilder {
                         self.mark_truncated();
                     }
                 }
+                if role == Role::CodeBlock {
+                    let class = n.attr("class").into_iter().chain(
+                        n.children()
+                            .filter(|c| tag_is(c, "code"))
+                            .filter_map(|c| c.attr("class")),
+                    );
+                    let language = class
+                        .flat_map(str::split_ascii_whitespace)
+                        .find_map(|s| {
+                            s.strip_prefix("language-")
+                                .or_else(|| s.strip_prefix("lang-"))
+                        })
+                        .filter(|s| valid_language(s));
+                    let room = self
+                        .limits
+                        .node_text_bytes
+                        .min(self.limits.text_bytes - self.text_bytes)
+                        - node.name.len()
+                        - node.element_id.as_deref().map_or(0, str::len);
+                    node.language = language.filter(|s| s.len() <= room).map(str::to_owned);
+                }
                 (Some(self.push(node)?), level + 1)
             } else {
                 (parent, level)
@@ -392,6 +432,33 @@ impl DocBuilder {
         }
         Ok(())
     }
+}
+
+fn marks(n: &NodeRef) -> Marks {
+    let mut marks = Marks::default();
+    for attr in [
+        "itemprop",
+        "itemtype",
+        "aria-label",
+        "data-testid",
+        "data-type",
+        "class",
+        "id",
+    ] {
+        if let Some(value) = n.attr(attr) {
+            if let Some(mark) = Marks::from_label(value) {
+                marks.insert(mark);
+            }
+            if matches!(attr, "class" | "itemprop" | "itemtype") {
+                for token in value.split_ascii_whitespace() {
+                    if let Some(mark) = Marks::from_label(token) {
+                        marks.insert(mark);
+                    }
+                }
+            }
+        }
+    }
+    marks
 }
 
 fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
@@ -508,9 +575,12 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
         "th" => CellHeader,
         "progress" => Progress,
         "iframe" => FrameBoundary,
+        "section" => Group,
+        _ if n.has_attr("itemprop") || marks(n) != Marks::default() => Group,
         _ => return None,
     })
 }
 
 #[cfg(test)]
 mod tests;
+pub use decode::MAX_CHARSET_LABEL_BYTES;

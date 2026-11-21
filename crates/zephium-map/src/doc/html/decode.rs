@@ -14,11 +14,11 @@ use html5ever::{
 use std::cell::Cell;
 
 pub(super) const CHUNK_BYTES: usize = 4096;
-pub(super) const MAX_CHARSET_LABEL_BYTES: usize = 64;
+pub const MAX_CHARSET_LABEL_BYTES: usize = 64;
 const META_PREFIX_BYTES: usize = 4096;
 // html5ever can buffer an unfinished token, foster-parented characters, and live handles
 // without issuing any arena allocations. Bound that work independently of the sink.
-const MAX_UNFINISHED_TOKEN_BYTES: usize = 64 * 1024;
+const MAX_UNFINISHED_TOKEN_BYTES: usize = 1024 * 1024;
 const MAX_PENDING_TEXT_TOKENS: usize = 4096;
 const MAX_LIVE_HANDLES: usize = 512;
 const MAX_LIVE_MARKUP_BYTES: usize = super::MAX_ARENA_TEXT_BYTES;

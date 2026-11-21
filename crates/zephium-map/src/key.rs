@@ -35,8 +35,19 @@ pub(crate) fn check_url(url: &Url, limit: usize) -> Result<(), KeyError> {
     Ok(())
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(try_from = "Url")]
 pub struct PageKey(Url);
+impl TryFrom<Url> for PageKey {
+    type Error = KeyError;
+    fn try_from(raw: Url) -> Result<Self, KeyError> {
+        let key = Self::from_url(&raw)?;
+        if key.as_url() != &raw {
+            return Err(KeyError::Url);
+        }
+        Ok(key)
+    }
+}
 
 impl PageKey {
     pub fn from_url(url: &Url) -> Result<Self, KeyError> {
@@ -74,8 +85,21 @@ impl PageKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(try_from = "String")]
 pub struct SiteKey(String);
+impl TryFrom<String> for SiteKey {
+    type Error = KeyError;
+    fn try_from(raw: String) -> Result<Self, KeyError> {
+        if raw.len() > MAX_URL_BYTES {
+            return Err(KeyError::UrlLength);
+        }
+        let url = Url::parse(&format!("https://{raw}")).map_err(|_| KeyError::Url)?;
+        Self::from_url(&url)
+            .filter(|k| k.as_str() == raw)
+            .ok_or(KeyError::Url)
+    }
+}
 
 impl SiteKey {
     pub fn from_url(url: &Url) -> Option<Self> {
@@ -89,8 +113,15 @@ impl SiteKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+#[serde(try_from = "String")]
 pub struct LocatorText(String);
+impl TryFrom<String> for LocatorText {
+    type Error = KeyError;
+    fn try_from(raw: String) -> Result<Self, KeyError> {
+        Self::new(&raw)
+    }
+}
 
 impl LocatorText {
     pub fn new(text: &str) -> Result<Self, KeyError> {
@@ -108,7 +139,7 @@ impl LocatorText {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Default)]
 pub enum Locator {
     #[default]
     None,

@@ -1,4 +1,4 @@
-use crate::doc::{Doc, Landmark, Node, Role};
+use crate::doc::{Doc, Landmark, Marks, Node, Role};
 use crate::flatten;
 use crate::key::{PageKey, SiteKey, MAX_URL_BYTES};
 use crate::query::{Confidence, QueryRead};
@@ -8,6 +8,7 @@ use zephium_core::search::SearchEngine;
 
 mod destination;
 mod entity;
+pub(crate) use entity::site_profile;
 
 pub const MAX_RESULTS: usize = 16;
 pub const MAX_SITELINKS: usize = 8;
@@ -22,6 +23,7 @@ const LABELS_BEFORE: usize = 3;
 const LABELS_AFTER: usize = 4;
 const ADDRESS_WORDS: usize = 10;
 
+#[derive(Clone)]
 pub struct Link {
     pub title: String,
     pub url: Url,
@@ -42,11 +44,12 @@ pub struct Organic {
 }
 #[derive(Default)]
 pub struct DropCounts {
+    pub generated: usize,
     pub paid: usize,
     pub own: usize,
     pub repeat: usize,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Network {
     Twitter,
     GitHub,
@@ -59,9 +62,14 @@ pub enum Network {
     Instagram,
     Facebook,
 }
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Profile {
     pub network: Network,
     pub url: Url,
+}
+pub struct Featured {
+    pub text: String,
+    pub organic_index: usize,
 }
 pub struct Official {
     pub organic_index: usize,
@@ -77,8 +85,11 @@ pub struct Evidence {
 }
 #[derive(Default)]
 pub struct FirstLayer {
+    pub featured: Option<Box<Featured>>,
+    pub discussion: Vec<usize>,
+    pub widget: bool,
     pub organic: Vec<Organic>,
-    pub official: Option<Official>,
+    pub official: Option<Box<Official>>,
     pub social: Vec<Profile>,
     pub video: Vec<Link>,
     pub images: Vec<Image>,
@@ -115,7 +126,7 @@ const AD_LABELS: &[&str] = &[
     "sponsorisé",
 ];
 /// A page that asks whether a person is there before any results.
-const CHALLENGE: &[&str] = &[
+pub(crate) const CHALLENGE: &[&str] = &[
     "unusual traffic",
     "not a robot",
     "are you a robot",
@@ -211,7 +222,7 @@ fn address_like(text: &str) -> bool {
         || (!text.contains(' ') && text.contains('.'))
 }
 
-fn clip(text: &str, bytes: usize) -> String {
+pub(crate) fn clip(text: &str, bytes: usize) -> String {
     if text.len() <= bytes {
         return text.to_owned();
     }
@@ -230,6 +241,10 @@ struct Context {
     main: bool,
     panel: bool,
     paid: bool,
+    generated: bool,
+    featured: bool,
+    widget: bool,
+    mixed: bool,
 }
 struct Page<'a> {
     nodes: &'a [Node],
@@ -264,8 +279,14 @@ impl<'a> Page<'a> {
         for (at, n) in nodes.iter().enumerate() {
             let mut state = n.parent.map(|p| context[p]).unwrap_or_default();
             state.end = at + 1;
-            state.hidden |= n.hidden;
-            state.paid |= n.sponsored || ad_label(&n.name);
+            state.generated |= n.marks.has(Marks::GENERATED)
+                || Marks::from_label(&n.name) == Some(Marks::GENERATED);
+            state.hidden |= n.hidden || state.generated;
+            state.featured =
+                n.marks.has(Marks::FEATURED) || Marks::from_label(&n.name) == Some(Marks::FEATURED);
+            state.widget =
+                n.marks.has(Marks::WIDGET) || Marks::from_label(&n.name) == Some(Marks::WIDGET);
+            state.paid |= n.marks.has(Marks::SPONSORED) || ad_label(&n.name);
             state.main |= n.role == Role::Landmark(Some(Landmark::Main));
             state.panel |= n.role == Role::Landmark(Some(Landmark::Complementary))
                 || n.role == Role::Landmark(Some(Landmark::Region))
@@ -295,6 +316,35 @@ impl<'a> Page<'a> {
             }
         }
         for (at, node) in nodes.iter().enumerate() {
+            if !context[at].hidden
+                && matches!(node.role, Role::Heading(_) | Role::Text | Role::Paragraph)
+            {
+                let mark = Marks::from_label(words(node));
+                if matches!(
+                    mark,
+                    Some(Marks::GENERATED | Marks::FEATURED | Marks::WIDGET)
+                ) {
+                    let card = std::iter::successors(node.parent, |&p| nodes[p].parent)
+                        .take_while(|&p| {
+                            !matches!(
+                                nodes[p].role,
+                                Role::Landmark(Some(Landmark::Main)) | Role::List
+                            )
+                        })
+                        .find(|&p| {
+                            nodes[p].parent.is_some()
+                                && (container(nodes[p].role)
+                                    || nodes[p].role == Role::Landmark(Some(Landmark::Region)))
+                        })
+                        .unwrap_or(at);
+                    match mark {
+                        Some(Marks::GENERATED) => context[card].generated = true,
+                        Some(Marks::FEATURED) => context[card].featured = true,
+                        Some(Marks::WIDGET) => context[card].widget = true,
+                        _ => {}
+                    }
+                }
+            }
             if !context[at].hidden && ad_label(words(node)) {
                 let card = std::iter::successors(node.parent, |&p| nodes[p].parent)
                     .take_while(|&p| !matches!(nodes[p].role, Role::Landmark(_) | Role::List))
@@ -307,8 +357,18 @@ impl<'a> Page<'a> {
             }
         }
         for (at, node) in nodes.iter().enumerate() {
+            if node.parent.is_some_and(|p| context[p].generated) {
+                context[at].generated = true;
+            }
+            context[at].hidden |= context[at].generated;
+            context[at].widget |= node.parent.is_some_and(|p| context[p].widget);
             if node.parent.is_some_and(|p| context[p].paid) {
                 context[at].paid = true;
+            }
+        }
+        for (i, n) in nodes.iter().enumerate().rev() {
+            if let Some(p) = n.parent {
+                context[p].mixed |= context[i].mixed || context[i].generated || context[i].widget;
             }
         }
         Self {
@@ -323,13 +383,14 @@ impl<'a> Page<'a> {
     }
     fn eligible(&self, at: usize) -> bool {
         let c = self.context[at];
-        !c.hidden && !c.chrome && (!self.has_main || c.main)
+        !c.hidden && !c.chrome && !c.widget && (!self.has_main || c.main)
     }
     fn titles(&self, rules: &Rules) -> Vec<Title> {
         let mut titles = Vec::new();
         for (at, n) in self.nodes.iter().enumerate() {
             if n.role != Role::Link
                 || !self.eligible(at)
+                || self.context[at].mixed
                 || self.ancestors(at).any(|p| self.nodes[p].role == Role::Link)
             {
                 continue;
@@ -497,6 +558,7 @@ impl<'a> Page<'a> {
             let n = &self.nodes[i];
             if !self.eligible(i)
                 || self.context[i].paid
+                || self.context[i].mixed
                 || !prose(n.role)
                 || (i < title.at && self.context[i].end <= title.at)
                 || self.context[i].end > end
@@ -620,6 +682,7 @@ pub fn read_results(
             sitelinks,
         });
     }
+    page.groups(&mut layer, &rules);
     page.enrich(&mut layer, &rules, query, &excluded);
     if layer.organic.is_empty() {
         for (phrases, wall) in [
@@ -643,9 +706,89 @@ pub fn read_results(
                 return ResultsRead::Wall(wall);
             }
         }
-        if layer.images.is_empty() && layer.video.is_empty() {
+        if layer.images.is_empty() && layer.video.is_empty() && !layer.widget {
             return ResultsRead::Wall(Wall::Unreadable);
         }
     }
     ResultsRead::FirstLayer(layer)
+}
+
+impl Page<'_> {
+    fn groups(&self, layer: &mut FirstLayer, rules: &Rules) {
+        let first = layer
+            .organic
+            .first()
+            .map_or(self.nodes.len(), |r| r.title_node);
+        for (i, n) in self.nodes.iter().enumerate() {
+            let c = self.context[i];
+            if c.generated && !n.parent.is_some_and(|p| self.context[p].generated) {
+                layer.dropped.generated += 1;
+            }
+            if c.hidden || c.paid {
+                continue;
+            }
+            layer.widget |= i < first && c.widget;
+            if c.featured && layer.featured.is_none() {
+                let mut citation = None;
+                let mut body = None;
+                for j in i..c.end {
+                    let node = &self.nodes[j];
+                    if self.context[j].hidden || self.context[j].paid {
+                        continue;
+                    }
+                    if node.role == Role::Paragraph
+                        && !self.context[j].mixed
+                        && !node.text.trim().is_empty()
+                    {
+                        body.get_or_insert(&node.text);
+                    }
+                    if let Some(url) = node
+                        .destination
+                        .as_ref()
+                        .and_then(|u| rules.destination(u).ok())
+                        .and_then(|u| PageKey::from_url(&u).ok())
+                    {
+                        citation =
+                            citation.or_else(|| layer.organic.iter().position(|r| r.key == url));
+                    }
+                }
+                layer.featured = citation
+                    .zip(body)
+                    .map(|(organic_index, text)| Featured {
+                        organic_index,
+                        text: clip(text, SNIPPET_BYTES),
+                    })
+                    .map(Box::new);
+            }
+        }
+        layer.discussion = layer
+            .organic
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                let host = r.url.host_str().unwrap_or_default();
+                [
+                    "reddit.com",
+                    "news.ycombinator.com",
+                    "stackexchange.com",
+                    "stackoverflow.com",
+                    "superuser.com",
+                    "serverfault.com",
+                    "askubuntu.com",
+                    "mathoverflow.net",
+                    "producthunt.com",
+                    "g2.com",
+                    "trustpilot.com",
+                    "quora.com",
+                ]
+                .iter()
+                .any(|d| destination::on(host, d))
+                    || host
+                        .split('.')
+                        .next()
+                        .is_some_and(|s| matches!(s, "forum" | "forums" | "discuss" | "community"))
+            })
+            .map(|(i, _)| i)
+            .collect();
+    }
 }
