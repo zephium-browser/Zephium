@@ -50,7 +50,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@hugeicons/core-free-icons": "4.4.0",
-    "@inlang/paraglide-js": "^2.25.0",
+    "@inlang/paraglide-js": "^3.2.2",
     "@inlang/plugin-message-format": "4.6.0",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
     "@tailwindcss/vite": "4.3.4",
