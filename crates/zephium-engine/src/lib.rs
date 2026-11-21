@@ -1353,6 +1353,19 @@ fn require_native_layout_application(
     applied
 }
 
+fn capture_then_layout<H>(
+    host: &mut H,
+    previews: &TabPreviewSlot,
+    capture: impl Fn(&TabPreviewRequest, &mut H),
+    apply: impl FnOnce(&mut H),
+) {
+    let pending = std::mem::take(&mut *previews.lock().unwrap_or_else(|e| e.into_inner()));
+    for preview in pending {
+        capture(&preview, host);
+    }
+    apply(host);
+}
+
 fn dispatch_layout_turn(
     dispatch: MainThreadDispatch,
     updates: Arc<layout_queue::LatestLayouts<PendingLayout>>,
@@ -1375,32 +1388,32 @@ fn dispatch_layout_turn(
             let application_fatal = fatal.clone();
             let admitted = host::try_with(move |host| {
                 // A coalesced layout can occupy a queue position before capture.
-                let preview = update
-                    .tab_preview
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take();
-                if let Some(preview) = preview {
-                    preview.capture(host);
-                }
-                if host_item_tokens
-                    .iter()
-                    .all(|(_, token)| token.load(Ordering::Acquire))
-                {
-                    // A hint belongs to the first layout of its window that
-                    // is actually applied, however many were coalesced first.
-                    let hint = motion
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&update.window);
-                    let applied = host.set_content(update.window, update.tree, update.region, hint);
-                    let _ = require_native_layout_application(
-                        applied,
-                        &application_delivery,
-                        &application_retirement,
-                        &application_fatal,
-                    );
-                }
+                capture_then_layout(
+                    host,
+                    &update.tab_preview,
+                    |preview, host| preview.capture(host),
+                    |host| {
+                        if host_item_tokens
+                            .iter()
+                            .all(|(_, token)| token.load(Ordering::Acquire))
+                        {
+                            // A hint belongs to the first layout of its window that
+                            // is actually applied, however many were coalesced first.
+                            let hint = motion
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .remove(&update.window);
+                            let applied =
+                                host.set_content(update.window, update.tree, update.region, hint);
+                            let _ = require_native_layout_application(
+                                applied,
+                                &application_delivery,
+                                &application_retirement,
+                                &application_fatal,
+                            );
+                        }
+                    },
+                );
             });
             if !admitted
                 && lock_retirement_gate(&retirement).allows_item_tokens(&update.item_tokens)
@@ -1683,11 +1696,16 @@ type StageMotionHints = Arc<Mutex<HashMap<WindowId, StageMotion>>>;
 
 type TabPreviewCompletion = Box<dyn FnOnce(Option<Vec<u8>>) + Send>;
 type TabPreviewCapture = (ItemId, String, TabPreviewCompletion);
-type TabPreviewSlot = Arc<Mutex<Option<Arc<TabPreviewRequest>>>>;
+type TabPreviewSlot = Arc<Mutex<Vec<Arc<TabPreviewRequest>>>>;
+const MAX_PENDING_CAPTURES: usize = 4;
 
-struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>);
+struct TabPreviewRequest(Mutex<Option<TabPreviewCapture>>, bool);
 
 impl TabPreviewRequest {
+    fn is_pending(&self) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+    }
+
     fn take(&self) -> Option<TabPreviewCapture> {
         self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
@@ -1695,7 +1713,7 @@ impl TabPreviewRequest {
     fn capture(&self, host: &mut host::EngineHost) {
         if let Some((id, url, done)) = self.take() {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
-            host.capture_tab_preview(id, url, done);
+            host.capture_tab_preview(id, url, self.1, done);
             #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 let _ = (host, id, url);
@@ -2350,6 +2368,31 @@ impl WebviewEngine {
     }
 }
 
+impl WebviewEngine {
+    fn request_capture(
+        &self,
+        id: ItemId,
+        url: String,
+        full: bool,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done))), full));
+        {
+            let mut pending = self.tab_preview.lock().unwrap_or_else(|e| e.into_inner());
+            pending.retain(|held| held.is_pending());
+            if pending.len() >= MAX_PENDING_CAPTURES {
+                pending.remove(0);
+            }
+            pending.push(request.clone());
+        }
+        self.answer_on_host(
+            request,
+            |request| request.refuse(),
+            |host, request| request.capture(host),
+        );
+    }
+}
+
 /// Whether a tab can be muted on this system: WebView2 always, WebKit when
 /// it has the page-mute SPI.
 pub fn page_mute_supported() -> bool {
@@ -2374,13 +2417,16 @@ impl Engine for WebviewEngine {
         url: String,
         done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
     ) {
-        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((id, url, done)))));
-        *self.tab_preview.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.clone());
-        self.answer_on_host(
-            request,
-            |request| request.refuse(),
-            |host, request| request.capture(host),
-        );
+        self.request_capture(id, url, false, done);
+    }
+
+    fn capture_backdrop(
+        &self,
+        id: ItemId,
+        url: String,
+        done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>,
+    ) {
+        self.request_capture(id, url, true, done);
     }
 
     fn set_focus_gate(&self, gate: Option<zephium_core::time::FocusGate>) {
@@ -4028,6 +4074,58 @@ mod tests {
     }
 
     #[test]
+    fn a_layout_takes_every_capture_queued_before_it_hides_their_views() {
+        let updates = test_layout_updates();
+        let preview = TabPreviewSlot::default();
+        let opener = ItemId::from(1);
+        let glance = ItemId::from(2);
+        assert_eq!(
+            updates.submit(
+                1,
+                PendingLayout {
+                    window: 1,
+                    tree: Some(Pane::leaf(glance)),
+                    region: Some(Rect::new(0., 0., 800., 600.)),
+                    item_tokens: Vec::new(),
+                    tab_preview: preview.clone(),
+                }
+            ),
+            layout_queue::Submit::Schedule
+        );
+        let request = |id, full| {
+            Arc::new(TabPreviewRequest(
+                Mutex::new(Some((
+                    id,
+                    "https://example.test/".into(),
+                    Box::new(|_: Option<Vec<u8>>| {}) as TabPreviewCompletion,
+                ))),
+                full,
+            ))
+        };
+        let backdrop = request(opener, true);
+        let thumbnail = request(opener, false);
+        preview.lock().unwrap().push(backdrop.clone());
+        preview.lock().unwrap().push(thumbnail.clone());
+        let update = updates.take_batch().pop().unwrap();
+        let mut order = Vec::new();
+        capture_then_layout(
+            &mut order,
+            &update.tab_preview,
+            |held, order: &mut Vec<String>| {
+                assert!(held.is_pending());
+                order.push(format!("capture full={}", held.1));
+                let _ = held.take();
+            },
+            |order| {
+                assert!(!backdrop.is_pending() && !thumbnail.is_pending());
+                order.push("layout".into());
+            },
+        );
+        assert_eq!(order, ["capture full=true", "capture full=false", "layout"]);
+        assert!(update.tab_preview.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn coalesced_layout_observes_capture_submitted_after_its_queue_position() {
         let updates = test_layout_updates();
         let preview = TabPreviewSlot::default();
@@ -4046,20 +4144,23 @@ mod tests {
         );
         let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let completed = completions.clone();
-        let request = Arc::new(TabPreviewRequest(Mutex::new(Some((
-            outgoing,
-            "https://example.test/".into(),
-            Box::new(move |_| {
-                completed.fetch_add(1, Ordering::SeqCst);
-            }),
-        )))));
-        *preview.lock().unwrap() = Some(request.clone());
+        let request = Arc::new(TabPreviewRequest(
+            Mutex::new(Some((
+                outgoing,
+                "https://example.test/".into(),
+                Box::new(move |_| {
+                    completed.fetch_add(1, Ordering::SeqCst);
+                }),
+            ))),
+            false,
+        ));
+        preview.lock().unwrap().push(request.clone());
         assert_eq!(
             updates.submit(1, layout(incoming)),
             layout_queue::Submit::Coalesced
         );
         let update = updates.take_batch().pop().unwrap();
-        let pending = update.tab_preview.lock().unwrap().take().unwrap();
+        let pending = update.tab_preview.lock().unwrap().pop().unwrap();
         let (id, _, done) = pending.take().unwrap();
         assert_eq!(id, outgoing);
         assert_eq!(update.tree.unwrap().tabs(), vec![incoming]);

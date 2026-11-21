@@ -1170,6 +1170,7 @@ impl super::EngineHost {
             url,
             features,
             clicked,
+            zephium_core::glance::LinkModifiers::default(),
             move || {
                 // Construction pumps native messages: closing or defocusing the
                 // popup during that interval must invalidate its pending request.

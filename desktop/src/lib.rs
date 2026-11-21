@@ -2100,6 +2100,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_pane_set_rect,
             work_pane_hide,
             tabs_split,
+            glance_act,
             tabs_unsplit,
             tabs_leave_split,
             chrome_menu_popup,
@@ -3597,6 +3598,19 @@ fn tabs_split(
             axis: Axis::Row,
         }
     })
+}
+
+#[tauri::command]
+#[specta::specta]
+fn glance_act(
+    caller: WebviewWindow,
+    shell: State<'_, Handle>,
+    action: zephium_ipc::GlanceAction,
+) -> zephium_ipc::OperationAdmission {
+    if !authorize(&caller, CallerPolicy::Main, "glance_act") {
+        return rejected_operation();
+    }
+    dispatch_operation(caller.app_handle(), &shell, Command::Glance(action))
 }
 
 #[tauri::command]
@@ -9236,6 +9250,34 @@ mod tests {
             reset.find("sidebar_card_lights(&window, false)").unwrap()
                 < reset.find("try_state::<Handle>()").unwrap()
         );
+    }
+
+    #[test]
+    fn glance_actions_are_refused_outside_the_main_window_before_dispatch() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let body = source
+            .split("fn glance_act(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("glance_act");
+        let authorize = body
+            .find("authorize(&caller, CallerPolicy::Main, \"glance_act\")")
+            .expect("Main caller policy");
+        let refusal = body.find("return rejected_operation();").unwrap();
+        let dispatch = body.find("dispatch_operation(").unwrap();
+        assert!(authorize < refusal && refusal < dispatch);
+        assert!(super::caller_allowed(
+            super::CallerPolicy::Main,
+            super::MAIN_LABEL
+        ));
+        assert!(!super::caller_allowed(
+            super::CallerPolicy::Main,
+            super::overlay::PANEL_LABEL
+        ));
+        assert!(!super::caller_allowed(
+            super::CallerPolicy::Main,
+            "settings"
+        ));
     }
 
     #[test]

@@ -330,6 +330,19 @@ export const fields = {
       { value: "always", label: m.tabs_close_buttons_option_always },
     ],
   },
+  "tabs.glance": {
+    section: "tabs",
+    windowsOnly: true,
+    label: m.pref_tabs_glance,
+    description: m.pref_tabs_glance_help,
+    initial: "shift",
+    options: [
+      { value: "shift", label: m.pref_tabs_glance_option_shift },
+      { value: "ctrl", label: m.pref_tabs_glance_option_ctrl },
+      { value: "always", label: m.pref_tabs_glance_option_always },
+      { value: "off", label: m.pref_tabs_glance_option_off },
+    ],
+  },
   "tabs.archive": {
     section: "tabs",
     label: m.pref_tabs_archive,

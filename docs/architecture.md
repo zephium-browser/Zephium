@@ -71,6 +71,17 @@ attachment, focus, input routing, and retirement. Svelte cannot position remote
 content by placing an iframe in its DOM. Overlays and menus must cooperate with
 native focus and stacking rather than assume normal web-page layering.
 
+A Glance is an ordinary tab that the stage lays out over a still picture of the
+page that opened it. The engine reports which modifier keys were held when a
+page opened a new window; `zephium-core/src/glance.rs` decides from the
+`tabs.glance` setting, the opener's section and a fixed set of site rules
+whether that tab becomes a Glance. `zephium-app/src/shell/glance.rs` captures
+the opener with `capture_backdrop`, lays the Glance into the middle of the
+content region and projects its geometry with the layout; the frame draws the
+dimmed picture and the controls around it. The picture is a capture, never a
+live view, so it receives no input. Glance is Windows-only until macOS reports
+link modifiers.
+
 macOS uses WKWebView and AppKit; Windows uses WebView2 and Win32/COM adapters.
 Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
