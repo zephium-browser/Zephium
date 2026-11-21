@@ -208,6 +208,13 @@ impl Session {
                     };
                 }
             }
+            Work::Anonymous(i, _) if self.unseeded[*i].is_some() => {
+                let failure = match read {
+                    ReadState::Refused { failure } => failure,
+                    _ => Failure::Limit,
+                };
+                self.unseeded[*i] = Some(Unseeded::Failed(failure));
+            }
             _ => {}
         }
     }

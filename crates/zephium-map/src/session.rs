@@ -78,6 +78,11 @@ enum Pending {
     Cache(usize),
     Job(Job),
 }
+#[derive(Clone, Copy)]
+enum Unseeded {
+    Searching,
+    Failed(Failure),
+}
 struct Seed {
     site: PlaceKey,
     result: Link,
@@ -187,6 +192,7 @@ pub struct Session {
     started: u32,
     sections: u32,
     sites: [Option<SiteState>; 2],
+    unseeded: [Option<Unseeded>; 2],
     articles: BTreeMap<usize, Doc>,
     first_passage: Option<Passage>,
     passages: Vec<Passage>,
@@ -218,6 +224,7 @@ impl Session {
             started: 0,
             sections: 0,
             sites: [None, None],
+            unseeded: [None, None],
             articles: BTreeMap::new(),
             first_passage: None,
             passages: Vec::new(),
@@ -274,6 +281,7 @@ impl Session {
         self.queue.push_back(Job { work, url });
     }
     fn lookup(&mut self, side: usize, seed: Seed, out: &mut Vec<Effect>) {
+        self.unseeded[side] = None;
         if self.elapsed >= self.cfg.last_start {
             self.budget(Budget::LastStart);
             self.emit(
@@ -424,12 +432,17 @@ impl Session {
             self.lookup(side, seed, out);
         }
         for (side, query) in missing {
+            self.unseeded[side] = Some(Unseeded::Failed(Failure::Missing));
             if let Some(url) = self
                 .cfg
                 .engine
                 .configured_search(&query, &self.cfg.custom_template)
             {
+                let queued = self.queue.len();
                 self.enqueue(Work::Anonymous(side, query), url);
+                if self.queue.len() > queued {
+                    self.unseeded[side] = Some(Unseeded::Searching);
+                }
             }
         }
         Ok(())
@@ -707,6 +720,7 @@ impl Session {
                 self.stats.cancelled = true;
                 for i in 0..self.sites.len() {
                     let Some(state) = self.sites[i].as_mut() else {
+                        self.close_slot(i, Failure::Cancelled, &mut out);
                         continue;
                     };
                     if state.complete {
@@ -771,9 +785,14 @@ impl Session {
                             Ok(doc) => {
                                 if let Some(seed) = self.side_seed(&doc, &text) {
                                     self.lookup(i, seed, &mut out);
+                                } else {
+                                    self.unseeded[i] = Some(Unseeded::Failed(Failure::Missing));
                                 }
                             }
-                            Err(f) => self.refused(Phase::AnonymousResults, f),
+                            Err(f) => {
+                                self.unseeded[i] = Some(Unseeded::Failed(f));
+                                self.refused(Phase::AnonymousResults, f);
+                            }
                         }
                     }
                     _ => {}
@@ -846,6 +865,19 @@ impl Session {
     }
     fn close_slot(&mut self, i: usize, missing: Failure, out: &mut Vec<Effect>) {
         let Some(s) = &self.sites[i] else {
+            if let Some(unseeded) = self.unseeded[i].take() {
+                let failure = match unseeded {
+                    Unseeded::Searching => missing,
+                    Unseeded::Failed(failure) => failure,
+                };
+                self.emit(
+                    MapEvent::PlaceFailed {
+                        slot: i as u8,
+                        failure,
+                    },
+                    out,
+                );
+            }
             return;
         };
         if s.complete {
@@ -963,6 +995,127 @@ fn origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 mod scheduler;
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    const RESULT: &str =
+        "<main><article><h2><a href='https://acme.com/'>Acme workshop</a></h2></article></main>";
+    fn doc(url: &str, markup: &str) -> Doc {
+        Doc::from_html(
+            &Url::parse(url).unwrap(),
+            markup.as_bytes(),
+            None,
+            DocLimits::RESULTS,
+        )
+        .unwrap()
+    }
+    fn closing(
+        anonymous: Option<Result<&str, Failure>>,
+        cancel_at_anonymous: bool,
+        engine_robots: Option<&str>,
+    ) -> Vec<String> {
+        let (mut session, effects) = Session::start(Config::default(), "acme vs other").unwrap();
+        let mut queue: VecDeque<_> = effects.into();
+        let mut last: [Option<String>; 2] = [None, None];
+        let mut ended = false;
+        while let Some(effect) = queue.pop_front() {
+            assert!(!ended);
+            let input = match effect {
+                Effect::LoadResults { id, .. } => Some(Input::Results {
+                    id,
+                    result: Ok(doc("https://duckduckgo.com/", RESULT)),
+                }),
+                Effect::Fetch { id, url, .. } => Some(Input::Fetch {
+                    id,
+                    result: match (url.host_str(), url.path(), engine_robots) {
+                        (_, "/", _) => Ok(FetchResult {
+                            final_url: url,
+                            content_type: "text/html".into(),
+                            charset: None,
+                            bytes: b"<nav><a href='/about'>About</a></nav>".to_vec(),
+                            truncated: false,
+                        }),
+                        (Some("duckduckgo.com"), "/robots.txt", Some(rules)) => Ok(FetchResult {
+                            final_url: url,
+                            content_type: "text/plain".into(),
+                            charset: None,
+                            bytes: rules.as_bytes().to_vec(),
+                            truncated: false,
+                        }),
+                        _ => Err(Failure::Missing),
+                    },
+                }),
+                Effect::ReadResultsAnonymously { id, .. } => {
+                    if cancel_at_anonymous {
+                        Some(Input::Cancel)
+                    } else {
+                        anonymous.map(|answer| Input::Results {
+                            id,
+                            result: answer.map(|markup| doc("https://duckduckgo.com/", markup)),
+                        })
+                    }
+                }
+                Effect::LookupSite { id, .. } => Some(Input::Cache { id, memo: None }),
+                Effect::Emit { event, .. } => {
+                    match event {
+                        MapEvent::Place { slot, complete, .. } => {
+                            last[slot as usize] = Some(format!("place {complete}"))
+                        }
+                        MapEvent::PlaceFailed { slot, failure } => {
+                            last[slot as usize] = Some(format!("failed {failure:?}"))
+                        }
+                        MapEvent::End { .. } => ended = true,
+                        _ => {}
+                    }
+                    None
+                }
+                Effect::Render { id, .. } => Some(Input::Render {
+                    id,
+                    result: Err(Failure::Unavailable),
+                }),
+                Effect::RememberSite { .. } => None,
+            };
+            if let Some(input) = input {
+                queue.extend(session.handle(input));
+            }
+            if queue.is_empty() && !ended {
+                queue.extend(session.handle(Input::Elapsed { time: MAX_ELAPSED }));
+            }
+        }
+        assert!(ended);
+        last.into_iter().map(Option::unwrap_or_default).collect()
+    }
+    #[test]
+    fn every_opened_comparison_side_closes_before_the_end() {
+        let other = RESULT.replace("acme.com", "other.com");
+        assert_eq!(
+            closing(Some(Ok(&other)), false, None),
+            ["place true", "place true"]
+        );
+        assert_eq!(
+            closing(Some(Err(Failure::Unavailable)), false, None),
+            ["place true", "failed Unavailable"]
+        );
+        assert_eq!(
+            closing(Some(Ok("<main></main>")), false, None),
+            ["place true", "failed Missing"]
+        );
+        assert_eq!(closing(None, false, None), ["place true", "failed Limit"]);
+        assert_eq!(
+            closing(None, true, None),
+            ["failed Cancelled", "failed Cancelled"]
+        );
+    }
+    #[test]
+    fn a_refused_comparison_search_reports_its_own_reason() {
+        let other = RESULT.replace("acme.com", "other.com");
+        assert_eq!(
+            closing(Some(Ok(&other)), false, Some("User-agent: *\nDisallow: /")),
+            ["place true", "failed Robots"]
+        );
+    }
+}
 
 #[cfg(test)]
 mod arrival_tests {

@@ -738,7 +738,7 @@ fn late_time_limits_allow_only_completions_and_one_terminal_event() {
     });
     assert_eq!(
         end.iter().map(name).collect::<Vec<_>>(),
-        ["layer", "place_failed", "done"]
+        ["layer", "place_failed", "place_failed", "done"]
     );
     assert!(
         matches!(end.last(),Some(Effect::Emit{event:MapEvent::End{stats:s,..},..}) if s.budgets.contains(&Budget::LastStart))
