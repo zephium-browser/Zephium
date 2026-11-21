@@ -53,6 +53,12 @@ test("Settings pages in their final shape, both themes", async () => {
   await settle();
   await shoot("general", "general");
   await shoot("tabs", "tabs");
+  await shoot("newtab-empty", "newtab");
+  await screen.getByRole("textbox", { name: "New tab URL" }).fill("https://example.com/start");
+  await shoot("newtab-filled", "newtab");
+  await page.viewport(740, 720);
+  await shoot("newtab-narrow", "newtab");
+  await page.viewport(1280, 860);
   await shoot("focus", "focus");
   await shoot("about", "about");
   await shoot("appearance", "appearance");

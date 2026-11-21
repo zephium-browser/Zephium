@@ -2012,3 +2012,65 @@ fn links_from_other_apps_follow_new_tabs_unless_placed_on_their_own() {
     shell.handle(Command::OpenExternal(vec!["https://next.example/".into()]));
     assert!(follows(&screen, active_id(&screen)));
 }
+
+#[test]
+fn new_tab_destination_opens_fresh_tabs_without_redirecting_explicit_urls() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "https://start.example/".into(),
+    });
+    shell.handle(Command::Open);
+    let first = active_id(&screen);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {first} https://start.example/ [default]")));
+    navigate_and_commit(&mut shell, first, "https://start.example/");
+    shell.handle(Command::Run("tab.new".into()));
+    let second = active_id(&screen);
+    assert_ne!(first, second);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {second} https://start.example/ [default]")));
+
+    let before = engine.calls().len();
+    shell.handle(Command::OpenUrl {
+        input: "https://other.example/".into(),
+        new_tab: true,
+    });
+    let explicit = active_id(&screen);
+    assert!(engine.calls()[before..]
+        .iter()
+        .all(|call| !call.contains("start.example")));
+    assert!(engine.calls()[before..]
+        .iter()
+        .any(|call| call == &format!("create {explicit} https://other.example/ [default]")));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "".into(),
+    });
+    shell.handle(Command::Open);
+    assert!(shell.is_untouched_new_tab(active_id(&screen)));
+}
+
+#[test]
+fn private_new_tabs_keep_the_builtin_page_with_a_custom_destination() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "https://start.example/".into(),
+    });
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.incognito_profile(shell.windows.focused().unwrap().profile));
+    shell.handle(Command::Open);
+    assert!(shell.is_untouched_new_tab(active_id(&screen)));
+    assert!(engine
+        .calls()
+        .iter()
+        .all(|call| !call.contains("start.example")));
+}

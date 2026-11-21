@@ -684,3 +684,34 @@ fn forged_degraded_profile_report_cannot_bootstrap_an_unrelated_session() {
     assert!(shell.degraded_storage_profiles.is_empty());
     assert!(engine.calls().is_empty());
 }
+
+#[test]
+fn persisted_new_tab_destination_is_loaded_at_startup_and_invalid_values_stay_blank() {
+    for destination in [
+        "https://start.example/",
+        "file:///etc/hosts",
+        "not an address",
+    ] {
+        let store = Arc::new(FakeStore::default());
+        store
+            .settings
+            .lock()
+            .unwrap()
+            .insert("tabs.new-page".into(), destination.into());
+        let (mut shell, engine, screen) = setup_with(store);
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        if destination.starts_with("https:") {
+            assert!(engine
+                .calls()
+                .iter()
+                .any(|call| call == &format!("create {id} {destination} [default]")));
+        } else {
+            assert!(shell.is_untouched_new_tab(id));
+            assert!(engine
+                .calls()
+                .iter()
+                .all(|call| !call.contains(destination)));
+        }
+    }
+}

@@ -59,6 +59,8 @@ pub(super) struct TabPreferences {
     pub(super) startup_pages: Vec<String>,
     /// Where the Home command goes.
     pub(super) home: Option<String>,
+    /// A regular new tab opens this page; none keeps the built-in page.
+    pub(super) new_page: Option<String>,
 }
 
 impl Default for TabPreferences {
@@ -74,6 +76,7 @@ impl Default for TabPreferences {
             start_with_pages: false,
             startup_pages: Vec::new(),
             home: None,
+            new_page: None,
         }
     }
 }
@@ -94,6 +97,7 @@ impl TabPreferences {
             "tabs.startup",
             "tabs.startup-pages",
             "tabs.home",
+            "tabs.new-page",
             "tabs.external-position",
             "tabs.archive",
         ] {
@@ -124,6 +128,9 @@ impl TabPreferences {
                 self.startup_pages = zephium_core::preferences::startup_pages(value)
             }
             ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
+            ("tabs.new-page", value) => {
+                self.new_page = zephium_core::preferences::new_tab_page(value)
+            }
             ("tabs.external-position", "new-tab") => self.external_position = None,
             ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
             ("tabs.external-position", "after-current") => {
@@ -147,9 +154,25 @@ struct KeptSlot {
 
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
-        self.open_tab_with_id()
+        self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
             .unwrap_or_default()
+    }
+
+    /// Apply the destination only to a new-tab intent, never to an intermediate
+    /// tab allocated for a link, duplicate, extension page or explicit URL.
+    pub(super) fn open_new_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        let (id, mut effects) = self.open_tab_with_id()?;
+        if self
+            .windows
+            .focused()
+            .is_some_and(|window| !self.incognito_profile(window.profile))
+        {
+            if let Some(page) = self.tab_preferences.new_page.clone() {
+                effects.extend(self.items.navigate(id, &page));
+            }
+        }
+        Some((id, effects))
     }
 
     pub(super) fn open_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
@@ -432,7 +455,7 @@ impl Shell {
         if self.incognito_profile(profile) {
             return Vec::new();
         }
-        self.open_tab_with_id()
+        self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
             .unwrap_or_default()
     }

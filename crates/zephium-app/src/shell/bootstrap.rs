@@ -277,7 +277,9 @@ impl Shell {
         let pages = self.tab_preferences.opens_pages() && self.pending_external.is_empty();
         let start_fresh = (self.tab_preferences.start_with_new_tab || pages)
             && self.pending_external.is_empty()
-            && active_item.is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some()));
+            && (self.tab_preferences.new_page.is_some()
+                || active_item
+                    .is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some())));
         let mut fx = Vec::new();
         if let Some(tree) = splits {
             if !start_fresh {
@@ -298,7 +300,12 @@ impl Shell {
         match restored {
             Some(item) => fx.extend(self.focus_tab(item)),
             None => {
-                if let Some((_, effects)) = self.open_tab_with_id() {
+                let opened = if !pages && self.pending_external.is_empty() {
+                    self.open_new_tab_with_id()
+                } else {
+                    self.open_tab_with_id()
+                };
+                if let Some((_, effects)) = opened {
                     fx.extend(effects);
                 } else if let Some(item) =
                     active_item.or_else(|| self.today_tabs(space).first().copied())

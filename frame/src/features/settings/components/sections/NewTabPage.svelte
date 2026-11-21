@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import NewTabPageRow from "../NewTabPageRow.svelte";
   import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
   import { retryImage } from "$session/newtab-background.svelte";
@@ -78,6 +79,10 @@
 
   const set = (key: preferences.PreferenceKey, value: string) => void preferences.set(key, value);
 </script>
+
+<SettingsGroup title={m.ntp_destination()}>
+  <NewTabPageRow />
+</SettingsGroup>
 
 <SettingsGroup title={m.ntp_background()}>
   <SettingsRow
