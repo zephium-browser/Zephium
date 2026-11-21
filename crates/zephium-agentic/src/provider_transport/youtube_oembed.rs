@@ -1,7 +1,7 @@
 //! A pasted YouTube link's real title and channel, from YouTube's public
 //! oEmbed endpoint. The address asked is built from a video ID parsed here,
 //! never from the pasted string, and only two plain-text fields are kept.
-use crate::public_asset::{lookup_client, PublicAssetError, RouteSource};
+use crate::public_asset::{lookup_client, settled_route, PublicAssetError, RouteSource};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -102,7 +102,7 @@ pub async fn fetch(routes: &RouteSource, raw: &str) -> Result<YoutubeDetails, Pu
     let endpoint = video_id(raw)
         .and_then(|id| oembed_url(&id))
         .ok_or(PublicAssetError::InvalidUrl)?;
-    let client = lookup_client(routes.route(), TIMEOUT)?;
+    let client = lookup_client(settled_route(routes).await, TIMEOUT)?;
     let unavailable = |_| PublicAssetError::Unavailable;
     let mut response = client
         .get(endpoint)

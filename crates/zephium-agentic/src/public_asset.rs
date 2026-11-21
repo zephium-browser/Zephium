@@ -4,8 +4,9 @@
 //! Every fetch connects directly, and only while the shared route is direct:
 //! it never goes around the person's proxy.
 use reqwest::{dns::Resolve, redirect::Policy, Client};
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 pub use zephium_public_fetch::guard::{public_address, public_https, public_resolver};
+use zephium_public_fetch::SYSTEM_ROUTE_TIMEOUT;
 pub use zephium_public_fetch::{PublicRoute, RouteSource};
 
 /// Largest public image body accepted before decoding; admission scales a
@@ -28,6 +29,24 @@ pub enum PublicAssetError {
     NotAnImage,
     /// The route is proxied or not known: a direct fetch would go around it.
     RouteRefused,
+}
+
+/// How long a fetch started before the route is known waits for it: one
+/// system read's timeout and a margin.
+pub const ROUTE_SETTLE_WAIT: Duration =
+    SYSTEM_ROUTE_TIMEOUT.saturating_add(Duration::from_millis(500));
+
+async fn within(
+    settled: impl Future<Output = ()>,
+    route: impl FnOnce() -> PublicRoute,
+    bound: Duration,
+) -> PublicRoute {
+    let _ = tokio::time::timeout(bound, settled).await;
+    route()
+}
+
+pub(crate) async fn settled_route(routes: &RouteSource) -> PublicRoute {
+    within(routes.settled(), || routes.route(), ROUTE_SETTLE_WAIT).await
 }
 
 fn direct(route: PublicRoute) -> Result<(), PublicAssetError> {
@@ -142,11 +161,11 @@ pub async fn fetch_public_image(
     routes: &RouteSource,
     url: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
-    image(routes.route(), public_resolver(), url).await
+    image(settled_route(routes), public_resolver(), url).await
 }
 
 async fn image(
-    route: PublicRoute,
+    route: impl Future<Output = PublicRoute>,
     resolver: Arc<dyn Resolve>,
     url: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
@@ -154,7 +173,7 @@ async fn image(
     if !public_https(&parsed) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    direct(route)?;
+    direct(route.await)?;
     let client = public_client(resolver)?;
     if let Some(variant) = display_variant(url).and_then(|v| url::Url::parse(&v).ok()) {
         if let Ok(bytes) = fetch_with(&client, variant).await {
@@ -170,11 +189,11 @@ pub async fn fetch_public_record_image(
     routes: &RouteSource,
     raw: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
-    record_image(routes.route(), public_resolver(), raw).await
+    record_image(settled_route(routes), public_resolver(), raw).await
 }
 
 async fn record_image(
-    route: PublicRoute,
+    route: impl Future<Output = PublicRoute>,
     resolver: Arc<dyn Resolve>,
     raw: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
@@ -183,7 +202,7 @@ async fn record_image(
     if !public_https(target.as_url()) || !crate::semantic_wire::model_safe_public_url(&target) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    direct(route)?;
+    direct(route.await)?;
     let client = public_client_builder(resolver)
         .redirect(Policy::none())
         .build()
@@ -303,13 +322,14 @@ mod tests {
             "https://images.example.com/a.png?access_token=secret",
         ] {
             assert_eq!(
-                record_image(PublicRoute::Direct, public_resolver(), url).await,
+                record_image(std::future::pending(), public_resolver(), url).await,
                 Err(PublicAssetError::InvalidUrl)
             );
         }
     }
 
     use super::*;
+    use std::future::ready;
     use std::net::SocketAddr;
     use zephium_public_fetch::guard::public_addresses;
 
@@ -382,11 +402,11 @@ mod tests {
         for route in [PublicRoute::Proxied, PublicRoute::Unsupported] {
             let resolver = Arc::new(CountingResolver::default());
             assert_eq!(
-                image(route, resolver.clone(), image_url).await,
+                image(ready(route), resolver.clone(), image_url).await,
                 Err(PublicAssetError::RouteRefused)
             );
             assert_eq!(
-                record_image(route, resolver.clone(), image_url).await,
+                record_image(ready(route), resolver.clone(), image_url).await,
                 Err(PublicAssetError::RouteRefused)
             );
             assert_eq!(
@@ -397,18 +417,18 @@ mod tests {
         }
         let resolver = Arc::new(CountingResolver::default());
         assert_eq!(
-            image(PublicRoute::Direct, resolver.clone(), image_url).await,
+            image(ready(PublicRoute::Direct), resolver.clone(), image_url).await,
             Err(PublicAssetError::Unavailable)
         );
         assert_eq!(
-            record_image(PublicRoute::Direct, resolver.clone(), image_url).await,
+            record_image(ready(PublicRoute::Direct), resolver.clone(), image_url).await,
             Err(PublicAssetError::Unavailable)
         );
         assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 2);
         assert!(lookup_client(PublicRoute::Direct, Duration::from_secs(1)).is_ok());
         assert_eq!(
             image(
-                PublicRoute::Proxied,
+                std::future::pending(),
                 resolver,
                 "http://images.example.com/a.png"
             )
@@ -417,13 +437,116 @@ mod tests {
         );
     }
 
+    /// A route that becomes known when `settle` is sent, as the source's
+    /// first system read does.
+    fn launching() -> (
+        tokio::sync::oneshot::Sender<PublicRoute>,
+        impl Future<Output = PublicRoute>,
+    ) {
+        let (settle, settled) = tokio::sync::oneshot::channel::<PublicRoute>();
+        let known = Arc::new(std::sync::Mutex::new(PublicRoute::Unsupported));
+        let route = {
+            let known = known.clone();
+            async move {
+                within(
+                    async {
+                        if let Ok(route) = settled.await {
+                            *known.lock().unwrap() = route;
+                        }
+                    },
+                    || *known.lock().unwrap(),
+                    Duration::from_millis(150),
+                )
+                .await
+            }
+        };
+        (settle, route)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_started_before_the_route_is_known_waits_for_it_within_the_bound() {
+        let image_url = "https://images.example.com/a.png";
+        for (settles, expected, lookups) in [
+            (Some(PublicRoute::Direct), PublicAssetError::Unavailable, 1),
+            (
+                Some(PublicRoute::Proxied),
+                PublicAssetError::RouteRefused,
+                0,
+            ),
+            (
+                Some(PublicRoute::Unsupported),
+                PublicAssetError::RouteRefused,
+                0,
+            ),
+            (None, PublicAssetError::RouteRefused, 0),
+        ] {
+            for record in [false, true] {
+                let resolver = Arc::new(CountingResolver::default());
+                let (settle, route) = launching();
+                let started = std::time::Instant::now();
+                let fetch = {
+                    let resolver = resolver.clone();
+                    tokio::spawn(async move {
+                        if record {
+                            record_image(route, resolver, image_url).await
+                        } else {
+                            image(route, resolver, image_url).await
+                        }
+                    })
+                };
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 0);
+                let unsent = match settles {
+                    Some(route) => {
+                        settle.send(route).unwrap();
+                        None
+                    }
+                    None => Some(settle),
+                };
+                assert_eq!(fetch.await.unwrap(), Err(expected), "{settles:?} {record}");
+                drop(unsent);
+                assert_eq!(
+                    resolver.0.load(std::sync::atomic::Ordering::Acquire),
+                    lookups,
+                    "{settles:?} {record}"
+                );
+                if settles.is_some() {
+                    assert!(started.elapsed() < Duration::from_millis(150));
+                } else {
+                    assert!(started.elapsed() >= Duration::from_millis(150));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn once_settled_the_wait_completes_on_its_first_poll() {
+        use futures_util::FutureExt as _;
+        assert!(ROUTE_SETTLE_WAIT > SYSTEM_ROUTE_TIMEOUT);
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(routes.settled().now_or_never(), Some(()));
+        assert_eq!(
+            settled_route(&routes).now_or_never(),
+            Some(PublicRoute::Proxied)
+        );
+    }
+
     #[tokio::test]
     async fn the_shared_route_source_gates_the_public_entry_points() {
         let routes = RouteSource::new(&tokio::runtime::Handle::current());
         let url = "https://images.example.com/a.png";
         assert_eq!(
-            fetch_public_image(&routes, url).await,
-            Err(PublicAssetError::RouteRefused)
+            within(
+                routes.settled(),
+                || routes.route(),
+                Duration::from_millis(50)
+            )
+            .await,
+            PublicRoute::Unsupported
         );
         routes.set_app_proxy(zephium_core::proxy::from_settings(
             "http",
