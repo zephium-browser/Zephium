@@ -700,7 +700,7 @@ mod tests {
             let mut sources = std::iter::successors(error.source(), |&source| source.source());
             assert!(
                 sources.any(|source| {
-                    source.to_string() == "non-public image address or resolution limit"
+                    source.to_string() == "non-public address answer or resolution limit"
                 }),
                 "{error:?}"
             );
