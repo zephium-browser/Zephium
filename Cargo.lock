@@ -7388,6 +7388,7 @@ dependencies = [
  "zephium-blocker",
  "zephium-core",
  "zephium-map",
+ "zephium-map-driver",
  "zephium-public-fetch",
 ]
 
