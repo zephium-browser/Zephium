@@ -3543,7 +3543,7 @@
   "native_account_more": "Compte…",
   "native_split_view_more": "Écran partagé…",
   "native_extensions_more": "Extensions…",
-  "native_reload_tab": "Recharger l'onglet",
+  "native_refresh": "Recharger l'onglet",
   "native_duplicate_tab": "Dupliquer l'onglet",
   "native_copy_link": "Copier le lien",
   "native_autofill_password_more": "Remplir automatiquement le mot de passe…",
