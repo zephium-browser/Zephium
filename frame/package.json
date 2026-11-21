@@ -69,7 +69,7 @@
     "prettier-plugin-svelte": "4.1.1",
     "prettier-plugin-tailwindcss": "0.8.1",
     "stylelint": "^17.15.0",
-    "stylelint-config-standard": "^40.0.0",
+    "stylelint-config-standard": "^41.0.0",
     "svelte-check": "4.7.8",
     "tailwindcss": "4.3.4",
     "typescript": "npm:@typescript/typescript6@6.0.2",
