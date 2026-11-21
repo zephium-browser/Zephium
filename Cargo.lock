@@ -7850,6 +7850,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-map-driver"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "specta",
+ "tokio",
+ "url",
+ "zephium-core",
+ "zephium-map",
+ "zephium-public-fetch",
+]
+
+[[package]]
 name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [

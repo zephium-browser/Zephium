@@ -1,0 +1,22 @@
+[package]
+name = "zephium-map-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+ipc-types = ["dep:specta"]
+
+[dependencies]
+serde.workspace = true
+specta = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+url.workspace = true
+zephium-core.workspace = true
+zephium-map = { version = "=0.1.0", path = "../zephium-map" }
+zephium-public-fetch = { version = "=0.1.0", path = "../zephium-public-fetch" }
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros", "test-util"] }
