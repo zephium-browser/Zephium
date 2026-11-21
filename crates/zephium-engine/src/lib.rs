@@ -1395,6 +1395,12 @@ fn dispatch_layout_turn(
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&update.window);
                     let applied = host.set_content(update.window, update.tree, update.region, hint);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(id) = update.focus.filter(|_| applied) {
+                        if !host.focus_page(id) {
+                            eprintln!("engine: a page was in no window to take the keyboard");
+                        }
+                    }
                     let _ = require_native_layout_application(
                         applied,
                         &application_delivery,
@@ -1718,6 +1724,8 @@ struct PendingLayout {
     region: Option<Rect>,
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
     tab_preview: TabPreviewSlot,
+    /// A page that takes the keyboard once this layout has placed it.
+    focus: Option<ItemId>,
 }
 
 /// Install on the main thread at startup. macOS and Windows attach child
@@ -3287,6 +3295,7 @@ impl Engine for WebviewEngine {
             region,
             item_tokens,
             tab_preview: self.tab_preview.clone(),
+            focus: None,
         };
         match self.layout_updates.submit(window, update) {
             layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
@@ -3330,6 +3339,21 @@ impl Engine for WebviewEngine {
     fn focus_page(&self, id: ItemId) -> NativeDispatch {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
+            // A layout still waiting to place the page carries the focus, so
+            // the page takes the keyboard only once it is in its window.
+            if self.layout_updates.amend(|layout| {
+                let places = layout.region.is_some()
+                    && layout
+                        .tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.tabs().contains(&id));
+                if places {
+                    layout.focus = Some(id);
+                }
+                places
+            }) {
+                return NativeDispatch::Scheduled;
+            }
             NativeDispatch::from_scheduled(self.run(move || {
                 let _ = host::try_with(move |host| {
                     if !host.focus_page(id) {
@@ -3352,6 +3376,7 @@ impl Engine for WebviewEngine {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&window);
+            self.layout_updates.forget(window);
             NativeDispatch::from_scheduled(self.run(move || {
                 // Refused only once the host is sealed or gone, when every
                 // native window and page is being torn down with it.
@@ -4096,6 +4121,7 @@ mod tests {
             region: Some(Rect::new(0., 0., 800., 600.)),
             item_tokens: Vec::new(),
             tab_preview: preview.clone(),
+            focus: None,
         };
         let outgoing = ItemId::from(1);
         let incoming = ItemId::from(2);

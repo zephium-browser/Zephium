@@ -81,6 +81,17 @@ impl<T> LatestLayouts<T> {
         state.scheduled = false;
     }
 
+    /// Drops the pending value of a window that is going away.
+    pub(crate) fn forget(&self, window: u64) {
+        self.lock().pending.remove(&window);
+    }
+
+    /// Amends the first pending value `amend` accepts. `false` when none
+    /// does: the value is already being applied, or was never submitted.
+    pub(crate) fn amend(&self, amend: impl FnMut(&mut T) -> bool) -> bool {
+        self.lock().pending.values_mut().any(amend)
+    }
+
     fn lock(&self) -> MutexGuard<'_, State<T>> {
         self.state
             .lock()
@@ -121,6 +132,30 @@ mod tests {
         assert_eq!(queue.submit(1, "new one"), Submit::Coalesced);
         assert_eq!(queue.take_batch(), vec!["new one", "two"]);
         assert!(!queue.finish_batch());
+    }
+
+    #[test]
+    fn a_forgotten_window_drops_only_its_own_pending_value() {
+        let queue = LatestLayouts::new(1);
+        assert_eq!(queue.submit(1, "one"), Submit::Schedule);
+        queue.forget(2);
+        queue.forget(1);
+        assert!(queue.take_batch().is_empty());
+        assert!(!queue.finish_batch());
+        assert_eq!(queue.submit(2, "two"), Submit::Schedule);
+    }
+
+    #[test]
+    fn only_a_value_still_pending_can_be_amended() {
+        let queue = LatestLayouts::new(2);
+        assert_eq!(queue.submit(1, 1), Submit::Schedule);
+        assert!(!queue.amend(|value| *value == 2));
+        assert!(queue.amend(|value| {
+            *value += 10;
+            true
+        }));
+        assert_eq!(queue.take_batch(), vec![11]);
+        assert!(!queue.amend(|_| true));
     }
 
     #[test]

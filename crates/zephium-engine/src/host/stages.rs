@@ -221,6 +221,12 @@ impl EngineHost {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
+        // A layout that was already on its way when its window was released
+        // has nothing left to place. It is skipped, never a failed stage.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if released(&self.window_parents, window) {
+            return true;
+        }
         let applied = self.apply_content(window, tree, region, motion);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.fullscreen_layout_applied(window, &shown);
@@ -702,6 +708,12 @@ impl EngineHost {
         }
         self.window_parents.insert(window, None);
     }
+}
+
+/// Whether `window` had its own native window and has released it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn released<T>(parents: &std::collections::HashMap<WindowId, Option<T>>, window: WindowId) -> bool {
+    parents.get(&window).is_some_and(Option::is_none)
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

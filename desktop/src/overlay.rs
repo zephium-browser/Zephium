@@ -88,7 +88,7 @@ impl State {
     /// Holds the launcher for one action until it settles, so a second one
     /// cannot hide the outcome of the first.
     fn arm(&mut self, id: &str, context: &SearchContext, background: bool) -> bool {
-        if !self.model.admits(context) || self.pending.is_some() {
+        if !self.idle_for(context) {
             return false;
         }
         self.model.clear_error();
@@ -97,6 +97,10 @@ impl State {
             background,
         });
         true
+    }
+    /// Whether `context` is this presentation's and no action holds it.
+    fn idle_for(&self, context: &SearchContext) -> bool {
+        self.model.admits(context) && self.pending.is_none()
     }
     fn settle(&mut self, id: &str) -> Option<Pending> {
         self.pending.take_if(|pending| pending.id == id)
@@ -631,6 +635,11 @@ impl Overlay {
     }
     pub fn search_context(&self, request_id: &str) -> Option<SearchContext> {
         self.state().model.context(request_id)
+    }
+    /// Whether an action from `context` may change this launcher: the
+    /// context is the current presentation's and no other action holds it.
+    pub fn idle_for(&self, context: &SearchContext) -> bool {
+        self.state().idle_for(context)
     }
     pub fn arm_action(&self, id: &str, context: &SearchContext, background: bool) -> bool {
         if !self.state().arm(id, context, background) {
@@ -1265,6 +1274,20 @@ mod action_barrier_tests {
         let _ = state.settle("disabled");
         assert!(state.pending.is_none());
         assert!(state.arm("next", &context, false));
+    }
+
+    #[test]
+    fn only_the_current_idle_presentation_may_change_mode() {
+        let mut state = presented();
+        let context = state.model.context("1").unwrap();
+        assert!(state.idle_for(&context));
+        assert!(state.arm("open", &context, false));
+        assert!(!state.idle_for(&context));
+        let _ = state.settle("open");
+        assert!(state.idle_for(&context));
+        state.model.hide();
+        state.begin();
+        assert!(!state.idle_for(&context));
     }
 
     #[test]

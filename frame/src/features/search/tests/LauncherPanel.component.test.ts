@@ -442,6 +442,22 @@ test("in a mini window's launcher the primary modifier plus Enter still opens in
   await expect.element(screen.getByText("Opened in a background tab")).not.toBeInTheDocument();
 });
 
+test("in a mini window's launcher the primary modifier plus Enter before results waits for them", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await screen.getByRole("combobox").fill("rust");
+  await userEvent.keyboard(`{${primary}>}{Enter}{/${primary}}`);
+  const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(
+      { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
+      owner,
+      false,
+    ),
+  );
+});
+
 test("The primary modifier plus K lists what can be done to the selected row", async () => {
   const screen = await render(LauncherPanel, { props: { context, destinations } });
   await screen.getByRole("combobox").fill("rust");

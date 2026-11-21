@@ -4732,8 +4732,15 @@ fn launcher_run(
     {
         return rejected_operation();
     }
-    // Offered as a command, it turns this launcher into the one it opens.
+    // Offered as a command, it turns this launcher into the one it opens,
+    // but only from the presentation it was offered in, with nothing pending.
     if matches!(&action, zephium_ipc::SearchAction::RunCommand { id } if id == "window.newMini") {
+        if !app
+            .try_state::<overlay::Overlay>()
+            .is_some_and(|overlay| overlay.idle_for(&context))
+        {
+            return rejected_operation();
+        }
         return execute_command(&app, "window.newMini");
     }
     let (Some(shell), Some(overlay), Some(ledger)) = (

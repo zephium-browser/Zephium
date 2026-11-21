@@ -279,6 +279,10 @@ export function createSearchSurface(options: {
     }
   }
 
+  /** A mini window's launcher opens only in the foreground, so a background
+   *  request there is an ordinary one, queued like it while results load. */
+  const foregroundOnly = (background: boolean) => background && !options.sitesOnly?.();
+
   /** Runs now when the visible rows answer the current query, otherwise waits
    *  for the answer rather than doing nothing. */
   /** A destination, a capture or an answer does not depend on native. */
@@ -286,6 +290,7 @@ export function createSearchSurface(options: {
     !!row.tool || row.id === CAPTURE_ID || row.id === CALCULATION_ID;
 
   function activate(row: SurfaceRow, background = false) {
+    background = foregroundOnly(background);
     if (settled || local(row)) void run(row, background);
     else if (!background) queued = row.id;
   }
@@ -344,6 +349,7 @@ export function createSearchSurface(options: {
 
   function submit(background = false) {
     if (composing) return;
+    background = foregroundOnly(background);
     const row = rows.find((candidate) => candidate.id === selectedId);
     if (row && (settled || row.id === CALCULATION_ID || (moved && local(row)))) {
       void run(row, background);
