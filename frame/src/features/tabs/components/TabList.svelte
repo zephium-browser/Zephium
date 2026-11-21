@@ -116,7 +116,7 @@
       if (over?.closest("[data-essentials-drop]") && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && over?.closest("[data-essentials-drop], [data-tabs-drop]")) {
         const essential = !!over.closest("[data-essentials-drop]");
-        void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
+        void tabDrag.leaveSplit(id, { essential, before });
         return;
       }
       if (over?.closest("[data-essentials-drop]")) {
