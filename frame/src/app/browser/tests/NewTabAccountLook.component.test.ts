@@ -203,8 +203,10 @@ test("a private window and an install without the service show no account", asyn
 
 test("hidden invitations leave only Customize, while signed-in account access remains", async () => {
   await preferences.init();
-  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
   let screen = await stage(accountFixture());
+  await expect.element(screen.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+  await shoot(screen, "visibility-before");
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
   await expect
     .element(screen.getByRole("button", { name: "Sign in", exact: true }))
     .not.toBeInTheDocument();

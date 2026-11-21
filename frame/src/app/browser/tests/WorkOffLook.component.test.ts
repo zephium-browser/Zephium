@@ -54,6 +54,44 @@ afterEach(() => {
 
 const switchShown = () => document.querySelector(".modes, .mode-switch") !== null;
 
+test("visibility comparisons for expanded Browse, compact Browse, Bookmarks and Work", async () => {
+  native.settings = { appearance: "dark" };
+  await page.viewport(900, 620);
+  document.documentElement.dataset.theme = "dark";
+  await paint();
+  await render(Shell);
+  await settle();
+  const tools = await import("$session/tools.svelte");
+  async function pair(name: string) {
+    for (const [state, shown] of [
+      ["before", true],
+      ["after", false],
+    ] as const) {
+      emitNativeEvent("uiCommand", `preference.ui.mode-switch=${shown}`);
+      await settle();
+      expect(switchShown()).toBe(shown);
+      expect(preferences.enabled("work")).toBe(true);
+      await page
+        .elementLocator(document.querySelector<HTMLElement>("aside.browser-sidebar")!)
+        .screenshot({ path: `../../../../../target/look/visibility/${name}-${state}.png` });
+    }
+  }
+  await pair("browse");
+  sidebar.setMode("compact");
+  await pair("compact");
+  sidebar.setMode("default");
+  tools.open("bookmarks");
+  await expect.element(page.getByText("Example bookmark", { exact: true })).toBeVisible();
+  await pair("bookmarks");
+  await page.viewport(740, 600);
+  await pair("bookmarks-narrow");
+  tools.close();
+  await page.viewport(900, 620);
+  emitNativeEvent("uiCommand", "browser.work");
+  await pair("work");
+  emitNativeEvent("uiCommand", "browser.return");
+});
+
 for (const theme of ["light", "dark"] as const) {
   test(`the column without Work, every shape, ${theme}`, async () => {
     await page.viewport(1100, 760);

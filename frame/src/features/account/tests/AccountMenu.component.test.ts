@@ -195,12 +195,20 @@ afterEach(() => preferences.dispose());
 
 test("hidden sign-in prompts preserve profile, model and settings actions", async () => {
   await preferences.init();
-  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
   await page.viewport(520, 420);
+  document.documentElement.dataset.theme = "dark";
   await open(accountFixture(), solo);
   await expect
-    .element(page.getByRole("menuitem", { name: "Sign in", exact: true }))
+    .element(page.getByRole("menuitem", { name: "Sign in to Zephium", exact: true }))
+    .toBeVisible();
+  await settle();
+  await page.screenshot({ path: "../../../../../target/look/visibility/profile-menu-before.png" });
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  await expect
+    .element(page.getByRole("menuitem", { name: "Sign in to Zephium", exact: true }))
     .not.toBeInTheDocument();
+  await settle();
+  await page.screenshot({ path: "../../../../../target/look/visibility/profile-menu-after.png" });
   await expect.element(page.getByRole("menuitem", { name: /Profile Settings/u })).toBeVisible();
   await expect.element(page.getByRole("menuitem", { name: "Models", exact: true })).toBeVisible();
 });

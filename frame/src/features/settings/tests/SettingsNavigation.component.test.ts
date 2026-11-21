@@ -73,10 +73,21 @@ afterEach(() => preferences.dispose());
 test("hiding sign-in prompts removes the identity slot and can be reversed", async () => {
   native.available = true;
   await preferences.init();
+  await page.viewport(300, 820);
+  document.documentElement.dataset.theme = "dark";
+  settings.select("general");
   const screen = await render(SettingsNavigation);
+  screen.container.style.cssText =
+    "inline-size:260px;block-size:800px;background:var(--color-chrome)";
   await expect.element(screen.getByRole("button", { name: /^Sign in/u })).toBeVisible();
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/look/visibility/settings-before.png" });
   emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
   await expect.poll(() => screen.container.querySelector(".identity-slot")).toBeNull();
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/look/visibility/settings-after.png" });
   expect(settings.section()).not.toBe("account");
   emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=true");
   await expect.element(screen.getByRole("button", { name: /^Sign in/u })).toBeVisible();
