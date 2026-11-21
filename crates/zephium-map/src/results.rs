@@ -198,13 +198,15 @@ fn past_site(text: &str, url: &Url) -> Option<String> {
 
 fn past_address(text: &str) -> Option<String> {
     let words: Vec<&str> = text.split(' ').collect();
+    let prefix = &words[..words.len().min(ADDRESS_WORDS)];
+    let last_crumb = prefix.iter().rposition(|word| *word == "›");
     let mut end = None;
     let mut crumb = false;
-    for (at, word) in words.iter().enumerate().take(ADDRESS_WORDS) {
+    for (at, word) in prefix.iter().enumerate() {
         if address_like(word) || *word == "›" || crumb {
             end = Some(at + 1);
             crumb = *word == "›";
-        } else if end.is_some() {
+        } else if end.is_some() && last_crumb.is_none_or(|last| at > last) {
             break;
         }
     }
@@ -860,5 +862,14 @@ fn address_prefix_does_not_consume_address_like_title_words() {
     assert_eq!(
         past_address("example.net › docs New Node.js Guide").as_deref(),
         Some("New Node.js Guide")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn address_prefix_consumes_multiword_breadcrumb_segments() {
+    assert_eq!(
+        past_address("example.net › getting started › install Install Guide").as_deref(),
+        Some("Install Guide")
     );
 }

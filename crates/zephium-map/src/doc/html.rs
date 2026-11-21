@@ -79,6 +79,10 @@ fn hidden(n: &NodeRef) -> bool {
                 .is_some_and(|v| v.eq_ignore_ascii_case("hidden"))
 }
 
+fn excluded(marks: Marks) -> bool {
+    marks.has(Marks::GENERATED) || marks.has(Marks::SPONSORED)
+}
+
 impl DocBuilder {
     fn resolve(&mut self, node: &NodeRef, attr: &str, base: &Url) -> Option<Url> {
         let raw = node.attr(attr)?;
@@ -296,10 +300,8 @@ impl DocBuilder {
             );
             inline |= self.doc.nodes[at].role == Role::Text;
             prose |= takes_prose;
-            if self.doc.nodes[at].marks.has(Marks::ANCILLARY)
-                || self.doc.nodes[at].marks.has(Marks::GENERATED)
-                || self.doc.nodes[at].marks.has(Marks::SPONSORED)
-            {
+            let marks = self.doc.nodes[at].marks;
+            if marks.has(Marks::ANCILLARY) || excluded(marks) {
                 break;
             }
         }
@@ -344,7 +346,7 @@ impl DocBuilder {
     }
 
     fn walk(&mut self, body: NodeRef<'_>, base: &Url) -> Result<(), DocError> {
-        let mut pending = vec![Some((body, None, 0, false))];
+        let mut pending = vec![Some((body, None::<usize>, 0, false))];
         while let Some(step) = pending.pop() {
             let Some((n, parent, level, verbatim)) = step else {
                 self.gap = true;
@@ -354,7 +356,11 @@ impl DocBuilder {
                 pending.push(Some((next, parent, level, verbatim)));
             }
             if n.is_text() {
-                self.capture_text(parent, n.text(), verbatim, level)?;
+                if !excluded(n.lifted_marks())
+                    || parent.is_some_and(|at| excluded(self.doc.nodes[at].marks))
+                {
+                    self.capture_text(parent, n.text(), verbatim, level)?;
+                }
                 continue;
             }
             let formatting = FORMATTING_TAGS.contains(&n.tag());
@@ -382,7 +388,9 @@ impl DocBuilder {
             {
                 continue;
             }
-            if verbatim && tag_is(&n, "br") {
+            let mut node_marks = marks(&n);
+            node_marks.insert(n.lifted_marks());
+            if verbatim && tag_is(&n, "br") && !excluded(node_marks) {
                 self.capture_text(parent, "\n", true, level)?;
             }
             if n.loss() {
@@ -433,31 +441,17 @@ impl DocBuilder {
             } else if tag_is(&n, "code") && in_sink && !verbatim {
                 Some(Role::Text)
             } else {
-                classify(&n, n.tag(), in_sink)
-                    .filter(|r| !(verbatim && *r == Role::CodeBlock))
-                    .or_else(|| n.generated_by_lift().then_some(Role::Group))
+                match classify(&n, n.tag(), in_sink) {
+                    Some(Role::CodeBlock) if verbatim => excluded(node_marks).then_some(Role::Text),
+                    role => role.or_else(|| excluded(node_marks).then_some(Role::Group)),
+                }
             };
             let (parent, level) = if let Some(role) = role {
-                let excluded = self.lift_exclusions(parent, level);
+                let lifted = self.lift_exclusions(parent, level);
                 let (parent, level) = self.fit_parent(parent, level);
                 let mut node = Node::new(role, parent.map(|i| i as u32));
-                node.marks.insert(excluded);
-                if n.generated_by_lift() {
-                    node.marks.insert(Marks::GENERATED);
-                }
-                if ["data-layout", "data-type", "data-testid"]
-                    .iter()
-                    .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
-                    || n.attr("rel").is_some_and(|v| {
-                        v.split_ascii_whitespace()
-                            .any(|w| w.eq_ignore_ascii_case("sponsored"))
-                    })
-                    || n.attr("class")
-                        .is_some_and(|v| v.split_ascii_whitespace().any(|w| w == "b_ad"))
-                {
-                    node.marks.insert(Marks::SPONSORED);
-                }
-                node.marks.insert(marks(&n));
+                node.marks = node_marks;
+                node.marks.insert(lifted);
                 if tag_is(&n, "p") {
                     node.marks.insert(Marks::PROSE);
                 }
@@ -492,7 +486,12 @@ impl DocBuilder {
                 if role == Role::CodeBlock {
                     let class = n.attr("class").into_iter().chain(
                         n.children()
-                            .filter(|c| tag_is(c, "code"))
+                            .filter(|c| {
+                                tag_is(c, "code")
+                                    && !hidden(c)
+                                    && !excluded(marks(c))
+                                    && !excluded(c.lifted_marks())
+                            })
                             .filter_map(|c| c.attr("class")),
                     );
                     let language = class
@@ -530,6 +529,18 @@ impl DocBuilder {
 
 fn marks(n: &NodeRef) -> Marks {
     let mut marks = Marks::default();
+    if ["data-layout", "data-type", "data-testid"]
+        .iter()
+        .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
+        || n.attr("rel").is_some_and(|v| {
+            v.split_ascii_whitespace()
+                .any(|w| w.eq_ignore_ascii_case("sponsored"))
+        })
+        || n.attr("class")
+            .is_some_and(|v| v.split_ascii_whitespace().any(|w| w == "b_ad"))
+    {
+        marks.insert(Marks::SPONSORED);
+    }
     for attr in [
         "itemprop",
         "itemtype",

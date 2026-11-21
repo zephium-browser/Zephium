@@ -572,6 +572,7 @@ fn report_matches_golden_and_hides_private_inputs() {
         },
         &mut FakeSource::default(),
         PROBE_CLOCK,
+        save_outcome,
     )
     .unwrap();
     let first = query_dir(root.path(), "blocked", false).unwrap();
@@ -715,6 +716,50 @@ fn resume_retries_a_checkpoint_without_a_measurement() {
     .unwrap();
     assert_eq!(pending(root.path(), [&query], 1).unwrap().len(), 1);
     write_json(&path.join(MEASURE), &Measure::default()).unwrap();
+    assert!(pending(root.path(), [&query], 1).unwrap().is_empty());
+}
+
+#[test]
+fn failed_outcome_publication_leaves_the_resumed_query_pending() {
+    let root = tempfile::tempdir().unwrap();
+    let query = place("unfinished");
+    let path = query_dir(root.path(), &query.label.id, true).unwrap();
+    save_outcome(
+        &path.join(OUTCOME),
+        QueryResult::unavailable(Verdict::Fail, Reason::ArtifactError, Activity::default()),
+    )
+    .unwrap();
+    assert_eq!(pending(root.path(), [&query], 1).unwrap().len(), 1);
+    let mut engine = Script {
+        path: "/denied",
+        expect: Expectation::Text,
+        repeated: false,
+    };
+    let mut source = FakeSource::default();
+    let error = record_query(
+        root.path(),
+        &query,
+        &mut engine,
+        &mut source,
+        PROBE_CLOCK,
+        |_, _| {
+            let measure = store::read_json::<Measure>(&path.join(MEASURE)).unwrap();
+            assert_eq!(measure.requests, 1);
+            Err(BenchError::new("publish_checkpoint"))
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.class, "publish_checkpoint");
+    assert_eq!(pending(root.path(), [&query], 1).unwrap().len(), 1);
+    record_query(
+        root.path(),
+        &query,
+        &mut engine,
+        &mut source,
+        PROBE_CLOCK,
+        save_outcome,
+    )
+    .unwrap();
     assert!(pending(root.path(), [&query], 1).unwrap().is_empty());
 }
 

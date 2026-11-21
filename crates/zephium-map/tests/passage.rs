@@ -182,7 +182,7 @@ fn answer_marks_language_and_term_boundaries() {
 
 #[test]
 fn an_adjacent_solution_heading_can_scope_the_fix() {
-    let d=doc("a","<main><h2>Problem</h2><pre>TypeError: invalid bucket</pre><h2>Solution</h2><pre>bucket.reset()</pre></main>");
+    let d=doc("a","<main><h2>Problem</h2><pre>TypeError: invalid bucket</pre><h3>Solution</h3><pre>bucket.reset()</pre></main>");
     let q = read_query(
         "Traceback (most recent call last):\n /tmp/project.py:14\nTypeError: invalid bucket",
     )
@@ -533,11 +533,33 @@ fn textual_list_values_keep_inline_content_and_the_subject_heading() {
 
 #[test]
 fn accepted_answers_do_not_cross_unrelated_issue_headings() {
-    let page = doc("issues", "<main><h2>Bucket failure</h2><pre>TypeError: invalid bucket</pre><h2>Printer setup</h2><div itemprop='acceptedAnswer'><pre>printer.reset()</pre></div></main>");
     let query = read_query("TypeError: invalid bucket").unwrap();
+    for heading in ["Printer setup", "Printer solution"] {
+        let page = doc("issues", &format!("<main><h2>Bucket failure</h2><pre>TypeError: invalid bucket</pre><h2>{heading}</h2><div itemprop='acceptedAnswer'><pre>printer.reset()</pre></div></main>"));
+        assert_eq!(
+            read_passages(&query, &[&page])[0].text,
+            "TypeError: invalid bucket"
+        );
+    }
+    let page = doc("issues", "<main><div><h2>Bucket failure</h2><pre>TypeError: invalid bucket</pre></div><div><h3>Printer solution</h3><pre>printer.reset()</pre></div></main>");
     assert_eq!(
         read_passages(&query, &[&page])[0].text,
         "TypeError: invalid bucket"
+    );
+}
+
+#[test]
+fn a_last_task_noun_may_appear_in_the_title() {
+    let page = doc(
+        "guide",
+        "<title>Undo a commit in Git</title><p>To undo the last commit, use git revert.</p>",
+    );
+    let query = read_query("how to undo last commit in git").unwrap();
+    assert_eq!(
+        read_passages(&query, &[&page])
+            .first()
+            .map(|p| p.text.as_str()),
+        Some("To undo the last commit, use git revert.")
     );
 }
 
@@ -547,11 +569,13 @@ fn timing_clause_can_follow_an_unrestricted_task_quantity() {
         "guide",
         "<title>Loom guide</title><p>Remove all spools before restarting.</p>",
     );
-    let q = read_query("loom remove all spools").unwrap();
-    assert_eq!(
-        read_passages(&q, &[&page])[0].text,
-        "Remove all spools before restarting."
-    );
+    for text in ["loom remove all spools", "how to remove all spools?"] {
+        let q = read_query(text).unwrap();
+        assert_eq!(
+            read_passages(&q, &[&page]).first().map(|p| p.text.as_str()),
+            Some("Remove all spools before restarting.")
+        );
+    }
 }
 
 #[test]

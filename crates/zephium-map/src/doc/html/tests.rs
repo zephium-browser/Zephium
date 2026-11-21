@@ -452,6 +452,40 @@ fn html_meta_utf16_labels_describe_utf8() {
 }
 
 #[test]
+fn nested_code_preserves_exclusions_without_changing_ordinary_code() {
+    let doc = document(
+        b"<main><pre><code aria-label='AI overview'>Generated answer</code><code rel='sponsored'>Paid answer</code><code>  run()\n</code></pre><a href='/docs'>Docs<code class='sponsored'>Paid label</code></a></main>",
+        DocLimits::default(),
+    );
+    let visible: Vec<_> = doc
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| crate::visible(doc.nodes(), *at))
+        .map(|(_, node)| node)
+        .collect();
+    assert_eq!(
+        visible
+            .iter()
+            .find(|node| node.role == Role::CodeBlock)
+            .unwrap()
+            .text,
+        "  run()\n"
+    );
+    assert_eq!(
+        visible
+            .iter()
+            .find(|node| node.role == Role::Link)
+            .unwrap()
+            .text,
+        "Docs"
+    );
+    assert!(visible
+        .iter()
+        .all(|node| { !node.text.contains("Generated") && !node.text.contains("Paid") }));
+}
+
+#[test]
 fn arena_and_document_lifts_preserve_generated_exclusion() {
     let html = b"<main><div aria-label='AI overview'><p>Generated answer</p></div><div><p>Ordinary answer</p></div></main>";
     for limits in [
@@ -466,6 +500,35 @@ fn arena_and_document_lifts_preserve_generated_exclusion() {
     ] {
         let doc = document(html, limits);
         for (text, visible) in [("Generated answer", false), ("Ordinary answer", true)] {
+            let at = doc
+                .nodes()
+                .iter()
+                .position(|node| node.text == text)
+                .unwrap();
+            assert_eq!(crate::visible(doc.nodes(), at), visible, "{text}");
+        }
+    }
+}
+
+#[test]
+fn arena_and_document_lifts_preserve_sponsored_exclusion() {
+    let html = b"<main><div class='sponsored'><p>Paid answer</p><a href='/paid'>Paid child</a></div><div><p>Ordinary answer</p></div></main>";
+    for limits in [
+        DocLimits {
+            arena_depth: 4,
+            ..DocLimits::default()
+        },
+        DocLimits {
+            depth: 3,
+            ..DocLimits::default()
+        },
+    ] {
+        let doc = document(html, limits);
+        for (text, visible) in [
+            ("Paid answer", false),
+            ("Paid child", false),
+            ("Ordinary answer", true),
+        ] {
             let at = doc
                 .nodes()
                 .iter()

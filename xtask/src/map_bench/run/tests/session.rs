@@ -103,6 +103,52 @@ fn refuse(class: StatusRefusal) -> FetchResult {
     Err(FetchRefusal::Reader(ReadRefusal::Status(class)))
 }
 
+#[test]
+fn probe_does_not_persist_robots_denied_redirect_bodies() {
+    const DENIED_BODY: &str = "denied homepage body";
+    let root = tempfile::tempdir().unwrap();
+    let query = place("redirected");
+    let mut source = ScriptedSource::new(|request| match request.url.path() {
+        "/robots.txt" => scripted_body(
+            request,
+            "text/plain",
+            if request.url.host_str() == Some("docs.example.com") {
+                "User-agent: *\nDisallow: /private"
+            } else {
+                "User-agent: *\nAllow: /"
+            },
+        )
+        .map(|mut body| {
+            body.wire_bytes = 0;
+            body
+        }),
+        "/" => scripted_body(request, "text/html", DENIED_BODY).map(|mut body| {
+            body.final_url = Url::parse("https://docs.example.com/private").unwrap();
+            body
+        }),
+        _ => refuse(StatusRefusal::Client),
+    });
+    let mut engine = crate::map_bench::probe::ProbeEngine;
+    record_query(
+        root.path(),
+        &query,
+        &mut engine,
+        &mut source,
+        PROBE_CLOCK,
+        save_outcome,
+    )
+    .unwrap();
+    let digest = store::digest(DENIED_BODY.as_bytes());
+    let path = query_dir(root.path(), &query.label.id, false).unwrap();
+    assert!(!root.path().join("bodies").join(&digest).exists());
+    assert!(!path.join("bodies").join(digest).exists());
+    let recorded: QueryResult = store::read_json(&path.join(OUTCOME)).unwrap();
+    assert_eq!(recorded.score.reason, Reason::RobotsDenied);
+    assert_eq!(recorded.activity.site_requests, 3);
+    let replay = replay_query(root.path(), &query, &mut engine, PROBE_CLOCK, 0, None).unwrap();
+    assert_eq!(recorded, replay);
+}
+
 fn site(request: &FetchRequest) -> FetchResult {
     match request.url.path() {
         "/robots.txt" => {
@@ -147,7 +193,15 @@ const ACME: &str = "kind='place'\nsite='acme.com'\nwant=['acme.com/setup']\ngrou
 
 fn run_session(root: &Path, query: &CorpusQuery, source: &mut ScriptedSource) -> QueryResult {
     let mut engine = crate::map_bench::session::SessionEngine;
-    record_query(root, query, &mut engine, source, SESSION_CLOCK).unwrap();
+    record_query(
+        root,
+        query,
+        &mut engine,
+        source,
+        SESSION_CLOCK,
+        save_outcome,
+    )
+    .unwrap();
     let path = query_dir(root, &query.label.id, false).unwrap();
     let captured = store::read_json::<QueryResult>(&path.join(OUTCOME)).unwrap();
     let destination = tempfile::tempdir().unwrap();
@@ -659,7 +713,7 @@ fn save_row(root: &Path, path: &Path, request: &FetchRequest, result: FetchResul
         wire_bytes: result.as_ref().ok().map(|body| body.wire_bytes),
     };
     journal
-        .finish(root, path, index, &result, transfer)
+        .finish(root, path, index, &result, transfer, None)
         .unwrap();
 }
 

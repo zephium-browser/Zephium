@@ -460,6 +460,7 @@ fn failure(refusal: FetchRefusal) -> Failure {
         | FetchRefusal::NotRecorded
         | FetchRefusal::Interrupted
         | FetchRefusal::Storage => Failure::Unavailable,
+        FetchRefusal::RobotsDenied => Failure::Robots,
         FetchRefusal::Reader(R::Timeout(_)) => Failure::Timeout,
         FetchRefusal::Reader(R::Status(S::Client)) => Failure::Client,
         FetchRefusal::Reader(R::Status(S::RateLimited | S::Server)) => Failure::Server,
@@ -704,7 +705,11 @@ mod tests {
     }
 
     impl BenchIo for EffectsOnly {
-        fn fetch(&mut self, _: FetchRequest) -> FetchResult {
+        fn fetch_checked(
+            &mut self,
+            _: FetchRequest,
+            _: &mut super::super::engine::LandingAdmission<'_>,
+        ) -> FetchResult {
             panic!("expected asynchronous fetch");
         }
 

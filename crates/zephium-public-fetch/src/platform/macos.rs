@@ -77,6 +77,9 @@ fn read() -> Option<MacProxies> {
         https_port: number(&proxies, "HTTPSPort"),
         socks: enabled("SOCKSEnable"),
         scoped: scoped(&proxies),
+        supplemental: proxies
+            .find(CFString::from_static_string("__SUPPLEMENTAL__"))
+            .is_some(),
     })
 }
 

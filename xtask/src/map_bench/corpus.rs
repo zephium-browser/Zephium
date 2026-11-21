@@ -383,7 +383,19 @@ pub(super) fn fixture(text: &str) -> CorpusQuery {
 
 #[cfg(test)]
 pub(super) fn load_external_fixture(paths: &[PathBuf]) -> Result<Option<Corpus>> {
-    if paths.iter().any(|path| path.exists()) {
+    let mut present = false;
+    for path in paths {
+        if super::store::exists(path)? {
+            present = true;
+        } else {
+            for parent in path.ancestors().skip(1) {
+                if super::store::directory(parent, false)? {
+                    break;
+                }
+            }
+        }
+    }
+    if present {
         Corpus::load(paths).map(Some)
     } else {
         Ok(None)
@@ -396,6 +408,23 @@ mod tests {
 
     const PLACE: &str =
         "[[query]]\nid='test'\ntext='private search'\nkind='place'\nsite='example.com'\n";
+
+    #[test]
+    fn external_fixture_only_skips_missing_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.toml");
+        assert!(load_external_fixture(std::slice::from_ref(&missing))
+            .unwrap()
+            .is_none());
+
+        let file = temp.path().join("file.toml");
+        std::fs::write(&file, PLACE).unwrap();
+        assert!(load_external_fixture(std::slice::from_ref(&file))
+            .unwrap()
+            .is_some());
+        assert!(load_external_fixture(&[file.clone(), missing.clone()]).is_err());
+        assert!(load_external_fixture(&[missing, file.join("corpus.toml")]).is_err());
+    }
 
     #[test]
     fn actual_corpora_when_available() {

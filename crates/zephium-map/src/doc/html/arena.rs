@@ -1,4 +1,4 @@
-use super::DocLimits;
+use super::{DocLimits, Marks};
 use html5ever::{local_name, ns, tendril::StrTendril, Attribute, LocalName};
 
 // Zero is both the document handle and the null link. The document is never a child.
@@ -11,7 +11,6 @@ const LOSS: u8 = 8;
 const JSON: u8 = 16;
 const HIDDEN_BY_LIFT: u8 = 32;
 const ATTACHED: u8 = 64;
-const GENERATED_BY_LIFT: u8 = 128;
 const ATTRIBUTE_NAMES: &[&str] = &[
     "href",
     "src",
@@ -54,6 +53,7 @@ struct Record {
     data: u32,
     depth: u8,
     flags: u8,
+    lifted_marks: Marks,
 }
 
 struct Attr {
@@ -147,8 +147,8 @@ impl<'a> NodeRef<'a> {
     pub(super) fn hidden_by_lift(self) -> bool {
         self.record().flags & HIDDEN_BY_LIFT != 0
     }
-    pub(super) fn generated_by_lift(self) -> bool {
-        self.record().flags & GENERATED_BY_LIFT != 0
+    pub(super) fn lifted_marks(self) -> Marks {
+        self.record().lifted_marks
     }
     pub(super) fn sibling(self) -> Option<Self> {
         let next = self.record().next;
@@ -357,14 +357,19 @@ impl Arena {
         let p = &self.records[parent as usize];
         let no_text = p.flags & (OPAQUE | NO_TEXT) != 0;
         let mut hidden = p.flags & HIDDEN_BY_LIFT != 0;
-        let mut generated = p.flags & GENERATED_BY_LIFT != 0;
+        let mut lifted_marks = p.lifted_marks;
         if usize::from(p.depth) >= self.limits.arena_depth as usize
             && self.records[id as usize].flags & TEXT == 0
         {
             self.lifted = true;
             let lifted = self.node(parent);
             hidden |= super::hidden(&lifted) || no_text;
-            generated |= super::marks(&lifted).has(super::Marks::GENERATED);
+            let marks = super::marks(&lifted);
+            for mark in [Marks::GENERATED, Marks::SPONSORED] {
+                if marks.has(mark) {
+                    lifted_marks.insert(mark);
+                }
+            }
             parent = p.parent;
             before = 0;
         }
@@ -404,10 +409,8 @@ impl Arena {
         n.prev = prev;
         n.next = before;
         n.depth = depth;
-        n.flags = (n.flags & !(NO_TEXT | HIDDEN_BY_LIFT | GENERATED_BY_LIFT)) | ATTACHED;
-        if generated {
-            n.flags |= GENERATED_BY_LIFT;
-        }
+        n.flags = (n.flags & !(NO_TEXT | HIDDEN_BY_LIFT)) | ATTACHED;
+        n.lifted_marks.insert(lifted_marks);
         if no_text {
             n.flags |= NO_TEXT
         }
