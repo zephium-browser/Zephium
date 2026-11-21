@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use url::Url;
 use zephium_core::search::SearchEngine;
 use zephium_map::session::{
-    Expect, Failure, FetchResult as SessionFetch, Id, Phase, Stats, MAX_CONCURRENT,
+    EndOutcome, Expect, Failure, FetchResult as SessionFetch, Id, Phase, Stats, MAX_CONCURRENT,
     MAX_HOST_CONCURRENT, MAX_MEMO_BYTES,
 };
 use zephium_map::{
@@ -46,7 +46,7 @@ impl Engine for SessionEngine {
 
 struct Driver {
     outcome: Outcome,
-    places: Vec<Place>,
+    places: [Option<Place>; MAX_PLACES],
     lookups: usize,
     memos: usize,
     terminal: bool,
@@ -58,7 +58,7 @@ impl Driver {
     fn new(query: &CorpusQuery) -> Self {
         Self {
             outcome: Outcome::empty(query.label.kind),
-            places: Vec::new(),
+            places: [None, None],
             lookups: 0,
             memos: 0,
             terminal: false,
@@ -98,7 +98,7 @@ impl Driver {
                     .get_or_insert(EngineFailure::MissingTerminal);
                 break;
             };
-            effects = session.handle(Input::Elapsed(io.elapsed()));
+            effects = session.handle(Input::Elapsed { time: io.elapsed() });
             if !effects.iter().any(is_terminal) {
                 effects.extend(session.handle(input));
             }
@@ -119,7 +119,6 @@ impl Driver {
         self.outcome
             .stats
             .insert("official_sites".into(), self.lookups as u64);
-        self.places.sort_by_key(|place| compare_side(query, place));
         if query.label.kind == Kind::Passage {
             let completed = self
                 .outcome
@@ -138,20 +137,10 @@ impl Driver {
                 self.outcome.stats.insert("passage_pages_read".into(), 0);
             }
         }
-        let mut occupied = [false; MAX_PLACES];
-        for place in self.places {
-            let preferred = compare_side(query, &place);
-            let Some(index) = occupied
-                .get(preferred)
-                .filter(|&&used| !used)
-                .map(|_| preferred)
-                .or_else(|| occupied.iter().position(|&used| !used))
-            else {
-                self.outcome.failure = Some(EngineFailure::UnexpectedPlace);
-                break;
-            };
-            occupied[index] = true;
-            flatten_place(&mut self.outcome, index, place);
+        for (index, place) in self.places.into_iter().enumerate() {
+            if let Some(place) = place {
+                flatten_place(&mut self.outcome, index, place);
+            }
         }
         self.outcome
     }
@@ -242,7 +231,7 @@ impl Driver {
                 let token = io.start_fetch(FetchRequest {
                     url: url.clone(),
                     expect,
-                    max_bytes,
+                    max_bytes: max_bytes as usize,
                     timeout,
                 });
                 if self.in_flight.insert(token, (id, url, expect)).is_some() {
@@ -292,40 +281,34 @@ impl Driver {
 
     fn emit(&mut self, event: MapEvent, io: &dyn BenchIo) {
         match event {
-            MapEvent::Kind(kind) => {
+            MapEvent::Kind { kind } => {
                 self.outcome.kind = match kind {
                     QueryKind::Instant => Kind::Instant,
                     QueryKind::List => Kind::List,
                     QueryKind::Place { .. } => Kind::Place,
                     QueryKind::Compare { .. } => Kind::Compare,
-                    QueryKind::Passage(_) => Kind::Passage,
+                    QueryKind::Passage { kind: _ } => Kind::Passage,
                 }
             }
-            MapEvent::FirstLayer(layer) if !self.outcome.synthetic_results => {
+            MapEvent::FirstLayer { layer } if !self.outcome.synthetic_results => {
                 self.outcome
                     .milestones
                     .first_layer
                     .get_or_insert(io.elapsed());
                 self.outcome.groups = groups(&layer);
             }
-            MapEvent::Place { place, .. } => {
+            MapEvent::Place { slot, place, .. } => {
                 self.outcome
                     .milestones
                     .first_place
                     .get_or_insert(io.elapsed());
-                if let Some(previous) = self
-                    .places
-                    .iter_mut()
-                    .find(|previous| previous.site == place.site && previous.entry == place.entry)
-                {
-                    *previous = place;
-                } else if self.places.len() < MAX_PLACES {
-                    self.places.push(place);
+                if let Some(previous) = self.places.get_mut(usize::from(slot)) {
+                    *previous = Some(place);
                 } else {
                     self.outcome.failure = Some(EngineFailure::UnexpectedPlace);
                 }
             }
-            MapEvent::Passages(passages) => {
+            MapEvent::Passages { passages } => {
                 self.outcome.passages = passages
                     .into_iter()
                     .map(|passage| Passage {
@@ -334,49 +317,29 @@ impl Driver {
                     })
                     .collect();
             }
-            MapEvent::Done(stats) => {
+            MapEvent::End { outcome, stats } => {
                 self.terminal = true;
                 self.outcome.milestones.full = Some(io.elapsed());
                 flatten_stats(&mut self.outcome, stats);
+                if let EndOutcome::Failed { failure } = outcome {
+                    self.outcome
+                        .stats
+                        .insert(format!("terminal_failure.{failure:?}"), 1);
+                    self.outcome.failure = Some(EngineFailure::SessionFailed);
+                }
             }
-            MapEvent::Failed(failure) => {
-                self.terminal = true;
-                self.outcome.milestones.full = Some(io.elapsed());
-                self.outcome
-                    .stats
-                    .insert(format!("terminal_failure.{failure:?}"), 1);
-                self.outcome.failure = Some(EngineFailure::SessionFailed);
-            }
-            MapEvent::Compare(_) | MapEvent::FirstLayer(_) => {}
+            MapEvent::Compare { .. }
+            | MapEvent::PlaceFailed { .. }
+            | MapEvent::FirstLayer { .. } => {}
         }
     }
-}
-
-fn compare_side(query: &CorpusQuery, place: &Place) -> usize {
-    let host = place
-        .entry
-        .as_url()
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches("www.");
-    query
-        .sites
-        .iter()
-        .position(|site| site.trim_start_matches("www.") == host)
-        .or_else(|| {
-            query
-                .sites
-                .iter()
-                .position(|site| psl::domain_str(site) == Some(place.site.as_str()))
-        })
-        .unwrap_or(MAX_PLACES)
 }
 
 fn is_terminal(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::Emit {
-            event: MapEvent::Done(_) | MapEvent::Failed(_),
+            event: MapEvent::End { .. },
             ..
         }
     )
@@ -384,7 +347,10 @@ fn is_terminal(effect: &Effect) -> bool {
 
 fn groups(layer: &FirstLayer) -> BTreeSet<Group> {
     [
-        (Group::Discussion, !layer.discussion.is_empty()),
+        (
+            Group::Discussion,
+            layer.organic.iter().any(|r| r.discussion),
+        ),
         (Group::Video, !layer.video.is_empty()),
         (Group::Social, !layer.social.is_empty()),
         (Group::Images, !layer.images.is_empty()),
@@ -547,6 +513,27 @@ fn flatten_stats(outcome: &mut Outcome, stats: Stats) {
     put("fresh_memos", stats.fresh_memos.into());
     put("stale_memos", stats.stale_memos.into());
     put("rejected_memos", stats.rejected_memos.into());
+    for (index, notes) in stats.places {
+        for (key, value) in [
+            ("robots_truncated", notes.robots_truncated),
+            ("entry_truncated", notes.entry_truncated),
+            ("sections_truncated", notes.sections_truncated),
+            ("section_page_truncated", notes.section_page_truncated),
+            ("llms_truncated", notes.llms_truncated),
+            ("sitemap_truncated", notes.sitemap_truncated),
+            ("sitelinks_truncated", notes.sitelinks_truncated),
+            ("linked_data_truncated", notes.linked_data_truncated),
+        ] {
+            put(&format!("place.{index}.{key}"), u64::from(value));
+        }
+        for (key, value) in [
+            ("links_seen", notes.links_seen),
+            ("sitemap_urls", notes.sitemap_urls),
+            ("section_pages", notes.section_pages),
+        ] {
+            put(&format!("place.{index}.{key}"), u64::from(value));
+        }
+    }
     for (phase, counts) in stats.phases {
         put(&format!("phase.{phase:?}.started"), counts.started.into());
         put(
@@ -586,6 +573,7 @@ fn source_tag(source: Source) -> &'static str {
         Source::PrimaryNav => "primary_nav",
         Source::MenuGroup => "menu_group",
         Source::Footer => "footer",
+        Source::EngineResult => "engine_result",
         Source::EngineSitelink => "engine_sitelink",
         Source::SectionSidebar => "section_sidebar",
         Source::Heading => "heading",
@@ -604,20 +592,9 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
         ("shell", notes.shell),
         ("wall", notes.wall),
         ("robots_disallowed", notes.robots_disallowed),
-        ("robots_truncated", notes.robots_truncated),
-        ("entry_truncated", notes.entry_truncated),
-        ("sections_truncated", notes.sections_truncated),
-        ("section_page_truncated", notes.section_page_truncated),
-        ("llms_truncated", notes.llms_truncated),
-        ("sitemap_truncated", notes.sitemap_truncated),
-        ("sitelinks_truncated", notes.sitelinks_truncated),
-        ("linked_data_truncated", notes.linked_data_truncated),
     ] {
         put(key, u64::from(value));
     }
-    put("links_seen", notes.links_seen.into());
-    put("sitemap_urls", notes.sitemap_urls.into());
-    put("section_pages", notes.section_pages.into());
     put("sections", place.sections.len() as u64);
     put(
         "children",
@@ -638,11 +615,23 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .filter(|source| **source != Source::Heading || depth == Depth::Two),
             );
             let mut url = entry.key.as_url().clone();
-            url.set_fragment(entry.locator.fragment().as_deref());
+            if let Some(fragment) = entry
+                .locator
+                .fragment()
+                .filter(|_| url.fragment().is_none())
+            {
+                url.set_fragment(fragment.strip_prefix('#'));
+            }
             outcome.entries.push(Entry {
                 url,
                 depth,
-                source: source_tag(entry.source).into(),
+                source: entry
+                    .sources
+                    .first()
+                    .copied()
+                    .map(source_tag)
+                    .unwrap_or_default()
+                    .into(),
                 tags: entry
                     .sources
                     .iter()
@@ -790,7 +779,8 @@ mod tests {
         }
         let mut driver = Driver::new(&query);
         let mut io = EffectsOnly::default();
-        let site = SiteKey::from_url(&Url::parse("https://example.com").unwrap()).unwrap();
+        let site =
+            zephium_map::PlaceKey::from_url(&Url::parse("https://example.com").unwrap()).unwrap();
         let memo = |len| Effect::RememberSite {
             id: ID,
             memo: vec![0; len],
@@ -809,7 +799,10 @@ mod tests {
         for effect in [
             Effect::Emit {
                 id: ID,
-                event: MapEvent::Done(Stats::default()),
+                event: MapEvent::End {
+                    outcome: EndOutcome::Done,
+                    stats: Stats::default(),
+                },
             },
             Effect::Render {
                 id: ID,
@@ -820,7 +813,10 @@ mod tests {
             driver.effect(
                 Effect::Emit {
                     id: ID,
-                    event: MapEvent::Done(Stats::default()),
+                    event: MapEvent::End {
+                        outcome: EndOutcome::Done,
+                        stats: Stats::default(),
+                    },
                 },
                 &query,
                 &mut io,

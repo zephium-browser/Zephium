@@ -39,7 +39,7 @@ fn ordered_site_with_all_evidence() {
     let place = read_site(&home, &inputs).unwrap();
     let expected = [
         ("Product", Some(Product), PrimaryNav, false),
-        ("Documentation", Some(Documentation), PrimaryNav, true),
+        ("Documentation", Some(Documentation), PrimaryNav, false),
         ("Pricing", Some(Pricing), PrimaryNav, false),
         ("Changelog", Some(Changelog), PrimaryNav, false),
         ("Status", Some(Status), PrimaryNav, true),
@@ -54,7 +54,7 @@ fn ordered_site_with_all_evidence() {
         place
             .sections
             .iter()
-            .map(|e| (e.label.as_str(), e.role, e.source, e.external))
+            .map(|e| (e.label.as_str(), e.role, e.sources[0], e.off_site))
             .collect::<Vec<_>>(),
         expected
     );
@@ -63,7 +63,7 @@ fn ordered_site_with_all_evidence() {
     assert!(product
         .children
         .iter()
-        .all(|e| e.source == MenuGroup && !e.external));
+        .all(|e| e.sources[0] == MenuGroup && !e.off_site));
     let guide = &place.sections[1];
     assert_eq!(
         labels(&guide.children),
@@ -73,13 +73,13 @@ fn ordered_site_with_all_evidence() {
         guide
             .children
             .iter()
-            .map(|e| (e.source, e.group.as_deref(), e.external))
+            .map(|e| (e.sources[0], e.group.as_deref(), e.off_site))
             .collect::<Vec<_>>(),
         [
-            (SectionSidebar, Some("Getting started"), true),
-            (SectionSidebar, Some("Reference"), true),
-            (Heading, None, true),
-            (Llms, None, true)
+            (SectionSidebar, Some("Getting started"), false),
+            (SectionSidebar, Some("Reference"), false),
+            (Heading, None, false),
+            (Llms, None, false)
         ]
     );
     let prices = &place.sections[2];
@@ -87,27 +87,32 @@ fn ordered_site_with_all_evidence() {
     assert_eq!(labels(&prices.children), ["Plan tiers", "Questions"]);
     assert_eq!(
         prices.children[0].locator.fragment().as_deref(),
-        Some("tiers")
+        Some("#tiers")
     );
     assert!(prices
         .children
         .iter()
-        .all(|c| c.key == prices.key && c.source == Heading && !c.external));
+        .all(|c| c.key == prices.key && c.sources[0] == Heading && !c.off_site));
     assert_eq!(
         labels(&place.sections[3].children),
         ["v3.2.1", "2026-06-10"]
     );
     assert!(matches!(
         place.sections[3].children[1].locator,
-        Locator::TextQuote { .. }
+        Locator { quote: Some(_), .. }
     ));
     assert_eq!(
         labels(&place.sections[9].children),
         ["Orientation", "Field guide"]
     );
     assert_eq!(place.social.len(), 1);
+    assert!(place.social[0].basis == results::ProfileBasis::SameAs);
+    assert!(
+        place.sections[3].children[0].locator.quote.is_some()
+            && place.sections[3].children[0].locator.element.is_some()
+    );
     assert_eq!(place.social[0].url.host_str(), Some("github.com"));
-    assert_eq!(place.fetch_sections(true)[0].label, "Changelog");
+
     inputs.pages.clear();
     for d in [&pricing, &docs, &changes] {
         inputs.pages.insert(PageKey::from_url(d.page()).unwrap(), d);
@@ -142,19 +147,19 @@ fn wide_navigation_and_menu_children_stay_bounded() {
     let links = (0..600)
         .map(|i| include_str!("fixtures/wide-nav-link.html").replace('N', &i.to_string()))
         .collect::<String>();
-    let p = read_site(
+    let (p, stats) = read_site_with_stats(
         &doc("/", &format!("<nav><ul>{links}</ul></nav>")),
         &Default::default(),
     )
     .unwrap();
-    assert_eq!(p.notes.links_seen, 600);
+    assert_eq!(stats.links_seen, 600);
     assert_eq!(
         labels(&p.sections),
         (0..MAX_SECTIONS)
             .map(|i| format!("Section {i}"))
             .collect::<Vec<_>>()
     );
-    assert!(p.notes.sections_truncated);
+    assert!(p.notes.truncated);
     let p = read_site(
         &doc(
             "/",
@@ -190,7 +195,7 @@ fn sitemap_sampling_and_index_bounds() {
     xml.push_str("</urlset>");
     let map = Sitemap::parse(xml.as_bytes(), &source).unwrap();
     let home = doc("/", "<title>Workshop</title>");
-    let p = read_site(
+    let (p, stats) = read_site_with_stats(
         &home,
         &SiteInputs {
             sitemaps: [(key("/index.xml"), &map)].into(),
@@ -202,11 +207,11 @@ fn sitemap_sampling_and_index_bounds() {
         labels(&p.sections),
         ["docs", "downloads", "examples", "news", "products"]
     );
-    assert_eq!(p.notes.sitemap_urls, 50_000);
+    assert_eq!(stats.sitemap_urls, 50_000);
     for e in p.sections {
         assert_eq!(e.more, 10_000 - 1 - MAX_CHILDREN as u32);
         assert_eq!(e.children.len(), MAX_CHILDREN);
-        assert_eq!(e.source, Source::Sitemap);
+        assert_eq!(e.sources[0], Source::Sitemap);
         assert_eq!(e.key.as_url().path(), format!("/{}/0", e.label));
         assert_eq!(
             labels(&e.children),
@@ -243,7 +248,7 @@ fn hostile_inputs_fail_closed_or_keep_bounded_independent_evidence() {
     ));
     let home=doc("/",&format!("<script type='application/ld+json'>{}0{}</script><nav><a href='/about'>About</a></nav>","[".repeat(10_000),"]".repeat(10_000)));
     let llms = "- [Repeated](/same)\n".repeat(100_000);
-    let p = read_site(
+    let (p, stats) = read_site_with_stats(
         &home,
         &SiteInputs {
             llms: Some(&llms),
@@ -251,7 +256,7 @@ fn hostile_inputs_fail_closed_or_keep_bounded_independent_evidence() {
         },
     )
     .unwrap();
-    assert!(p.notes.llms_truncated && p.notes.linked_data_truncated);
+    assert!(stats.llms_truncated && stats.linked_data_truncated);
     assert_eq!(labels(&p.sections), ["About"]);
     assert_eq!(
         Robots::parse(&"\n".repeat(1024 * 1024)).outcome,
@@ -305,8 +310,15 @@ fn compare_reserves_role_pairs_before_labels_and_keeps_unpaired() {
     assert_eq!(
         rows.iter()
             .map(|r| (
-                r.left.as_ref().map(|e| e.label.as_str()),
-                r.right.as_ref().map(|e| e.label.as_str())
+                left.sections
+                    .iter()
+                    .find(|e| Some(&e.id) == r.left.as_ref())
+                    .map(|e| e.label.as_str()),
+                right
+                    .sections
+                    .iter()
+                    .find(|e| Some(&e.id) == r.right.as_ref())
+                    .map(|e| e.label.as_str())
             ))
             .collect::<Vec<_>>(),
         [
@@ -330,7 +342,7 @@ fn labelled_menus_and_deep_landings_use_observed_destinations() {
     let p = read_site(&deep, &Default::default()).unwrap();
     assert_eq!(p.sections[0].key.as_url(), deep.page());
     assert_eq!(labels(&p.sections[0].children), ["Plan tiers", "Questions"]);
-    assert!(p.fetch_sections(false).is_empty());
+    assert_eq!(p.entry.as_url().path(), "/");
 }
 #[test]
 fn utility_entries_cannot_consume_every_slot() {
@@ -346,11 +358,8 @@ fn utility_entries_cannot_consume_every_slot() {
     let p = read_site(&home, &Default::default()).unwrap();
     assert_eq!(p.sections.len(), MAX_SECTIONS);
     assert_eq!(p.sections[0].label, "Docs");
-    assert_eq!(
-        p.sections[0].sources,
-        [Source::PrimaryNav, Source::Footer].into()
-    );
-    assert!(p.notes.sections_truncated);
+    assert_eq!(p.sections[0].sources, [Source::PrimaryNav, Source::Footer]);
+    assert!(p.notes.truncated);
 }
 #[test]
 fn separate_sitemaps_merge_one_cluster_regardless_of_arrival() {
@@ -386,7 +395,7 @@ fn metadata_and_section_page_boundaries() {
     let home = doc("/", "<title>Workshop</title>");
     let llms = |n| format!("#{}", "x".repeat(n - 1));
     for n in [MAX_LLMS_BYTES, MAX_LLMS_BYTES + 1] {
-        let p = read_site(
+        let (_, stats) = read_site_with_stats(
             &home,
             &SiteInputs {
                 llms: Some(&llms(n)),
@@ -394,7 +403,7 @@ fn metadata_and_section_page_boundaries() {
             },
         )
         .unwrap();
-        assert_eq!(p.notes.llms_truncated, n > MAX_LLMS_BYTES);
+        assert_eq!(stats.llms_truncated, n > MAX_LLMS_BYTES);
     }
     for n in [MAX_ROBOTS_BYTES, MAX_ROBOTS_BYTES + 1] {
         assert_eq!(
@@ -406,10 +415,7 @@ fn metadata_and_section_page_boundaries() {
         let lines = (0..n)
             .map(|i| format!("Sitemap: https://workshop.example/{i}.xml\n"))
             .collect::<String>();
-        assert_eq!(
-            Robots::parse(&lines).outcome == RobotsOutcome::Limit,
-            n > MAX_SITEMAPS
-        );
+        assert_eq!(Robots::parse(&lines).sitemaps.len(), MAX_SITEMAPS);
         let records = (0..n)
             .map(|i| format!("<sitemap><loc>https://workshop.example/{i}.xml</loc></sitemap>"))
             .collect::<String>();
@@ -431,7 +437,7 @@ fn metadata_and_section_page_boundaries() {
             title: "Guide".into(),
         })
         .collect::<Vec<_>>();
-    let p = read_site(
+    let (p, stats) = read_site_with_stats(
         &home,
         &SiteInputs {
             sitelinks: &links,
@@ -443,8 +449,8 @@ fn metadata_and_section_page_boundaries() {
         },
     )
     .unwrap();
-    assert_eq!(p.notes.section_pages, MAX_SECTION_PAGES as u32);
-    assert!(p.notes.section_page_truncated);
+    assert_eq!(stats.section_pages, MAX_SECTION_PAGES as u32);
+    assert!(stats.section_page_truncated);
     assert_eq!(
         p.sections.iter().filter(|e| !e.children.is_empty()).count(),
         MAX_SECTION_PAGES
@@ -463,4 +469,20 @@ fn metadata_and_section_page_boundaries() {
         assert!(!p.allows(path));
     }
     assert!(!Robots::parse("<html>try again</html>").allows("/"));
+}
+
+#[test]
+fn routed_pages_and_element_locators_keep_their_separate_destinations() {
+    let page=read_site(&doc("/","<nav><a href='/app#/inbox'>Inbox</a><a href='/app#!/draft'>Draft</a><a href='/app#standard-pricing.v2_é'>Prices</a></nav>"),&Default::default()).unwrap();
+    assert_eq!(page.sections.len(), 3);
+    for (e, route) in page.sections.iter().zip(["/inbox", "!/draft"]) {
+        assert_eq!(e.key.as_url().fragment(), Some(route));
+        assert!(e.locator.fragment().is_none());
+    }
+    let e = &page.sections[2];
+    assert!(e.key.as_url().fragment().is_none());
+    assert_eq!(
+        e.locator.fragment().as_deref(),
+        Some("#standard-pricing.v2_%C3%A9")
+    );
 }

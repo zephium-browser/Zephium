@@ -1,13 +1,20 @@
 use super::*;
 
-impl Place {
+impl Build {
     pub(super) fn navigation(&mut self, doc: &Doc, footer_pass: bool) {
         let nodes = doc.nodes();
         let first = nodes.iter().enumerate().position(|(i, n)| {
-            n.role == Role::Landmark(Some(Landmark::Navigation))
+            n.role
+                == Role::Landmark {
+                    landmark: Some(Landmark::Navigation),
+                }
                 && visible(nodes, i)
-                && !ancestors(nodes, i)
-                    .any(|a| nodes[a].role == Role::Landmark(Some(Landmark::Complementary)))
+                && !ancestors(nodes, i).any(|a| {
+                    nodes[a].role
+                        == Role::Landmark {
+                            landmark: Some(Landmark::Complementary),
+                        }
+                })
         });
         let mut owners = BTreeMap::new();
         let mut group_labels = BTreeMap::new();
@@ -16,22 +23,28 @@ impl Place {
             if !visible(nodes, i) {
                 continue;
             }
-            if matches!(n.role, Role::Heading(_) | Role::Button | Role::Text)
-                && n.parent.is_some()
-                && ancestors(nodes, i)
-                    .any(|a| nodes[a].role == Role::Landmark(Some(Landmark::Contentinfo)))
+            if matches!(
+                n.role,
+                Role::Heading { level: _ } | Role::Button | Role::Text
+            ) && n.parent_index().is_some()
+                && ancestors(nodes, i).any(|a| {
+                    nodes[a].role
+                        == Role::Landmark {
+                            landmark: Some(Landmark::Contentinfo),
+                        }
+                })
                 && !ancestors(nodes, i).any(|a| nodes[a].role == Role::Link)
             {
-                if let Some(p) = n.parent {
+                if let Some(p) = n.parent_index() {
                     group_labels.insert(p, clip(&n.text, TITLE_BYTES));
                 }
             }
-            if matches!(n.role, Role::Button | Role::Heading(_))
+            if matches!(n.role, Role::Button | Role::Heading { level: _ })
                 && !n.accessible_name().is_empty()
                 && !ancestors(nodes, i).any(|a| nodes[a].role == Role::Link)
             {
                 if let Some(p) = n
-                    .parent
+                    .parent_index()
                     .filter(|&p| matches!(nodes[p].role, Role::Group | Role::ListItem))
                 {
                     menu_labels.insert(p, n.accessible_name());
@@ -41,25 +54,36 @@ impl Place {
                 continue;
             };
             if !footer_pass {
-                self.notes.links_seen += 1;
+                self.stats.links_seen += 1;
             }
             let nav = ancestors(nodes, i).any(|a| {
-                Some(a) == first || nodes[a].role == Role::Landmark(Some(Landmark::Banner))
+                Some(a) == first
+                    || nodes[a].role
+                        == Role::Landmark {
+                            landmark: Some(Landmark::Banner),
+                        }
             });
-            let footer = ancestors(nodes, i)
-                .any(|a| nodes[a].role == Role::Landmark(Some(Landmark::Contentinfo)));
-            if footer != footer_pass || !nav && !footer || self.profile(url) {
+            let footer = ancestors(nodes, i).any(|a| {
+                nodes[a].role
+                    == Role::Landmark {
+                        landmark: Some(Landmark::Contentinfo),
+                    }
+            });
+            if footer != footer_pass
+                || !nav && !footer
+                || self.profile(url, ProfileBasis::Navigation)
+            {
                 continue;
             }
             let parent = ancestors(nodes, i).skip(1).find_map(|a| {
                 owners
                     .get(&a)
                     .copied()
-                    .filter(|_| n.parent != Some(a) || nodes[a].role == Role::ListItem)
+                    .filter(|_| n.parent_index() != Some(a) || nodes[a].role == Role::ListItem)
             });
             if nav && !footer && parent.is_none() {
                 if let Some((item, label)) = ancestors(nodes, i)
-                    .take_while(|&a| !matches!(nodes[a].role, Role::Landmark(_)))
+                    .take_while(|&a| !matches!(nodes[a].role, Role::Landmark { landmark: _ }))
                     .find_map(|a| menu_labels.get(&a).map(|s| (a, *s)))
                 {
                     if let Some(section) = self.entry_for(url, label, Source::PrimaryNav) {
@@ -97,7 +121,7 @@ impl Place {
                 if nav {
                     if let Some(item) = ancestors(nodes, i)
                         .skip(1)
-                        .take_while(|&a| !matches!(nodes[a].role, Role::Landmark(_)))
+                        .take_while(|&a| !matches!(nodes[a].role, Role::Landmark { landmark: _ }))
                         .find(|&a| matches!(nodes[a].role, Role::ListItem | Role::Group))
                     {
                         owners.insert(item, index);
@@ -107,8 +131,8 @@ impl Place {
         }
     }
     pub(super) fn section_page(&mut self, index: usize, doc: &Doc) {
-        self.notes.section_pages += 1;
-        self.notes.section_page_truncated |= doc.truncated();
+        self.stats.section_pages += 1;
+        self.stats.section_page_truncated |= doc.truncated();
         if challenge(doc)
             || SiteKey::from_url(doc.page()) != SiteKey::from_url(self.sections[index].key.as_url())
         {
@@ -118,7 +142,8 @@ impl Place {
             return;
         };
         self.sections[index].key = key.clone();
-        self.sections[index].external = key.as_url().host_str() != self.entry.as_url().host_str();
+        self.sections[index].off_site =
+            SiteKey::from_url(key.as_url()).as_ref() != Some(&self.site);
         let nodes = doc.nodes();
         let mut heading = None;
         let mut releases = 0;
@@ -134,7 +159,9 @@ impl Place {
             if ancestors(nodes, i).any(|a| {
                 matches!(
                     nodes[a].role,
-                    Role::Landmark(Some(Landmark::Banner | Landmark::Contentinfo))
+                    Role::Landmark {
+                        landmark: Some(Landmark::Banner | Landmark::Contentinfo)
+                    }
                 )
             }) {
                 continue;
@@ -142,10 +169,12 @@ impl Place {
             let local = ancestors(nodes, i).find(|&a| {
                 matches!(
                     nodes[a].role,
-                    Role::Landmark(Some(Landmark::Navigation | Landmark::Complementary))
+                    Role::Landmark {
+                        landmark: Some(Landmark::Navigation | Landmark::Complementary)
+                    }
                 )
             });
-            if matches!(n.role, Role::Heading(_)) {
+            if matches!(n.role, Role::Heading { level: _ }) {
                 if n.text.trim().is_empty() {
                     continue;
                 }
@@ -161,20 +190,21 @@ impl Place {
                 if dated && (!version || releases >= RELEASE_HEADINGS) {
                     continue;
                 }
-                let locator = n
-                    .element_id
-                    .as_deref()
-                    .and_then(|s| LocatorText::new(s).ok())
-                    .map(Locator::Element)
-                    .or_else(|| (dated && version).then(|| quote(&n.text)).flatten());
+                if headings.len() >= MAX_CHILDREN {
+                    if n.element_id.is_some() || dated {
+                        self.sections[index].more += 1;
+                    }
+                    continue;
+                }
+                let locator = if dated || n.element_id.is_some() {
+                    Locator::for_text(doc, i, &n.text, n.element_id.as_deref())
+                } else {
+                    None
+                };
                 if let Some(locator) = locator {
                     let mut e = self.sections[index].leaf(Source::Heading, &n.text);
                     e.locator = locator;
-                    if headings.len() < MAX_CHILDREN {
-                        headings.push(e);
-                    } else {
-                        self.sections[index].more += 1;
-                    }
+                    headings.push(e);
                     releases += 1;
                 }
             } else if let Some((url, group)) = n.destination.as_ref().zip(local) {

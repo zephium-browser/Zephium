@@ -16,7 +16,7 @@ pub enum XmlError {
 #[derive(Default)]
 pub struct Sitemap {
     pub index: Vec<Url>,
-    pub(super) groups: BTreeMap<String, Cluster>,
+    pub(super) groups: BTreeMap<crate::PageMatch, Cluster>,
     pub truncated: bool,
     pub count: u32,
 }
@@ -28,11 +28,31 @@ pub(super) struct Cluster {
 
 impl Sitemap {
     pub fn parse(bytes: &[u8], source: &Url) -> Result<Self, XmlError> {
+        Self::parse_sample(bytes, source, false, source)
+    }
+    pub(crate) fn parse_sample(
+        bytes: &[u8],
+        source: &Url,
+        truncated: bool,
+        entry: &Url,
+    ) -> Result<Self, XmlError> {
         if bytes.len() > MAX_XML_BYTES {
             return Err(XmlError::Limit);
         }
-        let mut xml =
-            Reader::from_str(std::str::from_utf8(bytes).map_err(|_| XmlError::Malformed)?);
+        let text = match std::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(e) if truncated && e.error_len().is_none() => {
+                std::str::from_utf8(&bytes[..e.valid_up_to()]).map_err(|_| XmlError::Malformed)?
+            }
+            Err(_) => return Err(XmlError::Malformed),
+        };
+        let text = if truncated {
+            text.rsplit_once('>')
+                .map_or("", |(before, _)| &text[..before.len() + 1])
+        } else {
+            text
+        };
+        let mut xml = Reader::from_str(text);
         let mut depth = 0usize;
         let mut index = false;
         let mut root = false;
@@ -42,7 +62,12 @@ impl Sitemap {
         let mut out = Self::default();
         let site = SiteKey::from_url(source).ok_or(XmlError::Malformed)?;
         loop {
-            match xml.read_event().map_err(|_| XmlError::Malformed)? {
+            let event = match xml.read_event() {
+                Ok(event) => event,
+                Err(quick_xml::Error::Syntax(_)) if truncated => break,
+                Err(_) => return Err(XmlError::Malformed),
+            };
+            match event {
                 Event::Start(tag) => {
                     depth += 1;
                     if depth > MAX_XML_DEPTH {
@@ -74,7 +99,7 @@ impl Sitemap {
                         }
                         if let Ok(url) = Url::parse(value.trim()) {
                             if SiteKey::from_url(&url).as_ref() == Some(&site) {
-                                out.add(url, source, index);
+                                out.add(url, source, index, entry);
                             }
                         }
                         loc = false;
@@ -116,22 +141,32 @@ impl Sitemap {
                 return Err(XmlError::Limit);
             }
         }
-        if !root || depth != 0 {
+        out.truncated |= truncated;
+        if !truncated && (!root || depth != 0) {
             return Err(XmlError::Malformed);
         }
         Ok(out)
     }
-    fn add(&mut self, url: Url, source: &Url, index: bool) {
+    fn add(&mut self, url: Url, source: &Url, index: bool, entry: &Url) {
         let Ok(key) = PageKey::from_url(&url) else {
             return;
         };
         if index {
-            if PageKey::from_url(source).ok().as_ref() == Some(&key)
-                || self.index.contains(key.as_url())
+            if crate::key::same_page(source, key.as_url())
+                || self
+                    .index
+                    .iter()
+                    .any(|u| crate::key::same_page(u, key.as_url()))
             {
                 return;
             }
             if self.index.len() >= MAX_SITEMAPS {
+                let rank = |u: &Url| (super::sitemap_priority(u, entry), u.as_str().to_owned());
+                if let Some(worst) = self.index.iter_mut().max_by_key(|u| rank(u)) {
+                    if rank(key.as_url()) < rank(worst) {
+                        *worst = key.as_url().clone();
+                    }
+                }
                 self.truncated = true;
                 return;
             }
@@ -147,11 +182,14 @@ impl Sitemap {
         let Ok(base) = url.join(&format!("/{prefix}")) else {
             return;
         };
-        if self.groups.len() >= MAX_SECTIONS && !self.groups.contains_key(base.as_str()) {
+        let Ok(base) = PageKey::from_url(&base).map(|k| k.page_match()) else {
+            return;
+        };
+        if self.groups.len() >= MAX_SECTIONS && !self.groups.contains_key(&base) {
             self.truncated = true;
             return;
         }
-        let group = self.groups.entry(base.into()).or_default();
+        let group = self.groups.entry(base).or_default();
         group.add(key);
     }
     pub(super) fn merge(&mut self, other: &Self) {
@@ -181,6 +219,13 @@ impl Cluster {
     fn add(&mut self, key: PageKey) {
         // Keep the shallowest landing page and a deterministic sample at fixed cost.
         let rank = |p: &PageKey| (p.as_url().path().matches('/').count(), p.as_str().len());
+        if self
+            .pages
+            .iter()
+            .any(|p| p.page_match() == key.page_match())
+        {
+            return;
+        }
         if let Err(pos) = self
             .pages
             .binary_search_by(|p| rank(p).cmp(&rank(&key)).then_with(|| p.cmp(&key)))

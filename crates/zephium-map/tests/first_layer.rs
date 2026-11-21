@@ -18,17 +18,17 @@ fn read(query: &str, html: &str) -> ResultsRead {
 }
 fn layer(query: &str, html: &str) -> FirstLayer {
     match read(query, html) {
-        ResultsRead::FirstLayer(l) => l,
-        ResultsRead::Wall(w) => panic!("wall {w:?}"),
+        ResultsRead::FirstLayer { layer: l } => l,
+        ResultsRead::Wall { wall: w } => panic!("wall {w:?}"),
     }
 }
 #[test]
 fn extracts_first_layer() {
     let l = layer("acme pricing", include_str!("fixtures/first-layer.html"));
     assert_eq!(l.organic.len(), 4);
-    let official = l.official.unwrap();
-    assert_eq!(official.organic_index, 1);
-    assert_eq!(official.evidence.position, 2);
+    let official = l.organic[1].official.as_ref().unwrap();
+    assert!(l.organic[0].official.is_none());
+    assert_eq!(l.organic[1].rank, 2);
     assert!(
         official.evidence.domain_match
             && official.evidence.panel_website
@@ -154,7 +154,10 @@ fn official_site_corpus() {
             .split_whitespace()
             .map(|s| card(s, "Result page"))
             .collect::<String>();
-        let official = layer(query, &html).official;
+        let official = layer(query, &html)
+            .organic
+            .into_iter()
+            .find_map(|r| r.official);
         assert_eq!(
             official.as_ref().map(|v| v.site.as_str()).unwrap_or(""),
             expected,
@@ -180,7 +183,11 @@ fn panel_evidence_requires_the_website_link_and_respects_intermediaries() {
                 "acme",
                 &format!("<main>{entry}{markup}<a href='https://{host}'>Website</a>"),
             );
-            assert_eq!(l.official.is_some(), match_expected, "{host}");
+            assert_eq!(
+                l.organic.iter().any(|r| r.official.is_some()),
+                match_expected,
+                "{host}"
+            );
         }
     }
 }
@@ -303,7 +310,9 @@ fn media_only_pages_and_engine_walls() {
             "acme",
             &format!("<title>Verify you are human</title>{html}")
         ),
-        ResultsRead::Wall(Wall::Challenge)
+        ResultsRead::Wall {
+            wall: Wall::Challenge
+        }
     ));
 }
 #[test]
@@ -313,7 +322,7 @@ fn the_reference_reader_deduplicates_www_slashes_and_campaigns() {
         + &card("a.example/x?id=2", "Different");
     let l = layer("acme", &html);
     assert_eq!(l.organic.len(), 2);
-    assert_eq!(l.dropped.repeat, 1);
+    assert_eq!(repeat_count(&html), 1);
 }
 #[test]
 fn an_oversized_custom_host_is_unreadable() {
@@ -328,7 +337,7 @@ fn an_oversized_custom_host_is_unreadable() {
     let query = read_query("acme").unwrap();
     for (len, valid) in [(MAX_URL_BYTES, true), (MAX_URL_BYTES + 1, false)] {
         let read = read_results(SearchEngine::Custom, Some(&"x".repeat(len)), &query, &doc);
-        assert_eq!(matches!(read, ResultsRead::FirstLayer(_)), valid);
+        assert_eq!(matches!(read, ResultsRead::FirstLayer { layer: _ }), valid);
     }
 }
 
@@ -348,5 +357,24 @@ fn drop_counts_include_repeats_beyond_the_display_limit() {
     html += &card(&format!("example.com/{MAX_RESULTS}"), "Repeat");
     let l = layer("example", &html);
     assert_eq!(l.organic.len(), MAX_RESULTS);
-    assert_eq!(l.dropped.repeat, 1);
+    assert_eq!(repeat_count(&html), 1);
+}
+
+fn repeat_count(html: &str) -> u32 {
+    let doc = Doc::from_html(
+        &Url::parse("https://google.com/search").unwrap(),
+        html.as_bytes(),
+        None,
+        DocLimits::RESULTS,
+    )
+    .unwrap();
+    let mut stats = zephium_map::results::ResultStats::default();
+    zephium_map::results::read_results_with_stats(
+        SearchEngine::Google,
+        None,
+        &read_query("acme").unwrap(),
+        &doc,
+        &mut stats,
+    );
+    stats.repeat
 }

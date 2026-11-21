@@ -116,21 +116,23 @@ fn structure_visibility_and_raw_code() {
         <img src='data:image/png;base64,AA'><a href='javascript:alert(1)'>js</a><a href='https://:pass@example.com/'>credentials</a><a href='data:text/plain,x'>data</a></main>");
     assert!(doc.nodes().iter().all(|n| !n.text.contains("forbidden")));
     let role = |role| doc.nodes().iter().find(|n| n.role == role).unwrap();
-    assert_eq!(role(Role::Heading(Some(3))).text, "first heading");
+    assert_eq!(role(Role::Heading { level: Some(3) }).text, "first heading");
     assert_eq!(
-        role(Role::Heading(Some(3))).element_id.as_deref(),
+        role(Role::Heading { level: Some(3) }).element_id.as_deref(),
         Some("intro")
     );
     assert_eq!(role(Role::CodeBlock).text, "  fn x() {\n    x +  1\n} ");
-    assert_eq!(role(Role::Heading(Some(4))).text, "Custom");
+    assert_eq!(role(Role::Heading { level: Some(4) }).text, "Custom");
     assert_eq!(role(Role::CellHeader).text, "Name");
     assert_eq!(role(Role::Cell).text, "A");
     let link = role(Role::Link);
     assert_eq!(link.name, "accessible");
     assert_eq!(link.text, "visible");
     assert_eq!(
-        doc.nodes()[link.parent.unwrap()].role,
-        Role::Landmark(Some(Landmark::Navigation))
+        doc.nodes()[link.parent.unwrap() as usize].role,
+        Role::Landmark {
+            landmark: Some(Landmark::Navigation)
+        }
     );
     assert_eq!(
         doc.nodes()
@@ -243,9 +245,9 @@ fn html_limits_report_truncation_and_preserve_atomic_fields() {
         let doc = parse(html.as_bytes(), limits).unwrap();
         assert!(doc.truncated());
         assert!(doc.head().linked_data.is_empty());
-        assert!(doc.nodes().iter().all(
-            |n| n.text.len() + n.name.len() <= limits.node_text_bytes && n.element_id.is_none()
-        ));
+        assert!(doc.nodes().iter().all(|n| n.text.len() + n.name.len()
+            <= limits.node_text_bytes as usize
+            && n.element_id.is_none()));
     }
     let head = "<link rel=alternate href='/feed'><script type='application/ld+json'>{}</script>";
     for (count, truncated) in [(MAX_HEAD_ITEMS, false), (MAX_HEAD_ITEMS + 1, true)] {
@@ -256,7 +258,7 @@ fn html_limits_report_truncation_and_preserve_atomic_fields() {
     }
     let u = page();
     let l = DocLimits {
-        url_bytes: u.as_str().len(),
+        url_bytes: u.as_str().len() as u32,
         ..Default::default()
     };
     let doc = parse(b"<a href='/more-than-the-original-url'>x", l).unwrap();
@@ -270,34 +272,36 @@ fn html_limits_report_truncation_and_preserve_atomic_fields() {
                 ..l
             }
         ),
-        Err(DocError::Url(KeyError::UrlLength))
+        Err(DocError::Url {
+            error: KeyError::UrlLength
+        })
     ));
 }
 #[test]
 fn absolute_ceilings_apply_to_callers() {
     for limits in [
         DocLimits {
-            input_bytes: MAX_INPUT_BYTES + 1,
+            input_bytes: MAX_INPUT_BYTES as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            nodes: MAX_NODES + 1,
+            nodes: MAX_NODES as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            depth: MAX_DEPTH + 1,
+            depth: MAX_DEPTH as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            text_bytes: MAX_TEXT_BYTES + 1,
+            text_bytes: MAX_TEXT_BYTES as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            node_text_bytes: MAX_NODE_TEXT_BYTES + 1,
+            node_text_bytes: MAX_NODE_TEXT_BYTES as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            url_bytes: MAX_URL_BYTES + 1,
+            url_bytes: MAX_URL_BYTES as u32 + 1,
             ..Default::default()
         },
     ] {
@@ -313,10 +317,11 @@ fn absolute_ceilings_apply_to_callers() {
     assert_eq!(b.push(Node::new(Role::Group, None)), Err(DocError::Nodes));
     let mut b = DocBuilder::new(&page(), DocLimits::default()).unwrap();
     for i in 0..MAX_DEPTH {
-        b.push(Node::new(Role::Group, i.checked_sub(1))).unwrap();
+        b.push(Node::new(Role::Group, i.checked_sub(1).map(|p| p as u32)))
+            .unwrap();
     }
     assert_eq!(
-        b.push(Node::new(Role::Group, Some(MAX_DEPTH - 1))),
+        b.push(Node::new(Role::Group, Some(MAX_DEPTH as u32 - 1))),
         Err(DocError::Depth)
     );
     let mut b = DocBuilder::new(&page(), DocLimits::default()).unwrap();
@@ -337,7 +342,7 @@ fn live_document_filters_hidden_descendants_and_validates_role_urls() {
     let mut root = Node::new(Role::Group, None);
     root.hidden = true;
     let p = b.push(root).unwrap();
-    let mut h = Node::new(Role::Heading(None), Some(p));
+    let mut h = Node::new(Role::Heading { level: None }, Some(p));
     h.name = "Heading".into();
     let h = b.push(h).unwrap();
     let mut n = Node::new(Role::Link, Some(h));
@@ -348,16 +353,18 @@ fn live_document_filters_hidden_descendants_and_validates_role_urls() {
     bad.destination = Some(page());
     assert_eq!(b.push(bad), Err(DocError::Role));
     assert_eq!(
-        b.push(Node::new(Role::Heading(Some(8)), None)),
+        b.push(Node::new(Role::Heading { level: Some(8) }, None)),
         Err(DocError::Role)
     );
     let mut bad = Node::new(Role::Link, None);
     bad.destination = Some(Url::parse("https://user@example.net").unwrap());
-    assert!(matches!(b.push(bad), Err(DocError::Url(_))));
+    assert!(matches!(b.push(bad), Err(DocError::Url { error: _ })));
     let q = read_query("example").unwrap();
     assert!(matches!(
         read_results(SearchEngine::Bing, None, &q, &b.finish()),
-        ResultsRead::Wall(Wall::Unreadable)
+        ResultsRead::Wall {
+            wall: Wall::Unreadable
+        }
     ));
     let mut b = DocBuilder::new(&page(), Default::default()).unwrap();
     b.mark_truncated();
@@ -372,7 +379,7 @@ fn dropped_head_metadata_keeps_complete_organic_results_readable() {
     assert!(!doc.body_truncated());
     assert!(matches!(
         read_results(SearchEngine::Bing, None, &read_query("acme").unwrap(), &doc),
-        ResultsRead::FirstLayer(_)
+        ResultsRead::FirstLayer { layer: _ }
     ));
     let html = format!(
         "<base href='{}'><a href='next'>Next</a>",
@@ -380,6 +387,24 @@ fn dropped_head_metadata_keeps_complete_organic_results_readable() {
     );
     assert!(matches!(
         parse(html.as_bytes(), DocLimits::default()),
-        Err(DocError::Url(KeyError::UrlLength))
+        Err(DocError::Url {
+            error: KeyError::UrlLength
+        })
     ));
+}
+
+#[test]
+fn page_strings_strip_directional_and_zero_width_controls() {
+    let doc=defaults("<title>A\u{202e}cme</title><main><h2 id='a\u{200b}b'>A\u{2066}B</h2><a aria-label='X\u{feff}Y' href='/'>Link</a></main>");
+    assert_eq!(doc.head().title, "Acme");
+    let heading = doc.nodes().iter().find(|n| n.element_id.is_some()).unwrap();
+    assert_eq!(heading.element_id.as_deref(), Some("ab"));
+    assert_eq!(heading.text, "AB");
+    assert!(doc.nodes().iter().any(|n| n.name == "XY"));
+    assert_eq!(
+        zephium_map::key::LocatorText::new("a\u{200d}b")
+            .unwrap()
+            .as_str(),
+        "ab"
+    );
 }

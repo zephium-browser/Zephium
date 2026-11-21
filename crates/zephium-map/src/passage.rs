@@ -1,7 +1,6 @@
 use crate::{
     ancestors,
     doc::{Landmark, Marks, Role},
-    key::LocatorText,
     query::{Confidence, PassageKind, QueryKind, QueryRead},
     results::{clip, Featured, Organic, TITLE_BYTES},
     site::{challenge, quote},
@@ -79,12 +78,14 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
     let forbidden = |role| {
         matches!(
             role,
-            Role::Landmark(Some(
-                Landmark::Navigation
-                    | Landmark::Banner
-                    | Landmark::Contentinfo
-                    | Landmark::Complementary
-            )) | Role::Link
+            Role::Landmark {
+                landmark: Some(
+                    Landmark::Navigation
+                        | Landmark::Banner
+                        | Landmark::Contentinfo
+                        | Landmark::Complementary
+                )
+            } | Role::Link
         )
     };
     let mut mass = vec![0usize; nodes.len()];
@@ -96,7 +97,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
                 || n.marks.has(Marks::SPONSORED)
                 || n.marks.has(Marks::GENERATED)
                 || forbidden(n.role)
-                || n.parent.is_some_and(|p| excluded[p]),
+                || n.parent_index().is_some_and(|p| excluded[p]),
         );
     }
     let mut has_main = false;
@@ -107,12 +108,15 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         }
         has_main |= matches!(
             n.role,
-            Role::Document | Role::Landmark(Some(Landmark::Main))
+            Role::Document
+                | Role::Landmark {
+                    landmark: Some(Landmark::Main)
+                }
         );
         if selected(n.role) {
             mass[i] += n.text.len();
         }
-        if let Some(p) = n.parent {
+        if let Some(p) = n.parent_index() {
             mass[p] += mass[i];
             elements[p] += elements[i];
         }
@@ -121,7 +125,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         .iter()
         .enumerate()
         .filter(|(i, n)| {
-            n.role == Role::Group && n.parent.is_some() && mass[*i] > 0 && !excluded[*i]
+            n.role == Role::Group && n.parent_index().is_some() && mass[*i] > 0 && !excluded[*i]
         })
         .max_by_key(|(i, _)| (mass[*i] * 64 / (elements[*i] + 1), mass[*i], *i))
         .map(|(i, _)| i);
@@ -139,7 +143,10 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         let scope = ancestors(nodes, i).find(|&a| {
             matches!(
                 nodes[a].role,
-                Role::Document | Role::Landmark(Some(Landmark::Main))
+                Role::Document
+                    | Role::Landmark {
+                        landmark: Some(Landmark::Main)
+                    }
             )
         });
         if has_main && scope.is_none()
@@ -147,15 +154,15 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         {
             continue;
         }
-        if matches!(n.role, Role::Heading(_)) {
+        if matches!(n.role, Role::Heading { level: _ }) {
             headings.insert(scope, (i, relevant(&n.text)));
             continue;
         }
         if !selected(n.role)
             || matches!(n.role, Role::Text)
-                && ancestors(nodes, i)
-                    .skip(1)
-                    .any(|a| selected(nodes[a].role) || matches!(nodes[a].role, Role::Heading(_)))
+                && ancestors(nodes, i).skip(1).any(|a| {
+                    selected(nodes[a].role) || matches!(nodes[a].role, Role::Heading { level: _ })
+                })
         {
             continue;
         }
@@ -163,10 +170,10 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             let cells = nodes[i + 1..]
                 .iter()
                 .enumerate()
-                .take_while(|(_, n)| n.parent.is_some_and(|p| p >= i))
+                .take_while(|(_, n)| n.parent_index().is_some_and(|p| p >= i))
                 .filter(|(offset, n)| {
                     visible(nodes, i + 1 + offset)
-                        && n.parent == Some(i)
+                        && n.parent_index() == Some(i)
                         && matches!(n.role, Role::Cell | Role::CellHeader)
                 })
                 .map(|(_, n)| n.text.as_str())
@@ -232,11 +239,12 @@ fn make(b: &Block<'_>, doc: &Doc) -> Option<Passage> {
         return None;
     }
     let heading = b.heading.map(|i| &doc.nodes()[i]);
-    let locator = heading
-        .and_then(|n| n.element_id.as_deref())
-        .and_then(|s| LocatorText::new(s).ok())
-        .map(Locator::Element)
-        .or_else(|| quote(text))?;
+    let locator = Locator::for_text(
+        doc,
+        b.node,
+        text,
+        heading.and_then(|n| n.element_id.as_deref()),
+    )?;
     Some(Passage {
         text: text.to_string(),
         code,
@@ -261,7 +269,7 @@ fn bits(mut mask: u64) -> impl Iterator<Item = usize> {
 }
 
 pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
-    let QueryKind::Passage(kind) = q.kind() else {
+    let QueryKind::Passage { kind } = q.kind() else {
         return Vec::new();
     };
     let terms = query_terms(q);
@@ -354,7 +362,10 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
             .filter(|(i, b)| b.doc == page && scores[*i] > 0)
             .max_by_key(|(i, _)| (scores[*i], std::cmp::Reverse(*i)));
         if let Some(p) = best.and_then(|(_, b)| make(b, doc)) {
-            if !passages.iter().any(|v: &Passage| v.source == p.source) {
+            if !passages
+                .iter()
+                .any(|v: &Passage| v.source.page_match() == p.source.page_match())
+            {
                 passages.push(p);
             }
         }
@@ -377,7 +388,7 @@ pub(crate) fn featured(q: &QueryRead, f: &Featured, result: &Organic) -> Option<
         text,
         code: false,
         language: None,
-        source: result.key.clone(),
+        source: f.cites.clone(),
         source_title: result.title.clone(),
         heading: None,
         confidence: Confidence::High,

@@ -64,7 +64,7 @@ fn reads_large_page_through_the_last_passage() {
     assert!(doc
         .nodes()
         .iter()
-        .any(|n| n.role == Role::Heading(Some(2)) && n.text == "Final heading"));
+        .any(|n| n.role == Role::Heading { level: Some(2) } && n.text == "Final heading"));
     assert!(doc.nodes().iter().any(|n| n.role == Role::Link
         && n.text == "Last link"
         && n.destination.as_ref().is_some_and(|u| u.path() == "/last")));
@@ -121,7 +121,9 @@ fn element_capacity_stops_feeding_before_the_tail() {
             &crate::read_query("example").unwrap(),
             &doc
         ),
-        crate::ResultsRead::Wall(crate::Wall::Unreadable)
+        crate::ResultsRead::Wall {
+            wall: crate::Wall::Unreadable
+        }
     ));
     let mut html = "<div>".repeat(MAX_INPUT_BYTES / 5);
     html.extend(std::iter::repeat_n(' ', MAX_INPUT_BYTES - html.len()));
@@ -147,14 +149,15 @@ fn depth_lifts_nodes_and_continues_into_later_siblings() {
     let heading = doc
         .nodes()
         .iter()
-        .find(|n| n.role == Role::Heading(Some(2)) && n.text == "deep")
+        .find(|n| n.role == Role::Heading { level: Some(2) } && n.text == "deep")
         .unwrap();
-    let ancestors = std::iter::successors(heading.parent, |&i| doc.nodes()[i].parent).count();
+    let ancestors =
+        std::iter::successors(heading.parent_index(), |&i| doc.nodes()[i].parent_index()).count();
     assert_eq!(ancestors, 3);
     assert!(doc
         .nodes()
         .iter()
-        .any(|n| n.role == Role::Paragraph && n.text == "shallow" && n.parent == Some(0)));
+        .any(|n| n.role == Role::Paragraph && n.text == "shallow" && n.parent_index() == Some(0)));
 }
 
 #[test]
@@ -191,18 +194,33 @@ fn browser_repairs_paragraphs_lists_links_and_fostered_content() {
     let fostered = at(Role::Paragraph, "fostered");
     let table = at(Role::Table, "");
     assert!(one < two && two < fostered && fostered < table);
-    assert_eq!(doc.nodes()[one].parent, doc.nodes()[two].parent);
-    assert_eq!(doc.nodes()[fostered].parent, doc.nodes()[table].parent);
+    assert_eq!(
+        doc.nodes()[one].parent_index(),
+        doc.nodes()[two].parent_index()
+    );
+    assert_eq!(
+        doc.nodes()[fostered].parent_index(),
+        doc.nodes()[table].parent_index()
+    );
     let cell = at(Role::Cell, "cell");
     assert_eq!(
-        doc.nodes()[doc.nodes()[cell].parent.unwrap()].role,
+        doc.nodes()[doc.nodes()[cell].parent_index().unwrap()].role,
         Role::Row
     );
     let first = at(Role::ListItem, "first");
     let second = at(Role::ListItem, "A B");
-    assert_eq!(doc.nodes()[first].parent, doc.nodes()[second].parent);
-    assert_eq!(doc.nodes()[at(Role::Link, "A")].parent, Some(second));
-    assert_eq!(doc.nodes()[at(Role::Link, "B")].parent, Some(second));
+    assert_eq!(
+        doc.nodes()[first].parent_index(),
+        doc.nodes()[second].parent_index()
+    );
+    assert_eq!(
+        doc.nodes()[at(Role::Link, "A")].parent_index(),
+        Some(second)
+    );
+    assert_eq!(
+        doc.nodes()[at(Role::Link, "B")].parent_index(),
+        Some(second)
+    );
 }
 
 #[test]
@@ -223,15 +241,15 @@ fn adoption_agency_reparents_children_and_merges_root_attributes() {
 fn arena_budgets_and_presets() {
     for limits in [
         DocLimits {
-            arena_elements: MAX_ARENA_ELEMENTS + 1,
+            arena_elements: MAX_ARENA_ELEMENTS as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            arena_text_bytes: MAX_ARENA_TEXT_BYTES + 1,
+            arena_text_bytes: MAX_ARENA_TEXT_BYTES as u32 + 1,
             ..Default::default()
         },
         DocLimits {
-            arena_depth: MAX_ARENA_DEPTH + 1,
+            arena_depth: MAX_ARENA_DEPTH as u32 + 1,
             ..Default::default()
         },
     ] {
@@ -248,7 +266,10 @@ fn arena_budgets_and_presets() {
     let doc = document(b"<p>12345<h1>tail", l);
     assert!(doc.body_truncated());
     assert!(doc.nodes().iter().any(|n| n.text == "1234"));
-    assert!(doc.nodes().iter().all(|n| n.role != Role::Heading(Some(1))));
+    assert!(doc
+        .nodes()
+        .iter()
+        .all(|n| n.role != Role::Heading { level: Some(1) }));
     for l in [
         DocLimits {
             arena_elements: 0,
@@ -304,7 +325,7 @@ proptest::proptest! {
     #[test]
     fn bounded_projection_of_malformed_markup(
         parts in proptest::collection::vec(0usize..31, 0..300),
-        arena_depth in 1usize..15, depth in 1usize..8,
+        arena_depth in 1u32..15, depth in 1u32..8,
     ) {
         let tokens = ["<div>", "</div>", "<template>", "</template>", "<table>", "<tr>", "<td>", "</table>",
             "<b>", "</b>", "<a href=x>", "</a>", "<p>", "<i>", "</i>", "<span>", "word", " ",
@@ -314,9 +335,9 @@ proptest::proptest! {
         let limits = DocLimits {arena_depth, depth, ..Default::default()};
         let doc = document(html.as_bytes(),limits);
         for (at, n) in doc.nodes().iter().enumerate() {
-            proptest::prop_assert!(n.parent.is_none_or(|p| p < at));
-            let ancestors = std::iter::successors(n.parent, |&i| doc.nodes()[i].parent).count();
-            proptest::prop_assert!(ancestors < depth);
+            proptest::prop_assert!(n.parent_index().is_none_or(|p| p < at));
+            let ancestors = std::iter::successors(n.parent_index(), |&i| doc.nodes()[i].parent_index()).count();
+            proptest::prop_assert!(ancestors < depth as usize);
         }
     }
 }
@@ -336,7 +357,7 @@ fn one_level_arena_keeps_visible_roles() {
     assert!(doc
         .nodes()
         .iter()
-        .any(|n| n.role == Role::Heading(Some(2)) && n.text == "two"));
+        .any(|n| n.role == Role::Heading { level: Some(2) } && n.text == "two"));
     assert!(doc.nodes().iter().all(|n| !n.text.contains("private")));
 }
 

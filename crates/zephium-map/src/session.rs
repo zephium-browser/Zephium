@@ -4,8 +4,8 @@ use crate::{
     passage::{self, Passage, MAX_PASSAGES, MAX_RESULT_PAGES},
     query::{Confidence, QueryError},
     results::{Link, Organic},
-    robots::{Robots, RobotsOutcome, MAX_SITEMAPS},
-    site::{read_site, SiteInputs, Sitemap, MAX_SECTION_PAGES},
+    robots::{Robots, RobotsOutcome},
+    site::{read_site_with_stats, SiteInputs, Sitemap, MAX_SECTION_PAGES},
     *,
 };
 use std::{
@@ -24,7 +24,7 @@ enum Work {
     Robots,
     Anonymous(usize, String),
     Entry(usize),
-    Section(usize, PageKey),
+    Section(usize, PageMatch),
     Llms(usize),
     Sitemap(usize),
     Passage(usize),
@@ -72,23 +72,31 @@ enum Pending {
     Job(Job),
 }
 struct Seed {
-    site: SiteKey,
+    site: PlaceKey,
+    result: Link,
     url: Url,
     links: Vec<Link>,
     confidence: Confidence,
 }
 impl Seed {
     fn new(hit: &Organic, confidence: Confidence) -> Option<Self> {
+        let site = PlaceKey::from_url(&hit.url)?;
         Some(Self {
-            site: SiteKey::from_url(&hit.url)?,
-            url: hit.url.clone(),
+            url: site.root(&hit.url).ok()?.as_url().clone(),
+            site,
+            result: Link {
+                url: hit.url.clone(),
+                title: hit.title.clone(),
+            },
             links: hit.sitelinks.clone(),
             confidence,
         })
     }
     fn official(layer: &FirstLayer) -> Option<Self> {
-        let o = layer.official.as_ref()?;
-        Self::new(layer.organic.get(o.organic_index)?, o.confidence)
+        layer
+            .organic
+            .iter()
+            .find_map(|hit| Self::new(hit, hit.official.as_ref()?.confidence))
     }
 }
 struct SiteState {
@@ -102,10 +110,15 @@ struct SiteState {
     denied: bool,
     cut: BTreeSet<Phase>,
     maps_wanted: usize,
+    reads: BTreeMap<PageMatch, ReadState>,
+    discovered: BTreeMap<site::EntryId, PageMatch>,
+    entry_failure: Option<Failure>,
+    complete: bool,
+    section_hint: Option<Link>,
     rendered: bool,
     clean: bool,
     stale: bool,
-    external: BTreeMap<PageKey, PageKey>,
+    external: BTreeMap<PageMatch, PageKey>,
 }
 impl SiteState {
     fn new(seed: Seed) -> Self {
@@ -120,11 +133,34 @@ impl SiteState {
             denied: false,
             cut: BTreeSet::new(),
             maps_wanted: 0,
+            reads: Default::default(),
+            discovered: Default::default(),
+            entry_failure: None,
+            complete: false,
+            section_hint: None,
             rendered: false,
             clean: true,
             stale: false,
             external: BTreeMap::new(),
         }
+    }
+}
+impl SiteState {
+    fn payload_place(&self, robots: &BTreeMap<String, Robots>) -> Option<Place> {
+        let doc = self.doc.as_ref()?;
+        let inputs = SiteInputs {
+            sitelinks: &[],
+            result_section: None,
+            robots: robots.get(&origin(doc.page())),
+            llms: self.llms.as_deref(),
+            sitemaps: self.maps.iter().map(|(k, v)| (k.clone(), v)).collect(),
+            pages: self.pages.iter().map(|(k, v)| (k.clone(), v)).collect(),
+        };
+        let (mut place, _) = read_site_with_stats(doc, &inputs).ok()?;
+        if let Some(previous) = &self.place {
+            place.keep_discovery(previous);
+        }
+        Some(place)
     }
 }
 pub struct Session {
@@ -136,11 +172,11 @@ pub struct Session {
     stats: Stats,
     pending: BTreeMap<Id, Pending>,
     queue: VecDeque<Job>,
-    seen: BTreeSet<(Work, PageKey)>,
+    seen: BTreeSet<(Work, PageMatch)>,
     robots: BTreeMap<String, Robots>,
-    hosts: BTreeMap<String, usize>,
-    started: usize,
-    sections: usize,
+    hosts: BTreeMap<String, u32>,
+    started: u32,
+    sections: u32,
     sites: [Option<SiteState>; 2],
     articles: BTreeMap<usize, Doc>,
     first_passage: Option<Passage>,
@@ -178,7 +214,7 @@ impl Session {
             passages: Vec::new(),
         };
         let mut out = Vec::new();
-        s.emit(MapEvent::Kind(kind), &mut out);
+        s.emit(MapEvent::Kind { kind }, &mut out);
         let id = s.id();
         s.pending.insert(id, Pending::Results);
         s.counts(Phase::Results).started += 1;
@@ -208,7 +244,7 @@ impl Session {
         self.stats.budgets.insert(b);
     }
     fn enqueue(&mut self, work: Work, url: Url) {
-        let Ok(key) = PageKey::from_url(&url) else {
+        let Ok(key) = PageKey::from_url(&url).map(|key| key.page_match()) else {
             return;
         };
         if self.seen.contains(&(work.clone(), key.clone())) {
@@ -218,8 +254,8 @@ impl Session {
             let Some(site) = self.sites[i].as_mut() else {
                 return;
             };
-            if site.maps_wanted >= MAX_SITEMAPS
-                || SiteKey::from_url(&url).as_ref() != Some(&site.seed.site)
+            if site.maps_wanted >= MAX_SITEMAP_READS
+                || SiteKey::from_url(&url) != SiteKey::from_url(&site.seed.url)
             {
                 return;
             }
@@ -231,15 +267,31 @@ impl Session {
     fn lookup(&mut self, side: usize, seed: Seed, out: &mut Vec<Effect>) {
         if self.elapsed >= self.cfg.last_start {
             self.budget(Budget::LastStart);
+            self.emit(
+                MapEvent::PlaceFailed {
+                    slot: side as u8,
+                    failure: Failure::Limit,
+                },
+                out,
+            );
             return;
         }
         let site = seed.site.clone();
+        let role = match self.query.kind() {
+            QueryKind::Place { section, .. } => section.map(|s| s.role),
+            QueryKind::Compare { shared, .. } => shared.map(|s| s.role),
+            _ => None,
+        };
         let mut state = SiteState::new(seed);
-        if let Some(at) = self
-            .queue
-            .iter()
-            .position(|j| matches!(j.work, Work::Passage(_)) && j.url == state.seed.url)
+        if role.is_some()
+            && role == site::section_role(&state.seed.result.title, &state.seed.result.url)
+            && !key::same_page(&state.seed.url, &state.seed.result.url)
         {
+            state.section_hint = Some(state.seed.result.clone());
+        }
+        if let Some(at) = self.queue.iter().position(|j| {
+            matches!(j.work, Work::Passage(_)) && key::same_page(&j.url, &state.seed.url)
+        }) {
             if let Some(Job {
                 work: Work::Passage(pos),
                 ..
@@ -255,8 +307,8 @@ impl Session {
     }
     fn read(&self, doc: &Doc, q: &QueryRead) -> Result<FirstLayer, Failure> {
         match read_results(self.cfg.engine, None, q, doc) {
-            ResultsRead::Wall(w) => Err(w.into()),
-            ResultsRead::FirstLayer(l) => Ok(l),
+            ResultsRead::Wall { wall: w } => Err(w.into()),
+            ResultsRead::FirstLayer { layer: l } => Ok(l),
         }
     }
     fn side_seed(&self, doc: &Doc, text: &str) -> Option<Seed> {
@@ -264,7 +316,16 @@ impl Session {
         Seed::official(&self.read(doc, &read).ok()?)
     }
     fn results(&mut self, doc: Doc, out: &mut Vec<Effect>) -> Result<(), Failure> {
-        let layer = self.read(&doc, &self.query)?;
+        let layer = match results::read_results_with_stats(
+            self.cfg.engine,
+            None,
+            &self.query,
+            &doc,
+            &mut self.stats.results,
+        ) {
+            ResultsRead::Wall { wall } => return Err(wall.into()),
+            ResultsRead::FirstLayer { layer } => layer,
+        };
         let mut seeds = Vec::new();
         let mut missing = Vec::new();
         match self.query.kind() {
@@ -290,14 +351,15 @@ impl Session {
                     }
                 }
             }
-            QueryKind::Passage(_) => {
+            QueryKind::Passage { kind: _ } => {
                 if let Some(f) = &layer.featured {
                     self.first_passage = layer
                         .organic
-                        .get(f.organic_index)
+                        .iter()
+                        .find(|hit| hit.key.page_match() == f.cites.page_match())
                         .and_then(|r| passage::featured(&self.query, f, r));
                 }
-                let count = self.cfg.result_pages;
+                let count = self.cfg.result_pages as usize;
                 if layer.organic.len() > count {
                     self.budget(Budget::ResultPages);
                 }
@@ -319,7 +381,7 @@ impl Session {
                 }
             }
         }
-        self.emit(MapEvent::FirstLayer(layer), out);
+        self.emit(MapEvent::FirstLayer { layer }, out);
         if self.first_passage.is_some() {
             self.update_passages(out);
         }
@@ -356,16 +418,27 @@ impl Session {
                 self.stats.fresh_memos += 1;
             }
             state.stale = stale;
-            state.place = Some(m.place.clone());
-            self.emit_place(m.place, stale, confidence, out);
-            if !stale {
+            let Ok(place) = site::with_results(
+                m.payload.place,
+                &state.seed.links,
+                state.section_hint.as_ref(),
+            ) else {
+                self.stats.rejected_memos += 1;
+                self.enqueue(Work::Entry(i), url);
+                return;
+            };
+            state.place = Some(place.clone());
+            let complete = !stale && state.section_hint.is_none();
+            state.complete = complete;
+            self.emit_place(i, place, stale, confidence, complete, out);
+            if complete {
                 if let Some(pos) = shared_passage {
                     self.queue.push_back(Job {
                         work: Work::Passage(pos),
                         url,
                     });
                 }
-                for (host, rules) in m.robots {
+                for (host, rules) in m.payload.robots {
                     if !self.pending.values().any(|p|matches!(p,Pending::Job(j) if j.work==Work::Robots && origin(&j.url)==host)){
                         self.robots.entry(host).or_insert(rules);
                     }
@@ -388,21 +461,26 @@ impl Session {
         let pages: Vec<_> = ordered.into_values().collect();
         let mut passages: Vec<_> = self.first_passage.clone().into_iter().collect();
         for p in passage::read_passages(&self.query, &pages) {
-            if !passages.iter().any(|f| f.source == p.source) {
+            if !passages
+                .iter()
+                .any(|f| f.source.page_match() == p.source.page_match())
+            {
                 passages.push(p);
             }
         }
         passages.truncate(MAX_PASSAGES);
         if self.passages != passages {
             self.passages = passages.clone();
-            self.emit(MapEvent::Passages(passages), out);
+            self.emit(MapEvent::Passages { passages }, out);
         }
     }
     fn emit_place(
         &mut self,
+        i: usize,
         place: Place,
         stale: bool,
         confidence: Confidence,
+        complete: bool,
         out: &mut Vec<Effect>,
     ) {
         for section in &place.sections {
@@ -412,6 +490,8 @@ impl Session {
         }
         self.emit(
             MapEvent::Place {
+                slot: i as u8,
+                complete,
                 place,
                 stale,
                 confidence,
@@ -426,24 +506,51 @@ impl Session {
         let Some(doc) = &state.doc else { return };
         let inputs = SiteInputs {
             sitelinks: &state.seed.links,
+            result_section: state.section_hint.as_ref(),
             robots: self.robots.get(&origin(doc.page())),
             llms: state.llms.as_deref(),
             sitemaps: state.maps.iter().map(|(k, v)| (k.clone(), v)).collect(),
             pages: state.pages.iter().map(|(k, v)| (k.clone(), v)).collect(),
         };
-        let Ok(mut place) = read_site(doc, &inputs) else {
+        let Ok((mut place, mut detail)) = read_site_with_stats(doc, &inputs) else {
+            state.entry_failure = Some(Failure::Unreadable);
+            state.clean = false;
             return;
         };
         place.notes.robots_disallowed |= state.denied;
-        place.notes.entry_truncated |= state.cut.contains(&Phase::Entry);
-        place.notes.section_page_truncated |= state.cut.contains(&Phase::Section);
-        place.notes.sitemap_truncated |= state.cut.contains(&Phase::Sitemap);
-        place.notes.llms_truncated |= state.cut.contains(&Phase::Llms);
+        detail.entry_truncated |= state.cut.contains(&Phase::Entry);
+        detail.section_page_truncated |= state.cut.contains(&Phase::Section);
+        detail.sitemap_truncated |= state.cut.contains(&Phase::Sitemap);
+        detail.llms_truncated |= state.cut.contains(&Phase::Llms);
+        place.notes.truncated |= detail.truncated();
+        self.stats.places.insert(i as u8, detail);
+        if let Some(previous) = &state.place {
+            place.keep_discovery(previous);
+            if place.check_ids().is_err() {
+                state.entry_failure = Some(Failure::Unreadable);
+                state.clean = false;
+                return;
+            }
+        }
+        let candidates: BTreeSet<_> = place
+            .fetch_sections(false)
+            .into_iter()
+            .map(|e| e.id.clone())
+            .collect();
         for entry in &mut place.sections {
-            if let Some(key) = state.external.get(&entry.key) {
-                entry.external = true;
+            let discovered = state
+                .discovered
+                .entry(entry.id.clone())
+                .or_insert_with(|| entry.key.page_match());
+            entry.read = state.reads.get(discovered).copied();
+            if entry.read.is_none() && candidates.contains(&entry.id) {
+                state.reads.insert(discovered.clone(), ReadState::Queued);
+                entry.read = Some(ReadState::Queued);
+            }
+            if let Some(key) = state.external.get(discovered) {
+                entry.off_site = SiteKey::from_url(key.as_url()).as_ref() != Some(&place.site);
                 entry.key = key.clone();
-                entry.locator = Locator::None;
+                entry.locator = Locator::default();
             }
         }
         if !std::mem::take(&mut state.stale) && state.place.as_ref() == Some(&place) {
@@ -451,7 +558,7 @@ impl Session {
         }
         let confidence = state.seed.confidence;
         state.place = Some(place.clone());
-        self.emit_place(place, false, confidence, out);
+        self.emit_place(i, place, false, confidence, false, out);
     }
     fn plan_sections(&mut self, i: usize) {
         let Some(state) = self.sites[i].as_ref() else {
@@ -464,17 +571,11 @@ impl Session {
         let keys: Vec<_> = place
             .fetch_sections(fresh)
             .into_iter()
-            .filter(|e| {
-                !state.external.values().any(|k| k == &e.key)
-                    && !state
-                        .pages
-                        .values()
-                        .any(|d| PageKey::from_url(d.page()).ok().as_ref() == Some(&e.key))
-            })
+            .filter(|e| e.read == Some(ReadState::Queued))
             .map(|e| e.key.clone())
             .collect();
         for key in keys {
-            self.enqueue(Work::Section(i, key.clone()), key.as_url().clone());
+            self.enqueue(Work::Section(i, key.page_match()), key.as_url().clone());
         }
     }
     fn entry(&mut self, i: usize, doc: Doc, out: &mut Vec<Effect>) {
@@ -501,17 +602,61 @@ impl Session {
         if let Ok(llms) = url.join("/llms.txt") {
             self.enqueue(Work::Llms(i), llms);
         }
-        let mut urls = self
-            .robots
-            .get(&origin(&url))
-            .map(|r| r.sitemaps.clone())
-            .unwrap_or_default();
-        if urls.is_empty() {
-            urls.extend(url.join("/sitemap.xml"));
+    }
+    fn next_sitemap(&mut self) -> bool {
+        for i in 0..self.sites.len() {
+            let Some(state) = &self.sites[i] else {
+                continue;
+            };
+            let Some((doc, place)) = state.doc.as_ref().zip(state.place.as_ref()) else {
+                continue;
+            };
+            if state.maps_wanted >= MAX_SITEMAP_READS
+                || place
+                    .sections
+                    .iter()
+                    .filter(|e| {
+                        e.sources.iter().any(|s| {
+                            matches!(
+                                s,
+                                Source::PrimaryNav
+                                    | Source::Footer
+                                    | Source::MenuGroup
+                                    | Source::Llms
+                            )
+                        })
+                    })
+                    .count()
+                    >= SITEMAP_SECTION_THRESHOLD
+            {
+                continue;
+            }
+            let mut candidates: Vec<_> = state
+                .maps
+                .values()
+                .flat_map(|map| map.index.iter().cloned().map(|u| (false, u)))
+                .collect();
+            let roots = self
+                .robots
+                .get(&origin(doc.page()))
+                .map(|r| r.sitemaps.as_slice())
+                .unwrap_or_default();
+            if roots.is_empty() {
+                candidates.extend(doc.page().join("/sitemap.xml").map(|u| (true, u)));
+            } else {
+                candidates.extend(roots.iter().cloned().map(|u| (true, u)));
+            }
+            candidates.sort_by_cached_key(|(root, u)| {
+                (*root, site::sitemap_priority(u, doc.page()), u.clone())
+            });
+            for (_, url) in candidates {
+                self.enqueue(Work::Sitemap(i), url);
+                if !self.queue.is_empty() {
+                    return true;
+                }
+            }
         }
-        for url in urls {
-            self.enqueue(Work::Sitemap(i), url);
-        }
+        false
     }
     pub fn handle(&mut self, input: Input) -> Vec<Effect> {
         let mut out = Vec::new();
@@ -521,10 +666,27 @@ impl Session {
         match input {
             Input::Cancel => {
                 self.stats.cancelled = true;
+                for i in 0..self.sites.len() {
+                    let Some(state) = self.sites[i].as_mut() else {
+                        continue;
+                    };
+                    if state.complete {
+                        continue;
+                    }
+                    for read in state.reads.values_mut() {
+                        if *read == ReadState::Queued {
+                            *read = ReadState::Refused {
+                                failure: Failure::Cancelled,
+                            };
+                        }
+                    }
+                    self.rebuild(i, &mut out);
+                    self.close_slot(i, Failure::Cancelled, &mut out);
+                }
                 self.done(&mut out);
                 return out;
             }
-            Input::Elapsed(time) => {
+            Input::Elapsed { time } => {
                 self.elapsed = self.elapsed.max(time);
                 if self.elapsed >= self.cfg.elapsed {
                     self.budget(Budget::Elapsed);
@@ -550,7 +712,14 @@ impl Session {
                         self.counts(Phase::Results).completed += 1;
                         if let Err(f) = result.and_then(|doc| self.results(doc, &mut out)) {
                             self.finished = true;
-                            self.emit(MapEvent::Failed(f), &mut out);
+                            self.refused(Phase::Results, f);
+                            self.emit(
+                                MapEvent::End {
+                                    outcome: EndOutcome::Failed { failure: f },
+                                    stats: self.stats.clone(),
+                                },
+                                &mut out,
+                            );
                             return out;
                         }
                     }
@@ -605,7 +774,10 @@ impl Session {
                 {
                     self.counts(Phase::Render).completed += 1;
                     match result {
-                        Ok(doc) if PageKey::from_url(doc.page()) == PageKey::from_url(&url) => {
+                        Ok(doc)
+                            if doc.page().origin() == url.origin()
+                                && key::same_page(doc.page(), &url) =>
+                        {
                             self.entry(i, doc, &mut out)
                         }
                         Ok(_) => self.refused(Phase::Render, Failure::External),
@@ -621,15 +793,67 @@ impl Session {
         self.finished = true;
         self.pending.clear();
         self.queue.clear();
-        self.emit(MapEvent::Done(self.stats.clone()), out);
+        self.emit(
+            MapEvent::End {
+                outcome: if self.stats.cancelled {
+                    EndOutcome::Cancelled
+                } else {
+                    EndOutcome::Done
+                },
+                stats: self.stats.clone(),
+            },
+            out,
+        );
+    }
+    fn close_slot(&mut self, i: usize, missing: Failure, out: &mut Vec<Effect>) {
+        let Some(s) = &self.sites[i] else {
+            return;
+        };
+        if s.complete {
+            return;
+        }
+        if let Some(failure) = s
+            .entry_failure
+            .or_else(|| s.place.is_none().then_some(missing))
+        {
+            self.emit(
+                MapEvent::PlaceFailed {
+                    slot: i as u8,
+                    failure,
+                },
+                out,
+            );
+        } else if let Some(place) = s.place.clone() {
+            self.emit_place(i, place, s.stale, s.seed.confidence, true, out);
+        }
     }
     fn finish(&mut self, out: &mut Vec<Effect>) {
-        if matches!(self.query.kind(), QueryKind::Passage(_))
+        if self.elapsed >= self.cfg.elapsed {
+            let jobs: Vec<_> = self
+                .pending
+                .values()
+                .filter_map(|v| match v {
+                    Pending::Job(j) => Some(j.clone()),
+                    _ => None,
+                })
+                .chain(self.queue.drain(..))
+                .collect();
+            for job in jobs {
+                self.set_read(
+                    &job,
+                    ReadState::Skipped {
+                        budget: Budget::Elapsed,
+                    },
+                    out,
+                );
+            }
+        }
+        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
             && self.sites.iter().any(Option::is_some)
         {
             self.update_passages(out);
         }
-        if matches!(self.query.kind(), QueryKind::Passage(_))
+        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
             && self.passages.is_empty()
             && self
                 .stats
@@ -637,35 +861,44 @@ impl Session {
                 .get(&Phase::Results)
                 .is_some_and(|c| c.completed > 0)
         {
-            self.emit(MapEvent::Passages(Vec::new()), out);
+            self.emit(
+                MapEvent::Passages {
+                    passages: Vec::new(),
+                },
+                out,
+            );
         }
         for i in 0..self.sites.len() {
+            self.close_slot(i, Failure::Limit, out);
             let Some(s) = &self.sites[i] else { continue };
-            if let Some(p) = s.place.as_ref().filter(|p| {
-                s.doc.is_some()
-                    && s.clean
-                    && !p.notes.shell
-                    && !p.notes.wall
-                    && self.stats.budgets.is_empty()
-            }) {
-                let site = p.site.clone();
-                let robots = self
-                    .robots
-                    .iter()
-                    .filter(|(o, _)| {
-                        Url::parse(o)
-                            .ok()
-                            .and_then(|u| SiteKey::from_url(&u))
-                            .as_ref()
-                            == Some(&site)
-                    })
-                    .map(|(o, r)| (o.clone(), r.clone()))
+            if s.clean
+                && self.stats.budgets.is_empty()
+                && s.place
+                    .as_ref()
+                    .is_some_and(|p| p.key == s.seed.site && !p.notes.shell && !p.notes.wall)
+            {
+                let Some(place) = s.payload_place(&self.robots) else {
+                    continue;
+                };
+                let mut origins =
+                    BTreeSet::from([origin(&s.seed.url), origin(place.entry.as_url())]);
+                for section in &place.sections {
+                    for entry in std::iter::once(section)
+                        .chain(&section.children)
+                        .filter(|e| !e.off_site)
+                    {
+                        origins.insert(origin(entry.key.as_url()));
+                    }
+                }
+                let robots = origins
+                    .into_iter()
+                    .filter_map(|o| Some((o.clone(), self.robots.get(&o)?.clone())))
                     .collect();
+                let site = s.seed.site.clone();
                 let memo = SiteMemo {
                     version: MEMO_VERSION,
-                    place: p.clone(),
-                    robots,
                     read_at: self.cfg.now,
+                    payload: SitePayload { place, robots },
                 };
                 if let Ok(memo) = memo.encode() {
                     let id = self.id();
@@ -677,7 +910,9 @@ impl Session {
             let place = |i: usize| self.sites[i].as_ref()?.place.as_ref();
             if let Some((l, r)) = place(0).zip(place(1)) {
                 self.emit(
-                    MapEvent::Compare(compare::compare(l, r, shared.map(|s| s.role))),
+                    MapEvent::Compare {
+                        rows: compare::compare(l, r, shared.map(|s| s.role)),
+                    },
                     out,
                 );
             }
@@ -689,3 +924,67 @@ fn origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 mod scheduler;
+
+#[cfg(test)]
+mod arrival_tests {
+    use super::*;
+    use proptest::prelude::*;
+    fn page(path: &str, markup: &str) -> Doc {
+        Doc::from_html(
+            &Url::parse(&format!("https://example.com/{path}")).unwrap(),
+            markup.as_bytes(),
+            None,
+            DocLimits::SITE_PAGE,
+        )
+        .unwrap()
+    }
+    proptest! {
+        #[test]
+        fn place_updates_keep_discovery_across_arrival_orders(weights in any::<[u32;5]>()){
+            let (mut session,_)=Session::start(Config::default(),"example").unwrap();
+            let root=page("","<nav><a href='/docs'>Docs</a><a href='/pricing'>Prices</a></nav><footer><a href='/news'>News</a></footer>");
+            let seed=Seed{site:PlaceKey::from_url(root.page()).unwrap(),url:root.page().clone(),result:Link{url:root.page().clone(),title:"Example".into()},links:Vec::new(),confidence:Confidence::High};
+            let mut state=SiteState::new(seed);
+            state.doc=Some(root);
+            session.sites[0]=Some(state);
+            let mut effects=Vec::new();
+            session.rebuild(0,&mut effects);
+            let mut order=[0,1,2,3,4];
+            order.sort_by_key(|&i|weights[i]);
+            for part in order{
+                let state=session.sites[0].as_mut().unwrap();
+                match part{
+                    0|1=>{
+                        let (requested,landed)=if part==0{("docs","guide")}else{("pricing","plans")};
+                        let doc=page(landed,"<h2 id='tiers'>Tiers</h2>");
+                        let request=state.seed.url.join(requested).unwrap();
+                        state.pages.insert(PageKey::from_url(&request).unwrap(),doc);
+                    }
+                    2=>state.llms=Some("## Library\n- [Books](/books)".into()),
+                    _=>{
+                        let urls=if part==3{["/learn/reference","/learn/introduction"]}else{["/learn","/learn/guide"]};
+                        let xml=format!("<urlset>{}</urlset>",urls.map(|path|format!("<url><loc>https://example.com{path}</loc></url>")).join(""));
+                        let url=state.seed.url.join(&format!("map-{part}.xml")).unwrap();
+                        state.maps.insert(PageKey::from_url(&url).unwrap(),Sitemap::parse(xml.as_bytes(),&url).unwrap());
+                    }
+                }
+                session.rebuild(0,&mut effects);
+            }
+            let mut ids=BTreeMap::new();
+            let mut previous=Vec::new();
+            for effect in effects{
+                let Effect::Emit{event:MapEvent::Place{slot:0,place,..},..}=effect else{panic!("expected slot zero")};
+                let current:Vec<_>=place.sections.iter().map(|e|e.id.clone()).collect();
+                let surviving:Vec<_>=previous.iter().filter(|id|current.contains(id)).collect();
+                let observed:Vec<_>=current.iter().filter(|id|previous.contains(id)).collect();
+                prop_assert_eq!(surviving,observed);
+                let mut distinct=BTreeSet::new();
+                for e in &place.sections{
+                    if let Some(prior)=ids.insert(e.label.clone(),e.id.clone()){prop_assert_eq!(&prior,&e.id);}
+                    for item in std::iter::once(e).chain(&e.children){prop_assert!(distinct.insert(item.id.clone()));}
+                }
+                previous=current;
+            }
+        }
+    }
+}

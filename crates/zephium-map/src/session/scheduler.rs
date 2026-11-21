@@ -9,9 +9,23 @@ impl Session {
         }
         if self.elapsed >= self.cfg.last_start && !self.queue.is_empty() {
             self.budget(Budget::LastStart);
-            self.queue.clear();
+            for job in std::mem::take(&mut self.queue) {
+                self.set_read(
+                    &job,
+                    ReadState::Skipped {
+                        budget: Budget::LastStart,
+                    },
+                    out,
+                );
+            }
         }
         loop {
+            if self.queue.is_empty()
+                && self.pending.is_empty()
+                && self.elapsed < self.cfg.last_start
+            {
+                self.next_sitemap();
+            }
             let jobs: Vec<_> = self
                 .pending
                 .values()
@@ -20,7 +34,9 @@ impl Session {
                     _ => None,
                 })
                 .collect();
-            if self.queue.is_empty() || !jobs.is_empty() && jobs.len() >= self.cfg.concurrent {
+            if self.queue.is_empty()
+                || !jobs.is_empty() && jobs.len() >= self.cfg.concurrent as usize
+            {
                 break;
             }
             let active: Vec<_> = jobs
@@ -34,7 +50,7 @@ impl Session {
                     .and_then(|s| s.place.as_ref())
                     .is_some_and(|p| {
                         p.sections.iter().any(|e| {
-                            &e.key == key
+                            &e.key.page_match() == key
                                 && matches!(
                                     e.role,
                                     Some(
@@ -91,6 +107,7 @@ impl Session {
                     None
                 };
                 if let Some(b) = blocked {
+                    self.set_read(&job, ReadState::Skipped { budget: b }, out);
                     self.budget(b);
                     self.refused(phase, Failure::Limit);
                     progressed = true;
@@ -101,12 +118,19 @@ impl Session {
                     .values()
                     .filter(|p| matches!(p,Pending::Job(j) if j.url.host_str()==job.url.host_str()))
                     .count();
-                if busy >= self.cfg.host_concurrent {
+                if busy >= self.cfg.host_concurrent as usize {
                     self.queue.push_back(job);
                     continue;
                 }
                 if let Some(policy) = self.robots.get(&host) {
                     if !policy.allows(&job.url[Position::BeforePath..Position::AfterQuery]) {
+                        self.set_read(
+                            &job,
+                            ReadState::Refused {
+                                failure: Failure::Robots,
+                            },
+                            out,
+                        );
                         self.refused(phase, Failure::Robots);
                         if let Some(i) = job.work.side() {
                             if let Some(s) = self.sites[i].as_mut() {
@@ -129,6 +153,13 @@ impl Session {
                         continue;
                     }
                     if self.cfg.text_bytes == 0 {
+                        self.set_read(
+                            &job,
+                            ReadState::Skipped {
+                                budget: Budget::TextBytes,
+                            },
+                            out,
+                        );
                         self.budget(Budget::TextBytes);
                         self.refused(phase, Failure::Limit);
                         progressed = true;
@@ -160,6 +191,26 @@ impl Session {
         }
         if self.pending.is_empty() && self.queue.is_empty() {
             self.finish(out);
+        }
+    }
+    pub(super) fn set_read(&mut self, job: &Job, read: ReadState, out: &mut Vec<Effect>) {
+        match &job.work {
+            Work::Section(i, key) => {
+                if let Some(s) = &mut self.sites[*i] {
+                    s.reads.insert(key.clone(), read);
+                }
+                self.rebuild(*i, out);
+            }
+            Work::Entry(i) => {
+                if let Some(s) = &mut self.sites[*i] {
+                    s.entry_failure = match read {
+                        ReadState::Refused { failure } => Some(failure),
+                        ReadState::Skipped { .. } => Some(Failure::Limit),
+                        _ => None,
+                    };
+                }
+            }
+            _ => {}
         }
     }
     fn start_job(&mut self, job: Job, out: &mut Vec<Effect>) {
@@ -210,8 +261,14 @@ impl Session {
         if let Ok(r) = &result {
             count.bytes = count.bytes.saturating_add(r.bytes.len() as u64);
         }
-        let result = result.and_then(|r| {
-            if r.bytes.len() > self.cfg.bytes(expect) || r.truncated {
+        let result = result.and_then(|mut r| {
+            if matches!(job.work, Work::Sitemap(_)) && r.bytes.len() > self.cfg.xml_bytes as usize {
+                r.bytes.truncate(self.cfg.xml_bytes as usize);
+                r.truncated = true;
+            }
+            if r.bytes.len() > self.cfg.bytes(expect) as usize
+                || r.truncated && !matches!(job.work, Work::Sitemap(_))
+            {
                 self.budget(expect.budget());
                 return Err(Failure::Limit);
             }
@@ -234,7 +291,7 @@ impl Session {
             {
                 return Err(Failure::External);
             }
-            if job.work == Work::Robots && origin(&job.url) != origin(&r.final_url) {
+            if job.work == Work::Robots && !r.final_url.path().ends_with("/robots.txt") {
                 return Err(Failure::External);
             }
             if job.work != Work::Robots
@@ -247,6 +304,7 @@ impl Session {
             Ok(r)
         });
         if job.work == Work::Robots {
+            let landing = result.as_ref().ok().map(|r| origin(&r.final_url));
             let policy = match result {
                 Ok(r) => match std::str::from_utf8(&r.bytes) {
                     Ok(text) => Robots::parse(text),
@@ -262,12 +320,16 @@ impl Session {
                 }
             };
             *self.stats.robots.entry(policy.outcome).or_default() += 1;
+            if let Some(landing) = landing {
+                self.robots.insert(landing, policy.clone());
+            }
             self.robots.insert(origin(&job.url), policy);
             return;
         }
         let side = job.work.side();
-        let applied = result.and_then(|r| self.apply(job, r, out));
+        let applied = result.and_then(|r| self.apply(job.clone(), r, out));
         if let Err(f) = applied {
+            self.set_read(&job, ReadState::Refused { failure: f }, out);
             self.refused(phase, f);
             if let Some(i) = side {
                 if let Some(s) = self.sites[i].as_mut() {
@@ -283,7 +345,9 @@ impl Session {
     }
     fn apply(&mut self, job: Job, r: FetchResult, out: &mut Vec<Effect>) -> Result<(), Failure> {
         match job.work {
-            Work::Entry(i) => self.entry(i, html(&r, DocLimits::SITE_PAGE)?, out),
+            Work::Entry(i) => {
+                self.entry(i, html(&r, DocLimits::SITE_PAGE)?, out);
+            }
             Work::Section(i, key) => {
                 let doc = html(&r, DocLimits::SITE_PAGE)?;
                 if crate::site::challenge(&doc) {
@@ -291,7 +355,11 @@ impl Session {
                     return Err(Failure::Challenge);
                 }
                 if let Some(s) = self.sites[i].as_mut() {
-                    s.pages.insert(key, doc);
+                    s.reads.insert(key, ReadState::Read);
+                    s.pages.insert(
+                        PageKey::from_url(&job.url).map_err(|_| Failure::Unreadable)?,
+                        doc,
+                    );
                 }
                 self.rebuild(i, out);
             }
@@ -315,13 +383,16 @@ impl Session {
                 self.plan_sections(i);
             }
             Work::Sitemap(i) => {
-                let map = Sitemap::parse(&r.bytes, &r.final_url).map_err(|e| match e {
-                    site::XmlError::Limit => Failure::Limit,
-                    site::XmlError::Malformed => Failure::Unreadable,
-                })?;
-                for child in &map.index {
-                    self.enqueue(Work::Sitemap(i), child.clone());
-                }
+                let entry = self.sites[i]
+                    .as_ref()
+                    .and_then(|s| s.doc.as_ref())
+                    .ok_or(Failure::Unreadable)?
+                    .page();
+                let map = Sitemap::parse_sample(&r.bytes, &r.final_url, r.truncated, entry)
+                    .map_err(|e| match e {
+                        site::XmlError::Limit => Failure::Limit,
+                        site::XmlError::Malformed => Failure::Unreadable,
+                    })?;
                 let key = PageKey::from_url(&r.final_url).map_err(|_| Failure::Unreadable)?;
                 if let Some(s) = self.sites[i].as_mut() {
                     s.maps.insert(key, map);

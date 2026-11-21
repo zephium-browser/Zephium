@@ -3,13 +3,17 @@ use crate::results::{MAX_SOCIAL, TITLE_BYTES};
 use crate::site::{MAX_CHILDREN, MAX_SECTIONS};
 use serde::{Deserialize, Serialize};
 
-pub const MEMO_VERSION: u16 = 1;
+pub const MEMO_VERSION: u16 = 2;
 pub const MAX_MEMO_BYTES: usize = 256 * 1024;
 pub const MEMO_TTL: u64 = 24 * 60 * 60;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SiteMemo {
     pub version: u16,
     pub read_at: u64,
+    pub payload: SitePayload,
+}
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SitePayload {
     pub place: Place,
     pub robots: BTreeMap<String, Robots>,
 }
@@ -20,7 +24,7 @@ pub enum MemoError {
     Invalid,
 }
 impl SiteMemo {
-    pub fn decode(raw: &[u8], site: &SiteKey) -> Result<Self, MemoError> {
+    pub fn decode(raw: &[u8], site: &PlaceKey) -> Result<Self, MemoError> {
         if raw.len() > MAX_MEMO_BYTES {
             return Err(MemoError::Limit);
         }
@@ -36,25 +40,29 @@ impl SiteMemo {
         memo.validate(site)?;
         Ok(memo)
     }
-    fn validate(&self, site: &SiteKey) -> Result<(), MemoError> {
-        let p = &self.place;
-        if &p.site != site
-            || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(site)
+    fn validate(&self, site: &PlaceKey) -> Result<(), MemoError> {
+        let p = &self.payload.place;
+        if &p.key != site
+            || PlaceKey::from_url(p.entry.as_url()).as_ref() != Some(site)
+            || site.root(p.entry.as_url()).ok().as_ref() != Some(&p.entry)
+            || p.check_ids().is_err()
+            || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(&p.site)
             || p.title.len() > TITLE_BYTES
             || p.sections.len() > MAX_SECTIONS
             || p.social.len() > MAX_SOCIAL
             || !p.social.iter().all(|v| {
-                crate::results::site_profile(&v.url) == Some(v.network)
+                v.basis != crate::results::ProfileBasis::Results
+                    && crate::results::site_profile(&v.url) == Some(v.network)
                     && PageKey::from_url(&v.url).is_ok()
             })
             || !p.sections.iter().all(|e| {
                 valid_entry(e, p, None) && e.children.iter().all(|c| valid_entry(c, p, Some(e)))
             })
-            || self.robots.len() > MAX_FETCHES
-            || !self.robots.iter().all(|(origin, r)| {
+            || self.payload.robots.len() > MAX_FETCHES
+            || !self.payload.robots.iter().all(|(origin, r)| {
                 Url::parse(origin).is_ok_and(|u| {
                     u.origin().ascii_serialization() == *origin
-                        && SiteKey::from_url(&u).as_ref() == Some(site)
+                        && SiteKey::from_url(&u).as_ref() == Some(&p.site)
                 }) && r.valid()
             })
         {
@@ -66,7 +74,7 @@ impl SiteMemo {
         if self.version != MEMO_VERSION {
             return Err(MemoError::Version);
         }
-        self.validate(&self.place.site)?;
+        self.validate(&self.payload.place.key)?;
         let mut bytes = Vec::new();
         struct Limited<'a>(&'a mut Vec<u8>);
         impl std::io::Write for Limited<'_> {
@@ -98,13 +106,19 @@ fn valid_entry(e: &Entry, place: &Place, parent: Option<&Entry>) -> bool {
     if site != place.site && !delegated && !(site_nav && site::external_role(e.role)) {
         return false;
     }
-    if e.external != (e.key.as_url().host_str() != place.entry.as_url().host_str()) {
+    if e.off_site != (site != place.site) {
         return false;
     }
 
-    !e.label.is_empty()
+    e.read.is_none()
+        && !e.label.is_empty()
         && e.label.len() <= TITLE_BYTES
         && e.group.as_ref().is_none_or(|s| s.len() <= TITLE_BYTES)
-        && e.sources.contains(&e.source)
+        && !e.sources.is_empty()
+        && !e
+            .sources
+            .iter()
+            .any(|s| matches!(s, Source::EngineResult | Source::EngineSitelink))
+        && e.sources.iter().collect::<BTreeSet<_>>().len() == e.sources.len()
         && e.children.len() <= if parent.is_none() { MAX_CHILDREN } else { 0 }
 }

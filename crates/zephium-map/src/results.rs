@@ -38,16 +38,15 @@ pub struct Organic {
     pub url: Url,
     pub title: String,
     pub snippet: Option<String>,
-    pub title_node: usize,
-    pub snippet_node: Option<usize>,
+    pub rank: u32,
+    pub official: Option<Official>,
+    pub discussion: bool,
     pub sitelinks: Vec<Link>,
 }
 #[derive(Default)]
 pub struct DropCounts {
-    pub generated: usize,
-    pub paid: usize,
-    pub own: usize,
-    pub repeat: usize,
+    pub generated: u32,
+    pub paid: u32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Network {
@@ -63,33 +62,36 @@ pub enum Network {
     Facebook,
 }
 #[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ProfileBasis {
+    SameAs,
+    Navigation,
+    Results,
+}
+#[derive(Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Profile {
+    pub basis: ProfileBasis,
     pub network: Network,
     pub url: Url,
 }
 pub struct Featured {
     pub text: String,
-    pub organic_index: usize,
+    pub cites: PageKey,
 }
 pub struct Official {
-    pub organic_index: usize,
     pub site: SiteKey,
     pub confidence: Confidence,
     pub evidence: Evidence,
 }
 pub struct Evidence {
     pub domain_match: bool,
-    pub position: usize,
     pub sitelinks: bool,
     pub panel_website: bool,
 }
 #[derive(Default)]
 pub struct FirstLayer {
     pub featured: Option<Box<Featured>>,
-    pub discussion: Vec<usize>,
     pub widget: bool,
     pub organic: Vec<Organic>,
-    pub official: Option<Box<Official>>,
     pub social: Vec<Profile>,
     pub video: Vec<Link>,
     pub images: Vec<Image>,
@@ -103,8 +105,8 @@ pub enum Wall {
     Unreadable,
 }
 pub enum ResultsRead {
-    Wall(Wall),
-    FirstLayer(FirstLayer),
+    Wall { wall: Wall },
+    FirstLayer { layer: FirstLayer },
 }
 
 const AD_LABELS: &[&str] = &[
@@ -277,7 +279,7 @@ impl<'a> Page<'a> {
         let mut context: Vec<Context> = Vec::with_capacity(nodes.len());
         let mut has_main = false;
         for (at, n) in nodes.iter().enumerate() {
-            let mut state = n.parent.map(|p| context[p]).unwrap_or_default();
+            let mut state = n.parent_index().map(|p| context[p]).unwrap_or_default();
             state.end = at + 1;
             state.generated |= n.marks.has(Marks::GENERATED)
                 || Marks::from_label(&n.name) == Some(Marks::GENERATED);
@@ -287,20 +289,31 @@ impl<'a> Page<'a> {
             state.widget =
                 n.marks.has(Marks::WIDGET) || Marks::from_label(&n.name) == Some(Marks::WIDGET);
             state.paid |= n.marks.has(Marks::SPONSORED) || ad_label(&n.name);
-            state.main |= n.role == Role::Landmark(Some(Landmark::Main));
-            state.panel |= n.role == Role::Landmark(Some(Landmark::Complementary))
-                || n.role == Role::Landmark(Some(Landmark::Region))
+            state.main |= n.role
+                == Role::Landmark {
+                    landmark: Some(Landmark::Main),
+                };
+            state.panel |= n.role
+                == Role::Landmark {
+                    landmark: Some(Landmark::Complementary),
+                }
+                || n.role
+                    == Role::Landmark {
+                        landmark: Some(Landmark::Region),
+                    }
                     && ["knowledge panel", "knowledge graph"]
                         .iter()
                         .any(|s| n.name.eq_ignore_ascii_case(s));
             state.chrome |= matches!(
                 n.role,
-                Role::Landmark(Some(
-                    Landmark::Navigation
-                        | Landmark::Contentinfo
-                        | Landmark::Banner
-                        | Landmark::Complementary
-                ))
+                Role::Landmark {
+                    landmark: Some(
+                        Landmark::Navigation
+                            | Landmark::Contentinfo
+                            | Landmark::Banner
+                            | Landmark::Complementary
+                    )
+                }
             );
             has_main |= state.main && !state.hidden;
             context.push(state);
@@ -310,33 +323,42 @@ impl<'a> Page<'a> {
             targets[at] += usize::from(
                 !context[at].hidden && matches!(nodes[at].role, Role::Link | Role::Image),
             );
-            if let Some(p) = nodes[at].parent {
+            if let Some(p) = nodes[at].parent_index() {
                 context[p].end = context[p].end.max(context[at].end);
                 targets[p] += targets[at];
             }
         }
         for (at, node) in nodes.iter().enumerate() {
             if !context[at].hidden
-                && matches!(node.role, Role::Heading(_) | Role::Text | Role::Paragraph)
+                && matches!(
+                    node.role,
+                    Role::Heading { level: _ } | Role::Text | Role::Paragraph
+                )
             {
                 let mark = Marks::from_label(words(node));
                 if matches!(
                     mark,
                     Some(Marks::GENERATED | Marks::FEATURED | Marks::WIDGET)
                 ) {
-                    let card = std::iter::successors(node.parent, |&p| nodes[p].parent)
-                        .take_while(|&p| {
-                            !matches!(
-                                nodes[p].role,
-                                Role::Landmark(Some(Landmark::Main)) | Role::List
-                            )
-                        })
-                        .find(|&p| {
-                            nodes[p].parent.is_some()
-                                && (container(nodes[p].role)
-                                    || nodes[p].role == Role::Landmark(Some(Landmark::Region)))
-                        })
-                        .unwrap_or(at);
+                    let card =
+                        std::iter::successors(node.parent_index(), |&p| nodes[p].parent_index())
+                            .take_while(|&p| {
+                                !matches!(
+                                    nodes[p].role,
+                                    Role::Landmark {
+                                        landmark: Some(Landmark::Main)
+                                    } | Role::List
+                                )
+                            })
+                            .find(|&p| {
+                                nodes[p].parent_index().is_some()
+                                    && (container(nodes[p].role)
+                                        || nodes[p].role
+                                            == Role::Landmark {
+                                                landmark: Some(Landmark::Region),
+                                            })
+                            })
+                            .unwrap_or(at);
                     match mark {
                         Some(Marks::GENERATED) => context[card].generated = true,
                         Some(Marks::FEATURED) => context[card].featured = true,
@@ -346,10 +368,14 @@ impl<'a> Page<'a> {
                 }
             }
             if !context[at].hidden && ad_label(words(node)) {
-                let card = std::iter::successors(node.parent, |&p| nodes[p].parent)
-                    .take_while(|&p| !matches!(nodes[p].role, Role::Landmark(_) | Role::List))
+                let card = std::iter::successors(node.parent_index(), |&p| nodes[p].parent_index())
+                    .take_while(|&p| {
+                        !matches!(nodes[p].role, Role::Landmark { landmark: _ } | Role::List)
+                    })
                     .find(|&p| {
-                        nodes[p].parent.is_some() && container(nodes[p].role) && targets[p] > 0
+                        nodes[p].parent_index().is_some()
+                            && container(nodes[p].role)
+                            && targets[p] > 0
                     });
                 if let Some(p) = card {
                     context[p].paid = true;
@@ -357,17 +383,17 @@ impl<'a> Page<'a> {
             }
         }
         for (at, node) in nodes.iter().enumerate() {
-            if node.parent.is_some_and(|p| context[p].generated) {
+            if node.parent_index().is_some_and(|p| context[p].generated) {
                 context[at].generated = true;
             }
             context[at].hidden |= context[at].generated;
-            context[at].widget |= node.parent.is_some_and(|p| context[p].widget);
-            if node.parent.is_some_and(|p| context[p].paid) {
+            context[at].widget |= node.parent_index().is_some_and(|p| context[p].widget);
+            if node.parent_index().is_some_and(|p| context[p].paid) {
                 context[at].paid = true;
             }
         }
         for (i, n) in nodes.iter().enumerate().rev() {
-            if let Some(p) = n.parent {
+            if let Some(p) = n.parent_index() {
                 context[p].mixed |= context[i].mixed || context[i].generated || context[i].widget;
             }
         }
@@ -379,7 +405,9 @@ impl<'a> Page<'a> {
     }
 
     fn ancestors(&self, at: usize) -> impl Iterator<Item = usize> + '_ {
-        std::iter::successors(self.nodes[at].parent, |&p| self.nodes[p].parent)
+        std::iter::successors(self.nodes[at].parent_index(), |&p| {
+            self.nodes[p].parent_index()
+        })
     }
     fn eligible(&self, at: usize) -> bool {
         let c = self.context[at];
@@ -400,11 +428,12 @@ impl<'a> Page<'a> {
             };
             let heading = (at + 1..self.context[at].end)
                 .find(|&i| {
-                    !self.context[i].hidden && matches!(self.nodes[i].role, Role::Heading(_))
+                    !self.context[i].hidden
+                        && matches!(self.nodes[i].role, Role::Heading { level: _ })
                 })
                 .or_else(|| {
                     self.ancestors(at)
-                        .find(|&p| matches!(self.nodes[p].role, Role::Heading(_)))
+                        .find(|&p| matches!(self.nodes[p].role, Role::Heading { level: _ }))
                 });
             let destination = rules.destination(source);
             let text = if let Some(h) = heading {
@@ -442,9 +471,14 @@ impl<'a> Page<'a> {
     fn nested_sitelink(&self, primary: &Title, next: &Title) -> bool {
         let card = self
             .ancestors(primary.at)
-            .take_while(|&p| !matches!(self.nodes[p].role, Role::Landmark(_) | Role::List))
+            .take_while(|&p| {
+                !matches!(
+                    self.nodes[p].role,
+                    Role::Landmark { landmark: _ } | Role::List
+                )
+            })
             .find(|&p| {
-                self.nodes[p].parent.is_some()
+                self.nodes[p].parent_index().is_some()
                     && (matches!(self.nodes[p].role, Role::ListItem | Role::Document)
                         || self.nodes[p].role == Role::Group && self.context[p].end > next.at)
             });
@@ -457,7 +491,7 @@ impl<'a> Page<'a> {
             .any(|p| matches!(self.nodes[p].role, Role::List | Role::Table) && p > primary.at);
         let level = |title: &Title| {
             title.heading.and_then(|i| match self.nodes[i].role {
-                Role::Heading(n) => n,
+                Role::Heading { level: n } => n,
                 _ => None,
             })
         };
@@ -468,8 +502,8 @@ impl<'a> Page<'a> {
             || lower_heading
                 && (self.nodes[card].role != Role::Group
                     || primary.heading.is_some_and(|h| {
-                        self.nodes[h].parent == Some(card)
-                            || self.nodes[primary.at].parent == Some(card)
+                        self.nodes[h].parent_index() == Some(card)
+                            || self.nodes[primary.at].parent_index() == Some(card)
                     }))
     }
 
@@ -495,11 +529,13 @@ impl<'a> Page<'a> {
     fn scope(&self, title: &Title, prev: Option<usize>, next: usize) -> Option<usize> {
         self.ancestors(title.at)
             .take_while(|&p| {
-                !matches!(self.nodes[p].role, Role::Landmark(_) | Role::List)
-                    && prev.is_none_or(|v| v < p)
+                !matches!(
+                    self.nodes[p].role,
+                    Role::Landmark { landmark: _ } | Role::List
+                ) && prev.is_none_or(|v| v < p)
                     && self.context[p].end <= next
             })
-            .filter(|&p| container(self.nodes[p].role) && self.nodes[p].parent.is_some())
+            .filter(|&p| container(self.nodes[p].role) && self.nodes[p].parent_index().is_some())
             .last()
     }
 
@@ -591,32 +627,37 @@ impl<'a> Page<'a> {
     }
 }
 
-fn result_identity(key: &PageKey) -> String {
-    use url::Position;
-    let page = key.as_url();
-    let mut id = page[Position::BeforeHost..Position::AfterPort]
-        .trim_start_matches("www.")
-        .to_owned();
-    id.push_str(page.path().trim_end_matches('/'));
-    if let Some(query) = page.query() {
-        id.push('?');
-        id.push_str(query);
-    }
-    id
-}
-
 pub fn read_results(
     engine: SearchEngine,
     own_host: Option<&str>,
     query: &QueryRead,
     doc: &Doc,
 ) -> ResultsRead {
+    read_results_with_stats(engine, own_host, query, doc, &mut ResultStats::default())
+}
+
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct ResultStats {
+    pub own: u32,
+    pub repeat: u32,
+}
+pub fn read_results_with_stats(
+    engine: SearchEngine,
+    own_host: Option<&str>,
+    query: &QueryRead,
+    doc: &Doc,
+    counts: &mut ResultStats,
+) -> ResultsRead {
     let own = own_host.unwrap_or_else(|| doc.page().host_str().unwrap_or_default());
     if own.len() > MAX_URL_BYTES || own.is_empty() {
-        return ResultsRead::Wall(Wall::Unreadable);
+        return ResultsRead::Wall {
+            wall: Wall::Unreadable,
+        };
     }
     if doc.body_truncated() {
-        return ResultsRead::Wall(Wall::Unreadable);
+        return ResultsRead::Wall {
+            wall: Wall::Unreadable,
+        };
     }
     let normalized_host = own.trim_end_matches('.').to_ascii_lowercase();
     let rules = Rules {
@@ -636,6 +677,7 @@ pub fn read_results(
         })
         .collect();
     let mut layer = FirstLayer::default();
+    let mut first_title = None;
     let mut seen = std::collections::BTreeSet::new();
     let mut excluded = vec![false; page.nodes.len()];
     for (pos, title) in titles.iter().enumerate() {
@@ -655,7 +697,7 @@ pub fn read_results(
         let url = match &title.destination {
             Ok(url) => url,
             Err(Drop::Own) => {
-                layer.dropped.own += 1;
+                counts.own = counts.own.saturating_add(1);
                 continue;
             }
             Err(_) => continue,
@@ -663,26 +705,28 @@ pub fn read_results(
         let Ok(key) = PageKey::from_url(url) else {
             continue;
         };
-        if !seen.insert(result_identity(&key)) {
-            layer.dropped.repeat += 1;
+        if !seen.insert(key.page_match()) {
+            counts.repeat = counts.repeat.saturating_add(1);
             continue;
         }
         if layer.organic.len() >= MAX_RESULTS {
             continue;
         }
         let sitelinks = page.sitelinks(title, scope, &rules);
-        let (snippet_node, snippet) = page.snippet(title, scope, end).unzip();
+        let snippet = page.snippet(title, scope, end).map(|(_, text)| text);
+        first_title.get_or_insert(title.at);
         layer.organic.push(Organic {
             key,
             url: url.clone(),
             title: clip(&title.text, TITLE_BYTES),
             snippet,
-            snippet_node,
-            title_node: title.at,
+            rank: layer.organic.len() as u32 + 1,
+            official: None,
+            discussion: false,
             sitelinks,
         });
     }
-    page.groups(&mut layer, &rules);
+    page.groups(&mut layer, &rules, first_title.unwrap_or(page.nodes.len()));
     page.enrich(&mut layer, &rules, query, &excluded);
     if layer.organic.is_empty() {
         for (phrases, wall) in [
@@ -703,25 +747,23 @@ pub fn read_results(
                     phrases.iter().any(|p| s.contains(p))
                 })
             {
-                return ResultsRead::Wall(wall);
+                return ResultsRead::Wall { wall };
             }
         }
         if layer.images.is_empty() && layer.video.is_empty() && !layer.widget {
-            return ResultsRead::Wall(Wall::Unreadable);
+            return ResultsRead::Wall {
+                wall: Wall::Unreadable,
+            };
         }
     }
-    ResultsRead::FirstLayer(layer)
+    ResultsRead::FirstLayer { layer }
 }
 
 impl Page<'_> {
-    fn groups(&self, layer: &mut FirstLayer, rules: &Rules) {
-        let first = layer
-            .organic
-            .first()
-            .map_or(self.nodes.len(), |r| r.title_node);
+    fn groups(&self, layer: &mut FirstLayer, rules: &Rules, first: usize) {
         for (i, n) in self.nodes.iter().enumerate() {
             let c = self.context[i];
-            if c.generated && !n.parent.is_some_and(|p| self.context[p].generated) {
+            if c.generated && !n.parent_index().is_some_and(|p| self.context[p].generated) {
                 layer.dropped.generated += 1;
             }
             if c.hidden || c.paid {
@@ -748,47 +790,46 @@ impl Page<'_> {
                         .and_then(|u| rules.destination(u).ok())
                         .and_then(|u| PageKey::from_url(&u).ok())
                     {
-                        citation =
-                            citation.or_else(|| layer.organic.iter().position(|r| r.key == url));
+                        citation = citation.or_else(|| {
+                            layer
+                                .organic
+                                .iter()
+                                .any(|r| r.key.page_match() == url.page_match())
+                                .then_some(url)
+                        });
                     }
                 }
                 layer.featured = citation
                     .zip(body)
-                    .map(|(organic_index, text)| Featured {
-                        organic_index,
+                    .map(|(cites, text)| Featured {
+                        cites,
                         text: clip(text, SNIPPET_BYTES),
                     })
                     .map(Box::new);
             }
         }
-        layer.discussion = layer
-            .organic
+        for r in &mut layer.organic {
+            let host = r.url.host_str().unwrap_or_default();
+            r.discussion = [
+                "reddit.com",
+                "news.ycombinator.com",
+                "stackexchange.com",
+                "stackoverflow.com",
+                "superuser.com",
+                "serverfault.com",
+                "askubuntu.com",
+                "mathoverflow.net",
+                "producthunt.com",
+                "g2.com",
+                "trustpilot.com",
+                "quora.com",
+            ]
             .iter()
-            .enumerate()
-            .filter(|(_, r)| {
-                let host = r.url.host_str().unwrap_or_default();
-                [
-                    "reddit.com",
-                    "news.ycombinator.com",
-                    "stackexchange.com",
-                    "stackoverflow.com",
-                    "superuser.com",
-                    "serverfault.com",
-                    "askubuntu.com",
-                    "mathoverflow.net",
-                    "producthunt.com",
-                    "g2.com",
-                    "trustpilot.com",
-                    "quora.com",
-                ]
-                .iter()
-                .any(|d| destination::on(host, d))
-                    || host
-                        .split('.')
-                        .next()
-                        .is_some_and(|s| matches!(s, "forum" | "forums" | "discuss" | "community"))
-            })
-            .map(|(i, _)| i)
-            .collect();
+            .any(|d| destination::on(host, d))
+                || host
+                    .split('.')
+                    .next()
+                    .is_some_and(|s| matches!(s, "forum" | "forums" | "discuss" | "community"));
+        }
     }
 }

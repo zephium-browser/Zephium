@@ -105,7 +105,6 @@ pub const SECTION_WORDS: &[(&str, SectionRole)] = &[
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Section {
-    pub word: &'static str,
     pub role: SectionRole,
 }
 
@@ -124,7 +123,9 @@ pub enum QueryKind {
         entity: Vec<String>,
         section: Option<Section>,
     },
-    Passage(PassageKind),
+    Passage {
+        kind: PassageKind,
+    },
     Compare {
         left: Vec<String>,
         right: Vec<String>,
@@ -173,7 +174,7 @@ fn split_section(terms: &[String]) -> (&[String], Option<Section>) {
                 .map(String::as_str)
                 .eq(word.split_whitespace())
             {
-                return (&terms[..split], Some(Section { word, role }));
+                return (&terms[..split], Some(Section { role }));
             }
         }
     }
@@ -277,11 +278,15 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
     let (entity, section) = split_section(&terms);
     let mut confidence = Confidence::High;
     let kind = if pasted(text, &terms) {
-        QueryKind::Passage(PassageKind::Pasted)
+        QueryKind::Passage {
+            kind: PassageKind::Pasted,
+        }
     } else if instant(&terms, &phrase) {
         QueryKind::Instant
     } else if question {
-        QueryKind::Passage(PassageKind::Question)
+        QueryKind::Passage {
+            kind: PassageKind::Question,
+        }
     } else if let Some(index) = entity
         .iter()
         .position(|word| matches!(word.as_str(), "vs" | "vs." | "versus" | "or"))
@@ -318,7 +323,7 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
         });
         let fresh = fresh_word.is_some()
             || section.is_some_and(|s| matches!(s.role, SectionRole::News | SectionRole::Releases));
-        let section = section.or_else(|| fresh_word.map(|&(word, role)| Section { word, role }));
+        let section = section.or_else(|| fresh_word.map(|&(_, role)| Section { role }));
         let entity = if fresh {
             entity
                 .iter()
@@ -342,7 +347,13 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
             section,
         }
     };
-    let diagnostic = matches!(kind, QueryKind::Passage(PassageKind::Pasted)).then(|| {
+    let diagnostic = matches!(
+        kind,
+        QueryKind::Passage {
+            kind: PassageKind::Pasted
+        }
+    )
+    .then(|| {
         let line = text
             .lines()
             .rev()

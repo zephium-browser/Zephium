@@ -192,7 +192,7 @@ fn session_builds_and_replays_a_two_level_place() {
     let memo =
         store::read_bytes(&path.join("memo.bin"), zephium_map::session::MAX_MEMO_BYTES).unwrap();
     assert_eq!(outcome.stats["memo.0.bytes"], memo.len() as u64);
-    let site = zephium_map::SiteKey::from_url(&Url::parse("https://acme.com/").unwrap()).unwrap();
+    let site = zephium_map::PlaceKey::from_url(&Url::parse("https://acme.com/").unwrap()).unwrap();
     assert_eq!(
         zephium_map::session::SiteMemo::decode(&memo, &site)
             .unwrap()

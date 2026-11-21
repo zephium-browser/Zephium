@@ -16,28 +16,28 @@ pub const MAX_HEAD_ITEMS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub struct DocLimits {
-    pub input_bytes: usize,
-    pub arena_elements: usize,
-    pub arena_depth: usize,
-    pub arena_text_bytes: usize,
-    pub nodes: usize,
-    pub depth: usize,
-    pub text_bytes: usize,
-    pub node_text_bytes: usize,
-    pub url_bytes: usize,
+    pub input_bytes: u32,
+    pub arena_elements: u32,
+    pub arena_depth: u32,
+    pub arena_text_bytes: u32,
+    pub nodes: u32,
+    pub depth: u32,
+    pub text_bytes: u32,
+    pub node_text_bytes: u32,
+    pub url_bytes: u32,
 }
 impl Default for DocLimits {
     fn default() -> Self {
         Self {
-            input_bytes: MAX_INPUT_BYTES,
-            arena_elements: MAX_ARENA_ELEMENTS,
-            arena_depth: MAX_ARENA_DEPTH,
-            arena_text_bytes: MAX_ARENA_TEXT_BYTES,
-            nodes: MAX_NODES,
-            depth: MAX_DEPTH,
-            text_bytes: MAX_TEXT_BYTES,
-            node_text_bytes: MAX_NODE_TEXT_BYTES,
-            url_bytes: MAX_URL_BYTES,
+            input_bytes: MAX_INPUT_BYTES as u32,
+            arena_elements: MAX_ARENA_ELEMENTS as u32,
+            arena_depth: MAX_ARENA_DEPTH as u32,
+            arena_text_bytes: MAX_ARENA_TEXT_BYTES as u32,
+            nodes: MAX_NODES as u32,
+            depth: MAX_DEPTH as u32,
+            text_bytes: MAX_TEXT_BYTES as u32,
+            node_text_bytes: MAX_NODE_TEXT_BYTES as u32,
+            url_bytes: MAX_URL_BYTES as u32,
         }
     }
 }
@@ -51,7 +51,7 @@ impl DocLimits {
         depth: 48,
         text_bytes: 192 * 1024,
         node_text_bytes: 4096,
-        url_bytes: MAX_URL_BYTES,
+        url_bytes: MAX_URL_BYTES as u32,
     };
     pub const SITE_PAGE: Self = Self {
         input_bytes: 7 * 512 * 1024,
@@ -62,7 +62,7 @@ impl DocLimits {
         depth: 56,
         text_bytes: 320 * 1024,
         node_text_bytes: 6144,
-        url_bytes: MAX_URL_BYTES,
+        url_bytes: MAX_URL_BYTES as u32,
     };
     pub const ARTICLE: Self = Self {
         arena_elements: 80 * 1024,
@@ -74,15 +74,15 @@ impl DocLimits {
     };
 
     fn validate(self) -> Result<Self, DocError> {
-        if self.input_bytes > MAX_INPUT_BYTES
-            || self.arena_elements > MAX_ARENA_ELEMENTS
-            || self.arena_depth > MAX_ARENA_DEPTH
-            || self.arena_text_bytes > MAX_ARENA_TEXT_BYTES
-            || self.nodes > MAX_NODES
-            || self.depth > MAX_DEPTH
-            || self.text_bytes > MAX_TEXT_BYTES
-            || self.node_text_bytes > MAX_NODE_TEXT_BYTES
-            || self.url_bytes > MAX_URL_BYTES
+        if self.input_bytes > MAX_INPUT_BYTES as u32
+            || self.arena_elements > MAX_ARENA_ELEMENTS as u32
+            || self.arena_depth > MAX_ARENA_DEPTH as u32
+            || self.arena_text_bytes > MAX_ARENA_TEXT_BYTES as u32
+            || self.nodes > MAX_NODES as u32
+            || self.depth > MAX_DEPTH as u32
+            || self.text_bytes > MAX_TEXT_BYTES as u32
+            || self.node_text_bytes > MAX_NODE_TEXT_BYTES as u32
+            || self.url_bytes > MAX_URL_BYTES as u32
         {
             Err(DocError::Limits)
         } else {
@@ -108,7 +108,10 @@ pub enum DocError {
     #[error("invalid field for node role")]
     Role,
     #[error(transparent)]
-    Url(#[from] KeyError),
+    Url {
+        #[from]
+        error: KeyError,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,8 +130,8 @@ pub enum Landmark {
 pub enum Role {
     Document,
     Group,
-    Landmark(Option<Landmark>),
-    Heading(Option<u8>),
+    Landmark { landmark: Option<Landmark> },
+    Heading { level: Option<u8> },
     Paragraph,
     Text,
     CodeBlock,
@@ -177,7 +180,7 @@ impl Marks {
 }
 pub struct Node {
     pub role: Role,
-    pub parent: Option<usize>,
+    pub parent: Option<u32>,
     pub name: String,
     pub text: String,
     pub destination: Option<Url>,
@@ -188,15 +191,22 @@ pub struct Node {
     pub element_id: Option<String>,
 }
 impl Node {
+    pub(crate) fn parent_index(&self) -> Option<usize> {
+        self.parent.map(|i| i as usize)
+    }
     pub fn accessible_name(&self) -> &str {
-        if self.name.is_empty() && matches!(self.role, Role::Heading(_) | Role::Link | Role::Button)
+        if self.name.is_empty()
+            && matches!(
+                self.role,
+                Role::Heading { level: _ } | Role::Link | Role::Button
+            )
         {
             &self.text
         } else {
             &self.name
         }
     }
-    pub fn new(role: Role, parent: Option<usize>) -> Self {
+    pub fn new(role: Role, parent: Option<u32>) -> Self {
         Self {
             role,
             parent,
@@ -261,7 +271,7 @@ pub struct DocBuilder {
 impl DocBuilder {
     pub fn new(page: &Url, limits: DocLimits) -> Result<Self, DocError> {
         let limits = limits.validate()?;
-        check_url(page, limits.url_bytes)?;
+        check_url(page, limits.url_bytes as usize)?;
         Ok(Self {
             doc: Doc {
                 page: page.clone(),
@@ -279,12 +289,12 @@ impl DocBuilder {
         self.doc.truncated = true;
     }
 
-    pub fn push(&mut self, node: Node) -> Result<usize, DocError> {
+    pub fn push(&mut self, node: Node) -> Result<u32, DocError> {
         let index = self.doc.nodes.len();
-        if index >= self.limits.nodes {
+        if index >= self.limits.nodes as usize {
             return Err(DocError::Nodes);
         }
-        let level = match node.parent {
+        let level = match node.parent_index() {
             None => 0,
             Some(parent) => {
                 self.path
@@ -294,10 +304,10 @@ impl DocBuilder {
                     + 1
             }
         };
-        if level >= self.limits.depth {
+        if level >= self.limits.depth as usize {
             return Err(DocError::Depth);
         }
-        if matches!(node.role, Role::Heading(Some(n)) if !(1..=6).contains(&n))
+        if matches!(node.role, Role::Heading{level:Some(n)} if !(1..=6).contains(&n))
             || node.destination.is_some() && node.role != Role::Link
             || node.image_source.is_some() && node.role != Role::Image
             || node
@@ -311,7 +321,7 @@ impl DocBuilder {
             .into_iter()
             .flatten()
         {
-            check_url(url, self.limits.url_bytes)?;
+            check_url(url, self.limits.url_bytes as usize)?;
         }
         let size = node
             .name
@@ -319,17 +329,31 @@ impl DocBuilder {
             .saturating_add(node.text.len())
             .saturating_add(node.language.as_deref().map_or(0, str::len))
             .saturating_add(node.element_id.as_deref().map_or(0, str::len));
-        if size > self.limits.node_text_bytes || size > self.limits.text_bytes - self.text_bytes {
+        if size > self.limits.node_text_bytes as usize
+            || size > self.limits.text_bytes as usize - self.text_bytes
+        {
             return Err(DocError::Text);
         }
         self.text_bytes += size;
         self.path.truncate(level);
         self.path.push(index);
         self.doc.nodes.push(node);
-        Ok(index)
+        Ok(index as u32)
     }
 
     pub fn finish(mut self) -> Doc {
+        for n in &mut self.doc.nodes {
+            n.text.retain(crate::visible_char);
+            n.name.retain(crate::visible_char);
+            if let Some(id) = &mut n.element_id {
+                id.retain(crate::visible_char);
+            }
+        }
+        self.doc.head.title.retain(crate::visible_char);
+        self.doc.head.site_name.retain(crate::visible_char);
+        for a in &mut self.doc.head.alternates {
+            a.title.retain(crate::visible_char);
+        }
         crate::linked::mark_answers(&mut self.doc.nodes, &self.doc.head);
         self.doc
     }

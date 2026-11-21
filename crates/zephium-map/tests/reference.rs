@@ -7,30 +7,36 @@ use zephium_map::{
 };
 
 fn read(engine: SearchEngine, page: &str, html: &str) -> ResultsRead {
+    read_with_stats(engine, page, html).0
+}
+fn read_with_stats(
+    engine: SearchEngine,
+    page: &str,
+    html: &str,
+) -> (ResultsRead, zephium_map::results::ResultStats) {
     let url = Url::parse(page).unwrap();
     let doc = Doc::from_html(&url, html.as_bytes(), None, DocLimits::default()).unwrap();
-    let read = read_results(
+    let mut stats = zephium_map::results::ResultStats::default();
+    let read = zephium_map::results::read_results_with_stats(
         engine,
         url.host_str(),
         &read_query("rust async runtime").unwrap(),
         &doc,
+        &mut stats,
     );
-    if let ResultsRead::FirstLayer(layer) = &read {
-        for hit in &layer.organic {
-            assert_eq!(doc.nodes()[hit.title_node].role, Role::Link);
-            assert_eq!(hit.snippet.is_some(), hit.snippet_node.is_some());
-            if let Some(at) = hit.snippet_node {
-                assert!(!doc.nodes()[at].text.is_empty());
-            }
+    if let ResultsRead::FirstLayer { layer } = &read {
+        for (i, hit) in layer.organic.iter().enumerate() {
+            assert_eq!(hit.rank, i as u32 + 1);
+            assert!(hit.snippet.as_ref().is_none_or(|s| !s.is_empty()));
         }
     }
-    read
+    (read, stats)
 }
 
 fn layer(read: &ResultsRead) -> &FirstLayer {
     match read {
-        ResultsRead::FirstLayer(layer) => layer,
-        ResultsRead::Wall(w) => panic!("unexpected wall {w:?}"),
+        ResultsRead::FirstLayer { layer } => layer,
+        ResultsRead::Wall { wall: w } => panic!("unexpected wall {w:?}"),
     }
 }
 fn hits(read: &ResultsRead) -> Vec<(&str, &str, Option<&str>)> {
@@ -49,7 +55,7 @@ const ASYNC_STD: &str =
 
 #[test]
 fn google_results_skip_its_ads_and_own_links_and_unwrap_its_redirect() {
-    let read = read(
+    let (read, stats) = read_with_stats(
         SearchEngine::Google,
         "https://www.google.com/search?q=rust+async+runtime",
         include_str!(
@@ -81,8 +87,7 @@ fn google_results_skip_its_ads_and_own_links_and_unwrap_its_redirect() {
         ("async-std", "https://async.rs/", Some(ASYNC_STD))
     );
     assert_eq!(layer(&read).dropped.paid, 1);
-    assert_eq!(layer(&read).dropped.own, 1);
-    assert_eq!(layer(&read).dropped.repeat, 1);
+    assert_eq!((stats.own, stats.repeat), (1, 1));
 }
 
 #[test]
@@ -224,7 +229,7 @@ fn walls_say_what_stood_in_the_way() {
         ),
     ] {
         let read = read(engine, page, html);
-        assert!(matches!(read,ResultsRead::Wall(w) if w==wall), "{page}");
+        assert!(matches!(read,ResultsRead::Wall{wall:w} if w==wall), "{page}");
     }
 }
 
@@ -331,7 +336,7 @@ fn redirect_destinations_through_html() {
         let html = format!("<h2><a href='{target}'>A result</a></h2>");
         let read = read(engine, &format!("https://{host}"), &html);
         let actual = match &read {
-            ResultsRead::FirstLayer(l) => Some(l.organic[0].url.as_str()),
+            ResultsRead::FirstLayer { layer: l } => Some(l.organic[0].url.as_str()),
             _ => None,
         };
         assert_eq!(actual, expected);
@@ -350,7 +355,10 @@ fn live_nodes_and_html_return_the_same_three_cited_rows() {
     for n in doc.nodes() {
         let mut observed = Node::new(n.role, n.parent);
         observed.name = n.accessible_name().to_owned();
-        if !matches!(n.role, Role::Heading(_) | Role::Link | Role::Button) {
+        if !matches!(
+            n.role,
+            Role::Heading { level: _ } | Role::Link | Role::Button
+        ) {
             observed.text = n.text.clone();
         }
         observed.destination = n.destination.clone();
@@ -364,9 +372,7 @@ fn live_nodes_and_html_return_the_same_three_cited_rows() {
     assert_eq!(hits(&a), hits(&b));
     assert_eq!(layer(&b).organic.len(), 3);
     for (html, observed) in layer(&a).organic.iter().zip(&layer(&b).organic) {
-        assert_eq!(html.title_node, observed.title_node);
-        assert_eq!(html.snippet_node, observed.snippet_node);
-        assert!(!live.nodes()[observed.title_node].name.is_empty());
-        assert!(!live.nodes()[observed.snippet_node.unwrap()].text.is_empty());
+        assert_eq!(html.rank, observed.rank);
+        assert!(html.key == observed.key);
     }
 }

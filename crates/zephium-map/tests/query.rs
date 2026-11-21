@@ -137,8 +137,8 @@ fn query_corpus() {
                 QueryKind::Instant => "instant",
                 QueryKind::Place { .. } if read.confidence() == Confidence::Low => "uncertain",
                 QueryKind::Place { .. } => "place",
-                QueryKind::Passage(Question) => "question",
-                QueryKind::Passage(Pasted) => "pasted",
+                QueryKind::Passage { kind: Question } => "question",
+                QueryKind::Passage { kind: Pasted } => "pasted",
                 QueryKind::Compare { .. } => "compare",
             };
             assert_eq!(actual, class, "{input}");
@@ -170,7 +170,7 @@ fn carries_normalized_terms_and_sections() {
             panic!()
         };
         assert_eq!(entity, &["github", "actions"]);
-        assert_eq!(*section, Some(Section { word, role }));
+        assert_eq!(*section, Some(Section { role }));
     }
 }
 #[test]

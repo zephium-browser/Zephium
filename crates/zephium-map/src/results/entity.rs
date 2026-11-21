@@ -125,7 +125,6 @@ impl Entity {
         Some((
             score,
             Official {
-                organic_index: position,
                 site,
                 confidence: if domain_match && (position == 0 || panel_website || sitelinks) {
                     Confidence::High
@@ -134,7 +133,6 @@ impl Entity {
                 },
                 evidence: Evidence {
                     domain_match,
-                    position: position + 1,
                     sitelinks,
                     panel_website,
                 },
@@ -249,9 +247,11 @@ impl Page<'_> {
             else {
                 continue;
             };
-            if target == *url
+            if crate::key::same_page(&target, url)
                 || SiteKey::from_url(&target).as_ref() != Some(&site)
-                || links.iter().any(|l: &Link| l.url == target)
+                || links
+                    .iter()
+                    .any(|l: &Link| crate::key::same_page(&l.url, &target))
             {
                 continue;
             }
@@ -312,12 +312,15 @@ impl Page<'_> {
                 if self.eligible(at)
                     && layer.video.len() < MAX_VIDEO
                     && video(&url)
-                    && !layer.video.iter().any(|v| v.url == url)
+                    && !layer
+                        .video
+                        .iter()
+                        .any(|v| crate::key::same_page(&v.url, &url))
                 {
                     let title = layer
                         .organic
                         .iter()
-                        .find(|hit| hit.url == url)
+                        .find(|hit| crate::key::same_page(&hit.url, &url))
                         .map_or_else(|| clip(words(n), TITLE_BYTES), |hit| hit.title.clone());
                     if !title.is_empty() {
                         layer.video.push(Link {
@@ -332,7 +335,11 @@ impl Page<'_> {
                         .and_then(|e| profile(&url, words(n), Some(e)))
                     {
                         if !layer.social.iter().any(|p| p.network == network) {
-                            layer.social.push(Profile { network, url });
+                            layer.social.push(Profile {
+                                network,
+                                url,
+                                basis: ProfileBasis::Results,
+                            });
                         }
                     }
                 }
@@ -352,11 +359,9 @@ impl Page<'_> {
                     None => rules.destination(source).ok(),
                 };
                 if let Some(destination) = dest {
-                    if !layer
-                        .images
-                        .iter()
-                        .any(|i| i.source == *source && i.destination == destination)
-                    {
+                    if !layer.images.iter().any(|i| {
+                        i.source == *source && crate::key::same_page(&i.destination, &destination)
+                    }) {
                         layer.images.push(Image {
                             title: clip(words(n), TITLE_BYTES),
                             source: source.clone(),
@@ -372,11 +377,13 @@ impl Page<'_> {
                 .as_ref()
                 .and_then(|e| e.result(hit, position, &panel))
             {
-                if best.is_none_or(|prior| score > prior) {
-                    best = Some(score);
-                    layer.official = Some(Box::new(official));
+                if best.as_ref().is_none_or(|(prior, _, _)| score > *prior) {
+                    best = Some((score, position, official));
                 }
             }
+        }
+        if let Some((_, index, official)) = best {
+            layer.organic[index].official = Some(official);
         }
     }
 }

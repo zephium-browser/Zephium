@@ -15,7 +15,7 @@ impl Doc {
         limits: DocLimits,
     ) -> Result<Self, DocError> {
         let mut builder = DocBuilder::new(page, limits)?;
-        if bytes.len() > limits.input_bytes {
+        if bytes.len() > limits.input_bytes as usize {
             return Err(DocError::Input);
         }
         let dom = decode::parse(bytes, charset_label, limits);
@@ -41,7 +41,9 @@ impl Doc {
                 }
             }
             if builder.doc.truncated {
-                return Err(DocError::Url(KeyError::UrlLength));
+                return Err(DocError::Url {
+                    error: KeyError::UrlLength,
+                });
             }
             for n in head.children().filter(|n| !n.is_text() && !hidden(n)) {
                 builder.head_element(&n, &base);
@@ -49,7 +51,7 @@ impl Doc {
             builder.doc.head.truncated = std::mem::take(&mut builder.doc.truncated);
         }
         let body = root.children().find(|n| tag_is(n, "body")).or_else(|| {
-            (dom.lifted && limits.arena_depth == 1)
+            (dom.lifted && limits.arena_depth as usize == 1)
                 .then(|| dom.node(0).children().find(|n| tag_is(n, "body")))
                 .flatten()
         });
@@ -77,7 +79,7 @@ fn hidden(n: &NodeRef) -> bool {
 impl DocBuilder {
     fn resolve(&mut self, node: &NodeRef, attr: &str, base: &Url) -> Option<Url> {
         let raw = node.attr(attr)?;
-        if node.clipped(attr) || raw.len() > self.limits.url_bytes {
+        if node.clipped(attr) || raw.len() > self.limits.url_bytes as usize {
             self.mark_truncated();
             return None;
         }
@@ -85,7 +87,7 @@ impl DocBuilder {
             return None;
         }
         let url = base.join(raw).ok()?;
-        match check_url(&url, self.limits.url_bytes) {
+        match check_url(&url, self.limits.url_bytes as usize) {
             Ok(()) => Some(url),
             Err(KeyError::UrlLength) => {
                 self.mark_truncated();
@@ -96,7 +98,8 @@ impl DocBuilder {
     }
 
     fn bounded_prefix<'a>(&mut self, value: &'a str, room: usize) -> &'a str {
-        let end = value.floor_char_boundary(room.min(self.limits.text_bytes - self.text_bytes));
+        let end =
+            value.floor_char_boundary(room.min(self.limits.text_bytes as usize - self.text_bytes));
         if end < value.len() {
             self.mark_truncated();
         }
@@ -110,7 +113,7 @@ impl DocBuilder {
     }
 
     fn head_element(&mut self, node: &NodeRef, base: &Url) {
-        let limit = self.limits.node_text_bytes;
+        let limit = self.limits.node_text_bytes as usize;
         if node.loss() {
             self.mark_truncated();
         }
@@ -172,7 +175,7 @@ impl DocBuilder {
                     .map_or("", |c| c.text());
                 if node.loss()
                     || self.doc.head.linked_data.len() >= MAX_HEAD_ITEMS
-                    || raw.len() > limit.min(self.limits.text_bytes - self.text_bytes)
+                    || raw.len() > limit.min(self.limits.text_bytes as usize - self.text_bytes)
                 {
                     self.mark_truncated();
                 } else {
@@ -186,13 +189,13 @@ impl DocBuilder {
 
     fn append(&mut self, at: usize, raw: &str, verbatim: bool) {
         let node = &self.doc.nodes[at];
-        let room = self.limits.node_text_bytes
+        let room = self.limits.node_text_bytes as usize
             - node.language.as_deref().map_or(0, str::len)
             - node.text.len()
             - node.name.len()
             - node.element_id.as_deref().map_or(0, str::len);
         let separator = !verbatim && !node.text.is_empty();
-        let room = room.min(self.limits.text_bytes - self.text_bytes);
+        let room = room.min(self.limits.text_bytes as usize - self.text_bytes);
         let extra = usize::from(separator);
         let end = raw.floor_char_boundary(room.saturating_sub(extra));
         if end < raw.len() {
@@ -210,10 +213,8 @@ impl DocBuilder {
 
     fn words(&mut self, raw: &str) -> String {
         let mut out = String::new();
-        let cap = self
-            .limits
-            .node_text_bytes
-            .min(self.limits.text_bytes - self.text_bytes);
+        let cap = (self.limits.node_text_bytes as usize)
+            .min(self.limits.text_bytes as usize - self.text_bytes);
         for word in raw
             .split(|c: char| c.is_control() || c.is_whitespace())
             .filter(|word| !word.is_empty())
@@ -255,7 +256,7 @@ impl DocBuilder {
         let mut prose = false;
         while let Some(at) = ancestor {
             let n = &self.doc.nodes[at];
-            ancestor = n.parent;
+            ancestor = n.parent_index();
             let takes_prose = matches!(
                 n.role,
                 Role::Paragraph
@@ -267,7 +268,10 @@ impl DocBuilder {
             );
             if n.role == Role::Text && !inline
                 || !prose && takes_prose
-                || matches!(n.role, Role::Heading(_) | Role::Link | Role::Button)
+                || matches!(
+                    n.role,
+                    Role::Heading { level: _ } | Role::Link | Role::Button
+                )
             {
                 captured = true;
                 self.append(at, &words, verbatim);
@@ -282,8 +286,8 @@ impl DocBuilder {
         }
         if !captured {
             let (parent, _) = self.fit_parent(parent, level);
-            match self.push(Node::new(Role::Text, parent)) {
-                Ok(at) => self.append(at, &words, verbatim),
+            match self.push(Node::new(Role::Text, parent.map(|i| i as u32))) {
+                Ok(at) => self.append(at as usize, &words, verbatim),
                 Err(DocError::Nodes | DocError::Depth) => self.mark_truncated(),
                 Err(e) => return Err(e),
             }
@@ -292,10 +296,10 @@ impl DocBuilder {
     }
 
     fn fit_parent(&mut self, parent: Option<usize>, level: usize) -> (Option<usize>, usize) {
-        if level >= self.limits.depth {
+        if level >= self.limits.depth as usize {
             self.mark_truncated();
             (
-                parent.and_then(|at| self.doc.nodes[at].parent),
+                parent.and_then(|at| self.doc.nodes[at].parent_index()),
                 level.saturating_sub(1),
             )
         } else {
@@ -313,7 +317,8 @@ impl DocBuilder {
                 self.capture_text(parent, n.text(), verbatim, level)?;
                 continue;
             }
-            if self.doc.nodes.len() >= self.limits.nodes || self.limits.depth == 0 {
+            if self.doc.nodes.len() >= self.limits.nodes as usize || self.limits.depth as usize == 0
+            {
                 self.mark_truncated();
                 continue;
             }
@@ -338,11 +343,11 @@ impl DocBuilder {
             if n.loss() {
                 self.mark_truncated()
             }
-            let in_sink =
-                std::iter::successors(parent, |&at| self.doc.nodes[at].parent).any(|at| {
+            let in_sink = std::iter::successors(parent, |&at| self.doc.nodes[at].parent_index())
+                .any(|at| {
                     matches!(
                         self.doc.nodes[at].role,
-                        Role::Heading(_)
+                        Role::Heading { level: _ }
                             | Role::Link
                             | Role::Button
                             | Role::Paragraph
@@ -355,7 +360,7 @@ impl DocBuilder {
                 classify(&n, n.tag(), in_sink).filter(|r| !(verbatim && *r == Role::CodeBlock));
             let (parent, level) = if let Some(role) = role {
                 let (parent, level) = self.fit_parent(parent, level);
-                let mut node = Node::new(role, parent);
+                let mut node = Node::new(role, parent.map(|i| i as u32));
                 if ["data-layout", "data-type", "data-testid"]
                     .iter()
                     .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
@@ -385,10 +390,8 @@ impl DocBuilder {
                 if let Some(id) = n.attr("id") {
                     if !n.clipped("id")
                         && id.len()
-                            <= self
-                                .limits
-                                .node_text_bytes
-                                .min(self.limits.text_bytes - self.text_bytes)
+                            <= (self.limits.node_text_bytes as usize)
+                                .min(self.limits.text_bytes as usize - self.text_bytes)
                                 - node.name.len()
                     {
                         node.element_id = Some(id.to_string());
@@ -409,15 +412,13 @@ impl DocBuilder {
                                 .or_else(|| s.strip_prefix("lang-"))
                         })
                         .filter(|s| valid_language(s));
-                    let room = self
-                        .limits
-                        .node_text_bytes
-                        .min(self.limits.text_bytes - self.text_bytes)
+                    let room = (self.limits.node_text_bytes as usize)
+                        .min(self.limits.text_bytes as usize - self.text_bytes)
                         - node.name.len()
                         - node.element_id.as_deref().map_or(0, str::len);
                     node.language = language.filter(|s| s.len() <= room).map(str::to_owned);
                 }
-                (Some(self.push(node)?), level + 1)
+                (Some(self.push(node)? as usize), level + 1)
             } else {
                 (parent, level)
             };
@@ -470,20 +471,38 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 "none" | "presentation" => return None,
                 "group" | "figure" => Group,
                 "document" | "article" => Document,
-                "heading" => Heading(Some(
-                    n.attr("aria-level")
-                        .and_then(|v| v.parse().ok())
-                        .filter(|v| (1..=6).contains(v))
-                        .unwrap_or(2),
-                )),
-                "main" => Landmark(Some(L::Main)),
-                "navigation" => Landmark(Some(L::Navigation)),
-                "banner" => Landmark(Some(L::Banner)),
-                "contentinfo" => Landmark(Some(L::Contentinfo)),
-                "form" => Landmark(Some(L::Form)),
-                "complementary" => Landmark(Some(L::Complementary)),
-                "region" => Landmark(Some(L::Region)),
-                "search" => Landmark(Some(L::Search)),
+                "heading" => Heading {
+                    level: Some(
+                        n.attr("aria-level")
+                            .and_then(|v| v.parse().ok())
+                            .filter(|v| (1..=6).contains(v))
+                            .unwrap_or(2),
+                    ),
+                },
+                "main" => Landmark {
+                    landmark: Some(L::Main),
+                },
+                "navigation" => Landmark {
+                    landmark: Some(L::Navigation),
+                },
+                "banner" => Landmark {
+                    landmark: Some(L::Banner),
+                },
+                "contentinfo" => Landmark {
+                    landmark: Some(L::Contentinfo),
+                },
+                "form" => Landmark {
+                    landmark: Some(L::Form),
+                },
+                "complementary" => Landmark {
+                    landmark: Some(L::Complementary),
+                },
+                "region" => Landmark {
+                    landmark: Some(L::Region),
+                },
+                "search" => Landmark {
+                    landmark: Some(L::Search),
+                },
                 "paragraph" => Paragraph,
                 "link" => Link,
                 "button" => Button,
@@ -529,20 +548,36 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
         }
         "body" | "div" | "fieldset" | "details" | "figure" => Group,
         "article" => Document,
-        "main" => Landmark(Some(L::Main)),
-        "nav" => Landmark(Some(L::Navigation)),
-        "header" => Landmark(Some(L::Banner)),
-        "footer" => Landmark(Some(L::Contentinfo)),
-        "aside" => Landmark(Some(L::Complementary)),
-        "search" => Landmark(Some(L::Search)),
+        "main" => Landmark {
+            landmark: Some(L::Main),
+        },
+        "nav" => Landmark {
+            landmark: Some(L::Navigation),
+        },
+        "header" => Landmark {
+            landmark: Some(L::Banner),
+        },
+        "footer" => Landmark {
+            landmark: Some(L::Contentinfo),
+        },
+        "aside" => Landmark {
+            landmark: Some(L::Complementary),
+        },
+        "search" => Landmark {
+            landmark: Some(L::Search),
+        },
         "section" | "form"
             if ["aria-label", "aria-labelledby", "title"]
                 .iter()
                 .any(|k| n.has_attr(k)) =>
         {
-            Landmark(Some(if tag == "section" { L::Region } else { L::Form }))
+            Landmark {
+                landmark: Some(if tag == "section" { L::Region } else { L::Form }),
+            }
         }
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Heading(tag[1..].parse().ok()),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Heading {
+            level: tag[1..].parse().ok(),
+        },
         "p" | "blockquote" | "dt" | "dd" => Paragraph,
         "pre" | "code" => CodeBlock,
         "a" if n.has_attr("href") => Link,

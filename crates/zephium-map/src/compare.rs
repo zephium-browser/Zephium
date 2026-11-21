@@ -1,10 +1,10 @@
-use crate::{Entry, Place, SectionRole};
+use crate::{site::EntryId, Place, SectionRole};
 
 pub struct Row {
     pub role: Option<SectionRole>,
     pub label: String,
-    pub left: Option<Entry>,
-    pub right: Option<Entry>,
+    pub left: Option<EntryId>,
+    pub right: Option<EntryId>,
 }
 fn normalized(s: &str) -> String {
     s.chars()
@@ -38,8 +38,8 @@ pub fn compare(left: &Place, right: &Place, shared: Option<SectionRole>) -> Vec<
         rows.push(Row {
             role: l.role.or_else(|| j.and_then(|i| right.sections[i].role)),
             label: l.label.clone(),
-            left: Some(l.clone()),
-            right: j.map(|i| right.sections[i].clone()),
+            left: Some(l.id.clone()),
+            right: j.map(|i| right.sections[i].id.clone()),
         });
     }
     for (r, used) in right.sections.iter().zip(taken) {
@@ -48,7 +48,7 @@ pub fn compare(left: &Place, right: &Place, shared: Option<SectionRole>) -> Vec<
                 role: r.role,
                 label: r.label.clone(),
                 left: None,
-                right: Some(r.clone()),
+                right: Some(r.id.clone()),
             });
         }
     }

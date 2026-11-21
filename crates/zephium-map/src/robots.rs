@@ -91,7 +91,7 @@ impl Robots {
                         return limited();
                     }
                     rules += 1;
-                    let pattern = normalized_path(value);
+                    let pattern = crate::key::normalize_percent(value);
                     if pattern.len() > MAX_PATTERN_BYTES {
                         return limited();
                     }
@@ -104,7 +104,7 @@ impl Robots {
                     if let Ok(url) = Url::parse(value) {
                         if PageKey::from_url(&url).is_ok() && !result.sitemaps.contains(&url) {
                             if result.sitemaps.len() >= MAX_SITEMAPS {
-                                return limited();
+                                continue;
                             }
                             result.sitemaps.push(url);
                         }
@@ -125,7 +125,7 @@ impl Robots {
         {
             return false;
         }
-        let path = normalized_path(path);
+        let path = crate::key::normalize_percent(path);
         self.rules
             .iter()
             .filter(|r| matches_path(&r.pattern, &path))
@@ -177,42 +177,4 @@ fn matches_path(pattern: &str, path: &str) -> bool {
         rest = tail;
     }
     anchored || rest.contains(last)
-}
-
-fn normalized_path(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut text = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let mut look = chars.clone();
-            if let Some((high, low)) = look
-                .next()
-                .and_then(|v| v.to_digit(16))
-                .zip(look.next().and_then(|v| v.to_digit(16)))
-            {
-                let byte = (high * 16 + low) as u8;
-                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-                    text.push(char::from(byte));
-                } else {
-                    text.push('%');
-                    text.push(char::from(HEX[high as usize]));
-                    text.push(char::from(HEX[low as usize]));
-                }
-                chars = look;
-                continue;
-            }
-        }
-        if c.is_ascii() {
-            text.push(c);
-        } else {
-            let mut bytes = [0; 4];
-            for b in c.encode_utf8(&mut bytes).bytes() {
-                text.push('%');
-                text.push(char::from(HEX[(b >> 4) as usize]));
-                text.push(char::from(HEX[(b & 15) as usize]));
-            }
-        }
-    }
-    text
 }

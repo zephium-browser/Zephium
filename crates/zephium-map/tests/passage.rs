@@ -87,7 +87,7 @@ fn question_and_error_corpus() {
         if let Some(p) = p.first() {
             assert_eq!(p.source_title, "Workshop manual");
             assert_eq!(p.source.as_url(), doc.page());
-            assert!(matches!(p.locator, Locator::Element(_)));
+            assert!(p.locator.element.is_some() && p.locator.quote.is_some());
             if q.contains("E0106") {
                 assert!(p.code);
                 assert_eq!(p.language.as_deref(), Some("rust"));
@@ -117,8 +117,7 @@ fn distinct_sources_keep_result_order_and_refuse_unfinished_blocks() {
     );
     assert!(passages
         .iter()
-        .all(|p| p.text == "Timer settings persist."
-            && matches!(p.locator, Locator::TextQuote { .. })));
+        .all(|p| p.text == "Timer settings persist." && p.locator.quote.is_some()));
     let no = doc(
         "e",
         &format!("<main><p>Timer {}</p></main>", "x".repeat(MAX_PROSE_CHARS)),
@@ -196,5 +195,91 @@ fn an_adjacent_solution_heading_can_scope_the_fix() {
     assert_eq!(
         read_passages(&q, &[&other])[0].text,
         "TypeError: invalid bucket"
+    );
+}
+
+#[test]
+fn selectors_reanchor_with_context_and_element_fallback() {
+    use zephium_map::key::{LocatorText, TextPosition, TextQuote};
+    let read = |markup: &str| {
+        Doc::from_html(
+            &Url::parse("https://example.com/").unwrap(),
+            markup.as_bytes(),
+            None,
+            DocLimits::ARTICLE,
+        )
+        .unwrap()
+    };
+    let markup="<main><h2 id='a'>First</h2><p>Before one</p><p>Shared timer reset.</p><h2 id='b'>Second</h2><p>Before two</p><p>Shared timer reset.</p><p>After two</p></main>";
+    let original = read(markup);
+    let q = read_query("how to reset timer").unwrap();
+    let passage = passage::read_passages(&q, &[&original]).pop().unwrap();
+    let generated = passage.locator;
+    assert!(generated.element.is_some() && generated.position.is_some());
+    let quote = generated.quote.as_ref().unwrap();
+    assert!(quote.prefix.is_some() && quote.suffix.is_some());
+    let renamed = read(&markup.replace("id='a'", "id='changed'"));
+    let range = generated.resolve(&renamed).unwrap();
+    assert_eq!(
+        renamed.nodes()[range.start as usize].text,
+        "Shared timer reset."
+    );
+    let reworded = read("<main><h2 id='a'>First</h2><p>New wording.</p></main>");
+    let found = generated.resolve(&reworded).unwrap();
+    assert_eq!(
+        reworded.nodes()[found.start as usize].element_id.as_deref(),
+        Some("a")
+    );
+    let repeated = Locator {
+        quote: Some(TextQuote {
+            prefix: Some(LocatorText::new("Before two").unwrap()),
+            start: LocatorText::new("Shared timer reset.").unwrap(),
+            end: None,
+            suffix: None,
+        }),
+        ..Default::default()
+    };
+    let selected = repeated.resolve(&original).unwrap().start as usize;
+    assert_eq!(original.nodes()[selected - 1].text, "Before two");
+    assert!(repeated
+        .resolve(&read(
+            "<main><p>Before one</p><p>Shared timer reset.</p></main>"
+        ))
+        .is_none());
+    assert!(generated
+        .resolve(&read("<main><h2>Archive</h2><p>Another topic.</p></main>"))
+        .is_none());
+    assert!(Locator {
+        position: Some(TextPosition { start: 0, end: 1 }),
+        ..Default::default()
+    }
+    .resolve(&original)
+    .is_none());
+}
+
+#[test]
+fn fragment_encoding_and_unknown_selector_fields() {
+    use zephium_map::key::LocatorText;
+    let locator: Locator =
+        serde_json::from_str(r#"{"element":"standard-pricing.v2_é","future":{"enabled":true}}"#)
+            .unwrap();
+    assert_eq!(
+        locator.fragment().as_deref(),
+        Some("#standard-pricing.v2_%C3%A9")
+    );
+    for route in ["/inbox", "!/x"] {
+        let loc = Locator {
+            element: Some(LocatorText::new(route).unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(loc.fragment(), Some(format!("#{route}")));
+    }
+    let quote: Locator = serde_json::from_str(
+        r#"{"quote":{"prefix":"pre-","start":"a,b","end":"x y","suffix":"é"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        quote.fragment().as_deref(),
+        Some("#:~:text=pre%2D-,a%2Cb,x%20y,-%C3%A9")
     );
 }

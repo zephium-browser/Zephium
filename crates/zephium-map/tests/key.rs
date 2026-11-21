@@ -62,13 +62,18 @@ fn site_and_locator() {
         let key = SiteKey::from_url(&Url::parse(url).unwrap());
         assert_eq!(key.as_ref().map(SiteKey::as_str), site);
     }
-    let quote = Locator::TextQuote {
-        start: LocatorText::new("a,b&-").unwrap(),
-        end: Some(LocatorText::new("é #").unwrap()),
+    let quote = Locator {
+        quote: Some(TextQuote {
+            prefix: None,
+            suffix: None,
+            start: LocatorText::new("a,b&-").unwrap(),
+            end: Some(LocatorText::new("é #").unwrap()),
+        }),
+        ..Default::default()
     };
     assert_eq!(
         quote.fragment().as_deref(),
-        Some(":~:text=a%2Cb%26%2D,%C3%A9%20%23")
+        Some("#:~:text=a%2Cb%26%2D,%C3%A9%20%23")
     );
     assert!(LocatorText::new(&"a".repeat(MAX_LOCATOR_BYTES)).is_ok());
     for raw in [" ".into(), "a\0b".into(), "a".repeat(MAX_LOCATOR_BYTES + 1)] {
@@ -92,4 +97,61 @@ proptest! {
     #[test] fn arbitrary_inputs_are_total(input in ".{0,512}") {
         if let Ok(url)=Url::parse(&input){let _=PageKey::from_url(&url);let _=SiteKey::from_url(&url);}
     }
+}
+
+#[test]
+fn stored_identity_is_independent_of_tracking_and_suffix_tables() {
+    let old = "https://example.com/doc?srsltid=old";
+    let stored: PageKey = serde_json::from_value(old.into()).unwrap();
+    assert_eq!(stored.as_str(), old);
+    assert_ne!(key(old).as_str(), old);
+    assert_eq!(stored.page_match(), key(old).page_match());
+    let suffix: SiteKey = serde_json::from_str("\"co.uk\"").unwrap();
+    assert_eq!(suffix.as_str(), "co.uk");
+    assert!(SiteKey::from_url(&Url::parse("https://co.uk/").unwrap()).is_none());
+    for invalid in [
+        "https://EXAMPLE.com/",
+        "https://bücher.example/",
+        "https://u@example.com/",
+        "file:///local",
+    ] {
+        assert!(serde_json::from_value::<PageKey>(invalid.into()).is_err());
+    }
+}
+
+proptest! {
+    #[test]
+    fn match_is_idempotent_and_preserves_meaning(path in "[a-z]{1,32}",value in "[0-9]{1,12}",route in "[a-z]{1,12}"){
+        let canonical=key(&format!("https://example.com/{path}~?a=%2F&b={value}#/{route}"));
+        let alias=key(&format!("http://www.example.com/{path}%7e/?b={value}&srsltid=1&a=%2f#/{route}"));
+        let matched=canonical.page_match();
+        prop_assert_eq!(&matched,&alias.page_match());
+        prop_assert_eq!(&matched,&key(&format!("https://{}",matched.as_str())).page_match());
+        for different in [format!("https://example.com/{path}x?a=%2F&b={value}#/{route}"),
+                format!("https://example.com/{path}~?a=/&b={value}#/{route}"),
+                format!("https://example.com/{path}~?a=%2F&b={value}#!/other")]{
+            prop_assert_ne!(&matched,&key(&different).page_match());
+        }
+    }
+}
+#[test]
+fn place_keys_scope_hosts_and_tenants() {
+    let place =
+        |s: &str| PlaceKey::from_url(&Url::parse(&format!("https://{s}")).unwrap()).unwrap();
+    for (seed, tenant) in [
+        ("github.com/a", Some("/a")),
+        ("github.com/a/b/tree/main", Some("/a/b")),
+        ("gitlab.com/team/project/blob/main", Some("/team")),
+        ("medium.com/@writer/blog", Some("/@writer")),
+        ("youtube.com/@channel/videos", Some("/@channel")),
+        ("sites.google.com/view/work/pages", Some("/view/work")),
+        ("x.com/name/status/1", Some("/name")),
+        ("reddit.com/r/rust/comments", Some("/r/rust")),
+        ("sites.google.com/view/", None),
+        ("medium.com/story", None),
+    ] {
+        assert_eq!(place(seed).tenant.as_deref(), tenant);
+    }
+    assert_eq!(place("www.acme.com/deep"), place("acme.com/"));
+    assert_ne!(place("docs.acme.com/"), place("acme.com/"));
 }

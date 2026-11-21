@@ -205,7 +205,7 @@ impl Arena {
         NodeRef { arena: self, id }
     }
     pub(super) fn create(&mut self, tag: &LocalName, attrs: Vec<Attribute>) -> Id {
-        if self.stopped || self.elements >= self.limits.arena_elements {
+        if self.stopped || self.elements >= self.limits.arena_elements as usize {
             self.stopped = true;
             return IGNORED;
         }
@@ -264,16 +264,18 @@ impl Arena {
             if self.node(id).has_attr(name) {
                 continue;
             }
-            if self.attributes.len() >= self.limits.arena_elements * ATTRIBUTES_PER_ELEMENT_BUDGET {
+            if self.attributes.len()
+                >= self.limits.arena_elements as usize * ATTRIBUTES_PER_ELEMENT_BUDGET
+            {
                 self.stopped = true;
                 break;
             }
             let cap = match name {
-                "href" | "src" => self.limits.url_bytes,
+                "href" | "src" => self.limits.url_bytes as usize,
                 _ => super::MAX_NODE_TEXT_BYTES,
             };
             let len = attr.value.floor_char_boundary(cap);
-            if len > self.limits.arena_text_bytes - self.bytes {
+            if len > self.limits.arena_text_bytes as usize - self.bytes {
                 self.stopped = true;
                 break;
             }
@@ -344,14 +346,14 @@ impl Arena {
         if self.stopped || id == IGNORED || parent == IGNORED {
             return;
         }
-        if self.limits.arena_depth == 0 {
+        if self.limits.arena_depth as usize == 0 {
             self.stopped = true;
             return;
         }
         let p = &self.records[parent as usize];
         let no_text = p.flags & (OPAQUE | NO_TEXT) != 0;
         let mut hidden = p.flags & HIDDEN_BY_LIFT != 0;
-        if usize::from(p.depth) >= self.limits.arena_depth
+        if usize::from(p.depth) >= self.limits.arena_depth as usize
             && self.records[id as usize].flags & TEXT == 0
         {
             self.lifted = true;
@@ -428,13 +430,13 @@ impl Arena {
             } else {
                 0
             };
-            let json_room = self.limits.node_text_bytes.saturating_sub(used);
+            let json_room = (self.limits.node_text_bytes as usize).saturating_sub(used);
             if value.len() > json_room {
                 self.records[parent as usize].flags |= LOSS
             }
             length = length.min(json_room);
         }
-        let room = self.limits.arena_text_bytes - self.bytes;
+        let room = self.limits.arena_text_bytes as usize - self.bytes;
         let len = value.floor_char_boundary(room.min(length));
         if len == 0 {
             self.stopped |= length > room;
@@ -444,7 +446,7 @@ impl Arena {
             let run = self.records[prev as usize].data as usize;
             self.runs[run].push_slice(&value[..len]);
         } else {
-            if self.runs.len() > self.limits.arena_elements {
+            if self.runs.len() > self.limits.arena_elements as usize {
                 self.stopped = true;
                 return;
             }
@@ -509,14 +511,14 @@ mod tests {
 
         let mut arena = Arena::new(limits);
         let id = arena.create(&local_name!("div"), Vec::new());
-        for _ in 0..=limits.arena_elements {
+        for _ in 0..=limits.arena_elements as usize {
             arena.text(id, 0, "t");
             assert!(!arena.stopped);
             arena.detach(arena.first(id));
         }
         arena.text(id, 0, "t");
         assert!(arena.stopped);
-        assert_eq!(arena.runs.len(), limits.arena_elements + 1);
+        assert_eq!(arena.runs.len(), limits.arena_elements as usize + 1);
     }
 
     #[test]

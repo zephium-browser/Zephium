@@ -47,17 +47,32 @@ fn name(e: &Effect) -> String {
         Effect::Fetch { url, .. } => format!("fetch {}{}", url.host_str().unwrap(), url.path()),
         Effect::Render { .. } => "render".into(),
         Effect::ReadResultsAnonymously { query, .. } => format!("anon {query}"),
-        Effect::LookupSite { site, .. } => format!("lookup {}", site.as_str()),
-        Effect::RememberSite { site, .. } => format!("remember {}", site.as_str()),
+        Effect::LookupSite { site, .. } => format!(
+            "lookup {}",
+            format_args!(
+                "{}{}",
+                site.host,
+                site.tenant.as_deref().unwrap_or_default()
+            )
+        ),
+        Effect::RememberSite { site, .. } => format!(
+            "remember {}",
+            format_args!(
+                "{}{}",
+                site.host,
+                site.tenant.as_deref().unwrap_or_default()
+            )
+        ),
         Effect::Emit { event, .. } => match event {
-            MapEvent::Kind(_) => "kind",
-            MapEvent::FirstLayer(_) => "layer",
+            MapEvent::Kind { kind: _, .. } => "kind",
+            MapEvent::FirstLayer { layer: _, .. } => "layer",
+            MapEvent::Place { complete: true, .. } => "complete",
             MapEvent::Place { stale: true, .. } => "stale",
             MapEvent::Place { .. } => "place",
-            MapEvent::Passages(_) => "passages",
-            MapEvent::Compare(_) => "compare",
-            MapEvent::Done(_) => "done",
-            MapEvent::Failed(_) => "failed",
+            MapEvent::Passages { passages: _, .. } => "passages",
+            MapEvent::Compare { rows: _, .. } => "compare",
+            MapEvent::End { stats: _, .. } => "done",
+            MapEvent::PlaceFailed { .. } => "place_failed",
         }
         .into(),
     }
@@ -134,7 +149,7 @@ fn run(
         });
         match effect {
             Effect::Emit {
-                event: MapEvent::Done(s),
+                event: MapEvent::End { stats: s, .. },
                 ..
             } => run.stats = s,
             Effect::Emit {
@@ -147,7 +162,7 @@ fn run(
                 run.conf.push(confidence);
             }
             Effect::Emit {
-                event: MapEvent::Passages(p),
+                event: MapEvent::Passages { passages: p, .. },
                 ..
             } => run.passages.push(p.into_iter().map(|p| p.text).collect()),
             Effect::RememberSite { memo, .. } => run.memo = Some(memo),
@@ -195,6 +210,7 @@ fn fresh_place_streams_complete_replacements() {
             "place",
             "fetch acme.com/llms.txt",
             "fetch acme.com/sitemap.xml",
+            "complete",
             "remember acme.com",
             "done"
         ]
@@ -275,10 +291,12 @@ fn compare_resolves_one_missing_side_and_handles_unavailable() {
             "fetch other.com/",
             "place",
             "fetch acme.com/llms.txt",
-            "fetch acme.com/sitemap.xml",
             "fetch other.com/llms.txt",
+            "fetch acme.com/sitemap.xml",
             "fetch other.com/sitemap.xml",
+            "complete",
             "remember acme.com",
+            "complete",
             "remember other.com",
             "compare",
             "done"
@@ -309,7 +327,14 @@ fn memo_replay_stale_and_invalid_versions() {
     };
     assert_eq!(
         answer(cfg(), &memo).trace,
-        ["kind", "load", "layer", "lookup acme.com", "place", "done"]
+        [
+            "kind",
+            "load",
+            "layer",
+            "lookup acme.com",
+            "complete",
+            "done"
+        ]
     );
     let stale = answer(
         Config {
@@ -349,6 +374,7 @@ fn disallowed_paths_robots_failures_and_redirects() {
                 "layer",
                 "lookup acme.com",
                 "fetch acme.com/robots.txt",
+                "place_failed",
                 "done"
             ]
         );
@@ -376,7 +402,7 @@ fn disallowed_paths_robots_failures_and_redirects() {
         )),
         _ => None,
     });
-    assert_eq!(r.places[0].entry.as_str(), "https://www.acme.com/start");
+    assert_eq!(r.places[0].entry.as_str(), "https://www.acme.com/");
     assert!(
         r.trace
             .iter()
@@ -421,6 +447,7 @@ fn unavailable_render_settles_and_preserves_the_shell() {
             "render",
             "fetch acme.com/llms.txt",
             "fetch acme.com/sitemap.xml",
+            "complete",
             "done"
         ]
     );
@@ -565,16 +592,27 @@ fn cancel_and_duplicate_inputs_at_every_stage() {
                 _ => continue,
             };
             if delivered == cutoff {
+                let stop = s.handle(Input::Cancel);
                 assert!(matches!(
-                    s.handle(Input::Cancel).as_slice(),
-                    [Effect::Emit {
-                        event: MapEvent::Done(Stats {
-                            cancelled: true,
-                            ..
-                        }),
+                    stop.last(),
+                    Some(Effect::Emit {
+                        event: MapEvent::End {
+                            outcome: EndOutcome::Cancelled,
+                            stats: Stats {
+                                cancelled: true,
+                                ..
+                            }
+                        },
                         ..
-                    }]
+                    })
                 ));
+                assert!(stop[..stop.len() - 1].iter().all(|e| matches!(
+                    e,
+                    Effect::Emit {
+                        event: MapEvent::Place { .. } | MapEvent::PlaceFailed { .. },
+                        ..
+                    }
+                )));
                 assert!(s.handle(input).is_empty());
                 break;
             }
@@ -599,7 +637,7 @@ fn cancel_and_duplicate_inputs_at_every_stage() {
 proptest! {
     #[test]
     fn arbitrary_delivery_respects_policy_identity_and_caps(ops in proptest::collection::vec(any::<u8>(),1..70), max in 0usize..14, host_max in 0usize..9, slots in 1usize..5){
-        let c=Config{fetches:max,host_fetches:host_max,concurrent:slots,host_concurrent:slots,..cfg()};
+        let c=Config{fetches:max as u32,host_fetches:host_max as u32,concurrent:slots as u32,host_concurrent:slots as u32,..cfg()};
         let (mut s,start)=Session::start(c,"acme").unwrap();
         let mut emitted=start;let mut pending=Vec::new();
         let mut requests=0usize;let mut done=0;let mut robots_read=false;
@@ -611,11 +649,11 @@ proptest! {
                     prop_assert!(url.path()=="/robots.txt" || robots_read);
                     prop_assert_ne!(url.path(),"/pricing");
                 }
-                match e{Effect::Emit{event:MapEvent::Done(_),..}=>done+=1,Effect::Emit{..}|Effect::RememberSite{..}=>{},_=>pending.push(e)}
+                match e{Effect::Emit{event:MapEvent::End{stats:_,..},..}=>done+=1,Effect::Emit{..}|Effect::RememberSite{..}=>{},_=>pending.push(e)}
             }
             prop_assert!(done<=1);
             prop_assert!(pending.iter().filter(|e|matches!(e,Effect::Fetch{..})).count()<=slots,"too many simultaneous fetches");
-            let input=if op==255{Input::Cancel}else if op%17==0{Input::Elapsed(Duration::from_secs(u64::from(op%20)))}else if op%7==0 || pending.is_empty(){Input::Fetch{id:Id{session:42,sequence:1000+u32::from(op)},result:Err(Failure::Unreadable)}}else{
+            let input=if op==255{Input::Cancel}else if op%17==0{Input::Elapsed{time:Duration::from_secs(u64::from(op%20))}}else if op%7==0 || pending.is_empty(){Input::Fetch{id:Id{session:42,sequence:1000+u32::from(op)},result:Err(Failure::Unreadable)}}else{
                 let i=usize::from(op)%pending.len();let e=pending.swap_remove(i);let id=e.id();
                 match e{
                     Effect::LoadResults{..}=>Input::Results{id,result:Ok(doc(ENGINE,RESULT))},
@@ -635,14 +673,14 @@ proptest! {
 #[test]
 fn malformed_memo_cannot_supply_an_unrelated_destination() {
     let original = run(cfg(), "acme", RESULT, |_| None).memo.unwrap();
-    let site = SiteKey::from_url(&Url::parse(HOME).unwrap()).unwrap();
+    let site = PlaceKey::from_url(&Url::parse(HOME).unwrap()).unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&original).unwrap();
     for raw in [
         "javascript:alert(1)",
         "https://other.example/unrelated",
         "https://user@acme.com/",
     ] {
-        value["place"]["sections"][0]["key"] = raw.into();
+        value["payload"]["place"]["sections"][0]["key"] = raw.into();
         assert!(SiteMemo::decode(&serde_json::to_vec(&value).unwrap(), &site).is_err());
     }
     assert!(matches!(
@@ -684,28 +722,35 @@ fn media_headers_and_truncation_have_typed_outcomes() {
         }),
         _ => None,
     });
-    assert!(r.places.last().unwrap().notes.llms_truncated);
+    assert!(r.stats.places[&0].llms_truncated);
     assert!(r.stats.budgets.contains(&Budget::TextBytes));
 }
 #[test]
 fn late_time_limits_allow_only_completions_and_one_terminal_event() {
     let (mut session, start) = Session::start(cfg(), "acme vs other").unwrap();
     let id = start[1].id();
-    assert!(session.handle(Input::Elapsed(LAST_START)).is_empty());
+    assert!(session
+        .handle(Input::Elapsed { time: LAST_START })
+        .is_empty());
     let end = session.handle(Input::Results {
         id,
         result: Ok(doc(ENGINE, RESULT)),
     });
-    assert_eq!(end.iter().map(name).collect::<Vec<_>>(), ["layer", "done"]);
+    assert_eq!(
+        end.iter().map(name).collect::<Vec<_>>(),
+        ["layer", "place_failed", "done"]
+    );
     assert!(
-        matches!(end.last(),Some(Effect::Emit{event:MapEvent::Done(s),..}) if s.budgets.contains(&Budget::LastStart))
+        matches!(end.last(),Some(Effect::Emit{event:MapEvent::End{stats:s,..},..}) if s.budgets.contains(&Budget::LastStart))
     );
     let (mut session, start) = Session::start(cfg(), "acme").unwrap();
     let id = start[1].id();
     assert!(matches!(
-        session.handle(Input::Elapsed(MAX_ELAPSED)).as_slice(),
+        session
+            .handle(Input::Elapsed { time: MAX_ELAPSED })
+            .as_slice(),
         [Effect::Emit {
-            event: MapEvent::Done(_),
+            event: MapEvent::End { stats: _, .. },
             ..
         }]
     ));
@@ -728,7 +773,7 @@ fn cross_domain_section_redirect_only_changes_the_landing() {
         _ => None,
     });
     let p = &r.places.last().unwrap().sections[0];
-    assert!(p.external && p.children.is_empty());
+    assert!(p.off_site && p.children.is_empty());
     assert_eq!(p.key.as_str(), "https://other.example/new");
     assert!(!r.trace.iter().any(|e| e.contains("other.example")));
 }
@@ -757,6 +802,7 @@ fn named_place_passage_shares_one_entry_read() {
             "fetch acme.com/llms.txt",
             "fetch acme.com/sitemap.xml",
             "passages",
+            "complete",
             "remember acme.com",
             "done"
         ]
@@ -790,7 +836,7 @@ fn stale_identical_place_still_emits_fresh_replacement() {
             _ => None,
         },
     );
-    assert_eq!(second.places.len(), 2);
+    assert_eq!(second.places.len(), 3);
     assert!(second.places[0] == second.places[1]);
     assert_eq!(second.stats.stale_memos, 1);
     assert!(
@@ -810,7 +856,12 @@ fn results_failures_and_wall_events_are_terminal() {
         assert!(matches!(
             s.handle(Input::Results { id, result }).as_slice(),
             [Effect::Emit {
-                event: MapEvent::Failed(Failure::Unavailable | Failure::Challenge),
+                event: MapEvent::End {
+                    outcome: EndOutcome::Failed {
+                        failure: Failure::Unavailable | Failure::Challenge
+                    },
+                    ..
+                },
                 ..
             }]
         ));
@@ -844,4 +895,305 @@ fn passage_updates_include_answers_from_other_cited_pages() {
             "Reset the timer using the side button."
         ]
     );
+}
+
+#[test]
+fn repository_memo_cannot_cross_tenants_or_store_result_evidence() {
+    let search = |repo: &str, memo: Option<Vec<u8>>| {
+        let root = format!("/org/{repo}");
+        let html = include_str!("fixtures/heading-sitelinks.html")
+            .replace("https://acme.com/", &format!("https://github.com{root}/"))
+            .replace("Acme tools", "GitHub repository")
+            .replace(
+                &format!("{root}/\""),
+                &format!("{root}/tree/main?person=private\""),
+            )
+            .replace("/products", "/private-plans");
+        run(cfg(), "github", &html, |e| match e {
+            Effect::LookupSite { id, site } => {
+                assert_eq!(site.tenant.as_deref(), Some(root.as_str()));
+                Some(Input::Cache {
+                    id: *id,
+                    memo: memo.clone(),
+                })
+            }
+            Effect::Fetch { id, url, .. } if url.path() == root => {
+                assert!(url.query().is_none());
+                Some(response(
+                    *id,
+                    url,
+                    "text/html",
+                    &format!("<title>{repo}</title><nav><a href='{root}/about'>About</a></nav>"),
+                ))
+            }
+            _ => None,
+        })
+    };
+    let first = search("first", None);
+    assert!(first.places.last().unwrap().sections.iter().any(|e| e
+        .key
+        .as_url()
+        .path()
+        .ends_with("private-plans")));
+    let memo = first.memo.unwrap();
+    let stored = std::str::from_utf8(&memo).unwrap();
+    for private in ["tree/main", "person=", "private-plans", "EngineSitelink"] {
+        assert!(!stored.contains(private));
+    }
+    let json: serde_json::Value = serde_json::from_slice(&memo).unwrap();
+    assert_eq!(
+        json["payload"]["place"]["entry"],
+        "https://github.com/org/first"
+    );
+    assert!(json["payload"].get("read_at").is_none());
+    let next = search("second", Some(memo));
+    assert_eq!(next.stats.rejected_memos, 1);
+    assert_eq!(next.stats.fresh_memos, 0);
+    assert!(next.places.iter().all(|p| p.title == "second"));
+}
+
+#[test]
+fn redirects_apply_robots_to_both_origins_only_at_the_robots_path() {
+    for (landing, allowed) in [
+        ("https://www.acme.com/robots.txt", true),
+        ("https://other.com/robots.txt", false),
+        ("https://acme.com/consent", false),
+    ] {
+        let r = run(cfg(), "acme", RESULT, |e| match e {
+            Effect::Fetch { id, url, .. } if url.path() == "/robots.txt" => Some(response(
+                *id,
+                &Url::parse(landing).unwrap(),
+                "text/plain",
+                "User-agent: *\nDisallow: /pricing",
+            )),
+            Effect::Fetch { id, url, .. } if url.as_str() == HOME => Some(response(
+                *id,
+                &Url::parse("https://www.acme.com/").unwrap(),
+                "text/html",
+                NAV,
+            )),
+            _ => None,
+        });
+        assert_eq!(r.stats.phases[&Phase::Robots].started, 1);
+        assert_eq!(!r.places.is_empty(), allowed);
+        assert!(!r.trace.iter().any(|s| s.ends_with("/pricing")));
+        if allowed {
+            assert_eq!(r.stats.phases[&Phase::Section].refused[&Failure::Robots], 1);
+        } else {
+            assert_eq!(
+                r.stats.phases[&Phase::Robots].refused[&Failure::External],
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn sitemap_samples_obey_read_byte_and_section_bounds() {
+    let robots = (0..10)
+        .map(|n| format!("Sitemap: https://acme.com/map-{n}.xml"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for n in [SITEMAP_SECTION_THRESHOLD - 1, SITEMAP_SECTION_THRESHOLD] {
+        let nav = (0..n - 1)
+            .map(|i| format!("<a href='/s{i}'>S{i}</a>"))
+            .collect::<String>();
+        let mut maps = Vec::new();
+        let r = run(cfg(), "acme", RESULT, |e| match e {
+            Effect::Fetch { id, url, .. } if url.path() == "/robots.txt" => {
+                Some(response(*id, url, "text/plain", &robots))
+            }
+            Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+                *id,
+                url,
+                "text/html",
+                &format!("<nav>{nav}</nav>"),
+            )),
+            Effect::Fetch { id, url, .. } if url.path() == "/llms.txt" => {
+                Some(response(*id, url, "text/plain", "## More\n- [Item](/more)"))
+            }
+            Effect::Fetch {
+                id,
+                url,
+                expect: Expect::Xml,
+                max_bytes,
+                ..
+            } => {
+                assert_eq!(*max_bytes, 512 * 1024);
+                maps.push(url.path().to_owned());
+                if maps.len() == 1 {
+                    let records = ["posts", "fr-pages", "en-docs"]
+                        .map(|name| {
+                            format!("<sitemap><loc>https://acme.com/{name}.xml</loc></sitemap>")
+                        })
+                        .join("");
+                    Some(response(
+                        *id,
+                        url,
+                        "application/xml",
+                        &format!("<sitemapindex>{records}</sitemapindex>"),
+                    ))
+                } else {
+                    let mut bytes =
+                        b"<urlset><url><loc>https://acme.com/sampled</loc></url>".to_vec();
+                    bytes.resize(*max_bytes as usize - 1, b' ');
+                    bytes.push(b'<');
+                    Some(Input::Fetch {
+                        id: *id,
+                        result: Ok(FetchResult {
+                            final_url: url.clone(),
+                            content_type: "application/xml".into(),
+                            charset: None,
+                            bytes,
+                            truncated: true,
+                        }),
+                    })
+                }
+            }
+            _ => None,
+        });
+        if n == SITEMAP_SECTION_THRESHOLD {
+            assert!(maps.is_empty());
+        } else {
+            assert_eq!(maps, ["/map-0.xml", "/en-docs.xml"]);
+            assert_eq!(
+                r.stats.phases[&Phase::Sitemap].started,
+                MAX_SITEMAP_READS as u32
+            );
+            assert!(r.stats.places[&0].sitemap_truncated);
+            assert!(r
+                .places
+                .last()
+                .unwrap()
+                .sections
+                .iter()
+                .any(|e| e.label == "sampled"));
+        }
+    }
+}
+
+#[test]
+fn section_ids_and_reads_survive_landing_refusal_and_budget() {
+    let r = run(
+        Config {
+            section_pages: 2,
+            ..cfg()
+        },
+        "acme",
+        RESULT,
+        |e| {
+            match e{
+        Effect::Fetch{id,url,..} if url.path()=="/"=>Some(response(*id,url,"text/html","<nav><a href='/docs'>Docs</a><a href='/news'>News</a><a href='/pricing'>Prices</a></nav>")),
+        Effect::Fetch{id,url,..} if url.path()=="/docs"=>Some(response(*id,&url.join("/guide").unwrap(),"text/html","<h2 id='guide'>Guide</h2>")),
+        Effect::Fetch{id,url,..} if url.path()=="/news"=>Some(Input::Fetch{id:*id,result:Err(Failure::Server)}),
+        _=>None
+    }
+        },
+    );
+    let first = &r.places[0];
+    let last = r.places.last().unwrap();
+    assert!(first
+        .sections
+        .iter()
+        .all(|e| e.read == Some(ReadState::Queued)));
+    assert_eq!(
+        first.sections.iter().map(|e| &e.id).collect::<Vec<_>>(),
+        last.sections.iter().map(|e| &e.id).collect::<Vec<_>>()
+    );
+    assert_eq!(last.sections[0].key.as_url().path(), "/guide");
+    assert_eq!(last.sections[0].read, Some(ReadState::Read));
+    assert_eq!(
+        last.sections[1].read,
+        Some(ReadState::Refused {
+            failure: Failure::Server
+        })
+    );
+    assert_eq!(
+        last.sections[2].read,
+        Some(ReadState::Skipped {
+            budget: Budget::SectionPages
+        })
+    );
+}
+
+#[test]
+fn deep_seed_and_root_are_separate_reads_when_the_plan_names_the_section_or_passage() {
+    let results = RESULT
+        .replace("acme.com/", "acme.com/pricing?plan=one")
+        .replace("Acme workshop", "Acme pricing");
+    for query in ["acme pricing", "how do acme.com timers work"] {
+        let r = run(cfg(), query, &results, |e| {
+            match e{
+            Effect::Fetch{id,url,..} if url.path()=="/"=>Some(response(*id,url,"text/html","<title>Workshop</title>")),
+            Effect::Fetch{id,url,..} if url.path()=="/pricing"=>Some(response(*id,url,"text/html","<main><h2 id='plans'>Plans</h2><p>Acme.com timers work with a daily reset.</p></main>")),
+            _=>None
+        }
+        });
+        assert!(r.trace.iter().any(|s| s == "fetch acme.com/"));
+        assert!(r.trace.iter().any(|s| s == "fetch acme.com/pricing"));
+        assert_eq!(r.places.last().unwrap().entry.as_url().as_str(), HOME);
+        assert!(!std::str::from_utf8(r.memo.as_ref().unwrap())
+            .unwrap()
+            .contains("plan=one"));
+    }
+}
+
+#[test]
+fn duplicate_ids_and_session_evidence_are_invalid_in_a_memo() {
+    let memo = run(cfg(), "acme", RESULT, |_| None).memo.unwrap();
+    let key = PlaceKey::from_url(&Url::parse(HOME).unwrap()).unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&memo).unwrap();
+    for kind in ["id", "short_id", "long_id", "source", "read"] {
+        let mut value = original.clone();
+        let entries = &mut value["payload"]["place"]["sections"];
+        match kind {
+            "id" => entries[0]["children"][0]["id"] = entries[1]["id"].clone(),
+            "short_id" => entries[0]["id"] = "f".repeat(site::ENTRY_ID_BYTES - 1).into(),
+            "long_id" => entries[0]["id"] = "f".repeat(site::ENTRY_ID_BYTES + 1).into(),
+            "source" => entries[0]["sources"] = serde_json::json!(["EngineSitelink"]),
+            _ => entries[0]["read"] = "Queued".into(),
+        }
+        assert!(matches!(
+            SiteMemo::decode(&serde_json::to_vec(&value).unwrap(), &key),
+            Err(MemoError::Invalid)
+        ));
+    }
+}
+
+#[test]
+fn stats_keep_engine_repeat_and_engine_owned_drop_counts() {
+    let markup = include_str!(
+        "../../zephium-agentic/src/provider_transport/decision/fixtures/search/google.html"
+    );
+    let r = run(
+        Config {
+            engine: zephium_core::search::SearchEngine::Google,
+            ..cfg()
+        },
+        "rust async runtime",
+        markup,
+        |e| match e {
+            Effect::LoadResults { id, .. } => Some(Input::Results {
+                id: *id,
+                result: Ok(doc("https://google.com/search", markup)),
+            }),
+            _ => None,
+        },
+    );
+    assert_eq!((r.stats.results.own, r.stats.results.repeat), (1, 1));
+}
+
+#[test]
+fn redirected_host_can_supply_a_live_place_without_writing_the_seeds_memo() {
+    let r = run(cfg(), "acme", RESULT, |e| match e {
+        Effect::Fetch { id, url, .. } if url.as_str() == HOME => Some(response(
+            *id,
+            &Url::parse("https://docs.acme.com/intro").unwrap(),
+            "text/html",
+            "<title>Manual</title>",
+        )),
+        _ => None,
+    });
+    assert_eq!(r.places.last().unwrap().key.host, "docs.acme.com");
+    assert!(r.memo.is_none());
 }

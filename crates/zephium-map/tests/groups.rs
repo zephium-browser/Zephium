@@ -9,7 +9,7 @@ fn read(html: &str) -> FirstLayer {
         DocLimits::RESULTS,
     )
     .unwrap();
-    let ResultsRead::FirstLayer(layer) = read_results(
+    let ResultsRead::FirstLayer { layer } = read_results(
         SearchEngine::Bing,
         None,
         &read_query("timer").unwrap(),
@@ -26,9 +26,17 @@ fn cited_answers_discussions_and_widget() {
     assert!(layer.widget);
     assert_eq!(layer.dropped.generated, 1);
     assert_eq!(layer.organic.len(), 3);
-    assert_eq!(layer.discussion, [1, 2]);
+    assert_eq!(
+        layer
+            .organic
+            .iter()
+            .filter(|r| r.discussion)
+            .map(|r| r.rank)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
     let f = layer.featured.unwrap();
-    assert_eq!(f.organic_index, 0);
+    assert!(f.cites == layer.organic[0].key);
     assert_eq!(f.text, "The reset switch clears the saved timer.");
     assert!(layer.organic.iter().all(|r| !r
         .snippet
@@ -54,4 +62,16 @@ fn widget_contents_do_not_supply_organic_evidence() {
     assert!(layer.widget);
     assert_eq!(layer.organic.len(), 1);
     assert_eq!(layer.organic[0].url.host_str(), Some("workshop.example"));
+}
+
+#[test]
+fn featured_citation_matches_an_alias_and_keeps_its_openable_key() {
+    let html = include_str!("fixtures/engine-groups.html").replace(
+        "https://sample.example/guide\">Source",
+        "http://www.sample.example/%67uide/?srsltid=x\">Source",
+    );
+    let layer = read(&html);
+    let citation = layer.featured.unwrap().cites;
+    assert_eq!(citation.as_str(), "http://www.sample.example/%67uide/");
+    assert_eq!(citation.page_match(), layer.organic[0].key.page_match());
 }

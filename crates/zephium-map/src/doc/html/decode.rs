@@ -278,7 +278,7 @@ pub(super) fn parse(bytes: &[u8], label: Option<&str>, limits: DocLimits) -> Are
             progressed: Cell::default(),
             pending_count: Cell::default(),
             pending_bytes: Cell::default(),
-            text_limit: limits.arena_text_bytes,
+            text_limit: limits.arena_text_bytes as usize,
         },
         Default::default(),
     );
