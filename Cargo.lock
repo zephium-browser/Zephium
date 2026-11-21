@@ -7924,6 +7924,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "url",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
  "zephium-core",
 ]

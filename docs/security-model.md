@@ -1139,9 +1139,9 @@ named public HTTPS hosts on port 443, re-checks every redirect hop (at most thre
 direct connection refuses a DNS answer holding any non-public address. Reads are capped at
 30 seconds, 8 MiB decoded, and 16 at once (4 per host). They follow Zephium's HTTP proxy or
 the system HTTPS proxy as the web view reads it, ignoring bypass lists, and refuse SOCKS,
-PAC, auto-discovery, and on Windows any system setting, since automatic detection is never
-proven off. No native client can share the exact profile's proxy, DNS, cookie, partition,
-and shutdown policy, so network access for the page the person is viewing remains inside
+PAC, and auto-discovery unless Windows proves it is off or found nothing. No native client
+can share the exact profile's proxy, DNS, cookie, partition, and shutdown policy, so
+network access for the page the person is viewing remains inside
 the exact profile-scoped native engine session. Favicon network access and codec parsing
 run inside the exact sandboxed site renderer. The host polls an asynchronous,
 same-origin image load under the current immutable WebView generation and navigation
