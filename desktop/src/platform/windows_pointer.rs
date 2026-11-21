@@ -1,27 +1,32 @@
 //! Pointer moves over this process's windows, pages included. A page's
 //! WebView2 belongs to another process, so none of its moves reach this
 //! thread; raw mouse input does. It is registered only while a listening
-//! window is in front, and read at most once a frame: each move unregisters
-//! it until the next frame, so a resting pointer costs nothing at all.
+//! window is in front. Move listeners run at most once a frame. Button
+//! listeners keep registration alive between frames so a quick press and
+//! release cannot be lost.
 //!
 //! Raw input rather than a low-level mouse hook: the hook would sit in the
 //! path of every move on the desktop, and the system drops one that is slow
 //! to answer. Raw input is only told about moves after the fact.
 
 use std::cell::{Cell, RefCell};
+use std::time::Duration;
 
 use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
 use windows::Win32::UI::Input::{
-    RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE,
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEMOUSE,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, IsIconic, IsWindow,
-    KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
+    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos,
+    GetMessageTime, IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND,
+    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
 };
 
 /// About a display frame, as often as the pointer was read while it moved.
@@ -41,6 +46,7 @@ const SLOW_RETRY_MS: u32 = 30_000;
 /// Told that the pointer moved, or that a window came to the front or left
 /// it. Receives the window it listens for; it reads the pointer itself.
 pub type Listener = fn(HWND);
+pub type ButtonListener = fn(u16, POINT, bool, Duration);
 
 struct Sink {
     hwnd: HWND,
@@ -49,6 +55,7 @@ struct Sink {
 
 thread_local! {
     static LISTENERS: RefCell<Vec<(HWND, Listener)>> = const { RefCell::new(Vec::new()) };
+    static BUTTON_LISTENERS: RefCell<Vec<(HWND, ButtonListener)>> = const { RefCell::new(Vec::new()) };
     static SINK: Cell<Option<Sink>> = const { Cell::new(None) };
     static REGISTERED: Cell<bool> = const { Cell::new(false) };
     static SETTLING: Cell<bool> = const { Cell::new(false) };
@@ -82,6 +89,38 @@ pub fn forget(window: HWND, listener: Listener) {
     follow_front();
 }
 
+pub fn listen_buttons(window: HWND, listener: ButtonListener) {
+    BUTTON_LISTENERS.with(|listeners| {
+        let mut listeners = listeners.borrow_mut();
+        if !listeners.contains(&(window, listener)) {
+            listeners.push((window, listener));
+        }
+    });
+    if ensure_sink() {
+        follow_front();
+    } else {
+        retry_later();
+    }
+}
+
+pub fn forget_buttons(window: HWND, listener: ButtonListener) {
+    BUTTON_LISTENERS.with(|listeners| {
+        listeners
+            .borrow_mut()
+            .retain(|entry| *entry != (window, listener));
+    });
+    follow_front();
+}
+
+fn button_owner(front: HWND) -> Option<HWND> {
+    BUTTON_LISTENERS.with(|listeners| {
+        listeners.borrow().iter().find_map(|(window, _)| {
+            // SAFETY: reads only the matching window's minimized state.
+            (*window == front && !unsafe { IsIconic(*window) }.as_bool()).then_some(*window)
+        })
+    })
+}
+
 fn ensure_sink() -> bool {
     if let Some(sink) = SINK.take() {
         SINK.set(Some(sink));
@@ -90,7 +129,7 @@ fn ensure_sink() -> bool {
     // SAFETY: a message-only window and out-of-context hooks owned by this
     // thread; both deliver through this thread's message loop.
     unsafe {
-        let Ok(hwnd) = CreateWindowExW(
+        let hwnd = match CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
             w!(""),
@@ -103,10 +142,15 @@ fn ensure_sink() -> bool {
             None,
             None,
             None,
-        ) else {
-            return false;
+        ) {
+            Ok(hwnd) => hwnd,
+            Err(error) => {
+                crate::write_diagnostic(format_args!("pointer: raw input sink failed: {error}"));
+                return false;
+            }
         };
         if !SetWindowSubclass(hwnd, Some(sink_proc), SUBCLASS, 0).as_bool() {
+            crate::write_diagnostic(format_args!("pointer: raw input subclass failed"));
             let _ = DestroyWindow(hwnd);
             return false;
         }
@@ -128,6 +172,9 @@ fn ensure_sink() -> bool {
         let sink = Sink { hwnd, hooks };
         // A hook that failed is not kept as done: the next listen starts over.
         if sink.hooks.iter().any(HWINEVENTHOOK::is_invalid) {
+            crate::write_diagnostic(format_args!(
+                "pointer: foreground event subscription failed"
+            ));
             drop(sink);
             let _ = DestroyWindow(hwnd);
             return false;
@@ -145,12 +192,9 @@ fn sink_hwnd() -> Option<HWND> {
 }
 
 /// Whether a listening window is in front and not minimized.
-fn listening_in_front() -> bool {
+fn listening_in_front(front: HWND) -> bool {
     // SAFETY: plain reads of the window in front and its owner.
-    let front = unsafe {
-        let front = GetForegroundWindow();
-        (!front.0.is_null()).then(|| GetAncestor(front, GA_ROOTOWNER))
-    };
+    let front = unsafe { (!front.0.is_null()).then(|| GetAncestor(front, GA_ROOTOWNER)) };
     let Some(front) = front else {
         return false;
     };
@@ -167,7 +211,11 @@ fn listening_in_front() -> bool {
 }
 
 fn follow_front() {
-    let wanted = listening_in_front() && !SETTLING.get();
+    // SAFETY: read foreground ownership once for this notification.
+    let front = unsafe { GetForegroundWindow() };
+    let owner = button_owner(front);
+    super::middle_click_foreground_changed(owner);
+    let wanted = owner.is_some() || (listening_in_front(front) && !SETTLING.get());
     if wanted != REGISTERED.get() {
         register(wanted);
     }
@@ -185,11 +233,19 @@ fn register(on: bool) {
     };
     // SAFETY: registers one sized device record for this process.
     let done = unsafe { RegisterRawInputDevices(&[device], size_of::<RAWINPUTDEVICE>() as u32) };
-    if done.is_ok() {
-        REGISTERED.set(on);
-        RETRIES.set(0);
-    } else if on {
-        retry_later();
+    match done {
+        Ok(()) => {
+            REGISTERED.set(on);
+            RETRIES.set(0);
+        }
+        Err(error) => {
+            crate::write_diagnostic(format_args!(
+                "pointer: raw input registration failed: {error}"
+            ));
+            if on {
+                retry_later();
+            }
+        }
     }
 }
 
@@ -214,7 +270,9 @@ unsafe extern "system" fn retry(_: HWND, _: u32, id: usize, _: u32) {
     let _ = KillTimer(None, id);
     RETRY.set(0);
     let _ = std::panic::catch_unwind(|| {
-        if LISTENERS.with(|listeners| listeners.borrow().is_empty()) {
+        if LISTENERS.with(|listeners| listeners.borrow().is_empty())
+            && BUTTON_LISTENERS.with(|listeners| listeners.borrow().is_empty())
+        {
             return;
         }
         if ensure_sink() {
@@ -256,14 +314,17 @@ unsafe extern "system" fn sink_proc(
     _: usize,
 ) -> LRESULT {
     match msg {
-        // Moves queued before the registration lapsed still arrive; the
-        // frame they fall in has already been read.
-        WM_INPUT if !SETTLING.get() => {
+        // Button transitions must survive move-listener frame throttling.
+        WM_INPUT => {
+            let mouse = std::panic::catch_unwind(|| notify_input(l)).unwrap_or(false);
+            if !mouse || SETTLING.get() {
+                return DefSubclassProc(hwnd, msg, w, l);
+            }
             // Input is held back only while a timer will end the frame;
             // without one it keeps arriving unthrottled rather than never.
             if SetTimer(Some(hwnd), SETTLE, FRAME_MS, None) != 0 {
                 SETTLING.set(true);
-                register(false);
+                follow_front();
             }
             let _ = std::panic::catch_unwind(notify);
         }
@@ -279,6 +340,58 @@ unsafe extern "system" fn sink_proc(
         _ => {}
     }
     DefSubclassProc(hwnd, msg, w, l)
+}
+
+fn notify_input(data: LPARAM) -> bool {
+    let mut input = RAWINPUT::default();
+    let mut size = size_of::<RAWINPUT>() as u32;
+    // SAFETY: WM_INPUT supplies the handle. The output is aligned and bounded
+    // by size. Read the union only after validating its tag and record length.
+    let buttons = unsafe {
+        let read = GetRawInputData(
+            HRAWINPUT(data.0 as *mut _),
+            RID_INPUT,
+            Some((&mut input as *mut RAWINPUT).cast()),
+            &mut size,
+            size_of::<RAWINPUTHEADER>() as u32,
+        );
+        if read == u32::MAX || read < size_of::<RAWINPUTHEADER>() as u32 {
+            return false;
+        }
+        if read != size_of::<RAWINPUT>() as u32 || input.header.dwType != RIM_TYPEMOUSE.0 {
+            return false;
+        }
+        input.data.mouse.Anonymous.Anonymous.usButtonFlags
+    };
+    if buttons & 0x03ff == 0 {
+        return true;
+    }
+    // SAFETY: read foreground ownership once for all button listeners.
+    let Some(owner) = button_owner(unsafe { GetForegroundWindow() }) else {
+        return true;
+    };
+    // SAFETY: these describe the input message currently being dispatched,
+    // including queued modifiers, rather than the later hardware state.
+    let (position, shift, age) = unsafe {
+        let packed = GetMessagePos();
+        (
+            POINT {
+                x: i32::from(packed as u16 as i16),
+                y: i32::from((packed >> 16) as u16 as i16),
+            },
+            GetKeyState(i32::from(VK_SHIFT.0)) < 0,
+            Duration::from_millis(u64::from(
+                GetTickCount().wrapping_sub(GetMessageTime() as u32),
+            )),
+        )
+    };
+    let listeners = BUTTON_LISTENERS.with(|listeners| listeners.borrow().clone());
+    for (window, listener) in listeners {
+        if window == owner {
+            listener(buttons, position, shift, age);
+        }
+    }
+    true
 }
 
 impl Drop for Sink {
