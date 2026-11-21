@@ -69,6 +69,8 @@ mod scriptlets;
 mod scripts;
 mod site_permissions;
 mod stages;
+#[cfg(any(target_os = "windows", test))]
+mod windows_dormancy;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod store_button;
 mod style_worker;
@@ -739,6 +741,10 @@ pub(crate) struct EngineHost {
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
     suspend_failed: std::collections::HashSet<ItemId>,
+    /// Final suspend refuse set `MemoryUsageLevel::Low`; cleared only on show
+    /// (Normal restore) or view teardown — not by `set_dormant` retain.
+    #[cfg(target_os = "windows")]
+    refuse_memory_low: std::collections::HashSet<ItemId>,
     // A refused view's one retry.
     #[cfg(target_os = "windows")]
     suspend_retries: HashMap<ItemId, discard::SuspendRetry>,
