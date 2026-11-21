@@ -2,9 +2,10 @@ use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
+    thread::JoinHandle,
     time::Duration,
 };
 
@@ -58,6 +59,8 @@ impl Gauge {
     }
 }
 
+const ACCEPT_POLL: Duration = Duration::from_millis(5);
+
 type Handler = dyn Fn(&Seen) -> Reply + Send + Sync;
 
 pub(crate) struct Server {
@@ -66,6 +69,8 @@ pub(crate) struct Server {
     pub(crate) connections: Arc<AtomicUsize>,
     pub(crate) closed: Arc<AtomicUsize>,
     pub(crate) in_flight: Arc<Gauge>,
+    stopped: Arc<AtomicBool>,
+    accept: Option<JoinHandle<()>>,
 }
 
 impl Server {
@@ -79,21 +84,33 @@ impl Server {
     ) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let server = Server {
+        listener.set_nonblocking(true).unwrap();
+        let mut server = Server {
             port,
             seen: Arc::default(),
             connections: Arc::default(),
             closed: Arc::default(),
             in_flight: Arc::default(),
+            stopped: Arc::default(),
+            accept: None,
         };
         let handler: Arc<Handler> = Arc::new(handler);
         let seen = server.seen.clone();
         let connections = server.connections.clone();
         let closed = server.closed.clone();
         let own = server.in_flight.clone();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
+        let stopped = server.stopped.clone();
+        server.accept = Some(std::thread::spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::park_timeout(ACCEPT_POLL);
+                        continue;
+                    }
+                    Err(_) => return,
+                };
+                stream.set_nonblocking(false).unwrap();
                 connections.fetch_add(1, Ordering::AcqRel);
                 let (handler, seen, closed, own, shared) = (
                     handler.clone(),
@@ -107,7 +124,7 @@ impl Server {
                     closed.fetch_add(1, Ordering::AcqRel);
                 });
             }
-        });
+        }));
         server
     }
 
@@ -118,6 +135,24 @@ impl Server {
     pub(crate) fn seen(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(accept) = self.accept.take() {
+            accept.thread().unpark();
+            let _ = accept.join();
+        }
+    }
+}
+
+#[test]
+fn dropping_server_joins_its_accepting_thread() {
+    let server = Server::start(|_| Reply::Hang);
+    let connections = Arc::downgrade(&server.connections);
+    drop(server);
+    assert!(connections.upgrade().is_none());
 }
 
 fn read_head(stream: &mut TcpStream) -> Option<Seen> {

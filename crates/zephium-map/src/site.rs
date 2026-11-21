@@ -331,6 +331,15 @@ impl Build<'_> {
         }
     }
     fn entry_for(&self, url: &Url, label: &str, source: Source) -> Option<Entry> {
+        self.entry_for_site(url, label, source, &self.site)
+    }
+    fn entry_for_site(
+        &self,
+        url: &Url,
+        label: &str,
+        source: Source,
+        scope: &SiteKey,
+    ) -> Option<Entry> {
         let key = PageKey::from_url(url).ok()?;
         let site = SiteKey::from_url(url)?;
         let label = clip(&crate::clean_text(label.trim()), TITLE_BYTES);
@@ -339,7 +348,7 @@ impl Build<'_> {
         }
         let role = section_role(&label, url);
         let off_site = site != self.site;
-        if site != self.site
+        if &site != scope
             && !(matches!(
                 source,
                 Source::PrimaryNav | Source::MenuGroup | Source::Footer
@@ -347,17 +356,7 @@ impl Build<'_> {
         {
             return None;
         }
-        let locator = if let Some(fragment) = url
-            .fragment()
-            .filter(|s| !s.is_empty() && !crate::key::route(s))
-        {
-            Locator {
-                element: Some(LocatorText::new(&decode_fragment(fragment)).ok()?),
-                ..Default::default()
-            }
-        } else {
-            Locator::default()
-        };
+        let locator = element_locator(url).ok()?;
         Some(Entry {
             id: EntryId::new(None, &key, &locator),
             read: None,
@@ -397,8 +396,8 @@ impl Build<'_> {
         let globals: BTreeSet<_> = self
             .sections
             .iter()
-            .map(|e| e.key.page_match())
-            .chain(std::iter::once(self.entry.page_match()))
+            .map(|e| (e.key.page_match(), e.locator.fragment()))
+            .chain(std::iter::once((self.entry.page_match(), None)))
             .collect();
         let first_signup = self
             .sections
@@ -417,7 +416,8 @@ impl Build<'_> {
                 e.tier = Tier::Secondary;
             }
             e.children.retain(|c| {
-                c.sources.contains(&Source::Heading) || !globals.contains(&c.key.page_match())
+                c.sources.contains(&Source::Heading)
+                    || !globals.contains(&(c.key.page_match(), c.locator.fragment()))
             });
         }
         self.sections.sort_by_cached_key(|e| (e.tier, demoted(e)));
@@ -754,6 +754,23 @@ impl Place {
         entries
     }
 }
+fn element_locator(url: &Url) -> Result<Locator, KeyError> {
+    let Some(fragment) = url
+        .fragment()
+        .filter(|s| !s.is_empty() && !crate::key::route(s))
+    else {
+        return Ok(Locator::default());
+    };
+    let id = decode_fragment(fragment);
+    if crate::clean_text(&id) != id {
+        return Ok(Locator::default());
+    }
+    Ok(Locator {
+        element: Some(LocatorText::new(&id)?),
+        ..Default::default()
+    })
+}
+
 fn decode_fragment(s: &str) -> String {
     url::form_urlencoded::parse(
         format!("id={}", s.replace('+', "%2B").replace('&', "%26")).as_bytes(),
@@ -892,7 +909,25 @@ pub(crate) fn with_results(
         place,
         stats: PlaceStats::default(),
     };
-    build.add_results(links, hint);
+    for (link, source) in links
+        .iter()
+        .take(MAX_SITELINKS)
+        .map(|link| (link, Source::EngineSitelink))
+        .chain(hint.map(|link| (link, Source::EngineResult)))
+    {
+        if let Some(entry) = build.entry_for(&link.url, &link.title, source) {
+            if let Some(existing) = build
+                .sections
+                .iter_mut()
+                .find(|existing| existing.id == entry.id)
+            {
+                existing.add_sources(entry.sources);
+            } else {
+                build.section(entry);
+            }
+        }
+    }
+    build.stats.sitelinks_truncated = links.len() > MAX_SITELINKS;
     build.finish_sections();
     build.notes.truncated |= build.stats.truncated();
     build.check_ids()?;
@@ -1094,5 +1129,57 @@ mod tests {
                 .unwrap();
             assert_eq!(focus.key.as_url().path(), "/pricing");
         }
+    }
+
+    #[test]
+    fn a_link_fragment_changed_by_cleaning_names_no_element() {
+        let locator = |raw: &str| element_locator(&Url::parse(raw).unwrap()).unwrap();
+        assert!(locator("https://workshop.example/a#a%E2%80%8Bb") == Locator::default());
+        assert_eq!(
+            locator("https://workshop.example/a#ab")
+                .element
+                .as_ref()
+                .map(LocatorText::as_str),
+            Some("ab")
+        );
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn result_sitelink_merges_with_the_discovered_id_after_a_redirect() {
+        let base = Url::parse("https://example.com/").unwrap();
+        let doc = |url: &Url, html: &str| {
+            Doc::from_html(url, html.as_bytes(), None, crate::DocLimits::SITE_PAGE).unwrap()
+        };
+        let home = doc(&base, "<nav><a href='/docs'>Documentation</a></nav>");
+        let original = base.join("/docs").unwrap();
+        let landing = doc(&base.join("/guide").unwrap(), "<p>Guide</p>");
+        let place = read_site(
+            &home,
+            &SiteInputs {
+                pages: [(PageKey::from_url(&original).unwrap(), &landing)].into(),
+                ..SiteInputs::default()
+            },
+        )
+        .unwrap();
+        let discovered = place.sections[0].id.clone();
+        let merged = with_results(
+            place,
+            &[Link {
+                url: original,
+                title: "Docs".into(),
+            }],
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(merged.sections.len(), 1);
+        assert!(merged.sections[0].id == discovered);
+        assert_eq!(merged.sections[0].key.as_url().path(), "/guide");
+        assert!(merged.sections[0].sources.contains(&Source::EngineSitelink));
     }
 }

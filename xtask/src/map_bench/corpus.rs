@@ -26,6 +26,19 @@ pub(super) enum Kind {
     List,
 }
 
+impl From<&zephium_map::QueryKind> for Kind {
+    fn from(kind: &zephium_map::QueryKind) -> Self {
+        use zephium_map::QueryKind;
+        match kind {
+            QueryKind::Instant => Self::Instant,
+            QueryKind::List => Self::List,
+            QueryKind::Place { .. } => Self::Place,
+            QueryKind::Compare { .. } => Self::Compare,
+            QueryKind::Passage { .. } => Self::Passage,
+        }
+    }
+}
+
 impl Kind {
     pub(super) fn label(self) -> &'static str {
         match self {
@@ -369,6 +382,15 @@ pub(super) fn fixture(text: &str) -> CorpusQuery {
 }
 
 #[cfg(test)]
+pub(super) fn load_external_fixture(paths: &[PathBuf]) -> Result<Option<Corpus>> {
+    if paths.iter().any(|path| path.exists()) {
+        Corpus::load(paths).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -380,8 +402,7 @@ mod tests {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../../zephium-audit/impl/search-map");
         let paths = [root.join("corpus-v0.toml"), root.join("corpus-v1.toml")];
-        if paths.iter().all(|path| path.is_file()) {
-            let corpus = Corpus::load(&paths).expect("both real corpora");
+        if let Some(corpus) = load_external_fixture(&paths).expect("both real corpora") {
             assert_eq!(corpus.hashes.len(), 2);
             for kind in [
                 Kind::Place,
@@ -529,4 +550,18 @@ mod tests {
         std::fs::write(&two, vec![0; MAX_CORPUS_BYTES + 1]).unwrap();
         assert!(Corpus::load(&[two]).is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn a_partially_installed_external_corpus_is_an_error() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = [root.path().join("v0.toml"), root.path().join("v1.toml")];
+    assert!(load_external_fixture(&paths).unwrap().is_none());
+    std::fs::write(
+        &paths[0],
+        "[[query]]\nid='v0'\ntext='Acme'\nkind='place'\nsite='example.com'\n",
+    )
+    .unwrap();
+    assert!(load_external_fixture(&paths).is_err());
 }

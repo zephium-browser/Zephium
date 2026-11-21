@@ -91,8 +91,9 @@ impl Driver {
             let input = self
                 .immediate
                 .pop_front()
+                .map(|input| (input, false))
                 .or_else(|| self.completion(query, io));
-            let Some(input) = input else {
+            let Some((input, listed)) = input else {
                 self.outcome
                     .failure
                     .get_or_insert(EngineFailure::MissingTerminal);
@@ -100,7 +101,15 @@ impl Driver {
             };
             effects = session.handle(Input::Elapsed { time: io.elapsed() });
             if !effects.iter().any(is_terminal) {
+                let before = listed.then(|| session.accepted_passage_pages());
                 effects.extend(session.handle(input));
+                if before.is_some_and(|count| session.accepted_passage_pages() > count) {
+                    *self
+                        .outcome
+                        .stats
+                        .entry("passage_pages_read".into())
+                        .or_default() += 1;
+                }
             }
         }
         let expected = match query.label.kind {
@@ -119,24 +128,6 @@ impl Driver {
         self.outcome
             .stats
             .insert("official_sites".into(), self.lookups as u64);
-        if query.label.kind == Kind::Passage {
-            let completed = self
-                .outcome
-                .stats
-                .get("phase.Passage.completed")
-                .copied()
-                .unwrap_or(0);
-            let refuses = self
-                .outcome
-                .stats
-                .range("phase.Passage.refused.".to_owned()..)
-                .take_while(|(key, _)| key.starts_with("phase.Passage.refused."))
-                .map(|(_, count)| *count)
-                .sum::<u64>();
-            if completed > 0 && completed == query.pages.len() as u64 && completed <= refuses {
-                self.outcome.stats.insert("passage_pages_read".into(), 0);
-            }
-        }
         for (index, place) in self.places.into_iter().enumerate() {
             if let Some(place) = place {
                 flatten_place(&mut self.outcome, index, place);
@@ -145,7 +136,7 @@ impl Driver {
         self.outcome
     }
 
-    fn completion(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Option<Input> {
+    fn completion(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Option<(Input, bool)> {
         if self.in_flight.is_empty() {
             return None;
         }
@@ -157,24 +148,20 @@ impl Driver {
             self.outcome.failure = Some(EngineFailure::UnexpectedCompletion);
             return None;
         };
-        if expect == Expectation::Html
+        let listed = expect == Expectation::Html
             && listed_page(query, &url)
             && result.as_ref().is_ok_and(|body| {
                 !body.truncated && SiteKey::from_url(&url) == SiteKey::from_url(&body.final_url)
-            })
-        {
-            *self
-                .outcome
-                .stats
-                .entry("passage_pages_read".into())
-                .or_default() += 1;
-        }
-        Some(Input::Fetch {
-            id,
-            result: result
-                .map(|body| session_body(body, expect))
-                .map_err(failure),
-        })
+            });
+        Some((
+            Input::Fetch {
+                id,
+                result: result
+                    .map(|body| session_body(body, expect))
+                    .map_err(failure),
+            },
+            listed,
+        ))
     }
 
     fn effect(&mut self, effect: Effect, query: &CorpusQuery, io: &mut dyn BenchIo) {
@@ -281,15 +268,7 @@ impl Driver {
 
     fn emit(&mut self, event: MapEvent, io: &dyn BenchIo) {
         match event {
-            MapEvent::Kind { kind } => {
-                self.outcome.kind = match kind {
-                    QueryKind::Instant => Kind::Instant,
-                    QueryKind::List => Kind::List,
-                    QueryKind::Place { .. } => Kind::Place,
-                    QueryKind::Compare { .. } => Kind::Compare,
-                    QueryKind::Passage { kind: _ } => Kind::Passage,
-                }
-            }
+            MapEvent::Kind { kind } => self.outcome.kind = Kind::from(&kind),
             MapEvent::FirstLayer { layer } if !self.outcome.synthetic_results => {
                 self.outcome
                     .milestones

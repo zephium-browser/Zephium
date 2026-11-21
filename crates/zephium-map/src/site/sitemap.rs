@@ -123,6 +123,9 @@ impl Sitemap {
                     };
                     value.push(c);
                 }
+                Event::CData(_) | Event::GeneralRef(_) if depth == 0 => {
+                    return Err(XmlError::Malformed);
+                }
                 Event::DocType(_) => return Err(XmlError::Malformed),
                 Event::Empty(tag) if depth == 0 => {
                     if root || !matches!(tag.local_name().as_ref(), "urlset" | "sitemapindex") {

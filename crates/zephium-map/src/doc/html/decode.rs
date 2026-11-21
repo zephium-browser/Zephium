@@ -260,9 +260,17 @@ impl Tracer for LiveMarkup {
 pub(super) fn parse(bytes: &[u8], label: Option<&str>, limits: DocLimits) -> Arena {
     let enc = label
         .and_then(|v| charset(v.as_bytes()))
-        .or_else(|| meta_charset(bytes))
+        .or_else(|| {
+            meta_charset(bytes).map(|hint| {
+                if hint == encoding_rs::UTF_16LE || hint == encoding_rs::UTF_16BE {
+                    UTF_8
+                } else {
+                    hint
+                }
+            })
+        })
         .unwrap_or(UTF_8);
-    let mut decoder = enc.new_decoder_without_bom_handling();
+    let mut decoder = enc.new_decoder();
     let sink = Sink::new(Arena::new(limits));
     let builder = TreeBuilder::new(
         sink,

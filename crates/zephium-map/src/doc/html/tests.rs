@@ -234,7 +234,41 @@ fn adoption_agency_reparents_children_and_merges_root_attributes() {
     assert!(doc
         .nodes()
         .iter()
-        .any(|n| n.role == Role::Paragraph && n.text == "one two three four"));
+        .any(|n| n.role == Role::Paragraph && n.text == "onetwothreefour"));
+}
+
+#[test]
+fn only_formatting_runs_without_source_whitespace_join() {
+    let doc = document(
+        b"<main><p>micro<b>scope</b> of H<sub>2</sub>O and decline<code>_code</code></p>\
+<p><span>Git</span><span>Hub</span></p><p><kbd>Ctrl</kbd><kbd>K</kbd></p>\
+<p>plain <em>emphasis</em>, and<em> again</em>x<i>y</i><a href='/w'>link</a>z</p>\
+<p><strong>Ada Lovelace</strong>Analytical Engine</p>\
+<p>line<br>break</p><ul><li><p>one</p>two</li></ul><div>block<div>inner</div>after</div>\
+<table><tr><td>cell<td>next</tr></table><pre>keep  <b>as</b>\nis</pre></main>",
+        Default::default(),
+    );
+    let texts: Vec<_> = doc.nodes().iter().map(|n| n.text.as_str()).collect();
+    for expected in [
+        "microscope of H2O and decline_code",
+        "Git Hub",
+        "Ctrl K",
+        "plain emphasis, and againxy link z",
+        "Ada Lovelace Analytical Engine",
+        "line break",
+        "one two",
+        "block inner after",
+        "keep  as\nis",
+    ] {
+        assert!(texts.contains(&expected), "{expected:?} in {texts:?}");
+    }
+    let cells: Vec<_> = doc
+        .nodes()
+        .iter()
+        .filter(|n| n.role == Role::Cell)
+        .map(|n| n.text.as_str())
+        .collect();
+    assert_eq!(cells, ["cell", "next"]);
 }
 
 #[test]
@@ -372,4 +406,88 @@ fn large_inline_attributes_allow_later_content() {
         .nodes()
         .iter()
         .all(|n| n.image_source.is_none() && !n.text.contains('Z')));
+}
+
+#[test]
+fn code_keeps_html_and_literal_line_breaks() {
+    let doc = document(
+        b"<pre><code># note<br>echo ready\nnext</code></pre>",
+        DocLimits::default(),
+    );
+    assert!(doc
+        .nodes()
+        .iter()
+        .any(|n| n.role == Role::CodeBlock && n.text == "# note\necho ready\nnext"));
+}
+
+#[test]
+fn bom_takes_precedence_over_transport_and_meta() {
+    let page = Url::parse("https://example.com/").unwrap();
+    let bytes = "\u{feff}<meta charset=windows-1252><p>café</p>".as_bytes();
+    for label in [None, Some("windows-1252")] {
+        let doc = Doc::from_html(&page, bytes, label, DocLimits::default()).unwrap();
+        assert!(doc.nodes().iter().any(|n| n.text == "café"));
+    }
+}
+
+#[test]
+fn html_meta_utf16_labels_describe_utf8() {
+    for meta in [
+        "<meta charset=utf-16le>",
+        "<meta http-equiv=Content-Type content='text/html; charset=utf-16be'>",
+    ] {
+        let html = format!("{meta}<p>café</p>");
+        assert!(document(html.as_bytes(), DocLimits::default())
+            .nodes()
+            .iter()
+            .any(|n| n.text == "café"));
+    }
+    let page = Url::parse("https://example.com/").unwrap();
+    let bytes: Vec<_> = "<p>café</p>"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let doc = Doc::from_html(&page, &bytes, Some("utf-16le"), DocLimits::default()).unwrap();
+    assert!(doc.nodes().iter().any(|n| n.text == "café"));
+}
+
+#[test]
+fn arena_and_document_lifts_preserve_generated_exclusion() {
+    let html = b"<main><div aria-label='AI overview'><p>Generated answer</p></div><div><p>Ordinary answer</p></div></main>";
+    for limits in [
+        DocLimits {
+            arena_depth: 4,
+            ..DocLimits::default()
+        },
+        DocLimits {
+            depth: 3,
+            ..DocLimits::default()
+        },
+    ] {
+        let doc = document(html, limits);
+        for (text, visible) in [("Generated answer", false), ("Ordinary answer", true)] {
+            let at = doc
+                .nodes()
+                .iter()
+                .position(|node| node.text == text)
+                .unwrap();
+            assert_eq!(crate::visible(doc.nodes(), at), visible, "{text}");
+        }
+    }
+}
+
+#[test]
+fn linked_answers_match_clean_text_but_never_empty_structural_nodes() {
+    let doc = document(
+        "<script type='application/ld+json'>{\"@type\":\"QAPage\",\"mainEntity\":{\"acceptedAnswer\":[{\"text\":\"a\u{200b}b\"},{\"text\":\"   \"}]}}</script><main><p>a\u{200b}b</p><p>Unrelated</p></main>".as_bytes(),
+        DocLimits::default(),
+    );
+    assert!(doc
+        .nodes()
+        .iter()
+        .any(|n| n.text == "ab" && n.marks.has(Marks::ACCEPTED)));
+    assert!(doc
+        .nodes()
+        .iter()
+        .all(|n| n.text == "ab" || !n.marks.has(Marks::ACCEPTED)));
 }

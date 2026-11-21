@@ -6,6 +6,9 @@ mod decode;
 mod sink;
 
 const GENERIC_TEXT_CHILDREN: usize = 8;
+const FORMATTING_TAGS: &[&str] = &[
+    "b", "i", "em", "u", "s", "small", "mark", "code", "sub", "sup", "wbr",
+];
 
 impl Doc {
     pub fn from_html(
@@ -187,14 +190,14 @@ impl DocBuilder {
         }
     }
 
-    fn append(&mut self, at: usize, raw: &str, verbatim: bool) {
+    fn append(&mut self, at: usize, raw: &str, verbatim: bool, gap: bool) {
         let node = &self.doc.nodes[at];
         let room = self.limits.node_text_bytes as usize
             - node.language.as_deref().map_or(0, str::len)
             - node.text.len()
             - node.name.len()
             - node.element_id.as_deref().map_or(0, str::len);
-        let separator = !verbatim && !node.text.is_empty();
+        let separator = !verbatim && gap && !node.text.is_empty();
         let room = room.min(self.limits.text_bytes as usize - self.text_bytes);
         let extra = usize::from(separator);
         let end = raw.floor_char_boundary(room.saturating_sub(extra));
@@ -243,14 +246,17 @@ impl DocBuilder {
         level: usize,
     ) -> Result<(), DocError> {
         let mut ancestor = parent;
+        let space = |c: char| c.is_control() || c.is_whitespace();
         let words = if verbatim {
             Cow::Borrowed(raw)
         } else {
             Cow::Owned(self.words(raw))
         };
         if words.is_empty() {
+            self.gap |= !raw.is_empty();
             return Ok(());
         }
+        let gap = std::mem::replace(&mut self.gap, raw.ends_with(space)) || raw.starts_with(space);
         let mut captured = false;
         let mut inline = false;
         let mut prose = false;
@@ -282,7 +288,7 @@ impl DocBuilder {
                 )
             {
                 captured = true;
-                self.append(at, &words, verbatim);
+                self.append(at, &words, verbatim, gap);
             }
             inside_list_or_code |= matches!(
                 self.doc.nodes[at].role,
@@ -298,14 +304,31 @@ impl DocBuilder {
             }
         }
         if !captured {
+            let excluded = self.lift_exclusions(parent, level);
             let (parent, _) = self.fit_parent(parent, level);
-            match self.push(Node::new(Role::Text, parent.map(|i| i as u32))) {
-                Ok(at) => self.append(at as usize, &words, verbatim),
+            let mut node = Node::new(Role::Text, parent.map(|i| i as u32));
+            node.marks.insert(excluded);
+            match self.push(node) {
+                Ok(at) => self.append(at as usize, &words, verbatim, gap),
                 Err(DocError::Nodes | DocError::Depth) => self.mark_truncated(),
                 Err(e) => return Err(e),
             }
         }
         Ok(())
+    }
+
+    fn lift_exclusions(&self, parent: Option<usize>, level: usize) -> Marks {
+        let mut excluded = Marks::default();
+        if level >= self.limits.depth as usize {
+            if let Some(at) = parent {
+                for mark in [Marks::ANCILLARY, Marks::GENERATED, Marks::SPONSORED] {
+                    if self.doc.nodes[at].marks.has(mark) {
+                        excluded.insert(mark);
+                    }
+                }
+            }
+        }
+        excluded
     }
 
     fn fit_parent(&mut self, parent: Option<usize>, level: usize) -> (Option<usize>, usize) {
@@ -321,15 +344,21 @@ impl DocBuilder {
     }
 
     fn walk(&mut self, body: NodeRef<'_>, base: &Url) -> Result<(), DocError> {
-        let mut pending = vec![(body, None, 0, false)];
-        while let Some((n, parent, level, verbatim)) = pending.pop() {
+        let mut pending = vec![Some((body, None, 0, false))];
+        while let Some(step) = pending.pop() {
+            let Some((n, parent, level, verbatim)) = step else {
+                self.gap = true;
+                continue;
+            };
             if let Some(next) = n.sibling() {
-                pending.push((next, parent, level, verbatim));
+                pending.push(Some((next, parent, level, verbatim)));
             }
             if n.is_text() {
                 self.capture_text(parent, n.text(), verbatim, level)?;
                 continue;
             }
+            let formatting = FORMATTING_TAGS.contains(&n.tag());
+            self.gap |= !formatting;
             if self.doc.nodes.len() >= self.limits.nodes as usize || self.limits.depth as usize == 0
             {
                 self.mark_truncated();
@@ -352,6 +381,9 @@ impl DocBuilder {
                 )
             {
                 continue;
+            }
+            if verbatim && tag_is(&n, "br") {
+                self.capture_text(parent, "\n", true, level)?;
             }
             if n.loss() {
                 self.mark_truncated()
@@ -401,11 +433,18 @@ impl DocBuilder {
             } else if tag_is(&n, "code") && in_sink && !verbatim {
                 Some(Role::Text)
             } else {
-                classify(&n, n.tag(), in_sink).filter(|r| !(verbatim && *r == Role::CodeBlock))
+                classify(&n, n.tag(), in_sink)
+                    .filter(|r| !(verbatim && *r == Role::CodeBlock))
+                    .or_else(|| n.generated_by_lift().then_some(Role::Group))
             };
             let (parent, level) = if let Some(role) = role {
+                let excluded = self.lift_exclusions(parent, level);
                 let (parent, level) = self.fit_parent(parent, level);
                 let mut node = Node::new(role, parent.map(|i| i as u32));
+                node.marks.insert(excluded);
+                if n.generated_by_lift() {
+                    node.marks.insert(Marks::GENERATED);
+                }
                 if ["data-layout", "data-type", "data-testid"]
                     .iter()
                     .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
@@ -474,12 +513,15 @@ impl DocBuilder {
                 (parent, level)
             };
             if let Some(child) = n.children().next() {
-                pending.push((
+                if !formatting {
+                    pending.push(None);
+                }
+                pending.push(Some((
                     child,
                     parent,
                     level,
                     verbatim || role == Some(Role::CodeBlock),
-                ));
+                )));
             }
         }
         Ok(())

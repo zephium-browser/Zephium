@@ -204,6 +204,8 @@ fn past_address(text: &str) -> Option<String> {
         if address_like(word) || *word == "›" || crumb {
             end = Some(at + 1);
             crumb = *word == "›";
+        } else if end.is_some() {
+            break;
         }
     }
     let rest = words[end?..].join(" ");
@@ -539,7 +541,14 @@ impl<'a> Page<'a> {
             .last()
     }
 
-    fn paid(&self, title: &Title, scope: Option<usize>, start: usize, end: usize) -> bool {
+    fn paid(
+        &self,
+        title: &Title,
+        scope: Option<usize>,
+        start: usize,
+        end: usize,
+        next_prefix: Option<usize>,
+    ) -> bool {
         if self.context[title.at].paid || matches!(title.destination, Err(Drop::Paid)) {
             return true;
         }
@@ -564,7 +573,7 @@ impl<'a> Page<'a> {
             || (inside_end..end)
                 .filter(|&i| !words(&self.nodes[i]).is_empty())
                 .take(LABELS_AFTER)
-                .any(label)
+                .any(|i| next_prefix.is_none_or(|start| i < start) && label(i))
         {
             return true;
         }
@@ -688,7 +697,18 @@ pub fn read_results_with_stats(
             .get(pos + 1)
             .map_or(page.nodes.len(), |n| scopes[pos + 1].unwrap_or(n.at));
         let scope = scopes[pos];
-        if page.paid(title, scope, start, end) {
+        let next_prefix = titles.get(pos + 1).and_then(|next| {
+            let next_start = scopes[pos + 1]
+                .filter(|&p| matches!(page.nodes[p].role, Role::Document | Role::ListItem))
+                .or_else(|| scope.map(|i| page.context[i].end))
+                .unwrap_or(title.at + 1);
+            (next_start..next.at)
+                .rev()
+                .filter(|&i| !words(&page.nodes[i]).is_empty())
+                .take(LABELS_BEFORE)
+                .last()
+        });
+        if page.paid(title, scope, start, end, next_prefix) {
             layer.dropped.paid += 1;
             excluded[scope.unwrap_or(title.at)..scope.map_or(end, |p| page.context[p].end)]
                 .fill(true);
@@ -832,4 +852,13 @@ impl Page<'_> {
                     .is_some_and(|s| matches!(s, "forum" | "forums" | "discuss" | "community"));
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn address_prefix_does_not_consume_address_like_title_words() {
+    assert_eq!(
+        past_address("example.net › docs New Node.js Guide").as_deref(),
+        Some("New Node.js Guide")
+    );
 }

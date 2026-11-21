@@ -1,6 +1,8 @@
 use std::{
     fmt,
+    future::{poll_fn, Future},
     sync::{Arc, Weak},
+    task::Poll,
     time::Duration,
 };
 
@@ -152,6 +154,46 @@ impl RouteSource {
     pub(crate) fn current(&self) -> (u64, Route) {
         let state = self.shared.state.borrow();
         (state.generation, state.effective.clone())
+    }
+
+    /// Runs one anonymous direct operation while its admitted route stays current.
+    /// The operation must not access or change this route source during a poll.
+    pub async fn while_direct<F: Future>(
+        &self,
+        operation: F,
+    ) -> Result<F::Output, crate::ReadRefusal> {
+        let mut changed = self.changed();
+        let (generation, route) = self.current();
+        if route != Route::Direct {
+            return Err(crate::ReadRefusal::ProxyUnsupported);
+        }
+        let mut operation = std::pin::pin!(operation);
+        let admitted =
+            poll_fn(
+                |cx| match self.at_generation(generation, || operation.as_mut().poll(cx)) {
+                    Ok(polled) => polled.map(Ok),
+                    Err(refusal) => Poll::Ready(Err(refusal)),
+                },
+            );
+        let output = tokio::select! {
+            biased;
+            Ok(()) = changed.changed() => return Err(crate::ReadRefusal::RouteChanged),
+            result = admitted => result?,
+        };
+        self.at_generation(generation, || output)
+    }
+
+    pub(crate) fn at_generation<T>(
+        &self,
+        generation: u64,
+        action: impl FnOnce() -> T,
+    ) -> Result<T, crate::ReadRefusal> {
+        let state = self.shared.state.borrow();
+        if state.generation != generation {
+            return Err(crate::ReadRefusal::RouteChanged);
+        }
+        // The watch borrow holds route publication until this synchronous admission returns.
+        Ok(action())
     }
 
     /// Asks for a system read soon; requests while one is due coalesce.
@@ -510,4 +552,58 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(calls.load(Ordering::Acquire), after);
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn an_old_generation_is_refused_before_admission_even_if_its_class_returns() {
+    let routes = RouteSource::primed(Arc::new(|| Route::Direct), RouteSource::FIXTURE);
+    let (direct, _) = routes.current();
+    routes.set_app_proxy(zephium_core::proxy::from_settings(
+        "http",
+        "proxy.example.com:3128",
+    ));
+    assert_eq!(
+        routes.at_generation(direct, || panic!("stale request must never dispatch")),
+        Err(crate::ReadRefusal::RouteChanged)
+    );
+    routes.set_app_proxy(None);
+    assert_eq!(routes.route(), PublicRoute::Direct);
+    assert_eq!(
+        routes.at_generation(direct, || panic!("stale request must never dispatch")),
+        Err(crate::ReadRefusal::RouteChanged)
+    );
+    assert_eq!(routes.at_generation(routes.current().0, || 7), Ok(7));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn a_direct_operation_cannot_start_its_fallback_after_the_route_changes() {
+    let routes = RouteSource::primed(Arc::new(|| Route::Direct), RouteSource::FIXTURE);
+    let (reached, first) = tokio::sync::oneshot::channel();
+    let (resume, release) = tokio::sync::oneshot::channel();
+    let operation = tokio::spawn({
+        let routes = routes.clone();
+        async move {
+            routes
+                .while_direct(async {
+                    reached.send(()).unwrap();
+                    assert!(release.await.is_ok());
+                    panic!("the fallback must not run on a stale route");
+                })
+                .await
+        }
+    });
+    first.await.unwrap();
+    routes.set_app_proxy(zephium_core::proxy::from_settings(
+        "http",
+        "proxy.example.com:3128",
+    ));
+    let _ = resume.send(());
+    assert_eq!(
+        operation.await.unwrap(),
+        Err(crate::ReadRefusal::RouteChanged)
+    );
+    routes.set_app_proxy(None);
+    assert_eq!(routes.while_direct(async { 7 }).await, Ok(7));
 }

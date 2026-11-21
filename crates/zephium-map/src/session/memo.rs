@@ -49,6 +49,8 @@ impl SiteMemo {
             || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(&p.site)
             || p.title.len() > TITLE_BYTES
             || p.focus.is_some()
+            || p.notes.shell
+            || p.notes.wall
             || p.sections
                 .iter()
                 .filter(|e| e.tier == site::Tier::Primary)

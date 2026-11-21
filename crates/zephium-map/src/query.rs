@@ -358,11 +358,13 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
         .any(|frame| phrase.contains(frame));
     let (entity, section) = split_section(&terms);
     let mut confidence = Confidence::High;
-    let kind = if pasted(text, &terms) {
+    let kind = if arithmetic(text) {
+        QueryKind::Instant
+    } else if pasted(text, &terms) {
         QueryKind::Passage {
             kind: PassageKind::Pasted,
         }
-    } else if instant(&terms, &phrase) {
+    } else if instant(&terms) {
         QueryKind::Instant
     } else if question || concept_comparison(&terms) {
         QueryKind::Passage {
@@ -412,13 +414,16 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
         let entity = if fresh {
             entity
                 .iter()
-                .filter(|w| {
-                    !matches!(
+                .enumerate()
+                .filter(|(index, w)| {
+                    !(matches!(
                         w.as_str(),
-                        "new" | "latest" | "news" | "announcement" | "announcements"
-                    )
+                        "latest" | "news" | "announcement" | "announcements"
+                    ) || *index == 0
+                        && w.as_str() == "new"
+                        && fresh_word.is_some_and(|(word, _)| *word == "new"))
                 })
-                .cloned()
+                .map(|(_, word)| word.clone())
                 .collect()
         } else {
             entity.to_vec()
@@ -468,7 +473,7 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
     })
 }
 
-fn instant(terms: &[String], phrase: &str) -> bool {
+fn instant(terms: &[String]) -> bool {
     let words: Vec<_> = terms.iter().map(String::as_str).collect();
     let number = |s: &str| s.parse::<f64>().is_ok_and(f64::is_finite);
     let unit = |s: &str| {
@@ -541,14 +546,17 @@ fn instant(terms: &[String], phrase: &str) -> bool {
             CITIES.contains(&place.join(" ").as_str())
                 || words.first() == Some(&"weather") && place.is_empty()
         }
-        _ => {
-            phrase.bytes().any(|b| b.is_ascii_digit())
-                && phrase.bytes().any(|b| b"+-*/".contains(&b))
-                && phrase
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || b"+-*/(). ".contains(&b))
-        }
+        _ => false,
     }
+}
+
+fn arithmetic(text: &str) -> bool {
+    text.bytes().any(|b| b.is_ascii_digit())
+        && text.bytes().any(|b| b"+-*/".contains(&b))
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_whitespace() || b"+-*/().".contains(&b))
+        && !text.trim_start().starts_with('/')
 }
 
 fn listing(terms: &[String]) -> bool {

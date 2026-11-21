@@ -193,7 +193,7 @@ impl Drop for ResolverPermit {
     }
 }
 
-async fn resolve_with(
+pub(crate) async fn resolve_with(
     slots: Arc<ResolverSlots>,
     resolve: impl FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
 ) -> std::io::Result<reqwest::dns::Addrs> {

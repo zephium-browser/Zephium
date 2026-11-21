@@ -464,3 +464,33 @@ fn action_words_need_a_following_term() {
         );
     }
 }
+
+#[test]
+fn arithmetic_division_and_file_paths_are_distinct() {
+    for query in ["10 /2", "10 / 2", "10/2"] {
+        assert!(matches!(
+            read_query(query).unwrap().kind(),
+            QueryKind::Instant
+        ));
+    }
+    for query in ["/usr/bin", "/2"] {
+        assert!(matches!(
+            read_query(query).unwrap().kind(),
+            QueryKind::Passage {
+                kind: PassageKind::Pasted
+            }
+        ));
+    }
+}
+
+#[test]
+fn freshness_removes_qualifiers_without_removing_new_from_names() {
+    assert!(matches!(
+        read_query("new york transit news").unwrap().kind(),
+        QueryKind::Place { entity, fresh: true, .. } if entity == &["new", "york", "transit"]
+    ));
+    assert!(matches!(
+        read_query("new openai model").unwrap().kind(),
+        QueryKind::Place { entity, fresh: true, .. } if entity == &["openai", "model"]
+    ));
+}

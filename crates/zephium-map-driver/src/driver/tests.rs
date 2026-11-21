@@ -534,7 +534,12 @@ async fn a_hanging_results_page_is_ended_by_the_elapsed_budget() {
     let changes = rest(&mut rx).await;
     checked(&changes, 0);
     let (outcome, elapsed) = outcome(&changes);
-    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(
+        outcome,
+        Outcome::Failed {
+            failure: WireFailure::Timeout
+        }
+    );
     let budget = MAX_ELAPSED.as_millis() as u32;
     assert!((budget..=budget + TICK.as_millis() as u32).contains(&elapsed));
     assert!(fake.seen().fetches.is_empty());

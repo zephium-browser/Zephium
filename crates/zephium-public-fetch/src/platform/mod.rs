@@ -28,11 +28,64 @@ pub(crate) struct MacProxies {
     pub(crate) https_host: Option<String>,
     pub(crate) https_port: Option<i64>,
     pub(crate) socks: bool,
+    pub(crate) scoped: Scoped,
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const MAX_SCOPED_ENTRIES: usize = 64;
+
+/// Per-interface keys under `__SCOPED__` that route traffic through a proxy.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const SCOPED_ENABLE_KEYS: [&str; 5] = [
+    "HTTPEnable",
+    "HTTPSEnable",
+    "SOCKSEnable",
+    "ProxyAutoConfigEnable",
+    "ProxyAutoDiscoveryEnable",
+];
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flag {
+    Absent,
+    Number(i64),
+    Other,
+}
+
+/// The `__SCOPED__` dictionary: one entry per interface, `None` for an entry
+/// that is not a dictionary.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Scoped {
+    #[default]
+    Absent,
+    Unreadable,
+    Entries(Vec<Option<[Flag; SCOPED_ENABLE_KEYS.len()]>>),
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Scoped {
+    fn enables_anything(&self) -> bool {
+        match self {
+            Scoped::Absent => false,
+            Scoped::Unreadable => true,
+            Scoped::Entries(entries) => {
+                entries.len() > MAX_SCOPED_ENTRIES
+                    || entries.iter().any(|entry| {
+                        entry.is_none_or(|flags| {
+                            flags
+                                .iter()
+                                .any(|flag| !matches!(flag, Flag::Absent | Flag::Number(0)))
+                        })
+                    })
+            }
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn mac_route(proxies: &MacProxies) -> Route {
-    if proxies.auto_config || proxies.auto_discovery {
+    if proxies.auto_config || proxies.auto_discovery || proxies.scoped.enables_anything() {
         return Route::Unsupported;
     }
     if proxies.https {
@@ -189,6 +242,63 @@ mod tests {
             ..https.clone()
         };
         assert_eq!(mac_route(&both), http("proxy.corp.example", 8080));
+    }
+
+    #[test]
+    fn a_scoped_interface_proxy_is_unsupported_and_a_harmless_one_is_not() {
+        let scoped = |scoped| MacProxies {
+            scoped,
+            ..MacProxies::default()
+        };
+        let harmless = [
+            Flag::Absent,
+            Flag::Number(0),
+            Flag::Absent,
+            Flag::Number(0),
+            Flag::Absent,
+        ];
+        for entries in [
+            vec![],
+            vec![Some([Flag::Absent; 5])],
+            vec![Some(harmless); 2],
+        ] {
+            assert_eq!(mac_route(&scoped(Scoped::Entries(entries))), Route::Direct);
+        }
+        assert_eq!(
+            mac_route(&scoped(Scoped::Entries(vec![
+                Some(harmless);
+                MAX_SCOPED_ENTRIES
+            ]))),
+            Route::Direct
+        );
+        for key in 0..SCOPED_ENABLE_KEYS.len() {
+            for value in [Flag::Number(1), Flag::Number(2), Flag::Other] {
+                let mut flags = harmless;
+                flags[key] = value;
+                let entries = vec![Some(harmless), Some(flags)];
+                assert_eq!(
+                    mac_route(&scoped(Scoped::Entries(entries))),
+                    Route::Unsupported,
+                    "{} {value:?}",
+                    SCOPED_ENABLE_KEYS[key]
+                );
+            }
+        }
+        let https = MacProxies {
+            https: true,
+            https_host: Some("proxy.corp.example".into()),
+            https_port: Some(8080),
+            scoped: Scoped::Entries(vec![Some([Flag::Number(1); 5])]),
+            ..MacProxies::default()
+        };
+        assert_eq!(mac_route(&https), Route::Unsupported);
+        for unreadable in [
+            Scoped::Unreadable,
+            Scoped::Entries(vec![Some(harmless), None]),
+            Scoped::Entries(vec![Some(harmless); MAX_SCOPED_ENTRIES + 1]),
+        ] {
+            assert_eq!(mac_route(&scoped(unreadable)), Route::Unsupported);
+        }
     }
 
     #[test]

@@ -1086,3 +1086,59 @@ async fn binary_is_refused_once_the_sniff_window_fills_not_at_the_end() {
     }
     assert!(reader.counters().wire_bytes < 1 << 20);
 }
+
+#[tokio::test]
+async fn zero_body_cap_never_returns_payload_bytes() {
+    let server = Server::start(|_| ok("text/html", PAGE));
+    let (reader, _) = reader();
+    let body = reader
+        .read(ReadRequest {
+            max_bytes: 0,
+            ..html(server.url("/"))
+        })
+        .await
+        .unwrap();
+    assert!(body.truncated && body.bytes.is_empty());
+}
+
+#[tokio::test]
+async fn cross_host_redirect_releases_global_capacity_before_waiting() {
+    let target = Server::start(|_| ok("text/html", PAGE));
+    let landing = target.url("/landing");
+    let (release, gated) = std::sync::mpsc::channel();
+    let gated = std::sync::Mutex::new(gated);
+    let start = Server::start(move |_| {
+        gated
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        redirect(landing.as_str())
+    });
+    let (reader, _) = reader_with(ReaderLimits {
+        max_concurrent: 1,
+        max_per_host: 1,
+        ..limits()
+    });
+    let first = tokio::spawn({
+        let reader = reader.clone();
+        let url = start.url("/");
+        async move { reader.read(html(url)).await }
+    });
+    wait_for(|| !start.seen().is_empty()).await;
+    let second = reader.read(html(target.url("/independent")));
+    tokio::pin!(second);
+    std::future::poll_fn(|cx| {
+        use std::future::Future;
+        assert!(second.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        assert!(second.await.is_ok());
+        assert_eq!(first.await.unwrap().unwrap().hops, 1);
+    })
+    .await
+    .unwrap();
+}

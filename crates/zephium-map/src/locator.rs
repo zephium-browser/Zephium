@@ -208,9 +208,10 @@ impl Locator {
     pub fn resolve(&self, doc: &Doc) -> Option<std::ops::Range<u32>> {
         let nodes = doc.nodes();
         let element = self.element.as_ref().and_then(|id| {
-            let mut matches = nodes.iter().enumerate().filter(|(i, n)| {
-                n.element_id.as_deref() == Some(id.as_str()) && crate::visible(nodes, *i)
-            });
+            let mut matches = nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, n)| n.selector_id() == Some(id.as_str()) && crate::visible(nodes, *i));
             let (at, n) = matches.next()?;
             if matches.next().is_some() {
                 return None;
@@ -219,6 +220,7 @@ impl Locator {
                 (at + 1..nodes.len())
                     .find(|&i| {
                         matches!(nodes[i].role,Role::Heading{level:l} if l<=level)
+                            && crate::visible(nodes, i)
                             || n.parent_index()
                                 .is_some_and(|p| !crate::ancestors(nodes, i).any(|a| a == p))
                     })
@@ -281,5 +283,39 @@ impl Locator {
             }
         }
         element.map(|e| e.start..e.start + 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cleaned_id_falls_back_to_its_quote_and_never_captures_an_unchanged_id() {
+        let doc = Doc::from_html(
+            &url::Url::parse("https://example.com/").unwrap(),
+            "<main><h2 id='a\u{200b}b'>First topic</h2><p>one</p><h2 id='ab'>Second topic</h2><p>two</p></main>".as_bytes(),
+            None,
+            crate::DocLimits::default(),
+        )
+        .unwrap();
+        let nodes = doc.nodes();
+        let at = |text: &str| nodes.iter().position(|n| n.text == text).unwrap();
+        let (first, second) = (at("First topic"), at("Second topic"));
+        assert_eq!(nodes[first].element_id.as_deref(), Some("ab"));
+        let locate =
+            |i: usize| Locator::for_text(&doc, i, &nodes[i].text, nodes[i].selector_id()).unwrap();
+        let cleaned = locate(first);
+        assert!(cleaned.element.is_none() && cleaned.quote.is_some());
+        assert_eq!(cleaned.resolve(&doc).map(|r| r.start), Some(first as u32));
+        let kept = locate(second);
+        assert_eq!(kept.element.as_ref().map(LocatorText::as_str), Some("ab"));
+        assert_eq!(kept.fragment().as_deref(), Some("#ab"));
+        assert_eq!(kept.resolve(&doc).map(|r| r.start), Some(second as u32));
+        let element = Locator {
+            element: kept.element,
+            ..Locator::default()
+        };
+        assert_eq!(element.resolve(&doc).map(|r| r.start), Some(second as u32));
     }
 }

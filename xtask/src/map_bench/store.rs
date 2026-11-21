@@ -6,7 +6,9 @@ use std::time::Duration;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
-use zephium_public_fetch::{PublicBody, ReadRefusal, StatusClass, Timings, MAX_DECODED_BYTES};
+use zephium_public_fetch::{
+    PublicBody, ReadRefusal, SizeLimit, StatusClass, Timings, MAX_DECODED_BYTES,
+};
 
 use super::corpus::valid_id;
 use super::engine::{
@@ -438,13 +440,13 @@ impl RequestRow {
     }
 
     fn answers(&self, request: &FetchRequest) -> bool {
+        let completion = self.elapsed_at_start.map_or(self.timings.total, |start| {
+            self.elapsed_at_return
+                .saturating_sub(start)
+                .max(self.timings.total)
+        });
         match (&self.result_class, &self.body) {
             (ResultClass::Body(_), Some(body)) => {
-                let completion = self.elapsed_at_start.map_or(self.timings.total, |start| {
-                    self.elapsed_at_return
-                        .saturating_sub(start)
-                        .max(self.timings.total)
-                });
                 request.timeout >= completion
                     && if body.truncated {
                         request.max_bytes <= self.cap
@@ -453,7 +455,10 @@ impl RequestRow {
                     }
             }
             (ResultClass::Refused(FetchRefusal::Reader(class)), None) => match class {
-                ReadRefusal::TooLarge(_) => request.max_bytes <= self.cap,
+                ReadRefusal::TooLarge(SizeLimit::Headers) => request.timeout >= completion,
+                ReadRefusal::TooLarge(SizeLimit::Wire) | ReadRefusal::Encoding => {
+                    request.max_bytes >= self.cap && request.timeout >= completion
+                }
                 ReadRefusal::Timeout(_) => request.timeout <= self.timeout,
                 ReadRefusal::NotPublicHttps
                 | ReadRefusal::RedirectRefused
@@ -461,10 +466,10 @@ impl RequestRow {
                 | ReadRefusal::DnsRefused
                 | ReadRefusal::ProxyUnsupported
                 | ReadRefusal::RouteChanged
-                | ReadRefusal::Status(_)
-                | ReadRefusal::WrongContentType
-                | ReadRefusal::Encoding
                 | ReadRefusal::Transport => true,
+                ReadRefusal::Status(_) | ReadRefusal::WrongContentType => {
+                    request.timeout >= completion
+                }
             },
             _ => false,
         }

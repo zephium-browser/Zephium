@@ -50,9 +50,21 @@ impl Robots {
     pub fn parse(text: &str) -> Self {
         Self::from_sample(text.as_bytes(), false)
     }
-    pub(crate) fn from_sample(bytes: &[u8], truncated: bool) -> Self {
+    pub fn from_sample(bytes: &[u8], truncated: bool) -> Self {
         let prefix = &bytes[..bytes.len().min(MAX_ROBOTS_BYTES)];
-        let complete = if truncated || prefix.len() < bytes.len() {
+        let readable = match std::str::from_utf8(prefix) {
+            Ok(text) => text,
+            Err(e) => std::str::from_utf8(&prefix[..e.valid_up_to()]).unwrap_or_default(),
+        };
+        if readable
+            .trim_start_matches(|c: char| c == '\u{feff}' || c.is_whitespace())
+            .starts_with('<')
+            || prefix.contains(&0)
+        {
+            return Self::unavailable(false);
+        }
+        let truncated = truncated || prefix.len() < bytes.len();
+        let complete = if truncated {
             prefix
                 .iter()
                 .rposition(|&b| matches!(b, b'\r' | b'\n'))
@@ -64,19 +76,12 @@ impl Robots {
             return Self::unavailable(false);
         };
         let limited = || Self::empty(RobotsOutcome::Limit);
-        if text
-            .trim_start_matches('\u{feff}')
-            .trim_start()
-            .starts_with('<')
-            || text.contains('\0')
-        {
-            return Self::unavailable(false);
-        }
         let mut result = Self::empty(RobotsOutcome::Parsed);
-        result.truncated = truncated || bytes.len() > MAX_ROBOTS_BYTES;
+        result.truncated = truncated;
         let mut groups = [Vec::new(), Vec::new()];
         let mut selected = 0;
         let mut directives = false;
+        let mut read_rule = false;
         let mut specific = false;
         let mut rules = 0;
         for line in text.trim_start_matches('\u{feff}').split(['\r', '\n']) {
@@ -100,6 +105,7 @@ impl Robots {
                 }
                 "allow" | "disallow" => {
                     directives = true;
+                    read_rule = true;
                     if selected == 0 || value.is_empty() {
                         continue;
                     }
@@ -128,6 +134,11 @@ impl Robots {
                 }
                 _ => {}
             }
+        }
+        if truncated && !read_rule {
+            let mut unread = Self::unavailable(false);
+            unread.truncated = true;
+            return unread;
         }
         result.rules = std::mem::take(&mut groups[usize::from(specific)]);
         result
@@ -209,5 +220,50 @@ mod tests {
             Robots::from_sample(prefix, false).outcome,
             RobotsOutcome::Unreadable
         );
+    }
+
+    #[test]
+    fn a_truncated_sample_without_a_complete_rule_denies() {
+        for (sample, truncated) in [
+            (&b"U"[..], true),
+            (b"User-agent: *\nDisallow: /", true),
+            (
+                b"\xef\xbb\xbf  <!doctype html><html><body>User-agent: *",
+                true,
+            ),
+            (b"  <html>\nUser-agent: *\nDisallow: /private\n", true),
+            (b"<html>\nUser-agent: *\nAllow: /\n", false),
+            (b"# robots for example\n# Disallow: /\n#", true),
+            (
+                b"User-agent: *\nSitemap: https://example.com/map.xml\nDisa",
+                true,
+            ),
+        ] {
+            let parsed = Robots::from_sample(sample, truncated);
+            assert_eq!(parsed.outcome, RobotsOutcome::Unreadable, "{sample:?}");
+            assert!(!parsed.allows("/"));
+            assert!(parsed.sitemaps.is_empty());
+        }
+        let prefix = b"User-agent: *\nDisallow: /private\nUser-agent: zeph";
+        let parsed = Robots::from_sample(prefix, true);
+        assert_eq!(parsed.outcome, RobotsOutcome::Parsed);
+        assert!(parsed.allows("/") && !parsed.allows("/private"));
+        let other = Robots::from_sample(b"User-agent: other\nDisallow: /\nUser", true);
+        assert_eq!(other.outcome, RobotsOutcome::Parsed);
+        assert!(other.allows("/"));
+    }
+
+    #[test]
+    fn an_untruncated_empty_or_comment_only_file_allows_all() {
+        for text in ["", "\n", "# nothing here\n# Disallow: /", "User-agent: *\n"] {
+            let parsed = Robots::parse(text);
+            assert_eq!(parsed.outcome, RobotsOutcome::Parsed, "{text:?}");
+            assert!(parsed.allows("/"));
+        }
+        let oversized = format!(
+            "{}User-agent: *\nDisallow: /",
+            "#\n".repeat(MAX_ROBOTS_BYTES)
+        );
+        assert_eq!(Robots::parse(&oversized).outcome, RobotsOutcome::Unreadable);
     }
 }

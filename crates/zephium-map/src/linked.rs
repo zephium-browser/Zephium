@@ -55,8 +55,11 @@ pub(crate) fn mark_answers(nodes: &mut [Node], head: &Head) {
                 {
                     ids.insert(id.to_owned(), mark);
                 }
-                if let Some(text) = answer["text"].as_str().filter(|s| !s.is_empty()) {
-                    texts.insert(crate::flatten(text), mark);
+                if let Some(text) = answer["text"].as_str() {
+                    let key = crate::clean_text(&crate::flatten(text));
+                    if !key.is_empty() {
+                        texts.insert(key, mark);
+                    }
                 }
             }
         }
@@ -66,8 +69,7 @@ pub(crate) fn mark_answers(nodes: &mut [Node], head: &Head) {
     }
     for n in nodes {
         if let Some(&mark) = n
-            .element_id
-            .as_ref()
+            .selector_id()
             .and_then(|id| ids.get(id))
             .or_else(|| texts.get(&n.text))
         {
