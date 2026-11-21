@@ -62,6 +62,7 @@ struct Block<'a> {
     text: Cow<'a, str>,
     node: usize,
     heading: Option<usize>,
+    heading_end: usize,
     scope: Option<usize>,
     accepted: bool,
     suggested: bool,
@@ -155,6 +156,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             .fold(0u64, |mask, i| mask | (1 << i))
     };
     let mut headings = BTreeMap::<_, Vec<(u8, usize, u64)>>::new();
+    let mut heading_ends = vec![nodes.len(); nodes.len()];
     let mut definitions = BTreeMap::<_, (String, bool)>::new();
     let mut headers = BTreeMap::<_, (String, usize)>::new();
     let mut out = Vec::new();
@@ -181,7 +183,11 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         let path = headings.entry(scope).or_default();
         if let Role::Heading { level } = n.role {
             let level = level.unwrap_or(1);
-            path.retain(|(prior, _, _)| *prior < level);
+            while path.last().is_some_and(|(prior, _, _)| *prior >= level) {
+                if let Some((_, closed, _)) = path.pop() {
+                    heading_ends[closed] = i;
+                }
+            }
             path.push((level, i, relevant(&n.text)));
             continue;
         }
@@ -338,9 +344,15 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             text,
             scope,
             heading: heading.map(|(i, _)| i),
+            heading_end: 0,
             accepted: ancestors(nodes, i).any(|a| nodes[a].marks.has(Marks::ACCEPTED)),
             suggested: ancestors(nodes, i).any(|a| nodes[a].marks.has(Marks::SUGGESTED)),
         });
+    }
+    for block in &mut out {
+        if let Some(heading) = block.heading {
+            block.heading_end = heading_ends[heading];
+        }
     }
     out
 }
@@ -502,6 +514,8 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
                     continue;
                 }
                 scores[i] = scores[i].max(1 + terms.len());
+                let nodes = docs[b.doc].nodes();
+                let issue_parent = b.heading.and_then(|h| nodes[h].parent_index());
                 for (distance, next) in blocks[i + 1..]
                     .iter()
                     .take(ERROR_FOLLOWING_BLOCKS)
@@ -510,15 +524,17 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
                     if next.doc != b.doc {
                         break;
                     }
-                    let remedy = next.heading.is_some_and(|h| {
-                        tokens(&docs[next.doc].nodes()[h].text).any(|s| {
-                            matches!(s.as_str(), "fix" | "solution" | "resolution" | "answer")
-                        })
+                    let nested_remedy = next.heading.is_some_and(|h| {
+                        (b.node..b.heading_end).contains(&h)
+                            && issue_parent.is_none_or(|p| ancestors(nodes, h).any(|a| a == p))
+                            && tokens(&nodes[h].text).any(|s| {
+                                matches!(s.as_str(), "fix" | "solution" | "resolution" | "answer")
+                            })
                     });
-                    if next.scope != b.scope || !remedy && next.heading != b.heading {
+                    if next.scope != b.scope || !nested_remedy && next.heading != b.heading {
                         break;
                     }
-                    if next.accepted || docs[next.doc].nodes()[next.node].role == Role::CodeBlock {
+                    if next.accepted || nodes[next.node].role == Role::CodeBlock {
                         scores[i + distance + 1] = scores[i + distance + 1]
                             .max(terms.len() + ERROR_FOLLOWING_BLOCKS + 1 - distance);
                         break;
@@ -684,10 +700,9 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
 pub(crate) fn featured(q: &QueryRead, f: &Featured, result: &Organic) -> Option<Passage> {
     let terms = query_terms(q);
     let present: BTreeSet<_> = tokens(&f.text).collect();
-    let title = tokens(&result.title).collect();
     if terms.is_empty()
         || !terms.is_subset(&present)
-        || !question::TaskQualifiers::new(q.terms(), &title).permits(&f.text)
+        || !question::TaskQualifiers::new(q.terms(), &result.url).permits(&f.text)
     {
         return None;
     }
@@ -707,7 +722,6 @@ pub(crate) fn featured(q: &QueryRead, f: &Featured, result: &Organic) -> Option<
 #[cfg(test)]
 #[test]
 fn featured_excerpts_obey_the_same_task_qualifiers_as_articles() {
-    let q = crate::read_query("loom remove all spools").unwrap();
     let url = url::Url::parse("https://example.com/guide").unwrap();
     let key = crate::PageKey::from_url(&url).unwrap();
     let result = Organic {
@@ -720,21 +734,24 @@ fn featured_excerpts_obey_the_same_task_qualifiers_as_articles() {
         discussion: false,
         sitelinks: Vec::new(),
     };
-    for (text, accepted) in [
-        ("Loom can remove all spools without thread.", false),
-        ("In Loom, remove all spools before restarting.", true),
-    ] {
-        assert_eq!(
-            featured(
-                &q,
-                &Featured {
-                    text: text.into(),
-                    cites: key.clone()
-                },
-                &result
-            )
-            .is_some(),
-            accepted
-        );
+    for query in ["loom remove all spools", "how to remove all spools?"] {
+        let q = crate::read_query(query).unwrap();
+        for (text, accepted) in [
+            ("Loom can remove all spools without thread.", false),
+            ("In Loom, remove all spools before restarting.", true),
+        ] {
+            assert_eq!(
+                featured(
+                    &q,
+                    &Featured {
+                        text: text.into(),
+                        cites: key.clone()
+                    },
+                    &result
+                )
+                .is_some(),
+                accepted
+            );
+        }
     }
 }

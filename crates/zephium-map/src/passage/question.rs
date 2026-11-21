@@ -160,7 +160,7 @@ impl Question {
             context,
             all: u64::MAX >> (MAX_CONTENT_TERMS - count),
             task: terms.first().is_some_and(|t| t == "how") || terms.iter().any(|t| action(t)),
-            qualifiers: TaskQualifiers::new(terms, &title),
+            qualifiers: TaskQualifiers::new(terms, doc.page()),
         }
     }
 
@@ -265,21 +265,33 @@ impl Question {
 }
 
 impl TaskQualifiers {
-    pub(super) fn new(terms: &[String], title: &BTreeSet<String>) -> Self {
+    pub(super) fn new(terms: &[String], source: &url::Url) -> Self {
+        let site = crate::SiteKey::from_url(source);
+        let entity = site
+            .as_ref()
+            .and_then(|site| site.as_str().split_once('.'))
+            .and_then(|(label, _)| tokens(label).next());
         Self {
             last: terms.iter().position(|t| t == "last").and_then(|at| {
-                let tail = terms.get(at + 1..)?;
-                let noun = if tail.len() > 1 && title.contains(&tail[0]) {
-                    &tail[1]
-                } else {
-                    tail.first()?
-                };
-                Some(noun.trim_end_matches('?').to_owned())
+                let mut tail = terms[at + 1..].iter();
+                let first = tokens(tail.next()?).next()?;
+                let qualifier = entity.as_ref() == Some(&first);
+                Some(
+                    qualifier
+                        .then(|| {
+                            tail.next()
+                                .and_then(|term| tokens(term).next())
+                                .filter(|noun| !STOP.contains(&noun.as_str()))
+                        })
+                        .flatten()
+                        .unwrap_or(first),
+                )
             }),
-            quantity: terms
-                .windows(2)
-                .find(|pair| pair[0] == "all")
-                .map(|pair| pair.join(" ")),
+            quantity: terms.windows(2).find(|pair| pair[0] == "all").map(|pair| {
+                let noun = pair[1].trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                let noun = if noun.is_empty() { &pair[1] } else { noun };
+                format!("all {noun}")
+            }),
         }
     }
 
