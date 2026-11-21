@@ -1394,14 +1394,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                     Placement::Favorites { space },
                     page("favorite.example"),
                 ),
-                item(
-                    pinned_folder,
-                    None,
-                    pinned,
-                    PersistedKind::Folder {
-                        name: "Work".into(),
-                    },
-                ),
+                item(pinned_folder, None, pinned, PersistedKind::folder("Work")),
                 item(
                     pinned_child,
                     Some(pinned_folder),

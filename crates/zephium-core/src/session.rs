@@ -68,6 +68,11 @@ pub struct PersistedItem {
 pub enum PersistedKind {
     Folder {
         name: String,
+        /// Absent on snapshots before schema 3, and for a folder with none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<crate::item::FolderColor>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        collapsed: bool,
     },
     Tab {
         url: String,
@@ -78,9 +83,18 @@ pub enum PersistedKind {
         last_active_ms: Option<u64>,
     },
     /// Browser-owned pages have no navigable URL or native content view.
-    BrowserTab {
-        page: BrowserOwnedTab,
-    },
+    BrowserTab { page: BrowserOwnedTab },
+}
+
+impl PersistedKind {
+    /// An open folder without a colour.
+    pub fn folder(name: impl Into<String>) -> Self {
+        Self::Folder {
+            name: name.into(),
+            color: None,
+            collapsed: false,
+        }
+    }
 }
 
 /// Bounded browser-owned state for restoring a recently closed regular tab.
@@ -207,7 +221,15 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
             return;
         };
         let kind = match &item.kind {
-            ItemKind::Folder { name } => PersistedKind::Folder { name: name.clone() },
+            ItemKind::Folder {
+                name,
+                color,
+                collapsed,
+            } => PersistedKind::Folder {
+                name: name.clone(),
+                color: *color,
+                collapsed: *collapsed,
+            },
             ItemKind::Tab(tab) => match tab.content {
                 // The document a source tab shows lives in memory only.
                 TabContent::BrowserOwned(BrowserOwnedTab::Source) => return,
@@ -299,8 +321,14 @@ pub fn restore(state: SessionState) -> Restored {
             continue;
         }
         let kind = match i.kind {
-            PersistedKind::Folder { name } => ItemKind::Folder {
+            PersistedKind::Folder {
+                name,
+                color,
+                collapsed,
+            } => ItemKind::Folder {
                 name: bounded_name(&name, "Folder"),
+                color,
+                collapsed,
             },
             PersistedKind::Tab {
                 url,
@@ -528,6 +556,64 @@ mod tests {
         assert!(!items.navigate(id, input).is_empty());
         let url = navigation::classify(input).expect("test URL must be valid");
         items.set_committed_url(id, url);
+    }
+
+    #[test]
+    fn folders_keep_their_colour_fold_and_contents_across_a_restart() {
+        let (profiles, spaces, mut items, _profile, space) = seed();
+        let (folder, inner, tab) = (ItemId::from(20), ItemId::from(21), ItemId::from(22));
+        assert!(items.insert_folder(folder, today(space), None, None, "Trips", None));
+        assert!(items.insert_folder(inner, today(space), Some(folder), None, "Rome", None));
+        assert_eq!(
+            items.set_folder_color(folder, Some(crate::item::FolderColor::Peach)),
+            Some(true)
+        );
+        assert_eq!(items.set_folder_collapsed(inner, true), Some(true));
+        items.insert_tab(tab, today(space));
+        navigate_and_commit(&mut items, tab, "example.com");
+        assert!(items.move_item(tab, today(space), Some(inner), None));
+
+        let state = snapshot(&profiles, &spaces, &items, Some(space), None, None);
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains(r#""color":"peach""#));
+        assert_eq!(json.matches(r#""collapsed":true"#).count(), 1);
+        let restored = restore(serde_json::from_str(&json).unwrap());
+        let Some(ItemKind::Folder {
+            name,
+            color,
+            collapsed,
+        }) = restored.items.get(folder).map(|item| &item.kind)
+        else {
+            panic!("folder");
+        };
+        assert_eq!(
+            (name.as_str(), *color, *collapsed),
+            ("Trips", Some(crate::item::FolderColor::Peach), false)
+        );
+        assert!(matches!(
+            restored.items.get(inner).map(|item| &item.kind),
+            Some(ItemKind::Folder {
+                collapsed: true,
+                ..
+            })
+        ));
+        assert_eq!(restored.items.children(inner), [tab]);
+        assert_eq!(canonicalize(state.clone()), state);
+
+        // A snapshot from before folders had looks reads as open and plain.
+        let legacy: PersistedKind = serde_json::from_str(r#"{"Folder":{"name":"Old"}}"#).unwrap();
+        assert_eq!(
+            legacy,
+            PersistedKind::Folder {
+                name: "Old".into(),
+                color: None,
+                collapsed: false
+            }
+        );
+        assert!(serde_json::from_str::<PersistedKind>(
+            r#"{"Folder":{"name":"Old","color":"neon"}}"#
+        )
+        .is_err());
     }
 
     #[test]

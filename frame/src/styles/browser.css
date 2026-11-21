@@ -660,39 +660,24 @@
     translate: 0 8px;
   }
 }
-.folder-row {
-  width: 100%;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-row);
-  color: var(--color-muted);
-  font: inherit;
-  font-size: 12px;
-  padding-inline-end: 8px;
-  text-align: start;
-  cursor: default;
+/* Rows inside folders: a hairline down the indent for each folder around
+   them, in its colour. A lit, hovered or lifted row stands over it, so the
+   lines break there and read as joining the rows between. */
+.browser-sidebar [data-spined]::before {
+  content: "";
+  position: absolute;
+  inset-block: calc(var(--sidebar-row-gap) / -2);
+  inset-inline: 0;
+  background: var(--spines);
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
 }
-.folder-row:hover {
-  background: var(--color-fill);
-  color: var(--color-text);
+.browser-sidebar
+  [data-spined]:is(:hover, [data-selected="true"], [data-multi-selected], [data-lifted])::before {
+  opacity: 0;
 }
-.folder-row > span:first-of-type {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.folder-chevron {
-  display: flex;
-  transition: transform var(--motion-base) var(--ease-out);
-}
-.folder-chevron[data-expanded="true"] {
-  transform: rotate(90deg);
+.browser-sidebar [data-spined]:dir(rtl)::before {
+  transform: scaleX(-1);
 }
 /* The environment switch, heading the column above the field it governs.
    Flush left like every other band in the column. */
@@ -868,8 +853,7 @@
 }
 /* Sidebar labels sit a step below full white so they belong to the material;
    only the current item is fully lit. */
-.settings-sidebar-navigation .settings-nav-item,
-.browser-sidebar .folder-row {
+.settings-sidebar-navigation .settings-nav-item {
   color: var(--color-label-secondary);
 }
 .settings-sidebar-navigation .settings-nav-item:hover,

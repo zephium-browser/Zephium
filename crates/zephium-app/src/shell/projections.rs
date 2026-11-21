@@ -367,7 +367,15 @@ impl Shell {
 
         let id_string = id.to_string();
         let kind = match &item.kind {
-            ItemKind::Folder { name } => SidebarNodeKindView::Folder { name: name.clone() },
+            ItemKind::Folder {
+                name,
+                color,
+                collapsed,
+            } => SidebarNodeKindView::Folder {
+                name: name.clone(),
+                color: *color,
+                collapsed: *collapsed,
+            },
             ItemKind::Tab(tab) => {
                 projection.tab_ids.insert(id);
                 projection
@@ -742,6 +750,9 @@ fn tab_view(
             }
         },
         loading: tab.loading,
+        asleep: tab.content == zephium_core::item::TabContent::Web
+            && tab.url.is_some()
+            && !tab.has_view(),
         page_request: tab.page_request.as_deref().map(|request| match request {
             zephium_core::item::PageRequest::ExternalApp { url, app, site } => {
                 zephium_ipc::PageRequestView::ExternalApp {

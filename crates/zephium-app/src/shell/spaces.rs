@@ -148,7 +148,7 @@ impl Shell {
 
     /// The focused window's persistent profile and space. Private browsing
     /// keeps a single space, and a profile being deleted has none to change.
-    fn space_scope(&self) -> Option<(ProfileId, SpaceId)> {
+    pub(super) fn space_scope(&self) -> Option<(ProfileId, SpaceId)> {
         let window = self.windows.focused()?;
         let persistent = self
             .profiles
@@ -158,7 +158,12 @@ impl Shell {
             .then_some((window.profile, window.space))
     }
 
-    fn owned_space(&self, profile: ProfileId, space: SpaceId) -> bool {
+    /// The tab a space shows when the window next returns to it.
+    pub(super) fn remember_left_tab(&mut self, space: SpaceId, tab: ItemId) {
+        self.space_memory.left_at.insert(space, tab);
+    }
+
+    pub(super) fn owned_space(&self, profile: ProfileId, space: SpaceId) -> bool {
         self.spaces
             .get(space)
             .is_some_and(|candidate| candidate.profile == profile)

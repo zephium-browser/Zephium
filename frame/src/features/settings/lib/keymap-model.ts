@@ -14,6 +14,7 @@ const TITLES: Record<string, () => string> = {
   "window.showPrivate": m.command_window_show_private,
   "note.new": m.command_note_new,
   "split.choose": m.command_split_choose,
+  "tab.group": m.command_tab_group,
   "page.save": m.command_page_save,
   "page.print": m.command_page_print,
   "page.viewSource": m.command_page_view_source,

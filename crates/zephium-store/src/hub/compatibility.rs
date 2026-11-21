@@ -81,7 +81,7 @@ impl Hub {
                     }
                 };
                 let (kind, name, url, title, zoom) = match &item.kind {
-                    PersistedKind::Folder { name } => {
+                    PersistedKind::Folder { name, .. } => {
                         ("folder", Some(name.as_str()), None, None, 1.0)
                     }
                     PersistedKind::Tab {
@@ -270,7 +270,7 @@ impl Hub {
                     }
                 };
                 let kind = match (kind.as_str(), name, url) {
-                    ("folder", Some(name), None) => PersistedKind::Folder { name },
+                    ("folder", Some(name), None) => PersistedKind::folder(name),
                     ("tab", None, Some(url)) => PersistedKind::Tab {
                         url,
                         title: title.unwrap_or_default(),

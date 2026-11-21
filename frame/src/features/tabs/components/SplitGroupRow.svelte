@@ -9,6 +9,7 @@
     splitting,
     closable = true,
     motionKey,
+    depth = 0,
     class: className = "",
     onSelect,
     onClose,
@@ -24,6 +25,7 @@
     splitting: boolean;
     closable?: boolean;
     motionKey?: string;
+    depth?: number;
     class?: string;
     onSelect: (id: string, event: MouseEvent) => void;
     onClose: (id: string) => void;
@@ -43,6 +45,8 @@
 -->
 <li
   data-motion-key={motionKey}
+  data-node-id={tabs[0]?.id}
+  data-depth={depth}
   class={[
     "overflow-hidden rounded-row transition-[box-shadow] duration-[var(--motion-fast)]",
     className,

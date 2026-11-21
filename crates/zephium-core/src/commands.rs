@@ -173,6 +173,16 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::File,
     ),
     command("split.choose", "Split View…", Keys::NONE, Group::File),
+    // The selected tabs, else the one in front, into a new folder. Shift
+    // and a letter, as the tool panels are: never Alt, which is AltGr on
+    // many Windows layouts. Not L: a note keeps that for its checklist, and
+    // a menu key would take it first on macOS. Not M: the mini window has it.
+    command(
+        "tab.group",
+        "Group into Folder",
+        Keys::same("CmdOrCtrl+Shift+A"),
+        Group::File,
+    ),
     command(
         "page.save",
         "Save Page As…",
@@ -685,7 +695,32 @@ pub fn resolve(overrides: &HashMap<String, String>) -> Vec<ResolvedCommand> {
     resolve_on(overrides, Platform::CURRENT)
 }
 
+/// Each key runs at most one command. A saved override is the person's
+/// choice, so a default that now lands on its key (a new default after an
+/// upgrade) is left unbound; two overrides on one key, which editing never
+/// allows, keep the first in registry order.
 fn resolve_on(overrides: &HashMap<String, String>, platform: Platform) -> Vec<ResolvedCommand> {
+    let mut resolved = resolve_each(overrides, platform);
+    let mut owners: HashMap<String, usize> = HashMap::new();
+    for pass in [true, false] {
+        for (at, command) in resolved.iter_mut().enumerate() {
+            if command.customized != pass {
+                continue;
+            }
+            let Some(key) = command.accelerator.clone() else {
+                continue;
+            };
+            if owners.get(&key).is_some_and(|owner| *owner != at) {
+                command.accelerator = None;
+            } else {
+                owners.insert(key, at);
+            }
+        }
+    }
+    resolved
+}
+
+fn resolve_each(overrides: &HashMap<String, String>, platform: Platform) -> Vec<ResolvedCommand> {
     REGISTRY
         .iter()
         .filter(|c| platform == Platform::Mac || !MAC_ONLY.contains(&c.id))
@@ -801,6 +836,31 @@ mod tests {
                     panic!("{} and {} share {text} on {platform:?}", other, c.id);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_saved_override_keeps_its_key_when_a_new_default_lands_on_it() {
+        for platform in PLATFORMS {
+            let mut overrides = HashMap::new();
+            overrides.insert("tab.new".into(), "CmdOrCtrl+Shift+A".into());
+            // A stored keymap edited by hand: a second override on that key.
+            overrides.insert("nav.reload".into(), "CmdOrCtrl+Shift+A".into());
+            let resolved = resolve_on(&overrides, platform);
+            let key = Accelerator::parse("CmdOrCtrl+Shift+A", platform)
+                .unwrap()
+                .format(platform);
+            let owners: Vec<_> = resolved
+                .iter()
+                .filter(|c| c.accelerator.as_deref() == Some(key.as_str()))
+                .map(|c| c.id)
+                .collect();
+            assert_eq!(owners, ["tab.new"], "{platform:?}");
+            let group = resolved.iter().find(|c| c.id == "tab.group").unwrap();
+            assert_eq!(group.accelerator, None);
+            assert!(!group.customized);
+            let reload = resolved.iter().find(|c| c.id == "nav.reload").unwrap();
+            assert_eq!(reload.accelerator, None);
         }
     }
 

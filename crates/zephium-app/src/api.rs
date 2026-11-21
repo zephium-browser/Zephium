@@ -251,6 +251,46 @@ pub enum SpaceCommand {
     MoveActive(zephium_core::ids::SpaceId),
 }
 
+/// Folder mutations from chrome, menus and keys, with ids parsed. The shell
+/// checks each against the focused space.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderCommand {
+    Create {
+        name: String,
+        color: Option<zephium_core::item::FolderColor>,
+        tabs: Vec<ItemId>,
+        parent: Option<ItemId>,
+        before: Option<ItemId>,
+    },
+    Rename {
+        id: ItemId,
+        name: String,
+    },
+    SetColor {
+        id: ItemId,
+        color: Option<zephium_core::item::FolderColor>,
+    },
+    SetCollapsed {
+        id: ItemId,
+        collapsed: bool,
+    },
+    Move {
+        id: ItemId,
+        parent: Option<ItemId>,
+        before: Option<ItemId>,
+    },
+    /// Takes a tab out of its folder, to just below it.
+    RemoveFromFolder(ItemId),
+    Ungroup(ItemId),
+    CloseTabs(ItemId),
+    Delete(ItemId),
+    /// The folder and everything in it, to another of the profile's spaces.
+    MoveToSpace {
+        id: ItemId,
+        space: zephium_core::ids::SpaceId,
+    },
+}
+
 /// What the person chose for a page's request to open another application
 /// or a blocked new tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -493,6 +533,8 @@ pub enum Command {
     },
     /// Something done to the focused profile's spaces.
     Space(Box<SpaceCommand>),
+    /// Something done to the focused space's folders.
+    Folder(Box<FolderCommand>),
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory
