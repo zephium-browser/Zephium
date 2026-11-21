@@ -6,7 +6,9 @@ use std::time::Duration;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
-use zephium_public_fetch::{PublicBody, ReadRefusal, StatusClass, Timings, MAX_DECODED_BYTES};
+use zephium_public_fetch::{
+    PublicBody, ReadRefusal, SizeLimit, StatusClass, Timings, MAX_DECODED_BYTES,
+};
 
 use super::corpus::valid_id;
 use super::engine::{
@@ -453,8 +455,9 @@ impl RequestRow {
                     }
             }
             (ResultClass::Refused(FetchRefusal::Reader(class)), None) => match class {
-                ReadRefusal::TooLarge(_) => {
-                    request.max_bytes <= self.cap && request.timeout >= completion
+                ReadRefusal::TooLarge(SizeLimit::Headers) => request.timeout >= completion,
+                ReadRefusal::TooLarge(SizeLimit::Wire) | ReadRefusal::Encoding => {
+                    request.max_bytes >= self.cap && request.timeout >= completion
                 }
                 ReadRefusal::Timeout(_) => request.timeout <= self.timeout,
                 ReadRefusal::NotPublicHttps
@@ -464,7 +467,7 @@ impl RequestRow {
                 | ReadRefusal::ProxyUnsupported
                 | ReadRefusal::RouteChanged
                 | ReadRefusal::Transport => true,
-                ReadRefusal::Status(_) | ReadRefusal::WrongContentType | ReadRefusal::Encoding => {
+                ReadRefusal::Status(_) | ReadRefusal::WrongContentType => {
                     request.timeout >= completion
                 }
             },

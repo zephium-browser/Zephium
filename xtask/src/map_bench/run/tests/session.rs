@@ -732,6 +732,7 @@ fn replay_uses_reader_time_for_journals_without_a_request_start() {
 
 #[test]
 fn replay_refusals_require_evidence_for_the_requested_limits() {
+    use zephium_public_fetch::SizeLimit;
     let root = tempfile::tempdir().unwrap();
     let req = request("/docs", Expectation::Html);
     for (index, class) in ReadRefusal::ALL
@@ -750,7 +751,10 @@ fn replay_refusals_require_evidence_for_the_requested_limits() {
         for cap in [req.max_bytes - 1, req.max_bytes, req.max_bytes + 1] {
             for timeout in [2999, 3000, 3001] {
                 let compatible = match class {
-                    FetchRefusal::Reader(ReadRefusal::TooLarge(_)) => cap <= req.max_bytes,
+                    FetchRefusal::Reader(ReadRefusal::TooLarge(SizeLimit::Headers)) => true,
+                    FetchRefusal::Reader(
+                        ReadRefusal::TooLarge(SizeLimit::Wire) | ReadRefusal::Encoding,
+                    ) => cap >= req.max_bytes,
                     FetchRefusal::Reader(ReadRefusal::Timeout(_)) => timeout <= 3000,
                     FetchRefusal::Reader(_) => true,
                     _ => cap == req.max_bytes && timeout == 3000,
@@ -764,6 +768,33 @@ fn replay_refusals_require_evidence_for_the_requested_limits() {
                     replay_row(&path, &req, cap, timeout),
                     Err(expected),
                     "{class:?}"
+                );
+            }
+        }
+        if matches!(
+            class,
+            FetchRefusal::Reader(ReadRefusal::TooLarge(_) | ReadRefusal::Encoding)
+        ) {
+            for (cap, timeout, answered) in [
+                (req.max_bytes, 9, false),
+                (req.max_bytes, 10, true),
+                (req.max_bytes * 2, 9, false),
+                (req.max_bytes * 2, 10, true),
+                (
+                    1,
+                    10,
+                    class == FetchRefusal::Reader(ReadRefusal::TooLarge(SizeLimit::Headers)),
+                ),
+            ] {
+                let expected = if answered {
+                    class
+                } else {
+                    FetchRefusal::NotRecorded
+                };
+                assert_eq!(
+                    replay_row(&path, &req, cap, timeout),
+                    Err(expected),
+                    "{class:?} {cap} {timeout}"
                 );
             }
         }
