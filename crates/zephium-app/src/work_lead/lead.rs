@@ -1215,15 +1215,9 @@ where
             .to_owned();
         let data = args.get("data").cloned().unwrap_or(Value::Null);
         let sources = strings(args.get("sources"));
+        let inherited = objects::revised_evidence(&canvas, &target);
         let mut proposed = match objects::propose(
-            self.run,
-            &canvas,
-            kind,
-            &title,
-            data,
-            &sources,
-            &target.artifact.evidence,
-            lenient,
+            self.run, &canvas, kind, &title, data, &sources, &inherited, lenient,
         ) {
             Ok(proposed) => proposed,
             Err((fault, reason)) => return self.refuse(&key, reason, fault),
