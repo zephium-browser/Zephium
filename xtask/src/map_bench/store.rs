@@ -438,13 +438,13 @@ impl RequestRow {
     }
 
     fn answers(&self, request: &FetchRequest) -> bool {
+        let completion = self.elapsed_at_start.map_or(self.timings.total, |start| {
+            self.elapsed_at_return
+                .saturating_sub(start)
+                .max(self.timings.total)
+        });
         match (&self.result_class, &self.body) {
             (ResultClass::Body(_), Some(body)) => {
-                let completion = self.elapsed_at_start.map_or(self.timings.total, |start| {
-                    self.elapsed_at_return
-                        .saturating_sub(start)
-                        .max(self.timings.total)
-                });
                 request.timeout >= completion
                     && if body.truncated {
                         request.max_bytes <= self.cap
@@ -453,7 +453,9 @@ impl RequestRow {
                     }
             }
             (ResultClass::Refused(FetchRefusal::Reader(class)), None) => match class {
-                ReadRefusal::TooLarge(_) => request.max_bytes <= self.cap,
+                ReadRefusal::TooLarge(_) => {
+                    request.max_bytes <= self.cap && request.timeout >= completion
+                }
                 ReadRefusal::Timeout(_) => request.timeout <= self.timeout,
                 ReadRefusal::NotPublicHttps
                 | ReadRefusal::RedirectRefused
@@ -461,10 +463,10 @@ impl RequestRow {
                 | ReadRefusal::DnsRefused
                 | ReadRefusal::ProxyUnsupported
                 | ReadRefusal::RouteChanged
-                | ReadRefusal::Status(_)
-                | ReadRefusal::WrongContentType
-                | ReadRefusal::Encoding
                 | ReadRefusal::Transport => true,
+                ReadRefusal::Status(_) | ReadRefusal::WrongContentType | ReadRefusal::Encoding => {
+                    request.timeout >= completion
+                }
             },
             _ => false,
         }

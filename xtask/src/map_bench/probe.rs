@@ -3,8 +3,8 @@ use zephium_public_fetch::{ReadRefusal, ReaderLimits, StatusRefusal};
 
 use super::corpus::{CorpusQuery, Kind};
 use super::engine::{
-    BenchIo, Engine, Expectation, FetchRefusal, FetchRequest, FetchResult, Outcome, ProbeFetch,
-    ProbeSite, RobotsStop,
+    BenchIo, Engine, EngineFailure, Expectation, FetchRefusal, FetchRequest, FetchResult, Outcome,
+    ProbeFetch, ProbeSite, RobotsStop,
 };
 
 pub(super) struct ProbeEngine;
@@ -12,6 +12,11 @@ pub(super) struct ProbeEngine;
 impl Engine for ProbeEngine {
     fn run(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Outcome {
         let mut outcome = Outcome::empty(query.label.kind);
+        let Ok(measured) = zephium_map::read_query(&query.text) else {
+            outcome.failure = Some(EngineFailure::InvalidInput);
+            return outcome;
+        };
+        outcome.kind = Kind::from(measured.kind());
         let sites = match query.label.kind {
             Kind::Place => query.site.as_slice(),
             Kind::Compare => &query.sites,
@@ -301,5 +306,19 @@ mod tests {
             assert!(ProbeEngine.run(&query, &mut io).probe.is_empty());
             assert!(io.calls.is_empty());
         }
+    }
+
+    #[test]
+    fn probe_measures_kind_independently_of_the_corpus_label() {
+        let query = crate::map_bench::corpus::fixture(
+            "[[query]]\nid='q'\ntext='Example docs'\nkind='instant'",
+        );
+        let mut io = FakeIo {
+            calls: vec![],
+            results: VecDeque::new(),
+        };
+        let outcome = ProbeEngine.run(&query, &mut io);
+        assert_eq!(outcome.kind, Kind::Place);
+        assert!(outcome.probe.is_empty());
     }
 }

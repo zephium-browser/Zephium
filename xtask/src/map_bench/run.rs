@@ -19,8 +19,7 @@ use super::engine::{
 };
 use super::score::{self, Reason, Score, Verdict};
 use super::store::{
-    self, optional_json, query_dir, write_json, Journal, MatchPolicy, RecordedMatch, ResultsSlot,
-    Transfer,
+    self, query_dir, write_json, Journal, MatchPolicy, RecordedMatch, ResultsSlot, Transfer,
 };
 use super::{platform, BenchError, Options, Result};
 
@@ -347,6 +346,14 @@ impl Source for PublicSource {
 }
 
 impl Measure {
+    fn include_prior_wire(&mut self, prior: u64) -> Result<()> {
+        self.wire_bytes = self
+            .wire_bytes
+            .checked_add(prior)
+            .ok_or(BenchError::new("wire_bytes_overflow"))?;
+        Ok(())
+    }
+
     fn delta(self, before: &Self) -> Self {
         Self {
             requests: self.requests.saturating_sub(before.requests),
@@ -617,7 +624,9 @@ fn execute(engine: &mut dyn Engine, query: &CorpusQuery, io: &mut QueryIo<'_>) -
     };
     let failure = io.failure.or(match outcome.failure {
         Some(EngineFailure::InvalidInput) => Some(Reason::EngineInvalidInput),
-        Some(EngineFailure::SessionFailed) if outcome.no_official_site => None,
+        Some(EngineFailure::SessionFailed) if outcome.no_official_site => {
+            (!outcome.valid()).then_some(Reason::InvalidOutcome)
+        }
         Some(EngineFailure::SessionFailed) => Some(Reason::EngineSessionFailed),
         Some(_) => Some(Reason::EngineFault),
         None if !outcome.valid() => Some(Reason::InvalidOutcome),
@@ -692,7 +701,7 @@ fn record_query(
     measure.wall = wall;
     (measure.cpu_ns, measure.peak_rss_delta_bytes) = cost;
     measure.requests += prior_reads;
-    measure.wire_bytes += prior_wire;
+    measure.include_prior_wire(prior_wire)?;
     measure.decoded_bytes += prior_decoded;
     for (class, count) in prior_refusals {
         *measure.refusals.entry(class).or_default() += count;
@@ -715,7 +724,7 @@ pub(super) fn pending<'a>(
             break;
         }
         let path = query_dir(root, &query.label.id, false)?;
-        if !store::exists(&path.join(OUTCOME))? {
+        if !store::exists(&path.join(OUTCOME))? || !store::exists(&path.join(MEASURE))? {
             pending.push(query);
         }
     }
@@ -789,20 +798,6 @@ fn record_queries(
         if let Err(error) = record_query(root, query, engine, source, clock) {
             failed = true;
             eprintln!("map bench: {}", error.for_query(&query.label.id));
-            let checkpoint = (|| {
-                let path = query_dir(root, &query.label.id, true)?;
-                save_outcome(
-                    &path.join(OUTCOME),
-                    QueryResult::unavailable(
-                        Verdict::Fail,
-                        Reason::ArtifactError,
-                        Activity::default(),
-                    ),
-                )
-            })();
-            if let Err(error) = checkpoint {
-                eprintln!("map bench: {}", error.for_query(&query.label.id));
-            }
         }
     }
     if failed {
@@ -899,7 +894,7 @@ pub(super) fn latest_replay(root: &Path) -> Result<Option<(PathBuf, ReplayManife
     if !store::directory(&parent, false)? {
         return Ok(None);
     }
-    let mut latest = None::<(PathBuf, ReplayManifest)>;
+    let mut latest = None::<(u128, Result<PathBuf>)>;
     for entry in store::children(&parent)? {
         let entry = entry.map_err(|error| BenchError::io("list_replay", &error))?;
         let name = entry.file_name();
@@ -910,30 +905,41 @@ pub(super) fn latest_replay(root: &Path) -> Result<Option<(PathBuf, ReplayManife
         if name != format!("{timestamp:039}")
             || latest
                 .as_ref()
-                .is_some_and(|(_, replay)| timestamp <= replay.started_unix_ns)
+                .is_some_and(|(newest, _)| timestamp <= *newest)
         {
             continue;
         }
         let path = entry.path();
-        if !store::directory(&path, false)? {
-            continue;
-        }
-        if let Some(manifest) = optional_json::<ReplayManifest>(&path.join(REPLAY))? {
-            if manifest.started_unix_ns != timestamp
-                || manifest.corpus_sha256.is_empty()
-                || manifest.corpus_sha256.len() > MAX_CORPUS_FILES
-                || !manifest
-                    .corpus_sha256
-                    .iter()
-                    .all(|hash| store::valid_digest(hash))
-            {
-                return Err(BenchError::new("invalid_replay_manifest"));
+        let published = store::directory(&path, false).and_then(|directory| {
+            if directory {
+                store::exists(&path.join(REPLAY))
+            } else {
+                Ok(false)
             }
-            validate_labels(&manifest.queries)?;
-            latest = Some((path, manifest));
+        });
+        match published {
+            Ok(false) => {}
+            Ok(true) => latest = Some((timestamp, Ok(path))),
+            Err(error) => latest = Some((timestamp, Err(error))),
         }
     }
-    Ok(latest)
+    let Some((timestamp, path)) = latest else {
+        return Ok(None);
+    };
+    let path = path?;
+    let manifest: ReplayManifest = store::read_json(&path.join(REPLAY))?;
+    if manifest.started_unix_ns != timestamp
+        || manifest.corpus_sha256.is_empty()
+        || manifest.corpus_sha256.len() > MAX_CORPUS_FILES
+        || !manifest
+            .corpus_sha256
+            .iter()
+            .all(|hash| store::valid_digest(hash))
+    {
+        return Err(BenchError::new("invalid_replay_manifest"));
+    }
+    validate_labels(&manifest.queries)?;
+    Ok(Some((path, manifest)))
 }
 
 #[cfg(test)]

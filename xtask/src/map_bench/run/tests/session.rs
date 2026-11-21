@@ -6,6 +6,7 @@ struct ScriptedSource {
     calls: Vec<FetchRequest>,
     elapsed: Duration,
     reversed: bool,
+    delay_html: Duration,
 }
 
 impl ScriptedSource {
@@ -16,6 +17,7 @@ impl ScriptedSource {
             calls: Vec::new(),
             elapsed: Duration::ZERO,
             reversed: false,
+            delay_html: Duration::ZERO,
         }
     }
 }
@@ -28,12 +30,16 @@ impl Source for ScriptedSource {
 
     fn submit(&mut self, token: usize, request: FetchRequest, start: Duration) {
         let result = (self.respond)(&request);
-        self.calls.push(request);
-        let delay = if self.reversed { [3, 1, 2][token] } else { 1 };
-        let end = if self.reversed {
-            Duration::from_secs(delay)
+        let delay = if request.expect == Expectation::Html {
+            self.delay_html
         } else {
-            self.elapsed.max(start) + Duration::from_millis(delay)
+            Duration::ZERO
+        };
+        self.calls.push(request);
+        let end = if self.reversed {
+            start
+        } else {
+            self.elapsed.max(start) + Duration::from_millis(1) + delay
         };
         let total = end - start;
         self.pending.push(Completed {
@@ -49,12 +55,24 @@ impl Source for ScriptedSource {
     }
 
     fn next(&mut self) -> Option<Completed> {
-        let (index, _) = self
-            .pending
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, item)| (item.transfer.end, item.token))?;
-        let completed = self.pending.swap_remove(index);
+        let order = |token| [3, 1, 2][token];
+        let (index, _) = self.pending.iter().enumerate().min_by_key(|(_, item)| {
+            if self.reversed {
+                (Duration::ZERO, order(item.token))
+            } else {
+                (item.transfer.end, item.token)
+            }
+        })?;
+        let mut completed = self.pending.swap_remove(index);
+        if self.reversed {
+            let ready = self
+                .pending
+                .iter()
+                .map(|item| item.transfer.start)
+                .fold(completed.transfer.start.max(self.elapsed), Duration::max);
+            completed.transfer.end = ready + Duration::from_millis(1);
+            completed.transfer.total = completed.transfer.end - completed.transfer.start;
+        }
         self.elapsed = completed.transfer.end;
         Some(completed)
     }
@@ -430,10 +448,9 @@ fn actual_corpus_synthetic_entity_findings() {
         evidence.join("corpus-v0.toml"),
         evidence.join("corpus-v1.toml"),
     ];
-    if !paths.iter().all(|path| path.is_file()) {
+    let Some(corpus) = crate::map_bench::corpus::load_external_fixture(&paths).unwrap() else {
         return;
-    }
-    let corpus = Corpus::load(&paths).unwrap();
+    };
     let mut source = ScriptedSource::new(|_| refuse(StatusRefusal::Client));
     let mut missing = Vec::new();
     for query in corpus
@@ -768,4 +785,84 @@ fn replay_prefers_an_unclaimed_exact_row_then_uses_the_first_compatible_row() {
     assert_eq!(io.fetch(req.clone()), refuse(StatusRefusal::Denied));
     assert_eq!(io.activity.matched_relaxed, 1);
     assert_eq!(io.fetch(req), Err(FetchRefusal::NotRecorded));
+}
+
+#[test]
+fn replay_response_refusal_requires_time_to_observe_it() {
+    let root = tempfile::tempdir().unwrap();
+    let path = query_dir(root.path(), "refusal", true).unwrap();
+    let req = request("/docs", Expectation::Html);
+    save_row(root.path(), &path, &req, refuse(StatusRefusal::Denied));
+    assert_eq!(
+        replay_row(&path, &req, req.max_bytes, 9),
+        Err(FetchRefusal::NotRecorded)
+    );
+    assert_eq!(
+        replay_row(&path, &req, req.max_bytes, 10),
+        refuse(StatusRefusal::Denied)
+    );
+}
+
+#[test]
+fn completion_order_fixture_accepts_late_submissions() {
+    let mut source = ScriptedSource::new(|_| refuse(StatusRefusal::Denied));
+    source.reversed = true;
+    for (token, start) in [8, 10, 12].into_iter().enumerate() {
+        source.submit(
+            token,
+            request("/docs", Expectation::Html),
+            Duration::from_secs(start),
+        );
+    }
+    for token in [1, 2, 0] {
+        let result = source.next().unwrap();
+        assert_eq!(result.token, token);
+        assert!(result.transfer.end >= result.transfer.start);
+    }
+}
+
+#[test]
+fn passage_page_counts_only_after_session_acceptance() {
+    let root = tempfile::tempdir().unwrap();
+    for (id, delay, expected) in [
+        ("in-time", Duration::ZERO, 1),
+        ("late", zephium_map::session::MAX_ELAPSED, 0),
+    ] {
+        let query = session_query(id, "how to reset timer", "kind='passage'\nanswer='side button'\nfrom=['example.com']\npages=['https://example.com/empty']");
+        let path = query_dir(root.path(), &query.label.id, true).unwrap();
+        let mut source = ScriptedSource::new(|request| {
+            if request.url.path() == "/robots.txt" {
+                scripted_body(request, "text/plain", "User-agent: *\n")
+            } else {
+                scripted_body(request, "text/html", "<p>Geese migrate in autumn.</p>")
+            }
+        });
+        source.delay_html = delay;
+        let mut io = QueryIo::new(
+            &path,
+            Journal::default(),
+            SESSION_CLOCK,
+            Some(Live {
+                root: root.path(),
+                source: &mut source,
+                started: Instant::now(),
+                prior_elapsed: Duration::ZERO,
+            }),
+        );
+        let output = execute(
+            &mut crate::map_bench::session::SessionEngine,
+            &query,
+            &mut io,
+        );
+        let outcome = output.outcome.unwrap();
+        assert!(outcome.passages.is_empty());
+        assert_eq!(
+            outcome
+                .stats
+                .get("passage_pages_read")
+                .copied()
+                .unwrap_or(0),
+            expected
+        );
+    }
 }

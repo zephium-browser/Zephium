@@ -702,3 +702,79 @@ Destinations scored as matched_locale — 0.
 }
 
 mod session;
+
+#[test]
+fn resume_retries_a_checkpoint_without_a_measurement() {
+    let root = tempfile::tempdir().unwrap();
+    let query = place("unfinished");
+    let path = query_dir(root.path(), &query.label.id, true).unwrap();
+    save_outcome(
+        &path.join(OUTCOME),
+        QueryResult::unavailable(Verdict::Fail, Reason::ArtifactError, Activity::default()),
+    )
+    .unwrap();
+    assert_eq!(pending(root.path(), [&query], 1).unwrap().len(), 1);
+    write_json(&path.join(MEASURE), &Measure::default()).unwrap();
+    assert!(pending(root.path(), [&query], 1).unwrap().is_empty());
+}
+
+#[test]
+fn invalid_outcomes_cannot_claim_the_no_site_exception() {
+    struct Invalid;
+    impl Engine for Invalid {
+        fn run(&mut self, _: &CorpusQuery, _: &mut dyn BenchIo) -> Outcome {
+            let mut outcome = Outcome::empty(Kind::Place);
+            outcome.failure = Some(EngineFailure::SessionFailed);
+            outcome.no_official_site = true;
+            outcome.entries.push(Entry {
+                focus: false,
+                url: Url::parse("https://example.com/").unwrap(),
+                depth: Depth::One,
+                source: "x".repeat(crate::map_bench::engine::MAX_SOURCE_BYTES + 1),
+                tags: BTreeSet::new(),
+            });
+            outcome
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut io = QueryIo::new(root.path(), Journal::default(), SESSION_CLOCK, None);
+    let result = execute(&mut Invalid, &place("invalid"), &mut io);
+    assert!(result.outcome.is_none());
+    assert_eq!(result.score.reason, Reason::InvalidOutcome);
+}
+
+#[test]
+fn latest_replay_reads_only_the_newest_published_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = |stamp: u128| root.path().join("replay").join(format!("{stamp:039}"));
+    for stamp in [1, 2, 3] {
+        fs::create_dir_all(directory(stamp)).unwrap();
+    }
+    fs::write(directory(1).join(REPLAY), b"invalid").unwrap();
+    write_json(
+        &directory(2).join(REPLAY),
+        &ReplayManifest {
+            started_unix_ns: 2,
+            corpus_sha256: vec![store::digest(b"corpus")],
+            queries: vec![place("example").label],
+        },
+    )
+    .unwrap();
+    assert_eq!(latest_replay(root.path()).unwrap().unwrap().0, directory(2));
+    fs::write(directory(3).join(REPLAY), b"invalid").unwrap();
+    assert!(latest_replay(root.path()).is_err());
+}
+
+#[test]
+fn recording_refuses_a_wire_total_above_u64() {
+    let mut measure = Measure {
+        wire_bytes: 1,
+        ..Measure::default()
+    };
+    measure.include_prior_wire(u64::MAX - 1).unwrap();
+    assert_eq!(measure.wire_bytes, u64::MAX);
+    assert_eq!(
+        measure.include_prior_wire(1).unwrap_err().class,
+        "wire_bytes_overflow"
+    );
+}
