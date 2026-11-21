@@ -7827,6 +7827,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-map"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "html5ever 0.39.0",
+ "proptest",
+ "psl",
+ "thiserror 2.0.18",
+ "url",
+ "zephium-core",
+]
+
+[[package]]
 name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [
