@@ -779,6 +779,52 @@ fn cross_domain_section_redirect_only_changes_the_landing() {
 }
 
 #[test]
+fn a_section_landing_in_another_tenant_contributes_nothing() {
+    let results = "<main><article><h2><a href='https://github.com/org/first'>GitHub first</a></h2></article></main>";
+    let r = run(cfg(), "github", results, |e| {
+        match e {
+        Effect::Fetch { id, url, .. } if url.path() == "/org/first" => Some(response(
+            *id,
+            url,
+            "text/html",
+            "<title>first</title><nav><a href='/org/first/pricing'>Pricing</a><a href='/org/first/news'>News</a></nav>",
+        )),
+        Effect::Fetch { id, url, .. } if url.path() == "/org/first/pricing" => Some(response(
+            *id,
+            &Url::parse("https://github.com/org/second/pricing").unwrap(),
+            "text/html",
+            include_str!("fixtures/section-pricing.html"),
+        )),
+        Effect::Fetch { id, url, .. } if url.path() == "/org/first/news" => Some(response(
+            *id,
+            url,
+            "text/html",
+            include_str!("fixtures/section-changes.html"),
+        )),
+        _ => None,
+    }
+    });
+    let place = r.places.last().unwrap();
+    assert_eq!(place.key.tenant.as_deref(), Some("/org/first"));
+    let entry = |label: &str| place.sections.iter().find(|e| e.label == label).unwrap();
+    let moved = entry("Pricing");
+    assert_eq!(moved.key.as_str(), "https://github.com/org/second/pricing");
+    assert!(moved.children.is_empty() && !moved.off_site);
+    assert!(moved.locator == Locator::default());
+    assert_eq!(
+        moved.read,
+        Some(ReadState::Refused {
+            failure: Failure::External
+        })
+    );
+    assert!(!entry("News").children.is_empty());
+    assert_eq!(
+        r.stats.phases[&Phase::Section].refused[&Failure::External],
+        1
+    );
+}
+
+#[test]
 fn named_place_passage_shares_one_entry_read() {
     let r = run(cfg(), "how do acme.com timers work", RESULT, |e| match e {
         Effect::Fetch { id, url, .. } if url.as_str() == HOME => Some(response(
@@ -953,11 +999,13 @@ fn repository_memo_cannot_cross_tenants_or_store_result_evidence() {
 }
 
 #[test]
-fn redirects_apply_robots_to_both_origins_only_at_the_robots_path() {
-    for (landing, allowed) in [
-        ("https://www.acme.com/robots.txt", true),
-        ("https://other.com/robots.txt", false),
-        ("https://acme.com/consent", false),
+fn a_redirected_robots_file_governs_the_landed_origin_only_as_its_own_file() {
+    for (landing, allowed, reads) in [
+        ("https://www.acme.com/robots.txt", true, 1),
+        ("https://www.acme.com/en/robots.txt", true, 2),
+        ("https://www.acme.com/robots.txt?lang=en", true, 2),
+        ("https://other.com/robots.txt", false, 1),
+        ("https://acme.com/consent", false, 1),
     ] {
         let r = run(cfg(), "acme", RESULT, |e| match e {
             Effect::Fetch { id, url, .. } if url.path() == "/robots.txt" => Some(response(
@@ -974,7 +1022,14 @@ fn redirects_apply_robots_to_both_origins_only_at_the_robots_path() {
             )),
             _ => None,
         });
-        assert_eq!(r.stats.phases[&Phase::Robots].started, 1);
+        assert_eq!(r.stats.phases[&Phase::Robots].started, reads, "{landing}");
+        assert_eq!(
+            r.trace
+                .iter()
+                .filter(|s| s.as_str() == "fetch www.acme.com/robots.txt")
+                .count() as u32,
+            reads - 1
+        );
         assert_eq!(!r.places.is_empty(), allowed);
         assert!(!r.trace.iter().any(|s| s.ends_with("/pricing")));
         if allowed {
@@ -1234,6 +1289,36 @@ fn robots_uses_its_own_ceiling_and_enforces_complete_rules_from_a_prefix() {
     });
     assert!(run.stats.places[&0].robots_truncated);
     assert!(run.places.last().unwrap().notes.robots_disallowed);
+}
+
+#[test]
+fn a_robots_sample_cut_before_any_rule_denies_the_site() {
+    let r = run(
+        Config {
+            text_bytes: 1,
+            ..cfg()
+        },
+        "acme",
+        RESULT,
+        |effect| match effect {
+            Effect::Fetch {
+                id, url, max_bytes, ..
+            } if url.path() == "/robots.txt" => {
+                assert_eq!(*max_bytes, 1);
+                Some(response(
+                    *id,
+                    url,
+                    "text/plain",
+                    "User-agent: *\nAllow: /\n",
+                ))
+            }
+            Effect::Fetch { .. } => panic!("read without robots evidence"),
+            _ => None,
+        },
+    );
+    assert_eq!(r.stats.robots[&RobotsOutcome::Unreadable], 1);
+    assert_eq!(r.stats.phases[&Phase::Entry].refused[&Failure::Robots], 1);
+    assert!(r.places.is_empty());
 }
 
 #[test]

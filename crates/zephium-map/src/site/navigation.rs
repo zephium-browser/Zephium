@@ -344,7 +344,7 @@ impl Build<'_> {
                     continue;
                 }
                 let locator = if dated || n.element_id.is_some() {
-                    Locator::for_text(doc, i, &n.text, n.element_id.as_deref())
+                    Locator::for_text(doc, i, &n.text, n.selector_id())
                 } else {
                     None
                 };

@@ -378,7 +378,7 @@ fn make(b: &Block<'_>, doc: &Doc) -> Option<Passage> {
         doc,
         b.node,
         text.get(b.quote_offset..)?,
-        heading.and_then(|n| n.element_id.as_deref()),
+        heading.and_then(|n| n.selector_id()),
     )?;
     Some(Passage {
         text: text.to_string(),

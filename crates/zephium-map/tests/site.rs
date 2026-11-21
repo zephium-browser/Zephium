@@ -261,7 +261,7 @@ fn hostile_inputs_fail_closed_or_keep_bounded_independent_evidence() {
     assert_eq!(labels(&p.sections), ["About"]);
     assert_eq!(
         Robots::parse(&"\n".repeat(1024 * 1024)).outcome,
-        RobotsOutcome::Parsed
+        RobotsOutcome::Unreadable
     );
 }
 #[test]

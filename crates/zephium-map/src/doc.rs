@@ -193,10 +193,16 @@ pub struct Node {
     pub marks: Marks,
     pub language: Option<String>,
     pub element_id: Option<String>,
+    pub element_id_cleaned: bool,
 }
 impl Node {
     pub(crate) fn parent_index(&self) -> Option<usize> {
         self.parent.map(|i| i as usize)
+    }
+    pub(crate) fn selector_id(&self) -> Option<&str> {
+        self.element_id
+            .as_deref()
+            .filter(|_| !self.element_id_cleaned)
     }
     pub fn accessible_name(&self) -> &str {
         if self.name.is_empty()
@@ -222,6 +228,7 @@ impl Node {
             marks: Marks::default(),
             language: None,
             element_id: None,
+            element_id_cleaned: false,
         }
     }
 }
@@ -271,6 +278,7 @@ pub struct DocBuilder {
     limits: DocLimits,
     text_bytes: usize,
     path: Vec<usize>,
+    gap: bool,
 }
 impl DocBuilder {
     pub fn new(page: &Url, limits: DocLimits) -> Result<Self, DocError> {
@@ -286,6 +294,7 @@ impl DocBuilder {
             limits,
             text_bytes: 0,
             path: Vec::new(),
+            gap: false,
         })
     }
 
@@ -350,7 +359,9 @@ impl DocBuilder {
             n.text.retain(crate::visible_char);
             n.name.retain(crate::visible_char);
             if let Some(id) = &mut n.element_id {
+                let raw = id.len();
                 id.retain(crate::visible_char);
+                n.element_id_cleaned = id.len() != raw;
             }
         }
         self.doc.head.title.retain(crate::visible_char);

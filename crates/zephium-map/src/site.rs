@@ -761,8 +761,12 @@ fn element_locator(url: &Url) -> Result<Locator, KeyError> {
     else {
         return Ok(Locator::default());
     };
+    let id = decode_fragment(fragment);
+    if crate::clean_text(&id) != id {
+        return Ok(Locator::default());
+    }
     Ok(Locator {
-        element: Some(LocatorText::new(&decode_fragment(fragment))?),
+        element: Some(LocatorText::new(&id)?),
         ..Default::default()
     })
 }
@@ -1125,6 +1129,19 @@ mod tests {
                 .unwrap();
             assert_eq!(focus.key.as_url().path(), "/pricing");
         }
+    }
+
+    #[test]
+    fn a_link_fragment_changed_by_cleaning_names_no_element() {
+        let locator = |raw: &str| element_locator(&Url::parse(raw).unwrap()).unwrap();
+        assert!(locator("https://workshop.example/a#a%E2%80%8Bb") == Locator::default());
+        assert_eq!(
+            locator("https://workshop.example/a#ab")
+                .element
+                .as_ref()
+                .map(LocatorText::as_str),
+            Some("ab")
+        );
     }
 }
 

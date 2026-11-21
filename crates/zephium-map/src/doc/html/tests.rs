@@ -234,7 +234,41 @@ fn adoption_agency_reparents_children_and_merges_root_attributes() {
     assert!(doc
         .nodes()
         .iter()
-        .any(|n| n.role == Role::Paragraph && n.text == "one two three four"));
+        .any(|n| n.role == Role::Paragraph && n.text == "onetwothreefour"));
+}
+
+#[test]
+fn only_formatting_runs_without_source_whitespace_join() {
+    let doc = document(
+        b"<main><p>micro<b>scope</b> of H<sub>2</sub>O and decline<code>_code</code></p>\
+<p><span>Git</span><span>Hub</span></p><p><kbd>Ctrl</kbd><kbd>K</kbd></p>\
+<p>plain <em>emphasis</em>, and<em> again</em>x<i>y</i><a href='/w'>link</a>z</p>\
+<p><strong>Ada Lovelace</strong>Analytical Engine</p>\
+<p>line<br>break</p><ul><li><p>one</p>two</li></ul><div>block<div>inner</div>after</div>\
+<table><tr><td>cell<td>next</tr></table><pre>keep  <b>as</b>\nis</pre></main>",
+        Default::default(),
+    );
+    let texts: Vec<_> = doc.nodes().iter().map(|n| n.text.as_str()).collect();
+    for expected in [
+        "microscope of H2O and decline_code",
+        "Git Hub",
+        "Ctrl K",
+        "plain emphasis, and againxy link z",
+        "Ada Lovelace Analytical Engine",
+        "line break",
+        "one two",
+        "block inner after",
+        "keep  as\nis",
+    ] {
+        assert!(texts.contains(&expected), "{expected:?} in {texts:?}");
+    }
+    let cells: Vec<_> = doc
+        .nodes()
+        .iter()
+        .filter(|n| n.role == Role::Cell)
+        .map(|n| n.text.as_str())
+        .collect();
+    assert_eq!(cells, ["cell", "next"]);
 }
 
 #[test]

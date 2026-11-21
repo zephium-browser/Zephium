@@ -274,13 +274,19 @@ impl Session {
                 return Err(Failure::ContentType);
             }
             if let Work::Section(i, ref key) = job.work {
-                if SiteKey::from_url(&job.url) != SiteKey::from_url(&r.final_url) {
+                let other_tenant = self.sites[i].as_ref().is_some_and(|s| {
+                    let place = s.place.as_ref().map_or(&s.seed.site, |p| &p.key);
+                    place.tenant.is_some()
+                        && PlaceKey::from_url(&r.final_url).as_ref() != Some(place)
+                });
+                if other_tenant || SiteKey::from_url(&job.url) != SiteKey::from_url(&r.final_url) {
                     if let Some((s, landing)) = self.sites[i]
                         .as_mut()
                         .zip(PageKey::from_url(&r.final_url).ok())
                     {
                         s.external.insert(key.clone(), landing);
                     }
+                    return Err(Failure::External);
                 }
             }
             if PageKey::from_url(&r.final_url).is_err()
@@ -302,7 +308,11 @@ impl Session {
             Ok(r)
         });
         if job.work == Work::Robots {
-            let landing = result.as_ref().ok().map(|r| origin(&r.final_url));
+            let landing = result.as_ref().ok().and_then(|r| {
+                let landing = origin(&r.final_url);
+                (r.final_url.as_str().strip_prefix(landing.as_str()) == Some("/robots.txt"))
+                    .then_some(landing)
+            });
             let policy = match result {
                 Ok(r) => Robots::from_sample(&r.bytes, r.truncated),
                 Err(f) => {

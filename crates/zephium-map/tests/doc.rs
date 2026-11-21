@@ -395,11 +395,15 @@ fn dropped_head_metadata_keeps_complete_organic_results_readable() {
 
 #[test]
 fn page_strings_strip_directional_and_zero_width_controls() {
-    let doc=defaults("<title>A\u{202e}cme</title><main><h2 id='a\u{200b}b'>A\u{2066}B</h2><a aria-label='X\u{feff}Y' href='/'>Link</a></main>");
+    let doc=defaults("<title>A\u{202e}cme</title><main><h2 id='a\u{200b}b'>A\u{2066}B</h2><h3 id='kept'>Kept</h3><a aria-label='X\u{feff}Y' href='/'>Link</a></main>");
     assert_eq!(doc.head().title, "Acme");
     let heading = doc.nodes().iter().find(|n| n.element_id.is_some()).unwrap();
     assert_eq!(heading.element_id.as_deref(), Some("ab"));
+    assert!(heading.element_id_cleaned);
     assert_eq!(heading.text, "AB");
+    let kept = doc.nodes().iter().find(|n| n.text == "Kept").unwrap();
+    assert_eq!(kept.element_id.as_deref(), Some("kept"));
+    assert!(!kept.element_id_cleaned);
     assert!(doc.nodes().iter().any(|n| n.name == "XY"));
     assert_eq!(
         zephium_map::key::LocatorText::new("a\u{200d}b")

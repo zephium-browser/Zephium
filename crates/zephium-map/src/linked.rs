@@ -69,8 +69,7 @@ pub(crate) fn mark_answers(nodes: &mut [Node], head: &Head) {
     }
     for n in nodes {
         if let Some(&mark) = n
-            .element_id
-            .as_ref()
+            .selector_id()
             .and_then(|id| ids.get(id))
             .or_else(|| texts.get(&n.text))
         {
