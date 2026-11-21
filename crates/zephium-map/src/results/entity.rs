@@ -175,6 +175,14 @@ fn profile(url: &Url, title: &str, entity: Option<&Entity>) -> Option<Network> {
     }
     let handle = match (net, section) {
         (Network::YouTube | Network::Mastodon, "") => last.strip_prefix('@')?,
+        (Network::GitHub, "")
+            if ["pricing", "login"]
+                .iter()
+                .any(|p| last.eq_ignore_ascii_case(p)) =>
+        {
+            return None
+        }
+        (Network::Twitter, "") if last.eq_ignore_ascii_case("search") => return None,
         (Network::Twitter | Network::GitHub | Network::Instagram | Network::Facebook, "") => last,
         (Network::LinkedIn, "company" | "in" | "school")
         | (Network::Reddit, "r")

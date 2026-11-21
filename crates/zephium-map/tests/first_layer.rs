@@ -378,3 +378,38 @@ fn repeat_count(html: &str) -> u32 {
     );
     stats.repeat
 }
+
+#[test]
+fn one_unscoped_paid_label_only_marks_the_following_card() {
+    let l = layer("acme", "<main><h2><a href='https://acme.com/'>Acme</a></h2><p>Sponsored</p><h2><a href='https://promotion.example/'>Promotion</a></h2></main>");
+    assert_eq!(l.dropped.paid, 1);
+    assert_eq!(
+        l.organic
+            .iter()
+            .map(|hit| hit.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Acme"]
+    );
+}
+
+#[test]
+fn a_unique_trailing_paid_label_still_marks_its_card() {
+    let l = layer("acme", "<main><h2><a href='https://promotion.example/'>Promotion</a></h2><p>Sponsored</p><p>One</p><p>Two</p><p>Three</p><p>Four</p><h2><a href='https://acme.com/'>Acme</a></h2></main>");
+    assert_eq!(l.dropped.paid, 1);
+    assert_eq!(l.organic[0].title, "Acme");
+}
+
+#[test]
+fn both_direct_and_wrapped_result_destinations_keep_route_fragments() {
+    let first = card("example.net/app#/docs", "Docs");
+    let second = "<article><h2><a href='/url?q=https%3A%2F%2Fexample.net%2Fapp%23%2Fpricing'>Pricing</a></h2></article>";
+    let ordinary = card("example.net/plain#heading", "Plain");
+    let l = layer("acme", &format!("<main>{first}{second}{ordinary}</main>"));
+    assert_eq!(
+        l.organic
+            .iter()
+            .map(|hit| hit.url.fragment())
+            .collect::<Vec<_>>(),
+        [Some("/docs"), Some("/pricing"), None]
+    );
+}

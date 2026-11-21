@@ -1419,3 +1419,91 @@ fn unusable_bodies_still_spend_the_default_six_mib() {
     assert_eq!(result.stats.phases[&Phase::Llms].started, 0);
     assert!(result.stats.budgets.contains(&Budget::TotalBytes));
 }
+
+#[test]
+fn elapsed_before_initial_results_ends_in_a_typed_timeout() {
+    let (mut session, _) = Session::start(cfg(), "acme").unwrap();
+    let effects = session.handle(Input::Elapsed { time: MAX_ELAPSED });
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::Emit { event: MapEvent::End { outcome: EndOutcome::Failed { failure: Failure::Timeout }, stats }, .. }]
+            if stats.phases[&Phase::Results].refused[&Failure::Timeout] == 1
+    ));
+}
+
+#[test]
+fn missing_comparison_side_reports_result_refusals_and_absent_seeds() {
+    for (reply, expected) in [
+        (Err(Failure::Unavailable), Failure::Unavailable),
+        (Ok(doc(ENGINE, "<p>No results found</p>")), Failure::Missing),
+    ] {
+        let (mut session, start) = Session::start(cfg(), "acme vs other").unwrap();
+        let mut effects: VecDeque<_> = session
+            .handle(Input::Results {
+                id: start[1].id(),
+                result: Ok(doc(ENGINE, RESULT)),
+            })
+            .into();
+        let id = loop {
+            match effects.pop_front().unwrap() {
+                Effect::ReadResultsAnonymously { id, .. } => break id,
+                Effect::LookupSite { id, .. } => {
+                    effects.extend(session.handle(Input::Cache { id, memo: None }))
+                }
+                Effect::Fetch { id, url, .. } => effects.extend(session.handle(response(
+                    id,
+                    &url,
+                    "text/plain",
+                    "User-agent: *\n",
+                ))),
+                _ => {}
+            }
+        };
+        assert!(session.handle(Input::Results { id, result: reply }).iter().any(|effect| matches!(
+            effect, Effect::Emit { event: MapEvent::PlaceFailed { slot: 1, failure }, .. } if *failure == expected
+        )));
+    }
+}
+
+#[test]
+fn shell_and_wall_memos_cannot_short_circuit_entry_reads() {
+    let base = run(cfg(), "acme", RESULT, |_| None);
+    let memo = base.memo.unwrap();
+    for field in ["shell", "wall"] {
+        let mut data: serde_json::Value = serde_json::from_slice(&memo).unwrap();
+        data["payload"]["place"]["notes"][field] = serde_json::Value::Bool(true);
+        let raw = serde_json::to_vec(&data).unwrap();
+        let next = run(cfg(), "acme", RESULT, |e| match e {
+            Effect::LookupSite { id, .. } => Some(Input::Cache {
+                id: *id,
+                memo: Some(raw.clone()),
+            }),
+            _ => None,
+        });
+        assert_eq!(next.stats.rejected_memos, 1);
+        assert!(next.trace.iter().any(|item| item == "fetch acme.com/"));
+    }
+}
+
+#[test]
+fn sitemap_fetch_requires_a_valid_media_type_essence() {
+    for media in [
+        "not-a-media-type+xml",
+        "/rdf+xml",
+        "application/xml/rdf+xml",
+    ] {
+        let r = run(cfg(), "acme", RESULT, |e| match e {
+            Effect::Fetch { id, url, .. } if url.path() == "/sitemap.xml" => {
+                Some(response(*id, url, media, "<urlset/>"))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            r.stats.phases[&Phase::Sitemap]
+                .refused
+                .get(&Failure::ContentType),
+            Some(&1),
+            "{media}"
+        );
+    }
+}

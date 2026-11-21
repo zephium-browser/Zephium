@@ -164,7 +164,10 @@ impl PageKey {
                 .filter(|s| keep_pair(s))
                 .map(normalize_percent)
                 .collect();
-            pairs.sort();
+            pairs.sort_by(|a, b| {
+                let key = |pair: &str| pair.find('=').unwrap_or(pair.len());
+                a[..key(a)].cmp(&b[..key(b)])
+            });
             if !pairs.is_empty() {
                 value.push('?');
                 value.push_str(&pairs.join("&"));

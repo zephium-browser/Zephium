@@ -530,3 +530,82 @@ fn textual_list_values_keep_inline_content_and_the_subject_heading() {
     let answers = read_passages(&read_query("loom storage default").unwrap(), &[&page]);
     assert_eq!(answers[0].text, "Storage\nDefault mode Read only");
 }
+
+#[test]
+fn accepted_answers_do_not_cross_unrelated_issue_headings() {
+    let page = doc("issues", "<main><h2>Bucket failure</h2><pre>TypeError: invalid bucket</pre><h2>Printer setup</h2><div itemprop='acceptedAnswer'><pre>printer.reset()</pre></div></main>");
+    let query = read_query("TypeError: invalid bucket").unwrap();
+    assert_eq!(
+        read_passages(&query, &[&page])[0].text,
+        "TypeError: invalid bucket"
+    );
+}
+
+#[test]
+fn timing_clause_can_follow_an_unrestricted_task_quantity() {
+    let page = doc(
+        "guide",
+        "<title>Loom guide</title><p>Remove all spools before restarting.</p>",
+    );
+    let q = read_query("loom remove all spools").unwrap();
+    assert_eq!(
+        read_passages(&q, &[&page])[0].text,
+        "Remove all spools before restarting."
+    );
+}
+
+#[test]
+fn comparison_skips_an_alias_to_find_a_distinct_second_source() {
+    let a = doc(
+        "codes",
+        "<h1>471 Empty</h1><p>Code 471 means the box is empty.</p>",
+    );
+    let alias = doc(
+        "codes/",
+        "<h1>472 Full</h1><p>Code 472 means the box is full.</p>",
+    );
+    let b = doc(
+        "full",
+        "<h1>472 Full</h1><p>Code 472 means the box is full.</p>",
+    );
+    let q = read_query("difference between 471 and 472").unwrap();
+    let answer = read_passages(&q, &[&a, &alias, &b]);
+    assert_eq!(answer.len(), 2);
+    assert_eq!(answer[1].source.as_url().path(), "/full");
+}
+
+#[test]
+fn invisible_heading_does_not_end_the_visible_anchor_scope() {
+    use zephium_map::{
+        doc::{Marks, Role},
+        key::{LocatorText, TextQuote},
+    };
+    let url = Url::parse("https://example.com/").unwrap();
+    let mut b = DocBuilder::new(&url, DocLimits::ARTICLE).unwrap();
+    let main = b.push(Node::new(Role::Group, None)).unwrap();
+    let mut heading = Node::new(Role::Heading { level: Some(2) }, Some(main));
+    heading.element_id = Some("first".into());
+    b.push(heading).unwrap();
+    let mut hidden = Node::new(Role::Heading { level: Some(2) }, Some(main));
+    hidden.marks.insert(Marks::GENERATED);
+    b.push(hidden).unwrap();
+    let mut p = Node::new(Role::Paragraph, Some(main));
+    p.text = "Repeated phrase".into();
+    let first = b.push(p).unwrap();
+    b.push(Node::new(Role::Heading { level: Some(2) }, Some(main)))
+        .unwrap();
+    let mut p = Node::new(Role::Paragraph, Some(main));
+    p.text = "Repeated phrase".into();
+    b.push(p).unwrap();
+    let locator = Locator {
+        element: Some(LocatorText::new("first").unwrap()),
+        quote: Some(TextQuote {
+            start: LocatorText::new("Repeated phrase").unwrap(),
+            prefix: None,
+            suffix: None,
+            end: None,
+        }),
+        position: None,
+    };
+    assert_eq!(locator.resolve(&b.finish()), Some(first..first + 1));
+}

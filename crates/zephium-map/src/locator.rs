@@ -219,6 +219,7 @@ impl Locator {
                 (at + 1..nodes.len())
                     .find(|&i| {
                         matches!(nodes[i].role,Role::Heading{level:l} if l<=level)
+                            && crate::visible(nodes, i)
                             || n.parent_index()
                                 .is_some_and(|p| !crate::ancestors(nodes, i).any(|a| a == p))
                     })

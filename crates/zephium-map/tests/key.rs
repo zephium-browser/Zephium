@@ -155,3 +155,16 @@ fn place_keys_scope_hosts_and_tenants() {
     assert_eq!(place("www.acme.com/deep"), place("acme.com/"));
     assert_ne!(place("docs.acme.com/"), place("acme.com/"));
 }
+
+#[test]
+fn page_match_preserves_relative_order_of_repeated_parameters() {
+    let original = key("https://example.com/?sort=name&count=10&sort=date").page_match();
+    assert_eq!(
+        original,
+        key("https://example.com/?count=10&sort=name&sort=date").page_match()
+    );
+    assert_ne!(
+        original,
+        key("https://example.com/?sort=date&count=10&sort=name").page_match()
+    );
+}

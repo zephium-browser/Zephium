@@ -98,7 +98,9 @@ impl Rules<'_> {
         } else {
             source.clone()
         };
-        url.set_fragment(None);
+        if !url.fragment().is_some_and(crate::key::route) {
+            url.set_fragment(None);
+        }
         Ok(url)
     }
 }

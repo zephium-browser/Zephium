@@ -515,10 +515,7 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
                             matches!(s.as_str(), "fix" | "solution" | "resolution" | "answer")
                         })
                     });
-                    if !next.accepted
-                        && !remedy
-                        && (next.scope != b.scope || next.heading != b.heading)
-                    {
+                    if next.scope != b.scope || !remedy && next.heading != b.heading {
                         break;
                     }
                     if next.accepted || docs[next.doc].nodes()[next.node].role == Role::CodeBlock {
@@ -687,7 +684,11 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
 pub(crate) fn featured(q: &QueryRead, f: &Featured, result: &Organic) -> Option<Passage> {
     let terms = query_terms(q);
     let present: BTreeSet<_> = tokens(&f.text).collect();
-    if terms.is_empty() || !terms.is_subset(&present) {
+    let title = tokens(&result.title).collect();
+    if terms.is_empty()
+        || !terms.is_subset(&present)
+        || !question::TaskQualifiers::new(q.terms(), &title).permits(&f.text)
+    {
         return None;
     }
     let text = cut(&f.text, false)?.to_owned();
@@ -701,4 +702,39 @@ pub(crate) fn featured(q: &QueryRead, f: &Featured, result: &Organic) -> Option<
         heading: None,
         confidence: Confidence::High,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn featured_excerpts_obey_the_same_task_qualifiers_as_articles() {
+    let q = crate::read_query("loom remove all spools").unwrap();
+    let url = url::Url::parse("https://example.com/guide").unwrap();
+    let key = crate::PageKey::from_url(&url).unwrap();
+    let result = Organic {
+        key: key.clone(),
+        url,
+        title: "Loom guide".into(),
+        snippet: None,
+        rank: 1,
+        official: None,
+        discussion: false,
+        sitelinks: Vec::new(),
+    };
+    for (text, accepted) in [
+        ("Loom can remove all spools without thread.", false),
+        ("In Loom, remove all spools before restarting.", true),
+    ] {
+        assert_eq!(
+            featured(
+                &q,
+                &Featured {
+                    text: text.into(),
+                    cites: key.clone()
+                },
+                &result
+            )
+            .is_some(),
+            accepted
+        );
+    }
 }

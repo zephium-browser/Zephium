@@ -12,10 +12,12 @@ impl Build<'_> {
                 }
                 && visible(nodes, i)
                 && !ancestors(nodes, i).any(|a| {
-                    nodes[a].role
-                        == Role::Landmark {
-                            landmark: Some(Landmark::Complementary),
+                    matches!(
+                        nodes[a].role,
+                        Role::Landmark {
+                            landmark: Some(Landmark::Complementary | Landmark::Contentinfo),
                         }
+                    )
                 })
         });
         let mut owners = BTreeMap::new();
@@ -132,9 +134,17 @@ impl Build<'_> {
                 && matches!(
                     n.role,
                     Role::Landmark {
-                        landmark: Some(Landmark::Navigation | Landmark::Banner)
+                        landmark: Some(Landmark::Navigation | Landmark::Banner),
                     }
                 )
+                && !ancestors(nodes, i).any(|a| {
+                    matches!(
+                        nodes[a].role,
+                        Role::Landmark {
+                            landmark: Some(Landmark::Contentinfo),
+                        }
+                    )
+                })
         }) {
             return;
         }
@@ -247,6 +257,11 @@ impl Build<'_> {
         let Ok(key) = PageKey::from_url(doc.page()) else {
             return;
         };
+        if !crate::key::same_page(doc.page(), self.sections[index].key.as_url())
+            || doc.page().fragment().is_some()
+        {
+            self.sections[index].locator = element_locator(doc.page()).unwrap_or_default();
+        }
         self.sections[index].key = key.clone();
         self.sections[index].off_site =
             SiteKey::from_url(key.as_url()).as_ref() != Some(&self.site);
@@ -344,14 +359,13 @@ impl Build<'_> {
                 let child = self
                     .entry_for(url, n.accessible_name(), Source::SectionSidebar)
                     .or_else(|| {
-                        if SiteKey::from_url(url)? != SiteKey::from_url(doc.page())? {
-                            return None;
-                        }
-                        let mut e =
-                            self.sections[index].leaf(Source::SectionSidebar, n.accessible_name());
-                        e.key = PageKey::from_url(url).ok()?;
-                        e.role = section_role(&e.label, url);
-                        Some(e)
+                        let scope = SiteKey::from_url(doc.page())?;
+                        self.entry_for_site(
+                            url,
+                            n.accessible_name(),
+                            Source::SectionSidebar,
+                            &scope,
+                        )
                     });
                 if let Some(mut e) = child.filter(|e| {
                     let page = e.key.page_match();

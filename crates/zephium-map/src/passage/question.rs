@@ -70,7 +70,7 @@ pub(super) fn contrast(
     if sides.iter().any(BTreeSet::is_empty) || sides[0] == sides[1] {
         return Vec::new();
     }
-    let mut leads = [None, None];
+    let mut leads = [Vec::new(), Vec::new()];
     for (page, doc) in docs.iter().take(MAX_RESULT_PAGES).enumerate() {
         let title: BTreeSet<_> = tokens(&doc.head().title).collect();
         let mut first = true;
@@ -94,24 +94,27 @@ pub(super) fn contrast(
                     .flat_map(|h| tokens(&doc.nodes()[h].text))
                     .collect();
                 for (i, side) in sides.iter().enumerate() {
-                    if leads[i].is_none()
-                        && [&heading, &title]
-                            .iter()
-                            .any(|label| side.is_subset(label) && !sides[1 - i].is_subset(label))
+                    if [&heading, &title]
+                        .iter()
+                        .any(|label| side.is_subset(label) && !sides[1 - i].is_subset(label))
                         && side.is_subset(&present)
                     {
-                        leads[i] = Some((page, b));
+                        if let Some(passage) = make(b, doc) {
+                            leads[i].push(passage);
+                        }
                     }
                 }
                 first = false;
             }
         }
     }
-    if let [Some((left, a)), Some((right, b))] = leads {
-        if let Some((a, b)) = make(a, docs[left]).zip(make(b, docs[right])) {
-            if a.source.page_match() != b.source.page_match() {
-                return vec![a, b];
-            }
+    let [left, right] = leads;
+    for a in left {
+        if let Some(b) = right
+            .iter()
+            .find(|b| a.source.page_match() != b.source.page_match())
+        {
+            return vec![a, b.clone()];
         }
     }
     Vec::new()
@@ -121,6 +124,10 @@ pub(super) struct Question {
     context: u64,
     all: u64,
     task: bool,
+    qualifiers: TaskQualifiers,
+}
+
+pub(super) struct TaskQualifiers {
     quantity: Option<String>,
     last: Option<String>,
 }
@@ -153,44 +160,12 @@ impl Question {
             context,
             all: u64::MAX >> (MAX_CONTENT_TERMS - count),
             task: terms.first().is_some_and(|t| t == "how") || terms.iter().any(|t| action(t)),
-            last: terms.iter().position(|t| t == "last").and_then(|at| {
-                let tail = terms.get(at + 1..)?;
-                let noun = if tail.len() > 1 && title.contains(&tail[0]) {
-                    &tail[1]
-                } else {
-                    tail.first()?
-                };
-                Some(noun.trim_end_matches('?').to_owned())
-            }),
-            quantity: terms
-                .windows(2)
-                .find(|pair| pair[0] == "all")
-                .map(|pair| pair.join(" ")),
+            qualifiers: TaskQualifiers::new(terms, &title),
         }
     }
 
     pub(super) fn permits(&self, text: &str) -> bool {
-        if self.quantity.is_none() && self.last.is_none() {
-            return true;
-        }
-        let text = text.to_lowercase();
-        let quantified = self.quantity.as_ref().is_none_or(|phrase| {
-            text.match_indices(phrase).any(|(i, _)| {
-                let rest = &text[i + phrase.len()..];
-                !text[..i].ends_with(char::is_alphanumeric)
-                    && (rest.is_empty() || rest.starts_with(['.', ',', ':', '!', '?', '\n']))
-            })
-        });
-        quantified
-            && self.last.as_ref().is_none_or(|noun| {
-                let mut words = tokens(&text);
-                let mut previous = words.next();
-                words.any(|word| {
-                    let found = word == *noun && previous.as_deref() == Some("last");
-                    previous = Some(word);
-                    found
-                })
-            })
+        self.qualifiers.permits(text)
     }
 
     pub(super) fn best(
@@ -286,5 +261,55 @@ impl Question {
             }
             Some(answer)
         }
+    }
+}
+
+impl TaskQualifiers {
+    pub(super) fn new(terms: &[String], title: &BTreeSet<String>) -> Self {
+        Self {
+            last: terms.iter().position(|t| t == "last").and_then(|at| {
+                let tail = terms.get(at + 1..)?;
+                let noun = if tail.len() > 1 && title.contains(&tail[0]) {
+                    &tail[1]
+                } else {
+                    tail.first()?
+                };
+                Some(noun.trim_end_matches('?').to_owned())
+            }),
+            quantity: terms
+                .windows(2)
+                .find(|pair| pair[0] == "all")
+                .map(|pair| pair.join(" ")),
+        }
+    }
+
+    pub(super) fn permits(&self, text: &str) -> bool {
+        if self.quantity.is_none() && self.last.is_none() {
+            return true;
+        }
+        let text = text.to_lowercase();
+        let quantified = self.quantity.as_ref().is_none_or(|phrase| {
+            text.match_indices(phrase).any(|(i, _)| {
+                let rest = &text[i + phrase.len()..];
+                !text[..i].ends_with(char::is_alphanumeric)
+                    && (rest.is_empty()
+                        || rest.starts_with(['.', ',', ':', '!', '?', '\n'])
+                        || rest.starts_with(char::is_whitespace)
+                            && matches!(
+                                rest.split_whitespace().next(),
+                                Some("before" | "after" | "when")
+                            ))
+            })
+        });
+        quantified
+            && self.last.as_ref().is_none_or(|noun| {
+                let mut words = tokens(&text);
+                let mut previous = words.next();
+                words.any(|word| {
+                    let found = word == *noun && previous.as_deref() == Some("last");
+                    previous = Some(word);
+                    found
+                })
+            })
     }
 }

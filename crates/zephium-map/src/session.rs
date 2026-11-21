@@ -488,6 +488,20 @@ impl Session {
         }
         self.enqueue(Work::Entry(i), url);
     }
+    pub fn accepted_passage_pages(&self) -> usize {
+        self.articles.len()
+            + self
+                .sites
+                .iter()
+                .flatten()
+                .filter(|site| {
+                    site.shared_passage.is_some()
+                        && site.doc.is_some()
+                        && site.place.as_ref().is_some_and(|place| !place.notes.wall)
+                })
+                .count()
+    }
+
     fn update_passages(&mut self, out: &mut Vec<Effect>) {
         let mut ordered: BTreeMap<_, _> =
             self.articles.iter().map(|(pos, doc)| (*pos, doc)).collect();
@@ -729,7 +743,15 @@ impl Session {
                 self.elapsed = self.elapsed.max(time);
                 if self.elapsed >= self.cfg.elapsed {
                     self.budget(Budget::Elapsed);
-                    self.finish(&mut out);
+                    if self
+                        .pending
+                        .values()
+                        .any(|pending| matches!(pending, Pending::Results))
+                    {
+                        self.fail_initial_results(Failure::Timeout, &mut out);
+                    } else {
+                        self.finish(&mut out);
+                    }
                     return out;
                 }
             }
@@ -750,15 +772,7 @@ impl Session {
                     Some(Pending::Results) => {
                         self.counts(Phase::Results).completed += 1;
                         if let Err(f) = result.and_then(|doc| self.results(doc, &mut out)) {
-                            self.finished = true;
-                            self.refused(Phase::Results, f);
-                            self.emit(
-                                MapEvent::End {
-                                    outcome: EndOutcome::Failed { failure: f },
-                                    stats: self.stats.clone(),
-                                },
-                                &mut out,
-                            );
+                            self.fail_initial_results(f, &mut out);
                             return out;
                         }
                     }
@@ -771,9 +785,26 @@ impl Session {
                             Ok(doc) => {
                                 if let Some(seed) = self.side_seed(&doc, &text) {
                                     self.lookup(i, seed, &mut out);
+                                } else {
+                                    self.emit(
+                                        MapEvent::PlaceFailed {
+                                            slot: i as u8,
+                                            failure: Failure::Missing,
+                                        },
+                                        &mut out,
+                                    );
                                 }
                             }
-                            Err(f) => self.refused(Phase::AnonymousResults, f),
+                            Err(failure) => {
+                                self.refused(Phase::AnonymousResults, failure);
+                                self.emit(
+                                    MapEvent::PlaceFailed {
+                                        slot: i as u8,
+                                        failure,
+                                    },
+                                    &mut out,
+                                );
+                            }
                         }
                     }
                     _ => {}
@@ -828,6 +859,19 @@ impl Session {
         self.schedule(&mut out);
         out
     }
+    fn fail_initial_results(&mut self, failure: Failure, out: &mut Vec<Effect>) {
+        self.finished = true;
+        self.pending.clear();
+        self.refused(Phase::Results, failure);
+        self.emit(
+            MapEvent::End {
+                outcome: EndOutcome::Failed { failure },
+                stats: self.stats.clone(),
+            },
+            out,
+        );
+    }
+
     fn done(&mut self, out: &mut Vec<Effect>) {
         self.finished = true;
         self.pending.clear();

@@ -671,3 +671,114 @@ fn surplus_role_entries_keep_the_first_in_site_order() {
         .collect();
     assert_eq!(labels(&place.sections), expected);
 }
+
+#[test]
+fn footer_navigation_does_not_hide_primary_link_clusters() {
+    let home = doc("/", "<main><ul><li><a href='/docs'>Docs</a></li><li><a href='/pricing'>Pricing</a></li><li><a href='/download'>Download</a></li><li><a href='/about'>About</a></li></ul></main><footer><nav><a href='/privacy'>Privacy</a></nav></footer>");
+    let place = read_site(&home, &SiteInputs::default()).unwrap();
+    assert!(place.sections.iter().any(|e| e.label == "Docs"
+        && e.sources.contains(&Source::LinkCluster)
+        && e.tier == Tier::Primary));
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.label == "Privacy" && e.sources.contains(&Source::Footer)));
+}
+
+#[test]
+fn nested_menu_links_keep_distinct_anchors_on_the_parent_page() {
+    let home = doc("/", "<nav><ul><li><a href='/pricing'>Pricing</a><ul><li><a href='/pricing#students'>Students</a></li><li><a href='/pricing'>Same page</a></li></ul></li></ul></nav>");
+    let place = read_site(&home, &SiteInputs::default()).unwrap();
+    assert_eq!(labels(&place.sections[0].children), ["Students"]);
+    assert_eq!(
+        place.sections[0].children[0].locator.fragment().as_deref(),
+        Some("#students")
+    );
+}
+
+#[test]
+fn delegated_sidebar_links_keep_their_real_destination_and_require_a_label() {
+    let home = doc(
+        "/",
+        "<nav><a href='https://guides.example/docs'>Documentation</a></nav>",
+    );
+    let docs = doc(
+        "https://guides.example/docs",
+        "<aside><a href='/setup#linux'>Linux setup</a><a href='/empty'></a></aside>",
+    );
+    let place = read_site(
+        &home,
+        &SiteInputs {
+            pages: [(PageKey::from_url(docs.page()).unwrap(), &docs)].into(),
+            ..SiteInputs::default()
+        },
+    )
+    .unwrap();
+    let section = &place.sections[0];
+    let child = section
+        .children
+        .iter()
+        .find(|e| e.label == "Linux setup")
+        .unwrap();
+    assert!(child.off_site);
+    assert_eq!(child.key.as_url().path(), "/setup");
+    assert_eq!(child.locator.fragment().as_deref(), Some("#linux"));
+    assert!(section.children.iter().all(|e| !e.label.is_empty()));
+}
+
+#[test]
+fn section_landing_updates_the_key_and_locator_together() {
+    let home = doc("/", "<nav><a href='/docs#install'>Documentation</a></nav>");
+    for (landing, expected) in [
+        ("/docs", Some("#install")),
+        ("/guide#setup", Some("#setup")),
+        ("/guide", None),
+    ] {
+        let docs = doc(landing, "<p>Guide</p>");
+        let place = read_site(
+            &home,
+            &SiteInputs {
+                pages: [(key("/docs"), &docs)].into(),
+                ..SiteInputs::default()
+            },
+        )
+        .unwrap();
+        let section = &place.sections[0];
+        assert_eq!(section.key.as_url().path(), docs.page().path());
+        assert_eq!(section.locator.fragment().as_deref(), expected);
+    }
+}
+
+#[test]
+fn site_profiles_ignore_known_service_routes() {
+    let doc = doc("/", "<nav><a href='https://github.com/pricing'>Pricing</a><a href='https://github.com/login'>Login</a><a href='https://x.com/search'>Search</a><a href='https://github.com/acme'>Acme</a></nav>");
+    let place = read_site(&doc, &SiteInputs::default()).unwrap();
+    assert_eq!(
+        place
+            .social
+            .iter()
+            .map(|profile| profile.url.path())
+            .collect::<Vec<_>>(),
+        ["/acme"]
+    );
+}
+
+#[test]
+fn sitemap_rejects_character_data_outside_the_root() {
+    let source = url("/sitemap.xml");
+    for text in [
+        "<![CDATA[extra]]><urlset/>",
+        "<urlset/><![CDATA[extra]]>",
+        "<urlset/>&#32;",
+    ] {
+        assert!(matches!(
+            Sitemap::parse(text.as_bytes(), &source),
+            Err(XmlError::Malformed)
+        ));
+    }
+    assert!(Sitemap::parse(
+        b"<urlset><url><loc><![CDATA[https://workshop.example/docs]]></loc></url></urlset>",
+        &source
+    )
+    .is_ok());
+}

@@ -305,7 +305,20 @@ impl FetchResult {
             Expect::Html => matches!(media.as_str(), "text/html" | "application/xhtml+xml"),
             Expect::Text => matches!(media.as_str(), "text/plain" | "text/markdown"),
             Expect::Xml => {
-                matches!(media.as_str(), "text/xml" | "application/xml") || media.ends_with("+xml")
+                matches!(media.as_str(), "text/xml" | "application/xml")
+                    || media.split_once('/').is_some_and(|(kind, subtype)| {
+                        let token = |value: &str| {
+                            !value.is_empty()
+                                && value.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^`_|~".contains(&b)
+                                })
+                        };
+                        token(kind)
+                            && token(subtype)
+                            && subtype
+                                .strip_suffix("+xml")
+                                .is_some_and(|base| !base.is_empty())
+                    })
             }
         }
     }

@@ -298,14 +298,31 @@ impl DocBuilder {
             }
         }
         if !captured {
+            let excluded = self.lift_exclusions(parent, level);
             let (parent, _) = self.fit_parent(parent, level);
-            match self.push(Node::new(Role::Text, parent.map(|i| i as u32))) {
+            let mut node = Node::new(Role::Text, parent.map(|i| i as u32));
+            node.marks.insert(excluded);
+            match self.push(node) {
                 Ok(at) => self.append(at as usize, &words, verbatim),
                 Err(DocError::Nodes | DocError::Depth) => self.mark_truncated(),
                 Err(e) => return Err(e),
             }
         }
         Ok(())
+    }
+
+    fn lift_exclusions(&self, parent: Option<usize>, level: usize) -> Marks {
+        let mut excluded = Marks::default();
+        if level >= self.limits.depth as usize {
+            if let Some(at) = parent {
+                for mark in [Marks::ANCILLARY, Marks::GENERATED, Marks::SPONSORED] {
+                    if self.doc.nodes[at].marks.has(mark) {
+                        excluded.insert(mark);
+                    }
+                }
+            }
+        }
+        excluded
     }
 
     fn fit_parent(&mut self, parent: Option<usize>, level: usize) -> (Option<usize>, usize) {
@@ -352,6 +369,9 @@ impl DocBuilder {
                 )
             {
                 continue;
+            }
+            if verbatim && tag_is(&n, "br") {
+                self.capture_text(parent, "\n", true, level)?;
             }
             if n.loss() {
                 self.mark_truncated()
@@ -401,11 +421,18 @@ impl DocBuilder {
             } else if tag_is(&n, "code") && in_sink && !verbatim {
                 Some(Role::Text)
             } else {
-                classify(&n, n.tag(), in_sink).filter(|r| !(verbatim && *r == Role::CodeBlock))
+                classify(&n, n.tag(), in_sink)
+                    .filter(|r| !(verbatim && *r == Role::CodeBlock))
+                    .or_else(|| n.generated_by_lift().then_some(Role::Group))
             };
             let (parent, level) = if let Some(role) = role {
+                let excluded = self.lift_exclusions(parent, level);
                 let (parent, level) = self.fit_parent(parent, level);
                 let mut node = Node::new(role, parent.map(|i| i as u32));
+                node.marks.insert(excluded);
+                if n.generated_by_lift() {
+                    node.marks.insert(Marks::GENERATED);
+                }
                 if ["data-layout", "data-type", "data-testid"]
                     .iter()
                     .any(|attr| n.attr(attr).is_some_and(|v| v.eq_ignore_ascii_case("ad")))
