@@ -225,6 +225,11 @@ jobs:
           pnpm tauri build --target aarch64-apple-darwin --bundles app,dmg
           --config "${RELEASE_CONFIG}"
 
+      - name: Check macOS WebKit imports
+        run: >-
+          cargo run --locked -p xtask -- check-macos-imports
+          target/aarch64-apple-darwin/release/bundle/macos/Zephium.app/Contents/MacOS/zephium-desktop
+
       - name: Locate the bundles
         run: |
           bundle=target/aarch64-apple-darwin/release/bundle

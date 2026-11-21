@@ -332,6 +332,7 @@ where
         &self,
         requests: Vec<Request>,
     ) -> Result<Vec<(String, String, bool)>, WorkAttemptStatus> {
+        let _reading = self.run.begin_reads();
         let projection = self
             .run
             .probe
@@ -612,6 +613,8 @@ where
         }
         let mut used_steps = BTreeSet::new();
         let mut results = Vec::new();
+        // Reads the driver ran; one never dispatched is not a page tried.
+        let mut ran = Vec::new();
         for request in &requests {
             let step = new.iter().find(|step| {
                 !used_steps.contains(&step.id) && same_request(&request.kind, &step.kind)
@@ -638,6 +641,7 @@ where
             let (content, error) = match (step, &execution) {
                 (Some(step), Some(execution)) => {
                     used_steps.insert(step.id);
+                    ran.push(request.call.clone());
                     let asked = new
                         .iter()
                         .filter(|s| {
@@ -676,6 +680,11 @@ where
             if !content.contains(notice.as_str()) {
                 content.push_str("\nNote: ");
                 content.push_str(notice);
+            }
+        }
+        for (request, (_, _, error)) in requests.iter().zip(&results) {
+            if matches!(request.kind, WorkStepKindV1::Read { .. }) && ran.contains(&request.call) {
+                self.run.note_page_read(!*error);
             }
         }
         let count = |search: bool| {

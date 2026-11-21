@@ -71,10 +71,21 @@ pub fn turn_within(patience: Duration) -> Result<Turn, VaultError> {
     Ok(Turn(()))
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
+fn isolated_identity(identifier: &str) -> Option<&str> {
+    match identifier {
+        "app.zephium" | "app.zephium.dev" => None,
+        other => Some(other),
+    }
+}
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{delete, list, present, read, write};
+pub use windows::{delete, list, present, read, set_windows_identity, write};
+
+#[cfg(any(windows, test))]
+mod windows_target;
 
 #[cfg(target_os = "macos")]
 mod macos;

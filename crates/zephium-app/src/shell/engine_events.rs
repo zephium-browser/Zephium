@@ -686,7 +686,8 @@ impl Shell {
                     }));
                 }
             }
-            EngineEvent::ShortcutPressed { .. } => {}
+            EngineEvent::ShortcutPressed { .. }
+            | EngineEvent::ExtensionActionMenuSelected { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
                 // Pages re-publish the title they already have (counters,
@@ -847,6 +848,7 @@ impl Shell {
             EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionActionMenuSelected { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),

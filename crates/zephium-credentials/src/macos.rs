@@ -27,12 +27,10 @@ fn account() -> &'static str {
 }
 
 fn account_for(identifier: Option<&str>) -> String {
-    match identifier {
-        Some(identifier) if identifier != "app.zephium" && identifier != "app.zephium.dev" => {
-            identifier.to_owned()
-        }
-        _ => SHARED.to_owned(),
-    }
+    identifier
+        .and_then(crate::isolated_identity)
+        .unwrap_or(SHARED)
+        .to_owned()
 }
 
 fn bundle_identifier() -> Option<String> {
