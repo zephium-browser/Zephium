@@ -49,6 +49,17 @@ pub(crate) async fn settled_route(routes: &RouteSource) -> PublicRoute {
     within(routes.settled(), || routes.route(), ROUTE_SETTLE_WAIT).await
 }
 
+pub(crate) async fn with_direct_route<T>(
+    routes: &RouteSource,
+    operation: impl Future<Output = Result<T, PublicAssetError>>,
+) -> Result<T, PublicAssetError> {
+    direct(settled_route(routes).await)?;
+    routes
+        .while_direct(operation)
+        .await
+        .map_err(|_| PublicAssetError::RouteRefused)?
+}
+
 fn direct(route: PublicRoute) -> Result<(), PublicAssetError> {
     match route {
         PublicRoute::Direct => Ok(()),
@@ -161,19 +172,23 @@ pub async fn fetch_public_image(
     routes: &RouteSource,
     url: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
-    image(settled_route(routes), public_resolver(), url).await
+    let parsed = image_target(url)?;
+    with_direct_route(routes, fetch_image(public_resolver(), url, parsed)).await
 }
 
-async fn image(
-    route: impl Future<Output = PublicRoute>,
-    resolver: Arc<dyn Resolve>,
-    url: &str,
-) -> Result<Vec<u8>, PublicAssetError> {
+fn image_target(url: &str) -> Result<url::Url, PublicAssetError> {
     let parsed = url::Url::parse(url).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(&parsed) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    direct(route.await)?;
+    Ok(parsed)
+}
+
+async fn fetch_image(
+    resolver: Arc<dyn Resolve>,
+    url: &str,
+    parsed: url::Url,
+) -> Result<Vec<u8>, PublicAssetError> {
     let client = public_client(resolver)?;
     if let Some(variant) = display_variant(url).and_then(|v| url::Url::parse(&v).ok()) {
         if let Ok(bytes) = fetch_with(&client, variant).await {
@@ -189,20 +204,23 @@ pub async fn fetch_public_record_image(
     routes: &RouteSource,
     raw: &str,
 ) -> Result<Vec<u8>, PublicAssetError> {
-    record_image(settled_route(routes), public_resolver(), raw).await
+    let target = record_target(raw)?;
+    with_direct_route(routes, fetch_record_image(public_resolver(), target)).await
 }
 
-async fn record_image(
-    route: impl Future<Output = PublicRoute>,
-    resolver: Arc<dyn Resolve>,
-    raw: &str,
-) -> Result<Vec<u8>, PublicAssetError> {
+fn record_target(raw: &str) -> Result<crate::ContextNavigationTarget, PublicAssetError> {
     let target =
         crate::ContextNavigationTarget::parse(raw).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(target.as_url()) || !crate::semantic_wire::model_safe_public_url(&target) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    direct(route.await)?;
+    Ok(target)
+}
+
+async fn fetch_record_image(
+    resolver: Arc<dyn Resolve>,
+    target: crate::ContextNavigationTarget,
+) -> Result<Vec<u8>, PublicAssetError> {
     let client = public_client_builder(resolver)
         .redirect(Policy::none())
         .build()
@@ -235,6 +253,10 @@ fn public_client(resolver: Arc<dyn Resolve>) -> Result<Client, PublicAssetError>
         .build()
         .map_err(|_| PublicAssetError::Unavailable)
 }
+fn permits_redirect(previous: usize, target: &url::Url) -> bool {
+    previous <= MAX_REDIRECTS && public_https(target)
+}
+
 fn public_client_builder(resolver: Arc<dyn Resolve>) -> reqwest::ClientBuilder {
     Client::builder()
         .no_proxy()
@@ -242,10 +264,10 @@ fn public_client_builder(resolver: Arc<dyn Resolve>) -> reqwest::ClientBuilder {
         .https_only(true)
         .redirect(Policy::custom(|attempt| {
             // `previous()` starts with the original request, not a redirect.
-            if attempt.previous().len() > MAX_REDIRECTS || !public_https(attempt.url()) {
-                attempt.stop()
-            } else {
+            if permits_redirect(attempt.previous().len(), attempt.url()) {
                 attempt.follow()
+            } else {
+                attempt.stop()
             }
         }))
         .referer(false)
@@ -311,6 +333,26 @@ async fn fetch_bounded(
 
 #[cfg(test)]
 mod tests {
+    async fn image(
+        route: impl Future<Output = PublicRoute>,
+        resolver: Arc<dyn Resolve>,
+        url: &str,
+    ) -> Result<Vec<u8>, PublicAssetError> {
+        let parsed = image_target(url)?;
+        direct(route.await)?;
+        fetch_image(resolver, url, parsed).await
+    }
+
+    async fn record_image(
+        route: impl Future<Output = PublicRoute>,
+        resolver: Arc<dyn Resolve>,
+        raw: &str,
+    ) -> Result<Vec<u8>, PublicAssetError> {
+        let target = record_target(raw)?;
+        direct(route.await)?;
+        fetch_record_image(resolver, target).await
+    }
+
     #[tokio::test]
     async fn exact_record_fetch_refuses_private_and_secret_destinations_before_transport() {
         for url in [
@@ -614,4 +656,14 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn public_redirect_policy_allows_three_hops_and_refuses_the_fourth() {
+    let target = url::Url::parse("https://example.com/asset.png").unwrap();
+    assert!(permits_redirect(MAX_REDIRECTS, &target));
+    assert!(!permits_redirect(MAX_REDIRECTS + 1, &target));
+    let private = url::Url::parse("https://127.0.0.1/asset.png").unwrap();
+    assert!(!permits_redirect(1, &private));
 }
