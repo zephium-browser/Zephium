@@ -1,9 +1,12 @@
 use std::{
     collections::HashMap,
+    future::{poll_fn, Future},
+    net::ToSocketAddrs,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, PoisonError,
     },
+    task::Poll,
     time::Instant,
 };
 
@@ -234,7 +237,7 @@ impl Drop for HostPermit {
 fn host_key(url: &url::Url) -> String {
     format!(
         "{}:{}",
-        url.host_str().unwrap_or_default(),
+        url.host_str().unwrap_or_default().trim_end_matches('.'),
         url.port_or_known_default().unwrap_or_default()
     )
 }
@@ -265,6 +268,7 @@ async fn host_permit(inner: &Arc<Inner>, url: &url::Url) -> Result<HostPermit, R
 
 struct ProxyOnly {
     host: String,
+    slots: Arc<ResolverSlots>,
 }
 
 impl reqwest::dns::Resolve for ProxyOnly {
@@ -273,6 +277,7 @@ impl reqwest::dns::Resolve for ProxyOnly {
         // proxy's own; a destination resolved here would mean a direct path.
         let own = name.as_str().eq_ignore_ascii_case(&self.host);
         let host = self.host.clone();
+        let slots = self.slots.clone();
         Box::pin(async move {
             if !own {
                 return Err(std::io::Error::new(
@@ -281,12 +286,14 @@ impl reqwest::dns::Resolve for ProxyOnly {
                 )
                 .into());
             }
-            let addresses: Vec<_> = tokio::net::lookup_host((host.as_str(), 0))
-                .await?
-                .take(guard::MAX_RESOLVED_ADDRESSES)
-                .collect();
-            let addresses: reqwest::dns::Addrs = Box::new(addresses.into_iter());
-            Ok(addresses)
+            Ok(guard::resolve_with(slots, move || {
+                let addresses: Vec<_> = (host.as_str(), 0)
+                    .to_socket_addrs()?
+                    .take(guard::MAX_RESOLVED_ADDRESSES)
+                    .collect();
+                Ok(Box::new(addresses.into_iter()))
+            })
+            .await?)
         })
     }
 }
@@ -318,9 +325,10 @@ fn build_client(inner: &Inner, route: &Route) -> Result<reqwest::Client, ReadRef
                 .proxy_url()
                 .and_then(|url| reqwest::Proxy::all(url).ok())
                 .ok_or(ReadRefusal::ProxyUnsupported)?;
-            builder
-                .proxy(proxy)
-                .dns_resolver(Arc::new(ProxyOnly { host: host.clone() }))
+            builder.proxy(proxy).dns_resolver(Arc::new(ProxyOnly {
+                host: host.clone(),
+                slots: inner.resolver_slots.clone(),
+            }))
         }
         Route::Unsupported => return Err(ReadRefusal::ProxyUnsupported),
     };
@@ -414,9 +422,8 @@ fn send_refusal(error: &reqwest::Error, probe: &ReadProbe) -> ReadRefusal {
 }
 
 impl ReadSession {
-    fn client(&self) -> Result<reqwest::Client, ReadRefusal> {
+    fn client(&self, generation: u64, route: &Route) -> Result<reqwest::Client, ReadRefusal> {
         let inner = &self.reader.inner;
-        let (generation, route) = inner.routes.current();
         let mut slot = self.client.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(current) = slot
             .as_ref()
@@ -425,7 +432,7 @@ impl ReadSession {
             return Ok(current.client.clone());
         }
         *slot = None;
-        let client = build_client(inner, &route)?;
+        let client = build_client(inner, route)?;
         *slot = Some(SessionClient {
             client: client.clone(),
             generation,
@@ -439,6 +446,8 @@ impl ReadSession {
         let started = Instant::now();
         let probe = Arc::new(ReadProbe::default());
         let mut changed = inner.routes.changed();
+        let admission = inner.routes.current();
+        let generation = admission.0;
         let deadline = request.deadline.min(started + inner.limits.max_duration);
         let outcome = if deadline <= started {
             Err(ReadRefusal::Timeout(TimeoutPhase::Queue))
@@ -448,10 +457,11 @@ impl ReadSession {
                 Ok(()) = changed.changed() => Err(ReadRefusal::RouteChanged),
                 result = tokio::time::timeout_at(
                     tokio::time::Instant::from_std(deadline),
-                    self.attempt(&request, &probe, started),
+                    self.attempt(&request, &probe, started, admission),
                 ) => result.unwrap_or_else(|_| Err(probe.timeout())),
             }
         };
+        let outcome = inner.routes.at_generation(generation, || outcome).flatten();
         if matches!(outcome, Err(ReadRefusal::Timeout(TimeoutPhase::Connect))) {
             inner.routes.request_refresh();
         }
@@ -484,6 +494,7 @@ impl ReadSession {
         request: &ReadRequest,
         probe: &Arc<ReadProbe>,
         started: Instant,
+        admission: (u64, Route),
     ) -> Result<PublicBody, ReadRefusal> {
         let inner = &self.reader.inner;
         let limits = inner.limits;
@@ -492,10 +503,11 @@ impl ReadSession {
         if !inner.policy.admits(&current) {
             return Err(ReadRefusal::NotPublicHttps);
         }
-        let client = self.client()?;
+        let (generation, route) = admission;
+        let client = self.client(generation, &route)?;
         let cap = request.max_bytes.clamp(1, limits.max_decoded_bytes);
         let mut host = host_permit(inner, &current).await?;
-        let _global = inner
+        let mut global = inner
             .global
             .clone()
             .acquire_owned()
@@ -506,18 +518,27 @@ impl ReadSession {
         let mut visited = vec![current.clone()];
         let (response, first_byte) = loop {
             probe.first_byte();
-            let sending = client
+            let request = client
                 .get(current.clone())
                 .header(ACCEPT, accept(request.expect))
-                .header(ACCEPT_ENCODING, ACCEPTED_CODINGS)
-                .send();
+                .header(ACCEPT_ENCODING, ACCEPTED_CODINGS);
+            let mut sending = std::pin::pin!(async { request.send().await });
+            let admitted = poll_fn(|cx| {
+                match inner
+                    .routes
+                    .at_generation(generation, || sending.as_mut().poll(cx))
+                {
+                    Ok(polled) => polled.map(Ok),
+                    Err(refusal) => Poll::Ready(Err(refusal)),
+                }
+            });
             let response = probe
                 .scope(tokio::time::timeout(
                     limits.connect_timeout + limits.first_byte_timeout,
-                    sending,
+                    admitted,
                 ))
                 .await
-                .map_err(|_| probe.timeout())?
+                .map_err(|_| probe.timeout())??
                 .map_err(|error| {
                     let refusal = send_refusal(&error, probe);
                     if error.is_connect() && refusal == ReadRefusal::Transport {
@@ -548,9 +569,16 @@ impl ReadSession {
                     }
                     drop(response);
                     if host_key(&next) != host_key(&current) {
+                        drop(global);
                         drop(host);
                         probe.queue();
                         host = host_permit(inner, &next).await?;
+                        global = inner
+                            .global
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| ReadRefusal::Transport)?;
                     }
                     visited.push(next.clone());
                     current = next;
@@ -594,9 +622,13 @@ impl ReadSession {
             }
         }
         drop(response);
-        let (bytes, truncated) = pipeline.finish().map_err(|_| ReadRefusal::Encoding)?;
+        let (mut bytes, mut truncated) = pipeline.finish().map_err(|_| ReadRefusal::Encoding)?;
         if !checked {
             content::check_body(request.expect, admission, &bytes)?;
+        }
+        if request.max_bytes == 0 && !bytes.is_empty() {
+            bytes.clear();
+            truncated = true;
         }
         let (media_type, charset) = declared
             .map(|declared| (Some(declared.essence), declared.charset))
@@ -617,5 +649,41 @@ impl ReadSession {
                 total: started.elapsed(),
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::dns::Resolve;
+
+    #[test]
+    fn equivalent_dns_names_share_one_host_key() {
+        let bare = url::Url::parse("https://example.com/").unwrap();
+        let rooted = url::Url::parse("https://example.com./").unwrap();
+        assert_eq!(host_key(&bare), host_key(&rooted));
+    }
+
+    #[tokio::test]
+    async fn proxy_dns_refuses_when_the_physical_resolver_slot_is_busy() {
+        let slots = Arc::new(ResolverSlots::new(1));
+        let proxy = ProxyOnly {
+            host: "127.0.0.1".into(),
+            slots: slots.clone(),
+        };
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let worker = tokio::spawn(guard::resolve_with(slots, move || {
+            started.send(()).unwrap();
+            released.recv().unwrap();
+            Ok(Box::new(std::iter::empty()))
+        }));
+        ready.await.unwrap();
+        let refused = proxy.resolve("127.0.0.1".parse().unwrap()).await;
+        release.send(()).unwrap();
+        assert_eq!(worker.await.unwrap().unwrap().count(), 0);
+        assert!(
+            matches!(refused, Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::WouldBlock))
+        );
     }
 }

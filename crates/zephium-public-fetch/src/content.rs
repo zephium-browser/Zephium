@@ -87,13 +87,15 @@ fn trimmed(head: &[u8]) -> &[u8] {
     &head[start..]
 }
 
-fn starts_with_tag(head: &[u8], tags: &[&[u8]]) -> bool {
+fn starts_with_tag(head: &[u8], tags: &[&[u8]], self_closing: bool) -> bool {
     tags.iter().any(|tag| {
         head.len() >= tag.len()
             && head[..tag.len()].eq_ignore_ascii_case(tag)
-            && head
-                .get(tag.len())
-                .is_none_or(|next| next.is_ascii_whitespace() || *next == b'>')
+            && head.get(tag.len()).is_none_or(|next| {
+                next.is_ascii_whitespace()
+                    || *next == b'>'
+                    || self_closing && head[tag.len()..].starts_with(b"/>")
+            })
     })
 }
 
@@ -109,13 +111,18 @@ pub(crate) fn looks_html(head: &[u8]) -> bool {
             b"<script",
             b"<meta",
         ],
+        false,
     )
 }
 
 pub(crate) fn looks_xml(head: &[u8]) -> bool {
     let head = trimmed(head);
     head.starts_with(b"<?xml")
-        || starts_with_tag(head, &[b"<urlset", b"<sitemapindex", b"<rss", b"<feed"])
+        || starts_with_tag(
+            head,
+            &[b"<urlset", b"<sitemapindex", b"<rss", b"<feed"],
+            true,
+        )
 }
 
 pub(crate) fn looks_binary(head: &[u8]) -> bool {
@@ -336,4 +343,15 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn known_xml_roots_allow_immediate_self_closing_delimiters() {
+    let admission = admit(Expect::Xml, None).unwrap();
+    for body in [b"<rss/>".as_slice(), b"<rss />"] {
+        assert_eq!(check_body(Expect::Xml, admission, body), Ok(()));
+        assert!(check_body(Expect::Text, admit(Expect::Text, None).unwrap(), body).is_err());
+    }
+    assert!(check_body(Expect::Xml, admission, b"<rss-extra/>").is_err());
 }
