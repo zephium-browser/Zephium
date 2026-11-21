@@ -46,30 +46,37 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    use std::process::{Command, Stdio};
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
     use super::ProcessSample;
 
+    fn ticks(time: FILETIME) -> u64 {
+        (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+    }
+
+    // Read in-process: starting PowerShell per sample cost far more CPU than
+    // the map work being measured.
     pub(in super::super) fn sample() -> Option<ProcessSample> {
-        let pid = std::process::id();
-        let script = format!(
-            "$ErrorActionPreference='Stop'; $p=Get-Process -Id {pid}; \
-             $p.TotalProcessorTime.Ticks; $p.PeakWorkingSet64"
-        );
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let output = std::str::from_utf8(&output.stdout).ok()?;
-        let mut lines = output.lines();
+        let (mut created, mut exited, mut kernel, mut user) = Default::default();
+        let mut memory = PROCESS_MEMORY_COUNTERS::default();
+        let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
+        // SAFETY: the current-process pseudo-handle needs no closing, and each
+        // out-pointer is a writable local of the type the call fills.
+        let (times, counted) = unsafe {
+            let process = GetCurrentProcess();
+            (
+                GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user),
+                GetProcessMemoryInfo(process, &mut memory, size),
+            )
+        };
+        times.ok()?;
+        counted.ok()?;
         Some(ProcessSample {
-            cpu_ns: lines.next()?.trim().parse::<u64>().ok()?.checked_mul(100)?,
-            peak_rss_bytes: lines.next()?.trim().parse().ok()?,
+            // Kernel and user time come in units of 100 ns.
+            cpu_ns: ticks(kernel).checked_add(ticks(user))?.checked_mul(100)?,
+            peak_rss_bytes: u64::try_from(memory.PeakWorkingSetSize).ok()?,
         })
     }
 
