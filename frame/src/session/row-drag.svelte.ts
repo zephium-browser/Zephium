@@ -133,6 +133,7 @@ export class RowDrag {
 
   down(event: PointerEvent, id: string) {
     if (event.button !== 0) return;
+    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
     this.#swallow = false;
     if (this.#dragging || this.#down !== null) this.abandon();
     this.#down = { x: event.clientX, y: event.clientY };
@@ -206,6 +207,7 @@ export class RowDrag {
   }
 
   up(event: PointerEvent) {
+    if (event.pointerId !== this.#pointerId) return;
     const over = document.elementFromPoint(event.clientX, event.clientY);
     const before = placeBefore(over, event.clientX, event.clientY, this.#id);
     const dragged = this.#dragging;
@@ -254,6 +256,7 @@ export class RowDrag {
   }
 
   cancel(event: PointerEvent) {
+    if (event.pointerId !== this.#pointerId) return;
     this.#release(event);
     this.#reorder?.release();
     this.#reset();

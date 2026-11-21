@@ -300,6 +300,28 @@ test("movement from another pointer does not hijack or cancel an active drag", a
   );
 });
 
+test.each(["pointerdown", "pointerup", "pointercancel"])(
+  "%s from another pointer leaves the original drag in control",
+  async (type) => {
+    const { row } = await list();
+    const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+    const target = row("c").getBoundingClientRect();
+    const point = { clientX: target.left + 20, clientY: target.bottom - 4 };
+    const { init } = drag(handle, { x: point.clientX, y: point.clientY });
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+
+    handle.dispatchEvent(new PointerEvent(type, { ...init, ...point, pointerId: 2 }));
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+    expect(native.setEssential).not.toHaveBeenCalled();
+
+    handle.dispatchEvent(new PointerEvent("pointerup", { ...init, ...point }));
+    await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+    expect(native.setEssential).toHaveBeenCalledExactlyOnceWith("a", false, "d");
+  },
+);
+
 test("unmounting an idle list does not clear another list's active drag", async () => {
   const active = await list();
   const idle = await list("pinned");
