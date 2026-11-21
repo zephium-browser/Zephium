@@ -76,6 +76,7 @@ struct Summary {
     metrics: BTreeMap<&'static str, Distribution>,
     refusals: BTreeMap<String, u64>,
     unrecorded_requests: u64,
+    matched_relaxed: u64,
     probe: ProbeTotals,
     synthetic_results: usize,
     session: Option<SessionTotals>,
@@ -344,6 +345,7 @@ impl Default for Accumulator {
                 metrics: BTreeMap::new(),
                 refusals: BTreeMap::new(),
                 unrecorded_requests: 0,
+                matched_relaxed: 0,
                 probe: ProbeTotals::default(),
                 synthetic_results: 0,
                 session: None,
@@ -424,6 +426,10 @@ impl Accumulator {
             }
         }
         if replay {
+            self.summary.matched_relaxed = self
+                .summary
+                .matched_relaxed
+                .saturating_add(result.activity.matched_relaxed);
             self.summary.unrecorded_requests = self
                 .summary
                 .unrecorded_requests
@@ -546,8 +552,8 @@ impl Summary {
         if replay {
             let _ = writeln!(
                 markdown,
-                "Unrecorded requests: {}\n",
-                self.unrecorded_requests
+                "Unrecorded requests: {}\n\nmatched_relaxed: {}\n",
+                self.unrecorded_requests, self.matched_relaxed
             );
         }
         markdown.push_str("| Scope |");

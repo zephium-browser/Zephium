@@ -288,11 +288,15 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
             vec![b'x'; BODY.len()]
         );
         let stored = Journal::load(&query_dir).unwrap();
-        let (index, _, _) = stored
-            .find(&request("/docs", Expectation::Text), |_| true, false)
+        let matched = stored
+            .find(
+                &request("/docs", Expectation::Text),
+                |_| true,
+                MatchPolicy::Probe,
+            )
             .unwrap();
         assert_eq!(
-            stored.result(index, &query_dir).unwrap_err().class,
+            stored.result(matched.index, &query_dir).unwrap_err().class,
             "body_digest_mismatch"
         );
     }

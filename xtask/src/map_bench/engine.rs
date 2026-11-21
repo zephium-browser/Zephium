@@ -364,9 +364,15 @@ pub(super) enum RobotsStop {
 #[derive(Clone, Default, Debug, Deserialize, PartialEq, Serialize)]
 pub(super) struct Activity {
     pub(super) site_requests: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(super) matched_relaxed: u64,
     pub(super) not_recorded: u64,
     pub(super) interrupted: u64,
     pub(super) refusals: BTreeMap<String, u64>,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Activity {

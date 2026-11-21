@@ -18,7 +18,10 @@ use super::engine::{
     FetchRefusal, FetchRequest, FetchResult, Outcome, ResultsPage, MAX_REQUESTS,
 };
 use super::score::{self, Reason, Score, Verdict};
-use super::store::{self, optional_json, query_dir, write_json, Journal, ResultsSlot, Transfer};
+use super::store::{
+    self, optional_json, query_dir, write_json, Journal, MatchPolicy, RecordedMatch, ResultsSlot,
+    Transfer,
+};
 use super::{platform, BenchError, Options, Result};
 
 const SCHEMA: u32 = 1;
@@ -361,7 +364,7 @@ struct QueryIo<'a> {
 }
 
 enum Ready {
-    Recorded(usize),
+    Recorded(RecordedMatch),
     Refused(FetchRefusal),
 }
 
@@ -408,20 +411,29 @@ impl<'a> QueryIo<'a> {
     }
 
     fn enqueue(&mut self, token: usize, request: FetchRequest) -> Result<()> {
-        let exact = self.clock.engine == EngineKind::Session;
-        if let Some((index, end, order)) = self.journal.find(
+        let probe = self.clock.engine == EngineKind::Probe;
+        let policy = if probe {
+            MatchPolicy::Probe
+        } else if self.live.is_some() {
+            MatchPolicy::Exact
+        } else {
+            MatchPolicy::Replay
+        };
+        if let Some(matched) = self.journal.find(
             &request,
-            |index| !exact || !self.claimed.contains(&index),
-            exact,
+            |index| probe || !self.claimed.contains(&index),
+            policy,
         ) {
-            self.claimed.insert(index);
-            self.ready
-                .insert((Some(order), end, token), Ready::Recorded(index));
+            self.claimed.insert(matched.index);
+            self.ready.insert(
+                (Some(matched.order), matched.end, token),
+                Ready::Recorded(matched),
+            );
         } else if let Some(live) = &mut self.live {
             let index = self.journal.reserve(&request, self.query, live.elapsed())?;
             self.claimed.insert(index);
             // The sequential probe can attribute refusals' reader-wide byte deltas.
-            let wire_before = (!exact).then(|| live.source.counts().wire_bytes);
+            let wire_before = probe.then(|| live.source.counts().wire_bytes);
             live.source.submit(token, request, live.elapsed());
             self.active.insert(token, (index, wire_before));
         } else {
@@ -519,10 +531,18 @@ impl BenchIo for QueryIo<'_> {
         let (token, result) = if let Some(((_, end, token), ready)) = self.ready.pop_first() {
             self.elapsed = self.elapsed.max(end);
             let result = match ready {
-                Ready::Recorded(index) => self
-                    .journal
-                    .result(index, self.query)
-                    .unwrap_or_else(|error| Err(self.refuse(error))),
+                Ready::Recorded(matched) => match self.journal.result(matched.index, self.query) {
+                    Ok(mut result) => {
+                        if let Some(cap) = matched.relaxed_cap {
+                            if let Ok(body) = &mut result {
+                                body.bytes.truncate(cap);
+                            }
+                            self.activity.matched_relaxed += 1;
+                        }
+                        result
+                    }
+                    Err(error) => Err(self.refuse(error)),
+                },
                 Ready::Refused(class) => Err(class),
             };
             (token, result)

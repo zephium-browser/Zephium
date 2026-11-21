@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
-use zephium_public_fetch::{PublicBody, StatusClass, Timings, MAX_DECODED_BYTES};
+use zephium_public_fetch::{PublicBody, ReadRefusal, StatusClass, Timings, MAX_DECODED_BYTES};
 
 use super::corpus::valid_id;
 use super::engine::{
@@ -345,8 +345,8 @@ struct RequestRow {
     wire_bytes: Option<u64>,
     decoded_bytes: usize,
     timings: TransferTimes,
-    #[serde(default)]
-    elapsed_at_start: Duration,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    elapsed_at_start: Option<Duration>,
     elapsed_at_return: Duration,
     #[serde(default)]
     completion_order: Option<usize>,
@@ -389,7 +389,7 @@ impl RequestRow {
                 first_byte: None,
                 total: Duration::ZERO,
             },
-            elapsed_at_start: elapsed,
+            elapsed_at_start: Some(elapsed),
             elapsed_at_return: elapsed,
             completion_order: None,
             body: None,
@@ -403,7 +403,7 @@ impl RequestRow {
         fetch: &FetchResult,
         transfer: Transfer,
     ) -> Result<()> {
-        self.elapsed_at_start = transfer.start;
+        self.elapsed_at_start = Some(transfer.start);
         self.elapsed_at_return = transfer.end;
         self.wire_bytes = transfer.wire_bytes;
         self.timings.total = transfer.total;
@@ -435,6 +435,39 @@ impl RequestRow {
             Err(class) => self.result_class = ResultClass::Refused(*class),
         }
         Ok(())
+    }
+
+    fn answers(&self, request: &FetchRequest) -> bool {
+        match (&self.result_class, &self.body) {
+            (ResultClass::Body(_), Some(body)) => {
+                let completion = self.elapsed_at_start.map_or(self.timings.total, |start| {
+                    self.elapsed_at_return
+                        .saturating_sub(start)
+                        .max(self.timings.total)
+                });
+                request.timeout >= completion
+                    && if body.truncated {
+                        request.max_bytes <= self.cap
+                    } else {
+                        request.max_bytes >= self.decoded_bytes
+                    }
+            }
+            (ResultClass::Refused(FetchRefusal::Reader(class)), None) => match class {
+                ReadRefusal::TooLarge(_) => request.max_bytes <= self.cap,
+                ReadRefusal::Timeout(_) => request.timeout <= self.timeout,
+                ReadRefusal::NotPublicHttps
+                | ReadRefusal::RedirectRefused
+                | ReadRefusal::TooManyRedirects
+                | ReadRefusal::DnsRefused
+                | ReadRefusal::ProxyUnsupported
+                | ReadRefusal::RouteChanged
+                | ReadRefusal::Status(_)
+                | ReadRefusal::WrongContentType
+                | ReadRefusal::Encoding
+                | ReadRefusal::Transport => true,
+            },
+            _ => false,
+        }
     }
 
     fn result(&self, query: &Path) -> Result<FetchResult> {
@@ -489,6 +522,19 @@ pub(super) struct Transfer {
     pub(super) end: Duration,
 }
 
+pub(super) enum MatchPolicy {
+    Probe,
+    Exact,
+    Replay,
+}
+
+pub(super) struct RecordedMatch {
+    pub(super) index: usize,
+    pub(super) end: Duration,
+    pub(super) order: usize,
+    pub(super) relaxed_cap: Option<usize>,
+}
+
 impl Journal {
     pub(super) fn load(query: &Path) -> Result<Self> {
         let path = query.join(JOURNAL);
@@ -509,7 +555,9 @@ impl Journal {
             }
             let row: RequestRow = serde_json::from_slice(line)
                 .map_err(|_| BenchError::new("invalid_request_journal").line(index + 1))?;
-            if row.elapsed_at_start > row.elapsed_at_return
+            if row
+                .elapsed_at_start
+                .is_some_and(|start| start > row.elapsed_at_return)
                 || row.completion_order.is_some_and(|order| {
                     order >= MAX_REQUESTS
                         || journal
@@ -549,24 +597,30 @@ impl Journal {
         &self,
         request: &FetchRequest,
         mut eligible: impl FnMut(usize) -> bool,
-        exact: bool,
-    ) -> Option<(usize, Duration, usize)> {
+        policy: MatchPolicy,
+    ) -> Option<RecordedMatch> {
         let key = request.into();
-        self.0
-            .iter()
-            .enumerate()
-            .find(|(index, row)| {
-                eligible(*index)
-                    && row.key == key
-                    && (!exact || (row.cap == request.max_bytes && row.timeout == request.timeout))
-            })
-            .map(|(index, row)| {
-                (
-                    index,
-                    row.elapsed_at_return,
-                    row.completion_order.unwrap_or(index),
-                )
-            })
+        let mut fallback = None;
+        for (index, row) in self.0.iter().enumerate() {
+            if row.key != key || !eligible(index) {
+                continue;
+            }
+            let matched = |relaxed_cap| RecordedMatch {
+                index,
+                end: row.elapsed_at_return,
+                order: row.completion_order.unwrap_or(index),
+                relaxed_cap,
+            };
+            if matches!(policy, MatchPolicy::Probe)
+                || (row.cap == request.max_bytes && row.timeout == request.timeout)
+            {
+                return Some(matched(None));
+            }
+            if matches!(policy, MatchPolicy::Replay) && fallback.is_none() && row.answers(request) {
+                fallback = Some(matched(Some(request.max_bytes)));
+            }
+        }
+        fallback
     }
 
     pub(super) fn result(&self, index: usize, query: &Path) -> Result<FetchResult> {

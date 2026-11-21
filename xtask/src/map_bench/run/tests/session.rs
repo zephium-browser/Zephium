@@ -629,3 +629,143 @@ fn replay_refuses_a_different_engine_before_writing_a_run() {
     assert_eq!(error.class, "replay_engine_mismatch");
     assert!(!root.path().join("replay").exists());
 }
+
+fn save_row(root: &Path, path: &Path, request: &FetchRequest, result: FetchResult) {
+    let mut journal = Journal::load(path).unwrap();
+    let start = Duration::from_secs(10);
+    let total = Duration::from_millis(10);
+    let index = journal.reserve(request, path, start).unwrap();
+    let transfer = Transfer {
+        start,
+        total,
+        end: start + total,
+        wire_bytes: result.as_ref().ok().map(|body| body.wire_bytes),
+    };
+    journal
+        .finish(root, path, index, &result, transfer)
+        .unwrap();
+}
+
+fn replay_row(path: &Path, request: &FetchRequest, cap: usize, timeout_ms: u64) -> FetchResult {
+    let mut io = QueryIo::new(path, Journal::load(path).unwrap(), SESSION_CLOCK, None);
+    let mut request = request.clone();
+    let exact = cap == request.max_bytes && Duration::from_millis(timeout_ms) == request.timeout;
+    request.max_bytes = cap;
+    request.timeout = Duration::from_millis(timeout_ms);
+    let result = io.fetch(request);
+    let missing = result == Err(FetchRefusal::NotRecorded);
+    assert_eq!(io.activity.not_recorded, u64::from(missing));
+    assert_eq!(io.activity.matched_relaxed, u64::from(!exact && !missing));
+    result
+}
+
+#[test]
+fn replay_checks_body_length_truncation_and_completion_time() {
+    let root = tempfile::tempdir().unwrap();
+    let mut req = request("/robots.txt", Expectation::Text);
+    req.max_bytes = 128 * 1024;
+    for truncated in [false, true] {
+        let path = query_dir(
+            root.path(),
+            if truncated { "partial" } else { "full" },
+            true,
+        )
+        .unwrap();
+        let mut body = scripted_body(&req, "text/plain", "abcd").unwrap();
+        body.timings.total = Duration::from_millis(8);
+        body.truncated = truncated;
+        if truncated {
+            body.bytes.resize(req.max_bytes, b'x');
+            body.wire_bytes = req.max_bytes as u64;
+        }
+        save_row(root.path(), &path, &req, Ok(body.clone()));
+        let missing = Err(FetchRefusal::NotRecorded);
+        assert_eq!(replay_row(&path, &req, req.max_bytes, 9), missing);
+        assert_eq!(replay_row(&path, &req, req.max_bytes, 10), Ok(body.clone()));
+        if truncated {
+            assert_eq!(replay_row(&path, &req, 512 * 1024, 3000), missing);
+            body.bytes.truncate(3);
+            assert_eq!(replay_row(&path, &req, 3, 10), Ok(body));
+        } else {
+            assert_eq!(replay_row(&path, &req, 3, 3000), missing);
+            assert_eq!(replay_row(&path, &req, 4, 10), Ok(body.clone()));
+            assert_eq!(replay_row(&path, &req, 512 * 1024, 3000), Ok(body));
+        }
+    }
+}
+
+#[test]
+fn replay_uses_reader_time_for_journals_without_a_request_start() {
+    let root = tempfile::tempdir().unwrap();
+    let req = request("/docs", Expectation::Text);
+    let path = query_dir(root.path(), "legacy", true).unwrap();
+    let mut body = scripted_body(&req, "text/plain", "abcd").unwrap();
+    body.timings.total = Duration::from_millis(8);
+    save_row(root.path(), &path, &req, Ok(body.clone()));
+    let journal = path.join("requests.jsonl");
+    let mut row: serde_json::Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+    row.as_object_mut().unwrap().remove("elapsed_at_start");
+    fs::write(journal, format!("{row}\n")).unwrap();
+    assert_eq!(
+        replay_row(&path, &req, 4, 7),
+        Err(FetchRefusal::NotRecorded)
+    );
+    assert_eq!(replay_row(&path, &req, 4, 8), Ok(body));
+}
+
+#[test]
+fn replay_refusals_require_evidence_for_the_requested_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let req = request("/docs", Expectation::Html);
+    for (index, class) in ReadRefusal::ALL
+        .into_iter()
+        .map(FetchRefusal::Reader)
+        .chain([
+            FetchRefusal::NotRecorded,
+            FetchRefusal::Interrupted,
+            FetchRefusal::Limit,
+            FetchRefusal::Storage,
+        ])
+        .enumerate()
+    {
+        let path = query_dir(root.path(), &format!("case-{index}"), true).unwrap();
+        save_row(root.path(), &path, &req, Err(class));
+        for cap in [req.max_bytes - 1, req.max_bytes, req.max_bytes + 1] {
+            for timeout in [2999, 3000, 3001] {
+                let compatible = match class {
+                    FetchRefusal::Reader(ReadRefusal::TooLarge(_)) => cap <= req.max_bytes,
+                    FetchRefusal::Reader(ReadRefusal::Timeout(_)) => timeout <= 3000,
+                    FetchRefusal::Reader(_) => true,
+                    _ => cap == req.max_bytes && timeout == 3000,
+                };
+                let expected = if compatible {
+                    class
+                } else {
+                    FetchRefusal::NotRecorded
+                };
+                assert_eq!(
+                    replay_row(&path, &req, cap, timeout),
+                    Err(expected),
+                    "{class:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn replay_prefers_an_unclaimed_exact_row_then_uses_the_first_compatible_row() {
+    let root = tempfile::tempdir().unwrap();
+    let path = query_dir(root.path(), "priority", true).unwrap();
+    let req = request("/docs", Expectation::Html);
+    let mut other = req.clone();
+    other.max_bytes += 1;
+    save_row(root.path(), &path, &other, refuse(StatusRefusal::Denied));
+    save_row(root.path(), &path, &req, refuse(StatusRefusal::Challenge));
+    let mut io = QueryIo::new(&path, Journal::load(&path).unwrap(), SESSION_CLOCK, None);
+    assert_eq!(io.fetch(req.clone()), refuse(StatusRefusal::Challenge));
+    assert_eq!(io.activity.matched_relaxed, 0);
+    assert_eq!(io.fetch(req.clone()), refuse(StatusRefusal::Denied));
+    assert_eq!(io.activity.matched_relaxed, 1);
+    assert_eq!(io.fetch(req), Err(FetchRefusal::NotRecorded));
+}
