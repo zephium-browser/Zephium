@@ -12,6 +12,13 @@ const RESERVED_HOSTS: &[&str] = &[
     "zephium-onboarding.localhost",
 ];
 
+fn is_reserved_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    RESERVED_HOSTS
+        .iter()
+        .any(|reserved| host.eq_ignore_ascii_case(reserved))
+}
+
 /// Turn raw omnibox text into an allowed URL. Explicit but forbidden or
 /// malformed URL-like input is rejected instead of being sent to the search
 /// provider: a local file path or password-bearing URL must not become a
@@ -264,9 +271,7 @@ pub fn is_allowed(url: &Url) -> bool {
         && url.as_str().len() <= MAX_URL_BYTES
         && url.username().is_empty()
         && url.password().is_none()
-        && url
-            .host_str()
-            .is_some_and(|host| !RESERVED_HOSTS.contains(&host))
+        && url.host_str().is_some_and(|host| !is_reserved_host(host))
 }
 
 /// Gate for page-initiated navigations (the engine hands us a resolved URL).
@@ -524,7 +529,7 @@ fn looks_like_host(s: &str) -> bool {
     // Reserved/local input is intentional host syntax even without a public
     // suffix. Keep these names off the search provider as before.
     if host == "localhost"
-        || RESERVED_HOSTS.contains(&host)
+        || is_reserved_host(host)
         || host.ends_with(".example")
         || host.ends_with(".invalid")
     {
@@ -861,6 +866,20 @@ mod tests {
         assert!(!is_allowed(
             &Url::parse("http://tauri.localhost/index.html").unwrap()
         ));
+        for reserved in [
+            "http://tauri.localhost./index.html",
+            "https://tauri.localhost./browser.html",
+            "http://tauri.localhost../index.html",
+            "HTTP://TAURI.LOCALHOST./index.html",
+            "http://ipc.localhost./",
+            "https://asset.localhost./app.js",
+            "http://zephium-onboarding.localhost./onboarding.html",
+        ] {
+            assert!(!is_allowed(&Url::parse(reserved).unwrap()), "{reserved}");
+            assert!(!is_allowed_str(reserved), "{reserved}");
+            assert_eq!(external_target(reserved), None, "{reserved}");
+        }
+        assert!(is_allowed(&Url::parse("https://localhost./").unwrap()));
         assert!(is_allowed(&Url::parse("https://example.com").unwrap()));
         assert!(is_allowed(&Url::parse("about:blank").unwrap()));
         assert!(is_allowed_str("https://x.com/"));
@@ -876,7 +895,12 @@ mod tests {
             "data:text/html,secret",
             "about:config",
             "tauri.localhost/index.html",
+            "tauri.localhost./index.html",
+            "ipc.localhost./",
+            "asset.localhost./",
             "zephium-onboarding.localhost/onboarding.html",
+            "zephium-onboarding.localhost./onboarding.html",
+            "compare http://tauri.localhost./index.html with docs",
             "https://user:secret@example.com/",
             "https://",
             "/home/alice/private.txt",
