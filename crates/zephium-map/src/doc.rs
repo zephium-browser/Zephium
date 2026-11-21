@@ -171,6 +171,8 @@ impl Marks {
     pub const GENERATED: Self = Self(8);
     pub const FEATURED: Self = Self(16);
     pub const WIDGET: Self = Self(32);
+    pub(crate) const ANCILLARY: Self = Self(64);
+    pub(crate) const PROSE: Self = Self(128);
     pub fn has(self, mark: Self) -> bool {
         self.0 & mark.0 != 0
     }

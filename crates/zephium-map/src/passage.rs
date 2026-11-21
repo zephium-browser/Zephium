@@ -14,11 +14,12 @@ pub const MAX_RESULT_PAGES: usize = 5;
 pub const MAX_PROSE_CHARS: usize = 1200;
 pub const MAX_CODE_BYTES: usize = 4096;
 pub const MAX_CONTENT_TERMS: usize = u64::BITS as usize;
+pub const SUBJECT_START_WORDS: usize = 16;
 const ERROR_FOLLOWING_BLOCKS: usize = 3;
 const STOP: &[&str] = &[
     "a", "an", "the", "how", "do", "does", "i", "to", "is", "are", "was", "be", "can", "in", "of",
     "on", "and", "or", "my", "what", "where", "when", "why", "who", "for", "with", "it", "at",
-    "from", "error", "please", "that", "this", "by",
+    "from", "error", "please", "that", "this", "by", "work",
 ];
 
 #[derive(Clone, PartialEq, Eq)]
@@ -48,7 +49,11 @@ fn query_terms(q: &QueryRead) -> BTreeSet<String> {
     if let Some(message) = &q.diagnostic {
         content_words(message).collect()
     } else {
-        q.terms().iter().flat_map(|t| content_words(t)).collect()
+        q.terms()
+            .iter()
+            .flat_map(|t| tokens(t))
+            .filter(|s| !STOP.contains(&s.as_str()) && s != "meaning")
+            .collect()
     }
 }
 struct Block<'a> {
@@ -60,6 +65,7 @@ struct Block<'a> {
     accepted: bool,
     suggested: bool,
     terms: u64,
+    opening: u64,
     heading_terms: u64,
 }
 fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec<Block<'a>> {
@@ -89,6 +95,7 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         )
     };
     let mut mass = vec![0usize; nodes.len()];
+    let mut link_text = vec![0usize; nodes.len()];
     let mut elements = vec![1usize; nodes.len()];
     let mut excluded = Vec::with_capacity(nodes.len());
     for n in nodes {
@@ -96,12 +103,19 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             n.hidden
                 || n.marks.has(Marks::SPONSORED)
                 || n.marks.has(Marks::GENERATED)
+                || n.marks.has(Marks::ANCILLARY)
                 || forbidden(n.role)
                 || n.parent_index().is_some_and(|p| excluded[p]),
         );
     }
     let mut has_main = false;
     for (i, n) in nodes.iter().enumerate().rev() {
+        if n.role == Role::Link && visible(nodes, i) {
+            link_text[i] = n.text.chars().filter(|c| c.is_alphanumeric()).count();
+        }
+        if let Some(p) = n.parent_index() {
+            link_text[p] += link_text[i];
+        }
         if excluded[i] {
             mass[i] = 0;
             continue;
@@ -159,6 +173,9 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
             continue;
         }
         if !selected(n.role)
+            || (link_text[i] > 0
+                && link_text[i] >= n.text.chars().filter(|c| c.is_alphanumeric()).count()
+                && n.role != Role::Row)
             || matches!(n.role, Role::Text)
                 && ancestors(nodes, i).skip(1).any(|a| {
                     selected(nodes[a].role) || matches!(nodes[a].role, Role::Heading { level: _ })
@@ -195,10 +212,38 @@ fn blocks<'a>(page: usize, doc: &'a Doc, terms: &BTreeMap<String, usize>) -> Vec
         }
         let heading = headings.get(&scope).copied();
 
+        let ancillary = |s: &str| {
+            matches!(
+                s.trim().trim_end_matches(':').to_ascii_lowercase().as_str(),
+                "see also"
+                    | "references"
+                    | "citations"
+                    | "contents"
+                    | "table of contents"
+                    | "further reading"
+                    | "external links"
+            )
+        };
+        if heading.is_some_and(|(h, _)| ancillary(&nodes[h].text))
+            || [
+                "main article:",
+                "see also:",
+                "for other uses",
+                "this article is about",
+            ]
+            .iter()
+            .any(|s| excerpt.to_ascii_lowercase().starts_with(s))
+        {
+            continue;
+        }
         out.push(Block {
             doc: page,
             node: i,
             terms: relevant(excerpt),
+            opening: tokens(excerpt)
+                .take(SUBJECT_START_WORDS)
+                .filter_map(|t| terms.get(&t))
+                .fold(0, |mask, i| mask | (1 << i)),
             heading_terms: heading.map_or(0, |(_, mask)| mask),
             text,
             scope,
@@ -257,6 +302,31 @@ fn make(b: &Block<'_>, doc: &Doc) -> Option<Passage> {
     })
 }
 
+fn paired(intro: &Block<'_>, command: &Block<'_>, doc: &Doc) -> Option<Passage> {
+    let mut passage = make(intro, doc)?;
+    let command_text = cut(&command.text, true)?;
+    passage.text.push('\n');
+    passage.text.push_str(command_text);
+    let end = Locator::for_text(doc, command.node, command_text, None)?;
+    let end_quote = end.quote?;
+    let range = passage.locator.quote.as_mut()?;
+    range.end = Some(end_quote.end.unwrap_or(end_quote.start));
+    range.suffix = end_quote.suffix;
+    passage.locator.position = passage
+        .locator
+        .position
+        .zip(end.position)
+        .map(|(start, end)| crate::locator::TextPosition {
+            start: start.start,
+            end: end.end,
+        });
+    passage.code = true;
+    passage
+        .language
+        .clone_from(&doc.nodes()[command.node].language);
+    Some(passage)
+}
+
 fn bits(mut mask: u64) -> impl Iterator<Item = usize> {
     std::iter::from_fn(move || {
         if mask == 0 {
@@ -299,12 +369,18 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
                 && t.starts_with('e')
                 && t.as_bytes()[1..].iter().all(u8::is_ascii_digit)
     });
+    let numbers = terms
+        .iter()
+        .filter(|(t, _)| t.bytes().all(|b| b.is_ascii_digit()))
+        .fold(0u64, |mask, (_, i)| mask | (1 << i));
     for (i, b) in blocks.iter().enumerate() {
         let overlap = (b.terms | b.heading_terms).count_ones() as usize;
         match kind {
             PassageKind::Question => {
-                if b.terms == 0 && !(b.accepted && overlap == terms.len())
-                    || overlap * 3 < terms.len() * 2
+                let near = b.opening | b.heading_terms;
+                if near & numbers != numbers
+                    || near.count_ones() as usize != terms.len()
+                    || b.terms == 0 && !(b.accepted && overlap == terms.len())
                     || b.text.trim_end().ends_with('?')
                 {
                     continue;
@@ -356,12 +432,137 @@ pub fn read_passages(q: &QueryRead, docs: &[&Doc]) -> Vec<Passage> {
     }
     let mut passages = Vec::new();
     for (page, doc) in docs.iter().enumerate().take(MAX_RESULT_PAGES) {
+        let local: Vec<_> = blocks.iter().filter(|b| b.doc == page).collect();
+        if local.is_empty() {
+            continue;
+        }
+        let article_heading = doc.nodes().iter().enumerate().find(|(i, n)| {
+            matches!(n.role, Role::Heading { level: Some(1) })
+                && visible(doc.nodes(), *i)
+                && !ancestors(doc.nodes(), *i).any(|a| {
+                    matches!(
+                        doc.nodes()[a].role,
+                        Role::Landmark {
+                            landmark: Some(Landmark::Banner | Landmark::Navigation)
+                        }
+                    )
+                })
+        });
+        let titles = std::iter::once(doc.head().title.as_str())
+            .chain(article_heading.map(|(_, n)| n.text.as_str()));
+        let diagnostic = q.diagnostic.as_deref().and_then(|s| {
+            tokens(s)
+                .find(|t| {
+                    t.len() == 5
+                        && t.starts_with('e')
+                        && t.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+                })
+                .or_else(|| {
+                    s.split_once(':')
+                        .map(|(name, _)| name.to_owned())
+                        .filter(|n| n.ends_with("error") || n.ends_with("exception"))
+                })
+        });
+        let canonical_error = diagnostic
+            .is_some_and(|code| titles.clone().any(|title| tokens(title).any(|t| t == code)));
+        let definition = q.terms().starts_with(&["what".to_owned(), "is".to_owned()])
+            || q.terms()
+                .last()
+                .is_some_and(|w| w.trim_end_matches('?') == "meaning");
+        let canonical_definition = definition
+            && titles.clone().any(|title| {
+                title
+                    .split(['|', '—'])
+                    .flat_map(|s| s.split(" - "))
+                    .next()
+                    .is_some_and(|name| {
+                        tokens(name)
+                            .filter(|t| !STOP.contains(&t.as_str()))
+                            .collect::<BTreeSet<_>>()
+                            .iter()
+                            .eq(terms.keys())
+                    })
+            });
+        let numbered_reference = definition
+            && numbers != 0
+            && titles.clone().any(|name| {
+                let present: BTreeSet<_> = tokens(name).collect();
+                terms
+                    .iter()
+                    .filter(|(_, i)| numbers & (1 << *i) != 0)
+                    .all(|(t, _)| present.contains(t))
+            });
+        let lead = local.iter().copied().find(|b| {
+            doc.nodes()[b.node].role == Role::Paragraph
+                && (doc.nodes()[b.node].marks.has(Marks::PROSE)
+                    || b.opening.count_ones() as usize == terms.len())
+                && b.text.chars().any(char::is_alphabetic)
+                && !ancestors(doc.nodes(), b.node)
+                    .any(|a| matches!(doc.nodes()[a].role, Role::Table | Role::ListItem))
+                && (canonical_error
+                    || canonical_definition
+                    || numbered_reference
+                        && (b.opening | b.heading_terms).count_ones() as usize == terms.len())
+        });
+        let canonical = lead.and_then(|b| {
+            if canonical_error {
+                let code = local
+                    .iter()
+                    .copied()
+                    .skip_while(|next| next.node <= b.node)
+                    .take_while(|next| next.scope == b.scope && next.heading == b.heading)
+                    .find(|next| doc.nodes()[next.node].role == Role::CodeBlock)?;
+                paired(b, code, doc)
+            } else if canonical_definition || numbered_reference {
+                make(b, doc)
+            } else {
+                None
+            }
+        });
         let best = blocks
             .iter()
             .enumerate()
             .filter(|(i, b)| b.doc == page && scores[*i] > 0)
             .max_by_key(|(i, _)| (scores[*i], std::cmp::Reverse(*i)));
-        if let Some(p) = best.and_then(|(_, b)| make(b, doc)) {
+        let selected = canonical.or_else(|| {
+            let (i, b) = best?;
+            if definition && numbers != 0 && !numbered_reference && b.heading_terms == 0 {
+                return None;
+            }
+            if *kind == PassageKind::Question && !definition {
+                if matches!(
+                    doc.nodes()[b.node].role,
+                    Role::Text | Role::ListItem | Role::Document
+                ) && !b.text.contains(['.', '!', ':'])
+                    && !b.accepted
+                {
+                    return None;
+                }
+                let code = |b: &Block<'_>| doc.nodes()[b.node].role == Role::CodeBlock;
+                let pair = if code(b) {
+                    i.checked_sub(1)
+                        .and_then(|i| blocks.get(i))
+                        .map(|intro| (intro, b))
+                } else {
+                    blocks.get(i + 1).map(|next| (b, next))
+                };
+                if let Some((intro, cmd)) = pair.filter(|(a, c)| {
+                    a.doc == page
+                        && c.doc == page
+                        && a.heading == c.heading
+                        && a.scope == c.scope
+                        && doc.nodes()[a.node].role == Role::Paragraph
+                        && code(c)
+                }) {
+                    if intro.opening == 0 && intro.heading_terms == 0 {
+                        return None;
+                    }
+                    return paired(intro, cmd, doc);
+                }
+            }
+            make(b, doc)
+        });
+        if let Some(p) = selected {
             if !passages
                 .iter()
                 .any(|v: &Passage| v.source.page_match() == p.source.page_match())

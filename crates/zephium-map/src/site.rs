@@ -20,7 +20,10 @@ mod sitemap;
 pub use sitemap::{Sitemap, XmlError, MAX_SITEMAP_URLS, MAX_XML_BYTES, MAX_XML_DEPTH};
 
 pub const ENTRY_ID_BYTES: usize = 16;
-pub const MAX_SECTIONS: usize = 32;
+pub const MAX_PRIMARY_SECTIONS: usize = 12;
+pub const MAX_SECONDARY_SECTIONS: usize = 20;
+pub const MAX_SECTIONS: usize = MAX_PRIMARY_SECTIONS + MAX_SECONDARY_SECTIONS;
+pub const MAX_PLACE_CHILDREN: usize = 36;
 pub const MAX_CHILDREN: usize = 12;
 pub const MAX_SECTION_PAGES: usize = 6;
 pub const MAX_LLMS_BYTES: usize = 128 * 1024;
@@ -40,6 +43,21 @@ pub enum Source {
     Llms,
     Sitemap,
     LinkedData,
+    LinkCluster,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Tier {
+    Primary,
+    Secondary,
+}
+impl Source {
+    fn tier(self) -> Tier {
+        match self {
+            Self::PrimaryNav | Self::MenuGroup | Self::Llms => Tier::Primary,
+            _ => Tier::Secondary,
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EntryId(String);
@@ -83,6 +101,7 @@ impl EntryId {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: EntryId,
+    pub tier: Tier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read: Option<ReadState>,
     pub key: PageKey,
@@ -135,6 +154,7 @@ pub struct Place {
     pub title: String,
     pub entry: PageKey,
     pub sections: Vec<Entry>,
+    pub focus: Option<EntryId>,
     pub social: Vec<Profile>,
     pub notes: PlaceNotes,
 }
@@ -149,17 +169,50 @@ pub struct SiteInputs<'a> {
     pub pages: BTreeMap<PageKey, &'a Doc>,
 }
 
+pub const MAX_WALL_TEXT_BYTES: usize = 2048;
 pub(crate) fn challenge(doc: &Doc) -> bool {
     let hit = |s: &str| {
         let lower = s.to_ascii_lowercase();
         CHALLENGE.iter().any(|p| lower.contains(p))
     };
-    hit(&doc.head().title)
-        || doc
-            .nodes()
-            .iter()
-            .enumerate()
-            .any(|(i, n)| visible(doc.nodes(), i) && hit(&n.text))
+    let prompt = |s: &str| {
+        let lower = s
+            .trim()
+            .trim_end_matches(['.', '!', '?'])
+            .to_ascii_lowercase();
+        let lower = lower.strip_prefix("please ").unwrap_or(&lower);
+        CHALLENGE.iter().any(|&phrase| {
+            lower == phrase
+                || phrase != "captcha"
+                    && lower
+                        .strip_prefix(phrase)
+                        .is_some_and(|tail| tail.starts_with(" to "))
+        })
+    };
+    let mut size = 0usize;
+    let nodes = doc.nodes();
+    let mut challenge = hit(&doc.head().title);
+    for (i, n) in nodes.iter().enumerate().filter(|(i, _)| visible(nodes, *i)) {
+        size = size.saturating_add(n.text.len());
+        if size > MAX_WALL_TEXT_BYTES
+            || matches!(n.role, Role::Paragraph | Role::CodeBlock | Role::Document)
+                && !n.text.trim().is_empty()
+                && !prompt(&n.text)
+                && ancestors(nodes, i).any(|a| {
+                    matches!(
+                        nodes[a].role,
+                        Role::Document
+                            | Role::Landmark {
+                                landmark: Some(Landmark::Main)
+                            }
+                    )
+                })
+        {
+            return false;
+        }
+        challenge |= hit(&n.text);
+    }
+    challenge
 }
 
 fn normal(s: &str) -> String {
@@ -206,22 +259,64 @@ pub(crate) fn external_role(role: Option<SectionRole>) -> bool {
         )
     )
 }
-struct Build {
+pub(crate) struct Focus {
+    pub role: SectionRole,
+    pub modifiers: Vec<String>,
+    pub fresh: bool,
+}
+impl Focus {
+    fn rank(&self, e: &Entry) -> Option<(bool, bool, bool)> {
+        let exact = e.role == Some(self.role);
+        if !(exact
+            || self.fresh
+                && matches!(
+                    e.role,
+                    Some(
+                        SectionRole::Changelog
+                            | SectionRole::Releases
+                            | SectionRole::News
+                            | SectionRole::Blog
+                    )
+                ))
+        {
+            return None;
+        }
+        let url = e.key.as_url();
+        let evidence = [
+            e.label.as_str(),
+            url.path(),
+            url.host_str().unwrap_or_default(),
+        ];
+        if !self.modifiers.iter().all(|modifier| {
+            evidence.iter().any(|s| {
+                s.split(|c: char| !c.is_alphanumeric())
+                    .any(|w| w.eq_ignore_ascii_case(modifier))
+            })
+        }) {
+            return None;
+        }
+        let (path, label) = e.focus_rank(self.role);
+        Some((!exact, path, label))
+    }
+}
+struct Build<'a> {
     place: Place,
+    index: std::collections::HashMap<(crate::PageMatch, Locator), usize>,
+    requested: Option<&'a Focus>,
     stats: PlaceStats,
 }
-impl std::ops::Deref for Build {
+impl std::ops::Deref for Build<'_> {
     type Target = Place;
     fn deref(&self) -> &Place {
         &self.place
     }
 }
-impl std::ops::DerefMut for Build {
+impl std::ops::DerefMut for Build<'_> {
     fn deref_mut(&mut self) -> &mut Place {
         &mut self.place
     }
 }
-impl Build {
+impl Build<'_> {
     fn add_results(&mut self, links: &[Link], result: Option<&Link>) {
         self.stats.sitelinks_truncated = links.len() > MAX_SITELINKS;
         for l in links.iter().take(MAX_SITELINKS) {
@@ -266,6 +361,7 @@ impl Build {
         Some(Entry {
             id: EntryId::new(None, &key, &locator),
             read: None,
+            tier: source.tier(),
             key,
             label,
             role,
@@ -277,35 +373,103 @@ impl Build {
             more: 0,
         })
     }
-    fn section(&mut self, entry: Entry) -> Option<usize> {
-        if let Some(i) = self.sections.iter().position(|e| {
-            e.key.page_match() == entry.key.page_match() && e.locator == entry.locator
-        }) {
+    fn section(&mut self, entry: Entry) -> usize {
+        let destination = (entry.key.page_match(), entry.locator.clone());
+        if let Some(&i) = self.index.get(&destination) {
             self.sections[i].add_sources(entry.sources);
-            return Some(i);
+            return i;
         }
-        let duplicate_signup = entry.role == Some(SectionRole::SignUp)
-            && self
-                .sections
-                .iter()
-                .any(|e| e.role == Some(SectionRole::SignUp));
-        let utility = entry.utility() || duplicate_signup;
-        let mut first_signup = true;
-        let count = self
+        let index = self.sections.len();
+        self.index.insert(destination, index);
+        self.sections.push(entry);
+        index
+    }
+    fn child(&mut self, index: usize, entry: Entry) {
+        let requested = self.requested;
+        self.sections[index].child(entry, requested);
+    }
+    fn finish_sections(&mut self) {
+        let requested = self.requested;
+        let cluster_primary = !self
             .sections
             .iter()
-            .filter(|e| {
-                let duplicate =
-                    e.role == Some(SectionRole::SignUp) && !std::mem::take(&mut first_signup);
-                (e.utility() || duplicate) == utility
-            })
-            .count();
-        if count >= MAX_SECTIONS {
-            self.stats.sections_truncated = true;
-            return None;
+            .any(|e| e.tier == Tier::Primary && !e.utility());
+        let globals: BTreeSet<_> = self
+            .sections
+            .iter()
+            .map(|e| e.key.page_match())
+            .chain(std::iter::once(self.entry.page_match()))
+            .collect();
+        let first_signup = self
+            .sections
+            .iter()
+            .find(|e| e.role == Some(SectionRole::SignUp))
+            .map(|e| e.id.clone());
+        let demoted = |e: &Entry| {
+            e.utility()
+                || e.role == Some(SectionRole::SignUp) && Some(&e.id) != first_signup.as_ref()
+        };
+        for e in &mut self.sections {
+            if e.sources.contains(&Source::LinkCluster) && cluster_primary {
+                e.tier = Tier::Primary;
+            }
+            if demoted(e) {
+                e.tier = Tier::Secondary;
+            }
+            e.children.retain(|c| {
+                c.sources.contains(&Source::Heading) || !globals.contains(&c.key.page_match())
+            });
         }
-        self.sections.push(entry);
-        Some(self.sections.len() - 1)
+        self.sections.sort_by_cached_key(|e| (e.tier, demoted(e)));
+        let mut focus = None;
+        if let Some(request) = requested {
+            focus = self
+                .sections
+                .iter()
+                .flat_map(|e| std::iter::once((e, e)).chain(e.children.iter().map(move |c| (e, c))))
+                .filter_map(|(p, e)| Some((request.rank(e)?, p, e)))
+                .min_by_key(|(rank, p, e)| (*rank, e.tier, p.id != e.id))
+                .map(|(_, parent, entry)| (parent.id.clone(), entry.id.clone()));
+        }
+        let mut sections = std::mem::take(&mut self.sections);
+        for tier in [Tier::Primary, Tier::Secondary] {
+            let cap = match tier {
+                Tier::Primary => MAX_PRIMARY_SECTIONS,
+                Tier::Secondary => MAX_SECONDARY_SECTIONS,
+            };
+            let mut kept = Vec::new();
+            for e in sections.extract_if(.., |e| e.tier == tier) {
+                if kept.len() == cap {
+                    self.stats.sections_truncated = true;
+                    if focus.as_ref().is_none_or(|(parent, _)| parent != &e.id) {
+                        continue;
+                    }
+                    kept.pop();
+                }
+                kept.push(e);
+            }
+            self.sections.extend(kept);
+        }
+        self.focus = focus.map(|(_, id)| id);
+        let total: usize = self.sections.iter().map(|e| e.children.len()).sum();
+        for _ in MAX_PLACE_CHILDREN..total {
+            if let Some(section) = self
+                .place
+                .sections
+                .iter_mut()
+                .max_by_key(|e| e.children.len())
+            {
+                let Some(index) = section
+                    .children
+                    .iter()
+                    .rposition(|c| Some(&c.id) != self.place.focus.as_ref())
+                else {
+                    break;
+                };
+                section.children.remove(index);
+                section.more = section.more.saturating_add(1);
+            }
+        }
     }
     fn profile(&mut self, url: &Url, basis: ProfileBasis) -> bool {
         let Some(network) = site_profile(url) else {
@@ -396,15 +560,16 @@ impl Build {
                 self.title = clip(&crate::clean_text(title.trim()), TITLE_BYTES);
             }
         }
+        let mut labels = BTreeMap::new();
+        for (i, e) in self.sections.iter().enumerate() {
+            labels.entry(normal(&e.label)).or_insert(i);
+        }
         let mut heading = None;
         let mut index = None;
         for line in text.lines().map(str::trim) {
             if let Some(label) = line.strip_prefix("## ") {
                 heading = Some(label.trim());
-                index = self
-                    .sections
-                    .iter()
-                    .position(|e| normal(&e.label) == normal(label));
+                index = labels.get(&normal(label)).copied();
                 continue;
             }
             let Some(label) = heading else { continue };
@@ -434,22 +599,21 @@ impl Build {
                     let Some(entry) = self.entry_for(&url, label, Source::Llms) else {
                         continue;
                     };
-                    let Some(i) = self.section(entry) else {
-                        continue;
-                    };
+                    let i = self.section(entry);
+                    labels.entry(normal(label)).or_insert(i);
                     index = Some(i);
                     i
                 }
             };
             self.sections[parent].add_sources([Source::Llms]);
-            self.sections[parent].child(child);
+            self.child(parent, child);
         }
     }
 
     fn sitemap(&mut self, map: &Sitemap) {
         self.stats.sitemap_truncated |= map.truncated;
         self.stats.sitemap_urls = self.stats.sitemap_urls.saturating_add(map.count);
-        for (prefix, group) in &map.groups {
+        for (prefix, group) in map.groups() {
             let Some(first) = group.pages.first() else {
                 continue;
             };
@@ -472,10 +636,7 @@ impl Build {
                 let Some(entry) = self.entry_for(first.as_url(), seg, Source::Sitemap) else {
                     continue;
                 };
-                let Some(i) = self.section(entry) else {
-                    continue;
-                };
-                i
+                self.section(entry)
             };
             self.sections[index].add_sources([Source::Sitemap]);
             for key in &group.pages {
@@ -491,7 +652,7 @@ impl Build {
                     .unwrap_or_default()
                     .replace('-', " ");
                 if let Some(child) = self.entry_for(key.as_url(), &label, Source::Sitemap) {
-                    self.sections[index].child(child);
+                    self.child(index, child);
                 }
             }
             self.sections[index].more += group.count.saturating_sub(group.pages.len() as u32);
@@ -524,19 +685,19 @@ impl Place {
                     && old.key.as_url().host_str() == section.key.as_url().host_str()
                     && old.id != section.id
             }) {
+                if self.focus.as_ref() == Some(&section.id) {
+                    self.focus = Some(old.id.clone());
+                }
                 section.id = old.id.clone();
                 for child in &mut section.children {
-                    child.id = EntryId::new(Some(&section.id), &child.key, &child.locator);
+                    let id = EntryId::new(Some(&section.id), &child.key, &child.locator);
+                    if self.focus.as_ref() == Some(&child.id) {
+                        self.focus = Some(id.clone());
+                    }
+                    child.id = id;
                 }
             }
         }
-        self.sections.sort_by_key(|e| {
-            previous
-                .sections
-                .iter()
-                .position(|p| p.id == e.id)
-                .unwrap_or(usize::MAX)
-        });
     }
     pub(crate) fn fetch_sections(&self, fresh: bool) -> Vec<&Entry> {
         let mut entries: Vec<_> = self
@@ -630,6 +791,7 @@ impl Entry {
         Entry {
             id: self.id.clone(),
             read: None,
+            tier: source.tier(),
             key: self.key.clone(),
             locator: Locator::default(),
             label: clip(label, TITLE_BYTES),
@@ -643,12 +805,32 @@ impl Entry {
     }
     fn add_sources(&mut self, sources: impl IntoIterator<Item = Source>) {
         for source in sources {
+            self.tier = self.tier.min(source.tier());
             if !self.sources.contains(&source) {
                 self.sources.push(source);
             }
         }
     }
-    fn child(&mut self, mut entry: Entry) {
+    fn focus_rank(&self, role: SectionRole) -> (bool, bool) {
+        let exact = |s: &str| {
+            SECTION_WORDS
+                .iter()
+                .any(|&(word, r)| r == role && s.eq_ignore_ascii_case(word))
+        };
+        (
+            !exact(
+                self.key
+                    .as_url()
+                    .path()
+                    .trim_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(""),
+            ),
+            !exact(&self.label),
+        )
+    }
+    fn child(&mut self, mut entry: Entry, requested: Option<&Focus>) {
         if let Some(existing) = self
             .children
             .iter_mut()
@@ -656,6 +838,19 @@ impl Entry {
         {
             existing.add_sources(entry.sources);
             return;
+        }
+        if self.children.len() == MAX_CHILDREN
+            && requested.is_some_and(|request| {
+                request.rank(&entry).is_some_and(|rank| {
+                    self.children
+                        .iter()
+                        .filter_map(|c| request.rank(c))
+                        .all(|existing| rank < existing)
+                })
+            })
+        {
+            self.children.pop();
+            self.more += 1;
         }
         if self.children.len() < MAX_CHILDREN {
             entry.id = EntryId::new(Some(&self.id), &entry.key, &entry.locator);
@@ -670,14 +865,21 @@ pub(crate) fn with_results(
     place: Place,
     links: &[Link],
     hint: Option<&Link>,
+    requested: Option<&Focus>,
 ) -> Result<Place, KeyError> {
     let mut build = Build {
+        index: place
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(i, e)| ((e.key.page_match(), e.locator.clone()), i))
+            .collect(),
+        requested,
         place,
         stats: PlaceStats::default(),
     };
     build.add_results(links, hint);
-    build.stats.sections_truncated |= build.sections.len() > MAX_SECTIONS;
-    build.sections.truncate(MAX_SECTIONS);
+    build.finish_sections();
     build.notes.truncated |= build.stats.truncated();
     build.check_ids()?;
     Ok(build.place)
@@ -688,6 +890,13 @@ pub fn read_site(doc: &Doc, inputs: &SiteInputs<'_>) -> Result<Place, KeyError> 
 pub fn read_site_with_stats(
     doc: &Doc,
     inputs: &SiteInputs<'_>,
+) -> Result<(Place, PlaceStats), KeyError> {
+    read_site_for(doc, inputs, None)
+}
+pub(crate) fn read_site_for(
+    doc: &Doc,
+    inputs: &SiteInputs<'_>,
+    requested: Option<&Focus>,
 ) -> Result<(Place, PlaceStats), KeyError> {
     let key = PlaceKey::from_url(doc.page()).ok_or(KeyError::Url)?;
     let site = SiteKey::from_url(doc.page()).ok_or(KeyError::Url)?;
@@ -700,6 +909,8 @@ pub fn read_site_with_stats(
     .find(|s| !s.trim().is_empty())
     .unwrap_or_default();
     let mut place = Build {
+        index: Default::default(),
+        requested,
         stats: PlaceStats::default(),
         place: Place {
             title: clip(title, TITLE_BYTES),
@@ -707,6 +918,7 @@ pub fn read_site_with_stats(
             entry: key.root(doc.page())?,
             key,
             sections: Vec::new(),
+            focus: None,
             social: Vec::new(),
             notes: PlaceNotes::default(),
         },
@@ -717,6 +929,7 @@ pub fn read_site_with_stats(
     if !place.notes.wall {
         place.navigation(doc, false);
         place.navigation(doc, true);
+        place.link_clusters(doc);
         let nodes = doc.nodes();
         place.notes.shell = place.stats.links_seen <= SHELL_LINKS
             && nodes.iter().map(|n| n.text.len()).sum::<usize>() <= SHELL_TEXT_BYTES
@@ -746,9 +959,8 @@ pub fn read_site_with_stats(
             .entry_for(doc.page(), heading, Source::Heading)
             .filter(|e| e.role.is_some())
         {
-            if let Some(i) = place.section(entry) {
-                place.section_page(i, doc);
-            }
+            let i = place.section(entry);
+            place.section_page(i, doc);
         }
     }
     // Infer parents first, then insert their children in source priority order.
@@ -784,33 +996,18 @@ pub fn read_site_with_stats(
         place.sections[i].children.append(&mut preferred);
         place.section_page(i, page);
         for c in others {
-            place.sections[i].child(c);
+            place.child(i, c);
         }
     }
     place.stats.section_page_truncated |= inputs.pages.len() > MAX_SECTION_PAGES;
     if let Some(robots) = inputs.robots {
-        place.stats.robots_truncated = robots.outcome == RobotsOutcome::Limit;
+        place.stats.robots_truncated = robots.truncated || robots.outcome == RobotsOutcome::Limit;
         place.notes.robots_disallowed = place.fetch_sections(false).iter().any(|e| {
             e.key.as_url().origin() == doc.page().origin()
                 && !robots.allows(&e.key.as_url()[url::Position::BeforePath..])
         });
     }
-    let first_signup = place
-        .sections
-        .iter()
-        .find(|e| e.role == Some(SectionRole::SignUp))
-        .map(|e| e.id.clone());
-    place.sections.sort_by_cached_key(|e| {
-        let duplicate = e.role == Some(SectionRole::SignUp)
-            && first_signup.as_ref().is_some_and(|id| *id != e.id);
-        (
-            duplicate || e.utility(),
-            e.sources.first() != Some(&Source::PrimaryNav),
-            e.sources.first() != Some(&Source::Footer),
-        )
-    });
-    place.stats.sections_truncated |= place.sections.len() > MAX_SECTIONS;
-    place.sections.truncate(MAX_SECTIONS);
+    place.finish_sections();
     place.check_ids()?;
     place.notes.truncated = place.stats.truncated() || place.sections.iter().any(|e| e.more > 0);
     Ok((place.place, place.stats))
@@ -848,4 +1045,40 @@ pub(crate) fn sitemap_priority(url: &Url, entry: &Url) -> (bool, bool, bool) {
             .iter()
             .any(|s| matches!(*s, "page" | "pages" | "docs")),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn asked_section_survives_tier_and_menu_limits() {
+        let links = (0..MAX_PRIMARY_SECTIONS + 1)
+            .map(|i| format!("<li><a href='/s{i}'>Item {i}</a></li>"))
+            .collect::<String>();
+        let children = (0..MAX_CHILDREN + 1)
+            .map(|i| format!("<li><a href='/c{i}'>Child {i}</a></li>"))
+            .collect::<String>();
+        let root = Url::parse("https://workshop.example").unwrap();
+        let top = "<li><a href='/pricing'>Pricing</a></li>".to_owned();
+        let nested = format!("<li><a href='/products'>Product</a><ul>{children}{top}</ul></li>");
+        let request = Focus {
+            role: SectionRole::Pricing,
+            modifiers: Vec::new(),
+            fresh: false,
+        };
+        for menu in [top, nested] {
+            let html = format!("<nav><ul>{links}{menu}</ul></nav>");
+            let doc =
+                Doc::from_html(&root, html.as_bytes(), None, crate::DocLimits::SITE_PAGE).unwrap();
+            let (place, _) = read_site_for(&doc, &SiteInputs::default(), Some(&request)).unwrap();
+            assert_eq!(place.sections.len(), MAX_PRIMARY_SECTIONS);
+            let focus = place
+                .sections
+                .iter()
+                .flat_map(|e| std::iter::once(e).chain(&e.children))
+                .find(|e| Some(&e.id) == place.focus.as_ref())
+                .unwrap();
+            assert_eq!(focus.key.as_url().path(), "/pricing");
+        }
+    }
 }

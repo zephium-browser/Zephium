@@ -1197,3 +1197,88 @@ fn redirected_host_can_supply_a_live_place_without_writing_the_seeds_memo() {
     assert_eq!(r.places.last().unwrap().key.host, "docs.acme.com");
     assert!(r.memo.is_none());
 }
+
+#[test]
+fn robots_uses_its_own_ceiling_and_enforces_complete_rules_from_a_prefix() {
+    let run = run(cfg(), "acme", RESULT, |effect| {
+        let Effect::Fetch {
+            id, url, max_bytes, ..
+        } = effect
+        else {
+            return None;
+        };
+        match url.path() {
+            "/robots.txt" => {
+                assert_eq!(*max_bytes as usize, zephium_map::robots::MAX_ROBOTS_BYTES);
+                let mut bytes = b"User-agent: *\nDisallow: /pricing\n#".to_vec();
+                bytes.resize(*max_bytes as usize - b"\nDisallow: /".len(), b' ');
+                bytes.extend_from_slice(b"\nDisallow: /");
+                Some(Input::Fetch {
+                    id: *id,
+                    result: Ok(FetchResult {
+                        final_url: url.clone(),
+                        content_type: "text/plain".into(),
+                        charset: None,
+                        bytes,
+                        truncated: true,
+                    }),
+                })
+            }
+            "/llms.txt" => {
+                assert_eq!(*max_bytes as usize, MAX_TEXT_BYTES);
+                None
+            }
+            "/pricing" => panic!("complete disallow line was ignored"),
+            _ => None,
+        }
+    });
+    assert!(run.stats.places[&0].robots_truncated);
+    assert!(run.places.last().unwrap().notes.robots_disallowed);
+}
+
+#[test]
+fn cached_place_recomputes_focus_for_the_current_query() {
+    let first = run(cfg(), "acme pricing", RESULT, |_| None);
+    let memo = first.memo.unwrap();
+    let first = first.places.last().unwrap();
+    assert!(first
+        .sections
+        .iter()
+        .any(|e| e.key.as_url().path() == "/pricing" && Some(&e.id) == first.focus.as_ref()));
+    let next = run(cfg(), "acme news", RESULT, |e| match e {
+        Effect::LookupSite { id, .. } => Some(Input::Cache {
+            id: *id,
+            memo: Some(memo.clone()),
+        }),
+        _ => None,
+    });
+    assert_eq!(next.stats.fresh_memos, 1);
+    let place = next.places.last().unwrap();
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.key.as_url().path() == "/news" && Some(&e.id) == place.focus.as_ref()));
+}
+
+#[test]
+fn qualified_section_focus_requires_the_named_subject_and_fresh_focus_uses_editorial_sections() {
+    let home = "<nav><a href='/docs'>Docs</a><a href='/guides/storage/docs'>Storage docs</a><a href='/blog'>Blog</a></nav>";
+    for (q, expected) in [
+        ("acme storage docs", Some("/guides/storage/docs")),
+        ("acme rendering docs", None),
+        ("acme news", Some("/blog")),
+    ] {
+        let run = run(cfg(), q, RESULT, |effect| match effect {
+            Effect::Fetch { id, url, .. } if url.path() == "/" => {
+                Some(response(*id, url, "text/html", home))
+            }
+            _ => None,
+        });
+        let place = run.places.last().unwrap();
+        let entry = place
+            .sections
+            .iter()
+            .find(|e| Some(&e.id) == place.focus.as_ref());
+        assert_eq!(entry.map(|e| e.key.as_url().path()), expected, "{q}");
+    }
+}

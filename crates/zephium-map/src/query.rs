@@ -84,6 +84,8 @@ pub const SECTION_WORDS: &[(&str, SectionRole)] = &[
     ("integrations", SectionRole::Integrations),
     ("home", SectionRole::Home),
     ("pricing", SectionRole::Pricing),
+    ("book", SectionRole::Documentation),
+    ("hub", SectionRole::Product),
     ("docs", SectionRole::Documentation),
     ("developers", SectionRole::Documentation),
     ("documentation", SectionRole::Documentation),
@@ -238,6 +240,77 @@ fn pasted(text: &str, terms: &[String]) -> bool {
         || (text.len() >= PUNCTUATED_BYTES && punct >= PUNCTUATION_MARKS && punct >= text.len() / 8)
 }
 
+const ACTIONS: &[&str] = &[
+    "create", "rename", "remove", "delete", "convert", "generate", "list", "clone", "undo",
+    "reset", "enable", "disable", "change", "set", "get", "find", "fix", "update", "merge",
+    "revert", "install", "download", "login",
+];
+const FACTS: &[&str] = &[
+    "port",
+    "command",
+    "shortcut",
+    "syntax",
+    "example",
+    "flag",
+    "default",
+    "limit",
+    "version number",
+    "status code",
+    "error code",
+    "meaning",
+];
+
+fn task(terms: &[String]) -> bool {
+    if terms.len() < 2 {
+        return false;
+    }
+    terms.iter().enumerate().any(|(i, word)| {
+        ACTIONS.contains(&word.as_str())
+            && (!matches!(word.as_str(), "download" | "install" | "login") || i + 1 < terms.len())
+            && !matches!(terms.get(i+1..i+4), Some([article, generic, to]) if article == "a" && matches!(generic.as_str(),"way" | "place") && to == "to")
+    }) || FACTS.iter().any(|fact| {
+        terms[1..]
+            .windows(fact.split_whitespace().count())
+            .any(|w| w.iter().map(String::as_str).eq(fact.split_whitespace()))
+    })
+}
+
+fn concept_comparison(terms: &[String]) -> bool {
+    const CONCEPTS: &[&str] = &[
+        "authentication",
+        "authorization",
+        "concurrency",
+        "parallelism",
+        "latency",
+        "throughput",
+        "encoding",
+        "encryption",
+        "hashing",
+        "stack",
+        "heap",
+        "tcp",
+        "udp",
+        "http",
+        "https",
+        "iteration",
+        "recursion",
+        "thread",
+        "process",
+        "threads",
+        "processes",
+    ];
+    let concept = |side: &[String]| {
+        !side.is_empty()
+            && side
+                .iter()
+                .all(|w| w.bytes().all(|b| b.is_ascii_digit()) || CONCEPTS.contains(&w.as_str()))
+    };
+    terms
+        .iter()
+        .position(|w| matches!(w.as_str(), "vs" | "vs." | "versus"))
+        .is_some_and(|i| concept(&terms[..i]) && concept(&terms[i + 1..]))
+}
+
 pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
     if text.len() > MAX_QUERY_BYTES {
         return Err(QueryError::Bytes);
@@ -256,6 +329,7 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
     let phrase = terms.join(" ");
     let question = phrase.ends_with('?')
         || [
+            "difference between ",
             "how to ",
             "how do ",
             "how does ",
@@ -274,7 +348,15 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
             "can i ",
         ]
         .iter()
-        .any(|prefix| phrase.starts_with(prefix));
+        .any(|prefix| phrase.starts_with(prefix))
+        || [
+            " how to ",
+            " how do i ",
+            " what is ",
+            " difference between ",
+        ]
+        .iter()
+        .any(|frame| phrase.contains(frame));
     let (entity, section) = split_section(&terms);
     let mut confidence = Confidence::High;
     let kind = if pasted(text, &terms) {
@@ -283,7 +365,7 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
         }
     } else if instant(&terms, &phrase) {
         QueryKind::Instant
-    } else if question {
+    } else if question || concept_comparison(&terms) {
         QueryKind::Passage {
             kind: PassageKind::Question,
         }
@@ -299,6 +381,10 @@ pub fn read_query(text: &str) -> Result<QueryRead, QueryError> {
         }
     } else if listing(&terms) {
         QueryKind::List
+    } else if task(&terms) {
+        QueryKind::Passage {
+            kind: PassageKind::Question,
+        }
     } else {
         let fresh_word = SECTION_WORDS.iter().find(|(word, role)| {
             if !matches!(role, SectionRole::News | SectionRole::Releases) {

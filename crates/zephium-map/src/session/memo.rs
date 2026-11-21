@@ -3,7 +3,7 @@ use crate::results::{MAX_SOCIAL, TITLE_BYTES};
 use crate::site::{MAX_CHILDREN, MAX_SECTIONS};
 use serde::{Deserialize, Serialize};
 
-pub const MEMO_VERSION: u16 = 2;
+pub const MEMO_VERSION: u16 = 3;
 pub const MAX_MEMO_BYTES: usize = 256 * 1024;
 pub const MEMO_TTL: u64 = 24 * 60 * 60;
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,6 +48,21 @@ impl SiteMemo {
             || p.check_ids().is_err()
             || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(&p.site)
             || p.title.len() > TITLE_BYTES
+            || p.focus.is_some()
+            || p.sections
+                .iter()
+                .filter(|e| e.tier == site::Tier::Primary)
+                .count()
+                > site::MAX_PRIMARY_SECTIONS
+            || p.sections
+                .iter()
+                .filter(|e| e.tier == site::Tier::Secondary)
+                .count()
+                > site::MAX_SECONDARY_SECTIONS
+            || p.sections
+                .windows(2)
+                .any(|pair| pair[0].tier > pair[1].tier)
+            || p.sections.iter().map(|e| e.children.len()).sum::<usize>() > site::MAX_PLACE_CHILDREN
             || p.sections.len() > MAX_SECTIONS
             || p.social.len() > MAX_SOCIAL
             || !p.social.iter().all(|v| {

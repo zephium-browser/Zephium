@@ -238,7 +238,7 @@ impl Session {
                 id,
                 url,
                 expect,
-                max_bytes: self.cfg.bytes(expect),
+                max_bytes: job.work.byte_cap(&self.cfg),
                 timeout: self
                     .cfg
                     .timeout
@@ -262,13 +262,13 @@ impl Session {
             count.bytes = count.bytes.saturating_add(r.bytes.len() as u64);
         }
         let result = result.and_then(|mut r| {
-            if matches!(job.work, Work::Sitemap(_)) && r.bytes.len() > self.cfg.xml_bytes as usize {
-                r.bytes.truncate(self.cfg.xml_bytes as usize);
-                r.truncated = true;
-            }
-            if r.bytes.len() > self.cfg.bytes(expect) as usize
-                || r.truncated && !matches!(job.work, Work::Sitemap(_))
-            {
+            let cap = job.work.byte_cap(&self.cfg) as usize;
+            if matches!(job.work, Work::Robots | Work::Sitemap(_)) {
+                if r.bytes.len() > cap {
+                    r.bytes.truncate(cap);
+                    r.truncated = true;
+                }
+            } else if r.bytes.len() > cap || r.truncated {
                 self.budget(expect.budget());
                 return Err(Failure::Limit);
             }
@@ -306,10 +306,7 @@ impl Session {
         if job.work == Work::Robots {
             let landing = result.as_ref().ok().map(|r| origin(&r.final_url));
             let policy = match result {
-                Ok(r) => match std::str::from_utf8(&r.bytes) {
-                    Ok(text) => Robots::parse(text),
-                    Err(_) => Robots::unavailable(false),
-                },
+                Ok(r) => Robots::from_sample(&r.bytes, r.truncated),
                 Err(f) => {
                     self.refused(phase, f);
                     if f == Failure::Limit {

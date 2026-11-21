@@ -16,7 +16,8 @@ pub enum XmlError {
 #[derive(Default)]
 pub struct Sitemap {
     pub index: Vec<Url>,
-    pub(super) groups: BTreeMap<crate::PageMatch, Cluster>,
+    groups: BTreeMap<crate::PageMatch, Cluster>,
+    order: Vec<crate::PageMatch>,
     pub truncated: bool,
     pub count: u32,
 }
@@ -189,16 +190,27 @@ impl Sitemap {
             self.truncated = true;
             return;
         }
+        if !self.groups.contains_key(&base) {
+            self.order.push(base.clone());
+        }
         let group = self.groups.entry(base).or_default();
         group.add(key);
+    }
+    pub(super) fn groups(&self) -> impl Iterator<Item = (&crate::PageMatch, &Cluster)> {
+        self.order
+            .iter()
+            .filter_map(|p| Some((p, self.groups.get(p)?)))
     }
     pub(super) fn merge(&mut self, other: &Self) {
         self.count = self.count.saturating_add(other.count);
         self.truncated |= other.truncated;
-        for (prefix, cluster) in &other.groups {
+        for (prefix, cluster) in other.groups() {
             if self.groups.len() >= MAX_SECTIONS && !self.groups.contains_key(prefix) {
                 self.truncated = true;
                 continue;
+            }
+            if !self.groups.contains_key(prefix) {
+                self.order.push(prefix.clone());
             }
             let into = self.groups.entry(prefix.clone()).or_default();
             into.count += cluster.count - cluster.pages.len() as u32;

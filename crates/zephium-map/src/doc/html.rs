@@ -278,7 +278,8 @@ impl DocBuilder {
             }
             inline |= self.doc.nodes[at].role == Role::Text;
             prose |= takes_prose;
-            if self.doc.nodes[at].marks.has(Marks::GENERATED)
+            if self.doc.nodes[at].marks.has(Marks::ANCILLARY)
+                || self.doc.nodes[at].marks.has(Marks::GENERATED)
                 || self.doc.nodes[at].marks.has(Marks::SPONSORED)
             {
                 break;
@@ -356,8 +357,36 @@ impl DocBuilder {
                             | Role::CodeBlock
                     )
                 });
-            let role =
-                classify(&n, n.tag(), in_sink).filter(|r| !(verbatim && *r == Role::CodeBlock));
+            let ancillary = matches!(n.tag(), "caption" | "figcaption")
+                || tag_is(&n, "cite")
+                    && !std::iter::successors(parent, |&at| self.doc.nodes[at].parent_index())
+                        .any(|at| self.doc.nodes[at].role == Role::Link)
+                || ["id", "class", "role"]
+                    .iter()
+                    .filter_map(|a| n.attr(a))
+                    .flat_map(str::split_ascii_whitespace)
+                    .any(|s| {
+                        matches!(
+                            s,
+                            "hatnote"
+                                | "disambig"
+                                | "navbox"
+                                | "toc"
+                                | "reflist"
+                                | "references"
+                                | "reference"
+                                | "doc-noteref"
+                                | "doc-bibliography"
+                                | "thumbcaption"
+                        )
+                    });
+            let role = if ancillary {
+                Some(Role::Group)
+            } else if tag_is(&n, "code") && in_sink && !verbatim {
+                Some(Role::Text)
+            } else {
+                classify(&n, n.tag(), in_sink).filter(|r| !(verbatim && *r == Role::CodeBlock))
+            };
             let (parent, level) = if let Some(role) = role {
                 let (parent, level) = self.fit_parent(parent, level);
                 let mut node = Node::new(role, parent.map(|i| i as u32));
@@ -374,6 +403,12 @@ impl DocBuilder {
                     node.marks.insert(Marks::SPONSORED);
                 }
                 node.marks.insert(marks(&n));
+                if tag_is(&n, "p") {
+                    node.marks.insert(Marks::PROSE);
+                }
+                if ancillary {
+                    node.marks.insert(Marks::ANCILLARY);
+                }
                 if role == Role::Link {
                     node.destination = self.resolve(&n, "href", base);
                 }
@@ -427,7 +462,7 @@ impl DocBuilder {
                     child,
                     parent,
                     level,
-                    verbatim || matches!(n.tag(), "pre" | "code"),
+                    verbatim || role == Some(Role::CodeBlock),
                 ));
             }
         }

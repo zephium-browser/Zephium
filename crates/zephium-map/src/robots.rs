@@ -2,7 +2,7 @@ use crate::{key::MAX_URL_BYTES, PageKey};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-pub const MAX_ROBOTS_BYTES: usize = 128 * 1024;
+pub const MAX_ROBOTS_BYTES: usize = 512 * 1024;
 pub const MAX_RULES: usize = 512;
 pub const MAX_PATTERN_BYTES: usize = 512;
 pub const MAX_SITEMAPS: usize = 8;
@@ -22,6 +22,8 @@ struct Rule {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Robots {
     pub outcome: RobotsOutcome,
+    #[serde(skip)]
+    pub(crate) truncated: bool,
     rules: Vec<Rule>,
     pub sitemaps: Vec<Url>,
 }
@@ -40,15 +42,28 @@ impl Robots {
     fn empty(outcome: RobotsOutcome) -> Self {
         Self {
             outcome,
+            truncated: false,
             rules: Vec::new(),
             sitemaps: Vec::new(),
         }
     }
     pub fn parse(text: &str) -> Self {
+        Self::from_sample(text.as_bytes(), false)
+    }
+    pub(crate) fn from_sample(bytes: &[u8], truncated: bool) -> Self {
+        let prefix = &bytes[..bytes.len().min(MAX_ROBOTS_BYTES)];
+        let complete = if truncated || prefix.len() < bytes.len() {
+            prefix
+                .iter()
+                .rposition(|&b| matches!(b, b'\r' | b'\n'))
+                .map_or(&[][..], |end| &prefix[..=end])
+        } else {
+            prefix
+        };
+        let Ok(text) = std::str::from_utf8(complete) else {
+            return Self::unavailable(false);
+        };
         let limited = || Self::empty(RobotsOutcome::Limit);
-        if text.len() > MAX_ROBOTS_BYTES {
-            return limited();
-        }
         if text
             .trim_start_matches('\u{feff}')
             .trim_start()
@@ -58,12 +73,13 @@ impl Robots {
             return Self::unavailable(false);
         }
         let mut result = Self::empty(RobotsOutcome::Parsed);
+        result.truncated = truncated || bytes.len() > MAX_ROBOTS_BYTES;
         let mut groups = [Vec::new(), Vec::new()];
         let mut selected = 0;
         let mut directives = false;
         let mut specific = false;
         let mut rules = 0;
-        for line in text.trim_start_matches('\u{feff}').lines() {
+        for line in text.trim_start_matches('\u{feff}').split(['\r', '\n']) {
             let line = line.split('#').next().unwrap_or_default();
             let Some((field, value)) = line.split_once(':') else {
                 continue;
@@ -177,4 +193,21 @@ fn matches_path(pattern: &str, path: &str) -> bool {
         rest = tail;
     }
     anchored || rest.contains(last)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reader_prefix_ends_at_last_complete_line_even_inside_unicode() {
+        let prefix = b"User-agent: *\rDisallow: /private\r\nAllow: /private/\xc3";
+        let parsed = Robots::from_sample(prefix, true);
+        assert_eq!(parsed.outcome, RobotsOutcome::Parsed);
+        assert!(parsed.allows("/"));
+        assert!(!parsed.allows("/private/path"));
+        assert_eq!(
+            Robots::from_sample(prefix, false).outcome,
+            RobotsOutcome::Unreadable
+        );
+    }
 }

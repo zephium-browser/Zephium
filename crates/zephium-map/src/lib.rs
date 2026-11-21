@@ -26,7 +26,7 @@ pub mod session;
 pub mod site;
 pub use passage::Passage;
 pub use session::{Config, Effect, Input, MapEvent, Session};
-pub use site::{Entry, Place, PlaceNotes, Source};
+pub use site::{Entry, Place, PlaceNotes, Source, Tier};
 
 fn ancestors(nodes: &[Node], at: usize) -> impl Iterator<Item = usize> + '_ {
     std::iter::successors(Some(at), |&i| nodes[i].parent_index())

@@ -283,3 +283,92 @@ fn fragment_encoding_and_unknown_selector_fields() {
         Some("#:~:text=pre%2D-,a%2Cb,x%20y,-%C3%A9")
     );
 }
+
+#[test]
+fn article_lead_excludes_editorial_furniture_and_citations() {
+    let page = doc("a", "<title>Sound waves - Reference</title><main><h1>Sound waves</h1><div class='hatnote'>Main article: Sound waves.</div><figure><figcaption>Sound waves in air.</figcaption></figure><p>Sound waves propagate through matter.<sup class='reference'>[1]</sup></p><h2>See also</h2><ul><li>Sound waves and music.</li></ul></main>");
+    for q in ["what is sound waves", "sound waves meaning"] {
+        let answers = read_passages(&read_query(q).unwrap(), &[&page]);
+        assert_eq!(answers[0].text, "Sound waves propagate through matter.");
+    }
+}
+
+#[test]
+fn canonical_error_pairs_the_lead_with_the_first_example() {
+    for title in [
+        "<title>E2071 - Compiler guide</title><main>",
+        "<main><h1>Error code E2071</h1>",
+    ] {
+        let page = doc("errors", &format!("{title}<p>The destination has already been moved.</p><p>Example:</p><pre><code class='language-rust'>take(x);\nuse_it(x);</code></pre><pre>later()</pre></main>"));
+        let answers = read_passages(
+            &read_query("error[E2071]: cannot use moved data").unwrap(),
+            &[&page],
+        );
+        assert_eq!(
+            answers[0].text,
+            "The destination has already been moved.\ntake(x);\nuse_it(x);"
+        );
+        assert!(answers[0].code && answers[0].locator.resolve(&page).is_some());
+    }
+    let page = doc(
+        "name",
+        "<title>BucketError</title><main><p>The bucket is empty.</p><pre>fill(bucket)</pre></main>",
+    );
+    assert_eq!(
+        read_passages(&read_query("BucketError: missing item").unwrap(), &[&page])[0].text,
+        "The bucket is empty.\nfill(bucket)"
+    );
+}
+
+#[test]
+fn command_stays_with_its_introduction_and_heading() {
+    let page = doc("guide","<main><h2>Rename a branch</h2><p>To rename a branch, run:</p><pre>tool move old new</pre><h2>Delete</h2><pre>tool delete old</pre></main>");
+    assert_eq!(
+        read_passages(&read_query("how to rename a branch").unwrap(), &[&page])[0].text,
+        "To rename a branch, run:\ntool move old new"
+    );
+}
+
+#[test]
+fn numbered_subject_is_required_in_the_opening_or_heading() {
+    let q = read_query("what is http status 472").unwrap();
+    for (pad, expected) in [
+        (SUBJECT_START_WORDS - 1, true),
+        (SUBJECT_START_WORDS, false),
+    ] {
+        let page = doc(
+            "codes",
+            &format!(
+                "<main><h1>HTTP status</h1><p>{}472 is a test status.</p></main>",
+                "word ".repeat(pad)
+            ),
+        );
+        assert_eq!(!read_passages(&q, &[&page]).is_empty(), expected);
+    }
+    let page = doc("other","<main><h2>HTTP status 473</h2><p>HTTP status 473 refers to an unrelated condition.</p></main>");
+    assert!(read_passages(&q, &[&page]).is_empty());
+}
+
+#[test]
+fn numbered_reference_prefers_lead_to_specification_and_incidental_mentions() {
+    let page = doc("ref","<title>472 Reserved - Protocol</title><main><h1>472 Reserved</h1><p>The protocol <code>472</code> status indicates a reserved value.</p><h2>Specifications</h2><p>Protocol status #472</p></main>");
+    let other = doc("history","<main><h1>History of networking</h1><p>In a recent update protocol releases included 472 as a new status.</p></main>");
+    let answers = read_passages(
+        &read_query("what is protocol status 472").unwrap(),
+        &[&page, &other],
+    );
+    assert_eq!(answers.len(), 1);
+    assert_eq!(
+        answers[0].text,
+        "The protocol 472 status indicates a reserved value."
+    );
+}
+
+#[test]
+fn an_unmarked_contents_list_cannot_answer_a_how_to() {
+    let page = doc("manual", "<main><h1>How to use a timer</h1><ul><li><p><a href='#use'>Use a timer</a></p></li></ul><h2 id='use'>Use a timer</h2><p>Use the dial on the timer to select a duration.</p></main>");
+    assert_eq!(
+        read_passages(&read_query("how to use a timer").unwrap(), &[&page])[0].text,
+        "Use the dial on the timer to select a duration."
+    );
+}

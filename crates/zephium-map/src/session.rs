@@ -50,6 +50,13 @@ impl Work {
             _ => Expect::Html,
         }
     }
+    fn byte_cap(&self, cfg: &Config) -> u32 {
+        if *self == Self::Robots && cfg.text_bytes == MAX_TEXT_BYTES as u32 {
+            crate::robots::MAX_ROBOTS_BYTES as u32
+        } else {
+            cfg.bytes(self.expect())
+        }
+    }
     fn side(&self) -> Option<usize> {
         match self {
             Self::Entry(i)
@@ -115,6 +122,7 @@ struct SiteState {
     entry_failure: Option<Failure>,
     complete: bool,
     section_hint: Option<Link>,
+    requested: Option<site::Focus>,
     rendered: bool,
     clean: bool,
     stale: bool,
@@ -138,6 +146,7 @@ impl SiteState {
             entry_failure: None,
             complete: false,
             section_hint: None,
+            requested: None,
             rendered: false,
             clean: true,
             stale: false,
@@ -283,6 +292,32 @@ impl Session {
             _ => None,
         };
         let mut state = SiteState::new(seed);
+        state.requested = role.map(|role| {
+            let mut modifiers = Vec::new();
+            let mut fresh = false;
+            if let QueryKind::Place {
+                entity,
+                fresh: is_fresh,
+                ..
+            } = self.query.kind()
+            {
+                fresh = *is_fresh;
+                if let Some((brand, rest)) = entity.split_first() {
+                    let domain = SiteKey::from_url(&state.seed.url);
+                    if !fresh
+                        && domain.as_ref().and_then(|s| s.as_str().split('.').next())
+                            == Some(brand.as_str())
+                    {
+                        modifiers = rest.to_vec();
+                    }
+                }
+            }
+            site::Focus {
+                role,
+                modifiers,
+                fresh,
+            }
+        });
         if role.is_some()
             && role == site::section_role(&state.seed.result.title, &state.seed.result.url)
             && !key::same_page(&state.seed.url, &state.seed.result.url)
@@ -422,13 +457,16 @@ impl Session {
                 m.payload.place,
                 &state.seed.links,
                 state.section_hint.as_ref(),
+                state.requested.as_ref(),
             ) else {
                 self.stats.rejected_memos += 1;
                 self.enqueue(Work::Entry(i), url);
                 return;
             };
             state.place = Some(place.clone());
-            let complete = !stale && state.section_hint.is_none();
+            let complete = !stale
+                && state.section_hint.is_none()
+                && (state.requested.is_none() || place.focus.is_some());
             state.complete = complete;
             self.emit_place(i, place, stale, confidence, complete, out);
             if complete {
@@ -512,7 +550,9 @@ impl Session {
             sitemaps: state.maps.iter().map(|(k, v)| (k.clone(), v)).collect(),
             pages: state.pages.iter().map(|(k, v)| (k.clone(), v)).collect(),
         };
-        let Ok((mut place, mut detail)) = read_site_with_stats(doc, &inputs) else {
+        let Ok((mut place, mut detail)) =
+            site::read_site_for(doc, &inputs, state.requested.as_ref())
+        else {
             state.entry_failure = Some(Failure::Unreadable);
             state.clean = false;
             return;

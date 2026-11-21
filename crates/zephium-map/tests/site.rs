@@ -43,11 +43,11 @@ fn ordered_site_with_all_evidence() {
         ("Pricing", Some(Pricing), PrimaryNav, false),
         ("Changelog", Some(Changelog), PrimaryNav, false),
         ("Status", Some(Status), PrimaryNav, true),
+        ("Courses", None, Llms, false),
         ("Careers", Some(Careers), Footer, false),
         ("Security", Some(Security), Footer, false),
         ("Examples", Some(Examples), LinkedData, false),
         ("Home", Some(Home), LinkedData, false),
-        ("Courses", None, Llms, false),
         ("Privacy", Some(Legal), Footer, false),
     ];
     assert_eq!(
@@ -101,10 +101,7 @@ fn ordered_site_with_all_evidence() {
         place.sections[3].children[1].locator,
         Locator { quote: Some(_), .. }
     ));
-    assert_eq!(
-        labels(&place.sections[9].children),
-        ["Orientation", "Field guide"]
-    );
+    assert_eq!(labels(&place.sections[5].children), ["Field guide"]);
     assert_eq!(place.social.len(), 1);
     assert!(place.social[0].basis == results::ProfileBasis::SameAs);
     assert!(
@@ -155,7 +152,7 @@ fn wide_navigation_and_menu_children_stay_bounded() {
     assert_eq!(stats.links_seen, 600);
     assert_eq!(
         labels(&p.sections),
-        (0..MAX_SECTIONS)
+        (0..MAX_PRIMARY_SECTIONS)
             .map(|i| format!("Section {i}"))
             .collect::<Vec<_>>()
     );
@@ -205,19 +202,23 @@ fn sitemap_sampling_and_index_bounds() {
     .unwrap();
     assert_eq!(
         labels(&p.sections),
-        ["docs", "downloads", "examples", "news", "products"]
+        ["downloads", "docs", "examples", "news", "products"]
     );
     assert_eq!(stats.sitemap_urls, 50_000);
-    for e in p.sections {
-        assert_eq!(e.more, 10_000 - 1 - MAX_CHILDREN as u32);
-        assert_eq!(e.children.len(), MAX_CHILDREN);
+    let count = p.sections.len();
+    assert_eq!(
+        p.sections.iter().map(|e| e.children.len()).sum::<usize>(),
+        MAX_PLACE_CHILDREN
+    );
+    for (index, e) in p.sections.into_iter().enumerate() {
+        let expected = MAX_PLACE_CHILDREN / count + usize::from(index < MAX_PLACE_CHILDREN % count);
+        assert_eq!(e.more, 10_000 - 1 - expected as u32);
+        assert_eq!(e.children.len(), expected);
         assert_eq!(e.sources[0], Source::Sitemap);
         assert_eq!(e.key.as_url().path(), format!("/{}/0", e.label));
         assert_eq!(
             labels(&e.children),
-            (1..=MAX_CHILDREN)
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
+            (1..=expected).map(|n| n.to_string()).collect::<Vec<_>>()
         );
     }
 }
@@ -260,7 +261,7 @@ fn hostile_inputs_fail_closed_or_keep_bounded_independent_evidence() {
     assert_eq!(labels(&p.sections), ["About"]);
     assert_eq!(
         Robots::parse(&"\n".repeat(1024 * 1024)).outcome,
-        RobotsOutcome::Limit
+        RobotsOutcome::Parsed
     );
 }
 #[test]
@@ -337,7 +338,7 @@ fn labelled_menus_and_deep_landings_use_observed_destinations() {
     let place = read_site(&home, &Default::default()).unwrap();
     assert_eq!(labels(&place.sections), ["Products", "Alpha", "Beta"]);
     assert_eq!(place.sections[0].key.as_url().path(), "/editor");
-    assert_eq!(labels(&place.sections[0].children), ["Editor", "Reader"]);
+    assert_eq!(labels(&place.sections[0].children), ["Reader"]);
     let deep = doc("/pricing", include_str!("fixtures/section-pricing.html"));
     let p = read_site(&deep, &Default::default()).unwrap();
     assert_eq!(p.sections[0].key.as_url(), deep.page());
@@ -356,7 +357,7 @@ fn utility_entries_cannot_consume_every_slot() {
         ),
     );
     let p = read_site(&home, &Default::default()).unwrap();
-    assert_eq!(p.sections.len(), MAX_SECTIONS);
+    assert_eq!(p.sections.len(), 1 + MAX_SECONDARY_SECTIONS);
     assert_eq!(p.sections[0].label, "Docs");
     assert_eq!(p.sections[0].sources, [Source::PrimaryNav, Source::Footer]);
     assert!(p.notes.truncated);
@@ -405,12 +406,18 @@ fn metadata_and_section_page_boundaries() {
         .unwrap();
         assert_eq!(stats.llms_truncated, n > MAX_LLMS_BYTES);
     }
-    for n in [MAX_ROBOTS_BYTES, MAX_ROBOTS_BYTES + 1] {
-        assert_eq!(
-            Robots::parse(&"#".repeat(n)).outcome == RobotsOutcome::Limit,
-            n > MAX_ROBOTS_BYTES
-        );
-    }
+    let header = "User-agent: *\nDisallow: /private\n#";
+    let mut prefix = format!(
+        "{header}{}",
+        "x".repeat(MAX_ROBOTS_BYTES - header.len() - 13)
+    );
+    prefix.push_str("\nDisallow: /x");
+    assert_eq!(prefix.len(), MAX_ROBOTS_BYTES);
+    assert!(!Robots::parse(&prefix).allows("/x"));
+    prefix.push('y');
+    let parsed = Robots::parse(&prefix);
+    assert!(!parsed.allows("/private"));
+    assert!(parsed.allows("/x"));
     for n in [MAX_SITEMAPS, MAX_SITEMAPS + 1] {
         let lines = (0..n)
             .map(|i| format!("Sitemap: https://workshop.example/{i}.xml\n"))
@@ -485,4 +492,122 @@ fn routed_pages_and_element_locators_keep_their_separate_destinations() {
         e.locator.fragment().as_deref(),
         Some("#standard-pricing.v2_%C3%A9")
     );
+}
+
+#[test]
+fn wall_evidence_depends_on_the_whole_document() {
+    for (text, wall) in [
+        ("CAPTCHA is a test for automated clients.", false),
+        ("Please verify you are human to continue.", true),
+    ] {
+        let page = doc("/", &format!("<main><p>{text}</p></main>"));
+        assert_eq!(
+            read_site(&page, &Default::default()).unwrap().notes.wall,
+            wall
+        );
+    }
+    for (len, wall) in [
+        (MAX_WALL_TEXT_BYTES, true),
+        (MAX_WALL_TEXT_BYTES + 1, false),
+    ] {
+        let page = doc(
+            "/",
+            &format!(
+                "<title>Checking your browser</title><p>{}</p>",
+                "x".repeat(len)
+            ),
+        );
+        assert_eq!(
+            read_site(&page, &Default::default()).unwrap().notes.wall,
+            wall
+        );
+    }
+    let page = doc("/","<main><p>HTTP status 472 is reserved.</p><p>Other errors may require a captcha.</p></main>");
+    assert!(!read_site(&page, &Default::default()).unwrap().notes.wall);
+}
+
+#[test]
+fn navigation_repeated_in_a_section_does_not_become_a_sidebar() {
+    let home = doc(
+        "/",
+        "<nav><a href='/docs'>Docs</a><a href='/plans'>Plans</a><a href='/news'>News</a></nav>",
+    );
+    let page = doc("/docs","<nav><a href='/docs'>Docs</a><a href='/'>Home</a><a href='/plans/'>Plans</a><a href='/news'>News</a><a href='/junk'>Global extra</a></nav><aside><a href='/docs'>Docs</a><a href='/edit'>Edit</a><a href='/save'>Save</a></aside>");
+    let p = read_site(
+        &home,
+        &SiteInputs {
+            pages: [(key("/docs"), &page)].into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(labels(&p.sections[0].children), ["Edit", "Save"]);
+}
+
+#[test]
+fn landmark_free_link_rows_require_short_labels_and_little_intervening_text() {
+    let links = |n| {
+        (0..n)
+            .map(|i| format!("<td><a href='/p{i}'>Page {i}</a></td>"))
+            .collect::<String>()
+    };
+    for (n, count) in [(3, 0), (4, 4)] {
+        let page = doc(
+            "/",
+            &format!("<table><tr>{}</tr></table><p>Article text.</p>", links(n)),
+        );
+        let place = read_site(&page, &Default::default()).unwrap();
+        assert_eq!(place.sections.len(), count);
+        assert!(place
+            .sections
+            .iter()
+            .all(|e| e.tier == Tier::Primary && e.sources == [Source::LinkCluster]));
+    }
+    for size in [48, 49] {
+        let page = doc("/",&format!("<div><a href='/a'>A</a><a href='/b'>B</a><a href='/c'>C</a><a href='/d'>{}</a></div><p>Body.</p>", "x".repeat(size)));
+        assert_eq!(
+            read_site(&page, &Default::default())
+                .unwrap()
+                .sections
+                .len(),
+            if size == 48 { 4 } else { 0 }
+        );
+    }
+    let page = doc("/", "<p>Read <a href='/a'>A</a>, <a href='/b'>B</a>, <a href='/c'>C</a> and <a href='/d'>D</a> together.</p>");
+    assert!(read_site(&page, &Default::default())
+        .unwrap()
+        .sections
+        .is_empty());
+    let page = doc("/",&format!("<table><tr>{}</tr></table><p>Body text.</p><div><a href='/a'>A</a><a href='/b'>B</a><a href='/c'>C</a><a href='/d'>D</a></div>",links(4)));
+    let p = read_site(
+        &page,
+        &SiteInputs {
+            llms: Some("## Manual\n- [Read](/manual)"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        p.sections
+            .iter()
+            .filter(|e| e.tier == Tier::Secondary)
+            .count(),
+        8
+    );
+}
+
+#[test]
+fn networks_own_navigation_is_not_an_external_profile() {
+    for root in ["https://github.com/", "https://instagram.com/"] {
+        let home = Doc::from_html(
+            &Url::parse(root).unwrap(),
+            b"<header><nav><a href='/pricing'>Pricing</a></nav></header>",
+            None,
+            DocLimits::SITE_PAGE,
+        )
+        .unwrap();
+        let p = read_site(&home, &SiteInputs::default()).unwrap();
+        assert_eq!(labels(&p.sections), ["Pricing"]);
+        assert!(p.social.is_empty());
+    }
 }

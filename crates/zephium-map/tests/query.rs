@@ -287,3 +287,137 @@ fn instant_listing_fresh_and_entity_boundaries() {
         }
     }
 }
+
+#[test]
+fn task_fact_section_and_name_boundaries() {
+    let questions = [
+        "git rename branch",
+        "gmail smtp port",
+        "difference between 401 and 403",
+        "python create virtual environment",
+        "docker remove all images",
+        "javascript deep clone object",
+        "postgres list all tables",
+        "rust convert string to integer",
+        "generate ssh key ed25519",
+        "install docker on ubuntu",
+        "npm install package",
+        "download rust source",
+        "netflix login failed",
+        "delete postgres database",
+        "git undo commit",
+        "git reset branch",
+        "enable wireguard",
+        "disable windows search",
+        "change node version",
+        "set python path",
+        "get git revision",
+        "find sqlite schema",
+        "fix cargo lock",
+        "update npm packages",
+        "git merge branches",
+        "git revert commit",
+        "cargo command",
+        "editor shortcut",
+        "lua syntax",
+        "sql join example",
+        "clang optimization flag",
+        "nginx default timeout",
+        "redis memory limit",
+        "lua version number",
+        "grpc status code",
+        "curl error code",
+        "mutex meaning",
+        "authentication vs authorization",
+        "tcp vs udp",
+        "elixir how to start",
+        "401 vs 403",
+        "404 versus 410",
+        "how to change directory",
+        "how do i install a font",
+        "what is a socket",
+        "remove docker images",
+        "rust download sources",
+        "python install pip",
+        "login docker registry",
+    ];
+    for q in questions {
+        assert!(
+            matches!(
+                read_query(q).unwrap().kind(),
+                QueryKind::Passage {
+                    kind: PassageKind::Question
+                }
+            ),
+            "{q}"
+        );
+    }
+    use SectionRole::*;
+    for (q, role) in [
+        ("stripe pricing", Pricing),
+        ("github docs", Documentation),
+        ("vscode download", Download),
+        ("netflix login", Login),
+        ("tauri changelog", Changelog),
+        ("python download", Download),
+        ("rust book", Documentation),
+        ("docker hub", Product),
+        ("openai api", Api),
+        ("package install", Install),
+        ("project sign in", Login),
+        ("engine reference", Reference),
+        ("editor support", Support),
+        ("forge releases", Releases),
+        ("forge latest", News),
+        ("sdk examples", Examples),
+        ("cargo blog", Blog),
+        ("rust community", Community),
+        ("sqlite documentation", Documentation),
+        ("sql tutorials", Learn),
+        ("cargo features", Features),
+        ("editor downloads", Download),
+        ("database status", Status),
+        ("service careers", Careers),
+    ] {
+        assert!(
+            matches!(read_query(q).unwrap().kind(), QueryKind::Place { section: Some(s), .. } if s.role == role),
+            "{q}"
+        );
+    }
+    for q in [
+        "docker",
+        "rust",
+        "python",
+        "javascript",
+        "go",
+        "clojure",
+        "vscode",
+        "ssh",
+        "git",
+        "gmail",
+        "sqlite",
+        "web kit",
+        "install",
+        "download",
+        "login",
+    ] {
+        assert!(
+            matches!(
+                read_query(q).unwrap().kind(),
+                QueryKind::Place { section: None, .. }
+            ),
+            "{q}"
+        );
+    }
+    for q in [
+        "git vs hg",
+        "docker vs podman",
+        "sqlite versus mysql",
+        "signal or telegram",
+    ] {
+        assert!(
+            matches!(read_query(q).unwrap().kind(), QueryKind::Compare { .. }),
+            "{q}"
+        );
+    }
+}
