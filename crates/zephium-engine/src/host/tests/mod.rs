@@ -38,7 +38,7 @@ fn raw_popups_use_owned_native_adoption_with_explicit_gesture_and_scope_checks()
         .split_whitespace()
         .collect::<String>()
         .contains("native_open_authority.reserve"));
-    assert!(boundary.contains("NativeViewPurpose::NativeTab(features.opener)"));
+    assert!(boundary.contains("opener: features.opener"));
 }
 
 #[test]

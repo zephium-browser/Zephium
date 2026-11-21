@@ -2594,7 +2594,16 @@ impl Engine for WebviewEngine {
         self.runtime_security_advisories
     }
 
-    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool {
+    fn create_view_with_media_policy(
+        &self,
+        id: ItemId,
+        partition: Partition,
+        url: &str,
+        bounds: Rect,
+        hold_media: bool,
+    ) -> bool {
+        #[cfg(not(target_os = "macos"))]
+        let _ = hold_media;
         let profile = partition.profile();
         let Some(active) = lock_retirement_gate(&self.retirement).reserve_item(id, profile) else {
             return false;
@@ -2612,7 +2621,17 @@ impl Engine for WebviewEngine {
                 return;
             }
             let failure_token = queued_active.clone();
-            if !host::try_with(move |h| h.create_view(id, partition, &url, bounds, queued_active)) {
+            if !host::try_with(move |h| {
+                h.create_view(
+                    id,
+                    partition,
+                    &url,
+                    bounds,
+                    queued_active,
+                    #[cfg(target_os = "macos")]
+                    hold_media,
+                )
+            }) {
                 queued_sink(EngineEventIngress::for_item(
                     EngineEvent::ViewCreationFailed { id },
                     failure_token,
@@ -2623,6 +2642,17 @@ impl Engine for WebviewEngine {
             lock_retirement_gate(&self.retirement).forget_item_if_token(id, &active);
         }
         dispatched
+    }
+
+    #[cfg(target_os = "macos")]
+    fn activate_tab_media(&self, id: ItemId) -> NativeDispatch {
+        self.run_for_active_item(id, move |host| host.activate_tab_media(id))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn activate_tab_media(&self, _id: ItemId) -> NativeDispatch {
+        // WebView2 controllers start hidden and rely on Chromium's media deferral.
+        NativeDispatch::Scheduled
     }
 
     fn navigate(&self, id: ItemId, url: &str, request: NavigationRequestId) -> bool {

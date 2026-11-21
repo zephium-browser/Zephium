@@ -894,7 +894,21 @@ pub trait Engine {
 
     /// Schedules creation on the native UI thread. `false` means the request
     /// was not admitted at all, so the shell must roll back its live-view bit.
-    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool;
+    fn create_view(&self, id: ItemId, partition: Partition, url: &str, bounds: Rect) -> bool {
+        self.create_view_with_media_policy(id, partition, url, bounds, false)
+    }
+    /// Schedules creation with the shell's initial media policy. Adapters with
+    /// an explicit hold release it through `activate_tab_media`.
+    fn create_view_with_media_policy(
+        &self,
+        id: ItemId,
+        partition: Partition,
+        url: &str,
+        bounds: Rect,
+        hold_media: bool,
+    ) -> bool;
+    /// Releases the first-activation hold for the current native generation.
+    fn activate_tab_media(&self, id: ItemId) -> NativeDispatch;
     /// Schedules a navigation on the native UI thread. `false` means the
     /// request was not admitted. An admitted request can still fail before
     /// its identity-bearing native commit, synchronously or asynchronously;
