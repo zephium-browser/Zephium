@@ -2262,32 +2262,34 @@ pub(crate) fn compact(messages: &mut [WorkModelMessage], budget: usize, rule: Us
         .map(|r| r.content.len())
         .sum();
     for index in &unplaced {
-        if held <= UNPLACED_CHARS {
-            break;
-        }
         if let WorkModelMessage::ToolResults(results) = &mut messages[*index] {
             for result in results.iter_mut().filter(|r| whole(r)) {
+                if held <= UNPLACED_CHARS {
+                    break;
+                }
                 held = held.saturating_sub(result.content.len());
                 result.content = excerpt(&result.content);
             }
         }
     }
+    // Past the hard budget results are shortened oldest first, the newest
+    // too when the older ones are not enough.
     let mut total: usize = messages.iter().map(size).sum();
-    let keep = messages.len().saturating_sub(6);
-    for message in messages[..keep].iter_mut() {
-        if total <= budget {
-            break;
-        }
-        if let WorkModelMessage::ToolResults(results) = message {
-            for result in results.iter_mut() {
-                let shortened = format!(
-                    "{} [shortened; read_canvas or search again if needed]",
-                    clip(&result.content, 380)
-                );
-                if shortened.len() < result.content.len() {
-                    total = total.saturating_sub(result.content.len()) + shortened.len();
-                    result.content = shortened;
-                }
+    for message in messages.iter_mut() {
+        let WorkModelMessage::ToolResults(results) = message else {
+            continue;
+        };
+        for result in results.iter_mut() {
+            if total <= budget {
+                return;
+            }
+            let shortened = format!(
+                "{} [shortened; read_canvas or search again if needed]",
+                clip(&result.content, 380)
+            );
+            if shortened.len() < result.content.len() {
+                total = total.saturating_sub(result.content.len()) + shortened.len();
+                result.content = shortened;
             }
         }
     }
@@ -2644,6 +2646,78 @@ mod compact_tests {
         messages.extend(refused);
         compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
         assert!(messages.iter().map(size).sum::<usize>() <= CONVERSATION_CHARS);
+    }
+
+    #[test]
+    fn unplaced_reads_in_one_batch_are_cut_only_down_to_the_ceiling() {
+        let result = |call: &str, content: String| WorkModelToolResult {
+            call: call.into(),
+            content,
+            is_error: false,
+        };
+        let page = |n: usize| {
+            format!(
+                "[s{n}] page {n}\n{}",
+                "plain words, no figures\n".repeat(400)
+            )
+        };
+        let mut messages = vec![
+            WorkModelMessage::ToolResults(
+                (1..=8)
+                    .map(|n| result(&format!("read{n}"), page(n)))
+                    .collect(),
+            ),
+            WorkModelMessage::ToolResults(vec![result("a", "short".into())]),
+            WorkModelMessage::ToolResults(vec![result("b", "short".into())]),
+        ];
+        compact(&mut messages, CONVERSATION_CHARS, Used::Placed);
+        let WorkModelMessage::ToolResults(batch) = &messages[0] else {
+            panic!("batch");
+        };
+        let whole: usize = batch
+            .iter()
+            .filter(|r| !r.content.ends_with(EXCERPT))
+            .map(|r| r.content.len())
+            .sum();
+        let cut = batch
+            .iter()
+            .filter(|r| r.content.ends_with(EXCERPT))
+            .count();
+        assert!(whole <= UNPLACED_CHARS, "{whole}");
+        assert!(
+            whole + page(1).len() > UNPLACED_CHARS,
+            "cut {cut}, more than needed"
+        );
+    }
+
+    #[test]
+    fn the_hard_budget_holds_when_the_newest_reads_alone_exceed_it() {
+        let budget = 65_536;
+        let mut messages: Vec<WorkModelMessage> = (1..=4)
+            .flat_map(|n| {
+                [
+                    WorkModelMessage::Assistant(vec![WorkModelPart::ToolCall(WorkModelToolCall {
+                        id: format!("read{n}"),
+                        name: "web_fetch".into(),
+                        arguments: serde_json::json!({}),
+                    })]),
+                    WorkModelMessage::ToolResults(vec![WorkModelToolResult {
+                        call: format!("read{n}"),
+                        content: format!("[s{n}] page {n}\n{}", "x".repeat(22_000)),
+                        is_error: false,
+                    }]),
+                ]
+            })
+            .collect();
+        compact(&mut messages, budget, Used::Placed);
+        assert!(messages.iter().map(size).sum::<usize>() <= budget);
+        let WorkModelMessage::ToolResults(newest) = &messages[7] else {
+            panic!("newest read");
+        };
+        assert!(
+            newest[0].content.len() > 22_000,
+            "the newest read stays whole"
+        );
     }
 
     #[test]
