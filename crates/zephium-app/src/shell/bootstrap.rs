@@ -271,15 +271,36 @@ impl Shell {
         let window = self
             .windows
             .create(WindowKind::Main, profile, space, self.pending_size);
-        // Starting with a new tab, or with pages, keeps every restored tab
-        // where it was and loads none of them. A link that launched the browser is its own
-        // new tab, and a blank tab left in front already is one.
+        // A new tab or startup list leaves restored tabs in place. A link
+        // that launched the browser is its own new tab, and a stand-in left
+        // in front can already serve as the new tab.
         let pages = self.tab_preferences.opens_pages() && self.pending_external.is_empty();
-        let start_fresh = (self.tab_preferences.start_with_new_tab || pages)
+        let mut start_fresh = (self.tab_preferences.start_with_new_tab || pages)
             && self.pending_external.is_empty()
             && (self.tab_preferences.new_page.is_some()
                 || active_item
                     .is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some())));
+        if start_fresh && !pages && !self.incognito_profile(profile) {
+            let matching_tab = active_item.and_then(|id| {
+                let item = self.items.get(id)?;
+                if !matches!(
+                    item.placement,
+                    Placement::Space {
+                        section: SpaceSection::Today,
+                        ..
+                    }
+                ) {
+                    return None;
+                }
+                let url = item.tab()?.url.as_ref()?;
+                let destination = self.tab_preferences.new_page.as_ref()?;
+                tabs::new_tab_destination_matches(destination, url).then(|| (id, url.clone()))
+            });
+            if let Some((id, url)) = matching_tab {
+                self.new_tab_destinations.insert(id, url);
+                start_fresh = false;
+            }
+        }
         let mut fx = Vec::new();
         if let Some(tree) = splits {
             if !start_fresh {

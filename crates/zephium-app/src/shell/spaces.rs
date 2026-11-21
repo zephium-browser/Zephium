@@ -320,7 +320,7 @@ impl Shell {
         let blank = active.filter(|id| {
             self.items.get(*id).is_some_and(
                 |item| matches!(item.placement, Placement::Space { space, .. } if space == leaving),
-            ) && self.is_untouched_new_tab(*id)
+            ) && self.is_new_tab_stand_in(*id)
         });
         if let Some(window) = self.windows.focused_mut() {
             window.space = space;

@@ -2,6 +2,10 @@
 
 use super::*;
 
+pub(super) fn new_tab_destination_matches(destination: &url::Url, target: &url::Url) -> bool {
+    destination == target || navigation::https_upgrade(destination).as_ref() == Some(target)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum NewTabPosition {
     #[default]
@@ -60,7 +64,7 @@ pub(super) struct TabPreferences {
     /// Where the Home command goes.
     pub(super) home: Option<String>,
     /// A regular new tab opens this page; none keeps the built-in page.
-    pub(super) new_page: Option<String>,
+    pub(super) new_page: Option<url::Url>,
 }
 
 impl Default for TabPreferences {
@@ -130,6 +134,7 @@ impl TabPreferences {
             ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
             ("tabs.new-page", value) => {
                 self.new_page = zephium_core::preferences::new_tab_page(value)
+                    .and_then(|page| url::Url::parse(&page).ok());
             }
             ("tabs.external-position", "new-tab") => self.external_position = None,
             ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
@@ -163,14 +168,13 @@ impl Shell {
     /// tab allocated for a link, duplicate, extension page or explicit URL.
     pub(super) fn open_new_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
         let (id, mut effects) = self.open_tab_with_id()?;
-        if self
-            .windows
-            .focused()
-            .is_some_and(|window| !self.incognito_profile(window.profile))
-        {
-            if let Some(page) = self.tab_preferences.new_page.clone() {
-                effects.extend(self.items.navigate(id, &page));
-            }
+        if let Some(page) = self.tab_preferences.new_page.clone().filter(|_| {
+            self.windows
+                .focused()
+                .is_some_and(|window| !self.incognito_profile(window.profile))
+        }) {
+            effects.extend(self.items.navigate(id, page.as_str()));
+            self.new_tab_destinations.insert(id, page);
         }
         Some((id, effects))
     }
@@ -471,14 +475,49 @@ impl Shell {
         }) && self.items.pending_navigation_request(id).is_none()
     }
 
-    /// The front tab is the only open tab of its space and an untouched New
-    /// Tab: closing it would only swap it for an identical one.
+    /// A custom New Tab can stand in while it is loading. Keep it if it has
+    /// been pinned or if an explicit navigation elsewhere is still pending.
+    pub(super) fn is_new_tab_stand_in(&self, id: ItemId) -> bool {
+        self.is_untouched_new_tab(id)
+            || (self.new_tab_destination_is_current(id)
+                && self.items.get(id).is_some_and(|item| {
+                    matches!(
+                        item.placement,
+                        Placement::Space {
+                            section: SpaceSection::Today,
+                            ..
+                        }
+                    )
+                }))
+    }
+
+    pub(super) fn new_tab_destination_is_current(&self, id: ItemId) -> bool {
+        self.new_tab_destinations.get(&id).is_some_and(|destination| {
+            self.items
+                .pending_navigation_url(id)
+                .is_none_or(|target| new_tab_destination_matches(destination, target))
+        })
+    }
+
+    pub(super) fn update_new_tab_destination(&mut self, id: ItemId, url: &url::Url, adopt: bool) {
+        let Some(destination) = self.new_tab_destinations.get_mut(&id) else {
+            return;
+        };
+        if adopt {
+            destination.clone_from(url);
+        } else if *destination != *url {
+            self.new_tab_destinations.remove(&id);
+        }
+    }
+
+    /// The front tab is the only open tab of its space and still stands in
+    /// for a page: closing it would only swap it for another new tab.
     pub(super) fn is_lone_new_tab(&self, id: ItemId) -> bool {
         self.windows.focused().is_some_and(|window| {
             window.active == Some(id)
                 && !self.incognito_profile(window.profile)
                 && self.regular_tabs(window.space) == [id]
-        }) && self.is_untouched_new_tab(id)
+        }) && self.is_new_tab_stand_in(id)
     }
 
     /// The tab in this space already showing exactly `url`, if any.
@@ -571,6 +610,7 @@ impl Shell {
             };
             self.recent_tabs.forget(item);
             self.tab_previews.forget(item);
+            self.new_tab_destinations.remove(&item);
             self.sources.retain(|held| held != item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));
@@ -683,7 +723,7 @@ impl Shell {
             .regular_tabs(space)
             .into_iter()
             .find(|tab| *tab != id)
-            .filter(|tab| self.is_untouched_new_tab(*tab))
+            .filter(|tab| self.is_new_tab_stand_in(*tab))
             .filter(|_| self.regular_tabs(space).len() == 2);
         let mut left_behind = None;
         let effects = if space == current {

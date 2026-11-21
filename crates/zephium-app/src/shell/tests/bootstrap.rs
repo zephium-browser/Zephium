@@ -715,3 +715,61 @@ fn persisted_new_tab_destination_is_loaded_at_startup_and_invalid_values_stay_bl
         }
     }
 }
+
+#[test]
+fn startup_reuses_the_restored_active_tab_at_the_destination() {
+    let destination = "https://start.example/";
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, destination);
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-page".into(), destination.into());
+
+    for _ in 0..2 {
+        let (mut restarted, engine, screen) = setup_with(store.clone());
+        restarted.handle(Command::Bootstrap);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(last(&screen).tabs.len(), 1);
+        assert!(restarted.is_new_tab_stand_in(first));
+        assert!(engine
+            .calls()
+            .contains(&format!("create {first} {destination} [default]")));
+        restarted.persist();
+    }
+}
+
+#[test]
+fn startup_opens_the_destination_when_the_restored_active_tab_is_elsewhere() {
+    let destination = "https://start.example/";
+    let elsewhere = "https://elsewhere.example/";
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let previous = active_id(&screen);
+    navigate_and_commit(&mut shell, previous, elsewhere);
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-page".into(), destination.into());
+
+    let (mut restarted, engine, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, previous);
+    let state = last(&screen);
+    assert_eq!(state.tabs.len(), 2);
+    assert!(state
+        .tabs
+        .iter()
+        .any(|tab| tab.id == previous.to_string() && tab.url.as_deref() == Some(elsewhere)));
+    assert!(engine
+        .calls()
+        .contains(&format!("create {fresh} {destination} [default]")));
+}
