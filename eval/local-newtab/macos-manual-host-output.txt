@@ -1,0 +1,16 @@
+PASS: selected local HTML runs its own script
+PASS: document has no application IPC bridge
+OBSERVED: direct file grant allowed sibling image = true
+OBSERVED: direct file grant allowed outside image = true
+PASS: directory-grant positive control can read sibling
+OBSERVED: directory grant allowed outside image = true
+OBSERVED: direct file view reads sibling after another view = true
+PASS: isolated copy runs the selected HTML
+OBSERVED: staged copy allowed source-directory image = true
+OBSERVED: staged copy allowed outside image = true
+PASS: opaque HTML snapshot runs the selected script
+PASS: opaque HTML snapshot denies source-directory image
+PASS: opaque HTML snapshot denies outside image
+PASS: opaque HTML snapshot has no application bridge
+PASS: page-initiated navigation cannot select another local file
+Qualification completed. This prototype does not enable product file navigation.
