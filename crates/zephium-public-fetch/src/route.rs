@@ -26,6 +26,31 @@ impl Route {
     }
 }
 
+/// How an anonymous reader may reach public sites, without where.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicRoute {
+    Direct,
+    Proxied,
+    /// Refuse the read: the route cannot be reproduced exactly.
+    Unsupported,
+}
+
+impl PublicRoute {
+    pub(crate) fn of(route: &Route) -> Self {
+        match route {
+            Route::Direct => PublicRoute::Direct,
+            Route::Http { .. } => PublicRoute::Proxied,
+            Route::Unsupported => PublicRoute::Unsupported,
+        }
+    }
+}
+
+/// The route [`crate::PublicReader`] would take with the app's proxy setting,
+/// so other anonymous readers refuse in the same cases.
+pub fn public_route(manual: Option<&ProxyServer>) -> PublicRoute {
+    PublicRoute::of(&route(manual, crate::platform::system_route))
+}
+
 /// The app's own proxy wins, as it does for the web views; otherwise the
 /// operating system's.
 pub(crate) fn route(manual: Option<&ProxyServer>, system: impl FnOnce() -> Route) -> Route {
@@ -95,6 +120,40 @@ mod tests {
             Route::Unsupported
         );
         assert_eq!(route(None, || Route::Unsupported), Route::Unsupported);
+    }
+
+    #[test]
+    fn the_public_class_agrees_with_the_internal_route() {
+        let proxy = Route::Http {
+            host: "proxy.example.com".into(),
+            port: 3128,
+        };
+        for (internal, public) in [
+            (Route::Direct, PublicRoute::Direct),
+            (proxy, PublicRoute::Proxied),
+            (Route::Unsupported, PublicRoute::Unsupported),
+        ] {
+            assert_eq!(PublicRoute::of(&internal), public, "{internal:?}");
+        }
+        for manual in [
+            from_settings("http", "proxy.example.com:3128"),
+            from_settings("socks5", "127.0.0.1:9050"),
+            None,
+        ] {
+            assert_eq!(
+                public_route(manual.as_ref()),
+                PublicRoute::of(&route(manual.as_ref(), crate::platform::system_route)),
+                "{manual:?}"
+            );
+        }
+        assert_eq!(
+            public_route(from_settings("http", "proxy.example.com:3128").as_ref()),
+            PublicRoute::Proxied
+        );
+        assert_eq!(
+            public_route(from_settings("socks5", "127.0.0.1:9050").as_ref()),
+            PublicRoute::Unsupported
+        );
     }
 
     #[test]

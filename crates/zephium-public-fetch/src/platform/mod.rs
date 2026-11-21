@@ -57,15 +57,42 @@ pub(crate) fn mac_route(proxies: &MacProxies) -> Route {
     Route::Direct
 }
 
-/// WinINET's per-user settings, as WebView2 reads them: a PAC address wins,
-/// then a manual `ProxyServer` list's `https=` entry, then its `socks=` entry.
+/// "Automatically detect settings" (WPAD), as far as the system can prove it.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Discovery {
+    Off,
+    NothingFound,
+    Found,
+    Unknown,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Discovery {
+    /// Each `None` is a fact the system did not prove.
+    pub(crate) fn proved(enabled: Option<bool>, discovered: Option<bool>) -> Self {
+        match (enabled, discovered) {
+            (Some(false), _) => Discovery::Off,
+            (Some(true), Some(false)) => Discovery::NothingFound,
+            (Some(true), Some(true)) => Discovery::Found,
+            (None, _) | (Some(true), None) => Discovery::Unknown,
+        }
+    }
+}
+
+/// WinINET's per-user settings, as WebView2 reads them: discovery or a PAC
+/// address wins, then a manual `ProxyServer` list's `https=` entry, then its
+/// `socks=` entry.
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn windows_route(
     auto_config: Option<&str>,
     enabled: bool,
     server: Option<&str>,
+    discovery: Discovery,
 ) -> Route {
-    if auto_config.is_some_and(|address| !address.trim().is_empty()) {
+    if matches!(discovery, Discovery::Found | Discovery::Unknown)
+        || auto_config.is_some_and(|address| !address.trim().is_empty())
+    {
         return Route::Unsupported;
     }
     let server = server.map(str::trim).unwrap_or("");
@@ -166,51 +193,65 @@ mod tests {
 
     #[test]
     fn windows_settings_map_to_what_webview2_does_for_https() {
-        assert_eq!(
-            windows_route(None, false, Some("proxy:8080")),
-            Route::Direct
-        );
-        assert_eq!(windows_route(None, true, None), Route::Direct);
-        assert_eq!(
-            windows_route(Some(""), true, Some("proxy:8080")),
-            http("proxy", 8080)
-        );
-        assert_eq!(
-            windows_route(Some("http://wpad/proxy.pac"), false, None),
-            Route::Unsupported
-        );
-        assert_eq!(
-            windows_route(None, true, Some("http://proxy:3128")),
-            http("proxy", 3128)
-        );
-        assert_eq!(
-            windows_route(
+        let cases = [
+            (None, false, Some("proxy:8080"), Route::Direct),
+            (None, true, None, Route::Direct),
+            (Some(""), true, Some("proxy:8080"), http("proxy", 8080)),
+            (
+                Some("http://wpad/proxy.pac"),
+                false,
+                None,
+                Route::Unsupported,
+            ),
+            (None, true, Some("http://proxy:3128"), http("proxy", 3128)),
+            (
                 None,
                 true,
-                Some("http=a:80;https=b.corp.example:8443;ftp=c:21")
+                Some("http=a:80;https=b.corp.example:8443;ftp=c:21"),
+                http("b.corp.example", 8443),
             ),
-            http("b.corp.example", 8443)
-        );
+            (None, true, Some("http=a:80;ftp=c:21"), Route::Direct),
+            (
+                None,
+                true,
+                Some("http=a:80;socks=s:1080"),
+                Route::Unsupported,
+            ),
+            (
+                None,
+                true,
+                Some("https=socks5://s:1080"),
+                Route::Unsupported,
+            ),
+            (None, true, Some("https=b:1;garbage"), Route::Unsupported),
+            (None, true, Some("socks5://s:1080"), Route::Unsupported),
+        ];
+        assert_eq!(Discovery::proved(Some(false), None), Discovery::Off);
         assert_eq!(
-            windows_route(None, true, Some("http=a:80;ftp=c:21")),
-            Route::Direct
+            Discovery::proved(Some(true), Some(false)),
+            Discovery::NothingFound
         );
-        assert_eq!(
-            windows_route(None, true, Some("http=a:80;socks=s:1080")),
-            Route::Unsupported
-        );
-        assert_eq!(
-            windows_route(None, true, Some("https=socks5://s:1080")),
-            Route::Unsupported
-        );
-        assert_eq!(
-            windows_route(None, true, Some("https=b:1;garbage")),
-            Route::Unsupported
-        );
-        assert_eq!(
-            windows_route(None, true, Some("socks5://s:1080")),
-            Route::Unsupported
-        );
+        assert_eq!(Discovery::proved(Some(true), Some(true)), Discovery::Found);
+        for unproved in [(None, None), (None, Some(false)), (Some(true), None)] {
+            assert_eq!(
+                Discovery::proved(unproved.0, unproved.1),
+                Discovery::Unknown
+            );
+        }
+        for (auto_config, enabled, server, manual) in cases {
+            for (discovery, expected) in [
+                (Discovery::Off, manual.clone()),
+                (Discovery::NothingFound, manual.clone()),
+                (Discovery::Found, Route::Unsupported),
+                (Discovery::Unknown, Route::Unsupported),
+            ] {
+                assert_eq!(
+                    windows_route(auto_config, enabled, server, discovery),
+                    expected,
+                    "{auto_config:?} {enabled} {server:?} {discovery:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -220,8 +261,11 @@ mod tests {
 
     proptest! {
         #[test]
-        fn no_proxy_setting_text_panics(auto in proptest::option::of("\\PC{0,40}"), enabled in any::<bool>(), server in proptest::option::of("[ -~]{0,80}")) {
-            let _ = windows_route(auto.as_deref(), enabled, server.as_deref());
+        fn no_proxy_setting_text_panics(auto in proptest::option::of("\\PC{0,40}"), enabled in any::<bool>(), server in proptest::option::of("[ -~]{0,80}"), discovery in proptest::sample::select(vec![Discovery::Off, Discovery::NothingFound, Discovery::Found, Discovery::Unknown])) {
+            let route = windows_route(auto.as_deref(), enabled, server.as_deref(), discovery);
+            if matches!(discovery, Discovery::Found | Discovery::Unknown) {
+                prop_assert_eq!(route, Route::Unsupported);
+            }
         }
     }
 }
