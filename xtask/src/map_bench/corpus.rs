@@ -1,0 +1,425 @@
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use url::{Host, Url};
+
+use super::store::{digest, read_bytes};
+use super::{BenchError, Result, MAX_URL_BYTES};
+
+pub(super) const MAX_CORPUS_FILES: usize = 32;
+pub(super) const MAX_QUERIES: usize = 1024;
+const MAX_CORPUS_BYTES: usize = 1024 * 1024;
+const MAX_TEXT_BYTES: usize = 4096;
+const MAX_LABEL_BYTES: usize = 80;
+const MAX_VALUES: usize = 32;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Kind {
+    Place,
+    Passage,
+    Compare,
+    Instant,
+    List,
+}
+
+impl Kind {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Place => "place",
+            Self::Passage => "passage",
+            Self::Compare => "compare",
+            Self::Instant => "instant",
+            Self::List => "list",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Group {
+    Discussion,
+    Video,
+    Social,
+    Images,
+    Featured,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusFile {
+    query: Vec<RawQuery>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawQuery {
+    id: String,
+    text: String,
+    kind: Kind,
+    site: Option<String>,
+    #[serde(default)]
+    sites: Vec<String>,
+    #[serde(default)]
+    want: Vec<String>,
+    answer: Option<String>,
+    #[serde(default)]
+    from: Vec<String>,
+    #[serde(default)]
+    group: BTreeSet<Group>,
+    slice: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct QueryLabel {
+    pub(super) id: String,
+    pub(super) kind: Kind,
+    pub(super) slice: Option<String>,
+}
+
+pub(super) struct CorpusQuery {
+    pub(super) label: QueryLabel,
+    pub(super) text: String,
+    pub(super) site: Option<String>,
+    pub(super) sites: Vec<String>,
+    pub(super) want: Vec<Destination>,
+    pub(super) answer: Option<String>,
+    pub(super) from: Vec<String>,
+    pub(super) group: BTreeSet<Group>,
+}
+
+pub(super) struct Destination {
+    host: String,
+    path: String,
+    fragment: Option<String>,
+}
+
+impl Destination {
+    fn parse(value: &str) -> Result<Self> {
+        if value.len() > MAX_URL_BYTES {
+            return Err(BenchError::new("corpus_destination_limit"));
+        }
+        let (name, _) = value.split_once('/').unwrap_or((value, ""));
+        let host = host(name.trim_end_matches('.')).ok_or(BenchError::new("invalid_want"))?;
+        let url =
+            Url::parse(&format!("https://{value}")).map_err(|_| BenchError::new("invalid_want"))?;
+        if url.query().is_some() || value.chars().any(|c| c.is_control() || c == '\\') {
+            return Err(BenchError::new("invalid_want"));
+        }
+        Ok(Self {
+            host,
+            path: url.path().to_owned(),
+            fragment: url.fragment().map(str::to_owned),
+        })
+    }
+
+    pub(super) fn matches(&self, url: &Url) -> bool {
+        let host = self.host.trim_end_matches('.');
+        let actual = url.host_str().unwrap_or_default().trim_end_matches('.');
+        let expected = host.strip_prefix("www.").unwrap_or(host);
+        let actual = actual.strip_prefix("www.").unwrap_or(actual);
+        actual == expected
+            && url.path().strip_prefix(&self.path).is_some_and(|tail| {
+                tail.is_empty() || self.path.ends_with('/') || tail.starts_with('/')
+            })
+            && self
+                .fragment
+                .as_deref()
+                .is_none_or(|fragment| url.fragment() == Some(fragment))
+    }
+}
+
+fn host(value: &str) -> Option<String> {
+    if value.is_empty()
+        || value.len() > MAX_URL_BYTES
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || "/\\?#@:%".contains(c))
+    {
+        return None;
+    }
+    let Host::Domain(domain) = Host::parse(value).ok()? else {
+        return None;
+    };
+    let domain = domain.trim_end_matches('.');
+    let valid_label = |label: &str| {
+        !label.starts_with('-')
+            && !label.ends_with('-')
+            && !label.is_empty()
+            && label
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+    };
+    (psl::domain_str(domain).is_some() && domain.split('.').all(valid_label))
+        .then(|| domain.to_owned())
+}
+
+fn label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LABEL_BYTES
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"-_".contains(&c))
+}
+
+pub(super) fn valid_id(value: &str) -> bool {
+    label(value)
+        && !matches!(value, "con" | "prn" | "aux" | "nul")
+        && !["com", "lpt"].iter().any(|prefix| {
+            value.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix.len() == 1 && suffix.bytes().all(|c| c.is_ascii_digit())
+            })
+        })
+}
+
+impl QueryLabel {
+    pub(super) fn valid(&self) -> bool {
+        valid_id(&self.id) && self.slice.as_deref().is_none_or(label)
+    }
+}
+
+impl TryFrom<RawQuery> for CorpusQuery {
+    type Error = BenchError;
+
+    fn try_from(raw: RawQuery) -> Result<Self> {
+        let label = QueryLabel {
+            id: raw.id,
+            kind: raw.kind,
+            slice: raw.slice,
+        };
+        if !label.valid() {
+            return Err(BenchError::new("invalid_query_label"));
+        }
+        let bad_text = |text: &str| text.trim().is_empty() || text.len() > MAX_TEXT_BYTES;
+        if raw.answer.as_deref().is_some_and(bad_text) {
+            return Err(BenchError::new("invalid_query_text_or_answer"));
+        }
+        if [raw.sites.len(), raw.want.len(), raw.from.len()]
+            .into_iter()
+            .any(|len| len > MAX_VALUES)
+        {
+            return Err(BenchError::new("corpus_list_limit"));
+        }
+        let site = |value: &str| host(value).ok_or(BenchError::new("invalid_site"));
+        let primary = raw.site.as_deref().map(site).transpose()?;
+        let sites = raw
+            .sites
+            .iter()
+            .map(|value| site(value))
+            .collect::<Result<Vec<_>>>()?;
+        match raw.kind {
+            Kind::Place if primary.is_none() => return Err(BenchError::new("place_without_site")),
+            Kind::Compare if sites.len() != 2 || sites[0] == sites[1] => {
+                return Err(BenchError::new("compare_requires_two_distinct_sites"));
+            }
+            Kind::Passage if raw.answer.is_none() => {
+                return Err(BenchError::new("passage_without_answer"));
+            }
+            _ => {}
+        }
+        let from = raw
+            .from
+            .iter()
+            .map(|value| {
+                host(value)
+                    .filter(|domain| psl::domain_str(domain) == Some(domain))
+                    .ok_or(BenchError::new("invalid_from_domain"))
+            })
+            .collect::<Result<_>>()?;
+        let query = Self {
+            label,
+            text: raw.text,
+            site: primary,
+            sites,
+            want: raw
+                .want
+                .iter()
+                .map(|want| Destination::parse(want))
+                .collect::<Result<_>>()?,
+            answer: raw.answer,
+            from,
+            group: raw.group,
+        };
+        if bad_text(&query.text) {
+            return Err(BenchError::new("invalid_query_text_or_answer"));
+        }
+        Ok(query)
+    }
+}
+
+pub(super) struct Corpus {
+    pub(super) queries: Vec<CorpusQuery>,
+    pub(super) hashes: Vec<String>,
+}
+
+impl Corpus {
+    pub(super) fn load(paths: &[PathBuf]) -> Result<Self> {
+        if paths.is_empty() || paths.len() > MAX_CORPUS_FILES {
+            return Err(BenchError::new("corpus_file_count"));
+        }
+        let mut corpus = Self {
+            queries: Vec::new(),
+            hashes: Vec::new(),
+        };
+        let mut ids = BTreeSet::new();
+        for (index, path) in paths.iter().enumerate() {
+            let source = read_bytes(path, MAX_CORPUS_BYTES).map_err(|error| error.at(index + 1))?;
+            let text = std::str::from_utf8(&source)
+                .map_err(|_| BenchError::new("corpus_encoding").at(index + 1))?;
+            let queries = parse(text).map_err(|error| error.at(index + 1))?;
+            if corpus.queries.len() + queries.len() > MAX_QUERIES {
+                return Err(BenchError::new("corpus_query_limit"));
+            }
+            for query in &queries {
+                if !ids.insert(query.label.id.clone()) {
+                    return Err(BenchError::new("duplicate_query_id").for_query(&query.label.id));
+                }
+            }
+            corpus.queries.extend(queries);
+            corpus.hashes.push(digest(&source));
+        }
+        Ok(corpus)
+    }
+}
+
+fn parse(text: &str) -> Result<Vec<CorpusQuery>> {
+    let file: CorpusFile = toml::from_str(text).map_err(|error| {
+        let mut message = BenchError::new("invalid_corpus_toml");
+        if let Some(span) = error.span() {
+            let line = text.as_bytes()[..span.start.min(text.len())]
+                .iter()
+                .filter(|&&c| c == b'\n')
+                .count();
+            message = message.line(line + 1);
+        }
+        message
+    })?;
+    if file.query.is_empty() || file.query.len() > MAX_QUERIES {
+        return Err(BenchError::new("corpus_query_count"));
+    }
+    file.query
+        .into_iter()
+        .enumerate()
+        .map(|(index, query)| CorpusQuery::try_from(query).map_err(|error| error.entry(index + 1)))
+        .collect()
+}
+
+#[cfg(test)]
+pub(super) fn fixture(text: &str) -> CorpusQuery {
+    parse(text).expect("test corpus").remove(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLACE: &str =
+        "[[query]]\nid='test'\ntext='private search'\nkind='place'\nsite='example.com'\n";
+
+    #[test]
+    fn actual_corpora_when_available() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../zephium-audit/impl/search-map");
+        let paths = [root.join("corpus-v0.toml"), root.join("corpus-v1.toml")];
+        if paths.iter().all(|path| path.is_file()) {
+            let corpus = Corpus::load(&paths).expect("both real corpora");
+            assert_eq!(corpus.hashes.len(), 2);
+            for kind in [
+                Kind::Place,
+                Kind::Compare,
+                Kind::Passage,
+                Kind::Instant,
+                Kind::List,
+            ] {
+                assert!(corpus.queries.iter().any(|query| query.label.kind == kind));
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_and_out_of_bounds_corpora_without_echoing_input() {
+        let cases = [
+            ("unknown", format!("{PLACE}private_field='private payload'")),
+            (
+                "unknown kind",
+                PLACE.replace("kind='place'", "kind='private payload'"),
+            ),
+            ("missing site", PLACE.replace("site=", "#site=")),
+            ("missing answer", PLACE.replace("'place'", "'passage'")),
+            (
+                "missing compare sites",
+                PLACE.replace("'place'", "'compare'"),
+            ),
+            (
+                "too many compare sites",
+                format!(
+                    "{}sites=['a.com','b.com','c.com']",
+                    PLACE.replace("'place'", "'compare'")
+                ),
+            ),
+            (
+                "duplicate compare sites",
+                format!(
+                    "{}sites=['a.com','A.COM']",
+                    PLACE.replace("'place'", "'compare'")
+                ),
+            ),
+            (
+                "bad site",
+                PLACE.replace("example.com", "https://example.com"),
+            ),
+            ("bad want", format!("{PLACE}want=['https://example.com']")),
+            ("bad from", format!("{PLACE}from=['docs.example.com']")),
+            ("bad group", format!("{PLACE}group=['private payload']")),
+            ("bad slice", format!("{PLACE}slice='private payload'")),
+            ("unsafe id", PLACE.replace("'test'", "'../private payload'")),
+            ("reserved id", PLACE.replace("'test'", "'lpt1'")),
+            ("empty text", PLACE.replace("private search", "")),
+            (
+                "text limit",
+                PLACE.replace("private search", &"x".repeat(MAX_TEXT_BYTES + 1)),
+            ),
+            (
+                "label limit",
+                PLACE.replace("'test'", &format!("'{}'", "x".repeat(MAX_LABEL_BYTES + 1))),
+            ),
+            (
+                "list limit",
+                format!("{PLACE}want=[{}]", "'example.com',".repeat(MAX_VALUES + 1)),
+            ),
+            (
+                "want size limit",
+                format!("{PLACE}want=['example.com/{}']", "x".repeat(MAX_URL_BYTES)),
+            ),
+            ("no queries", "query=[]".into()),
+            ("query count", PLACE.repeat(MAX_QUERIES + 1)),
+        ];
+        for (scenario, text) in cases {
+            let error = parse(&text)
+                .err()
+                .unwrap_or_else(|| panic!("accepted {scenario}"));
+            assert!(!error.to_string().contains("private"), "{scenario}");
+        }
+    }
+
+    #[test]
+    fn combined_queries_and_files_are_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let one = directory.path().join("one.toml");
+        std::fs::write(&one, PLACE).unwrap();
+        let duplicate = Corpus::load(&[one.clone(), one.clone()]).err().unwrap();
+        assert_eq!(duplicate.class, "duplicate_query_id");
+        assert!(Corpus::load(&vec![one.clone(); MAX_CORPUS_FILES + 1]).is_err());
+        let two = directory.path().join("two.toml");
+        std::fs::write(&two, PLACE.repeat(MAX_QUERIES)).unwrap();
+        assert_eq!(
+            Corpus::load(&[one, two.clone()]).err().unwrap().class,
+            "corpus_query_limit"
+        );
+        std::fs::write(&two, vec![0; MAX_CORPUS_BYTES + 1]).unwrap();
+        assert!(Corpus::load(&[two]).is_err());
+    }
+}

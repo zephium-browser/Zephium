@@ -7371,6 +7371,8 @@ dependencies = [
  "flate2",
  "libc",
  "minisign",
+ "nix",
+ "psl",
  "regex",
  "ring",
  "semver",
@@ -7379,10 +7381,13 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "time",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "url",
  "windows",
  "zephium-blocker",
  "zephium-core",
+ "zephium-public-fetch",
 ]
 
 [[package]]
