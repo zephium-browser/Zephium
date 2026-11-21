@@ -12,13 +12,31 @@ use super::{Result, MAX_URL_BYTES};
 pub(super) const MAX_REQUESTS: usize = 64;
 pub(super) const MAX_SOURCE_BYTES: usize = 80;
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum EngineKind {
+    Probe,
+    Session,
+}
+
+impl EngineKind {
+    pub(super) fn legacy() -> Self {
+        Self::Probe
+    }
+}
+
 pub(super) trait Engine {
     fn run(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Outcome;
 }
 
 pub(super) trait BenchIo {
     fn fetch(&mut self, request: FetchRequest) -> FetchResult;
-    fn results_page(&mut self, query: &CorpusQuery) -> ResultsPage;
+    fn start_fetch(&mut self, request: FetchRequest) -> usize;
+    fn next_fetch(&mut self) -> Option<(usize, FetchResult)>;
+    fn results_page(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> ResultsPage;
+    fn remember(&mut self, index: usize, memo: &[u8]);
+    fn now(&self) -> u64;
+    fn session_id(&self) -> u64;
     // The clock advances at recorded I/O boundaries so an identical replay sees the same time.
     fn elapsed(&self) -> Duration;
 }
@@ -123,14 +141,18 @@ impl<'de> Deserialize<'de> for FetchRefusal {
 
 pub(super) enum ResultsPage {
     Unavailable,
-    Available { url: Url, bytes: Vec<u8> },
+    Available {
+        url: Url,
+        bytes: Vec<u8>,
+        synthetic: bool,
+    },
 }
 
 impl ResultsPage {
     pub(super) fn available(&self) -> bool {
         match self {
             Self::Unavailable => false,
-            Self::Available { url, bytes } => url.has_host() && !bytes.is_empty(),
+            Self::Available { url, bytes, .. } => url.has_host() && !bytes.is_empty(),
         }
     }
 }
@@ -166,6 +188,8 @@ pub(super) struct Entry {
     pub(super) url: Url,
     pub(super) depth: Depth,
     pub(super) source: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) tags: BTreeSet<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -215,6 +239,12 @@ pub(super) struct Outcome {
     pub(super) milestones: Milestones,
     pub(super) stats: BTreeMap<String, u64>,
     pub(super) probe: Vec<ProbeSite>,
+    #[serde(default)]
+    pub(super) synthetic_results: bool,
+    #[serde(default)]
+    pub(super) no_official_site: bool,
+    #[serde(default)]
+    pub(super) needs_results_page: bool,
 }
 
 impl Outcome {
@@ -228,6 +258,9 @@ impl Outcome {
             milestones: Milestones::default(),
             stats: BTreeMap::new(),
             probe: Vec::new(),
+            synthetic_results: false,
+            no_official_site: false,
+            needs_results_page: false,
         }
     }
 
@@ -248,6 +281,13 @@ impl Outcome {
 pub(super) enum EngineFailure {
     InvalidInput,
     SessionFailed,
+    AfterTerminal,
+    MissingTerminal,
+    Concurrency,
+    UnexpectedCompletion,
+    UnexpectedPlace,
+    StayOutFetch,
+    MemoLimit,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -348,30 +388,37 @@ impl Activity {
     }
 }
 
+thread_local! {
+    static REDACT_PANICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn redact_thread_panics() {
+    REDACT_PANICS.set(true);
+}
+
 pub(super) fn run_catching(
     engine: &mut dyn Engine,
     query: &CorpusQuery,
     io: &mut dyn BenchIo,
 ) -> Result<Outcome> {
-    use std::cell::Cell;
     use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
     use std::sync::Once;
 
-    thread_local! {
-        static RUNNING_ENGINE: Cell<bool> = const { Cell::new(false) };
-    }
     static INSTALL_HOOK: Once = Once::new();
     INSTALL_HOOK.call_once(|| {
         let original = take_hook();
         set_hook(Box::new(move |info| {
-            if !RUNNING_ENGINE.try_with(Cell::get).unwrap_or(false) {
+            if !REDACT_PANICS
+                .try_with(std::cell::Cell::get)
+                .unwrap_or(false)
+            {
                 original(info);
             }
         }));
     });
-    let previous = RUNNING_ENGINE.replace(true);
+    let previous = REDACT_PANICS.replace(true);
     let outcome = catch_unwind(AssertUnwindSafe(|| engine.run(query, io)));
-    RUNNING_ENGINE.set(previous);
+    REDACT_PANICS.set(previous);
     outcome.map_err(|payload| {
         // A custom panic payload can panic again when dropped.
         std::mem::forget(payload);

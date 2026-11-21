@@ -6,6 +6,14 @@ use url::Url;
 use zephium_public_fetch::{PublicBody, StatusClass, StatusRefusal, Timings};
 
 const TEXT: &str = "private search secret";
+const PROBE_CLOCK: RunClock = RunClock {
+    engine: EngineKind::Probe,
+    now: 0,
+};
+const SESSION_CLOCK: RunClock = RunClock {
+    engine: EngineKind::Session,
+    now: 4321,
+};
 const BODY: &[u8] = b"private third party content";
 
 fn repository() -> PathBuf {
@@ -46,6 +54,7 @@ struct FakeSource {
     wire: u64,
     decoded: u64,
     denied: u64,
+    pending: Option<Completed>,
 }
 
 impl Source for FakeSource {
@@ -53,36 +62,51 @@ impl Source for FakeSource {
         self.sessions += 1;
     }
 
-    fn fetch(&mut self, request: FetchRequest) -> FetchResult {
+    fn submit(&mut self, token: usize, request: FetchRequest, start: Duration) {
         self.calls += 1;
         self.wire += 42;
-        if request.url.path() == "/denied" {
+        let result = if request.url.path() == "/denied" {
             self.denied += 1;
-            return Err(FetchRefusal::Reader(ReadRefusal::Status(
+            Err(FetchRefusal::Reader(ReadRefusal::Status(
                 StatusRefusal::Denied,
-            )));
-        }
-        self.decoded += BODY.len() as u64;
-        Ok(PublicBody {
-            final_url: request.url,
-            hops: 0,
-            status: StatusClass::NonAuthoritative,
-            media_type: Some("text/plain".into()),
-            charset: Some("utf-8".into()),
-            bytes: BODY.to_vec(),
-            truncated: true,
-            wire_bytes: 42,
-            timings: Timings {
-                queued: Duration::from_millis(1),
-                connect: None,
-                first_byte: Duration::from_millis(2),
-                total: Duration::from_millis(3),
-            },
-        })
+            )))
+        } else {
+            self.decoded += BODY.len() as u64;
+            Ok(PublicBody {
+                final_url: request.url,
+                hops: 0,
+                status: StatusClass::NonAuthoritative,
+                media_type: Some("text/plain".into()),
+                charset: Some("utf-8".into()),
+                bytes: BODY.to_vec(),
+                truncated: true,
+                wire_bytes: 42,
+                timings: Timings {
+                    queued: Duration::from_millis(1),
+                    connect: None,
+                    first_byte: Duration::from_millis(2),
+                    total: Duration::from_millis(3),
+                },
+            })
+        };
+        let total = Duration::from_millis(3);
+        assert!(self
+            .pending
+            .replace(Completed {
+                token,
+                result,
+                transfer: Transfer {
+                    wire_bytes: Some(42),
+                    start,
+                    total,
+                    end: start + total
+                },
+            })
+            .is_none());
     }
 
-    fn wire_bytes(&self) -> u64 {
-        self.wire
+    fn next(&mut self) -> Option<Completed> {
+        self.pending.take()
     }
 
     fn counts(&self) -> Measure {
@@ -127,6 +151,7 @@ impl Engine for Script<'_> {
                 url: body.final_url,
                 depth: Depth::One,
                 source: "test_source".into(),
+                tags: BTreeSet::new(),
             });
         }
         outcome.milestones.full = Some(io.elapsed());
@@ -135,10 +160,14 @@ impl Engine for Script<'_> {
 }
 
 fn init(root: &Path, corpus: &Corpus) {
+    init_engine(root, corpus, EngineKind::Probe);
+}
+
+fn init_engine(root: &Path, corpus: &Corpus, engine: EngineKind) {
     let _lock = store::record_lock(root, true).unwrap();
     write_json(
         &root.join(MANIFEST),
-        &RunManifest::new(corpus, &repository(), ReaderLimits::default()).unwrap(),
+        &RunManifest::new(corpus, &repository(), ReaderLimits::default(), engine).unwrap(),
     )
     .unwrap();
 }
@@ -161,6 +190,7 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
         &mut script,
         &mut source,
         Duration::ZERO,
+        PROBE_CLOCK,
     )
     .unwrap();
 
@@ -191,7 +221,14 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
         store::digest(b"https://example.com/docs")
     );
 
-    replay(root.path(), &corpus, vec![&corpus.queries[0]], &mut script).unwrap();
+    replay(
+        root.path(),
+        &corpus,
+        vec![&corpus.queries[0]],
+        &mut script,
+        EngineKind::Probe,
+    )
+    .unwrap();
     let (first_replay, _) = latest_replay(root.path()).unwrap().unwrap();
     let replayed =
         store::read_json::<QueryResult>(&first_replay.join("queries/a/outcome.json")).unwrap();
@@ -206,7 +243,15 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
             expect,
             repeated: false,
         };
-        let replayed = replay_query(root.path(), &corpus.queries[0], &mut changed).unwrap();
+        let replayed = replay_query(
+            root.path(),
+            &corpus.queries[0],
+            &mut changed,
+            PROBE_CLOCK,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(replayed.score.verdict, Verdict::NotRecorded);
         assert_eq!(replayed.activity.not_recorded, 1);
         assert_eq!(replayed.activity.refusals["NotRecorded"], 1);
@@ -215,6 +260,9 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
         root.path(),
         &corpus.queries[2],
         &mut crate::map_bench::probe::ProbeEngine,
+        PROBE_CLOCK,
+        2,
+        None,
     )
     .unwrap();
     assert_eq!(unrecorded.score.verdict, Verdict::NotRecorded);
@@ -239,12 +287,11 @@ fn fake_recording_is_lossless_idempotent_and_can_be_replayed() {
             vec![b'x'; BODY.len()]
         );
         let stored = Journal::load(&query_dir).unwrap();
+        let (index, _, _) = stored
+            .find(&request("/docs", Expectation::Text), |_| true, false)
+            .unwrap();
         assert_eq!(
-            stored
-                .lookup(&request("/docs", Expectation::Text), &query_dir)
-                .err()
-                .unwrap()
-                .class,
+            stored.result(index, &query_dir).unwrap_err().class,
             "body_digest_mismatch"
         );
     }
@@ -277,6 +324,7 @@ fn interrupted_reservation_is_never_retried_and_partial_run_resumes() {
         &mut script,
         &mut source,
         Duration::ZERO,
+        PROBE_CLOCK,
     )
     .unwrap();
 
@@ -325,6 +373,7 @@ fn engine_panic_and_limits_checkpoint_query_failures_and_continue() {
                         url: Url::parse("https://example.com/").unwrap(),
                         depth: Depth::One,
                         source: "x".repeat(crate::map_bench::engine::MAX_SOURCE_BYTES + 1),
+                        tags: BTreeSet::new(),
                     });
                     return outcome;
                 }
@@ -358,6 +407,7 @@ fn engine_panic_and_limits_checkpoint_query_failures_and_continue() {
         &mut Unreliable,
         &mut source,
         Duration::ZERO,
+        PROBE_CLOCK,
     )
     .unwrap();
     assert_eq!(source.calls, MAX_REQUESTS as u64);
@@ -404,14 +454,7 @@ fn invalid_request_cap_timeout_and_url_are_refused() {
             Expectation::Text,
         ),
     ] {
-        let mut io = QueryIo {
-            query: root.path(),
-            journal: Journal::default(),
-            live: None,
-            elapsed: Duration::ZERO,
-            activity: Activity::default(),
-            failure: None,
-        };
+        let mut io = QueryIo::new(root.path(), Journal::default(), PROBE_CLOCK, None);
         assert_eq!(io.fetch(invalid), Err(FetchRefusal::Limit));
         assert_eq!(io.failure, Some(Reason::RequestLimit));
     }
@@ -420,7 +463,6 @@ fn invalid_request_cap_timeout_and_url_are_refused() {
 #[test]
 fn recorded_results_page_slot_replays_bytes_and_time() {
     let root = tempfile::tempdir().unwrap();
-    let query = place("q");
     let path = query_dir(root.path(), "q", true).unwrap();
     let bodies = path.join("bodies");
     fs::create_dir(&bodies).unwrap();
@@ -435,22 +477,17 @@ fn recorded_results_page_slot_replays_bytes_and_time() {
             sha256: hash,
             decoded_bytes: BODY.len(),
             elapsed_at_return: elapsed,
+            synthetic: false,
         },
     )
     .unwrap();
 
-    let mut io = QueryIo {
-        query: &path,
-        journal: Journal::default(),
-        live: None,
-        elapsed: Duration::ZERO,
-        activity: Activity::default(),
-        failure: None,
-    };
+    let mut io = QueryIo::new(&path, Journal::default(), PROBE_CLOCK, None);
     let ResultsPage::Available {
         url: recorded_url,
         bytes,
-    } = io.results_page(&query)
+        synthetic: false,
+    } = io.results_page(None)
     else {
         panic!("recorded results page unavailable");
     };
@@ -523,6 +560,7 @@ fn report_matches_golden_and_hides_private_inputs() {
             repeated: false,
         },
         &mut FakeSource::default(),
+        PROBE_CLOCK,
     )
     .unwrap();
     let first = query_dir(root.path(), "blocked", false).unwrap();
@@ -582,13 +620,13 @@ fn report_matches_golden_and_hides_private_inputs() {
 
 ## Recording
 
-| Scope | pass | partial | fail | stayed_out_ok | stayed_out_broken | blocked | not_recorded |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Total | 0 | 0 | 0 | 1 | 0 | 1 | 0 |
-| instant | 0 | 0 | 0 | 1 | 0 | 0 | 0 |
-| place | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
-| Slice (unsliced) | 0 | 0 | 0 | 1 | 0 | 0 | 0 |
-| Slice founder | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| Scope | pass | partial | fail | stayed_out_ok | stayed_out_broken | blocked | not_recorded | not_measured | no_official_site |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Total | 0 | 0 | 0 | 1 | 0 | 1 | 0 | 0 | 0 |
+| instant | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |
+| place | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |
+| Slice (unsliced) | 0 | 0 | 0 | 1 | 0 | 0 | 0 | 0 | 0 |
+| Slice founder | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 |
 
 | Metric | Samples | p50 | p90 | Max |
 | --- | ---: | ---: | ---: | ---: |
@@ -637,6 +675,7 @@ fn report_matches_golden_and_hides_private_inputs() {
             expect: Expectation::Text,
             repeated: false,
         },
+        EngineKind::Probe,
     )
     .unwrap();
     let custom = root.path().join("custom.md");
@@ -645,3 +684,5 @@ fn report_matches_golden_and_hides_private_inputs() {
     assert!(markdown.contains("## Latest replay\n\nUnrecorded requests: 1"));
     assert!(!markdown.contains("https://") && !markdown.contains(TEXT));
 }
+
+mod session;

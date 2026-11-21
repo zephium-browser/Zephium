@@ -13,10 +13,12 @@ pub(super) enum Verdict {
     StayedOutBroken,
     Blocked,
     NotRecorded,
+    NotMeasured,
+    NoOfficialSite,
 }
 
 impl Verdict {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 9] = [
         Self::Pass,
         Self::Partial,
         Self::Fail,
@@ -24,6 +26,8 @@ impl Verdict {
         Self::StayedOutBroken,
         Self::Blocked,
         Self::NotRecorded,
+        Self::NotMeasured,
+        Self::NoOfficialSite,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -35,6 +39,8 @@ impl Verdict {
             Self::StayedOutBroken => "stayed_out_broken",
             Self::Blocked => "blocked",
             Self::NotRecorded => "not_recorded",
+            Self::NotMeasured => "not_measured",
+            Self::NoOfficialSite => "no_official_site",
         }
     }
 
@@ -53,6 +59,7 @@ pub(super) enum Reason {
     MissingGroups,
     DestinationMissing,
     PassageMissing,
+    PassageUnreadable,
     WrongAnswerShown,
     AnswerFromUnlistedSource,
     ReaderBlocked,
@@ -66,8 +73,11 @@ pub(super) enum Reason {
     EnginePanic,
     EngineInvalidInput,
     EngineSessionFailed,
+    EngineFault,
     InvalidOutcome,
     ArtifactError,
+    NeedsResultsPage,
+    NoOfficialSite,
 }
 
 impl Reason {
@@ -80,6 +90,7 @@ impl Reason {
             Self::MissingGroups => "missing_groups",
             Self::DestinationMissing => "destination_missing",
             Self::PassageMissing => "passage_missing",
+            Self::PassageUnreadable => "passage_unreadable",
             Self::WrongAnswerShown => "wrong_answer_shown",
             Self::AnswerFromUnlistedSource => "answer_from_unlisted_source",
             Self::ReaderBlocked => "reader_blocked",
@@ -93,8 +104,11 @@ impl Reason {
             Self::EnginePanic => "engine_panic",
             Self::EngineInvalidInput => "engine_invalid_input",
             Self::EngineSessionFailed => "engine_session_failed",
+            Self::EngineFault => "engine_fault",
             Self::InvalidOutcome => "invalid_outcome",
             Self::ArtifactError => "artifact_error",
+            Self::NeedsResultsPage => "needs_results_page",
+            Self::NoOfficialSite => "no_official_site",
         }
     }
 }
@@ -111,6 +125,8 @@ pub(super) struct PassageScore {
     pub(super) answer_from_unlisted_source: bool,
     pub(super) wrong_answer_shown: bool,
     pub(super) nothing_returned: bool,
+    #[serde(default)]
+    pub(super) page_could_not_be_read: bool,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -120,7 +136,7 @@ pub(super) struct Score {
     pub(super) kind_matched: bool,
     pub(super) destination: Option<DestinationMatch>,
     pub(super) passage: Option<PassageScore>,
-    pub(super) missing_groups: Vec<Group>,
+    pub(super) missing_groups: Option<Vec<Group>>,
     pub(super) stayed_out: Option<bool>,
 }
 
@@ -132,15 +148,20 @@ impl Score {
             kind_matched: false,
             destination: None,
             passage: None,
-            missing_groups: Vec::new(),
+            missing_groups: None,
             stayed_out: None,
         }
     }
 }
 
 pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity) -> Score {
+    if outcome.needs_results_page {
+        return Score::unavailable(Verdict::NotMeasured, Reason::NeedsResultsPage);
+    }
     let kind_matched = outcome.kind == query.label.kind;
-    let missing_groups: Vec<_> = query.group.difference(&outcome.groups).copied().collect();
+    let missing_groups: Option<Vec<_>> = (!outcome.synthetic_results)
+        .then(|| query.group.difference(&outcome.groups).copied().collect());
+    let missing_count = missing_groups.as_ref().map_or(0, Vec::len);
     let destination = matches!(query.label.kind, Kind::Place | Kind::Compare)
         .then(|| {
             outcome
@@ -166,8 +187,10 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
         (Verdict::NotRecorded, Reason::RequestNotRecorded)
     } else if activity.interrupted > 0 {
         (Verdict::NotRecorded, Reason::RequestInterrupted)
+    } else if outcome.no_official_site {
+        (Verdict::NoOfficialSite, Reason::NoOfficialSite)
     } else if let Some(stayed_out) = stayed_out {
-        match (stayed_out, kind_matched, missing_groups.is_empty()) {
+        match (stayed_out, kind_matched, missing_count == 0) {
             (false, _, _) => (Verdict::StayedOutBroken, Reason::SideEffects),
             (true, false, _) => (Verdict::StayedOutBroken, Reason::KindMismatch),
             (true, true, false) => (Verdict::StayedOutBroken, Reason::MissingGroups),
@@ -180,13 +203,14 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
                 Err(Reason::AnswerFromUnlistedSource)
             }
             Some(passage) if passage.wrong_answer_shown => Err(Reason::WrongAnswerShown),
+            Some(passage) if passage.page_could_not_be_read => Err(Reason::PassageUnreadable),
             Some(_) => Err(Reason::PassageMissing),
             None if destination.is_some() => Ok(()),
             None => Err(Reason::DestinationMissing),
         };
         match main {
             Ok(()) if !kind_matched => (Verdict::Partial, Reason::KindMismatch),
-            Ok(()) if !missing_groups.is_empty() => (Verdict::Partial, Reason::MissingGroups),
+            Ok(()) if missing_count != 0 => (Verdict::Partial, Reason::MissingGroups),
             Ok(()) => (Verdict::Pass, Reason::Matched),
             Err(Reason::AnswerFromUnlistedSource) => {
                 (Verdict::Partial, Reason::AnswerFromUnlistedSource)
@@ -194,7 +218,7 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
             Err(reason) => {
                 if let Some(block) = blocked(outcome, activity) {
                     (Verdict::Blocked, block)
-                } else if missing_groups.len() < query.group.len() {
+                } else if missing_groups.is_some() && missing_count < query.group.len() {
                     (Verdict::Partial, reason)
                 } else {
                     (Verdict::Fail, reason)
@@ -215,8 +239,19 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
 
 fn passages(query: &CorpusQuery, outcome: &Outcome, answer: &str) -> PassageScore {
     let answer = answer.to_lowercase();
+    let unreadable = outcome.synthetic_results
+        && !query.pages.is_empty()
+        && outcome.kind == Kind::Passage
+        && outcome.passages.is_empty()
+        && outcome
+            .stats
+            .get("passage_pages_read")
+            .copied()
+            .unwrap_or(0)
+            == 0;
     let mut score = PassageScore {
-        nothing_returned: outcome.passages.is_empty(),
+        nothing_returned: outcome.passages.is_empty() && !unreadable,
+        page_could_not_be_read: unreadable,
         ..PassageScore::default()
     };
     for passage in &outcome.passages {
@@ -228,7 +263,9 @@ fn passages(query: &CorpusQuery, outcome: &Outcome, answer: &str) -> PassageScor
             .source
             .domain()
             .and_then(|host| psl::domain_str(host.trim_end_matches('.')));
-        if domain.is_some_and(|domain| query.from.iter().any(|source| source == domain)) {
+        if domain.is_some_and(|domain| query.from.iter().any(|source| source == domain))
+            || (query.from.is_empty() && super::session::listed_page(query, &passage.source))
+        {
             score.answer_from_listed_source = true;
         } else {
             score.answer_from_unlisted_source = true;
@@ -239,6 +276,19 @@ fn passages(query: &CorpusQuery, outcome: &Outcome, answer: &str) -> PassageScor
 
 fn blocked(outcome: &Outcome, activity: &Activity) -> Option<Reason> {
     if outcome.probe.is_empty() {
+        if outcome.entries.is_empty()
+            && outcome.passages.is_empty()
+            && ["Entry", "Passage"].iter().any(|phase| {
+                outcome
+                    .stats
+                    .get(&format!("phase.{phase}.refused.Robots"))
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+            })
+        {
+            return Some(Reason::RobotsBlocksAll);
+        }
         return (outcome.entries.is_empty() && outcome.passages.is_empty() && activity.blocked())
             .then_some(Reason::ReaderBlocked);
     }
@@ -275,6 +325,7 @@ mod tests {
             url: Url::parse(url).unwrap(),
             depth,
             source: source.into(),
+            tags: Default::default(),
         }
     }
 

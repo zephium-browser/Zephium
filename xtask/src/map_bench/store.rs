@@ -342,10 +342,14 @@ struct RequestRow {
     cap: usize,
     timeout: Duration,
     result_class: ResultClass,
-    wire_bytes: u64,
+    wire_bytes: Option<u64>,
     decoded_bytes: usize,
     timings: TransferTimes,
+    #[serde(default)]
+    elapsed_at_start: Duration,
     elapsed_at_return: Duration,
+    #[serde(default)]
+    completion_order: Option<usize>,
     body: Option<BodyRef>,
 }
 
@@ -377,7 +381,7 @@ impl RequestRow {
             cap: request.max_bytes,
             timeout: request.timeout,
             result_class: ResultClass::Refused(FetchRefusal::Interrupted),
-            wire_bytes: 0,
+            wire_bytes: None,
             decoded_bytes: 0,
             timings: TransferTimes {
                 queued: None,
@@ -385,7 +389,9 @@ impl RequestRow {
                 first_byte: None,
                 total: Duration::ZERO,
             },
+            elapsed_at_start: elapsed,
             elapsed_at_return: elapsed,
+            completion_order: None,
             body: None,
         }
     }
@@ -395,13 +401,12 @@ impl RequestRow {
         root: &Path,
         query: &Path,
         fetch: &FetchResult,
-        wire_bytes: u64,
-        total: Duration,
-        elapsed: Duration,
+        transfer: Transfer,
     ) -> Result<()> {
-        self.elapsed_at_return = elapsed;
-        self.wire_bytes = wire_bytes;
-        self.timings.total = total;
+        self.elapsed_at_start = transfer.start;
+        self.elapsed_at_return = transfer.end;
+        self.wire_bytes = transfer.wire_bytes;
+        self.timings.total = transfer.total;
         match fetch {
             Ok(body) => {
                 let sha256 = write_body(root, query, &body.bytes)?;
@@ -452,7 +457,9 @@ impl RequestRow {
                     charset: body.charset.clone(),
                     bytes: read_body(query, &body.sha256, self.decoded_bytes)?,
                     truncated: body.truncated,
-                    wire_bytes: self.wire_bytes,
+                    wire_bytes: self
+                        .wire_bytes
+                        .ok_or(BenchError::new("missing_wire_bytes"))?,
                     timings: Timings {
                         queued: self
                             .timings
@@ -475,6 +482,13 @@ impl RequestRow {
 #[derive(Default)]
 pub(super) struct Journal(Vec<RequestRow>);
 
+pub(super) struct Transfer {
+    pub(super) wire_bytes: Option<u64>,
+    pub(super) start: Duration,
+    pub(super) total: Duration,
+    pub(super) end: Duration,
+}
+
 impl Journal {
     pub(super) fn load(query: &Path) -> Result<Self> {
         let path = query.join(JOURNAL);
@@ -495,8 +509,16 @@ impl Journal {
             }
             let row: RequestRow = serde_json::from_slice(line)
                 .map_err(|_| BenchError::new("invalid_request_journal").line(index + 1))?;
-            if journal.0.iter().any(|previous| previous.key == row.key) {
-                return Err(BenchError::new("duplicate_request_key").line(index + 1));
+            if row.elapsed_at_start > row.elapsed_at_return
+                || row.completion_order.is_some_and(|order| {
+                    order >= MAX_REQUESTS
+                        || journal
+                            .0
+                            .iter()
+                            .any(|prior| prior.completion_order == Some(order))
+                })
+            {
+                return Err(BenchError::new("invalid_request_timeline").line(index + 1));
             }
             journal.0.push(row);
         }
@@ -523,23 +545,43 @@ impl Journal {
         Ok(())
     }
 
-    pub(super) fn lookup(
+    pub(super) fn find(
         &self,
         request: &FetchRequest,
-        query: &Path,
-    ) -> Result<Option<(FetchResult, Duration)>> {
+        mut eligible: impl FnMut(usize) -> bool,
+        exact: bool,
+    ) -> Option<(usize, Duration, usize)> {
         let key = request.into();
         self.0
             .iter()
-            .find(|row| row.key == key)
-            .map(|row| Ok((row.result(query)?, row.elapsed_at_return)))
-            .transpose()
+            .enumerate()
+            .find(|(index, row)| {
+                eligible(*index)
+                    && row.key == key
+                    && (!exact || (row.cap == request.max_bytes && row.timeout == request.timeout))
+            })
+            .map(|(index, row)| {
+                (
+                    index,
+                    row.elapsed_at_return,
+                    row.completion_order.unwrap_or(index),
+                )
+            })
+    }
+
+    pub(super) fn result(&self, index: usize, query: &Path) -> Result<FetchResult> {
+        self.0
+            .get(index)
+            .ok_or(BenchError::new("missing_request_reservation"))?
+            .result(query)
     }
 
     pub(super) fn elapsed(&self) -> Duration {
         self.0
-            .last()
-            .map_or(Duration::ZERO, |row| row.elapsed_at_return)
+            .iter()
+            .map(|row| row.elapsed_at_return)
+            .max()
+            .unwrap_or_default()
     }
 
     pub(super) fn reserve(
@@ -547,28 +589,31 @@ impl Journal {
         request: &FetchRequest,
         query: &Path,
         elapsed: Duration,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if self.0.len() >= MAX_REQUESTS {
             return Err(BenchError::new("request_limit"));
         }
+        let index = self.0.len();
         self.0.push(RequestRow::reserve(request, elapsed));
-        self.save(query)
+        self.save(query)?;
+        Ok(index)
     }
 
     pub(super) fn finish(
         &mut self,
         root: &Path,
         query: &Path,
+        index: usize,
         fetch: &FetchResult,
-        wire_bytes: u64,
-        total: Duration,
-        elapsed: Duration,
+        transfer: Transfer,
     ) -> Result<()> {
+        let order = self.0.iter().filter_map(|row| row.completion_order).max();
         let row = self
             .0
-            .last_mut()
+            .get_mut(index)
             .ok_or(BenchError::new("missing_request_reservation"))?;
-        row.finish(root, query, fetch, wire_bytes, total, elapsed)?;
+        row.finish(root, query, fetch, transfer)?;
+        row.completion_order = Some(order.map_or(0, |order| order + 1));
         self.save(query)
     }
 
@@ -582,7 +627,7 @@ impl Journal {
                 );
                 (
                     reads + u64::from(completed),
-                    wire.saturating_add(row.wire_bytes),
+                    wire.saturating_add(row.wire_bytes.unwrap_or_default()),
                     decoded.saturating_add(row.decoded_bytes as u64),
                 )
             })
@@ -606,6 +651,8 @@ pub(super) enum ResultsSlot {
         sha256: String,
         decoded_bytes: usize,
         elapsed_at_return: Duration,
+        #[serde(default)]
+        synthetic: bool,
     },
 }
 
@@ -625,14 +672,36 @@ impl ResultsSlot {
                 sha256,
                 decoded_bytes,
                 elapsed_at_return,
+                synthetic,
             }) => Ok((
                 ResultsPage::Available {
                     url,
                     bytes: read_body(query, &sha256, decoded_bytes)?,
+                    synthetic,
                 },
                 elapsed_at_return,
             )),
             _ => Ok((ResultsPage::Unavailable, Duration::ZERO)),
         }
+    }
+
+    pub(super) fn save(
+        root: &Path,
+        query: &Path,
+        url: &Url,
+        bytes: &[u8],
+        elapsed: Duration,
+    ) -> Result<()> {
+        let sha256 = write_body(root, query, bytes)?;
+        write_json(
+            &query.join("results-page.json"),
+            &Self::Available {
+                url: url.clone(),
+                sha256,
+                decoded_bytes: bytes.len(),
+                elapsed_at_return: elapsed,
+                synthetic: true,
+            },
+        )
     }
 }

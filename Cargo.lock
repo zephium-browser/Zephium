@@ -7387,6 +7387,7 @@ dependencies = [
  "windows",
  "zephium-blocker",
  "zephium-core",
+ "zephium-map",
  "zephium-public-fetch",
 ]
 

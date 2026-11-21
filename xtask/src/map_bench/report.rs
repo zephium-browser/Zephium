@@ -3,12 +3,14 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
+use zephium_map::session::Budget;
 use zephium_public_fetch::ReadRefusal;
 
-use super::corpus::QueryLabel;
-use super::engine::{FetchRefusal, ProbeFetch, RobotsStop};
+use super::corpus::{Kind, QueryLabel};
+use super::engine::{EngineFailure, EngineKind, FetchRefusal, ProbeFetch, RobotsStop};
 use super::run::{latest_replay, Measure, QueryResult, RunManifest, MEASURE, OUTCOME};
 use super::score::{Reason, Score, Verdict};
+use super::session::{MAX_PLACES, PHASES, PLACE_SOURCES};
 use super::store::{self, optional_json, query_dir, read_json, write_blob, write_json};
 use super::{BenchError, Result};
 
@@ -63,6 +65,7 @@ struct QueryScore {
     query: QueryLabel,
     #[serde(flatten)]
     score: Score,
+    engine_failure: Option<EngineFailure>,
 }
 
 #[derive(Serialize)]
@@ -74,7 +77,197 @@ struct Summary {
     refusals: BTreeMap<String, u64>,
     unrecorded_requests: u64,
     probe: ProbeTotals,
+    synthetic_results: usize,
+    session: Option<SessionTotals>,
     queries: Vec<QueryScore>,
+}
+
+#[derive(Default, Serialize)]
+struct SessionTotals {
+    sites: u64,
+    places_with_three_sections: u64,
+    sources: Counts,
+    shells: u64,
+    walls: u64,
+    robots_denials: u64,
+    render_wanted: u64,
+    anonymous_results_wanted: u64,
+    budgets: BTreeMap<String, u64>,
+    requests_per_query_by_phase: BTreeMap<String, Distribution>,
+    passage: Counts,
+}
+
+impl SessionTotals {
+    fn collect(&mut self, label: &QueryLabel, result: &QueryResult, samples: &mut Samples) {
+        let site_count = match label.kind {
+            Kind::Place => 1,
+            Kind::Compare => 2,
+            _ => 0,
+        };
+        self.sites += site_count;
+        if let Some(score) = &result.score.passage {
+            for (class, occurred) in [
+                (
+                    "answered_from_listed_source",
+                    score.answer_from_listed_source,
+                ),
+                ("answered_wrong", score.wrong_answer_shown),
+                ("nothing_returned", score.nothing_returned),
+                ("page_could_not_be_read", score.page_could_not_be_read),
+            ] {
+                *self.passage.entry(class).or_default() += u64::from(occurred);
+            }
+        }
+        let Some(outcome) = &result.outcome else {
+            return;
+        };
+        let count = |key: &str| outcome.stats.get(key).copied().unwrap_or(0);
+        self.shells = self.shells.saturating_add(count("shells"));
+        self.walls = self.walls.saturating_add(count("walls"));
+        self.render_wanted = self.render_wanted.saturating_add(count("render_wanted"));
+        self.anonymous_results_wanted = self
+            .anonymous_results_wanted
+            .saturating_add(count("anonymous_results_wanted"));
+        for phase in PHASES {
+            let phase = format!("{phase:?}");
+            self.robots_denials = self
+                .robots_denials
+                .saturating_add(count(&format!("phase.{phase}.refused.Robots")));
+            if outcome.stats.contains_key("cancelled") {
+                samples
+                    .phases
+                    .entry(phase.clone())
+                    .or_default()
+                    .push(count(&format!("phase.{phase}.started")));
+            }
+        }
+        for budget in [
+            Budget::Fetches,
+            Budget::HostFetches,
+            Budget::Concurrent,
+            Budget::HostConcurrent,
+            Budget::HtmlBytes,
+            Budget::XmlBytes,
+            Budget::TextBytes,
+            Budget::SectionPages,
+            Budget::ResultPages,
+            Budget::Elapsed,
+            Budget::LastStart,
+            Budget::Timeout,
+        ] {
+            let class = format!("{budget:?}");
+            let hits = count(&format!("budget.{class}"));
+            if hits != 0 {
+                let total = self.budgets.entry(class).or_default();
+                *total = total.saturating_add(hits);
+            }
+        }
+        for index in 0..MAX_PLACES {
+            if let Some(&sections) = outcome.stats.get(&format!("place.{index}.sections")) {
+                if site_count > 0 {
+                    self.places_with_three_sections += u64::from(sections >= 3);
+                    samples.sections.push(sections);
+                    samples
+                        .children
+                        .push(count(&format!("place.{index}.children")));
+                    for source in PLACE_SOURCES {
+                        let total = self.sources.entry(source).or_default();
+                        *total = total.saturating_add(count(&format!("place.{index}.{source}")));
+                    }
+                }
+            }
+            samples
+                .memos
+                .extend(outcome.stats.get(&format!("memo.{index}.bytes")));
+        }
+    }
+
+    fn markdown(&self, markdown: &mut String) {
+        let _ = writeln!(
+            markdown,
+            "
+Places with at least 3 sections — {} of {} place and compare sites.
+",
+            self.places_with_three_sections, self.sites,
+        );
+        markdown.push_str(
+            "| Session activity | Count |
+| --- | ---: |
+",
+        );
+        for (label, count) in [
+            ("Shells", self.shells),
+            ("Walls", self.walls),
+            ("Robots denials", self.robots_denials),
+            ("Renders wanted", self.render_wanted),
+            (
+                "Anonymous results reads wanted",
+                self.anonymous_results_wanted,
+            ),
+        ] {
+            let _ = writeln!(markdown, "| {label} | {count} |");
+        }
+        markdown.push_str(
+            "
+| Source | Places |
+| --- | ---: |
+",
+        );
+        for source in PLACE_SOURCES {
+            let _ = writeln!(
+                markdown,
+                "| {source} | {} |",
+                self.sources.get(source).copied().unwrap_or(0)
+            );
+        }
+        markdown.push_str(
+            "
+| Budget hit | Queries |
+| --- | ---: |
+",
+        );
+        if self.budgets.is_empty() {
+            markdown.push_str(
+                "| — | 0 |
+",
+            );
+        }
+        for (class, count) in &self.budgets {
+            let _ = writeln!(markdown, "| {class} | {count} |");
+        }
+        markdown.push_str(
+            "
+| Requests per query by phase | Samples | p50 | p90 | Max |
+| --- | ---: | ---: | ---: | ---: |
+",
+        );
+        for phase in PHASES {
+            let name = format!("{phase:?}");
+            if let Some(values) = self.requests_per_query_by_phase.get(&name) {
+                metric_row(markdown, &name, values);
+            } else {
+                metric_row(markdown, &name, &Distribution::default());
+            }
+        }
+        markdown.push_str(
+            "
+| Passage queries with listed pages | Count |
+| --- | ---: |
+",
+        );
+        for class in [
+            "answered_from_listed_source",
+            "answered_wrong",
+            "nothing_returned",
+            "page_could_not_be_read",
+        ] {
+            let _ = writeln!(
+                markdown,
+                "| {class} | {} |",
+                self.passage.get(class).copied().unwrap_or(0)
+            );
+        }
+    }
 }
 
 #[derive(Default)]
@@ -88,11 +281,15 @@ struct Samples {
     decoded_bytes: Vec<u64>,
     cpu: Vec<u64>,
     memory: Vec<u64>,
+    sections: Vec<u64>,
+    children: Vec<u64>,
+    memos: Vec<u64>,
+    phases: BTreeMap<String, Vec<u64>>,
 }
 
 impl Samples {
-    fn finish(self) -> BTreeMap<&'static str, Distribution> {
-        [
+    fn finish(self, session: bool) -> BTreeMap<&'static str, Distribution> {
+        let mut metrics: BTreeMap<_, _> = [
             ("first_layer_ns", self.first_layer, true),
             ("first_place_ns", self.first_place, true),
             ("full_ns", self.full, true),
@@ -105,7 +302,13 @@ impl Samples {
         ]
         .into_iter()
         .map(|(label, samples, p90)| (label, distribution(samples, p90)))
-        .collect()
+        .collect();
+        if session {
+            metrics.insert("sections_per_place", distribution(self.sections, true));
+            metrics.insert("children_per_place", distribution(self.children, true));
+            metrics.insert("memo_bytes", distribution(self.memos, false));
+        }
+        metrics
     }
 }
 
@@ -126,6 +329,8 @@ impl Default for Accumulator {
                 refusals: BTreeMap::new(),
                 unrecorded_requests: 0,
                 probe: ProbeTotals::default(),
+                synthetic_results: 0,
+                session: None,
                 queries: Vec::new(),
             },
             samples: Samples::default(),
@@ -145,6 +350,12 @@ impl Default for Accumulator {
 }
 
 impl Accumulator {
+    fn new(engine: EngineKind) -> Self {
+        let mut accumulator = Self::default();
+        accumulator.summary.session = (engine == EngineKind::Session).then(SessionTotals::default);
+        accumulator
+    }
+
     fn push(
         &mut self,
         label: &QueryLabel,
@@ -167,7 +378,13 @@ impl Accumulator {
             .or_insert_with(counts);
         *slice.entry(verdict).or_default() += 1;
         let ns = |time: std::time::Duration| u64::try_from(time.as_nanos()).unwrap_or(u64::MAX);
+        if let Some(session) = &mut self.summary.session {
+            session.collect(label, &result, &mut self.samples);
+        }
+        let mut engine_failure = None;
         if let Some(outcome) = result.outcome {
+            self.summary.synthetic_results += usize::from(outcome.synthetic_results);
+            engine_failure = outcome.failure;
             self.samples
                 .first_layer
                 .extend(outcome.milestones.first_layer.map(ns));
@@ -209,6 +426,7 @@ impl Accumulator {
         self.summary.queries.push(QueryScore {
             query: label.clone(),
             score: result.score,
+            engine_failure,
         });
     }
 
@@ -221,7 +439,18 @@ impl Accumulator {
     }
 
     fn finish(mut self) -> Summary {
-        self.summary.metrics = self.samples.finish();
+        if let Some(session) = &mut self.summary.session {
+            session.requests_per_query_by_phase = std::mem::take(&mut self.samples.phases)
+                .into_iter()
+                .map(|(phase, samples)| (phase, distribution(samples, true)))
+                .collect();
+        }
+        self.summary.metrics = self.samples.finish(self.summary.session.is_some());
+        if self.summary.synthetic_results != 0
+            && self.summary.metrics["first_layer_ns"].samples == 0
+        {
+            self.summary.metrics.remove("first_layer_ns");
+        }
         self.summary.refusals = self
             .refusal_classes
             .into_iter()
@@ -233,6 +462,7 @@ impl Accumulator {
 
 #[derive(Serialize)]
 struct Report {
+    engine: EngineKind,
     recording: Summary,
     latest_replay: Option<Summary>,
 }
@@ -240,7 +470,7 @@ struct Report {
 impl Report {
     fn read(root: &Path) -> Result<Self> {
         let manifest = RunManifest::open(root)?;
-        let mut recording = Accumulator::default();
+        let mut recording = Accumulator::new(manifest.engine);
         for query in &manifest.queries {
             let path = query_dir(root, &query.id, false)?;
             if !store::directory(&path, false)? {
@@ -257,9 +487,10 @@ impl Report {
             });
             recording.push(query, outcome, measure, false);
         }
+        let engine = manifest.engine;
         let latest_replay = latest_replay(root)?
             .map(|(path, manifest)| -> Result<_> {
-                let mut replay = Accumulator::default();
+                let mut replay = Accumulator::new(engine);
                 for query in &manifest.queries {
                     let path = query_dir(&path, &query.id, false)?;
                     let result = read_json(&path.join(OUTCOME))?;
@@ -269,6 +500,7 @@ impl Report {
             })
             .transpose()?;
         Ok(Self {
+            engine,
             recording: recording.finish(),
             latest_replay,
         })
@@ -276,6 +508,14 @@ impl Report {
 
     fn markdown(&self) -> String {
         let mut markdown = String::from("# Search map benchmark\n\n");
+        if self.recording.synthetic_results != 0
+            || self
+                .latest_replay
+                .as_ref()
+                .is_some_and(|replay| replay.synthetic_results != 0)
+        {
+            markdown.push_str("This run used synthetic results pages. Group checks and first-layer latency were not measured for those pages.\n\n");
+        }
         self.recording.markdown(&mut markdown, "Recording", false);
         if let Some(replay) = &self.latest_replay {
             replay.markdown(&mut markdown, "Latest replay", true);
@@ -294,8 +534,15 @@ impl Summary {
                 self.unrecorded_requests
             );
         }
-        markdown.push_str("| Scope | pass | partial | fail | stayed_out_ok | stayed_out_broken | blocked | not_recorded |\n");
-        markdown.push_str("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+        markdown.push_str("| Scope |");
+        for verdict in Verdict::ALL {
+            let _ = write!(markdown, " {} |", verdict.label());
+        }
+        markdown.push_str("\n| --- |");
+        for _ in Verdict::ALL {
+            markdown.push_str(" ---: |");
+        }
+        markdown.push('\n');
         count_row(markdown, "Total", &self.totals);
         for (kind, counts) in &self.by_kind {
             count_row(markdown, kind, counts);
@@ -310,21 +557,18 @@ impl Summary {
             if replay
                 && !matches!(
                     *metric,
-                    "first_layer_ns" | "first_place_ns" | "full_ns" | "requests"
+                    "first_layer_ns"
+                        | "first_place_ns"
+                        | "full_ns"
+                        | "requests"
+                        | "sections_per_place"
+                        | "children_per_place"
+                        | "memo_bytes"
                 )
             {
                 continue;
             }
-            let number =
-                |value: Option<u64>| value.map_or_else(|| "—".into(), |value| value.to_string());
-            let _ = writeln!(
-                markdown,
-                "| {metric} | {} | {} | {} | {} |",
-                values.samples,
-                number(values.p50),
-                number(values.p90),
-                number(values.max)
-            );
+            metric_row(markdown, metric, values);
         }
         markdown.push_str("\n| Refusal class | Count |\n| --- | ---: |\n");
         if self.refusals.is_empty() {
@@ -333,29 +577,41 @@ impl Summary {
         for (class, count) in &self.refusals {
             let _ = writeln!(markdown, "| {class} | {count} |");
         }
-        let probe = &self.probe;
-        markdown.push_str("\n| Probe | Sites |\n| --- | ---: |\n");
-        for (label, count) in [
-            ("Total", probe.sites),
-            ("Robots answered", probe.robots_answered),
-            ("Homepage answered", probe.homepage_answered),
-            ("llms.txt answered", probe.llms_answered),
-            ("Sitemap answered", probe.sitemap_answered),
-            ("Blocked", probe.blocked),
-            ("robots_blocks_all", probe.robots_blocks_all),
-        ] {
-            let _ = writeln!(markdown, "| {label} | {count} |");
+        if let Some(session) = &self.session {
+            session.markdown(markdown);
+        } else {
+            let probe = &self.probe;
+            markdown.push_str("\n| Probe | Sites |\n| --- | ---: |\n");
+            for (label, count) in [
+                ("Total", probe.sites),
+                ("Robots answered", probe.robots_answered),
+                ("Homepage answered", probe.homepage_answered),
+                ("llms.txt answered", probe.llms_answered),
+                ("Sitemap answered", probe.sitemap_answered),
+                ("Blocked", probe.blocked),
+                ("robots_blocks_all", probe.robots_blocks_all),
+            ] {
+                let _ = writeln!(markdown, "| {label} | {count} |");
+            }
         }
         markdown.push_str("\n| Query ID | Verdict | Reason |\n| --- | --- | --- |\n");
         for query in &self.queries {
             let score = &query.score;
             if !score.verdict.passed() {
+                let reason = score.reason.label();
+                let reason = if let (Reason::EngineFault, Some(class)) =
+                    (score.reason, query.engine_failure)
+                {
+                    format!("{reason} / {class:?}")
+                } else {
+                    reason.into()
+                };
                 let _ = writeln!(
                     markdown,
                     "| `{}` | {} | {} |",
                     query.query.id,
                     score.verdict.label(),
-                    score.reason.label()
+                    reason
                 );
             }
         }
@@ -368,6 +624,18 @@ impl Summary {
         }
         markdown.push('\n');
     }
+}
+
+fn metric_row(markdown: &mut String, label: &str, values: &Distribution) {
+    let number = |value: Option<u64>| value.map_or_else(|| "—".into(), |value| value.to_string());
+    let _ = writeln!(
+        markdown,
+        "| {label} | {} | {} | {} | {} |",
+        values.samples,
+        number(values.p50),
+        number(values.p90),
+        number(values.max),
+    );
 }
 
 fn count_row(markdown: &mut String, name: &str, counts: &Counts) {

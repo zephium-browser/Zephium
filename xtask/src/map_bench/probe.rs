@@ -22,7 +22,7 @@ impl Engine for ProbeEngine {
         }
         outcome.stats.insert(
             "results_page_available".into(),
-            u64::from(io.results_page(query).available()),
+            u64::from(io.results_page(None).available()),
         );
         outcome.stats.insert(
             "robots_blocks_all".into(),
@@ -144,8 +144,31 @@ mod tests {
             self.results.pop_front().expect("unexpected request")
         }
 
-        fn results_page(&mut self, _: &CorpusQuery) -> super::super::engine::ResultsPage {
+        fn results_page(
+            &mut self,
+            _: Option<(&Url, Vec<u8>)>,
+        ) -> super::super::engine::ResultsPage {
             super::super::engine::ResultsPage::Unavailable
+        }
+
+        fn start_fetch(&mut self, _: FetchRequest) -> usize {
+            panic!("probe must remain sequential")
+        }
+
+        fn next_fetch(&mut self) -> Option<(usize, FetchResult)> {
+            None
+        }
+
+        fn remember(&mut self, _: usize, _: &[u8]) {
+            panic!("probe does not store memos")
+        }
+
+        fn session_id(&self) -> u64 {
+            0
+        }
+
+        fn now(&self) -> u64 {
+            0
         }
 
         fn elapsed(&self) -> Duration {

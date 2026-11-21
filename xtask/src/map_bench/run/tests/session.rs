@@ -1,0 +1,623 @@
+use super::*;
+
+struct ScriptedSource {
+    respond: fn(&FetchRequest) -> FetchResult,
+    pending: Vec<Completed>,
+    calls: Vec<FetchRequest>,
+    elapsed: Duration,
+    reversed: bool,
+}
+
+impl ScriptedSource {
+    fn new(respond: fn(&FetchRequest) -> FetchResult) -> Self {
+        Self {
+            respond,
+            pending: Vec::new(),
+            calls: Vec::new(),
+            elapsed: Duration::ZERO,
+            reversed: false,
+        }
+    }
+}
+
+impl Source for ScriptedSource {
+    fn start(&mut self) {
+        assert!(self.pending.is_empty());
+        self.elapsed = Duration::ZERO;
+    }
+
+    fn submit(&mut self, token: usize, request: FetchRequest, start: Duration) {
+        let result = (self.respond)(&request);
+        self.calls.push(request);
+        let delay = if self.reversed { [3, 1, 2][token] } else { 1 };
+        let end = if self.reversed {
+            Duration::from_secs(delay)
+        } else {
+            self.elapsed.max(start) + Duration::from_millis(delay)
+        };
+        let total = end - start;
+        self.pending.push(Completed {
+            token,
+            transfer: Transfer {
+                wire_bytes: result.as_ref().ok().map(|body| body.wire_bytes),
+                start,
+                total,
+                end,
+            },
+            result,
+        });
+    }
+
+    fn next(&mut self) -> Option<Completed> {
+        let (index, _) = self
+            .pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, item)| (item.transfer.end, item.token))?;
+        let completed = self.pending.swap_remove(index);
+        self.elapsed = completed.transfer.end;
+        Some(completed)
+    }
+
+    fn counts(&self) -> Measure {
+        Measure {
+            requests: self.calls.len() as u64,
+            ..Measure::default()
+        }
+    }
+}
+
+fn scripted_body(request: &FetchRequest, media: &str, text: &str) -> FetchResult {
+    Ok(PublicBody {
+        final_url: request.url.clone(),
+        hops: 0,
+        status: StatusClass::Ok,
+        media_type: Some(media.into()),
+        charset: Some("utf-8".into()),
+        bytes: text.as_bytes().to_vec(),
+        truncated: false,
+        wire_bytes: text.len() as u64,
+        timings: Timings::default(),
+    })
+}
+
+fn refuse(class: StatusRefusal) -> FetchResult {
+    Err(FetchRefusal::Reader(ReadRefusal::Status(class)))
+}
+
+fn site(request: &FetchRequest) -> FetchResult {
+    match request.url.path() {
+        "/robots.txt" => {
+            scripted_body(request, "text/plain", "User-agent: *\nDisallow: /private\n")
+        }
+        "/" => scripted_body(
+            request,
+            "text/html",
+            r#"<title>Acme</title>
+            <header><nav><a href="/docs">Documentation</a><a href="/pricing">Pricing</a></nav></header>
+            <footer><a href="/about">About</a></footer>"#,
+        ),
+        "/llms.txt" => scripted_body(
+            request,
+            "text/markdown",
+            "# Acme\n## Resources\n- [Careers](/careers): Join the team\n",
+        ),
+        "/sitemap.xml" => scripted_body(
+            request,
+            "application/xml",
+            r#"<urlset><url><loc>https://acme.com/contact</loc></url></urlset>"#,
+        ),
+        "/docs" => scripted_body(
+            request,
+            "text/html",
+            r#"<aside><h2>Getting started</h2><ul><li><a href="/setup">Setup</a></li></ul></aside>"#,
+        ),
+        "/pricing" => scripted_body(
+            request,
+            "text/html",
+            r#"<main><h1>Pricing</h1><h2 id="tiers">Plan tiers</h2></main>"#,
+        ),
+        _ => panic!("unexpected scripted request"),
+    }
+}
+
+fn session_query(id: &str, text: &str, fields: &str) -> CorpusQuery {
+    fixture(&format!("[[query]]\nid='{id}'\ntext='{text}'\n{fields}"))
+}
+
+const ACME: &str = "kind='place'\nsite='acme.com'\nwant=['acme.com/setup']\ngroup=['video']";
+
+fn run_session(root: &Path, query: &CorpusQuery, source: &mut ScriptedSource) -> QueryResult {
+    let mut engine = crate::map_bench::session::SessionEngine;
+    record_query(root, query, &mut engine, source, SESSION_CLOCK).unwrap();
+    let path = query_dir(root, &query.label.id, false).unwrap();
+    let captured = store::read_json::<QueryResult>(&path.join(OUTCOME)).unwrap();
+    let destination = tempfile::tempdir().unwrap();
+    let replayed = replay_query(
+        root,
+        query,
+        &mut engine,
+        SESSION_CLOCK,
+        query.index,
+        Some(destination.path()),
+    )
+    .unwrap();
+    for name in ["memo.bin", "memo-2.bin"] {
+        let recorded = path.join(name);
+        if recorded.is_file() {
+            assert_eq!(
+                fs::read(&recorded).unwrap(),
+                fs::read(destination.path().join(name)).unwrap()
+            );
+        }
+    }
+    assert!(
+        captured == replayed,
+        "record and replay differed for {}",
+        query.label.id
+    );
+    captured
+}
+
+#[test]
+fn session_builds_and_replays_a_two_level_place() {
+    let root = tempfile::tempdir().unwrap();
+    let query = session_query("site", "Acme docs", ACME);
+    let mut source = ScriptedSource::new(site);
+    let result = run_session(root.path(), &query, &mut source);
+    assert_eq!(result.score.verdict, Verdict::Pass);
+    assert_eq!(result.score.missing_groups, None);
+    assert_eq!(result.score.destination.unwrap().depth, 2);
+    let outcome = result.outcome.unwrap();
+    assert!(outcome.synthetic_results);
+    assert_eq!(outcome.milestones.first_layer, None);
+    assert!(outcome.milestones.first_place.unwrap() < outcome.milestones.full.unwrap());
+    for (path, depth, source) in [
+        ("/docs", Depth::One, "primary_nav"),
+        ("/about", Depth::One, "footer"),
+        ("/setup", Depth::Two, "section_sidebar"),
+        ("/pricing", Depth::Two, "heading"),
+    ] {
+        assert!(
+            outcome.entries.iter().any(|entry| {
+                entry.url.path() == path && entry.depth == depth && entry.tags.contains(source)
+            }),
+            "{path} {depth:?} {source}"
+        );
+    }
+    for (phase, requests) in [("Entry", 1), ("Llms", 1), ("Sitemap", 1), ("Section", 2)] {
+        assert_eq!(outcome.stats[&format!("phase.{phase}.started")], requests);
+    }
+    let path = query_dir(root.path(), "site", false).unwrap();
+    let memo =
+        store::read_bytes(&path.join("memo.bin"), zephium_map::session::MAX_MEMO_BYTES).unwrap();
+    assert_eq!(outcome.stats["memo.0.bytes"], memo.len() as u64);
+    let site = zephium_map::SiteKey::from_url(&Url::parse("https://acme.com/").unwrap()).unwrap();
+    assert_eq!(
+        zephium_map::session::SiteMemo::decode(&memo, &site)
+            .unwrap()
+            .read_at,
+        SESSION_CLOCK.now
+    );
+    let ResultsPage::Available {
+        bytes,
+        synthetic: true,
+        ..
+    } = ResultsSlot::load(&path).unwrap().0
+    else {
+        panic!("missing synthetic slot");
+    };
+    assert_eq!(
+        std::str::from_utf8(&bytes).unwrap(),
+        "<main><article><h2><a href=\"https://acme.com/\">Acme</a></h2></article></main>"
+    );
+}
+
+#[test]
+fn concurrent_completions_are_saved_and_replay_in_finish_order() {
+    let root = tempfile::tempdir().unwrap();
+    let path = query_dir(root.path(), "order", true).unwrap();
+    let mut source =
+        ScriptedSource::new(|request| scripted_body(request, "text/html", "<main>data</main>"));
+    source.reversed = true;
+    let mut live = QueryIo::new(
+        &path,
+        Journal::default(),
+        SESSION_CLOCK,
+        Some(Live {
+            root: root.path(),
+            source: &mut source,
+            started: Instant::now(),
+            prior_elapsed: Duration::ZERO,
+        }),
+    );
+    let requests = ["/a", "/b", "/c"].map(|path| request(path, Expectation::Html));
+    for request in &requests {
+        live.start_fetch(request.clone());
+    }
+    let mut expected = Vec::new();
+    for token in [1, 2, 0] {
+        let (actual, result) = live.next_fetch().unwrap();
+        assert_eq!(actual, token);
+        assert!(result.is_ok());
+        expected.push((actual, result, live.elapsed()));
+    }
+    assert!(live.next_fetch().is_none());
+    let journal = Journal::load(&path).unwrap();
+    let mut replay = QueryIo::new(&path, journal, SESSION_CLOCK, None);
+    for request in requests {
+        replay.start_fetch(request);
+    }
+    let missing = replay.start_fetch(request("/not-recorded", Expectation::Html));
+    assert_eq!(
+        replay.next_fetch(),
+        Some((missing, Err(FetchRefusal::NotRecorded)))
+    );
+    assert_eq!(replay.elapsed(), Duration::ZERO);
+    for (token, result, end) in expected {
+        assert_eq!(replay.next_fetch(), Some((token, result)));
+        assert_eq!(replay.elapsed(), end);
+    }
+    assert!(replay.next_fetch().is_none());
+}
+
+#[test]
+fn session_verdicts_cover_no_results_no_official_site_and_staying_out() {
+    let root = tempfile::tempdir().unwrap();
+    let mut source = ScriptedSource::new(|request| {
+        assert_eq!(request.url.path(), "/robots.txt");
+        scripted_body(request, "text/plain", "User-agent: *\nDisallow:\n")
+    });
+    for (id, text, fields, expected) in [
+        (
+            "missing",
+            "how to reset timer",
+            "kind='passage'\nanswer='button'",
+            (Verdict::NotMeasured, Reason::NeedsResultsPage),
+        ),
+        (
+            "unmatched",
+            "Odd Brand docs",
+            ACME,
+            (Verdict::NoOfficialSite, Reason::NoOfficialSite),
+        ),
+        (
+            "instant",
+            "2 + 2",
+            "kind='instant'\ngroup=['featured']",
+            (Verdict::StayedOutOk, Reason::StayedOut),
+        ),
+        (
+            "list",
+            "best laptops",
+            "kind='list'\ngroup=['discussion']",
+            (Verdict::StayedOutOk, Reason::StayedOut),
+        ),
+    ] {
+        let query = session_query(id, text, fields);
+        let result = run_session(root.path(), &query, &mut source);
+        assert_eq!(
+            (result.score.verdict, result.score.reason),
+            expected,
+            "{id}"
+        );
+        assert_eq!(result.activity.site_requests, 0, "{id}");
+    }
+    assert!(source.calls.is_empty());
+    let query = session_query(
+        "compare",
+        "Acme vs Odd Brand",
+        "kind='compare'\nsites=['acme.com','another.com']",
+    );
+    let mut source = ScriptedSource::new(|request| {
+        if request.url.path() == "/robots.txt" {
+            scripted_body(request, "text/plain", "User-agent: *\nDisallow:\n")
+        } else {
+            refuse(StatusRefusal::Client)
+        }
+    });
+    let result = run_session(root.path(), &query, &mut source);
+    assert_eq!(result.score.verdict, Verdict::NoOfficialSite);
+    let outcome = result.outcome.unwrap();
+    assert_eq!(outcome.stats["official_sites"], 1);
+    assert_eq!(outcome.stats["anonymous_results_wanted"], 1);
+    assert_eq!(
+        outcome.stats["phase.AnonymousResults.refused.Unavailable"],
+        1
+    );
+}
+
+#[test]
+fn session_handles_robots_denial_and_render_unavailability() {
+    let root = tempfile::tempdir().unwrap();
+    let mut denied = ScriptedSource::new(|request| {
+        assert_eq!(request.url.path(), "/robots.txt");
+        scripted_body(request, "text/plain", "User-agent: *\nDisallow: /\n")
+    });
+    let query = session_query("denied", "Acme docs", ACME);
+    let result = run_session(root.path(), &query, &mut denied);
+    assert_eq!(
+        (result.score.verdict, result.score.reason),
+        (Verdict::Blocked, Reason::RobotsBlocksAll)
+    );
+    assert_eq!(denied.calls.len(), 1);
+    assert_eq!(
+        result.outcome.unwrap().stats["phase.Entry.refused.Robots"],
+        1
+    );
+
+    let mut shell = ScriptedSource::new(|request| match request.url.path() {
+        "/robots.txt" => scripted_body(request, "text/plain", "User-agent: *\nDisallow:\n"),
+        "/" => scripted_body(
+            request,
+            "text/html",
+            "<title>Acme</title><div id='__next'></div><script>mount()</script>",
+        ),
+        _ => refuse(StatusRefusal::Client),
+    });
+    let query = session_query("shell", "Acme docs", ACME);
+    let result = run_session(root.path(), &query, &mut shell);
+    let stats = result.outcome.unwrap().stats;
+    assert_eq!(stats["shells"], 1);
+    assert_eq!(stats["render_wanted"], 1);
+    assert_eq!(stats["phase.Render.refused.Unavailable"], 1);
+    assert_eq!(stats["place.0.shell"], 1);
+}
+
+#[test]
+fn passage_reports_answer_wrong_empty_and_unreadable() {
+    let root = tempfile::tempdir().unwrap();
+    for (id, url, answer, expected) in [
+        (
+            "right",
+            "answer",
+            "side button",
+            (true, false, false, false),
+        ),
+        ("wrong", "answer", "top lever", (false, true, false, false)),
+        ("empty", "empty", "side button", (false, false, true, false)),
+        (
+            "bad",
+            "unreadable",
+            "side button",
+            (false, false, false, true),
+        ),
+        (
+            "wall",
+            "challenge",
+            "side button",
+            (false, false, false, true),
+        ),
+    ] {
+        let mut source = ScriptedSource::new(|request| match request.url.path() {
+            "/robots.txt" => scripted_body(request, "text/plain", "User-agent: *\nDisallow:\n"),
+            "/answer" => scripted_body(
+                request,
+                "text/html",
+                "<main><p>Reset the timer using the side button.</p></main>",
+            ),
+            "/empty" => scripted_body(
+                request,
+                "text/html",
+                "<main><p>Geese migrate in autumn.</p></main>",
+            ),
+            "/challenge" => scripted_body(request, "text/html", "<title>Just a moment</title>"),
+            _ => refuse(StatusRefusal::Server),
+        });
+        let query = session_query(id, "how to reset timer", &format!(
+            "kind='passage'\nanswer='{answer}'\nfrom=['example.com']\npages=['https://example.com/{url}']"
+        ));
+        let result = run_session(root.path(), &query, &mut source);
+        let score = result.score.passage.unwrap();
+        assert_eq!(
+            (
+                score.answer_from_listed_source,
+                score.wrong_answer_shown,
+                score.nothing_returned,
+                score.page_could_not_be_read
+            ),
+            expected,
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn actual_corpus_synthetic_entity_findings() {
+    let root = tempfile::tempdir().unwrap();
+    let evidence = repository().join("../../zephium-audit/impl/search-map");
+    let paths = [
+        evidence.join("corpus-v0.toml"),
+        evidence.join("corpus-v1.toml"),
+    ];
+    if !paths.iter().all(|path| path.is_file()) {
+        return;
+    }
+    let corpus = Corpus::load(&paths).unwrap();
+    let mut source = ScriptedSource::new(|_| refuse(StatusRefusal::Client));
+    let mut missing = Vec::new();
+    for query in corpus
+        .queries
+        .iter()
+        .filter(|q| matches!(q.label.kind, Kind::Place | Kind::Compare))
+    {
+        let result = run_session(root.path(), query, &mut source);
+        if result.score.verdict == Verdict::NoOfficialSite {
+            missing.push(query.label.id.as_str());
+        } else {
+            assert_ne!(
+                result.score.reason,
+                Reason::EngineSessionFailed,
+                "{}",
+                query.label.id
+            );
+        }
+    }
+    eprintln!("no_official_site IDs: {missing:?}");
+}
+
+#[test]
+fn synthetic_session_report_matches_golden() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = corpus(vec![
+        session_query("site", "Acme docs", ACME),
+        session_query(
+            "missing",
+            "secret unanswered search",
+            "kind='passage'\nanswer='private answer'",
+        ),
+    ]);
+    init_engine(root.path(), &corpus, EngineKind::Session);
+    let mut source = ScriptedSource::new(site);
+    for query in &corpus.queries {
+        let mut result = run_session(root.path(), query, &mut source);
+        let outcome = result.outcome.as_mut().unwrap();
+        let is_place = query.label.kind == Kind::Place;
+        outcome.milestones.first_place = is_place.then(|| Duration::from_nanos(5));
+        outcome.milestones.full = is_place.then(|| Duration::from_nanos(10));
+        if is_place {
+            outcome.stats.insert("memo.0.bytes".into(), 256);
+            outcome.stats.insert("budget.Fetches".into(), 1);
+        }
+        outcome
+            .stats
+            .insert("budget.https://private.example/".into(), 42);
+        let path = query_dir(root.path(), &query.label.id, false).unwrap();
+        save_outcome(&path.join(OUTCOME), result).unwrap();
+        write_json(&path.join(MEASURE), &Measure::default()).unwrap();
+    }
+    report::write(root.path(), None).unwrap();
+    let markdown = fs::read_to_string(root.path().join("summary.md")).unwrap();
+    assert!(!markdown.contains("https://"));
+    assert!(!markdown.contains("Acme docs"));
+    assert!(!markdown.contains("secret unanswered search"));
+    let golden = r"# Search map benchmark
+
+This run used synthetic results pages. Group checks and first-layer latency were not measured for those pages.
+
+## Recording
+
+| Scope | pass | partial | fail | stayed_out_ok | stayed_out_broken | blocked | not_recorded | not_measured | no_official_site |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Total | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| passage | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+| place | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| Slice (unsliced) | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 |
+
+| Metric | Samples | p50 | p90 | Max |
+| --- | ---: | ---: | ---: | ---: |
+| children_per_place | 1 | 3 | 3 | 3 |
+| cpu_ns | 0 | — | — | — |
+| decoded_bytes | 2 | 0 | 0 | 0 |
+| first_place_ns | 1 | 5 | 5 | 5 |
+| full_ns | 1 | 10 | 10 | 10 |
+| memo_bytes | 1 | 256 | — | 256 |
+| peak_rss_delta_bytes | 0 | — | — | — |
+| requests | 2 | 0 | 0 | 0 |
+| sections_per_place | 1 | 5 | 5 | 5 |
+| wall_ns | 2 | 0 | 0 | 0 |
+| wire_bytes | 2 | 0 | 0 | 0 |
+
+| Refusal class | Count |
+| --- | ---: |
+| — | 0 |
+
+Places with at least 3 sections — 1 of 1 place and compare sites.
+
+| Session activity | Count |
+| --- | ---: |
+| Shells | 0 |
+| Walls | 0 |
+| Robots denials | 0 |
+| Renders wanted | 0 |
+| Anonymous results reads wanted | 0 |
+
+| Source | Places |
+| --- | ---: |
+| navigation | 1 |
+| footer | 1 |
+| llms_txt | 1 |
+| sitemap | 1 |
+| linked_data | 0 |
+| section_pages | 1 |
+
+| Budget hit | Queries |
+| --- | ---: |
+| Fetches | 1 |
+
+| Requests per query by phase | Samples | p50 | p90 | Max |
+| --- | ---: | ---: | ---: | ---: |
+| Results | 1 | 1 | 1 | 1 |
+| AnonymousResults | 1 | 0 | 0 | 0 |
+| Robots | 1 | 1 | 1 | 1 |
+| Entry | 1 | 1 | 1 | 1 |
+| Render | 1 | 0 | 0 | 0 |
+| Section | 1 | 2 | 2 | 2 |
+| Llms | 1 | 1 | 1 | 1 |
+| Sitemap | 1 | 1 | 1 | 1 |
+| Passage | 1 | 0 | 0 | 0 |
+
+| Passage queries with listed pages | Count |
+| --- | ---: |
+| answered_from_listed_source | 0 |
+| answered_wrong | 0 |
+| nothing_returned | 0 |
+| page_could_not_be_read | 0 |
+
+| Query ID | Verdict | Reason |
+| --- | --- | --- |
+| `missing` | not_measured | needs_results_page |
+
+";
+    assert_eq!(markdown, golden);
+}
+
+#[test]
+fn compare_keeps_both_last_places_and_two_memos() {
+    let root = tempfile::tempdir().unwrap();
+    let query = session_query(
+        "both",
+        "Acme vs Example docs",
+        "kind='compare'\nsites=['acme.com','example.com']\nwant=['example.com/manual']",
+    );
+    let mut source = ScriptedSource::new(|request| match request.url.path() {
+        "/robots.txt" => scripted_body(request, "text/plain", "User-agent: *\nDisallow:\n"),
+        "/" if request.url.host_str() == Some("acme.com") => {
+            scripted_body(request, "text/html", "<nav><a href='/docs'>Docs</a></nav>")
+        }
+        "/" => scripted_body(
+            request,
+            "text/html",
+            "<nav><a href='/manual'>Docs</a></nav>",
+        ),
+        _ => refuse(StatusRefusal::Client),
+    });
+    let output = run_session(root.path(), &query, &mut source);
+    assert_eq!(output.score.verdict, Verdict::Pass);
+    let outcome = output.outcome.unwrap();
+    assert_eq!(outcome.stats["official_sites"], 2);
+    assert_eq!(outcome.stats["place.0.sections"], 1);
+    assert_eq!(outcome.stats["place.1.sections"], 1);
+    assert_eq!(outcome.entries[0].url.host_str(), Some("acme.com"));
+    assert_eq!(outcome.entries[1].url.host_str(), Some("example.com"));
+    let directory = query_dir(root.path(), "both", false).unwrap();
+    assert!(directory.join("memo.bin").is_file());
+    assert!(directory.join("memo-2.bin").is_file());
+}
+
+#[test]
+fn replay_refuses_a_different_engine_before_writing_a_run() {
+    let root = tempfile::tempdir().unwrap();
+    let corpus = corpus(vec![session_query("site", "Acme docs", ACME)]);
+    init_engine(root.path(), &corpus, EngineKind::Session);
+    let error = replay(
+        root.path(),
+        &corpus,
+        vec![&corpus.queries[0]],
+        &mut crate::map_bench::probe::ProbeEngine,
+        EngineKind::Probe,
+    )
+    .unwrap_err();
+    assert_eq!(error.class, "replay_engine_mismatch");
+    assert!(!root.path().join("replay").exists());
+}

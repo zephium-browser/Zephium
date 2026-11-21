@@ -5,17 +5,20 @@ mod probe;
 mod report;
 mod run;
 mod score;
+mod session;
 mod store;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use engine::{Engine, EngineKind};
+
 use corpus::{valid_id, Corpus, CorpusQuery, MAX_CORPUS_FILES, MAX_QUERIES};
 
 const MAX_URL_BYTES: usize = zephium_public_fetch::MAX_LOCATION_BYTES;
 const USAGE: &str = "\
-cargo xtask map-bench record --corpus <file>... --out <dir> [--only <id>...] [--limit N] [--resume]
-cargo xtask map-bench replay --corpus <file>... --from <dir> [--only <id>...]
+cargo xtask map-bench record --corpus <file>... --out <dir> [--only <id>...] [--limit N] [--resume] [--engine probe|session]
+cargo xtask map-bench replay --corpus <file>... --from <dir> [--only <id>...] [--engine probe|session]
 cargo xtask map-bench report --from <dir> [--markdown <file>]";
 
 type Result<T> = std::result::Result<T, BenchError>;
@@ -115,6 +118,7 @@ struct Options {
     only: Vec<String>,
     limit: usize,
     resume: bool,
+    engine: EngineKind,
     markdown: Option<PathBuf>,
 }
 
@@ -138,6 +142,7 @@ impl Options {
         let mut only = Vec::new();
         let mut limit = None;
         let mut resume = false;
+        let mut engine = None;
         let mut markdown = None;
         while let Some(flag) = arguments.next() {
             let has_value = |next: &&String| !next.starts_with("--");
@@ -174,6 +179,13 @@ impl Options {
                         id = arguments.next_if(has_value);
                     }
                 }
+                (Mode::Record | Mode::Replay, "--engine") if engine.is_none() => {
+                    engine = Some(match value()?.as_str() {
+                        "probe" => EngineKind::Probe,
+                        "session" => EngineKind::Session,
+                        _ => return Err(BenchError::new("unknown_engine")),
+                    });
+                }
                 (Mode::Record, "--resume") if !resume => resume = true,
                 (Mode::Record, "--limit") if limit.is_none() => {
                     limit = Some(
@@ -201,6 +213,7 @@ impl Options {
             only,
             limit: limit.unwrap_or(MAX_QUERIES),
             resume,
+            engine: engine.unwrap_or(EngineKind::Session),
             markdown,
         })
     }
@@ -241,18 +254,13 @@ pub(crate) fn run(arguments: &[String]) -> Result<()> {
     }
     let corpus = Corpus::load(&options.corpora)?;
     let selected = options.select(&corpus)?;
-    let mut engine = probe::ProbeEngine;
+    let engine: &mut dyn Engine = match options.engine {
+        EngineKind::Probe => &mut probe::ProbeEngine,
+        EngineKind::Session => &mut session::SessionEngine,
+    };
     match options.mode {
-        Mode::Record => run::record(
-            &repository,
-            &root,
-            &corpus,
-            selected,
-            options.resume,
-            options.limit,
-            &mut engine,
-        ),
-        Mode::Replay => run::replay(&root, &corpus, selected, &mut engine),
+        Mode::Record => run::record(&repository, &root, &corpus, selected, &options, engine),
+        Mode::Replay => run::replay(&root, &corpus, selected, engine, options.engine),
         Mode::Report => Err(BenchError::new("invalid_mode")),
     }
 }
@@ -278,6 +286,13 @@ mod tests {
         assert_eq!(options.only, ["a", "b", "c"]);
         assert_eq!(options.limit, 2);
         assert!(options.resume);
+        assert_eq!(options.engine, EngineKind::Session);
+        assert_eq!(
+            parse("replay --corpus a --from dir --engine probe")
+                .unwrap()
+                .engine,
+            EngineKind::Probe
+        );
         assert!(parse("replay --corpus a --from dir --only a").is_ok());
         assert!(parse("report --from dir --markdown path").is_ok());
 
@@ -291,6 +306,9 @@ mod tests {
             "replay --corpus a --from r --resume",
             "report --from r --corpus a",
             "report --from r --markdown",
+            "report --from r --engine session",
+            "replay --corpus a --from r --engine invalid",
+            "replay --corpus a --from r --engine session --engine probe",
             "replay --corpus a --from r --only ../r",
         ] {
             assert!(parse(invalid).is_err(), "{invalid}");

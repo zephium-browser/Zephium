@@ -13,6 +13,8 @@ const MAX_CORPUS_BYTES: usize = 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 4096;
 const MAX_LABEL_BYTES: usize = 80;
 const MAX_VALUES: usize = 32;
+const MAX_PAGES: usize = 5;
+const MAX_PAGE_URL_BYTES: usize = zephium_map::key::MAX_URL_BYTES;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +68,7 @@ struct RawQuery {
     answer: Option<String>,
     #[serde(default)]
     from: Vec<String>,
+    pages: Option<Vec<String>>,
     #[serde(default)]
     group: BTreeSet<Group>,
     slice: Option<String>,
@@ -87,7 +90,9 @@ pub(super) struct CorpusQuery {
     pub(super) want: Vec<Destination>,
     pub(super) answer: Option<String>,
     pub(super) from: Vec<String>,
+    pub(super) pages: Vec<Url>,
     pub(super) group: BTreeSet<Group>,
+    pub(super) index: usize,
 }
 
 pub(super) struct Destination {
@@ -203,6 +208,34 @@ impl TryFrom<RawQuery> for CorpusQuery {
         {
             return Err(BenchError::new("corpus_list_limit"));
         }
+        if raw.pages.is_some() && raw.kind != Kind::Passage {
+            return Err(BenchError::new("pages_require_passage"));
+        }
+        let pages = raw.pages.unwrap_or_default();
+        if pages.len() > MAX_PAGES {
+            return Err(BenchError::new("corpus_pages_limit"));
+        }
+        let pages = pages
+            .iter()
+            .map(|page| {
+                if page.len() > MAX_PAGE_URL_BYTES {
+                    return Err(BenchError::new("corpus_page_url_limit"));
+                }
+                Url::parse(page)
+                    .ok()
+                    .filter(|url| {
+                        page.trim() == page
+                            && page
+                                .get(.."https://".len())
+                                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
+                            && !page.chars().any(|c| c.is_control() || c == '\\')
+                            && url.as_str().len() <= MAX_PAGE_URL_BYTES
+                            && zephium_public_fetch::guard::public_target(url)
+                            && url.domain().and_then(host).is_some()
+                    })
+                    .ok_or(BenchError::new("invalid_corpus_page"))
+            })
+            .collect::<Result<_>>()?;
         let site = |value: &str| host(value).ok_or(BenchError::new("invalid_site"));
         let primary = raw.site.as_deref().map(site).transpose()?;
         let sites = raw
@@ -241,7 +274,9 @@ impl TryFrom<RawQuery> for CorpusQuery {
                 .collect::<Result<_>>()?,
             answer: raw.answer,
             from,
+            pages,
             group: raw.group,
+            index: 0,
         };
         if bad_text(&query.text) {
             return Err(BenchError::new("invalid_query_text_or_answer"));
@@ -269,14 +304,15 @@ impl Corpus {
             let source = read_bytes(path, MAX_CORPUS_BYTES).map_err(|error| error.at(index + 1))?;
             let text = std::str::from_utf8(&source)
                 .map_err(|_| BenchError::new("corpus_encoding").at(index + 1))?;
-            let queries = parse(text).map_err(|error| error.at(index + 1))?;
+            let mut queries = parse(text).map_err(|error| error.at(index + 1))?;
             if corpus.queries.len() + queries.len() > MAX_QUERIES {
                 return Err(BenchError::new("corpus_query_limit"));
             }
-            for query in &queries {
+            for (index, query) in queries.iter_mut().enumerate() {
                 if !ids.insert(query.label.id.clone()) {
                     return Err(BenchError::new("duplicate_query_id").for_query(&query.label.id));
                 }
+                query.index = corpus.queries.len() + index;
             }
             corpus.queries.extend(queries);
             corpus.hashes.push(digest(&source));
@@ -403,6 +439,57 @@ mod tests {
                 .unwrap_or_else(|| panic!("accepted {scenario}"));
             assert!(!error.to_string().contains("private"), "{scenario}");
         }
+    }
+
+    #[test]
+    fn pages_are_passage_only_and_public_https_within_both_limits() {
+        let passage = PLACE.replace("'place'", "'passage'") + "answer='example'\n";
+        let page = "'https://example.com/docs',";
+        let with = |pages: &str| format!("{passage}pages=[{pages}]");
+        assert_eq!(
+            parse(&with(&page.repeat(MAX_PAGES))).unwrap()[0]
+                .pages
+                .len(),
+            MAX_PAGES
+        );
+        assert_eq!(
+            parse(&with(&page.repeat(MAX_PAGES + 1)))
+                .err()
+                .unwrap()
+                .class,
+            "corpus_pages_limit"
+        );
+        assert_eq!(
+            parse(&format!("{PLACE}pages=[]")).err().unwrap().class,
+            "pages_require_passage"
+        );
+        for bad in [
+            "http://example.com/",
+            "https://localhost/",
+            "https://127.0.0.1/",
+            "https://example.com:8443/",
+            "https://name@example.com/",
+            "https://example.invalid/",
+            "https://intranet.local/",
+            "https:example.com/",
+            " https://example.com/",
+        ] {
+            assert_eq!(
+                parse(&with(&format!("'{bad}'"))).err().unwrap().class,
+                "invalid_corpus_page"
+            );
+        }
+        let prefix = "https://example.com/";
+        let at_limit = format!(
+            "'{prefix}{}'",
+            "x".repeat(MAX_PAGE_URL_BYTES - prefix.len())
+        );
+        assert!(parse(&with(&at_limit)).is_ok());
+        let over_limit = at_limit.replace("/x", "/xx");
+        assert_eq!(
+            parse(&with(&over_limit)).err().unwrap().class,
+            "corpus_page_url_limit"
+        );
     }
 
     #[test]

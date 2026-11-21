@@ -1,20 +1,23 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tokio::task::{Id as TaskId, JoinSet};
+use url::Url;
 use zephium_public_fetch::{PublicReader, ReadRefusal, ReadRequest, ReadSession, ReaderLimits};
 
 use super::corpus::{Corpus, CorpusQuery, QueryLabel, MAX_CORPUS_FILES, MAX_QUERIES};
 use super::engine::{
-    run_catching, Activity, BenchIo, Engine, EngineFailure, FetchRefusal, FetchRequest,
-    FetchResult, Outcome, ResultsPage, MAX_REQUESTS,
+    redact_thread_panics, run_catching, Activity, BenchIo, Engine, EngineFailure, EngineKind,
+    FetchRefusal, FetchRequest, FetchResult, Outcome, ResultsPage, MAX_REQUESTS,
 };
 use super::score::{self, Reason, Score, Verdict};
-use super::store::{self, optional_json, query_dir, write_json, Journal, ResultsSlot};
-use super::{platform, BenchError, Result};
+use super::store::{self, optional_json, query_dir, write_json, Journal, ResultsSlot, Transfer};
+use super::{platform, BenchError, Options, Result};
 
 const SCHEMA: u32 = 1;
 pub(super) const BETWEEN_QUERIES: Duration = Duration::from_millis(500);
@@ -31,6 +34,8 @@ pub(super) struct RunManifest {
     host_os: String,
     host_arch: String,
     start_unix_ns: u128,
+    #[serde(default = "EngineKind::legacy")]
+    pub(super) engine: EngineKind,
     pub(super) corpus_sha256: Vec<String>,
     reader_limits: ReaderConfig,
     pub(super) queries: Vec<QueryLabel>,
@@ -75,7 +80,12 @@ fn now() -> Result<u128> {
 }
 
 impl RunManifest {
-    fn new(corpus: &Corpus, repository: &Path, limits: ReaderLimits) -> Result<Self> {
+    fn new(
+        corpus: &Corpus,
+        repository: &Path,
+        limits: ReaderLimits,
+        engine: EngineKind,
+    ) -> Result<Self> {
         let git = Command::new("git")
             .args(["rev-parse", "--verify", "HEAD"])
             .current_dir(repository)
@@ -100,6 +110,7 @@ impl RunManifest {
             host_os: std::env::consts::OS.into(),
             host_arch: std::env::consts::ARCH.into(),
             start_unix_ns: now()?,
+            engine,
             corpus_sha256: corpus.hashes.clone(),
             reader_limits: limits.into(),
             queries: corpus
@@ -108,6 +119,14 @@ impl RunManifest {
                 .map(|query| query.label.clone())
                 .collect(),
         })
+    }
+
+    fn clock(&self) -> RunClock {
+        RunClock {
+            engine: self.engine,
+            now: u64::try_from(self.start_unix_ns / Duration::from_secs(1).as_nanos())
+                .unwrap_or(u64::MAX),
+        }
     }
 
     pub(super) fn open(root: &Path) -> Result<Self> {
@@ -175,52 +194,114 @@ impl QueryResult {
     }
 }
 
+#[derive(Clone, Copy)]
+struct RunClock {
+    engine: EngineKind,
+    now: u64,
+}
+
+struct Completed {
+    token: usize,
+    result: FetchResult,
+    transfer: Transfer,
+}
+
 trait Source {
     fn start(&mut self);
-    fn fetch(&mut self, request: FetchRequest) -> FetchResult;
+    fn submit(&mut self, token: usize, request: FetchRequest, start: Duration);
+    fn next(&mut self) -> Option<Completed>;
     fn counts(&self) -> Measure;
-    fn wire_bytes(&self) -> u64;
 }
 
 struct PublicSource {
     reader: PublicReader,
-    session: Option<ReadSession>,
+    session: Arc<ReadSession>,
     runtime: tokio::runtime::Runtime,
+    reads: JoinSet<Completed>,
+    tasks: HashMap<TaskId, (usize, Instant, Duration)>,
 }
 
 impl PublicSource {
     fn new() -> Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .on_thread_start(redact_thread_panics)
             .enable_all()
             .build()
             .map_err(|error| BenchError::io("reader_runtime", &error))?;
+        let reader = PublicReader::new(ReaderLimits::default());
+        let session = Arc::new(reader.session());
         Ok(Self {
-            reader: PublicReader::new(ReaderLimits::default()),
-            session: None,
+            reader,
+            session,
             runtime,
+            reads: JoinSet::new(),
+            tasks: HashMap::new(),
         })
     }
 }
 
 impl Source for PublicSource {
     fn start(&mut self) {
-        self.session = Some(self.reader.session());
+        self.session = Arc::new(self.reader.session());
     }
 
-    fn fetch(&mut self, request: FetchRequest) -> FetchResult {
-        let session = self.session.as_ref().ok_or(FetchRefusal::Storage)?;
-        self.runtime
-            .block_on(session.read(ReadRequest {
-                url: request.url,
-                expect: request.expect.into(),
-                max_bytes: request.max_bytes,
-                deadline: Instant::now() + request.timeout,
-            }))
-            .map_err(FetchRefusal::Reader)
+    fn submit(&mut self, token: usize, request: FetchRequest, start: Duration) {
+        let session = Arc::clone(&self.session);
+        let started = Instant::now();
+        let task = self.reads.spawn_on(
+            async move {
+                let result = session
+                    .read(ReadRequest {
+                        url: request.url,
+                        expect: request.expect.into(),
+                        max_bytes: request.max_bytes,
+                        deadline: started + request.timeout,
+                    })
+                    .await
+                    .map_err(FetchRefusal::Reader);
+                let total = started.elapsed();
+                let wire_bytes = result.as_ref().ok().map(|body| body.wire_bytes);
+                Completed {
+                    token,
+                    result,
+                    transfer: Transfer {
+                        wire_bytes,
+                        start,
+                        total,
+                        end: start.saturating_add(total),
+                    },
+                }
+            },
+            self.runtime.handle(),
+        );
+        self.tasks.insert(task.id(), (token, started, start));
     }
 
-    fn wire_bytes(&self) -> u64 {
-        self.reader.counters().wire_bytes
+    fn next(&mut self) -> Option<Completed> {
+        match self.runtime.block_on(self.reads.join_next_with_id())? {
+            Ok((id, completed)) => {
+                self.tasks.remove(&id);
+                Some(completed)
+            }
+            Err(error) => {
+                let (token, started, start) = self.tasks.remove(&error.id())?;
+                if error.is_panic() {
+                    std::mem::forget(error.into_panic());
+                }
+                let total = started.elapsed();
+                Some(Completed {
+                    token,
+                    result: Err(FetchRefusal::Storage),
+                    transfer: Transfer {
+                        wire_bytes: None,
+                        start,
+                        total,
+                        end: start.saturating_add(total),
+                    },
+                })
+            }
+        }
     }
 
     fn counts(&self) -> Measure {
@@ -260,11 +341,23 @@ impl Measure {
 
 struct QueryIo<'a> {
     query: &'a Path,
+    memo_directory: Option<&'a Path>,
     journal: Journal,
     live: Option<Live<'a>>,
+    clock: RunClock,
+    query_index: usize,
     elapsed: Duration,
     activity: Activity,
     failure: Option<Reason>,
+    submitted: usize,
+    claimed: BTreeSet<usize>,
+    active: BTreeMap<usize, (usize, Option<u64>)>,
+    ready: BTreeMap<(Option<usize>, Duration, usize), Ready>,
+}
+
+enum Ready {
+    Recorded(usize),
+    Refused(FetchRefusal),
 }
 
 struct Live<'a> {
@@ -274,66 +367,196 @@ struct Live<'a> {
     prior_elapsed: Duration,
 }
 
-impl QueryIo<'_> {
-    fn fetch_once(&mut self, request: FetchRequest) -> Result<FetchResult> {
-        if let Some((result, elapsed)) = self.journal.lookup(&request, self.query)? {
-            self.elapsed = self.elapsed.max(elapsed);
-            return Ok(result);
+impl Live<'_> {
+    fn elapsed(&self) -> Duration {
+        self.prior_elapsed.saturating_add(self.started.elapsed())
+    }
+}
+
+impl<'a> QueryIo<'a> {
+    fn new(query: &'a Path, journal: Journal, clock: RunClock, live: Option<Live<'a>>) -> Self {
+        Self {
+            query,
+            memo_directory: live.as_ref().map(|_| query),
+            journal,
+            clock,
+            live,
+            query_index: 0,
+            elapsed: Duration::ZERO,
+            activity: Activity::default(),
+            failure: None,
+            submitted: 0,
+            claimed: BTreeSet::new(),
+            active: BTreeMap::new(),
+            ready: BTreeMap::new(),
         }
-        let Some(live) = &mut self.live else {
-            return Ok(Err(FetchRefusal::NotRecorded));
+    }
+
+    fn refuse(&mut self, error: BenchError) -> FetchRefusal {
+        if error.class == "request_limit" {
+            self.failure = Some(Reason::RequestLimit);
+            FetchRefusal::Limit
+        } else {
+            self.failure = Some(Reason::ArtifactError);
+            FetchRefusal::Storage
+        }
+    }
+
+    fn enqueue(&mut self, token: usize, request: FetchRequest) -> Result<()> {
+        let exact = self.clock.engine == EngineKind::Session;
+        if let Some((index, end, order)) = self.journal.find(
+            &request,
+            |index| !exact || !self.claimed.contains(&index),
+            exact,
+        ) {
+            self.claimed.insert(index);
+            self.ready
+                .insert((Some(order), end, token), Ready::Recorded(index));
+        } else if let Some(live) = &mut self.live {
+            let index = self.journal.reserve(&request, self.query, live.elapsed())?;
+            self.claimed.insert(index);
+            // The sequential probe can attribute refusals' reader-wide byte deltas.
+            let wire_before = (!exact).then(|| live.source.counts().wire_bytes);
+            live.source.submit(token, request, live.elapsed());
+            self.active.insert(token, (index, wire_before));
+        } else {
+            self.ready.insert(
+                (None, self.elapsed, token),
+                Ready::Refused(FetchRefusal::NotRecorded),
+            );
+        }
+        Ok(())
+    }
+
+    fn complete_live(&mut self) -> Option<(usize, FetchResult)> {
+        let live = self.live.as_mut()?;
+        if self.active.is_empty() {
+            return None;
+        }
+        let Some(mut completed) = live.source.next() else {
+            self.active.clear();
+            self.failure = Some(Reason::ArtifactError);
+            return None;
         };
-        let elapsed = || live.prior_elapsed.saturating_add(live.started.elapsed());
-        // A killed process cannot tell whether a reserved request reached the server.
-        self.journal.reserve(&request, self.query, elapsed())?;
-        let before = live.source.wire_bytes();
-        let started = Instant::now();
-        let result = live.source.fetch(request);
-        let total = started.elapsed();
-        let wire = live.source.wire_bytes().saturating_sub(before);
-        self.elapsed = elapsed();
-        self.journal
-            .finish(live.root, self.query, &result, wire, total, self.elapsed)?;
-        Ok(result)
+        let Some((index, wire_before)) = self.active.remove(&completed.token) else {
+            self.active.clear();
+            self.failure = Some(Reason::ArtifactError);
+            return None;
+        };
+        if let Some(before) = wire_before {
+            completed.transfer.wire_bytes =
+                Some(live.source.counts().wire_bytes.saturating_sub(before));
+        }
+        if completed.result == Err(FetchRefusal::Storage) {
+            self.failure = Some(Reason::ArtifactError);
+        }
+        self.elapsed = self.elapsed.max(completed.transfer.end);
+        let result = self
+            .journal
+            .finish(
+                live.root,
+                self.query,
+                index,
+                &completed.result,
+                completed.transfer,
+            )
+            .map_or_else(|error| Err(self.refuse(error)), |()| completed.result);
+        Some((completed.token, result))
+    }
+
+    fn load_results(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> Result<ResultsPage> {
+        let (page, elapsed) = ResultsSlot::load(self.query)?;
+        if let (ResultsPage::Unavailable, Some(live), Some((url, bytes))) =
+            (&page, &self.live, synthetic)
+        {
+            // A resumed query keeps the original results clock if it had one.
+            self.elapsed = live.started.elapsed();
+            ResultsSlot::save(live.root, self.query, url, &bytes, self.elapsed)?;
+            return Ok(ResultsPage::Available {
+                url: url.clone(),
+                bytes,
+                synthetic: true,
+            });
+        }
+        self.elapsed = self.elapsed.max(elapsed);
+        Ok(page)
     }
 }
 
 impl BenchIo for QueryIo<'_> {
     fn fetch(&mut self, request: FetchRequest) -> FetchResult {
-        let result = if self.failure.is_some() {
-            Err(FetchRefusal::Storage)
-        } else if self.activity.site_requests >= MAX_REQUESTS as u64 || !request.valid() {
-            self.failure = Some(Reason::RequestLimit);
-            Err(FetchRefusal::Limit)
-        } else {
-            self.fetch_once(request).unwrap_or_else(|error| {
-                Err(if error.class == "request_limit" {
-                    self.failure = Some(Reason::RequestLimit);
-                    FetchRefusal::Limit
-                } else {
-                    self.failure = Some(Reason::ArtifactError);
-                    FetchRefusal::Storage
-                })
-            })
-        };
-        self.activity.called(&result);
-        result
+        self.start_fetch(request);
+        self.next_fetch()
+            .map_or(Err(FetchRefusal::Storage), |(_, result)| result)
     }
 
-    fn results_page(&mut self, _: &CorpusQuery) -> ResultsPage {
-        if self.live.is_some() {
+    fn start_fetch(&mut self, request: FetchRequest) -> usize {
+        let token = self.submitted;
+        self.submitted = self.submitted.saturating_add(1);
+        let refused = if self.failure.is_some() {
+            Some(FetchRefusal::Storage)
+        } else if token >= MAX_REQUESTS || !request.valid() {
+            self.failure = Some(Reason::RequestLimit);
+            Some(FetchRefusal::Limit)
+        } else {
+            self.enqueue(token, request)
+                .err()
+                .map(|error| self.refuse(error))
+        };
+        if let Some(class) = refused {
+            self.ready
+                .insert((None, self.elapsed, token), Ready::Refused(class));
+        }
+        token
+    }
+
+    fn next_fetch(&mut self) -> Option<(usize, FetchResult)> {
+        let (token, result) = if let Some(((_, end, token), ready)) = self.ready.pop_first() {
+            self.elapsed = self.elapsed.max(end);
+            let result = match ready {
+                Ready::Recorded(index) => self
+                    .journal
+                    .result(index, self.query)
+                    .unwrap_or_else(|error| Err(self.refuse(error))),
+                Ready::Refused(class) => Err(class),
+            };
+            (token, result)
+        } else {
+            self.complete_live()?
+        };
+        self.activity.called(&result);
+        Some((token, result))
+    }
+
+    fn results_page(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> ResultsPage {
+        if self.live.is_some() && self.clock.engine == EngineKind::Probe {
             return ResultsPage::Unavailable;
         }
-        match ResultsSlot::load(self.query) {
-            Ok((page, elapsed)) => {
-                self.elapsed = self.elapsed.max(elapsed);
-                page
-            }
-            Err(_) => {
-                self.failure = Some(Reason::ArtifactError);
-                ResultsPage::Unavailable
+        self.load_results(synthetic).unwrap_or_else(|error| {
+            self.refuse(error);
+            ResultsPage::Unavailable
+        })
+    }
+
+    fn remember(&mut self, index: usize, memo: &[u8]) {
+        if let Some(directory) = self.memo_directory {
+            let name = if index == 0 {
+                "memo.bin".into()
+            } else {
+                format!("memo-{}.bin", index + 1)
+            };
+            if let Err(error) = store::write_blob(&directory.join(name), memo) {
+                self.refuse(error);
             }
         }
+    }
+
+    fn now(&self) -> u64 {
+        self.clock.now
+    }
+
+    fn session_id(&self) -> u64 {
+        self.query_index as u64
     }
 
     fn elapsed(&self) -> Duration {
@@ -343,18 +566,25 @@ impl BenchIo for QueryIo<'_> {
 
 fn execute(engine: &mut dyn Engine, query: &CorpusQuery, io: &mut QueryIo<'_>) -> QueryResult {
     let outcome = run_catching(engine, query, io);
+    while io.next_fetch().is_some() {}
     let activity = std::mem::take(&mut io.activity);
     let Ok(outcome) = outcome else {
         return QueryResult::unavailable(Verdict::Fail, Reason::EnginePanic, activity);
     };
     let failure = io.failure.or(match outcome.failure {
         Some(EngineFailure::InvalidInput) => Some(Reason::EngineInvalidInput),
+        Some(EngineFailure::SessionFailed) if outcome.no_official_site => None,
         Some(EngineFailure::SessionFailed) => Some(Reason::EngineSessionFailed),
+        Some(_) => Some(Reason::EngineFault),
         None if !outcome.valid() => Some(Reason::InvalidOutcome),
         None => None,
     });
     if let Some(reason) = failure {
-        return QueryResult::unavailable(Verdict::Fail, reason, activity);
+        return QueryResult {
+            outcome: outcome.valid().then_some(outcome),
+            score: Score::unavailable(Verdict::Fail, reason),
+            activity,
+        };
     }
     QueryResult {
         score: score::score(query, &outcome, &activity),
@@ -380,6 +610,7 @@ fn record_query(
     query: &CorpusQuery,
     engine: &mut dyn Engine,
     source: &mut dyn Source,
+    clock: RunClock,
 ) -> Result<()> {
     let path = query_dir(root, &query.label.id, false)?;
     let resumed = store::directory(&path, false)?;
@@ -398,19 +629,18 @@ fn record_query(
     let process_before = (!resumed).then(platform::sample).flatten();
     let started = Instant::now();
     source.start();
-    let mut io = QueryIo {
-        query: &path,
+    let mut io = QueryIo::new(
+        &path,
         journal,
-        elapsed: Duration::ZERO,
-        activity: Activity::default(),
-        failure: None,
-        live: Some(Live {
+        clock,
+        Some(Live {
             root,
             source,
             started,
             prior_elapsed,
         }),
-    };
+    );
+    io.query_index = query.index;
     let output = execute(engine, query, &mut io);
     let wall = prior_elapsed.saturating_add(started.elapsed());
     let process_after = (!resumed).then(platform::sample).flatten();
@@ -457,10 +687,10 @@ pub(super) fn record(
     root: &Path,
     corpus: &Corpus,
     selected: Vec<&CorpusQuery>,
-    resume: bool,
-    limit: usize,
+    options: &Options,
     engine: &mut dyn Engine,
 ) -> Result<()> {
+    let (resume, limit, engine_kind) = (options.resume, options.limit, options.engine);
     store::create_parents(root)?;
     let path = root.join(MANIFEST);
     if !store::exists(&path)? {
@@ -469,11 +699,14 @@ pub(super) fn record(
     let _lock = store::record_lock(root, true)?;
     let mut source = PublicSource::new()?;
     let limits = source.reader.limits();
-    if store::exists(&path)? {
+    let manifest = if store::exists(&path)? {
         if !resume {
             return Err(BenchError::new("run_exists_use_resume"));
         }
         let recorded = RunManifest::open(root)?;
+        if recorded.engine != engine_kind {
+            return Err(BenchError::new("resume_engine_mismatch"));
+        }
         if recorded.corpus_sha256 != corpus.hashes {
             return Err(BenchError::new("resume_corpus_mismatch"));
         }
@@ -483,16 +716,20 @@ pub(super) fn record(
         {
             return Err(BenchError::new("resume_reader_or_host_mismatch"));
         }
+        recorded
     } else {
         store::ensure_empty_run(root)?;
-        write_json(&path, &RunManifest::new(corpus, repository, limits)?)?;
-    }
+        let manifest = RunManifest::new(corpus, repository, limits, engine_kind)?;
+        write_json(&path, &manifest)?;
+        manifest
+    };
     record_queries(
         root,
         pending(root, selected, limit)?,
         engine,
         &mut source,
         BETWEEN_QUERIES,
+        manifest.clock(),
     )
 }
 
@@ -502,13 +739,14 @@ fn record_queries(
     engine: &mut dyn Engine,
     source: &mut dyn Source,
     pause: Duration,
+    clock: RunClock,
 ) -> Result<()> {
     let mut failed = false;
     for (index, query) in queries.into_iter().enumerate() {
         if index > 0 {
             std::thread::sleep(pause);
         }
-        if let Err(error) = record_query(root, query, engine, source) {
+        if let Err(error) = record_query(root, query, engine, source, clock) {
             failed = true;
             eprintln!("map bench: {}", error.for_query(&query.label.id));
             let checkpoint = (|| {
@@ -534,16 +772,18 @@ fn record_queries(
     }
 }
 
-fn replay_query(root: &Path, query: &CorpusQuery, engine: &mut dyn Engine) -> Result<QueryResult> {
+fn replay_query(
+    root: &Path,
+    query: &CorpusQuery,
+    engine: &mut dyn Engine,
+    clock: RunClock,
+    index: usize,
+    destination: Option<&Path>,
+) -> Result<QueryResult> {
     let path = query_dir(root, &query.label.id, false)?;
-    let mut io = QueryIo {
-        query: &path,
-        journal: Journal::load(&path)?,
-        live: None,
-        elapsed: Duration::ZERO,
-        activity: Activity::default(),
-        failure: None,
-    };
+    let mut io = QueryIo::new(&path, Journal::load(&path)?, clock, None);
+    io.query_index = index;
+    io.memo_directory = destination;
     let result = execute(engine, query, &mut io);
     if !store::directory(&path, false)? {
         return Ok(QueryResult::unavailable(
@@ -560,9 +800,13 @@ pub(super) fn replay(
     corpus: &Corpus,
     queries: Vec<&CorpusQuery>,
     engine: &mut dyn Engine,
+    engine_kind: EngineKind,
 ) -> Result<()> {
     let _lock = store::read_lock(root)?;
-    RunManifest::open(root)?;
+    let recorded = RunManifest::open(root)?;
+    if recorded.engine != engine_kind {
+        return Err(BenchError::new("replay_engine_mismatch"));
+    }
     let parent = root.join("replay");
     store::directory(&parent, true)?;
     let started_unix_ns = now()?;
@@ -574,10 +818,16 @@ pub(super) fn replay(
         .map_err(|error| BenchError::io("create_replay", &error))?;
     for query in &queries {
         let path = query_dir(&destination, &query.label.id, true)?;
-        let result = replay_query(root, query, engine).unwrap_or_else(|error| {
-            eprintln!("map bench: {}", error.for_query(&query.label.id));
-            QueryResult::unavailable(Verdict::Fail, Reason::ArtifactError, Activity::default())
-        });
+        let index = recorded
+            .queries
+            .iter()
+            .position(|label| label.id == query.label.id)
+            .unwrap_or(query.index);
+        let result = replay_query(root, query, engine, recorded.clock(), index, Some(&path))
+            .unwrap_or_else(|error| {
+                eprintln!("map bench: {}", error.for_query(&query.label.id));
+                QueryResult::unavailable(Verdict::Fail, Reason::ArtifactError, Activity::default())
+            });
         save_outcome(&path.join(OUTCOME), result)?;
     }
     let manifest = ReplayManifest {
