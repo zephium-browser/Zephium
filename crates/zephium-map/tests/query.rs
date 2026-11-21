@@ -421,3 +421,46 @@ fn task_fact_section_and_name_boundaries() {
         );
     }
 }
+
+#[test]
+fn action_words_need_a_following_term() {
+    for (place, question) in [
+        ("windows update", "update npm packages"),
+        ("lego set", "set timezone"),
+        ("forbes list", "list remote branches"),
+        ("password reset", "git reset branch"),
+        ("wireguard enable", "enable wireguard"),
+        ("account disable", "disable notifications"),
+        ("github clone", "clone github repository"),
+        ("project rename", "rename workspace"),
+        ("archive remove", "remove branch"),
+        ("account delete", "delete account"),
+        ("batch convert", "convert audio files"),
+        ("key generate", "generate recovery codes"),
+        ("editor undo", "undo text changes"),
+        ("address change", "change billing address"),
+        ("artifact get", "get package metadata"),
+        ("finder find", "find tracked files"),
+        ("quick fix", "fix permissions"),
+        ("mail merge", "merge document templates"),
+        ("commit revert", "revert last commit"),
+        ("project create", "create release tag"),
+        ("offline install", "install rust toolchain"),
+        ("manual download", "download release archive"),
+        ("member login", "login member portal"),
+    ] {
+        assert!(
+            matches!(read_query(place).unwrap().kind(), QueryKind::Place { .. }),
+            "{place}"
+        );
+        assert!(
+            matches!(
+                read_query(question).unwrap().kind(),
+                QueryKind::Passage {
+                    kind: PassageKind::Question
+                }
+            ),
+            "{question}"
+        );
+    }
+}

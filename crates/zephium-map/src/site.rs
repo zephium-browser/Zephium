@@ -437,14 +437,27 @@ impl Build<'_> {
                 Tier::Primary => MAX_PRIMARY_SECTIONS,
                 Tier::Secondary => MAX_SECONDARY_SECTIONS,
             };
+            let priority = |entry: &Entry| {
+                (
+                    focus
+                        .as_ref()
+                        .is_some_and(|(parent, _)| parent == &entry.id),
+                    entry.role.is_some(),
+                )
+            };
             let mut kept = Vec::new();
             for e in sections.extract_if(.., |e| e.tier == tier) {
                 if kept.len() == cap {
                     self.stats.sections_truncated = true;
-                    if focus.as_ref().is_none_or(|(parent, _)| parent != &e.id) {
-                        continue;
-                    }
-                    kept.pop();
+                    let rank = priority(&e);
+                    let replace = kept
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .min_by_key(|(_, entry)| priority(entry))
+                        .filter(|(_, entry)| priority(entry) < rank);
+                    let Some((index, _)) = replace else { continue };
+                    kept.remove(index);
                 }
                 kept.push(e);
             }

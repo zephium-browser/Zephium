@@ -264,9 +264,8 @@ fn task(terms: &[String]) -> bool {
     if terms.len() < 2 {
         return false;
     }
-    terms.iter().enumerate().any(|(i, word)| {
+    terms[..terms.len() - 1].iter().enumerate().any(|(i, word)| {
         ACTIONS.contains(&word.as_str())
-            && (!matches!(word.as_str(), "download" | "install" | "login") || i + 1 < terms.len())
             && !matches!(terms.get(i+1..i+4), Some([article, generic, to]) if article == "a" && matches!(generic.as_str(),"way" | "place") && to == "to")
     }) || FACTS.iter().any(|fact| {
         terms[1..]

@@ -611,3 +611,63 @@ fn networks_own_navigation_is_not_an_external_profile() {
         assert!(p.social.is_empty());
     }
 }
+
+#[test]
+fn capped_tiers_preserve_site_order_and_align_late_roles() {
+    let menu = |tag, cap, last: &str, label: &str| {
+        let items: String = (0..cap)
+            .map(|i| format!("<a href='/item-{i}'>Item {i}</a>"))
+            .collect();
+        let page = doc(
+            &format!("https://{tag}.example/"),
+            &format!("<header><h1>Catalogue</h1></header><{tag}>{items}<a href='/{last}'>{label}</a></{tag}>"),
+        );
+        read_site_with_stats(&page, &SiteInputs::default()).unwrap()
+    };
+
+    let mut places = Vec::new();
+    for (tag, cap, tier, label) in [
+        ("nav", MAX_PRIMARY_SECTIONS, Tier::Primary, "Plans"),
+        ("footer", MAX_SECONDARY_SECTIONS, Tier::Secondary, "Rates"),
+    ] {
+        for (last, name) in [("pricing", label), ("extra", "Extra")] {
+            let (place, stats) = menu(tag, cap, last, name);
+            assert!(stats.sections_truncated);
+            assert!(place.sections.iter().all(|entry| entry.tier == tier));
+            let mut expected: Vec<_> = (0..cap).map(|i| format!("Item {i}")).collect();
+            if last == "pricing" {
+                expected[cap - 1] = label.into();
+            }
+            assert_eq!(labels(&place.sections), expected);
+            if last == "pricing" {
+                places.push(place);
+            }
+        }
+    }
+    let rows = compare::compare(&places[0], &places[1], None);
+    let pricing = rows
+        .iter()
+        .find(|row| row.role == Some(SectionRole::Pricing))
+        .unwrap();
+    assert_eq!(
+        pricing.left.as_ref(),
+        Some(&places[0].sections.last().unwrap().id)
+    );
+    assert_eq!(
+        pricing.right.as_ref(),
+        Some(&places[1].sections.last().unwrap().id)
+    );
+}
+
+#[test]
+fn surplus_role_entries_keep_the_first_in_site_order() {
+    let links: String = (0..=MAX_PRIMARY_SECTIONS)
+        .map(|i| format!("<a href='/p{i}'>Features {i}</a>"))
+        .collect();
+    let page = doc("/", &format!("<nav><a href='/item'>Item</a>{links}</nav>"));
+    let place = read_site(&page, &SiteInputs::default()).unwrap();
+    let expected: Vec<_> = (0..MAX_PRIMARY_SECTIONS)
+        .map(|i| format!("Features {i}"))
+        .collect();
+    assert_eq!(labels(&place.sections), expected);
+}
