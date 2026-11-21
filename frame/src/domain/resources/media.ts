@@ -29,6 +29,12 @@ export function mediaUrl(profile: string, digest: string, width = 720): string |
   return `${base}${profile}/${digest}?w=${width}`;
 }
 
+/** Request the original image without thumbnail scaling. */
+export function mediaOriginalUrl(profile: string, digest: string): string | null {
+  if (!DIGEST.test(digest) || !PROFILE.test(profile)) return null;
+  return `${base}${profile}/${digest}`;
+}
+
 export function mediaSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;

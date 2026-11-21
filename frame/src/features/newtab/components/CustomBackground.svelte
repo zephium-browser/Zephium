@@ -1,12 +1,13 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { mediaUrl } from "$domain/resources";
+  import { mediaUrl, mediaOriginalUrl } from "$domain/resources";
 
   let {
     profile,
     digest,
     width,
     height,
+    original,
     dim,
     onfailure,
   }: {
@@ -14,24 +15,32 @@
     digest: string;
     width: number;
     height: number;
+    original: boolean;
     dim: boolean;
     onfailure: () => void;
   } = $props();
-  // One image element and one bounded decode, with no resize observer or
-  // preloading image. Reopening reuses the protocol/browser cache. Never ask
-  // beyond the pipeline's largest thumbnail (larger asks serve the original).
+
+  // One image element, with no resize observer or preloading image.
+  // Reopening reuses the protocol/browser cache.
+  //
+  // Optimized mode requests thumbnails up to 1600px.
+  // Original mode requests the full image without thumbnail scaling.
   const src = untrack(() =>
-    mediaUrl(
-      profile,
-      digest,
-      Math.min(1600, Math.max(1, Math.ceil(Math.max(width, height) * window.devicePixelRatio))),
-    ),
+    original
+      ? mediaOriginalUrl(profile, digest)
+      : mediaUrl(
+          profile,
+          digest,
+          Math.min(1600, Math.max(1, Math.ceil(Math.max(width, height) * window.devicePixelRatio))),
+        ),
   );
 </script>
 
 {#if src}
   <img {src} alt="" decoding="async" onerror={onfailure} />
-  {#if dim}<div class="dim"></div>{/if}
+  {#if dim}
+    <div class="dim"></div>
+  {/if}
 {/if}
 
 <style>

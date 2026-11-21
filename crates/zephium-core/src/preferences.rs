@@ -17,6 +17,7 @@ pub const KEYS: &[&str] = &[
     "ui.newtab-tasks",
     "ui.newtab-background",
     "ui.newtab-image",
+    "ui.newtab-image-original",
     "ui.newtab-dim",
     "ui.newtab-wordmark",
     "ui.newtab-trackers",
@@ -318,6 +319,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         | "ui.newtab-name"
         | "ui.newtab-clock"
         | "ui.newtab-tasks"
+        | "ui.newtab-image-original"
         | "ui.newtab-dim"
         | "ui.newtab-wordmark"
         | "ui.newtab-trackers"
@@ -349,6 +351,7 @@ mod tests {
     #[test]
     fn newtab_customization_accepts_only_local_images_and_closed_choices() {
         for key in [
+            "ui.newtab-image-original",
             "ui.newtab-dim",
             "ui.newtab-wordmark",
             "ui.newtab-trackers",

@@ -22,6 +22,7 @@ const native = vi.hoisted(() => ({
   profile: "00000000000000000000000901",
   import: vi.fn(),
   media: vi.fn(),
+  mediaOriginal: vi.fn(),
   decode: vi.fn(),
   blocked: vi.fn(),
   time: vi.fn(),
@@ -45,10 +46,12 @@ vi.mock("$shared/sky", async (original) => {
 vi.mock("$domain/resources", async (original) => ({
   ...(await original<Record<string, unknown>>()),
   mediaUrl: native.media,
+  mediaOriginalUrl: native.mediaOriginal,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    captionReplay: async () => {},
     settingGet: async (key) => native.settings[key] ?? null,
     settingSet: async (key, value) => {
       native.settings[key] = value;
@@ -98,6 +101,7 @@ beforeEach(async () => {
   native.profile = "00000000000000000000000901";
   native.import.mockReset().mockResolvedValue({ status: "ok", data: imported() });
   native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day.avif");
+  native.mediaOriginal.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day.avif");
   native.decode.mockClear();
   native.blocked
     .mockReset()
@@ -184,6 +188,60 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
   expect(preferences.value("ui.newtab-image")).toBe("");
   expect(preferences.value("ui.newtab-dim")).toBe("false");
+});
+
+test("original wallpaper mode switches image URLs and preserves the optimized default", async () => {
+  native.settings = {
+    "ui.newtab-background": "image",
+    "ui.newtab-image": digest,
+  };
+  await preferences.init();
+
+  expect(preferences.value("ui.newtab-image-original")).toBe("false");
+
+  const ntp = await tab();
+  const settings = await settingsScreen();
+  const toggle = settings.getByRole("switch", {
+    name: "Use original wallpaper resolution",
+    exact: true,
+  });
+
+  await expect.poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0).toBeGreaterThan(0);
+
+  expect(native.media).toHaveBeenCalledWith(native.profile, digest, 1600);
+  expect(native.mediaOriginal).not.toHaveBeenCalled();
+
+  await toggle.click();
+  await expect.poll(() => preferences.value("ui.newtab-image-original")).toBe("true");
+  await expect.poll(() => native.mediaOriginal.mock.calls.length).toBe(1);
+  expect(native.mediaOriginal).toHaveBeenCalledWith(native.profile, digest);
+
+  await toggle.click();
+  await expect.poll(() => preferences.value("ui.newtab-image-original")).toBe("false");
+  await expect.poll(() => native.media.mock.calls.length).toBe(2);
+});
+
+test("an original wallpaper failure restores the sky and does not block optimized mode", async () => {
+  native.settings = {
+    "ui.newtab-background": "image",
+    "ui.newtab-image": digest,
+    "ui.newtab-image-original": "true",
+  };
+  native.mediaOriginal.mockReturnValue("/missing-original-wallpaper.png");
+
+  await preferences.init();
+  const ntp = await tab();
+
+  await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+  expect(newTabImage()).toBeNull();
+
+  await preferences.set("ui.newtab-image-original", "false");
+
+  await expect.poll(() => newTabImage()).not.toBeNull();
+  await expect.poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0).toBeGreaterThan(0);
+
+  expect(native.media).toHaveBeenCalledWith(native.profile, digest, 1600);
+  expect(ntp.container.querySelector(".sky")).toBeNull();
 });
 
 test("native image import commits only the admitted digest, and cancellation keeps the sky", async () => {
