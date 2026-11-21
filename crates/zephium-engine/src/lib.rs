@@ -559,7 +559,8 @@ pub fn run_windows_agentic_semantic_probe(
 pub use platform::windows::{
     browser_process_record, detach_privileged_environment_update,
     finalize_privileged_environment_registrations, generation_report_lines,
-    install_privileged_environment_registration, WindowsLeftoverProcesses,
+    install_privileged_environment_registration, privileged_environment_process,
+    WindowsLeftoverProcesses,
 };
 
 /// Runs the isolated-principal native WebKit probe on the process main thread.
@@ -1394,6 +1395,12 @@ fn dispatch_layout_turn(
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&update.window);
                     let applied = host.set_content(update.window, update.tree, update.region, hint);
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    if let Some(id) = update.focus.filter(|_| applied) {
+                        if !host.focus_page(id) {
+                            eprintln!("engine: a page was in no window to take the keyboard");
+                        }
+                    }
                     let _ = require_native_layout_application(
                         applied,
                         &application_delivery,
@@ -1711,12 +1718,26 @@ impl TabPreviewRequest {
     }
 }
 
+/// A replacement keeps the focus of the layout it replaces while it still
+/// shows that page; one that hides or removes it drops the focus.
+fn carry_layout_focus(replaced: &PendingLayout, replacement: &mut PendingLayout) {
+    replacement.focus = replacement.focus.or(replaced.focus.filter(|id| {
+        replacement.region.is_some()
+            && replacement
+                .tree
+                .as_ref()
+                .is_some_and(|tree| tree.tabs().contains(id))
+    }));
+}
+
 struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
     region: Option<Rect>,
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
     tab_preview: TabPreviewSlot,
+    /// A page that takes the keyboard once this layout has placed it.
+    focus: Option<ItemId>,
 }
 
 /// Install on the main thread at startup. macOS and Windows attach child
@@ -1830,6 +1851,20 @@ impl WebviewEngine {
         let _ = self.run(|| {
             let _ = host::try_with(|host| host.store_buttons_foreground());
         });
+    }
+
+    /// Gives `window` its own native window, such as a mini window, on the
+    /// main thread before its first layout. `false` leaves it without one.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub fn attach_window(&self, window: WindowId, handle: RawWindowHandle) -> bool {
+        #[cfg(target_os = "macos")]
+        if objc2_foundation::MainThreadMarker::new().is_none() {
+            return false;
+        }
+        let attached = std::rc::Rc::new(std::cell::Cell::new(false));
+        let result = attached.clone();
+        host::try_with(move |host| result.set(host.attach_window(window, handle)));
+        attached.get()
     }
 
     /// Installs the profile-scoped download service before raw views are made.
@@ -3272,8 +3307,12 @@ impl Engine for WebviewEngine {
             region,
             item_tokens,
             tab_preview: self.tab_preview.clone(),
+            focus: None,
         };
-        match self.layout_updates.submit(window, update) {
+        match self
+            .layout_updates
+            .submit_with(window, update, carry_layout_focus)
+        {
             layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
             layout_queue::Submit::Full => {
                 self.layout_updates.reject_scheduled();
@@ -3305,6 +3344,66 @@ impl Engine for WebviewEngine {
                 }
                 NativeDispatch::from_scheduled(scheduled)
             }
+        }
+    }
+
+    fn hosts_mini_windows(&self) -> bool {
+        cfg!(any(target_os = "macos", target_os = "windows"))
+    }
+
+    fn focus_page(&self, id: ItemId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            // A layout still waiting to place the page carries the focus, so
+            // the page takes the keyboard only once it is in its window.
+            if self.layout_updates.amend(|layout| {
+                let places = layout.region.is_some()
+                    && layout
+                        .tree
+                        .as_ref()
+                        .is_some_and(|tree| tree.tabs().contains(&id));
+                if places {
+                    layout.focus = Some(id);
+                }
+                places
+            }) {
+                return NativeDispatch::Scheduled;
+            }
+            NativeDispatch::from_scheduled(self.run(move || {
+                let _ = host::try_with(move |host| {
+                    if !host.focus_page(id) {
+                        eprintln!("engine: a page was in no window to take the keyboard");
+                    }
+                });
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = id;
+            NativeDispatch::Unsupported
+        }
+    }
+
+    fn release_window(&self, window: WindowId) -> NativeDispatch {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            self.stage_motion
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&window);
+            self.layout_updates.forget(window);
+            NativeDispatch::from_scheduled(self.run(move || {
+                // Refused only once the host is sealed or gone, when every
+                // native window and page is being torn down with it.
+                if !host::try_with_window_release(move |host| host.release_window(window)) {
+                    eprintln!("engine: window {window} released after the host stopped");
+                }
+            }))
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = window;
+            NativeDispatch::Unsupported
         }
     }
 
@@ -4028,6 +4127,53 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_focus_survives_a_replacement_that_still_shows_its_page() {
+        let preview = TabPreviewSlot::default();
+        let page = ItemId::from(7);
+        let layout = |tree: Option<Pane>, region: Option<Rect>| PendingLayout {
+            window: 1,
+            tree,
+            region,
+            item_tokens: Vec::new(),
+            tab_preview: preview.clone(),
+            focus: None,
+        };
+        let shown = || Some(Rect::new(0., 0., 800., 600.));
+        let focus_page = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            updates.amend(|layout| {
+                layout.focus = Some(page);
+                true
+            })
+        };
+        let drained = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            let focus: Vec<_> = updates.take_batch().iter().map(|l| l.focus).collect();
+            assert!(!updates.finish_batch());
+            focus
+        };
+
+        let updates = test_layout_updates();
+        updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+        assert!(focus_page(&updates));
+        updates.submit_with(
+            1,
+            layout(Some(Pane::leaf(page)), shown()),
+            carry_layout_focus,
+        );
+        assert_eq!(drained(&updates), vec![Some(page)]);
+
+        for (tree, region) in [
+            (Some(Pane::leaf(page)), None),
+            (Some(Pane::leaf(ItemId::from(8))), shown()),
+            (None, None),
+        ] {
+            updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+            assert!(focus_page(&updates));
+            updates.submit_with(1, layout(tree, region), carry_layout_focus);
+            assert_eq!(drained(&updates), vec![None]);
+        }
+    }
+
+    #[test]
     fn coalesced_layout_observes_capture_submitted_after_its_queue_position() {
         let updates = test_layout_updates();
         let preview = TabPreviewSlot::default();
@@ -4037,6 +4183,7 @@ mod tests {
             region: Some(Rect::new(0., 0., 800., 600.)),
             item_tokens: Vec::new(),
             tab_preview: preview.clone(),
+            focus: None,
         };
         let outgoing = ItemId::from(1);
         let incoming = ItemId::from(2);

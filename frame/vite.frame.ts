@@ -39,6 +39,7 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
       entries: [
         "browser.html",
         "panel.html",
+        "mini.html",
         "onboarding.html",
         "src/**/*.svelte",
         "src/**/*.ts",
@@ -81,16 +82,20 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
                 tags: ["$initial"],
               },
               {
+                // Every privileged page draws these; the error boundary rides
+                // along so each page loads it without a request of its own.
                 name: "ui-core",
-                test: /[\\/]src[\\/]shared[\\/]ui[\\/](Icon|Button|FavIcon)[\\/]/u,
+                test: /[\\/]src[\\/]shared[\\/]ui[\\/](Icon|Button|FavIcon|RenderBoundary)[\\/]/u,
                 tags: ["$initial"],
               },
               {
                 name: "chrome-shared",
                 priority: 2,
                 // Preferences are read by lazy destinations too; kept here they
-                // never make a destination import the browser entry.
-                test: /[\\/]src[\\/](?:shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)|domain[\\/]preferences[\\/])/u,
+                // never make a destination import the browser entry. Every
+                // privileged page reads the look and language, so those stay
+                // in this one chunk rather than splitting per set of pages.
+                test: /[\\/]src[\\/](?:shared[\\/](ipc[\\/]|platform\.ts|lib[\\/](?:motion\.ts|locale\.svelte\.ts)|i18n[\\/]runtime\.js)|domain[\\/](?:preferences|appearance)[\\/])|[\\/]@tauri-apps[\\/]api[\\/](?:window|dpi|image)\.js$/u,
                 tags: ["$initial"],
               },
             ],
