@@ -367,6 +367,7 @@ impl Default for Accumulator {
                     FetchRefusal::Interrupted,
                     FetchRefusal::Limit,
                     FetchRefusal::Storage,
+                    FetchRefusal::RobotsDenied,
                 ])
                 .map(|class| (class.to_string(), 0))
                 .collect(),
@@ -516,14 +517,20 @@ impl Report {
             }
             let outcome = optional_json(&path.join(OUTCOME))?;
             let measure = optional_json(&path.join(MEASURE))?;
-            let outcome = outcome.unwrap_or_else(|| {
-                QueryResult::unavailable(
-                    Verdict::NotRecorded,
-                    Reason::RecordingMissing,
-                    Default::default(),
-                )
-            });
-            recording.push(query, outcome, measure, false);
+            if let (Some(outcome), Some(measure)) = (outcome, measure) {
+                recording.push(query, outcome, Some(measure), false);
+            } else {
+                recording.push(
+                    query,
+                    QueryResult::unavailable(
+                        Verdict::NotRecorded,
+                        Reason::RecordingMissing,
+                        Default::default(),
+                    ),
+                    None,
+                    false,
+                );
+            }
         }
         let engine = manifest.engine;
         let latest_replay = latest_replay(root)?

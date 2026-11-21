@@ -15,7 +15,7 @@ use zephium_public_fetch::{
 use super::corpus::{Corpus, CorpusQuery, QueryLabel, MAX_CORPUS_FILES, MAX_QUERIES};
 use super::engine::{
     redact_thread_panics, run_catching, Activity, BenchIo, Engine, EngineFailure, EngineKind,
-    FetchRefusal, FetchRequest, FetchResult, Outcome, ResultsPage, MAX_REQUESTS,
+    FetchRefusal, FetchRequest, FetchResult, LandingAdmission, Outcome, ResultsPage, MAX_REQUESTS,
 };
 use super::score::{self, Reason, Score, Verdict};
 use super::store::{
@@ -471,7 +471,10 @@ impl<'a> QueryIo<'a> {
         Ok(())
     }
 
-    fn complete_live(&mut self) -> Option<(usize, FetchResult)> {
+    fn complete_live(
+        &mut self,
+        admit: Option<&mut LandingAdmission<'_>>,
+    ) -> Option<(usize, FetchResult)> {
         let live = self.live.as_mut()?;
         if self.active.is_empty() {
             return None;
@@ -494,17 +497,67 @@ impl<'a> QueryIo<'a> {
             self.failure = Some(Reason::ArtifactError);
         }
         self.elapsed = self.elapsed.max(completed.transfer.end);
+        let root = live.root;
+        let mut denied_origin = None;
+        if let (Ok(body), Some(admit)) = (&completed.result, admit) {
+            if !admit(self, &body.final_url) {
+                denied_origin = Url::parse(&body.final_url.origin().ascii_serialization()).ok();
+                completed.result = Err(FetchRefusal::RobotsDenied);
+            }
+        }
         let result = self
             .journal
             .finish(
-                live.root,
+                root,
                 self.query,
                 index,
                 &completed.result,
                 completed.transfer,
+                denied_origin,
             )
             .map_or_else(|error| Err(self.refuse(error)), |()| completed.result);
         Some((completed.token, result))
+    }
+
+    fn next_fetch_with(
+        &mut self,
+        admit: Option<&mut LandingAdmission<'_>>,
+    ) -> Option<(usize, FetchResult)> {
+        let (token, result) = if let Some(((_, end, token), ready)) = self.ready.pop_first() {
+            self.elapsed = self.elapsed.max(end);
+            let result = match ready {
+                Ready::Recorded(matched) => match self.journal.result(matched.index, self.query) {
+                    Ok(mut result) => {
+                        if let Some(cap) = matched.relaxed_cap {
+                            if let Ok(body) = &mut result {
+                                body.bytes.truncate(cap);
+                            }
+                            self.activity.matched_relaxed += 1;
+                        }
+                        if let Some(admit) = admit {
+                            if let Ok(body) = &result {
+                                if !admit(self, &body.final_url) {
+                                    result = Err(FetchRefusal::RobotsDenied);
+                                }
+                            } else if let (Err(FetchRefusal::RobotsDenied), Some(origin)) = (
+                                &result,
+                                self.journal.robots_denied_origin(matched.index).cloned(),
+                            ) {
+                                admit(self, &origin);
+                            }
+                        }
+                        result
+                    }
+                    Err(error) => Err(self.refuse(error)),
+                },
+                Ready::Refused(class) => Err(class),
+            };
+            (token, result)
+        } else {
+            self.complete_live(admit)?
+        };
+        self.activity.called(&result);
+        Some((token, result))
     }
 
     fn load_results(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> Result<ResultsPage> {
@@ -533,6 +586,16 @@ impl BenchIo for QueryIo<'_> {
             .map_or(Err(FetchRefusal::Storage), |(_, result)| result)
     }
 
+    fn fetch_checked(
+        &mut self,
+        request: FetchRequest,
+        admit: &mut LandingAdmission<'_>,
+    ) -> FetchResult {
+        self.start_fetch(request);
+        self.next_fetch_with(Some(admit))
+            .map_or(Err(FetchRefusal::Storage), |(_, result)| result)
+    }
+
     fn start_fetch(&mut self, request: FetchRequest) -> usize {
         let token = self.submitted;
         self.submitted = self.submitted.saturating_add(1);
@@ -554,29 +617,7 @@ impl BenchIo for QueryIo<'_> {
     }
 
     fn next_fetch(&mut self) -> Option<(usize, FetchResult)> {
-        let (token, result) = if let Some(((_, end, token), ready)) = self.ready.pop_first() {
-            self.elapsed = self.elapsed.max(end);
-            let result = match ready {
-                Ready::Recorded(matched) => match self.journal.result(matched.index, self.query) {
-                    Ok(mut result) => {
-                        if let Some(cap) = matched.relaxed_cap {
-                            if let Ok(body) = &mut result {
-                                body.bytes.truncate(cap);
-                            }
-                            self.activity.matched_relaxed += 1;
-                        }
-                        result
-                    }
-                    Err(error) => Err(self.refuse(error)),
-                },
-                Ready::Refused(class) => Err(class),
-            };
-            (token, result)
-        } else {
-            self.complete_live()?
-        };
-        self.activity.called(&result);
-        Some((token, result))
+        self.next_fetch_with(None)
     }
 
     fn results_page(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> ResultsPage {
@@ -664,6 +705,7 @@ fn record_query(
     engine: &mut dyn Engine,
     source: &mut dyn Source,
     clock: RunClock,
+    publish_outcome: impl FnOnce(&Path, QueryResult) -> Result<()>,
 ) -> Result<()> {
     let path = query_dir(root, &query.label.id, false)?;
     let resumed = store::directory(&path, false)?;
@@ -709,8 +751,16 @@ fn record_query(
     if let Some(count) = output.activity.refusals.get("Limit") {
         measure.refusals.insert("Limit".into(), *count);
     }
+    let robots_denied = FetchRefusal::RobotsDenied.to_string();
+    if let Some(count) = output.activity.refusals.get(&robots_denied) {
+        measure.refusals.insert(robots_denied, *count);
+    }
+    let outcome = path.join(OUTCOME);
+    if store::exists(&outcome)? {
+        fs::remove_file(&outcome).map_err(|error| BenchError::io("invalidate_outcome", &error))?;
+    }
     write_json(&path.join(MEASURE), &measure)?;
-    save_outcome(&path.join(OUTCOME), output)
+    publish_outcome(&outcome, output)
 }
 
 pub(super) fn pending<'a>(
@@ -795,7 +845,7 @@ fn record_queries(
         if index > 0 {
             std::thread::sleep(pause);
         }
-        if let Err(error) = record_query(root, query, engine, source, clock) {
+        if let Err(error) = record_query(root, query, engine, source, clock, save_outcome) {
             failed = true;
             eprintln!("map bench: {}", error.for_query(&query.label.id));
         }

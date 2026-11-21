@@ -1,7 +1,9 @@
-use url::Url;
+use std::collections::HashMap;
+use url::{Origin, Position, Url};
 use zephium_map::doc::MAX_CHARSET_LABEL_BYTES;
 use zephium_map::session::MAX_MEDIA_TYPE_BYTES;
 use zephium_map::{robots::Robots, PageKey, SiteKey};
+use zephium_public_fetch::guard::public_target;
 use zephium_public_fetch::{ReadRefusal, ReaderLimits, StatusRefusal};
 
 use super::corpus::{CorpusQuery, Kind};
@@ -26,7 +28,9 @@ impl Engine for ProbeEngine {
             _ => &[],
         };
         for site in sites {
-            outcome.probe.push(probe(io, site));
+            if let Ok(site) = Url::parse(&format!("https://{site}/")) {
+                outcome.probe.push(probe(io, &site));
+            }
         }
         outcome.stats.insert(
             "results_page_available".into(),
@@ -45,8 +49,8 @@ impl Engine for ProbeEngine {
     }
 }
 
-fn probe(io: &mut dyn BenchIo, site: &str) -> ProbeSite {
-    let robots = fetch(io, site, "/robots.txt", Expectation::Text);
+fn probe(io: &mut dyn BenchIo, site: &Url) -> ProbeSite {
+    let robots = fetch_robots(io, site);
     let mut result = ProbeSite {
         robots: (&robots).into(),
         homepage: ProbeFetch::Skipped,
@@ -59,17 +63,27 @@ fn probe(io: &mut dyn BenchIo, site: &str) -> ProbeSite {
     if result.robots_stop.is_some() {
         return result;
     }
-    let mut policies = vec![(site.to_owned(), policy(site, &robots))];
-    if !policies[0].1.allows("/") {
+    let initial = policy(site, &robots);
+    if !initial.allows("/") {
         result.robots_stop = Some(RobotsStop::BlocksAll);
         return result;
     }
+    let mut policies = HashMap::from([(site.origin(), initial)]);
 
-    let home = fetch(io, site, "/", Expectation::Html);
+    let home = fetch_page(io, site.clone(), Expectation::Html, &mut policies);
     result.homepage = (&home).into();
-    let home = if home.is_err() && !site.starts_with("www.") {
-        let www = format!("www.{site}");
-        let robots = fetch(io, &www, "/robots.txt", Expectation::Text);
+    let retry_host = site.host_str().filter(|host| {
+        !host.starts_with("www.")
+            && home
+                .as_ref()
+                .is_err_and(|class| *class != FetchRefusal::RobotsDenied)
+    });
+    let home = if let Some(host) = retry_host {
+        let mut www = site.clone();
+        if www.set_host(Some(&format!("www.{host}"))).is_err() {
+            return result;
+        }
+        let robots = fetch_robots(io, &www);
         if let Some(stop) = robots_stop(&robots) {
             result.robots_stop = Some(stop);
             return result;
@@ -79,48 +93,78 @@ fn probe(io: &mut dyn BenchIo, site: &str) -> ProbeSite {
             result.robots_stop = Some(RobotsStop::BlocksAll);
             return result;
         }
-        policies.push((www.clone(), www_policy));
-        let retry = fetch(io, &www, "/", Expectation::Html);
+        policies.insert(www.origin(), www_policy);
+        let retry = fetch_page(io, www, Expectation::Html, &mut policies);
         result.www_retry = Some((&retry).into());
         retry
     } else {
         home
     };
 
-    if let Ok(home) = home {
-        if let Some(host) = home.final_url.host_str() {
-            result.homepage_final_host = Some(host.to_owned());
-            let known = policies
-                .into_iter()
-                .find_map(|(origin, policy)| (origin == host).then_some(policy));
-            let landed = known.or_else(|| {
-                let robots = fetch(io, host, "/robots.txt", Expectation::Text);
-                robots_stop(&robots)
-                    .is_none()
-                    .then(|| policy(host, &robots))
-            });
-            if let Some(landed) = landed {
-                if landed.allows("/llms.txt") {
-                    result.llms = (&fetch(io, host, "/llms.txt", Expectation::Text)).into();
-                }
-                if landed.allows("/sitemap.xml") {
-                    result.sitemap = (&fetch(io, host, "/sitemap.xml", Expectation::Xml)).into();
-                }
+    let landing = match home {
+        Ok(home) => home.final_url,
+        Err(FetchRefusal::RobotsDenied) => {
+            result.robots_stop = Some(RobotsStop::BlocksAll);
+            return result;
+        }
+        Err(_) => return result,
+    };
+    result.homepage_final_host = landing.host_str().map(str::to_owned);
+    for (path, expect, slot) in [
+        ("/llms.txt", Expectation::Text, &mut result.llms),
+        ("/sitemap.xml", Expectation::Xml, &mut result.sitemap),
+    ] {
+        if policies
+            .get(&landing.origin())
+            .is_some_and(|p| p.allows(path))
+        {
+            let page = fetch_page(io, at_path(&landing, path), expect, &mut policies);
+            *slot = (&page).into();
+            if page == Err(FetchRefusal::RobotsDenied) {
+                result.robots_stop = Some(RobotsStop::BlocksAll);
+                break;
             }
         }
     }
     result
 }
 
-fn fetch(io: &mut dyn BenchIo, host: &str, path: &str, expect: Expectation) -> FetchResult {
-    let url = Url::parse(&format!("https://{host}{path}"))
-        .map_err(|_| FetchRefusal::Reader(ReadRefusal::NotPublicHttps))?;
+fn at_path(origin: &Url, path: &str) -> Url {
+    let mut url = origin.clone();
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    url
+}
+
+fn request(url: Url, expect: Expectation) -> FetchRequest {
     let limits = ReaderLimits::default();
-    io.fetch(FetchRequest {
+    FetchRequest {
         url,
         expect,
         max_bytes: limits.max_decoded_bytes,
         timeout: limits.max_duration,
+    }
+}
+
+fn fetch_robots(io: &mut dyn BenchIo, origin: &Url) -> FetchResult {
+    io.fetch(request(at_path(origin, "/robots.txt"), Expectation::Text))
+}
+
+fn fetch_page(
+    io: &mut dyn BenchIo,
+    url: Url,
+    expect: Expectation,
+    policies: &mut HashMap<Origin, Robots>,
+) -> FetchResult {
+    io.fetch_checked(request(url, expect), &mut |io, landing| {
+        if !public_target(landing) {
+            return false;
+        }
+        let policy = policies
+            .entry(landing.origin())
+            .or_insert_with(|| policy(landing, &fetch_robots(io, landing)));
+        policy.allows(&landing[Position::BeforePath..Position::AfterQuery])
     })
 }
 
@@ -138,7 +182,7 @@ fn robots_stop(result: &FetchResult) -> Option<RobotsStop> {
 /// The session engine's robots admission: `Session::receive` for `Work::Robots`
 /// in `zephium-map/src/session/scheduler.rs`, fed by `failure` and `session_body`
 /// in `map_bench/session.rs`.
-fn policy(host: &str, result: &FetchResult) -> Robots {
+fn policy(origin: &Url, result: &FetchResult) -> Robots {
     let body = match result {
         Ok(body) => body,
         Err(FetchRefusal::Reader(ReadRefusal::Status(StatusRefusal::Client))) => {
@@ -155,9 +199,7 @@ fn policy(host: &str, result: &FetchResult) -> Robots {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    let site = Url::parse(&format!("https://{host}/"))
-        .ok()
-        .and_then(|url| SiteKey::from_url(&url));
+    let site = SiteKey::from_url(origin);
     if body
         .media_type
         .as_ref()
@@ -181,6 +223,7 @@ fn policy(host: &str, result: &FetchResult) -> Robots {
 mod tests {
     use super::*;
     use crate::map_bench::corpus::fixture;
+    use crate::map_bench::engine::LandingAdmission;
     use std::collections::VecDeque;
     use std::time::Duration;
     use zephium_public_fetch::{PublicBody, StatusClass, TimeoutPhase, Timings};
@@ -191,9 +234,18 @@ mod tests {
     }
 
     impl BenchIo for FakeIo {
-        fn fetch(&mut self, request: FetchRequest) -> FetchResult {
+        fn fetch_checked(
+            &mut self,
+            request: FetchRequest,
+            admit: &mut LandingAdmission<'_>,
+        ) -> FetchResult {
             self.calls.push((request.url.to_string(), request.expect));
-            self.results.pop_front().expect("unexpected request")
+            let body = self.results.pop_front().expect("unexpected request")?;
+            if admit(self, &body.final_url) {
+                Ok(body)
+            } else {
+                Err(FetchRefusal::RobotsDenied)
+            }
         }
 
         fn results_page(
@@ -352,7 +404,7 @@ mod tests {
             ("<html><body>Not found</body></html>", false),
         ] {
             let policy = policy(
-                "a.com",
+                &Url::parse("https://a.com/").unwrap(),
                 &body("https://a.com/robots.txt", robots.as_bytes()),
             );
             assert_eq!(policy.allows("/"), home, "{robots:?}");
@@ -414,7 +466,11 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(policy("a.com", &robots).allows("/"), allowed, "{robots:?}");
+            assert_eq!(
+                policy(&Url::parse("https://a.com/").unwrap(), &robots).allows("/"),
+                allowed,
+                "{robots:?}"
+            );
         }
         let query = fixture("[[query]]\nid='q'\ntext='q'\nkind='place'\nsite='a.com'");
         let mut io = FakeIo {
@@ -494,6 +550,61 @@ mod tests {
         assert!(outcome.probe[0].sitemap.answered());
         assert_eq!(io.calls[2].0, "https://docs.a.com/robots.txt");
         assert_eq!(io.calls[3].0, "https://docs.a.com/sitemap.xml");
+    }
+
+    #[test]
+    fn redirected_homepage_rejects_a_denied_path() {
+        let query = fixture("[[query]]\nid='q'\ntext='q'\nkind='place'\nsite='example.com'");
+        let mut io = FakeIo {
+            calls: vec![],
+            results: [
+                body(
+                    "https://example.com/robots.txt",
+                    b"User-agent: *\nDisallow: /private",
+                ),
+                body("https://example.com/private", b"denied"),
+                body("https://example.com/llms.txt", b"llms"),
+                body("https://example.com/sitemap.xml", b"sitemap"),
+            ]
+            .into(),
+        };
+        let outcome = ProbeEngine.run(&query, &mut io);
+        let site = &outcome.probe[0];
+        assert_eq!(site.robots_stop, Some(RobotsStop::BlocksAll));
+        assert!(!site.homepage.answered());
+        assert!(site.homepage_final_host.is_none());
+        assert_eq!(io.calls.len(), 2);
+    }
+
+    #[test]
+    fn redirected_homepage_rejects_a_denied_or_unknown_new_origin() {
+        let query = fixture("[[query]]\nid='q'\ntext='q'\nkind='place'\nsite='example.com'");
+        for robots in [
+            body(
+                "https://docs.example.com/robots.txt",
+                b"User-agent: *\nDisallow: /private",
+            ),
+            Err(FetchRefusal::Reader(ReadRefusal::Transport)),
+        ] {
+            let mut io = FakeIo {
+                calls: vec![],
+                results: [
+                    body("https://example.com/robots.txt", b"User-agent: *\nAllow: /"),
+                    body("https://docs.example.com/private", b"denied"),
+                    robots,
+                    body("https://docs.example.com/llms.txt", b"llms"),
+                    body("https://docs.example.com/sitemap.xml", b"sitemap"),
+                ]
+                .into(),
+            };
+            let outcome = ProbeEngine.run(&query, &mut io);
+            let site = &outcome.probe[0];
+            assert_eq!(site.robots_stop, Some(RobotsStop::BlocksAll));
+            assert!(!site.homepage.answered());
+            assert!(site.homepage_final_host.is_none());
+            assert_eq!(io.calls.len(), 3);
+            assert_eq!(io.calls[2].0, "https://docs.example.com/robots.txt");
+        }
     }
 
     #[test]

@@ -353,7 +353,12 @@ struct RequestRow {
     #[serde(default)]
     completion_order: Option<usize>,
     body: Option<BodyRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    robots_denied_origin: Option<JournalUrl>,
 }
+
+#[derive(Deserialize, Serialize)]
+struct JournalUrl(#[serde(with = "url_text")] Url);
 
 #[derive(Deserialize, Serialize)]
 struct TransferTimes {
@@ -395,6 +400,7 @@ impl RequestRow {
             elapsed_at_return: elapsed,
             completion_order: None,
             body: None,
+            robots_denied_origin: None,
         }
     }
 
@@ -635,6 +641,14 @@ impl Journal {
             .result(query)
     }
 
+    pub(super) fn robots_denied_origin(&self, index: usize) -> Option<&Url> {
+        self.0
+            .get(index)?
+            .robots_denied_origin
+            .as_ref()
+            .map(|url| &url.0)
+    }
+
     pub(super) fn elapsed(&self) -> Duration {
         self.0
             .iter()
@@ -665,6 +679,7 @@ impl Journal {
         index: usize,
         fetch: &FetchResult,
         transfer: Transfer,
+        robots_denied_origin: Option<Url>,
     ) -> Result<()> {
         let order = self.0.iter().filter_map(|row| row.completion_order).max();
         let row = self
@@ -672,6 +687,7 @@ impl Journal {
             .get_mut(index)
             .ok_or(BenchError::new("missing_request_reservation"))?;
         row.finish(root, query, fetch, transfer)?;
+        row.robots_denied_origin = robots_denied_origin.map(JournalUrl);
         row.completion_order = Some(order.map_or(0, |order| order + 1));
         self.save(query)
     }

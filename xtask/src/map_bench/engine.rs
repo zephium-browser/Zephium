@@ -30,7 +30,14 @@ pub(super) trait Engine {
 }
 
 pub(super) trait BenchIo {
-    fn fetch(&mut self, request: FetchRequest) -> FetchResult;
+    fn fetch(&mut self, request: FetchRequest) -> FetchResult {
+        self.fetch_checked(request, &mut |_, _| true)
+    }
+    fn fetch_checked(
+        &mut self,
+        request: FetchRequest,
+        admit: &mut LandingAdmission<'_>,
+    ) -> FetchResult;
     fn start_fetch(&mut self, request: FetchRequest) -> usize;
     fn next_fetch(&mut self) -> Option<(usize, FetchResult)>;
     fn results_page(&mut self, synthetic: Option<(&Url, Vec<u8>)>) -> ResultsPage;
@@ -40,6 +47,8 @@ pub(super) trait BenchIo {
     // The clock advances at recorded I/O boundaries so an identical replay sees the same time.
     fn elapsed(&self) -> Duration;
 }
+
+pub(super) type LandingAdmission<'a> = dyn FnMut(&mut dyn BenchIo, &Url) -> bool + 'a;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +94,7 @@ pub(super) enum FetchRefusal {
     Interrupted,
     Limit,
     Storage,
+    RobotsDenied,
 }
 
 impl FetchRefusal {
@@ -106,6 +116,7 @@ impl fmt::Display for FetchRefusal {
             Self::Interrupted => formatter.write_str("Interrupted"),
             Self::Limit => formatter.write_str("Limit"),
             Self::Storage => formatter.write_str("Storage"),
+            Self::RobotsDenied => formatter.write_str("RobotsDenied"),
         }
     }
 }
@@ -130,6 +141,7 @@ impl<'de> Deserialize<'de> for FetchRefusal {
             "Interrupted" => Ok(Self::Interrupted),
             "Limit" => Ok(Self::Limit),
             "Storage" => Ok(Self::Storage),
+            "RobotsDenied" => Ok(Self::RobotsDenied),
             _ => ReadRefusal::ALL
                 .into_iter()
                 .find(|refusal| refusal.to_string() == text)
