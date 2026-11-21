@@ -182,7 +182,8 @@ fn public_client_builder(resolver: Arc<dyn reqwest::dns::Resolve>) -> reqwest::C
         .dns_resolver(resolver)
         .https_only(true)
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS || !public_https(attempt.url()) {
+            // `previous()` starts with the original request, not a redirect.
+            if attempt.previous().len() > MAX_REDIRECTS || !public_https(attempt.url()) {
                 attempt.stop()
             } else {
                 attempt.follow()
