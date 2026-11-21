@@ -649,7 +649,7 @@ mode with `synchronous=FULL`; every opened connection also enables SQLite's defe
 mode and cell-size checking, disables trusted-schema behavior and double-quoted string
 literals, and keeps temporary storage in memory. The complete restorable non-private
 session is committed as one meta-database transaction. History is capped at 50,000 rows
-per profile and the favicon cache at 512 origins per profile.
+per profile and the favicon cache at 1,024 origins per profile.
 
 `user_version` is not treated as sufficient schema identity. Before migration DML and
 after every committed migration step, the store compares a bounded inventory of every
@@ -1142,7 +1142,7 @@ same-origin image load under the current immutable WebView generation and naviga
 epoch, then accepts only a canonical base64 encoding of exactly 32x32 RGBA pixels
 (4,096 bytes). Rust validates and stores only that fixed raster; privileged chrome
 paints it with `ImageData` on a canvas and never invokes an `<img>` decoder or custom
-protocol. Persistent caches are capped at 512 decoded origins; private-profile icons
+protocol. Persistent caches are capped at 1,024 decoded origins; private-profile icons
 are bounded in memory and never sent to SQLite. A page can choose or forge its own
 pixels, but malformed containers, SVG/ICO/PNG parsers, cross-origin late results, and
 unbounded payloads do not cross into the privileged renderer. Candidate discovery
