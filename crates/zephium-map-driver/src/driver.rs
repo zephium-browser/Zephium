@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, PoisonError,
     },
     time::Duration,
@@ -42,6 +42,8 @@ pub struct MapRequest {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
+    pub fetches: u32,
+    pub bytes: u64,
     pub render_unavailable: u32,
     pub anonymous_unavailable: u32,
     pub truncated_results: u32,
@@ -51,6 +53,8 @@ pub struct Counts {
 #[derive(Default)]
 struct Shared {
     targets: Mutex<[Option<Targets>; SLOTS]>,
+    fetches: AtomicU32,
+    bytes: AtomicU64,
     render_unavailable: AtomicU32,
     anonymous_unavailable: AtomicU32,
     truncated_results: AtomicU32,
@@ -153,6 +157,8 @@ impl Driver {
     pub fn counts(&self) -> Counts {
         let load = |counter: &AtomicU32| counter.load(Ordering::Acquire);
         Counts {
+            fetches: load(&self.shared.fetches),
+            bytes: self.shared.bytes.load(Ordering::Acquire),
             render_unavailable: load(&self.shared.render_unavailable),
             anonymous_unavailable: load(&self.shared.anonymous_unavailable),
             truncated_results: load(&self.shared.truncated_results),
@@ -294,6 +300,7 @@ impl Run {
         let mut session = self.session.take()?;
         let time = self.elapsed();
         let cancelling = self.cancelling;
+        let shared = Arc::clone(&self.shared);
         let done = task::spawn_blocking(move || {
             let mut effects = if cancelling {
                 Vec::new()
@@ -302,6 +309,18 @@ impl Run {
             };
             if let Some(input) = input {
                 if !effects.iter().any(is_end) {
+                    if let Input::Fetch {
+                        result: Ok(answer), ..
+                    } = &input
+                    {
+                        let size = answer.bytes.len() as u64;
+                        let _ =
+                            shared
+                                .bytes
+                                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                                    Some(n.saturating_add(size))
+                                });
+                    }
                     effects.extend(session.handle(input));
                 }
             }
@@ -468,6 +487,7 @@ impl Run {
         }
         let fetcher = Arc::clone(&self.io.fetch);
         let timeout = request.timeout;
+        bump(&self.shared.fetches);
         let read = self.reads.spawn(async move {
             let result = tokio::time::timeout(timeout, fetcher.fetch(request))
                 .await

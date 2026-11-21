@@ -323,7 +323,15 @@ async fn a_place_streams_first_layer_then_places_then_one_end() {
     ] {
         assert_eq!(driver.target(slot, target), None);
     }
-    assert_eq!(driver.counts(), Counts::default());
+    let counts = driver.counts();
+    assert_eq!(
+        counts,
+        Counts {
+            fetches: counts.fetches,
+            bytes: counts.bytes,
+            ..Counts::default()
+        }
+    );
     let fetched = fake.seen().fetches.len();
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(fake.seen().fetches.len(), fetched);
@@ -443,6 +451,37 @@ async fn the_driver_refuses_reads_over_the_ceilings() {
         })
     ));
     assert_eq!(run.hosts.len(), MAX_CONCURRENT - 1);
+}
+
+#[tokio::test]
+async fn two_fetch_answers_are_counted_and_the_counts_survive_cancel() {
+    const ROBOTS: &str = "User-agent: *\nAllow: /\n";
+    let fake = Arc::new(Fake::new(html(RESULT)).site(
+        "acme.com",
+        &[
+            ("/robots.txt", Plan::Page("text/plain", ROBOTS.into())),
+            ("/", html(NAV)),
+        ],
+    ));
+    // The first layer fills the buffer so the first place blocks further effects.
+    let (driver, mut rx) =
+        Driver::start_buffered(request("acme"), io(&fake), &Handle::current(), 1).unwrap();
+    let bytes = (ROBOTS.len() + NAV.len()) as u64;
+    tokio::time::timeout(FETCH_TIMEOUT, async {
+        while driver.counts().bytes < bytes {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(driver.counts().fetches, 2);
+    assert_eq!(driver.counts().bytes, bytes);
+    driver.cancel();
+    let changes = rest(&mut rx).await;
+    checked(&changes, 0);
+    assert_eq!(outcome(&changes).0, Outcome::Cancelled);
+    assert_eq!(driver.counts().fetches, 2);
+    assert_eq!(driver.counts().bytes, bytes);
 }
 
 #[tokio::test(start_paused = true)]
