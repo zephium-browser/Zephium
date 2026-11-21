@@ -1114,6 +1114,7 @@ where
             super::lead::compact(
                 &mut messages,
                 super::lead::conversation_budget(&model.entry),
+                super::lead::Used::Behind,
             );
             let request = WorkModelRequest {
                 image_fence: None,
