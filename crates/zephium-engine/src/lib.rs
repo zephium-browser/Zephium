@@ -1718,6 +1718,18 @@ impl TabPreviewRequest {
     }
 }
 
+/// A replacement keeps the focus of the layout it replaces while it still
+/// shows that page; one that hides or removes it drops the focus.
+fn carry_layout_focus(replaced: &PendingLayout, replacement: &mut PendingLayout) {
+    replacement.focus = replacement.focus.or(replaced.focus.filter(|id| {
+        replacement.region.is_some()
+            && replacement
+                .tree
+                .as_ref()
+                .is_some_and(|tree| tree.tabs().contains(id))
+    }));
+}
+
 struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
@@ -3297,7 +3309,10 @@ impl Engine for WebviewEngine {
             tab_preview: self.tab_preview.clone(),
             focus: None,
         };
-        match self.layout_updates.submit(window, update) {
+        match self
+            .layout_updates
+            .submit_with(window, update, carry_layout_focus)
+        {
             layout_queue::Submit::Coalesced => NativeDispatch::Scheduled,
             layout_queue::Submit::Full => {
                 self.layout_updates.reject_scheduled();
@@ -4109,6 +4124,53 @@ mod tests {
 
     fn test_layout_updates() -> Arc<layout_queue::LatestLayouts<PendingLayout>> {
         Arc::new(layout_queue::LatestLayouts::new(MAX_PENDING_LAYOUT_WINDOWS))
+    }
+
+    #[test]
+    fn a_queued_focus_survives_a_replacement_that_still_shows_its_page() {
+        let preview = TabPreviewSlot::default();
+        let page = ItemId::from(7);
+        let layout = |tree: Option<Pane>, region: Option<Rect>| PendingLayout {
+            window: 1,
+            tree,
+            region,
+            item_tokens: Vec::new(),
+            tab_preview: preview.clone(),
+            focus: None,
+        };
+        let shown = || Some(Rect::new(0., 0., 800., 600.));
+        let focus_page = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            updates.amend(|layout| {
+                layout.focus = Some(page);
+                true
+            })
+        };
+        let drained = |updates: &layout_queue::LatestLayouts<PendingLayout>| {
+            let focus: Vec<_> = updates.take_batch().iter().map(|l| l.focus).collect();
+            assert!(!updates.finish_batch());
+            focus
+        };
+
+        let updates = test_layout_updates();
+        updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+        assert!(focus_page(&updates));
+        updates.submit_with(
+            1,
+            layout(Some(Pane::leaf(page)), shown()),
+            carry_layout_focus,
+        );
+        assert_eq!(drained(&updates), vec![Some(page)]);
+
+        for (tree, region) in [
+            (Some(Pane::leaf(page)), None),
+            (Some(Pane::leaf(ItemId::from(8))), shown()),
+            (None, None),
+        ] {
+            updates.submit(1, layout(Some(Pane::leaf(page)), shown()));
+            assert!(focus_page(&updates));
+            updates.submit_with(1, layout(tree, region), carry_layout_focus);
+            assert_eq!(drained(&updates), vec![None]);
+        }
     }
 
     #[test]
