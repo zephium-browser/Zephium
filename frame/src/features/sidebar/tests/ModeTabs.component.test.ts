@@ -83,3 +83,19 @@ test("with Work off the column has no switch at either width, and it comes back 
   await expect.element(wide.getByRole("radio", { name: "Work", exact: true })).toBeVisible();
   await expect.element(rail.getByRole("button", { name: "Work", exact: true })).toBeVisible();
 });
+
+test("the visibility preference hides every switch shape while keeping Work enabled", async () => {
+  native.settings["ui.mode-switch"] = "false";
+  await preferences.init();
+  await surface.init();
+  for (const props of [{}, { compact: true }, { compact: true, standalone: true }]) {
+    const screen = await render(ModeTabs, props);
+    expect(screen.container.textContent?.trim()).toBe("");
+    await screen.unmount();
+  }
+  expect(preferences.enabled("work")).toBe(true);
+  expect(preferences.commandOffered("browser.work")).toBe(true);
+  const screen = await render(ModeTabs, { compact: true, standalone: true });
+  emitNativeEvent("uiCommand", "preference.ui.mode-switch=true");
+  await expect.element(screen.getByRole("button", { name: "Work", exact: true })).toBeVisible();
+});

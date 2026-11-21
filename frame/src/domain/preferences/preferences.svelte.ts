@@ -15,6 +15,8 @@ const defaults = {
   "ui.accent": "graphite",
   "ui.material": "auto",
   "ui.reduce-motion": "false",
+  "ui.sign-in-prompts": "true",
+  "ui.mode-switch": "true",
   "ui.newtab-greeting": "false",
   "ui.newtab-name": "false",
   "ui.newtab-clock": "true",
@@ -103,6 +105,9 @@ export const aiEnabled = () => values["ai.enabled"] !== "false";
 export type Feature = "work" | "notes" | "tasks" | "time";
 /** A feature switch: off, the feature leaves the app; its data stays. */
 export const enabled = (feature: Feature) => values[`${feature}.enabled`] !== "false";
+/** Visibility only: Work remains available through its commands and menus. */
+export const showModeSwitch = () => enabled("work") && values["ui.mode-switch"] !== "false";
+export const showSignInPrompts = () => values["ui.sign-in-prompts"] !== "false";
 /** The feature a command belongs to. Mirrors `zephium_core::commands::feature_of`. */
 function featureOf(command: string): Feature | "ai" | null {
   if (["work.dictate", "tool.ai", "mode.choose"].includes(command)) return "ai";

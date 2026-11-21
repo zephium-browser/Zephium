@@ -30,9 +30,13 @@ export function accountFoot(options: { private?: () => boolean } = {}) {
   );
 
   return {
-    /** The account service answers here, and this is not a private window. */
+    /** An account surface is visible here; signed-in account access is retained. */
     get available() {
-      return account?.available === true && !options.private?.();
+      return (
+        account?.available === true &&
+        !options.private?.() &&
+        (signedIn || preferences.showSignInPrompts())
+      );
     },
     get signedIn() {
       return signedIn;

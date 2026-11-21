@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BrowserControls from "../BrowserControls.svelte";
   import PreferenceSelect from "../PreferenceSelect.svelte";
   import ZoomLevels from "../ZoomLevels.svelte";
   import ModePicker from "../appearance/ModePicker.svelte";
@@ -173,6 +174,8 @@
     />
   </SettingsRow>
 </SettingsGroup>
+
+<BrowserControls />
 
 <SettingsGroup title={m.look_typography()}>
   <FontPicker />

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { accountSession as session, planName } from "$domain/account";
+  import { preferences } from "$domain/preferences";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
   import ZephiumTile from "$shared/ui/ZephiumTile";
@@ -15,7 +16,8 @@
   const account = $derived(session.account());
   /** Shown only where hosted models exist: a self-hosted server may offer none. */
   const offered = $derived(
-    !!account?.available && (account.signed_in || account.hosted_models === true),
+    !!account?.available &&
+      (account.signed_in || (account.hosted_models === true && preferences.showSignInPrompts())),
   );
   const detail = $derived.by(() => {
     if (!account?.signed_in) return m.ai_cloud_signed_out();

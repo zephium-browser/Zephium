@@ -25,6 +25,21 @@ vi.mock("$shared/ipc/bindings", async () => {
     settingGet: async (key: string) => native.settings[key] ?? null,
     settingSet: async () => ({ accepted: true, operation_id: null }),
     keymapEntries: async () => [],
+    bookmarkCall: async () => ({
+      kind: "listing" as const,
+      folder: null,
+      path: [],
+      items: [
+        {
+          id: "bookmark",
+          title: "Example bookmark",
+          url: "https://example.com/",
+          parent: null,
+          children: 0,
+          icon: null,
+        },
+      ],
+    }),
   });
 });
 
@@ -65,3 +80,38 @@ for (const theme of ["light", "dark"] as const) {
     await shot(`work-off-${theme}-settings`);
   });
 }
+
+test("hiding the switch covers Browse, Bookmarks and Settings without disabling Work", async () => {
+  native.settings = { "ui.mode-switch": "false" };
+  await page.viewport(1100, 760);
+  document.documentElement.dataset.theme = "dark";
+  await paint();
+  await render(Shell);
+  await settle();
+  expect(switchShown()).toBe(false);
+  expect(document.querySelector(".sidebar-head")).toBeNull();
+  expect(preferences.enabled("work")).toBe(true);
+  await shot("mode-switch-hidden-browse");
+
+  const tools = await import("$session/tools.svelte");
+  tools.open("bookmarks");
+  await settle();
+  await settle();
+  expect(tools.activeTool()).toBe("bookmarks");
+  expect(switchShown()).toBe(false);
+  await expect.element(page.getByText("Example bookmark", { exact: true })).toBeVisible();
+  await shot("mode-switch-hidden-bookmarks");
+  await page.viewport(740, 600);
+  await settle();
+  expect(switchShown()).toBe(false);
+  await shot("mode-switch-hidden-bookmarks-narrow");
+  tools.close();
+
+  emitNativeEvent("uiCommand", "browser.settings");
+  await settle();
+  expect(switchShown()).toBe(false);
+  emitNativeEvent("uiCommand", "browser.return");
+  emitNativeEvent("uiCommand", "preference.ui.mode-switch=true");
+  await settle();
+  expect(switchShown()).toBe(true);
+});

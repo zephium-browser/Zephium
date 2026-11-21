@@ -469,7 +469,7 @@
           <div class="rail-search"><SidebarSearch /></div>
         {:else if paneled}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
-      {:else if !incognito && preferences.enabled("work")}<div class="sidebar-head">
+      {:else if !incognito && preferences.showModeSwitch()}<div class="sidebar-head">
           <ModeTabs />
         </div>{/if}
       <!-- One column in both environments: only what it lists changes, and the

@@ -4,6 +4,8 @@ import { render } from "vitest-browser-svelte";
 import "$styles/global.css";
 import type { AccountV1 } from "$shared/ipc/bindings";
 import { accountFixture, portraitFixture, usageFixture } from "$shared/testing/account";
+import { preferences } from "$domain/preferences";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import NewTabLook from "./NewTabLook.svelte";
 
 const native = vi.hoisted(() => ({
@@ -72,6 +74,7 @@ const signedIn = (email: string, used: number, offers = false) =>
   });
 
 afterEach(() => {
+  preferences.dispose();
   native.kind = "default";
   delete document.documentElement.dataset.theme;
 });
@@ -196,4 +199,19 @@ test("a private window and an install without the service show no account", asyn
   screen = await stage(accountFixture({ available: false }));
   expect(screen.getByRole("button", { name: "Sign in", exact: true }).query()).toBeNull();
   expect(screen.container.querySelectorAll(".control")).toHaveLength(1);
+});
+
+test("hidden invitations leave only Customize, while signed-in account access remains", async () => {
+  await preferences.init();
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  let screen = await stage(accountFixture());
+  await expect
+    .element(screen.getByRole("button", { name: "Sign in", exact: true }))
+    .not.toBeInTheDocument();
+  await expect.element(screen.getByRole("button", { name: "Customize New Tab" })).toBeVisible();
+  expect(screen.container.querySelectorAll(".control")).toHaveLength(1);
+  await shoot(screen, "sign-in-hidden");
+  await screen.unmount();
+  screen = await stage(signedIn("ada@example.com", 42));
+  await expect.element(screen.getByRole("button", { name: "Account", exact: true })).toBeVisible();
 });

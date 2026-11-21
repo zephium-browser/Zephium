@@ -29,7 +29,7 @@
   request, so the thumb only travels once the environment has actually
   changed and can never be left on a side native refused.
 -->
-{#if !preferences.enabled("work")}{:else if compact}<ModeWord {standalone} />{:else}<div
+{#if !preferences.showModeSwitch()}{:else if compact}<ModeWord {standalone} />{:else}<div
     class="modes"
   >
     <SegmentedControl

@@ -1,8 +1,10 @@
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import type { AccountV1, ProfileEntryView, ProfilesView } from "$shared/ipc/bindings";
 import { accountFixture, usageFixture } from "$shared/testing/account";
+import { preferences } from "$domain/preferences";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import AccountMenuStage from "./AccountMenuStage.svelte";
 
 const native = vi.hoisted(() => ({
@@ -188,3 +190,17 @@ test(
     }
   },
 );
+
+afterEach(() => preferences.dispose());
+
+test("hidden sign-in prompts preserve profile, model and settings actions", async () => {
+  await preferences.init();
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  await page.viewport(520, 420);
+  await open(accountFixture(), solo);
+  await expect
+    .element(page.getByRole("menuitem", { name: "Sign in", exact: true }))
+    .not.toBeInTheDocument();
+  await expect.element(page.getByRole("menuitem", { name: /Profile Settings/u })).toBeVisible();
+  await expect.element(page.getByRole("menuitem", { name: "Models", exact: true })).toBeVisible();
+});
