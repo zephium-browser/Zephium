@@ -684,3 +684,153 @@ fn forged_degraded_profile_report_cannot_bootstrap_an_unrelated_session() {
     assert!(shell.degraded_storage_profiles.is_empty());
     assert!(engine.calls().is_empty());
 }
+
+#[test]
+fn persisted_new_tab_destination_is_loaded_at_startup_and_invalid_values_stay_blank() {
+    for destination in [
+        "https://start.example/",
+        "file:///etc/hosts",
+        "not an address",
+    ] {
+        let store = Arc::new(FakeStore::default());
+        store
+            .settings
+            .lock()
+            .unwrap()
+            .insert("tabs.new-page".into(), destination.into());
+        let (mut shell, engine, screen) = setup_with(store);
+        shell.handle(Command::Bootstrap);
+        let id = active_id(&screen);
+        if destination.starts_with("https:") {
+            assert!(engine
+                .calls()
+                .iter()
+                .any(|call| call == &format!("create {id} {destination} [default]")));
+        } else {
+            assert!(shell.is_untouched_new_tab(id));
+            assert!(engine
+                .calls()
+                .iter()
+                .all(|call| !call.contains(destination)));
+        }
+    }
+}
+
+#[test]
+fn startup_reuses_the_restored_active_tab_at_the_destination() {
+    let destination = "https://start.example/";
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, destination);
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-page".into(), destination.into());
+
+    for _ in 0..2 {
+        let (mut restarted, engine, screen) = setup_with(store.clone());
+        restarted.handle(Command::Bootstrap);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(last(&screen).tabs.len(), 1);
+        assert!(restarted.is_new_tab_stand_in(first));
+        assert!(engine
+            .calls()
+            .contains(&format!("create {first} {destination} [default]")));
+        restarted.persist();
+    }
+}
+
+#[test]
+fn startup_reuses_the_restored_destination_after_a_www_redirect() {
+    let destination = "https://start.example/";
+    let redirected = "https://www.start.example/";
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "new-tab".to_owned()),
+        ("tabs.new-page".to_owned(), destination.to_owned()),
+    ]);
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    commit_url(&mut shell, first, redirected);
+    shell.persist();
+    drop(shell);
+
+    for _ in 0..2 {
+        let (mut restarted, engine, screen) = setup_with(store.clone());
+        restarted.handle(Command::Bootstrap);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(last(&screen).tabs.len(), 1);
+        let before = engine.calls();
+        assert!(before.contains(&format!("create {first} {redirected} [default]")));
+
+        let closed = restarted.handle_operation(Command::Close(first));
+        assert_eq!(closed.outcome, OperationOutcome::NoOp);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(engine.calls(), before);
+        restarted.persist();
+    }
+}
+
+#[test]
+fn closing_the_lone_restored_destination_tab_is_a_no_op() {
+    let destination = "https://start.example/";
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "continue".to_owned()),
+        ("tabs.new-page".to_owned(), destination.to_owned()),
+    ]);
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    commit_url(&mut shell, first, destination);
+    shell.persist();
+    drop(shell);
+
+    let (mut restarted, engine, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(last(&screen).tabs.len(), 1);
+    let before = engine.calls();
+
+    let closed = restarted.handle_operation(Command::Close(first));
+
+    assert_eq!(closed.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(engine.calls(), before);
+    assert!(restarted.recently_closed.is_empty());
+}
+
+#[test]
+fn startup_opens_the_destination_when_the_restored_active_tab_is_elsewhere() {
+    let destination = "https://start.example/";
+    let elsewhere = "https://elsewhere.example/";
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let previous = active_id(&screen);
+    navigate_and_commit(&mut shell, previous, elsewhere);
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-page".into(), destination.into());
+
+    let (mut restarted, engine, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+
+    let fresh = active_id(&screen);
+    assert_ne!(fresh, previous);
+    let state = last(&screen);
+    assert_eq!(state.tabs.len(), 2);
+    assert!(state
+        .tabs
+        .iter()
+        .any(|tab| tab.id == previous.to_string() && tab.url.as_deref() == Some(elsewhere)));
+    assert!(engine
+        .calls()
+        .contains(&format!("create {fresh} {destination} [default]")));
+}

@@ -224,6 +224,12 @@ export const fields = {
       { value: "compact", label: m.pref_appearance_density_option_1 },
     ],
   },
+  "ntp.page": {
+    section: "newtab",
+    label: m.ntp_page,
+    description: m.ntp_page_help,
+    initial: "",
+  },
   "ntp.background": {
     section: "newtab",
     label: m.ntp_background,
