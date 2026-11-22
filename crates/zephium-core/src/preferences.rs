@@ -38,6 +38,7 @@ pub const KEYS: &[&str] = &[
     "tabs.startup",
     "tabs.startup-pages",
     "tabs.home",
+    "tabs.new-page",
     "network.proxy",
     "network.proxy-address",
     "time.track",
@@ -101,6 +102,11 @@ pub fn startup_pages(value: &str) -> Vec<String> {
 /// The home page a stored value names, if it is a web address.
 pub fn home_page(value: &str) -> Option<String> {
     crate::navigation::web_address(value).map(|page| page.to_string())
+}
+
+/// A bounded new-tab preference, without treating invalid input as a search.
+pub fn new_tab_page(value: &str) -> Option<String> {
+    (value.len() <= 2048).then(|| home_page(value)).flatten()
 }
 
 /// Interface languages a person may choose, by BCP 47 tag. One without a
@@ -266,6 +272,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "network.proxy" => matches!(value, "system" | "http" | "socks5"),
         "network.proxy-address" => value.is_empty() || crate::proxy::parse_address(value).is_some(),
         "tabs.home" => value.is_empty() || home_page(value).is_some(),
+        "tabs.new-page" => value.is_empty() || new_tab_page(value).is_some(),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
@@ -822,6 +829,34 @@ mod tests {
             Some("https://example.com/")
         );
         assert_eq!(home_page(""), None);
+    }
+
+    #[test]
+    fn new_tab_destination_is_empty_or_a_web_address_without_search_fallback() {
+        for value in [
+            "",
+            "example.com",
+            "https://example.com/start?q=1",
+            "http://localhost:8080/",
+        ] {
+            assert!(value_allowed("tabs.new-page", value), "{value:?}");
+        }
+        for value in [
+            "two words",
+            "javascript:alert(1)",
+            "file:///etc/hosts",
+            "/Users/me/home.html",
+            "C:\\dev\\home.html",
+            "about:blank",
+            "https://user:pass@example.com",
+            "https://tauri.localhost/",
+        ] {
+            assert!(!value_allowed("tabs.new-page", value), "{value:?}");
+        }
+        assert!(!value_allowed(
+            "tabs.new-page",
+            &format!("https://example.com/{}", "a".repeat(2048))
+        ));
     }
 
     #[test]
