@@ -334,7 +334,7 @@ impl Shell {
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
-        let Some((_id, effects)) = self.open_tab_with_id() else {
+        let Some((_id, effects)) = self.open_new_tab_with_id() else {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
