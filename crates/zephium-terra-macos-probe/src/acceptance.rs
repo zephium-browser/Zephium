@@ -1959,7 +1959,7 @@ pub(super) use super::loopback_support::{part_rows, run_row};
 /// Probe-only public reachability check. These bytes are not stored or rendered;
 /// canvas image coverage requires an actual record-media reference.
 pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecutionFact) {
-    use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError};
+    use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError, RouteSource};
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
     let mut urls: Vec<String> = Vec::new();
     for step in &execution.steps {
@@ -1989,8 +1989,11 @@ pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecu
     urls.dedup();
     let candidates = urls.len();
     let (mut admitted, mut too_large, mut other, mut scaled) = (0, 0, 0, 0);
+    let routes = RouteSource::new(&tokio::runtime::Handle::current());
+    routes.set_app_proxy(None);
+    routes.settled().await;
     for url in urls.into_iter().take(16) {
-        match fetch_public_image(&url).await {
+        match fetch_public_image(&routes, &url).await {
             Ok(bytes) => {
                 admitted += 1;
                 // Admission scales these to display size before storing them.

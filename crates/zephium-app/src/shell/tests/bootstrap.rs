@@ -188,6 +188,64 @@ fn the_engine_learns_the_proxy_before_any_view_and_whenever_it_changes() {
 }
 
 #[test]
+fn anonymous_readers_learn_the_proxy_when_attached_and_whenever_it_changes() {
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("network.proxy".to_owned(), "http".to_owned()),
+        (
+            "network.proxy-address".to_owned(),
+            "proxy.example.com:3128".to_owned(),
+        ),
+    ]);
+    let (mut shell, _engine, _screen) = setup_with(store);
+    let reported = Arc::new(Mutex::new(Vec::new()));
+    let attach = |reported: &Arc<Mutex<Vec<Option<zephium_core::proxy::ProxyServer>>>>| {
+        let sink = reported.clone();
+        Command::AttachAppProxy(crate::AppProxyAttachment(Arc::new(move |server| {
+            sink.lock().unwrap().push(server)
+        })))
+    };
+    shell.handle(attach(&reported));
+    let http = zephium_core::proxy::from_settings("http", "proxy.example.com:3128");
+    assert_eq!(
+        reported.lock().unwrap().as_slice(),
+        std::slice::from_ref(&http)
+    );
+    shell.handle(Command::Bootstrap);
+    assert_eq!(reported.lock().unwrap().len(), 1);
+
+    let ignored = Arc::new(Mutex::new(Vec::new()));
+    shell.handle(attach(&ignored));
+    assert_eq!(reported.lock().unwrap().len(), 2);
+    assert!(ignored.lock().unwrap().is_empty());
+
+    for (key, value) in [
+        ("network.proxy", "socks5"),
+        ("network.proxy", "system"),
+        ("network.proxy-address", ""),
+    ] {
+        shell.handle(Command::SetAppSetting {
+            key: key.into(),
+            value: value.into(),
+        });
+    }
+    shell.handle(Command::SetAppSetting {
+        key: "search.history".into(),
+        value: "false".into(),
+    });
+    assert_eq!(
+        reported.lock().unwrap().as_slice(),
+        [
+            http.clone(),
+            http,
+            zephium_core::proxy::from_settings("socks5", "proxy.example.com:3128"),
+            None,
+            None,
+        ]
+    );
+}
+
+#[test]
 fn starting_with_pages_opens_the_list_in_front_and_loads_no_restored_tab() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, screen) = setup_with(store.clone());
