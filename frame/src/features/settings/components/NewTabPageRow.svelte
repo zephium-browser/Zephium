@@ -4,7 +4,6 @@
   import { preferences } from "$domain/preferences";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
-  import SettingsRow from "$shared/ui/SettingsRow";
 
   let draft = $state(untrack(() => preferences.value("tabs.new-page")));
   let editing = $state(false);
@@ -25,7 +24,11 @@
   }
 </script>
 
-<SettingsRow settingId="ntp.page" title={m.ntp_page()} description={m.ntp_page_help()}>
+<div class="destination" data-setting="ntp.page">
+  <div class="copy">
+    <h3>{m.ntp_page()}</h3>
+    <p>{m.ntp_page_help()}</p>
+  </div>
   <form onsubmit={save}>
     <Field
       label={m.ntp_page()}
@@ -47,13 +50,40 @@
       {m.search_save()}
     </Button>
   </form>
-</SettingsRow>
+</div>
 
 <style>
+  .destination {
+    display: grid;
+    gap: 12px;
+    min-inline-size: 0;
+    padding: 14px 18px;
+  }
+
+  h3 {
+    margin: 0;
+    color: var(--color-text);
+    font-size: var(--text-page-title);
+    font-weight: 500;
+    line-height: 19px;
+    letter-spacing: -0.008em;
+  }
+
+  p {
+    margin: 2px 0 0;
+    color: var(--color-muted);
+    font-size: var(--text-label);
+    line-height: 1.5;
+  }
+
   form {
     display: flex;
     align-items: start;
     gap: 8px;
     min-inline-size: 0;
+  }
+
+  form :global(.ui-field) {
+    flex: 1;
   }
 </style>
