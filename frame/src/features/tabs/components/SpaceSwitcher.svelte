@@ -32,39 +32,55 @@
     onnew: () => void;
   } = $props();
 
+  let list = $state<HTMLElement>();
+  let held = $state<{ id: string; pointerId: number; from: number; y: number; to: number } | null>(
+    null,
+  );
+  let moved = $state(false);
+
   // Holding Control names the key of every row, as a menu's alternates appear.
   let ctrl = $state(false);
   $effect(() => {
     if (!open) {
       ctrl = false;
+      held = null;
+      moved = false;
       return;
     }
     const read = (event: KeyboardEvent) => (ctrl = event.ctrlKey);
-    const lost = () => (ctrl = false);
+    const lost = () => {
+      ctrl = false;
+      held = null;
+    };
     window.addEventListener("keydown", read, true);
     window.addEventListener("keyup", read, true);
     window.addEventListener("blur", lost);
+    // Before a row captures the pointer it may be released anywhere in the window.
+    window.addEventListener("pointerup", cancel);
+    window.addEventListener("pointercancel", cancel);
     return () => {
       window.removeEventListener("keydown", read, true);
       window.removeEventListener("keyup", read, true);
       window.removeEventListener("blur", lost);
+      window.removeEventListener("pointerup", cancel);
+      window.removeEventListener("pointercancel", cancel);
       ctrl = false;
     };
   });
 
   // Rows reorder by dragging them, or with Option and the arrows.
-  let list = $state<HTMLElement>();
-  let held = $state<{ id: string; from: number; y: number; to: number } | null>(null);
-  let moved = $state(false);
-
   function down(event: PointerEvent, id: string, from: number) {
-    if (event.button !== 0) return;
-    held = { id, from, y: event.clientY, to: from };
+    if (event.button !== 0 || (held && held.pointerId !== event.pointerId)) return;
+    held = { id, pointerId: event.pointerId, from, y: event.clientY, to: from };
     moved = false;
   }
 
   function move(event: PointerEvent) {
-    if (!held || !list) return;
+    if (!held || held.pointerId !== event.pointerId || !list) return;
+    if (event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      held = null;
+      return;
+    }
     if (!moved && Math.abs(event.clientY - held.y) < 5) return;
     if (!moved) (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
     moved = true;
@@ -76,12 +92,16 @@
     held = { ...held, to: to === -1 ? rows.length : to };
   }
 
-  function up() {
-    if (!held) return;
+  function up(event: PointerEvent) {
+    if (!held || held.pointerId !== event.pointerId) return;
     const { id, from, to } = held;
     held = null;
     if (!moved || to === from || to === from + 1) return;
     void tabs.reorderSpace(id, spaces[to]?.id ?? null);
+  }
+
+  function cancel(event: PointerEvent) {
+    if (held?.pointerId === event.pointerId) held = null;
   }
 
   function choose(id: string) {
@@ -139,7 +159,7 @@
         onpointerdown={(event) => down(event, space.id, index)}
         onpointermove={move}
         onpointerup={up}
-        onpointercancel={() => (held = null)}
+        onlostpointercapture={cancel}
         onkeydown={(event) => keydown(event, index)}
         onclick={() => choose(space.id)}
       >

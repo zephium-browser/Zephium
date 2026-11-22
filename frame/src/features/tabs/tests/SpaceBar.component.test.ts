@@ -152,6 +152,30 @@ test("middle-clicking the padding beneath the last tab opens a tab", async () =>
   expect(native.open).toHaveBeenCalledOnce();
 });
 
+test("a space press released outside its row cannot become a drag", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const first = screen.getByRole("menuitemradio").first();
+  await expect.element(first).toBeVisible();
+  const row = first.element() as HTMLButtonElement;
+  const capture = vi.spyOn(row, "setPointerCapture").mockImplementation(() => {});
+  const y = row.getBoundingClientRect().top + 4;
+  const pointer = { bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 };
+  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
+  window.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  expect(capture).not.toHaveBeenCalled();
+  expect(native.reorder).not.toHaveBeenCalled();
+
+  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
+  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 1, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, pointerId: 2, clientY: y + 200 }));
+  expect(native.reorder).not.toHaveBeenCalled();
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  expect(native.reorder).toHaveBeenCalledExactlyOnceWith("home", null);
+});
+
 test("the switcher lists every space, checks the one shown and moves to another", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
