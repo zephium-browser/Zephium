@@ -11,6 +11,7 @@ struct FocusRecord {
     focus: HWND,
     foreground: HWND,
     targets: Vec<HWND>,
+    moved: Vec<(&'static str, COREWEBVIEW2_MOVE_FOCUS_REASON)>,
 }
 
 thread_local! {
@@ -32,9 +33,18 @@ pub(super) fn record_focus_target(target: HWND) -> bool {
         let Some(record) = record.as_mut() else {
             return false;
         };
+        record.focus = target;
         record.targets.push(target);
         true
     })
+}
+
+fn record_move_focus(label: &'static str, reason: COREWEBVIEW2_MOVE_FOCUS_REASON) {
+    FOCUS.with(|record| {
+        if let Some(record) = record.borrow_mut().as_mut() {
+            record.moved.push((label, reason));
+        }
+    });
 }
 
 struct Windows(Vec<HWND>);
@@ -76,6 +86,7 @@ impl Drop for Windows {
 
 #[windows_core::implement(ICoreWebView2Controller)]
 struct Controller {
+    label: &'static str,
     on_hide: Box<dyn Fn()>,
 }
 
@@ -93,7 +104,7 @@ impl ICoreWebView2Controller_Impl for Controller_Impl {
         Err(E_NOTIMPL.into())
     }
     fn SetBounds(&self, _: &RECT) -> windows_core::Result<()> {
-        Err(E_NOTIMPL.into())
+        Ok(())
     }
     fn ZoomFactor(&self, _: *mut f64) -> windows_core::Result<()> {
         Err(E_NOTIMPL.into())
@@ -114,8 +125,9 @@ impl ICoreWebView2Controller_Impl for Controller_Impl {
     fn SetBoundsAndZoomFactor(&self, _: &RECT, _: f64) -> windows_core::Result<()> {
         Err(E_NOTIMPL.into())
     }
-    fn MoveFocus(&self, _: COREWEBVIEW2_MOVE_FOCUS_REASON) -> windows_core::Result<()> {
-        Err(E_NOTIMPL.into())
+    fn MoveFocus(&self, reason: COREWEBVIEW2_MOVE_FOCUS_REASON) -> windows_core::Result<()> {
+        record_move_focus(self.label, reason);
+        Ok(())
     }
     fn add_MoveFocusRequested(
         &self,
@@ -164,7 +176,7 @@ impl ICoreWebView2Controller_Impl for Controller_Impl {
         Err(E_NOTIMPL.into())
     }
     fn NotifyParentWindowPositionChanged(&self) -> windows_core::Result<()> {
-        Err(E_NOTIMPL.into())
+        Ok(())
     }
     fn Close(&self) -> windows_core::Result<()> {
         Err(E_NOTIMPL.into())
@@ -197,6 +209,7 @@ fn hides_return_focus_after_settlement_including_a_revision_redrive() {
             let weak = Rc::downgrade(&stage.state);
             let supersede = Cell::new(redrive);
             let controller: ICoreWebView2Controller = Controller {
+                label: "page",
                 on_hide: Box::new(move || {
                     if deny == "visible" {
                         // SAFETY: reshow this fixture's page without activation
@@ -236,6 +249,7 @@ fn hides_return_focus_after_settlement_including_a_revision_redrive() {
                     },
                     foreground: if deny == "background" { other } else { owner },
                     targets: Vec::new(),
+                    moved: Vec::new(),
                 });
             });
             if deny == "destroyed" {
@@ -276,6 +290,7 @@ fn a_page_never_revealed_returns_focus_once_deselected() {
         let stage = Stage::new(owner, 8.0, |_, _| {});
         let id = ItemId::generate();
         let controller: ICoreWebView2Controller = Controller {
+            label: "page",
             on_hide: Box::new(|| panic!("an already hidden page is not hidden again")),
         }
         .into();
@@ -304,6 +319,7 @@ fn a_page_never_revealed_returns_focus_once_deselected() {
                 focus: renderer,
                 foreground: owner,
                 targets: Vec::new(),
+                moved: Vec::new(),
             });
         });
         hide_views(&stage.state, &[id]);
@@ -316,4 +332,291 @@ fn a_page_never_revealed_returns_focus_once_deselected() {
             );
         });
     }
+}
+
+#[test]
+fn closing_a_focused_tab_returns_focus_before_teardown_and_focuses_the_successor_page() {
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let page_a = windows.create(Some(owner));
+    let renderer_a = windows.create(Some(page_a));
+    let page_b = windows.create(Some(owner));
+    let _ = unsafe { ShowWindow(page_b, windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_a = ItemId::generate();
+    let tab_b = ItemId::generate();
+    let ctrl_a: ICoreWebView2Controller = Controller {
+        label: "a",
+        on_hide: Box::new(|| {}),
+    }
+    .into();
+    let ctrl_b: ICoreWebView2Controller = Controller {
+        label: "b",
+        on_hide: Box::new(|| {}),
+    }
+    .into();
+    {
+        let mut s = stage.state.borrow_mut();
+        s.views.insert(
+            tab_a,
+            HostView {
+                container: page_a,
+                controller: ctrl_a,
+                serial: 1,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(true),
+                    controller_visible: Some(true),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.views.insert(
+            tab_b,
+            HostView {
+                container: page_b,
+                controller: ctrl_b,
+                serial: 2,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(false),
+                    controller_visible: Some(false),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.ready.insert(tab_a);
+        s.ready.insert(tab_b);
+        s.visible.insert(tab_a);
+        s.hidden = false;
+    }
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: renderer_a,
+            foreground: owner,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+
+    // Shell::commit closes the outgoing view first and lays out its successor next.
+    stage.remove_view(tab_a);
+    FOCUS.with(|record| {
+        assert_eq!(record.borrow().as_ref().unwrap().targets, vec![owner]);
+    });
+    assert!(stage.state.borrow().pending_page_focus);
+
+    assert!(stage.apply(
+        Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+        Some(Pane::Leaf(tab_b)),
+        &[tab_b],
+    ));
+    sync(&stage.state);
+
+    FOCUS.with(|record| {
+        let record = record.borrow();
+        let record = record.as_ref().unwrap();
+        assert_eq!(
+            record.moved,
+            vec![("b", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
+        );
+    });
+    assert!(!stage.state.borrow().pending_page_focus);
+
+    // Subsequent layout syncs must not re-steal focus once handed off.
+    stage.state.borrow_mut().dirty.insert(tab_b);
+    sync(&stage.state);
+    FOCUS.with(|record| {
+        assert_eq!(record.borrow().as_ref().unwrap().moved.len(), 1);
+    });
+}
+
+#[test]
+fn switching_tabs_transfers_focus_to_the_revealed_page_unless_chrome_held_focus() {
+    for chrome_focused in [false, true] {
+        let mut windows = Windows(Vec::new());
+        let owner = windows.create(None);
+        let chrome = windows.create(Some(owner));
+        let page_a = windows.create(Some(owner));
+        let renderer_a = windows.create(Some(page_a));
+        let page_b = windows.create(Some(owner));
+        let _ = unsafe { ShowWindow(page_b, windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+        let stage = Stage::new(owner, 8.0, |_, _| {});
+        let tab_a = ItemId::generate();
+        let tab_b = ItemId::generate();
+        let ctrl_a: ICoreWebView2Controller = Controller {
+            label: "a",
+            on_hide: Box::new(|| {}),
+        }
+        .into();
+        let ctrl_b: ICoreWebView2Controller = Controller {
+            label: "b",
+            on_hide: Box::new(|| {}),
+        }
+        .into();
+        {
+            let mut s = stage.state.borrow_mut();
+            s.views.insert(
+                tab_a,
+                HostView {
+                    container: page_a,
+                    controller: ctrl_a,
+                    serial: 1,
+                    applied: Cell::new(AppliedPlacement {
+                        window_visible: Some(true),
+                        controller_visible: Some(true),
+                        ..AppliedPlacement::default()
+                    }),
+                    consecutive_failures: Cell::new(0),
+                    terminal_failure_reported: Cell::new(false),
+                    generation: Arc::new(AtomicBool::new(true)),
+                    presentation_permit: Arc::new(AtomicBool::new(true)),
+                },
+            );
+            s.views.insert(
+                tab_b,
+                HostView {
+                    container: page_b,
+                    controller: ctrl_b,
+                    serial: 2,
+                    applied: Cell::new(AppliedPlacement {
+                        window_visible: Some(false),
+                        controller_visible: Some(false),
+                        ..AppliedPlacement::default()
+                    }),
+                    consecutive_failures: Cell::new(0),
+                    terminal_failure_reported: Cell::new(false),
+                    generation: Arc::new(AtomicBool::new(true)),
+                    presentation_permit: Arc::new(AtomicBool::new(true)),
+                },
+            );
+            s.ready.insert(tab_a);
+            s.ready.insert(tab_b);
+            s.visible.insert(tab_a);
+            s.hidden = false;
+        }
+        FOCUS.with(|record| {
+            *record.borrow_mut() = Some(FocusRecord {
+                focus: if chrome_focused { chrome } else { renderer_a },
+                foreground: owner,
+                targets: Vec::new(),
+                moved: Vec::new(),
+            });
+        });
+
+        assert!(stage.apply(
+            Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+            Some(Pane::Leaf(tab_b)),
+            &[tab_b],
+        ));
+        sync(&stage.state);
+
+        FOCUS.with(|record| {
+            let record = record.borrow();
+            let record = record.as_ref().unwrap();
+            if chrome_focused {
+                assert!(record.moved.is_empty());
+            } else {
+                assert_eq!(
+                    record.moved,
+                    vec![("b", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn empty_stage_clears_pending_focus_handoff_so_chrome_keeps_focus() {
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let page_a = windows.create(Some(owner));
+    let renderer_a = windows.create(Some(page_a));
+    let page_b = windows.create(Some(owner));
+    let _ = unsafe { ShowWindow(page_b, windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_a = ItemId::generate();
+    let tab_b = ItemId::generate();
+    {
+        let mut s = stage.state.borrow_mut();
+        s.views.insert(
+            tab_a,
+            HostView {
+                container: page_a,
+                controller: Controller {
+                    label: "a",
+                    on_hide: Box::new(|| {}),
+                }
+                .into(),
+                serial: 1,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(true),
+                    controller_visible: Some(true),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.views.insert(
+            tab_b,
+            HostView {
+                container: page_b,
+                controller: Controller {
+                    label: "b",
+                    on_hide: Box::new(|| {}),
+                }
+                .into(),
+                serial: 2,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(false),
+                    controller_visible: Some(false),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.ready.insert(tab_a);
+        s.ready.insert(tab_b);
+        s.visible.insert(tab_a);
+        s.hidden = false;
+    }
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: renderer_a,
+            foreground: owner,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+
+    stage.remove_view(tab_a);
+    assert!(stage.state.borrow().pending_page_focus);
+
+    // Switching onto an empty stage (e.g. built-in New Tab) clears the handoff.
+    assert!(stage.apply(None, None, &[]));
+    assert!(!stage.state.borrow().pending_page_focus);
+    sync(&stage.state);
+
+    // Revealing a page later must not fire the cleared handoff.
+    assert!(stage.apply(
+        Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+        Some(Pane::Leaf(tab_b)),
+        &[tab_b],
+    ));
+    sync(&stage.state);
+    FOCUS.with(|record| {
+        assert!(record.borrow().as_ref().unwrap().moved.is_empty());
+    });
 }
