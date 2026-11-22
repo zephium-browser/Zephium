@@ -2669,6 +2669,7 @@ mod extension_browser_requests;
 mod extension_browser_surface;
 mod extension_data;
 mod favicons;
+mod folders;
 mod fullscreen;
 mod history;
 mod history_list;

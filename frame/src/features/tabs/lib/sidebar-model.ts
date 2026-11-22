@@ -1,4 +1,5 @@
 import type {
+  FolderColor,
   SidebarNodeView,
   SidebarSectionView,
   SplitGroupView,
@@ -8,7 +9,9 @@ import type {
 export type SidebarFolderEntry = {
   kind: "folder";
   key: string;
-  node: SidebarNodeView & { kind: { type: "folder"; name: string } };
+  node: SidebarNodeView & {
+    kind: { type: "folder"; name: string; color: FolderColor | null; collapsed: boolean };
+  };
   depth: number;
 };
 
@@ -175,32 +178,104 @@ export function sidebarDisplayUnits(
   return output;
 }
 
-/** Keep the real active tab visible even when its parent was folded. */
+const holds = (unit: SidebarDisplayUnit, id: string | null) =>
+  (unit.kind === "tab" && unit.tab.id === id) ||
+  (unit.kind === "split" && unit.tabs.some((entry) => entry.tab.id === id));
+
+/** A folded folder hides what it holds, except the tab in front, which
+ *  stays beneath it with the folders on its way. */
 export function collapsedSidebarUnits(
   units: readonly SidebarDisplayUnit[],
   folded: ReadonlySet<string>,
   activeId: string | null,
 ): Set<string> {
   const hidden = new Set<string>();
-  const ancestors: number[] = [];
   for (let index = 0; index < units.length; index++) {
     const unit = units[index]!;
-    while (ancestors.length && ancestors[ancestors.length - 1]! >= unit.depth) ancestors.pop();
-    if (ancestors.length) hidden.add(unit.key);
     if (unit.kind !== "folder" || !folded.has(unit.key)) continue;
-    let hasActive = false;
-    for (let childIndex = index + 1; childIndex < units.length; childIndex++) {
-      const child = units[childIndex]!;
-      if (child.depth <= unit.depth) break;
-      if (
-        (child.kind === "tab" && child.tab.id === activeId) ||
-        (child.kind === "split" && child.tabs.some((entry) => entry.tab.id === activeId))
-      ) {
-        hasActive = true;
-        break;
-      }
+    let end = index + 1;
+    while (end < units.length && units[end]!.depth > unit.depth) end += 1;
+    const kept = new Set<number>();
+    for (let at = index + 1; at < end; at++) {
+      if (!holds(units[at]!, activeId)) continue;
+      kept.add(at);
+      let depth = units[at]!.depth;
+      for (let up = at - 1; up > index; up--)
+        if (units[up]!.depth < depth) {
+          kept.add(up);
+          depth = units[up]!.depth;
+        }
+      break;
     }
-    if (!hasActive) ancestors.push(unit.depth);
+    for (let at = index + 1; at < end; at++) if (!kept.has(at)) hidden.add(units[at]!.key);
   }
   return hidden;
+}
+
+/** What a folded folder says about what it holds. */
+export type FolderSummary = {
+  /** Every tab under it, nested folders' included. */
+  count: number;
+  /** The first few that have an icon to show, in sidebar order. */
+  faces: TabView[];
+  audible: boolean;
+  loading: boolean;
+  /** Its own tabs that are not asleep. */
+  awake: number;
+  /** The deepest folder level inside it, itself counted. */
+  levels: number;
+};
+
+export type FolderContext = {
+  summaries: Map<string, FolderSummary>;
+  /** For each row inside a folder, the colour of every folder around it, outermost first. */
+  spines: Map<string, (FolderColor | null)[]>;
+};
+
+const FACES = 3;
+
+/** One pass over the rows: each folder's summary and each row's spines. */
+export function folderContext(units: readonly SidebarDisplayUnit[]): FolderContext {
+  const summaries = new Map<string, FolderSummary>();
+  const spines = new Map<string, (FolderColor | null)[]>();
+  const open: { depth: number; color: FolderColor | null; summary: FolderSummary }[] = [];
+  for (const unit of units) {
+    while (open.length && open[open.length - 1]!.depth >= unit.depth) open.pop();
+    if (open.length)
+      spines.set(
+        unit.key,
+        open.map((folder) => folder.color),
+      );
+    const tabs =
+      unit.kind === "folder"
+        ? []
+        : unit.kind === "split"
+          ? unit.tabs.map((e) => e.tab)
+          : [unit.tab];
+    for (const folder of open) {
+      const summary = folder.summary;
+      for (const tab of tabs) {
+        summary.count += 1;
+        if (summary.faces.length < FACES && tab.url) summary.faces.push(tab);
+        if (tab.audio && !tab.audio.muted) summary.audible = true;
+        if (tab.loading) summary.loading = true;
+        if (!tab.asleep) summary.awake += 1;
+      }
+    }
+    if (unit.kind !== "folder") continue;
+    const summary: FolderSummary = {
+      count: 0,
+      faces: [],
+      audible: false,
+      loading: false,
+      awake: 0,
+      levels: 1,
+    };
+    open.forEach((folder, at) => {
+      folder.summary.levels = Math.max(folder.summary.levels, open.length - at + 1);
+    });
+    summaries.set(unit.key, summary);
+    open.push({ depth: unit.depth, color: unit.node.kind.color, summary });
+  }
+  return { summaries, spines };
 }

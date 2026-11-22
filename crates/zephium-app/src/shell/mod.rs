@@ -202,6 +202,7 @@ impl AgentLifecycleOwner {
 }
 
 mod browser_pages;
+mod folders;
 mod kept_sites;
 mod spaces;
 mod work_pane;
@@ -249,6 +250,8 @@ pub struct Shell {
     spaces: Spaces,
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
+    /// Folders deleted this run, for Reopen Closed Tab. Never persisted.
+    deleted_folders: Vec<folders::DeletedFolder>,
     windows: Windows,
     recent_tabs: recent_tabs::RecentTabs,
     tab_previews: tab_previews::TabPreviews,
@@ -525,6 +528,7 @@ impl Shell {
             spaces: Spaces::default(),
             items: Items::default(),
             recently_closed: Vec::new(),
+            deleted_folders: Vec::new(),
             windows: Windows::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
@@ -1009,6 +1013,9 @@ impl Shell {
             }
             Command::Space(command) => {
                 let _ = self.operation_space(*command);
+            }
+            Command::Folder(command) => {
+                let _ = self.operation_folder(*command);
             }
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {

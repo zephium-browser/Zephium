@@ -170,6 +170,7 @@ mod tests {
         let sources = [
             include_str!("lib.rs"),
             include_str!("spaces.rs"),
+            include_str!("folders.rs"),
             include_str!("help.rs"),
             include_str!("recently_closed.rs"),
             include_str!("resource_close.rs"),

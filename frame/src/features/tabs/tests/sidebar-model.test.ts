@@ -26,7 +26,12 @@ function tabNode(
 describe("authoritative sidebar model", () => {
   it("preserves native section, pre-order, and folder depth", () => {
     const nodes: SidebarNodeView[] = [
-      { id: "f", parent_id: null, section: "pinned", kind: { type: "folder", name: "Work" } },
+      {
+        id: "f",
+        parent_id: null,
+        section: "pinned",
+        kind: { type: "folder", name: "Work", color: null, collapsed: false },
+      },
       tabNode("a", "pinned", "f"),
       tabNode("b"),
     ];

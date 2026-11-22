@@ -256,6 +256,8 @@ export const commands = {
 	tabsActivate: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_activate", { id }),
 	tabsClose: (id: string) => __TAURI_INVOKE<OperationAdmission>("tabs_close", { id }),
 	tabsSetEssential: (id: string, essential: boolean, before: string | null) => __TAURI_INVOKE<OperationAdmission>("tabs_set_essential", { id, essential, before }),
+	tabsFolder: (intent: FolderIntent) => __TAURI_INVOKE<OperationAdmission>("tabs_folder", { intent }),
+	folderMenuPopup: (id: string, x: number | null, y: number | null, context: FolderMenuContext) => __TAURI_INVOKE<boolean>("folder_menu_popup", { id, x, y, context }),
 	/**
 	 *  Onboarding keeps a site by its catalog id; native owns the address and
 	 *  the mark, so chrome can never pin an arbitrary URL through this path.
@@ -1630,6 +1632,43 @@ export type FocusView = {
 	focused: number,
 	/**  Sites let through for a moment. */
 	allowed: string[],
+};
+
+/**  A folder's colour: one of the interface's soft hues, or none. */
+export type FolderColor = "sky" | "mint" | "lemon" | "peach" | "rose" | "lilac";
+
+/**
+ *  What chrome asks of the sidebar's folders. Every id is one the focused
+ *  space projected; native checks each against that space again.
+ */
+export type FolderIntent =
+/**
+ *  A new folder holding `tabs`, in sidebar order. With tabs it takes the
+ *  first one's place; without, it goes into `parent` before `before`.
+ */
+{ type: "create"; name: string; color: FolderColor | null; tabs: string[]; parent: string | null; before: string | null } | { type: "rename"; id: string; name: string } | { type: "set_color"; id: string; color: FolderColor | null } | { type: "set_collapsed"; id: string; collapsed: boolean } |
+/**
+ *  A tab or a folder, into `parent` (none: the open tabs) before
+ *  `before` (none: at the end).
+ */
+{ type: "move"; id: string; parent: string | null; before: string | null } |
+/**  The folder goes; what it held stays where it was. */
+{ type: "ungroup"; id: string } |
+/**  Every page in the folder ends; the tabs stay in it, asleep. */
+{ type: "close_tabs"; id: string } |
+/**  The folder and its tabs close. Reopen Closed Tab brings it back. */
+{ type: "delete"; id: string };
+
+/**
+ *  What a folder's menu can offer, as the sidebar sees it. Only
+ *  availability: the shell checks every action again.
+ */
+export type FolderMenuContext = {
+	color: FolderColor | null,
+	/**  Another folder level fits inside this one. */
+	can_nest: boolean,
+	/**  A page in it is loaded. */
+	awake: boolean,
 };
 
 export type HapticKind = "align" | "level";
@@ -3115,7 +3154,9 @@ export type SidebarMenuExtension = {
  *  into [`ItemsState::tabs`]. The node id and tab id intentionally match, but
  *  the explicit reference keeps consumers from inferring that invariant.
  */
-export type SidebarNodeKindView = { type: "folder"; name: string } | { type: "tab"; tab_id: string };
+export type SidebarNodeKindView = { type: "folder"; name: string; color: FolderColor | null;
+/**  Folded: its rows are hidden, the active tab's excepted. */
+collapsed: boolean } | { type: "tab"; tab_id: string };
 
 /**
  *  One pre-order entry in the focused sidebar tree. Parents always precede
@@ -3337,6 +3378,10 @@ export type TabMenuContext = {
 	 *  in-use indicator.
 	 */
 	media_only: boolean,
+	/**  A web page that may go into a folder. */
+	fileable?: boolean,
+	/**  The tab is in a folder now. */
+	in_folder?: boolean,
 };
 
 export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
@@ -3408,6 +3453,11 @@ export type TabView = {
 	zoom?: number | null,
 	/**  Present while the page plays sound, and for as long as it is muted. */
 	audio?: TabAudioView | null,
+	/**
+	 *  A web page whose address is kept but which has no live view: it
+	 *  loads when opened.
+	 */
+	asleep?: boolean,
 };
 
 /**

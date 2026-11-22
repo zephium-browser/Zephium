@@ -48,7 +48,7 @@ describe("keptSites", () => {
       id: "f",
       parent_id: null,
       section: "favorites",
-      kind: { type: "folder", name: "Work" },
+      kind: { type: "folder", name: "Work", color: null, collapsed: false },
     };
     expect(keptSites([folder, node("n", "favorites")], [tab("n", null)], URLS).size).toBe(0);
   });

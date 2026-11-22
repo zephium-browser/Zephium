@@ -246,7 +246,7 @@ mod tests {
             id: ItemId::from(41),
             parent: None,
             placement: essentials(1),
-            kind: PersistedKind::Folder { name: "F".into() },
+            kind: PersistedKind::folder("F"),
         };
         let items = vec![
             folder,

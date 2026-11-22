@@ -14,6 +14,8 @@
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
   import { openOnBackgroundMiddleClick } from "../lib/middle-click";
   import { untrack, type Snippet } from "svelte";
+  import * as folderEdit from "$session/folder-edit.svelte";
+  import { groupable } from "../lib/folder-group";
 
   let {
     pinned,
@@ -35,6 +37,17 @@
   export function clearSelection() {
     selection.clear();
   }
+
+  // Group into Folder: the selected tabs, or the one in front.
+  $effect(() =>
+    folderEdit.handleGroup(() => {
+      const chosen = selection.value.ids.length > 0 ? selection.value.ids : [tabs.activeId()];
+      const ids = groupable(chosen, tabs.tabs(), tabs.sidebarNodes());
+      if (ids.length === 0) return;
+      selection.clear();
+      void folderEdit.create(m.folder_default_name(), { tabs: ids });
+    }),
+  );
 
   let pinnedOrder = $state.raw<string[]>([]);
   let todayOrder = $state.raw<string[]>([]);

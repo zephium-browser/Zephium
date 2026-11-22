@@ -1,7 +1,8 @@
 <script lang="ts">
+  import * as folderEdit from "$session/folder-edit.svelte";
   import "$shared/ui/Menu/surface.css";
   import * as m from "$shared/i18n/messages";
-  import { Add01Icon, ArrowDown01Icon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, FolderAddIcon, ArrowDown01Icon } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import Icon from "$shared/ui/Icon";
@@ -94,6 +95,14 @@
   </button>
   <div class="space-end">
     {@render extras?.()}
+    <button
+      type="button"
+      class="space-new-tab"
+      title={m.folder_new()}
+      aria-label={m.folder_new()}
+      onclick={() => void folderEdit.create(m.folder_default_name())}
+      ><Icon icon={FolderAddIcon} size={16} /></button
+    >
     <button
       type="button"
       class="space-new-tab"
