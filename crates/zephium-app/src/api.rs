@@ -813,6 +813,9 @@ pub enum Command {
     },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
+    /// Hands the shell the port anonymous readers learn the app's proxy
+    /// setting from, once, after startup.
+    AttachAppProxy(AppProxyAttachment),
     /// Icons for origins shown outside a tab: cached or stored rasters are
     /// delivered to chrome, the rest are queued for the origin probe.
     ProbeFavicons {
@@ -990,6 +993,18 @@ pub struct FaviconProberAttachment {
 impl fmt::Debug for FaviconProberAttachment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FaviconProberAttachment")
+    }
+}
+
+/// Told the proxy chosen in Zephium, or `None` for the system's: when
+/// attached, then on every change.
+pub type AppProxyReport = Arc<dyn Fn(Option<zephium_core::proxy::ProxyServer>) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AppProxyAttachment(pub AppProxyReport);
+impl fmt::Debug for AppProxyAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AppProxyAttachment")
     }
 }
 

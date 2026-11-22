@@ -953,6 +953,7 @@ impl Shell {
             let server = self.proxy.server();
             let enabled = server.is_some();
             self.engine.set_proxy(server);
+            self.proxy.report();
             if enabled {
                 self.stop_network_favicon_probes();
             }

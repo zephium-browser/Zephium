@@ -7371,6 +7371,8 @@ dependencies = [
  "flate2",
  "libc",
  "minisign",
+ "nix",
+ "psl",
  "regex",
  "ring",
  "semver",
@@ -7379,10 +7381,14 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "time",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "url",
  "windows",
  "zephium-blocker",
  "zephium-core",
+ "zephium-map",
+ "zephium-public-fetch",
 ]
 
 [[package]]
@@ -7546,6 +7552,7 @@ dependencies = [
  "zephium-core",
  "zephium-credentials",
  "zephium-decision",
+ "zephium-public-fetch",
  "zeroize",
 ]
 
@@ -7827,6 +7834,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-map"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "html5ever 0.39.0",
+ "proptest",
+ "psl",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "zephium-core",
+]
+
+[[package]]
 name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [
@@ -7884,6 +7907,25 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-normalization",
  "windows",
+]
+
+[[package]]
+name = "zephium-public-fetch"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "brotli-decompressor",
+ "flate2",
+ "proptest",
+ "psl",
+ "reqwest",
+ "system-configuration",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "url",
+ "windows-sys 0.61.2",
+ "zephium-core",
 ]
 
 [[package]]

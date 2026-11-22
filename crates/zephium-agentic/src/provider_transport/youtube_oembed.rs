@@ -1,7 +1,9 @@
 //! A pasted YouTube link's real title and channel, from YouTube's public
 //! oEmbed endpoint. The address asked is built from a video ID parsed here,
 //! never from the pasted string, and only two plain-text fields are kept.
-use crate::public_asset::lookup_client;
+use crate::public_asset::{
+    lookup_client, with_direct_route, PublicAssetError, PublicRoute, RouteSource,
+};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -96,31 +98,45 @@ pub fn details(body: &[u8]) -> Option<YoutubeDetails> {
     })
 }
 
-/// One anonymous request; any failure is simply `None`.
-pub async fn fetch(raw: &str) -> Option<YoutubeDetails> {
-    let endpoint = oembed_url(&video_id(raw)?)?;
-    let client = lookup_client(TIMEOUT).ok()?;
-    let mut response = client
-        .get(endpoint)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .ok()?;
+/// One anonymous request, refused unless `routes` is direct; every other
+/// failure is `Unavailable`.
+pub async fn fetch(routes: &RouteSource, raw: &str) -> Result<YoutubeDetails, PublicAssetError> {
+    let endpoint = video_id(raw)
+        .and_then(|id| oembed_url(&id))
+        .ok_or(PublicAssetError::InvalidUrl)?;
+    with_direct_route(routes, async {
+        let client = lookup_client(PublicRoute::Direct, TIMEOUT)?;
+        let response = client
+            .get(endpoint)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|_| PublicAssetError::Unavailable)?;
+        read_details(response).await
+    })
+    .await
+}
+
+async fn read_details(mut response: reqwest::Response) -> Result<YoutubeDetails, PublicAssetError> {
     if response.status() != reqwest::StatusCode::OK
         || response
             .content_length()
             .is_some_and(|length| length > MAX_BODY_BYTES as u64)
     {
-        return None;
+        return Err(PublicAssetError::Unavailable);
     }
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| PublicAssetError::Unavailable)?
+    {
         if body.len() + chunk.len() > MAX_BODY_BYTES {
-            return None;
+            return Err(PublicAssetError::Unavailable);
         }
         body.extend_from_slice(&chunk);
     }
-    details(&body)
+    details(&body).ok_or(PublicAssetError::Unavailable)
 }
 
 #[cfg(test)]
@@ -189,5 +205,98 @@ mod tests {
         let got = details(long.to_string().as_bytes()).unwrap();
         assert_eq!(got.title.chars().count(), MAX_TITLE_CHARS);
         assert_eq!(got.channel.chars().count(), MAX_CHANNEL_CHARS);
+    }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn fetch_refuses_invalid_input_before_route_admission() {
+    let routes = RouteSource::new(&tokio::runtime::Handle::current());
+    assert_eq!(
+        fetch(&routes, "https://example.com/not-a-video").await,
+        Err(PublicAssetError::InvalidUrl)
+    );
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn oembed_response_maps_status_size_and_json_failures() {
+    use std::io::{Read, Write};
+    let valid = br#"{"title":"Title","author_name":"Channel"}"#;
+    let cases = [
+        (
+            "200 OK",
+            format!("Content-Length: {}\r\n", valid.len()),
+            valid.to_vec(),
+            true,
+        ),
+        (
+            "503 Service Unavailable",
+            "Content-Length: 0\r\n".into(),
+            Vec::new(),
+            false,
+        ),
+        (
+            "200 OK",
+            format!("Content-Length: {}\r\n", MAX_BODY_BYTES + 1),
+            Vec::new(),
+            false,
+        ),
+        (
+            "200 OK",
+            "Content-Length: 1\r\n".into(),
+            b"{".to_vec(),
+            false,
+        ),
+        (
+            "200 OK",
+            "Transfer-Encoding: chunked\r\n".into(),
+            {
+                let mut encoded = format!("{:x}\r\n", MAX_BODY_BYTES + 1).into_bytes();
+                encoded.resize(encoded.len() + MAX_BODY_BYTES + 1, b'x');
+                encoded.extend_from_slice(b"\r\n0\r\n\r\n");
+                encoded
+            },
+            false,
+        ),
+    ];
+    for (status, header, body, accepted) in cases {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\n{header}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            let _ = stream.write_all(&body);
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(TIMEOUT)
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let expected = if accepted {
+            Ok(YoutubeDetails {
+                title: "Title".into(),
+                channel: "Channel".into(),
+            })
+        } else {
+            Err(PublicAssetError::Unavailable)
+        };
+        assert_eq!(read_details(response).await, expected);
+        worker.join().unwrap();
     }
 }

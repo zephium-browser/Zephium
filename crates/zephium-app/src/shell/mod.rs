@@ -1189,6 +1189,7 @@ impl Shell {
             } => self.import_into_profile(destination, *work, done),
             Command::Export { kind, done } => self.export_from_focused(kind, done),
             Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment),
+            Command::AttachAppProxy(attachment) => self.proxy.attach(attachment.0),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
                 profile,
