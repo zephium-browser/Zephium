@@ -294,7 +294,8 @@ impl Shell {
                 }
                 let url = item.tab()?.url.as_ref()?;
                 let destination = self.tab_preferences.new_page.as_ref()?;
-                tabs::new_tab_destination_matches(destination, url).then(|| (id, url.clone()))
+                tabs::restored_tab_is_new_tab_destination(destination, url)
+                    .then(|| (id, url.clone()))
             });
             if let Some((id, url)) = matching_tab {
                 self.new_tab_destinations.insert(id, url);

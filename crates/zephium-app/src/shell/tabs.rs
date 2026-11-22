@@ -6,6 +6,31 @@ pub(super) fn new_tab_destination_matches(destination: &url::Url, target: &url::
     destination == target || navigation::https_upgrade(destination).as_ref() == Some(target)
 }
 
+/// A restored tab may hold the committed URL of a `www.` redirect.
+pub(super) fn restored_tab_is_new_tab_destination(
+    destination: &url::Url,
+    restored: &url::Url,
+) -> bool {
+    if new_tab_destination_matches(destination, restored) {
+        return true;
+    }
+    let (Some(destination_host), Some(restored_host)) = (destination.domain(), restored.domain())
+    else {
+        return false;
+    };
+    let differs_by_www = destination_host.strip_prefix("www.") == Some(restored_host)
+        || restored_host.strip_prefix("www.") == Some(destination_host);
+    if !differs_by_www
+        || !destination_host.trim_end_matches('.').contains('.')
+        || !restored_host.trim_end_matches('.').contains('.')
+    {
+        return false;
+    }
+    let mut restored = restored.clone();
+    restored.set_host(Some(destination_host)).is_ok()
+        && new_tab_destination_matches(destination, &restored)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum NewTabPosition {
     #[default]
@@ -1070,4 +1095,55 @@ pub(super) fn unix_millis() -> Option<u64> {
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .filter(|ms| (1_000..=zephium_core::session::MAX_EXACT_MS).contains(ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_tab_is_new_tab_destination;
+    use url::Url;
+
+    #[test]
+    fn restored_destination_matches_www_redirects() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/"),
+            ("https://www.google.com/", "https://google.com/"),
+            ("http://google.com/", "https://www.google.com/"),
+        ] {
+            assert!(
+                restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
+
+    #[test]
+    fn restored_destination_rejects_other_url_changes() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/other"),
+            ("https://google.com/", "https://www.google.com/?q=1"),
+            ("https://google.com/", "https://www.google.com/#top"),
+            ("https://google.com/", "https://www.google.com:8443/"),
+            ("https://google.com/", "http://www.google.com/"),
+            ("https://google.com/", "https://www.www.google.com/"),
+            ("https://www.com/", "https://com/"),
+            ("https://www.com./", "https://com./"),
+            ("http://127.0.0.1/", "https://127.0.0.1/"),
+            ("https://google.com/", "https://user@www.google.com/"),
+            (
+                "https://user:one@google.com/",
+                "https://user:two@www.google.com/",
+            ),
+        ] {
+            assert!(
+                !restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
 }

@@ -744,6 +744,38 @@ fn startup_reuses_the_restored_active_tab_at_the_destination() {
 }
 
 #[test]
+fn startup_reuses_the_restored_destination_after_a_www_redirect() {
+    let destination = "https://start.example/";
+    let redirected = "https://www.start.example/";
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "new-tab".to_owned()),
+        ("tabs.new-page".to_owned(), destination.to_owned()),
+    ]);
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    commit_url(&mut shell, first, redirected);
+    shell.persist();
+    drop(shell);
+
+    for _ in 0..2 {
+        let (mut restarted, engine, screen) = setup_with(store.clone());
+        restarted.handle(Command::Bootstrap);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(last(&screen).tabs.len(), 1);
+        let before = engine.calls();
+        assert!(before.contains(&format!("create {first} {redirected} [default]")));
+
+        let closed = restarted.handle_operation(Command::Close(first));
+        assert_eq!(closed.outcome, OperationOutcome::NoOp);
+        assert_eq!(active_id(&screen), first);
+        assert_eq!(engine.calls(), before);
+        restarted.persist();
+    }
+}
+
+#[test]
 fn closing_the_lone_restored_destination_tab_is_a_no_op() {
     let destination = "https://start.example/";
     let store = Arc::new(FakeStore::default());
