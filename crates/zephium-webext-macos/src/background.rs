@@ -123,19 +123,21 @@ pub(crate) fn wait(shared: &Rc<Shared>, context: &WKWebExtensionContext, done: D
         return done(Err("The extension background view is unavailable.".into()));
     };
     let previous = state.pending.borrow().clone();
-    if let Some(previous) = previous {
-        if std::ptr::eq(&*previous.view, &*view) {
-            if previous.waiters.borrow().len() >= MAX_WAITERS {
-                return done(Err("Too many extension background requests.".into()));
-            }
-            previous.waiters.borrow_mut().push(done);
-            return;
-        }
+    if let Some(previous) = previous.filter(|previous| !std::ptr::eq(&*previous.view, &*view)) {
         previous.finish(Err("The extension background was replaced.".into()));
     }
-    // Settling an older attempt invokes callers, which may unload this context.
+    // Settling an older attempt invokes callers, which may unload this context
+    // or start an attempt for this view.
     if !state_for(shared, context).is_some_and(|current| Rc::ptr_eq(&current, &state)) {
         return done(Err("The extension was unloaded.".into()));
+    }
+    let pending = state.pending.borrow().clone();
+    if let Some(pending) = pending.filter(|pending| std::ptr::eq(&*pending.view, &*view)) {
+        if pending.waiters.borrow().len() >= MAX_WAITERS {
+            return done(Err("Too many extension background requests.".into()));
+        }
+        pending.waiters.borrow_mut().push(done);
+        return;
     }
     let ready = state
         .ready

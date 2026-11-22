@@ -687,11 +687,11 @@ impl WebextHost {
         };
         let extension_id = install.extension_id.clone();
         let tab = entry.bridge.ids.borrow_mut().tab(request.tab());
-        if runtime.context(&extension_id).is_none() {
+        let Some(clicked) = runtime.context(&extension_id) else {
             return ExtensionActionSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
             );
-        }
+        };
         if let Some(rows) = request.menu_rows() {
             let tab_object = runtime.tab_object(tab);
             // SAFETY: the context and tab object are live on the WebKit main thread.
@@ -721,12 +721,23 @@ impl WebextHost {
         // WebKit drops what a popup sends while the worker sleeps, and the
         // popup then waits forever; wake it first (immediate when running).
         let waking = extension_id.clone();
+        let clicked = objc2::rc::Weak::from_retained(&clicked);
         runtime.wake_then(&waking, move || {
             super::dispatch::best_effort_with(move |host| {
                 if let Some(entry) = host.webext.profiles.get(&profile) {
                     let Some(runtime) = &entry.runtime else {
                         return;
                     };
+                    // An unload or reload while the worker was waking leaves
+                    // this click without the context it was made on.
+                    let same = match (clicked.load(), runtime.context(&extension_id)) {
+                        (Some(clicked), Some(current)) => std::ptr::eq(&*clicked, &*current),
+                        _ => false,
+                    };
+                    if !same {
+                        entry.bridge.popup.borrow_mut().take();
+                        return;
+                    }
                     // Only a popup consumes the anchor; left behind, it would
                     // retain the button and place a later action.openPopup
                     // on it, perhaps in a window since closed.
