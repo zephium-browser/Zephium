@@ -1,47 +1,66 @@
-# macOS popup worker restart investigation
+# macOS extension worker recovery
 
-## Scope
+## Failure and change
 
-A report that the installed 1Password toolbar button does nothing led to
-this native runtime investigation. The installed failure was observed, but
-its causal link to the fixture failure below is not established. A separate
-disposable, unsigned-in 1Password session also produced an empty popup.
-This change supplies a reproduction, not a verified 1Password fix.
+After an exit with an extension context still live, WebKit can restore its
+service-worker registration without starting the worker. Its native background
+completion reports success, but the popup's runtime message receives no response.
+Two fresh-profile baseline runs at `2e95353e3346d674a907c7ec07e59498048da2bf`
+produced pass/pass/fail for first launch, clean restart and unclean restart.
+An immediate restart could mask the failure; both controls wait five seconds.
 
-The committed fixture contains no third-party extension code or user data.
-No installed application or personal profile is used by the probe.
+The runtime now waits for the prepared worker's existing `worker.started`
+signal. After five seconds without it, a guarded `_backgroundWebView` getter
+accesses that context's native background page. From that page, recovery
+unregisters only the exact expected worker and registers the same URL, scope
+and classic/module type. It waits for activation and has a further five-second
+deadline. Ordinary extension pages cannot perform this recovery on the tested
+WebKit (`InvalidStateError: Client is unknown`).
 
-## Native reproduction
+The operation checks origin, script URL, context and view identity. Concurrent
+callers share one attempt, capped at 64 waiters. Unload cancels pending callers;
+late callbacks cannot settle a replacement context. The ready view is weakly
+held so it does not keep an idle worker alive. Background pages and unadapted
+fixtures retain their existing behavior. Permission policy is unchanged.
+No website registrations, extension storage or native messaging grants are reset.
 
-Host: Apple Silicon, macOS 26.5.2. Base: `2e95353e3346d674a907c7ec07e59498048da2bf`.
+## Native qualification
+
+Host: Apple Silicon M5 Max, macOS 26.5.2 (25F84). Run:
 
 ```sh
 node scripts/qualification/macos-popup-restart.mjs
 ```
 
-| Phase | Popup response | Persistent fixture marker | Result |
-| --- | --- | --- | --- |
-| First launch | `ready`, new worker boot ID | Absent initially | Pass |
-| Reopen after closing popup and unloading context | `ready`, different boot ID | Preserved | Pass |
-| Reopen after process exit with popup/context live | `missing-worker-response` | Preserved | Fail |
+| Case | Classic worker | Module worker |
+| --- | --- | --- |
+| First launch: popup answers with a boot ID | Pass | Pass |
+| Clean restart: new worker answers | Pass | Pass |
+| Unclean restart: new worker answers | Pass | Pass |
+| 65 concurrent requests: 64 succeed, one refused | Pass | Pass |
+| Eight cancelled requests: eight errors, no late duplicate | Pass | Pass |
+| Reload after cancellation: popup answers | Pass | Pass |
 
-Two fresh-profile runs reproduced this pass/pass/fail sequence. The command
-returns exit code 1. The native background-loading callback
-reports success in the failing phase, but the worker-start trace is absent
-and the popup receives no response object. The failure is below the frame's
-button handling: this probe uses `Runtime::perform_action` directly.
+Markers in chrome.storage.local, localStorage and IndexedDB survived every
+restart and the reload after cancellation. Raw fixture evidence is under Cargo's
+`target/popup-restart/1d9ce3c0-2699-49b9-9a24-6552c17fb3fc` (classic) and
+`267197bc-83ea-4483-9d66-718d0eabdca5` (module).
 
-Timing matters: an immediate relaunch passed all three phases in an earlier
-control. The committed probe waits five seconds after both shutdown modes.
-This is evidence of a restart-sensitive runtime failure, not proof of a
-particular WebKit cache or persistence mechanism.
+An existing disposable, unsigned-in 1Password 8.12.46.29 profile that previously
+had no worker-start trace now starts its module worker and responds to its native
+action by requesting its welcome page. External native messaging was denied in
+this lab session. This is worker/action evidence only: no account sign-in,
+vault unlock, autofill or desktop-app integration was tested. The installed
+user-profile symptom was observed earlier; its causal equivalence to this
+restart failure is not conclusively established.
 
-## Limits and checks
+## Checks and remaining evidence
 
-- JavaScript syntax checks and `cargo fmt --all -- --check` passed.
-- `cargo clippy -p zephium-webext-macos --all-targets --features lab --locked -- -D warnings` passed on macOS.
-- No production behavior, generated contracts or permission policy changes.
-- Windows native execution, the full workspace CI matrix and signed-in
-  1Password acceptance have not been performed.
-- Earlier popup-retention and URL-scheme experiments did not establish a
-  fix; their diagnostic changes were removed.
+- `node --test scripts/qualification/macos-popup-recovery.test.mjs`: six passing
+  tests, including wrong-origin/registration refusal and activation waiting.
+- `cargo clippy -p zephium-webext-macos --all-targets --features lab --locked -- -D warnings`: passed.
+- `cargo test -p zephium-webext-macos --lib --locked`: 30 passed.
+- Workspace/macOS CI results are recorded in the pull request after final checks.
+- Windows native execution and signed-in 1Password acceptance remain untested.
+  This change is confined to the macOS adapter; Windows compilation is not
+  a substitute for native acceptance.

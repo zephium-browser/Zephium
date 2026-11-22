@@ -24,6 +24,7 @@ const IMPLEMENTED: &[(&CStr, &[&CStr])] = &[
         ],
     ),
     (c"WKBackForwardList", &[c"_clear"]),
+    (c"WKWebExtensionContext", &[c"_backgroundWebView"]),
     (
         c"WKUserContentController",
         &[c"_removeAllUserScriptsAssociatedWithContentWorld:"],

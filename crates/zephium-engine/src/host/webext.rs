@@ -274,6 +274,7 @@ impl WebextHost {
             external_native_messaging: load.external_native_messaging,
             native_messaging_grantable: load.native_messaging_grantable,
             inspectable: true,
+            verify_background_start: true,
         };
         let install = load.install;
         let start_background = load.start_background || reloaded;
@@ -379,6 +380,7 @@ impl WebextHost {
             external_native_messaging: false,
             native_messaging_grantable: false,
             inspectable: false,
+            verify_background_start: true,
         };
         runtime.load(spec, move |_| {
             super::dispatch::best_effort_with(move |host| {
