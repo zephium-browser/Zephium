@@ -744,6 +744,35 @@ fn startup_reuses_the_restored_active_tab_at_the_destination() {
 }
 
 #[test]
+fn closing_the_lone_restored_destination_tab_is_a_no_op() {
+    let destination = "https://start.example/";
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "continue".to_owned()),
+        ("tabs.new-page".to_owned(), destination.to_owned()),
+    ]);
+    let (mut shell, _, screen) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    commit_url(&mut shell, first, destination);
+    shell.persist();
+    drop(shell);
+
+    let (mut restarted, engine, screen) = setup_with(store);
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(last(&screen).tabs.len(), 1);
+    let before = engine.calls();
+
+    let closed = restarted.handle_operation(Command::Close(first));
+
+    assert_eq!(closed.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), first);
+    assert_eq!(engine.calls(), before);
+    assert!(restarted.recently_closed.is_empty());
+}
+
+#[test]
 fn startup_opens_the_destination_when_the_restored_active_tab_is_elsewhere() {
     let destination = "https://start.example/";
     let elsewhere = "https://elsewhere.example/";

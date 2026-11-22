@@ -476,8 +476,9 @@ impl Shell {
         }) && self.items.pending_navigation_request(id).is_none()
     }
 
-    /// A custom New Tab can stand in while it is loading. Keep it if it has
-    /// been pinned or if an explicit navigation elsewhere is still pending.
+    /// Used to keep the lone New Tab open and to skip Recently Closed when
+    /// a stand-in is explicitly closed. A website can hold user input, so
+    /// automatic removal uses the untouched built-in New Tab check.
     pub(super) fn is_new_tab_stand_in(&self, id: ItemId) -> bool {
         self.is_untouched_new_tab(id)
             || (self.new_tab_destination_is_current(id)
@@ -726,7 +727,7 @@ impl Shell {
             .regular_tabs(space)
             .into_iter()
             .find(|tab| *tab != id)
-            .filter(|tab| self.is_new_tab_stand_in(*tab))
+            .filter(|tab| self.is_untouched_new_tab(*tab))
             .filter(|_| self.regular_tabs(space).len() == 2);
         let mut left_behind = None;
         let effects = if space == current {

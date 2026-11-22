@@ -280,7 +280,7 @@ impl Shell {
             && (self.tab_preferences.new_page.is_some()
                 || active_item
                     .is_none_or(|id| self.items.tab(id).is_some_and(|tab| tab.url.is_some())));
-        if start_fresh && !pages && !self.incognito_profile(profile) {
+        if !self.incognito_profile(profile) {
             let matching_tab = active_item.and_then(|id| {
                 let item = self.items.get(id)?;
                 if !matches!(
@@ -298,7 +298,9 @@ impl Shell {
             });
             if let Some((id, url)) = matching_tab {
                 self.new_tab_destinations.insert(id, url);
-                start_fresh = false;
+                if start_fresh && !pages {
+                    start_fresh = false;
+                }
             }
         }
         let mut fx = Vec::new();

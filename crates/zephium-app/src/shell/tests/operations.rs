@@ -2078,13 +2078,13 @@ fn private_new_tabs_keep_the_builtin_page_with_a_custom_destination() {
 
 const NEW_TAB_DESTINATION: &str = "https://start.example/";
 
-fn custom_new_tab(first_url: &str) -> (Shell, Arc<FakeEngine>, Screen) {
+fn custom_new_tab(destination: &str, first_url: &str) -> (Shell, Arc<FakeEngine>, Screen) {
     let store = Arc::new(FakeStore::default());
     store
         .settings
         .lock()
         .unwrap()
-        .insert("tabs.new-page".into(), NEW_TAB_DESTINATION.into());
+        .insert("tabs.new-page".into(), destination.into());
     let (mut shell, engine, screen) = setup_with(store);
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
@@ -2095,7 +2095,7 @@ fn custom_new_tab(first_url: &str) -> (Shell, Arc<FakeEngine>, Screen) {
 
 #[test]
 fn closing_the_lone_destination_tab_is_a_no_op_even_after_reload() {
-    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION);
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
     let id = active_id(&screen);
     shell.handle(Command::Reload(id));
     commit_url(&mut shell, id, NEW_TAB_DESTINATION);
@@ -2110,9 +2110,28 @@ fn closing_the_lone_destination_tab_is_a_no_op_even_after_reload() {
 }
 
 #[test]
+fn closing_a_destination_tab_with_another_tab_open_skips_recently_closed() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let stand_in = active_id(&screen);
+    assert_ne!(stand_in, first);
+    commit_url(&mut shell, stand_in, NEW_TAB_DESTINATION);
+    present_committed(&mut shell, stand_in, NEW_TAB_DESTINATION);
+    assert!(shell.is_new_tab_stand_in(stand_in));
+
+    shell.handle(Command::Close(stand_in));
+
+    assert!(shell.items.tab(stand_in).is_none());
+    assert_eq!(active_id(&screen), first);
+    assert!(engine.calls().contains(&format!("close {stand_in}")));
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
 fn a_destination_redirect_stands_in_until_a_later_commit_changes_url() {
     let redirected = "https://www.start.example/";
-    let (mut shell, engine, screen) = custom_new_tab(redirected);
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, redirected);
     let id = active_id(&screen);
     let before = engine.calls();
     assert!(before.contains(&format!("create {id} {NEW_TAB_DESTINATION} [default]")));
@@ -2140,8 +2159,26 @@ fn a_destination_redirect_stands_in_until_a_later_commit_changes_url() {
 }
 
 #[test]
-fn leaving_a_space_drops_the_destination_stand_in_and_keeps_a_navigated_tab() {
-    let (mut shell, _, screen) = custom_new_tab(NEW_TAB_DESTINATION);
+fn an_https_upgraded_destination_stands_in_until_a_later_commit() {
+    let destination = "http://start.example/";
+    let upgraded = navigation::https_upgrade(&url::Url::parse(destination).unwrap()).unwrap();
+    let (mut shell, engine, screen) = custom_new_tab(destination, upgraded.as_str());
+    let id = active_id(&screen);
+    assert!(engine
+        .calls()
+        .contains(&format!("create {id} {upgraded} [default]")));
+    assert_eq!(shell.new_tab_destinations.get(&id), Some(&upgraded));
+    assert!(shell.is_new_tab_stand_in(id));
+
+    commit_url(&mut shell, id, "https://elsewhere.example/");
+
+    assert!(!shell.new_tab_destinations.contains_key(&id));
+    assert!(!shell.is_new_tab_stand_in(id));
+}
+
+#[test]
+fn leaving_a_space_keeps_the_destination_tab_and_returning_focuses_it() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
     let home = shell.windows.focused().unwrap().space;
     let stand_in = active_id(&screen);
     shell.handle(Command::Space(Box::new(SpaceCommand::Create {
@@ -2150,27 +2187,23 @@ fn leaving_a_space_drops_the_destination_stand_in_and_keeps_a_navigated_tab() {
     })));
     let studio = shell.windows.focused().unwrap().space;
     assert_ne!(studio, home);
-    assert!(shell.items.tab(stand_in).is_none());
+    let studio_tab = active_id(&screen);
+    commit_url(&mut shell, studio_tab, NEW_TAB_DESTINATION);
+    present_committed(&mut shell, studio_tab, NEW_TAB_DESTINATION);
+    assert_eq!(shell.regular_tabs(home), [stand_in]);
+    assert!(!engine.calls().contains(&format!("close {stand_in}")));
 
-    let used = active_id(&screen);
-    commit_url(&mut shell, used, NEW_TAB_DESTINATION);
-    present_committed(&mut shell, used, NEW_TAB_DESTINATION);
-    shell.handle(Command::Navigate {
-        id: used,
-        input: "https://elsewhere.example/".into(),
-    });
     shell.handle(Command::Space(Box::new(SpaceCommand::Switch(home))));
 
     assert_eq!(shell.windows.focused().unwrap().space, home);
-    assert_eq!(shell.regular_tabs(studio), [used]);
-    commit_url(&mut shell, used, "https://elsewhere.example/");
-    assert!(!shell.is_new_tab_stand_in(used));
+    assert_eq!(active_id(&screen), stand_in);
+    assert_eq!(shell.regular_tabs(studio), [studio_tab]);
     assert!(shell.recently_closed.is_empty());
 }
 
 #[test]
-fn reopening_a_tab_replaces_the_lone_destination_stand_in() {
-    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION);
+fn reopening_a_tab_keeps_the_destination_tab_beside_it() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
     let first = active_id(&screen);
     navigate_and_commit(&mut shell, first, "https://closed.example/");
     shell.handle(Command::Close(first));
@@ -2183,7 +2216,10 @@ fn reopening_a_tab_replaces_the_lone_destination_stand_in() {
 
     let restored = active_id(&screen);
     assert_ne!(restored, stand_in);
-    assert_eq!(last(&screen).tabs.len(), 1);
+    let space = shell.windows.focused().unwrap().space;
+    let tabs = shell.regular_tabs(space);
+    assert_eq!(tabs.len(), 2);
+    assert!(tabs.contains(&stand_in) && tabs.contains(&restored));
     assert_eq!(
         shell
             .items
@@ -2192,13 +2228,13 @@ fn reopening_a_tab_replaces_the_lone_destination_stand_in() {
             .map(url::Url::as_str),
         Some("https://closed.example/")
     );
-    assert!(engine.calls().contains(&format!("close {stand_in}")));
+    assert!(!engine.calls().contains(&format!("close {stand_in}")));
     assert!(shell.recently_closed.is_empty());
 }
 
 #[test]
 fn a_destination_tab_that_navigated_away_can_close_after_returning() {
-    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION);
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
     let used = active_id(&screen);
     commit_url(&mut shell, used, "https://elsewhere.example/");
     commit_url(&mut shell, used, NEW_TAB_DESTINATION);
