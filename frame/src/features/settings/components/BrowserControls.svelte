@@ -4,6 +4,19 @@
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Switch from "$shared/ui/Switch";
+
+  let signInPrompts = $derived(preferences.showSignInPrompts());
+  let modeSwitch = $derived(preferences.value("ui.mode-switch") !== "false");
+
+  async function save(key: "ui.sign-in-prompts" | "ui.mode-switch", next: boolean) {
+    // Track the control's pending choice so a rejected write can restore its
+    // previous value without remounting the focused switch.
+    if (key === "ui.sign-in-prompts") signInPrompts = next;
+    else modeSwitch = next;
+    await preferences.set(key, String(next));
+    signInPrompts = preferences.showSignInPrompts();
+    modeSwitch = preferences.value("ui.mode-switch") !== "false";
+  }
 </script>
 
 <SettingsGroup title={m.look_browser_controls()}>
@@ -15,9 +28,9 @@
     <Switch
       label={m.look_sign_in_prompts()}
       labelHidden
-      checked={preferences.showSignInPrompts()}
+      checked={signInPrompts}
       disabled={preferences.saving()}
-      onchange={(value) => void preferences.set("ui.sign-in-prompts", String(value))}
+      onchange={(value) => void save("ui.sign-in-prompts", value)}
     />
   </SettingsRow>
   <SettingsRow
@@ -28,9 +41,9 @@
     <Switch
       label={m.look_mode_switch()}
       labelHidden
-      checked={preferences.value("ui.mode-switch") !== "false"}
+      checked={modeSwitch}
       disabled={preferences.saving()}
-      onchange={(value) => void preferences.set("ui.mode-switch", String(value))}
+      onchange={(value) => void save("ui.mode-switch", value)}
     />
   </SettingsRow>
 </SettingsGroup>
