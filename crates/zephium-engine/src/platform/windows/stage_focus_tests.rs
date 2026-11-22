@@ -620,3 +620,167 @@ fn empty_stage_clears_pending_focus_handoff_so_chrome_keeps_focus() {
         assert!(record.borrow().as_ref().unwrap().moved.is_empty());
     });
 }
+
+#[test]
+fn removing_focused_split_pane_schedules_sync_when_surviving_pane_is_clean() {
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let page_a = windows.create(Some(owner));
+    let renderer_a = windows.create(Some(page_a));
+    let page_b = windows.create(Some(owner));
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_a = ItemId::generate();
+    let tab_b = ItemId::generate();
+    {
+        let mut s = stage.state.borrow_mut();
+        s.views.insert(
+            tab_a,
+            HostView {
+                container: page_a,
+                controller: Controller {
+                    label: "a",
+                    on_hide: Box::new(|| {}),
+                }
+                .into(),
+                serial: 1,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(true),
+                    controller_visible: Some(true),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.views.insert(
+            tab_b,
+            HostView {
+                container: page_b,
+                controller: Controller {
+                    label: "b",
+                    on_hide: Box::new(|| {}),
+                }
+                .into(),
+                serial: 2,
+                applied: Cell::new(AppliedPlacement {
+                    window_visible: Some(true),
+                    controller_visible: Some(true),
+                    ..AppliedPlacement::default()
+                }),
+                consecutive_failures: Cell::new(0),
+                terminal_failure_reported: Cell::new(false),
+                generation: Arc::new(AtomicBool::new(true)),
+                presentation_permit: Arc::new(AtomicBool::new(true)),
+            },
+        );
+        s.ready.insert(tab_a);
+        s.ready.insert(tab_b);
+        s.visible.insert(tab_a);
+        s.visible.insert(tab_b);
+        s.hidden = false;
+    }
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: renderer_a,
+            foreground: owner,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+
+    stage.remove_view(tab_a);
+    assert!(stage.state.borrow().dirty.is_empty());
+    assert!(stage.state.borrow().pending_page_focus);
+    // Timer must be armed (or already drained synchronously if SetTimer failed).
+    let scheduled = stage.state.borrow().layout_timer.is_some();
+    if scheduled {
+        sync(&stage.state);
+    }
+    FOCUS.with(|record| {
+        assert_eq!(
+            record.borrow().as_ref().unwrap().moved,
+            vec![("b", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
+        );
+    });
+    assert!(!stage.state.borrow().pending_page_focus);
+}
+
+#[test]
+fn focus_transfer_refuses_background_minimized_or_already_focused_windows() {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_MINIMIZE, SW_RESTORE};
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let other = windows.create(None);
+    let chrome = windows.create(Some(owner));
+    let target = windows.create(Some(owner));
+    let sibling = windows.create(Some(owner));
+    let sibling_renderer = windows.create(Some(sibling));
+
+    assert!(can_focus_revealed_page(
+        owner,
+        target,
+        &[sibling],
+        chrome,
+        owner
+    ));
+    assert!(can_focus_revealed_page(
+        owner,
+        target,
+        &[sibling],
+        HWND::default(),
+        owner
+    ));
+    assert!(!can_focus_revealed_page(
+        owner,
+        target,
+        &[sibling],
+        chrome,
+        other
+    ));
+    assert!(!can_focus_revealed_page(
+        owner,
+        target,
+        &[sibling],
+        target,
+        owner
+    ));
+    assert!(!can_focus_revealed_page(
+        owner,
+        target,
+        &[sibling],
+        sibling_renderer,
+        owner
+    ));
+
+    // SAFETY: test-owned offscreen window, restored before drop.
+    unsafe {
+        let _ = ShowWindow(owner, SW_MINIMIZE);
+        assert!(!can_focus_revealed_page(
+            owner,
+            target,
+            &[sibling],
+            chrome,
+            owner
+        ));
+        let _ = ShowWindow(owner, SW_RESTORE);
+    }
+
+    // Losing foreground while waiting on replacement readiness clears pending handoff.
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_b = ItemId::generate();
+    stage.state.borrow_mut().hidden = false;
+    stage.state.borrow_mut().visible.insert(tab_b);
+    stage.state.borrow_mut().pending_page_focus = true;
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: chrome,
+            foreground: other,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+    restore_page_focus(&stage.state, 0);
+    assert!(!stage.state.borrow().pending_page_focus);
+}

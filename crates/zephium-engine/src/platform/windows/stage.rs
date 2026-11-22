@@ -1244,7 +1244,7 @@ unsafe extern "system" fn layout_timer_proc(_: HWND, _: u32, timer: usize, _: u3
 fn schedule_sync(state: &Rc<RefCell<State>>) {
     {
         let state = state.borrow();
-        if state.layout_timer.is_some() || state.dirty.is_empty() {
+        if state.layout_timer.is_some() || (state.dirty.is_empty() && !state.pending_page_focus) {
             return;
         }
     }
@@ -1406,6 +1406,17 @@ fn return_hidden_focus(container: HWND, selected: bool) -> bool {
     false
 }
 
+fn parent_holds_foreground(parent: HWND, focus: HWND, foreground: HWND) -> bool {
+    // SAFETY: Win32 validates these borrowed handles. No native object is
+    // activated or retained across a callback.
+    unsafe {
+        !parent.0.is_null()
+            && foreground == parent
+            && !IsIconic(parent).as_bool()
+            && (focus.0.is_null() || focus == parent || IsChild(parent, focus).as_bool())
+    }
+}
+
 fn can_focus_revealed_page(
     parent: HWND,
     target_container: HWND,
@@ -1416,16 +1427,13 @@ fn can_focus_revealed_page(
     // SAFETY: Win32 validates these borrowed handles. The queries neither
     // activate windows nor keep a native object alive across a callback.
     unsafe {
-        !parent.0.is_null()
-            && foreground == parent
-            && !IsIconic(parent).as_bool()
+        parent_holds_foreground(parent, focus, foreground)
             && IsWindowVisible(target_container).as_bool()
             && focus != target_container
             && !IsChild(target_container, focus).as_bool()
             && !other_visible_containers
                 .iter()
                 .any(|&other| focus == other || IsChild(other, focus).as_bool())
-            && (focus.0.is_null() || focus == parent || IsChild(parent, focus).as_bool())
     }
 }
 
@@ -1467,8 +1475,18 @@ fn restore_page_focus(state: &Rc<RefCell<State>>, revision: u64) {
             return;
         }
         let Some(id) = select_focus_target(&current) else {
-            // The replacement page is not revealed yet; keep armed until its
-            // reveal settles on a later layout or readiness pass.
+            let parent = current.parent;
+            drop(current);
+            // Drop the deferred handoff if the window already left the
+            // foreground before the replacement page became ready.
+            let (focus, foreground) = hidden_focus_snapshot();
+            if !parent_holds_foreground(parent, focus, foreground) {
+                if let Ok(mut current) = state.try_borrow_mut() {
+                    if current.revision == revision {
+                        current.pending_page_focus = false;
+                    }
+                }
+            }
             return;
         };
         let (container, controller) = {
