@@ -189,6 +189,7 @@ impl WebextHost {
                 pending_pages: RefCell::new(HashMap::new()),
                 next_request: Cell::new(1),
                 popup: RefCell::new(None),
+                popup_click: Cell::new(0),
                 self_weak: RefCell::new(std::rc::Weak::new()),
                 repeats: RefCell::new(HashMap::new()),
                 access: RefCell::new(HashMap::new()),
@@ -717,6 +718,8 @@ impl WebextHost {
             }
             return ExtensionActionSettlement::Dispatched;
         }
+        let click = entry.bridge.popup_click.get().wrapping_add(1);
+        entry.bridge.popup_click.set(click);
         *entry.bridge.popup.borrow_mut() = parent.map(|parent| (parent, request.anchor().rect()));
         // WebKit drops what a popup sends while the worker sleeps, and the
         // popup then waits forever; wake it first (immediate when running).
@@ -728,6 +731,12 @@ impl WebextHost {
                     let Some(runtime) = &entry.runtime else {
                         return;
                     };
+                    // A newer click owns the anchor once it has stored its own.
+                    let release = || {
+                        if entry.bridge.popup_click.get() == click {
+                            entry.bridge.popup.borrow_mut().take();
+                        }
+                    };
                     // An unload or reload while the worker was waking leaves
                     // this click without the context it was made on.
                     let same = match (clicked.load(), runtime.context(&extension_id)) {
@@ -735,8 +744,7 @@ impl WebextHost {
                         _ => false,
                     };
                     if !same {
-                        entry.bridge.popup.borrow_mut().take();
-                        return;
+                        return release();
                     }
                     // Only a popup consumes the anchor; left behind, it would
                     // retain the button and place a later action.openPopup
@@ -747,7 +755,7 @@ impl WebextHost {
                         .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
                         .is_some_and(|action| unsafe { action.presentsPopup() });
                     if !popup {
-                        entry.bridge.popup.borrow_mut().take();
+                        release();
                     }
                     runtime.perform_action(&extension_id, Some(tab));
                 }
@@ -1212,6 +1220,8 @@ struct Bridge {
     pending_pages: RefCell<HashMap<ExtensionBrowserRequestId, PendingPage>>,
     next_request: Cell<u64>,
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
+    /// The toolbar click that stored `popup`.
+    popup_click: Cell<u64>,
     self_weak: RefCell<std::rc::Weak<Bridge>>,
     repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
     access: RefCell<HashMap<u64, AccessAnswer>>,
