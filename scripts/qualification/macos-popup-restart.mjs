@@ -150,8 +150,15 @@ for (const kind of ["classic", "module"]) {
     // both shutdown modes; do not infer durability from the child exiting.
     if (phase !== "unclean-restart") await delay(5000);
   }
-  // The last restart leaves its context live again. Reopen that same profile
-  // to exercise single-flight recovery, the waiter bound, and unload cancellation.
+  // Force a missing startup signal in a separate profile: the raw fixture
+  // intentionally has no compatibility layer, while verification is enabled.
+  // This makes the waiting/capacity cases independent of WebKit's restart race.
+  const waiterProfile = randomUUID();
+  const waiterLoad = {
+    load: fixture,
+    compat: false,
+    verify_background_start: true,
+  };
   const waiterRuns = [];
   if (runs.length === 3 && runs.every((run) => run.passed)) {
     for (const cancel of [false, true]) {
@@ -159,18 +166,19 @@ for (const kind of ["classic", "module"]) {
       const phase = cancel ? "cancel-waiters" : "concurrent-waiters";
       const count = cancel ? 8 : 65;
       const scenario = join(output, `${phase}.json`);
-      const probeSteps = [steps[0], { background_waiters: count, cancel }];
+      const probeSteps = [waiterLoad, { background_waiters: count, cancel }];
       if (cancel) {
         // Reload the same extension immediately after cancellation. An old
         // callback must not settle the replacement context's readiness.
-        probeSteps.push(...steps);
+        probeSteps.push(waiterLoad, { background: true });
       }
+      probeSteps.push(...steps.slice(2));
       writeFileSync(scenario, JSON.stringify(probeSteps, null, 2));
       const result = spawnSync(binary, [scenario], {
         cwd: root,
         env: {
           ...process.env,
-          LAB_PROFILE: profile,
+          LAB_PROFILE: waiterProfile,
           ZEPHIUM_WEBEXT_TRACE: "1",
         },
         encoding: "utf8",
@@ -200,11 +208,10 @@ for (const kind of ["classic", "module"]) {
         value?.settled === count &&
         value.ok === (cancel ? 0 : 64) &&
         value.errors === (cancel ? 8 : 1) &&
-        (!cancel ||
-          (popup?.popup?.status === "ready" &&
-            popup.previous === marker &&
-            popup.localPrevious === marker &&
-            popup.indexedPrevious === marker));
+        popup?.popup?.status === "ready" &&
+        popup.previous === (cancel ? marker : null) &&
+        popup.localPrevious === (cancel ? marker : null) &&
+        popup.indexedPrevious === (cancel ? marker : null);
       waiterRuns.push({
         phase,
         passed,
@@ -220,7 +227,11 @@ for (const kind of ["classic", "module"]) {
   }
   writeFileSync(
     join(output, "results.json"),
-    JSON.stringify({ kind, profile, binary, runs, waiterRuns }, null, 2),
+    JSON.stringify(
+      { kind, profile, waiterProfile, binary, runs, waiterRuns },
+      null,
+      2,
+    ),
   );
   console.log(`Evidence: ${output}`);
   outcomes.push(

@@ -19,10 +19,12 @@ localStorage and IndexedDB must survive every restart. The module variant
 imports its worker from another module, checking recovery preserves module type.
 The cold startup has a 2.5-second settling period; this is not a latency benchmark.
 
-The same profile then checks concurrent recovery (64 accepted waiters and one
-capacity refusal), unload cancellation (eight callers each settle once), and
-successful reload after cancellation. The probe observes callbacks beyond both
-readiness deadlines to catch duplicate settlement.
+A second profile uses the raw fixture without the compatibility startup signal,
+while explicitly enabling verification. This forces the pending state even when
+WebKit happens to restart promptly. It checks concurrent recovery (64 accepted
+waiters and one capacity refusal), unload cancellation (eight callers each settle
+once), and successful reload after cancellation. The probe observes callbacks
+beyond both readiness deadlines to catch duplicate settlement.
 
 The command exits nonzero on a failed phase and preserves scenarios, logs
 and `results.json` under Cargo's target directory in `popup-restart/<uuid>`.

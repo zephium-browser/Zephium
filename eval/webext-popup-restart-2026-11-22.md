@@ -42,9 +42,13 @@ node scripts/qualification/macos-popup-restart.mjs
 | Reload after cancellation: popup answers | Pass | Pass |
 
 Markers in chrome.storage.local, localStorage and IndexedDB survived every
-restart and the reload after cancellation. Raw fixture evidence is under Cargo's
-`target/popup-restart/1d9ce3c0-2699-49b9-9a24-6552c17fb3fc` (classic) and
-`267197bc-83ea-4483-9d66-718d0eabdca5` (module).
+restart and the reload after cancellation. Capacity and cancellation now use a
+separate raw fixture with startup verification enabled but no startup signal,
+forcing the pending state. An earlier capacity probe assumed every unclean
+restart would stall; a post-merge run correctly started promptly and settled all
+65 requests, exposing that test assumption rather than a capacity-limit failure. Raw fixture evidence is under Cargo's
+`target/popup-restart/eb529596-f874-43f8-b5e0-32f4c659a3cd` (classic) and
+`fdab5858-36b6-49c8-9404-f7c13cdb4bb9` (module).
 
 An existing disposable, unsigned-in 1Password 8.12.46.29 profile that previously
 had no worker-start trace now starts its module worker and responds to its native
@@ -60,7 +64,23 @@ restart failure is not conclusively established.
   tests, including wrong-origin/registration refusal and activation waiting.
 - `cargo clippy -p zephium-webext-macos --all-targets --features lab --locked -- -D warnings`: passed.
 - `cargo test -p zephium-webext-macos --lib --locked`: 30 passed.
-- Workspace/macOS CI results are recorded in the pull request after final checks.
+- `cargo fmt --all -- --check`, workspace Clippy with both `--all-targets` and
+  `--lib`, and `-D warnings`: passed after merging main `5cf563fec`.
+- `cargo nextest run --workspace --locked --profile ci --retries 2`: 6,472 passed,
+  50 skipped. One existing trash-retention test was slow; the xtask test
+  `agent_controller_boundary::tests::mutation_cannot_bypass_action_authority_or_drop_pending_ownership`
+  passed with a nextest leaked-child report. Its focused rerun passed without
+  that report; the original result was not suppressed.
+- `cargo test -p tauri-plugin-updater --lib --locked`: 17 passed. Generated IPC
+  bindings, work constants and theme presets show no drift.
+- Engine floors, advisory exceptions, agentic probe boundaries, fork locks and
+  `cargo deny --locked check`: passed. Engine-floor checks emitted the existing
+  November 17 review-deadline warnings. Fork fetch/check commands ran at the
+  same commit in a temporary worktree outside the parent workspace, because the
+  nested worktree confuses Cargo's independent vendored workspace discovery.
+- Native bundled seed compile/reload and admission self-test, blocker scriptlet
+  runtime checks and off-list corpus refusal checks: passed using the CI recipes.
+- Hosted CI awaits GitHub workflow approval; no hosted result is claimed here.
 - Windows native execution and signed-in 1Password acceptance remain untested.
   This change is confined to the macOS adapter; Windows compilation is not
   a substitute for native acceptance.
