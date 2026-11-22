@@ -189,6 +189,7 @@ impl WebextHost {
                 pending_pages: RefCell::new(HashMap::new()),
                 next_request: Cell::new(1),
                 popup: RefCell::new(None),
+                popup_click: Cell::new(0),
                 self_weak: RefCell::new(std::rc::Weak::new()),
                 repeats: RefCell::new(HashMap::new()),
                 access: RefCell::new(HashMap::new()),
@@ -274,6 +275,7 @@ impl WebextHost {
             external_native_messaging: load.external_native_messaging,
             native_messaging_grantable: load.native_messaging_grantable,
             inspectable: true,
+            verify_background_start: true,
         };
         let install = load.install;
         let start_background = load.start_background || reloaded;
@@ -379,6 +381,7 @@ impl WebextHost {
             external_native_messaging: false,
             native_messaging_grantable: false,
             inspectable: false,
+            verify_background_start: true,
         };
         runtime.load(spec, move |_| {
             super::dispatch::best_effort_with(move |host| {
@@ -685,11 +688,11 @@ impl WebextHost {
         };
         let extension_id = install.extension_id.clone();
         let tab = entry.bridge.ids.borrow_mut().tab(request.tab());
-        if runtime.context(&extension_id).is_none() {
+        let Some(clicked) = runtime.context(&extension_id) else {
             return ExtensionActionSettlement::Rejected(
                 ExtensionActionRejection::RuntimeUnavailable,
             );
-        }
+        };
         if let Some(rows) = request.menu_rows() {
             let tab_object = runtime.tab_object(tab);
             // SAFETY: the context and tab object are live on the WebKit main thread.
@@ -715,16 +718,34 @@ impl WebextHost {
             }
             return ExtensionActionSettlement::Dispatched;
         }
+        let click = entry.bridge.popup_click.get().wrapping_add(1);
+        entry.bridge.popup_click.set(click);
         *entry.bridge.popup.borrow_mut() = parent.map(|parent| (parent, request.anchor().rect()));
         // WebKit drops what a popup sends while the worker sleeps, and the
         // popup then waits forever; wake it first (immediate when running).
         let waking = extension_id.clone();
+        let clicked = objc2::rc::Weak::from_retained(&clicked);
         runtime.wake_then(&waking, move || {
             super::dispatch::best_effort_with(move |host| {
                 if let Some(entry) = host.webext.profiles.get(&profile) {
                     let Some(runtime) = &entry.runtime else {
                         return;
                     };
+                    // A newer click owns the anchor once it has stored its own.
+                    let release = || {
+                        if entry.bridge.popup_click.get() == click {
+                            entry.bridge.popup.borrow_mut().take();
+                        }
+                    };
+                    // An unload or reload while the worker was waking leaves
+                    // this click without the context it was made on.
+                    let same = match (clicked.load(), runtime.context(&extension_id)) {
+                        (Some(clicked), Some(current)) => std::ptr::eq(&*clicked, &*current),
+                        _ => false,
+                    };
+                    if !same {
+                        return release();
+                    }
                     // Only a popup consumes the anchor; left behind, it would
                     // retain the button and place a later action.openPopup
                     // on it, perhaps in a window since closed.
@@ -734,7 +755,7 @@ impl WebextHost {
                         .and_then(|context| unsafe { context.actionForTab(tab_object.as_deref()) })
                         .is_some_and(|action| unsafe { action.presentsPopup() });
                     if !popup {
-                        entry.bridge.popup.borrow_mut().take();
+                        release();
                     }
                     runtime.perform_action(&extension_id, Some(tab));
                 }
@@ -1199,6 +1220,8 @@ struct Bridge {
     pending_pages: RefCell<HashMap<ExtensionBrowserRequestId, PendingPage>>,
     next_request: Cell<u64>,
     popup: RefCell<Option<(Retained<NSView>, Rect)>>,
+    /// The toolbar click that stored `popup`.
+    popup_click: Cell<u64>,
     self_weak: RefCell<std::rc::Weak<Bridge>>,
     repeats: RefCell<HashMap<u64, (std::time::Instant, u32)>>,
     access: RefCell<HashMap<u64, AccessAnswer>>,
