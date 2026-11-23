@@ -69,11 +69,15 @@ impl Doc {
 fn tag_is(node: &NodeRef, tag: &str) -> bool {
     node.tag() == tag
 }
+fn aria_hidden(n: &NodeRef) -> bool {
+    n.attr("aria-hidden")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+}
+
 fn hidden(n: &NodeRef) -> bool {
     n.hidden_by_lift()
         || n.has_attr("hidden")
-        || n.attr("aria-hidden")
-            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        || aria_hidden(n)
         || tag_is(n, "input")
             && n.attr("type")
                 .is_some_and(|v| v.eq_ignore_ascii_case("hidden"))
@@ -83,21 +87,49 @@ fn excluded(marks: Marks) -> bool {
     marks.has(Marks::GENERATED) || marks.has(Marks::SPONSORED)
 }
 
-fn call_to_action(n: &NodeRef) -> bool {
-    n.attr("class").is_some_and(|v| {
-        v.split_ascii_whitespace()
-            .any(|t| t.eq_ignore_ascii_case("cta"))
-    })
+fn marked_action(n: &NodeRef) -> bool {
+    n.has_attr("download")
+        || n.attr("class").is_some_and(|v| {
+            v.split_ascii_whitespace()
+                .any(|t| t.eq_ignore_ascii_case("cta"))
+        })
+}
+
+fn ancillary(n: &NodeRef, in_link: impl FnOnce() -> bool) -> bool {
+    matches!(n.tag(), "caption" | "figcaption")
+        || tag_is(n, "cite") && !in_link()
+        || ["id", "class", "role"]
+            .iter()
+            .filter_map(|a| n.attr(a))
+            .flat_map(str::split_ascii_whitespace)
+            .any(|s| {
+                matches!(
+                    s,
+                    "hatnote"
+                        | "disambig"
+                        | "navbox"
+                        | "toc"
+                        | "reflist"
+                        | "references"
+                        | "doc-noteref"
+                        | "doc-bibliography"
+                        | "thumbcaption"
+                ) || s == "reference"
+                    && !(n.tag() == "a"
+                        && n.has_attr("href")
+                        && !n.attr("href").is_some_and(|v| v.starts_with("#cite")))
+            })
+}
+
+fn omitted_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "script" | "style" | "template" | "noscript" | "svg" | "head"
+    )
 }
 
 fn disclosure_content(n: &NodeRef<'_>) -> bool {
-    !hidden(n)
-        && !excluded(marks(n))
-        && !excluded(n.lifted_marks())
-        && !matches!(
-            n.tag(),
-            "script" | "style" | "template" | "noscript" | "svg"
-        )
+    !omitted_tag(n.tag()) && !excluded(marks(n)) && !excluded(n.lifted_marks())
 }
 
 fn disclosure_text(anchor: NodeRef<'_>) -> impl Iterator<Item = &str> {
@@ -106,11 +138,14 @@ fn disclosure_text(anchor: NodeRef<'_>) -> impl Iterator<Item = &str> {
         while let Some(step) = pending.pop() {
             let Some(n) = step else { return Some(" ") };
             pending.extend(n.sibling().map(Some));
-            if !disclosure_content(&n) || n.tag() == "a" {
+            if hidden(&n) || !disclosure_content(&n) {
                 continue;
             }
             if n.is_text() {
                 return Some(n.text());
+            }
+            if ancillary(&n, || true) || classify(&n, n.tag(), true) == Some(Role::Link) {
+                continue;
             }
             let formatting = FORMATTING_TAGS.contains(&n.tag());
             if let Some(child) = n.children().next() {
@@ -419,10 +454,11 @@ impl DocBuilder {
         if panel.attr("id") != Some(id)
             || panel.clipped("id")
             || panel.hidden_by_lift()
-            || excluded(marks(&panel))
-            || excluded(panel.lifted_marks())
+            || !disclosure_content(&panel)
+            || classify(&panel, panel.tag(), false).is_some_and(Role::outside_menu)
             || panel.has_attr("hidden")
-            || panel.attr("aria-hidden") != Some("true")
+            || !aria_hidden(&panel)
+            || !crate::visible(&self.doc.nodes, index)
             || !super::super::ancestors(&self.doc.nodes, index).any(|a| {
                 matches!(
                     self.doc.nodes[a].role,
@@ -435,15 +471,25 @@ impl DocBuilder {
             return;
         }
         // Collapsed panel links belong to the control. Its hidden text never enters the document.
+        if panel.loss() {
+            self.mark_truncated();
+        }
         let mut links = Vec::new();
         let mut pending: Vec<_> = panel.children().next().into_iter().collect();
         while let Some(n) = pending.pop() {
             pending.extend(n.sibling());
-            if !disclosure_content(&n) {
+            if n.is_text() || hidden(&n) || !disclosure_content(&n) {
+                continue;
+            }
+            if n.loss() {
+                self.mark_truncated();
+            }
+            let role = classify(&n, n.tag(), false);
+            if role.is_some_and(Role::outside_menu) {
                 continue;
             }
             pending.extend(n.children().next());
-            if n.tag() != "a" || n.has_attr("download") {
+            if role != Some(Role::Link) || ancillary(&n, || false) {
                 continue;
             }
             let Some(url) = self.resolve(&n, "href", base) else {
@@ -455,21 +501,31 @@ impl DocBuilder {
                 break;
             }
             self.text_bytes += size;
-            let aria = n.attr("aria-label").unwrap_or_default();
-            let mut label = self.head_text(aria, self.limits.node_text_bytes as usize);
+            let mut label = self.words(
+                n.attr("aria-label")
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|&c| crate::visible_char(c)),
+            );
+            if label.is_empty() {
+                label = self.words(
+                    disclosure_text(n)
+                        .flat_map(str::chars)
+                        .filter(|&c| crate::visible_char(c)),
+                );
+            }
+            self.text_bytes += label.len();
+            let room = (self.limits.node_text_bytes as usize - label.len())
+                .min(self.limits.text_bytes as usize - self.text_bytes);
             let language = link_language(&n)
-                .filter(|s| s.len() <= self.limits.text_bytes as usize - self.text_bytes)
+                .filter(|s| s.len() <= room)
                 .map(str::to_ascii_lowercase);
             self.text_bytes += language.as_deref().map_or(0, str::len);
-            if aria.is_empty() {
-                label = self.words(disclosure_text(n).flat_map(str::chars));
-                self.text_bytes += label.len();
-            }
             links.push(MenuLink {
                 url,
                 label,
                 language,
-                action: call_to_action(&n),
+                action: marked_action(&n),
             });
         }
         if !links.is_empty() {
@@ -512,12 +568,7 @@ impl DocBuilder {
                 self.doc.head.truncated |= std::mem::replace(&mut self.doc.truncated, body_loss);
                 continue;
             }
-            if hidden(&n)
-                || matches!(
-                    n.tag(),
-                    "script" | "style" | "template" | "noscript" | "svg" | "head"
-                )
-            {
+            if hidden(&n) || omitted_tag(n.tag()) {
                 continue;
             }
             let mut node_marks = marks(&n);
@@ -543,31 +594,10 @@ impl DocBuilder {
                             | Role::CodeBlock
                     )
                 });
-            let ancillary = matches!(n.tag(), "caption" | "figcaption")
-                || tag_is(&n, "cite")
-                    && !std::iter::successors(parent, |&at| self.doc.nodes[at].parent_index())
-                        .any(|at| self.doc.nodes[at].role == Role::Link)
-                || ["id", "class", "role"]
-                    .iter()
-                    .filter_map(|a| n.attr(a))
-                    .flat_map(str::split_ascii_whitespace)
-                    .any(|s| {
-                        matches!(
-                            s,
-                            "hatnote"
-                                | "disambig"
-                                | "navbox"
-                                | "toc"
-                                | "reflist"
-                                | "references"
-                                | "doc-noteref"
-                                | "doc-bibliography"
-                                | "thumbcaption"
-                        ) || s == "reference"
-                            && !(n.tag() == "a"
-                                && n.has_attr("href")
-                                && !n.attr("href").is_some_and(|v| v.starts_with("#cite")))
-                    });
+            let ancillary = ancillary(&n, || {
+                std::iter::successors(parent, |&at| self.doc.nodes[at].parent_index())
+                    .any(|at| self.doc.nodes[at].role == Role::Link)
+            });
             let role = if ancillary {
                 Some(Role::Group)
             } else if tag_is(&n, "code") && in_sink && !verbatim {
@@ -591,7 +621,7 @@ impl DocBuilder {
                     node.marks.insert(Marks::ANCILLARY);
                 }
                 if role == Role::Link {
-                    if n.has_attr("download") || call_to_action(&n) {
+                    if marked_action(&n) {
                         node.marks.insert(Marks::ACTION);
                     }
                     node.destination = self.resolve(&n, "href", base);

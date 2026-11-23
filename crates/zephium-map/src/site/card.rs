@@ -24,28 +24,32 @@ pub(super) fn locale(segment: &str) -> bool {
         })
 }
 
-impl Entry {
-    pub fn card_page(&self) -> PageMatch {
-        if self.localized {
-            if let Some((_, rest)) = locale_path(self.key.as_url()) {
-                let mut url = self.key.as_url().clone();
-                url.set_path(&format!("/{rest}"));
-                if let Ok(key) = PageKey::from_url(&url) {
-                    return key.page_match();
-                }
+pub(super) fn card_page(key: &PageKey, localized: bool) -> PageMatch {
+    if localized {
+        if let Some((_, rest)) = locale_path(key.as_url()) {
+            let mut url = key.as_url().clone();
+            url.set_path(&format!("/{rest}"));
+            if let Ok(key) = PageKey::from_url(&url) {
+                return key.page_match();
             }
         }
-        self.key.page_match()
+    }
+    key.page_match()
+}
+
+impl Entry {
+    pub fn card_page(&self) -> PageMatch {
+        card_page(&self.key, self.localized)
     }
     pub(super) fn card_route(&self) -> (PageMatch, Option<String>) {
         (self.card_page(), self.locator.fragment())
     }
 }
 
-pub(super) fn skip_link(url: &Url, label: &str, landing: &Url) -> bool {
+pub(super) fn skip_link(url: &Url, labels: &[&str], landing: &Url) -> bool {
     url.fragment().is_some_and(|s| !s.is_empty())
         && crate::key::same_page(url, landing)
-        && skip_label(label)
+        && labels.iter().any(|label| skip_label(label))
 }
 
 pub fn skip_label(label: &str) -> bool {
@@ -183,10 +187,13 @@ pub(super) fn capitalized(name: &str) -> String {
 }
 
 pub(super) fn action(entry: &Entry) -> bool {
-    let url = entry.key.as_url();
+    entry.tier == Tier::Action || action_target(entry.key.as_url(), &entry.label)
+}
+
+pub(super) fn action_target(url: &Url, label: &str) -> bool {
     let path = url.path().trim_matches('/').to_ascii_lowercase();
     let last = path.rsplit('/').next().unwrap_or_default();
-    let label = normal(&entry.label);
+    let label = normal(label);
     if matches!(
         last,
         "login"
@@ -217,8 +224,7 @@ pub(super) fn action(entry: &Entry) -> bool {
     if matches!(last, "download" | "downloads" | "download.html") {
         return false;
     }
-    entry.tier == Tier::Action
-        || (last == "refer" && label.starts_with("refer "))
+    (last == "refer" && label.starts_with("refer "))
         || (matches!(last, "shell" | "app") && label.starts_with("launch "))
         || (last == "get-started" && label == "get started" && !path.contains('/'))
         || matches!(

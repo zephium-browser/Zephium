@@ -164,6 +164,20 @@ pub enum Role {
     FrameBoundary,
 }
 
+impl Role {
+    pub(crate) fn outside_menu(self) -> bool {
+        matches!(
+            self,
+            Self::Document
+                | Self::Landmark {
+                    landmark: Some(
+                        Landmark::Main | Landmark::Complementary | Landmark::Contentinfo
+                    )
+                }
+        )
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Marks(u16);
 impl Marks {

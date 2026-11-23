@@ -78,6 +78,38 @@ enum Region {
     Excluded,
 }
 
+struct ObservedLink<'a> {
+    url: &'a Url,
+    label: &'a str,
+    action: bool,
+    entry: Option<Entry>,
+}
+
+impl<'a> ObservedLink<'a> {
+    fn new(build: &Build<'_>, url: &'a Url, label: &'a str, marked: bool) -> Self {
+        let entry = build.entry_for(url, label, Source::MenuGroup);
+        let action = marked
+            || entry
+                .as_ref()
+                .map_or_else(|| card::action_target(url, label), card::action);
+        Self {
+            url,
+            label,
+            action,
+            entry,
+        }
+    }
+
+    fn route(&self, build: &Build<'_>) -> Option<(crate::PageMatch, Option<String>)> {
+        if let Some(entry) = &self.entry {
+            return Some(entry.card_route());
+        }
+        let key = PageKey::from_url(self.url).ok()?;
+        let page = card::card_page(&key, build.localized.contains(&key.page_match()));
+        Some((page, element_locator(self.url).ok()?.fragment()))
+    }
+}
+
 struct Menu {
     label: String,
     page: Option<Entry>,
@@ -129,6 +161,10 @@ pub(super) fn link_label(n: &Node) -> &str {
         .unwrap_or_default()
 }
 
+pub(super) fn skip_node(n: &Node, url: &Url, label: &str, landing: &Url) -> bool {
+    card::skip_link(url, &[n.accessible_name(), label], landing)
+}
+
 fn group_page(label: &str) -> Option<&str> {
     ["see all ", "view all ", "browse all ", "explore all "]
         .into_iter()
@@ -156,11 +192,11 @@ impl Menus {
             })
             .collect();
         let mut standalone = Vec::new();
-        let actions: BTreeSet<_> = build
+        let mut actions: BTreeSet<_> = build
             .sections
             .iter()
             .flat_map(|e| std::iter::once(e).chain(&e.children))
-            .filter(|e| card::action(e))
+            .filter(|e| card::action(e) || build.names.get(&e.id).is_some_and(|name| name.action))
             .map(Entry::card_route)
             .collect();
         let clusters: BTreeSet<_> = build
@@ -178,25 +214,22 @@ impl Menus {
                 peer_buttons[p] += usize::from(n.role == Role::Button && visible(nodes, i));
             }
         }
+        let self_link = |e: &Entry| card::self_link(e, &build.entry, Some(doc.page()));
+        let profile = |e: &Entry| e.off_site && site_profile(e.key.as_url()).is_some();
+        let mut targets = Vec::new();
         let mut regions = Vec::with_capacity(nodes.len());
         for (i, n) in nodes.iter().enumerate() {
             let inherited = n.parent_index().map(|p| regions[p]).unwrap_or_default();
             let region = match (inherited, n.role) {
-                (Region::Excluded, _)
-                | (_, Role::Document)
-                | (
-                    _,
-                    Role::Landmark {
-                        landmark: Some(Landmark::Main | Landmark::Complementary),
-                    },
-                ) => Region::Excluded,
-                (Region::Footer, _)
-                | (
+                (Region::Excluded, _) => Region::Excluded,
+                (
                     _,
                     Role::Landmark {
                         landmark: Some(Landmark::Contentinfo),
                     },
                 ) => Region::Footer,
+                (_, role) if role.outside_menu() => Region::Excluded,
+                (Region::Footer, _) => Region::Footer,
                 (
                     _,
                     Role::Landmark {
@@ -225,22 +258,20 @@ impl Menus {
             } else {
                 n.accessible_name().trim()
             };
-            if n.destination
-                .as_ref()
-                .is_some_and(|u| card::skip_link(u, link_label(n), doc.page()))
-            {
-                continue;
-            }
-            if n.role == Role::Link
-                && n.destination.as_ref().is_some_and(|u| {
-                    u.fragment().is_none()
-                        && build
-                            .entry_for(u, label, Source::PrimaryNav)
-                            .is_some_and(|e| card::self_link(&e, &build.entry, Some(doc.page())))
-                })
-            {
-                continue;
-            }
+            let control_action = if let Some(url) = &n.destination {
+                let short = link_label(n);
+                let link =
+                    ObservedLink::new(build, url, short, n.marks.has(crate::doc::Marks::ACTION));
+                if skip_node(n, url, short, doc.page()) {
+                    menus.excluded.extend(link.entry.map(|e| e.id));
+                    continue;
+                }
+                let action = link.action;
+                targets.push((i, None, link));
+                action
+            } else {
+                false
+            };
             if region == Region::Footer {
                 if matches!(n.role, Role::Text | Role::Heading { .. } | Role::Button)
                     && !n.text.trim().is_empty()
@@ -311,10 +342,22 @@ impl Menus {
                 .destination
                 .as_ref()
                 .and_then(|u| build.entry_for(u, label, Source::PrimaryNav));
-            if page.as_ref().is_some_and(card::action) {
+            let panel = doc.menu_links.get(&i);
+            let action = control_action
+                || page
+                    .as_ref()
+                    .is_some_and(|e| card::action(e) || actions.contains(&e.card_route()));
+
+            if panel.is_none()
+                && (action
+                    || page.as_ref().is_some_and(&self_link)
+                        && n.destination
+                            .as_ref()
+                            .is_some_and(|u| u.fragment().is_none()))
+            {
                 continue;
             }
-            let page = page.filter(|e| !card::self_link(e, &build.entry, Some(doc.page())));
+            let page = page.filter(|e| !action && !self_link(e) && !profile(e));
             let trigger = page
                 .as_ref()
                 .filter(|e| e.key.page_match() == build.entry.page_match())
@@ -338,30 +381,16 @@ impl Menus {
                 items: Vec::new(),
                 editions: Editions::default(),
             });
-            if let Some(links) = doc.menu_links.get(&i) {
-                if let Some(menu) = menus.groups.get_mut(&owner) {
-                    for link in links {
-                        let (url, label) = (&link.url, link.label.as_str());
-                        if card::skip_link(url, label, doc.page()) {
-                            continue;
-                        }
-                        menu.editions
-                            .observe(url, &build.localized, doc.page(), &alternates);
-                        if let Some(mut e) =
-                            build.entry_for(url, label, Source::MenuGroup).filter(|e| {
-                                !(card::placeholder(label)
-                                    || card::self_link(e, &build.entry, Some(doc.page()))
-                                    || e.off_site && site_profile(url).is_some())
-                            })
-                        {
-                            if link.action || card::action(&e) {
-                                e.tier = Tier::Action;
-                                menus.actions.push(e);
-                            } else {
-                                menu.add_item(e);
-                            }
-                        }
+            if let Some(links) = panel {
+                for link in links {
+                    if card::skip_link(&link.url, &[&link.label], doc.page()) {
+                        continue;
                     }
+                    targets.push((
+                        i,
+                        Some(owner),
+                        ObservedLink::new(build, &link.url, &link.label, link.action),
+                    ));
                 }
             }
             scopes
@@ -394,42 +423,45 @@ impl Menus {
                     flat_scopes[i] = flat_headings.get(&p).copied().or(flat_scopes[p]);
                 }
             }
-            let Some(url) = &n.destination else { continue };
-            if region == Region::Excluded
-                || region == Region::Other && clusters.is_empty()
-                || !visible(nodes, i)
-            {
-                continue;
+        }
+        for (_, _, link) in &targets {
+            if link.action {
+                actions.extend(link.route(build));
             }
-            let label = link_label(n);
-            if card::skip_link(url, label, doc.page()) {
-                if let Some(entry) = build.entry_for(url, label, Source::MenuGroup) {
-                    menus.excluded.insert(entry.id);
+        }
+        for (i, panel_owner, link) in targets {
+            let region = regions[i];
+            let nav = region == Region::Navigation;
+            let owner = panel_owner.or_else(|| {
+                ancestors(nodes, i)
+                    .filter_map(|a| scopes.get(&a).copied().flatten())
+                    .last()
+                    .filter(|&o| o != i)
+            });
+            let action = link.action
+                || link
+                    .route(build)
+                    .is_some_and(|route| actions.contains(&route));
+            let url = link.url;
+            let label = link.label;
+            if !action {
+                if let Some(menu) = owner.and_then(|o| menus.groups.get_mut(&o)) {
+                    menu.editions
+                        .observe(url, &build.localized, doc.page(), &alternates);
                 }
-                continue;
             }
-            let owner = ancestors(nodes, i)
-                .filter_map(|a| scopes.get(&a).copied().flatten())
-                .last();
-            if let Some(menu) = owner
-                .filter(|&o| o != i)
-                .and_then(|o| menus.groups.get_mut(&o))
-            {
-                menu.editions
-                    .observe(url, &build.localized, doc.page(), &alternates);
-            }
-            if SiteKey::from_url(url).as_ref() != Some(&build.site) && site_profile(url).is_some() {
-                continue;
-            }
-            let Some(entry) = build.entry_for(url, label, Source::MenuGroup) else {
+            let Some(mut entry) = link.entry else {
                 continue;
             };
-            if n.marks.has(crate::doc::Marks::ACTION)
-                || card::action(&entry)
-                || actions.contains(&entry.card_route())
-                || card::self_link(&entry, &build.entry, Some(doc.page()))
-                || card::placeholder(label)
-            {
+            if self_link(&entry) || card::placeholder(label) || profile(&entry) {
+                continue;
+            }
+            menus.excluded.remove(&entry.id);
+            if action {
+                if panel_owner.is_some() && link.action {
+                    entry.tier = Tier::Action;
+                    menus.actions.push(entry);
+                }
                 continue;
             }
             if region == Region::Footer {
@@ -447,22 +479,23 @@ impl Menus {
                 }
                 continue;
             }
-            if !nav && !clusters.contains(&entry.id) {
+            if panel_owner.is_none() && !nav && !clusters.contains(&entry.id) {
                 continue;
             }
-            menus.order.entry(entry.id.clone()).or_insert(i);
-            let label = normal(label);
-            let all = group_page(&label).and_then(|g| named.get(g)).copied();
-            if let Some(owner) = all {
-                if let Some(menu) = menus.groups.get_mut(&owner) {
-                    menu.index.get_or_insert(entry);
-                }
-            } else if let Some(owner) = owner.filter(|&o| o != i) {
+            if panel_owner.is_none() {
+                menus.order.entry(entry.id.clone()).or_insert(i);
+            }
+            if let Some(owner) = owner {
                 if seen.insert((owner, entry.id.clone())) {
                     if let Some(menu) = menus.groups.get_mut(&owner) {
                         menu.add_item(entry);
                     }
                 }
+            } else if let Some(menu) = group_page(&normal(label))
+                .and_then(|g| named.get(g))
+                .and_then(|o| menus.groups.get_mut(o))
+            {
+                menu.index.get_or_insert(entry);
             } else if nav {
                 standalone.push((i, entry));
             }
@@ -585,7 +618,9 @@ impl Menus {
                 .chain(menu.index.take())
                 .find(|p| {
                     let target = route(p);
-                    !menus.direct.contains_key(&p.card_route())
+                    !actions.contains(&target)
+                        && !actions.contains(&p.card_route())
+                        && !menus.direct.contains_key(&p.card_route())
                         && !ambiguous.contains(&target)
                         && !items.contains(&target)
                 });

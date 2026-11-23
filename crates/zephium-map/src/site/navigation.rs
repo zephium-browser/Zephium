@@ -99,6 +99,11 @@ impl Build<'_> {
                     .take_while(|&a| !matches!(nodes[a].role, Role::Landmark { landmark: _ }))
                     .find_map(|a| menu_labels.get(&a).map(|s| (a, *s)))
                 {
+                    let group = if marked_action || card::action_target(url, label) {
+                        label
+                    } else {
+                        group
+                    };
                     if let Some(section) = self.entry_for(url, group, Source::PrimaryNav) {
                         let name = if section_role(label, url).is_some()
                             && normal(label)
@@ -188,7 +193,7 @@ impl Build<'_> {
             }
             if let Some(url) = &n.destination {
                 if n.accessible_name().is_empty()
-                    || card::skip_link(url, menus::link_label(n), doc.page())
+                    || menus::skip_node(n, url, menus::link_label(n), doc.page())
                     || n.accessible_name().chars().count() > MAX_CLUSTER_LABEL_CHARS
                     || SiteKey::from_url(url).as_ref() != Some(&self.site)
                 {

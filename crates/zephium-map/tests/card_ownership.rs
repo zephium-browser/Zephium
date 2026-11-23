@@ -475,3 +475,246 @@ fn site_names_use_bounded_metadata_then_the_registrable_brand_then_the_title() {
         assert_eq!(p.title, if accepted { &value } else { "App name" });
     }
 }
+
+fn panel(control: &str, content: &str) -> String {
+    format!("<nav>{control}<div aria-hidden='true' id='panel'>{content}</div></nav>")
+}
+
+const TOPICS: &str = "<button aria-controls='panel'>Topics</button>";
+const GUIDE: &str = "<a href='/guide'>Guide</a>";
+
+#[test]
+fn disclosure_case_matches_the_hidden_walk() {
+    let (place, _) = read(&panel(TOPICS, GUIDE).replace("'true'", "'TRUE'"));
+    assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+}
+
+#[test]
+fn disclosure_self_control_keeps_its_children() {
+    let (place, _) = read(&panel(
+        "<a role='button' href='/' aria-controls='panel'>Topics</a>",
+        GUIDE,
+    ));
+    assert_eq!(place.sections.len(), 1);
+    let topics = row(&place, "Topics");
+    assert!(topics.menu_only);
+    assert_eq!(labels(topics), ["Guide"]);
+}
+
+#[test]
+fn disclosure_action_control_keeps_its_own_action_row() {
+    for (attr, path, label) in [
+        ("class='cta'", "/start", "Start building"),
+        ("", "/signin", "Sign in"),
+    ] {
+        let control = format!("<a {attr} href='{path}' aria-controls='panel'>{label}</a>");
+        let (place, _) = read(&panel(&control, GUIDE));
+        let topics = row(&place, label);
+        assert!(topics.menu_only);
+        assert_eq!(labels(topics), ["Guide"]);
+        assert!(place.sections.iter().any(|e| e.label == label
+            && e.key.as_url().path() == path
+            && e.tier == Tier::Action
+            && e.children.is_empty()));
+    }
+}
+
+fn picker(collapsed: bool, extra: &str) -> Place {
+    let links = format!(
+        "<a href='/deutsch' lang='de'>Deutsch</a><a href='/francais' lang='fr'>Français</a>{extra}"
+    );
+    let html = if collapsed {
+        panel(TOPICS, &links)
+    } else {
+        format!("<nav><div><button>Topics</button>{links}</div></nav>")
+    };
+    read(&format!("<link rel='alternate' hreflang='de' href='/deutsch'><link rel='alternate' hreflang='fr' href='/francais'>{html}")).0
+}
+
+fn assert_picker_ignores_actions(collapsed: bool) {
+    for action in [
+        "<a class='cta' href='/start'>Start building</a>",
+        "<a href='/signin'>Account</a>",
+        "<a class='cta' href='https://example.com/offer'></a>",
+        "<a href='https://example.com/signin'></a>",
+    ] {
+        let place = picker(collapsed, action);
+        assert!(place
+            .sections
+            .iter()
+            .all(|e| e.tier != Tier::Primary || e.label != "Topics"));
+    }
+    let place = picker(collapsed, "<a href='https://example.com/guide'></a>");
+    assert!(place.sections.iter().any(|e| e.label == "Topics"));
+}
+
+#[test]
+fn disclosure_picker_excludes_actions_from_evidence() {
+    assert_picker_ignores_actions(true);
+}
+
+#[test]
+fn visible_picker_excludes_actions_from_evidence() {
+    assert_picker_ignores_actions(false);
+}
+
+#[test]
+fn disclosure_download_is_an_action() {
+    let (place, _) = read(&panel(
+        TOPICS,
+        &format!("{GUIDE}<a download href='/kit'>Starter kit</a>"),
+    ));
+    assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.label == "Starter kit" && e.tier == Tier::Action));
+}
+
+#[test]
+fn disclosure_roles_and_regions_bound_navigation() {
+    let (place, _) = read(&panel(TOPICS, &format!("{GUIDE}<a href='/fake' role='presentation'>Fake</a>
+        <a href='/note' class='doc-noteref'>Note</a><aside><a href='/sidebar'>Sidebar</a></aside>
+        <div role='article'><a href='/article'>Article</a></div><footer><a href='/foot'>Foot</a></footer>
+        <span role='link' href='/help'>Help</span>")));
+    assert_eq!(labels(row(&place, "Topics")), ["Guide", "Help"]);
+    for tag in ["aside", "article", "footer", "svg"] {
+        let html =
+            format!("<nav>{TOPICS}<{tag} id='panel' aria-hidden='true'>{GUIDE}</{tag}></nav>");
+        assert!(read(&html).0.sections.is_empty());
+    }
+}
+
+#[test]
+fn disclosure_text_excludes_ancillary_annotations() {
+    let (place, _) = read(&panel(
+        TOPICS,
+        "<a href='/guide'>Guide<span class='doc-noteref'>[1]</span></a>",
+    ));
+    assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+}
+
+#[test]
+fn disclosure_action_evidence_applies_to_an_unmarked_alias_in_either_order() {
+    let marked = "<a href='/start' class='cta'>Start building</a>";
+    let alias = "<a href='/start'>Begin</a>";
+    for links in [format!("{marked}{alias}"), format!("{alias}{marked}")] {
+        let (place, _) = read(&panel(TOPICS, &format!("{GUIDE}{links}")));
+        assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+        assert!(place
+            .sections
+            .iter()
+            .any(|e| e.key.as_url().path() == "/start" && e.tier == Tier::Action));
+    }
+}
+
+#[test]
+fn disclosure_alias_of_a_visible_action_cannot_supply_a_landing() {
+    let (place, _) = read(&format!(
+        "<header><a class='cta' href='/start'>Start building</a>{}</header>",
+        panel(
+            TOPICS,
+            &format!("{GUIDE}<a href='/start'>See all topics</a>")
+        )
+    ));
+    assert!(row(&place, "Topics").menu_only);
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.label == "Start building" && e.tier == Tier::Action));
+}
+
+#[test]
+fn a_visible_scoped_index_must_name_its_own_menu() {
+    let (place, _) = read(
+        "<nav><div><button>Topics</button><a href='/guide'>Guide</a>
+        <a href='/library'>See all resources</a></div><div><button>Resources</button>
+        <a href='/kit'>Starter kit</a></div></nav>",
+    );
+    assert_eq!(
+        labels(row(&place, "Topics")),
+        ["Guide", "See all resources"]
+    );
+    assert!(row(&place, "Resources").menu_only);
+}
+
+#[test]
+fn disclosure_social_control_cannot_lend_its_profile_as_a_landing() {
+    let (place, _) = read(&panel(
+        "<a href='https://github.com/workshop' aria-controls='panel'>Community</a>",
+        GUIDE,
+    ));
+    let community = row(&place, "Community");
+    assert!(community.menu_only);
+    assert_eq!(labels(community), ["Guide"]);
+}
+
+#[test]
+fn picker_ignores_an_unnamed_alias_of_a_known_action() {
+    for collapsed in [true, false] {
+        let place = picker(
+            collapsed,
+            "<a class='cta' href='/start'>Start building</a><a href='/start'></a>",
+        );
+        assert!(place
+            .sections
+            .iter()
+            .all(|e| e.tier != Tier::Primary || e.label != "Topics"));
+    }
+}
+
+#[test]
+fn disclosure_skip_target_uses_the_accessible_name_in_both_presentations() {
+    let link = "<a href='#main' aria-label='Skip to main content'>Main</a>";
+    for html in [
+        panel(TOPICS, &format!("{GUIDE}{link}")),
+        format!("<nav><div><button>Topics</button>{GUIDE}{link}</div></nav>"),
+    ] {
+        assert_eq!(labels(row(&read(&html).0, "Topics")), ["Guide"]);
+    }
+}
+
+#[test]
+fn repeated_disclosure_and_visible_groups_keep_the_first_observed_member() {
+    let visible = "<div><button>Topics</button><a href='/guide'>Desktop guide</a></div>";
+    let collapsed = "<button aria-controls='panel'>Topics</button><div id='panel' aria-hidden='true'><a href='/guide'>Mobile guide</a></div>";
+    for (first, second, expected) in [
+        (visible, collapsed, "Desktop guide"),
+        (collapsed, visible, "Mobile guide"),
+    ] {
+        let (place, _) = read(&format!("<nav>{first}{second}</nav>"));
+        assert_eq!(labels(row(&place, "Topics")), [expected]);
+    }
+}
+
+#[test]
+fn visible_menu_actions_keep_their_link_name_and_tier() {
+    let (place, _) = read("<nav><div><button>Tools</button><a href='/start' class='cta'>Start building</a><a href='/guide'>Guide</a></div></nav>");
+    assert_eq!(labels(row(&place, "Tools")), ["Guide"]);
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.label == "Start building" && e.tier == Tier::Action));
+}
+
+#[test]
+fn visible_empty_fragment_control_keeps_its_structural_menu() {
+    let (place, _) = read("<nav><ul><li><a href='#'>Topics</a><ul><li><a href='/guide'>Guide</a></li></ul></li></ul></nav>");
+    let topics = row(&place, "Topics");
+    assert!(topics.menu_only);
+    assert_eq!(labels(topics), ["Guide"]);
+}
+
+#[test]
+fn a_skip_link_does_not_erase_an_independent_navigation_alias() {
+    for (first, second) in [("Guide", "Skip to content"), ("Skip to content", "Guide")] {
+        let (place, _) = read(&format!(
+            "<nav><a href='#main'>{first}</a><a href='#main'>{second}</a></nav>"
+        ));
+        assert_eq!(place.sections.len(), 1);
+        assert_eq!(
+            row(&place, "Guide").locator.fragment().as_deref(),
+            Some("#main")
+        );
+    }
+}

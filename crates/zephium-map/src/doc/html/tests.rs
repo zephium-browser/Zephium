@@ -583,3 +583,45 @@ fn linked_answers_match_clean_text_but_never_empty_structural_nodes() {
         .iter()
         .all(|n| n.text == "ab" || !n.marks.has(Marks::ACCEPTED)));
 }
+
+#[test]
+fn disclosure_normalizes_the_name_before_charging_the_retained_label() {
+    for (name, expected) in [
+        ("      ", "Guide"),
+        ("&#x200b;", "Guide"),
+        ("  A   B  ", "A B"),
+    ] {
+        let html = format!("<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g' aria-label='{name}'>Guide</a></div></nav>");
+        let doc = document(
+            html.as_bytes(),
+            DocLimits {
+                text_bytes: ("https://example.com/g".len() + expected.len()) as u32,
+                ..DocLimits::SITE_PAGE
+            },
+        );
+        let link = &doc.menu_links.values().next().unwrap()[0];
+        assert_eq!(link.label, expected);
+        assert!(!doc.body_truncated());
+    }
+}
+
+#[test]
+fn disclosure_metadata_shares_the_node_byte_limit() {
+    let doc = document(b"<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a lang='fr' aria-label='Name' href='/g'></a></div></nav>",
+        DocLimits { node_text_bytes: 5, ..DocLimits::SITE_PAGE });
+    let link = &doc.menu_links.values().next().unwrap()[0];
+    assert_eq!(link.label, "Name");
+    assert!(link.language.is_none());
+}
+
+#[test]
+fn disclosure_reports_clipped_attributes_like_the_walk() {
+    let html = format!("<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g' title='{}'>Guide</a></div></nav>", "x".repeat(MAX_NODE_TEXT_BYTES + 1));
+    assert!(document(html.as_bytes(), DocLimits::SITE_PAGE).body_truncated());
+}
+
+#[test]
+fn an_excluded_control_does_not_reserve_disclosure_bytes() {
+    let doc = document(b"<nav><div class='sponsored'><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g'>Guide</a></div></div></nav>", DocLimits::SITE_PAGE);
+    assert!(doc.menu_links.is_empty());
+}
