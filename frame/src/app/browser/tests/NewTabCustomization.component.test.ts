@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
-import { page, userEvent } from "vitest/browser";
+import { page } from "vitest/browser";
 import { createRawSnippet } from "svelte";
 import "$styles/global.css";
 import { preferences } from "$domain/preferences";
@@ -230,10 +230,10 @@ test.each(["light", "dark"])(
     }
     document.documentElement.dataset.material = "liquid_glass";
     const button = ntp.container.querySelector<HTMLButtonElement>("button.figure")!;
-    await ntp.getByRole("textbox", { name: "Search" }).click();
-    await userEvent.tab();
-    await userEvent.tab();
+    // WebKit's Tab skips buttons by default, so focus it as the keyboard would.
+    button.focus({ focusVisible: true } as FocusOptions);
     expect(document.activeElement).toBe(button);
+    expect(button.matches(":focus-visible")).toBe(true);
     expect(getComputedStyle(button).outlineStyle).toBe("solid");
     await page.elementLocator(ntp.container).screenshot({
       path: `../../../../../target/newtab/custom-figures-${theme}.png`,
