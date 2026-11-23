@@ -497,7 +497,7 @@ mod thumb {
     }
 
     /// The widths a copy is made at, so a few variants exist per picture.
-    const WIDTHS: [u32; 7] = [160, 240, 360, 540, 800, 1200, 1600];
+    const WIDTHS: [u32; 8] = [160, 240, 360, 540, 800, 1200, 1600, 2560];
     /// What the copies may hold on disk before the oldest go.
     const CACHE_BYTES: u64 = 96 * 1024 * 1024;
 
@@ -664,7 +664,9 @@ mod thumb {
             assert_eq!(width(Some("w=100")), Some(160));
             assert_eq!(width(Some("x=1&w=300")), Some(360));
             assert_eq!(width(Some("w=1600")), Some(1600));
-            assert_eq!(width(Some("w=2000")), None);
+            assert_eq!(width(Some("w=2000")), Some(2560));
+            assert_eq!(width(Some("w=2560")), Some(2560));
+            assert_eq!(width(Some("w=2561")), None);
             assert_eq!(width(Some("w=abc")), None);
             assert_eq!(width(None), None);
         }

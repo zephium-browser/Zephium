@@ -513,6 +513,8 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             next_fullscreen_retirement: 0,
             stages: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            window_parents: HashMap::new(),
             native_terminal_failure,
             #[cfg(not(target_os = "windows"))]
             shutdown_completion: None,
@@ -990,6 +992,16 @@ fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
         );
     }
     false
+}
+
+/// Admits the release of a window that is going away in the close band, so
+/// a busy reentrant queue never drops it the way it can drop ordinary work.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn try_with_window_release<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::Close, None, f)
 }
 
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
