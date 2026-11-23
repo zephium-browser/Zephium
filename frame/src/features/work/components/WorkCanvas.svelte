@@ -3,7 +3,7 @@
   import { pointerTool as currentTool, setPointerTool } from "../lib/pointer-tool.svelte";
   const pointerTool = $derived(currentTool());
   import { type Edge } from "@xyflow/svelte";
-  import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
+  import { Background, NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
   import { fade } from "svelte/transition";
   import Icon from "$shared/ui/Icon";
@@ -788,7 +788,6 @@
       bind:height={canvasHeight}
       fitView={scene.items.length > 0 && !restoredViewport && !home}
       fitViewOptions={{ padding: 0.2, duration: 0 }}
-      dots={{ color: "var(--work-canvas-dot)", gap: 20, size: 1.5 }}
       panOnDrag={pointerTool === "hand"}
       edgeDescription={m.work_env_edge_readonly()}
       virtualize={scene.items.length >= virtualizeFrom}
@@ -876,6 +875,7 @@
       }}
       oncamera={(ready) => (camera = ready)}
     >
+      <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
       <ZoomLevel
         label={m.work_canvas_controls()}
         fitLabel={m.work_fit()}

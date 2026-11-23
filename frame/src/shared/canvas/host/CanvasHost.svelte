@@ -2,7 +2,6 @@
   import "@xyflow/svelte/dist/base.css";
   import {
     SvelteFlow,
-    Background,
     type Edge,
     type Node,
     type NodeTypes,
@@ -34,7 +33,6 @@
     fitView = false,
     fitViewOptions,
     virtualize = false,
-    dots,
     panOnDrag = true,
     panKey = " ",
     edgeDescription,
@@ -63,7 +61,6 @@
     fitViewOptions?: FitViewOptions<N>;
     /** Past this, the flow keeps only what is on screen in the page. */
     virtualize?: boolean;
-    dots?: { color: string; gap: number; size: number };
     panOnDrag?: boolean;
     panKey?: string | null;
     edgeDescription?: string;
@@ -79,7 +76,7 @@
     oninit?: () => void;
     /** The camera, once the flow can move it. */
     oncamera?: (camera: CanvasCamera) => void;
-    /** What the top draws inside the flow: its toolbars, its zoom level. */
+    /** What the top draws inside the flow: its ground, its toolbars, its zoom level. */
     children?: Snippet;
   } = $props();
   let root = $state<HTMLDivElement>();
@@ -300,7 +297,6 @@
         oncamera?.(camera);
       }}
     />
-    {#if dots}<Background patternColor={dots.color} gap={dots.gap} size={dots.size} />{/if}
     {@render children?.()}
   </SvelteFlow>
 </div>
