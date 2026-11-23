@@ -2391,6 +2391,7 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new_with_failure(
@@ -2457,6 +2458,7 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let icons: IconLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
@@ -2493,6 +2495,7 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -2530,6 +2533,7 @@ pub(super) fn setup_with_operation_log_and_failure(
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();

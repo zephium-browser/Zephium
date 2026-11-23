@@ -182,6 +182,7 @@ fn records(title: &str, host: &str, text: &str) -> HomeRecords {
             map: Some(MapId(7)),
             results: Some(tab),
             results_url: Some("https://duckduckgo.com/?q=acme".into()),
+            results_seen: false,
             pages: Vec::new(),
         }],
         pages: vec![vec![HomePage {
@@ -230,7 +231,7 @@ fn a_snapshot_names_no_address_whatever_the_pages_call_themselves() {
         let json = serde_json::to_string(&shot).unwrap();
         let page = &shot.searches[0].pages[0];
         assert!(!page.title.contains('\n') && !page.title.contains('\u{0}'));
-        assert!(!json.contains("duckduckgo"), "{json}");
+        assert!(!json.contains("duckduckgo.com"), "{json}");
         if text.contains("://") || text.contains("http") {
             continue;
         }
@@ -238,6 +239,18 @@ fn a_snapshot_names_no_address_whatever_the_pages_call_themselves() {
         assert!(!json.contains("://"), "{json}");
     }
     let shot = snapshot(&host, records("Acme pricing", "WWW.Acme.Example.", "acme"));
+    assert_eq!(shot.searches[0].engine, SearchEngine::default());
+    let json = serde_json::to_value(&shot).unwrap();
+    assert_eq!(json["searches"][0]["engine"], "duckduckgo");
+    let mut custom = records("Acme pricing", "acme.example", "acme");
+    custom.searches[0].engine = SearchEngine::Custom;
+    custom.searches[0].results_url = Some("https://search.example/find?q=acme".into());
+    let json = serde_json::to_string(&snapshot(&host, custom)).unwrap();
+    assert!(json.contains("\"engine\":\"custom\""), "{json}");
+    assert!(
+        !json.contains("search.example") && !json.contains("://") && !json.contains("http"),
+        "{json}"
+    );
     assert_eq!(shot.searches[0].pages[0].host, "acme.example");
     assert_eq!(shot.searches[0].pages[0].title, "Acme pricing");
     assert!(shot.searches[0].results_open);
@@ -578,4 +591,219 @@ fn a_private_search_asks_the_driver_for_a_private_map() {
         assert_eq!(request.private, private);
         assert_eq!(request.session_id, 7);
     }
+}
+
+#[test]
+fn the_show_event_names_the_row_only_when_there_is_one() {
+    let row = HomeShowV1 {
+        search: "000000000000001f".into(),
+        slot: Some(1),
+        entry: Some("0123456789abcdef".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(&row).unwrap(),
+        serde_json::json!({"search": "000000000000001f", "slot": 1, "entry": "0123456789abcdef"})
+    );
+    let title = HomeShowV1 {
+        search: "000000000000001f".into(),
+        slot: None,
+        entry: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&title).unwrap(),
+        serde_json::json!({"search": "000000000000001f", "slot": null, "entry": null})
+    );
+}
+
+fn live_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn live(search: u64, driver: Option<Driver>) -> LiveMap {
+    LiveMap {
+        search: SearchId(search),
+        window: 1,
+        profile: ProfileId::generate(),
+        driver,
+        folded: Folded::default(),
+        targets: Targets::default(),
+    }
+}
+
+#[test]
+fn the_host_holds_a_map_while_it_keeps_its_driver() {
+    let runtime = live_runtime();
+    let never: Dispatch = Arc::new(|_| false);
+    let host = Host::new(
+        never.clone(),
+        Arc::new(|_, _| {}),
+        runtime.handle().clone(),
+        None,
+    );
+    let io = Io {
+        results: Arc::new(source(never, RESULTS_READ_TIMEOUT)),
+        fetch: Arc::new(Offline),
+        memo: Arc::new(MemoryMemo::new()),
+        clock: Arc::new(SystemClock::new()),
+    };
+    let request = MapRequest {
+        query: "stripe".into(),
+        engine: SearchEngine::DuckDuckGo,
+        session_id: 1,
+        profile: "p".into(),
+        private: false,
+    };
+    let (driver, _changes) = Driver::start(request, io, runtime.handle()).unwrap();
+    host.maps().insert(MapId(1), live(1, Some(driver)));
+    host.maps().insert(MapId(2), live(2, None));
+    let port = HostPort(host.clone());
+    assert!(port.holds(MapId(1)));
+    assert!(!port.holds(MapId(2)), "its view stays, its driver is gone");
+    assert!(!port.holds(MapId(3)));
+    host.maps().get_mut(&MapId(1)).unwrap().folded.fold(&end(1));
+    assert!(port.holds(MapId(1)), "a finished map is still held");
+    port.forget(MapId(1));
+    assert!(!port.holds(MapId(1)));
+}
+
+const ACME_RESULTS: &str =
+    "<main><article><h2><a href='https://acme.com/'>Acme workshop</a></h2></article></main>";
+const ACME_NAV: &str =
+    "<title>Acme Workshop</title><nav><a href='/pricing'>Pricing</a><a href='/news'>News</a></nav>";
+
+struct Canned;
+impl ResultsSource for Canned {
+    fn load(&self, url: tauri::Url) -> Reading<Result<ResultsPage, Failure>> {
+        Box::pin(async move {
+            Ok(ResultsPage {
+                html: ACME_RESULTS.into(),
+                url,
+                truncated: false,
+            })
+        })
+    }
+}
+
+struct Acme;
+impl zephium_map_driver::Fetcher for Acme {
+    fn fetch(
+        &self,
+        request: zephium_map_driver::FetchRequest,
+    ) -> Reading<Result<zephium_map::session::FetchResult, Failure>> {
+        let body = match (request.url.host_str(), request.url.path()) {
+            (Some("acme.com"), "/") => Some(ACME_NAV),
+            (Some("acme.com"), "/pricing") => {
+                Some("<h2 id='tiers'>Tiers</h2><h2 id='teams'>Teams</h2>")
+            }
+            _ => None,
+        };
+        Box::pin(async move {
+            match body {
+                Some(body) => Ok(zephium_map::session::FetchResult {
+                    final_url: request.url,
+                    content_type: "text/html".into(),
+                    charset: None,
+                    bytes: body.as_bytes().to_vec(),
+                    truncated: false,
+                }),
+                None => Err(Failure::Missing),
+            }
+        })
+    }
+}
+
+fn wait_for(seen: &Mutex<Vec<MapChange>>, done: impl Fn(&[MapChange]) -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !done(&seen.lock().unwrap()) {
+        assert!(std::time::Instant::now() < deadline, "the stream stalled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn section<'a>(change: &'a MapChange, id: &str) -> Option<&'a MapEntry> {
+    let MapChange::Place { place, .. } = change else {
+        return None;
+    };
+    place.sections.iter().find(|entry| entry.id == id)
+}
+
+/// The driver sends no waiting mark for an inside it accepted: the first
+/// change after admission already carries the section's content, so the
+/// frame keeps its own waiting mark from the admission until then.
+#[test]
+fn an_accepted_inside_streams_its_content_with_no_waiting_mark_first() {
+    let runtime = live_runtime();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let host = Host::new(
+        Arc::new(|_| false),
+        Arc::new(move |name, event: &HomeMapChangedV1| {
+            assert_eq!(name, EVENT_HOME_MAP_CHANGED);
+            sink.lock().unwrap().push(event.change.clone());
+        }),
+        runtime.handle().clone(),
+        None,
+    );
+    let io = Io {
+        results: Arc::new(Canned),
+        fetch: Arc::new(Acme),
+        memo: Arc::new(MemoryMemo::new()),
+        clock: Arc::new(SystemClock::new()),
+    };
+    let request = MapRequest {
+        query: "acme".into(),
+        engine: SearchEngine::DuckDuckGo,
+        session_id: 5,
+        profile: "p".into(),
+        private: false,
+    };
+    let (driver, changes) = Driver::start(request, io, runtime.handle()).unwrap();
+    host.maps().insert(MapId(5), live(9, Some(driver)));
+    host.pump(MapId(5), changes);
+    wait_for(&seen, |changes| {
+        changes.iter().any(|c| matches!(c, MapChange::End { .. }))
+    });
+    let pricing = {
+        let changes = seen.lock().unwrap();
+        let MapChange::Place { place, .. } = changes
+            .iter()
+            .rev()
+            .find(|c| matches!(c, MapChange::Place { slot: 0, .. }))
+            .expect("a place was drawn")
+        else {
+            unreachable!()
+        };
+        let pricing = place
+            .sections
+            .iter()
+            .find(|entry| entry.label == "Pricing")
+            .expect("pricing is a row");
+        assert!(pricing.open && pricing.read.is_none() && pricing.children.is_empty());
+        pricing.id.clone()
+    };
+    let admitted = seen.lock().unwrap().len();
+    assert_eq!(host.open_inside(SearchId(9), 0, &pricing), Ok(()));
+    wait_for(&seen, |changes| {
+        changes[admitted..]
+            .iter()
+            .any(|c| matches!(c, MapChange::Opened { .. }))
+    });
+    let after = seen.lock().unwrap()[admitted..].to_vec();
+    assert!(after
+        .iter()
+        .filter_map(|change| section(change, &pricing))
+        .all(|entry| entry.read != Some(wire::MapRead::Queued)));
+    let first = section(&after[0], &pricing).expect("the first change names the row");
+    assert_eq!(first.read, Some(wire::MapRead::Read));
+    assert!(!first.children.is_empty(), "its content comes with it");
+    assert!(matches!(
+        after.last(),
+        Some(MapChange::Opened { id, .. }) if *id == pricing
+    ));
+    let folded = host.view(MapId(5)).unwrap();
+    assert_eq!(folded.seq, after.last().map(MapChange::seq));
 }

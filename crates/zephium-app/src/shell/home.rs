@@ -25,7 +25,7 @@ const MAX_ENTRY_BYTES: usize = 64;
 #[derive(Default)]
 pub(super) struct HomeState {
     maps: Option<Arc<dyn HomeMaps>>,
-    searches: zephium_core::home::Searches,
+    pub(super) searches: zephium_core::home::Searches,
     origins: std::collections::HashMap<ItemId, Origin>,
     pub(super) reads: std::collections::HashMap<MapId, PendingRead>,
     /// Spaces left while their Home was in front.
@@ -76,7 +76,7 @@ impl Shell {
             })
     }
 
-    fn new_tab_is_home(&self, profile: ProfileId) -> bool {
+    pub(super) fn new_tab_is_home(&self, profile: ProfileId) -> bool {
         self.incognito_profile(profile) || self.tab_preferences.new_page.is_none()
     }
 
@@ -121,6 +121,7 @@ impl Shell {
         match command {
             HomeCommand::Attach(attachment) => {
                 self.home.maps = Some(attachment.0);
+                self.home_keep_one_per_space();
                 self.project_items();
             }
             HomeCommand::Records { done } => done.finish(self.home_records()),
@@ -192,9 +193,12 @@ impl Shell {
         });
     }
 
-    fn home_show(&self, search: SearchId) {
+    fn home_show(&self, search: SearchId, row: Option<PageRow>) {
+        let (slot, entry) = row.map_or((None, None), |row| (Some(row.slot), Some(row.entry)));
         (self.emit)(Projection::HomeShow {
             search: search.to_string(),
+            slot,
+            entry,
         });
     }
 
@@ -275,15 +279,16 @@ impl Shell {
         {
             return None;
         }
-        if let Some(same) = self
-            .home
-            .searches
-            .same(profile, space, query)
-            .filter(|id| self.home.searches.get(*id).is_some_and(|s| s.map.is_some()))
-        {
+        if let Some(same) = self.home.searches.same(profile, space, query).filter(|id| {
+            self.home
+                .searches
+                .get(*id)
+                .and_then(|search| search.map)
+                .is_some_and(|map| maps.holds(map))
+        }) {
             self.home.searches.touch(same, unix_millis().unwrap_or(0));
             self.home_changed(profile, space);
-            self.home_show(same);
+            self.home_show(same, None);
             return Some(operation_result(
                 OperationOutcome::Applied,
                 OperationReason::HomeMapStarted,
@@ -305,14 +310,18 @@ impl Shell {
             Ok(MapKind::Compare) => SearchKind::Compare,
             Err(MapRefusal::NotAMap | MapRefusal::Busy | MapRefusal::Unavailable) => return None,
         };
-        if let Some(record) = self.home.searches.get_mut(search) {
-            if let Some(old) = record.map.replace(map) {
-                maps.forget(old);
-            }
+        let gone = self.home.searches.get_mut(search).and_then(|record| {
             record.kind = kind;
+            record.map.replace(map)
+        });
+        if let Some(old) = gone {
+            if let Some(read) = self.home.reads.remove(&old) {
+                read.done.finish(Err(ResultsRefusal::Unknown));
+            }
+            maps.forget(old);
         }
         self.home_changed(profile, space);
-        self.home_show(search);
+        self.home_show(search, None);
         Some(operation_result(
             OperationOutcome::Applied,
             OperationReason::HomeMapStarted,
@@ -338,9 +347,11 @@ impl Shell {
                     return;
                 }
                 let id = self.home_record(profile, space, query, SearchKind::Other);
+                let seen = self.home_in_front(tab);
                 if let Some(record) = self.home.searches.get_mut(id) {
                     record.results = Some(tab);
                     record.results_url = Some(parsed.to_string());
+                    record.results_seen |= seen;
                 }
                 id
             }
@@ -389,6 +400,18 @@ impl Shell {
             self.home.searches.touch(same, at_ms);
             return same;
         }
+        let idle: Vec<SearchId> = self
+            .home
+            .searches
+            .in_scope(profile, space)
+            .filter(|search| search.pages.is_empty() && !self.home_results_seen(search))
+            .map(|search| search.id)
+            .collect();
+        for gone in idle {
+            if let Some(search) = self.home.searches.forget(gone) {
+                self.home_let_go(search, true);
+            }
+        }
         let id = SearchId(self.home.next());
         let evicted = self.home.searches.record(Search {
             id,
@@ -401,10 +424,11 @@ impl Shell {
             map: None,
             results: None,
             results_url: None,
+            results_seen: false,
             pages: Vec::new(),
         });
         for gone in evicted {
-            self.home_let_go(gone);
+            self.home_let_go(gone, true);
         }
         id
     }
@@ -412,14 +436,51 @@ impl Shell {
     fn home_forget(&mut self, id: SearchId) {
         if let Some(search) = self.home.searches.forget(id) {
             let (profile, space) = (search.profile, search.space);
-            self.home_let_go(search);
+            self.home_let_go(search, true);
             self.home_changed(profile, space);
         }
     }
 
-    /// Lets go of a search no longer kept: its map ends, the tabs opened from
-    /// it stay open and no longer name it.
-    fn home_let_go(&mut self, search: Search) {
+    /// The tab is shown in a window: in front, in a split or in the pane.
+    fn home_in_front(&self, tab: ItemId) -> bool {
+        self.windows.iter().any(|window| {
+            window.active == Some(tab) || window.splits.as_ref().is_some_and(|t| t.contains(tab))
+        }) || self.work_pane.as_ref().is_some_and(|pane| pane.tab == tab)
+    }
+
+    fn home_results_seen(&self, search: &Search) -> bool {
+        search.results_seen || search.results.is_some_and(|tab| self.home_in_front(tab))
+    }
+
+    /// A tab came to the front: a search's results tab has now been seen.
+    pub(super) fn home_fronted(&mut self, tab: ItemId) {
+        for search in self.home.searches.iter_mut() {
+            if search.results == Some(tab) {
+                search.results_seen = true;
+            }
+        }
+    }
+
+    /// Closes a tab of Home's own without choosing a successor or leaving it
+    /// in Recently Closed.
+    fn home_close_quietly(&mut self, tab: ItemId) {
+        self.forget_content_fullscreen(tab);
+        self.forget_tab_media(tab);
+        if self.work_pane.as_ref().is_some_and(|pane| pane.tab == tab) {
+            self.clear_work_pane();
+        }
+        self.remove_tab_quietly(tab);
+    }
+
+    /// Lets go of a search no longer kept: its map ends and the tabs opened
+    /// from it stay open, no longer naming it. With `close_unseen`, a results
+    /// tab that was never in front closes with it.
+    fn home_let_go(&mut self, search: Search, close_unseen: bool) {
+        if let Some(tab) = search.results.filter(|tab| {
+            close_unseen && self.items.tab(*tab).is_some() && !self.home_results_seen(&search)
+        }) {
+            self.home_close_quietly(tab);
+        }
         if let Some(map) = search.map {
             if let Some(read) = self.home.reads.remove(&map) {
                 read.done.finish(Err(ResultsRefusal::Unknown));
@@ -447,7 +508,7 @@ impl Shell {
             .searches
             .forget_where(|search| search.profile == profile)
         {
-            self.home_let_go(search);
+            self.home_let_go(search, false);
         }
         if let Some(maps) = &self.home.maps {
             maps.forget_profile(profile);
@@ -512,6 +573,7 @@ impl Shell {
     /// open, else Home, shown at its search.
     pub(super) fn home_take_over(
         &mut self,
+        tab: ItemId,
         closed: Option<Origin>,
         profile: ProfileId,
         space: SpaceId,
@@ -525,8 +587,9 @@ impl Shell {
             return Some(self.focus_tab(opener));
         }
         let effects = self.show_home()?;
-        if self.home.searches.get(origin.search).is_some() {
-            self.home_show(origin.search);
+        if let Some(search) = self.home.searches.get(origin.search) {
+            let row = search.page(tab).and_then(|page| page.row.clone());
+            self.home_show(origin.search, row);
         }
         Some(effects)
     }
@@ -539,6 +602,34 @@ impl Shell {
         match self.open_home_tab() {
             Some(home) => Some(self.focus_tab(home)),
             None => self.open_new_tab_with_id().map(|(_, effects)| effects),
+        }
+    }
+
+    /// Each space keeps one untouched tab while Home is on: the one in front
+    /// if it is among them, else the first.
+    pub(super) fn home_keep_one_per_space(&mut self) {
+        if !self.home_on() {
+            return;
+        }
+        let spaces: Vec<SpaceId> = self.spaces.iter().map(|space| space.id).collect();
+        for space in spaces {
+            let homes: Vec<ItemId> = self
+                .regular_tabs(space)
+                .into_iter()
+                .filter(|id| self.is_home_tab(*id))
+                .collect();
+            if homes.len() < 2 {
+                continue;
+            }
+            let shown = self
+                .windows
+                .iter()
+                .find(|window| window.space == space)
+                .and_then(|window| window.active);
+            let keep = shown.filter(|id| homes.contains(id)).unwrap_or(homes[0]);
+            for id in homes.into_iter().filter(|id| *id != keep) {
+                self.home_close_quietly(id);
+            }
         }
     }
 
@@ -761,6 +852,7 @@ impl Shell {
         if let Some(record) = self.home.searches.get_mut(search) {
             record.results = Some(tab);
             record.results_url = Some(url.to_string());
+            record.results_seen = true;
             let (profile, space) = (record.profile, record.space);
             self.home_changed(profile, space);
         }
@@ -768,7 +860,6 @@ impl Shell {
     }
 
     fn home_focus_search(&mut self, search: SearchId) -> OperationDisposition {
-        self.home.searches.touch(search, unix_millis().unwrap_or(0));
         let Some(effects) = self.show_home() else {
             return operation_result(
                 OperationOutcome::Rejected,
@@ -779,7 +870,7 @@ impl Shell {
         if let Some((profile, space)) = self.windows.focused().map(|w| (w.profile, w.space)) {
             self.home_changed(profile, space);
         }
-        self.home_show(search);
+        self.home_show(search, None);
         mutation_result(native)
     }
 

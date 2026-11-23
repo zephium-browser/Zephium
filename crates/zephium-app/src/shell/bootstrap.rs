@@ -345,6 +345,7 @@ impl Shell {
         self.hydrate_favicon_cache(profile, space);
         self.apply(fx);
         let _ = self.relayout();
+        self.home_keep_one_per_space();
         self.project_items();
         self.project_browser_page();
         self.bootstrapped = true;

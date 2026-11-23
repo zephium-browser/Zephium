@@ -1501,6 +1501,7 @@ fn find_follows_the_page_in_front_and_answers_only_for_it() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let (sink, view) = (results.clone(), screen.clone());
     let mut shell = Shell::new_with_failure(

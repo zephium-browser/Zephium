@@ -5,7 +5,7 @@
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
   import { SIZE, type HomeNode } from "../../lib/layout";
-  import { NETWORK_MARK } from "../../lib/marks";
+  import { NETWORK_MARK, NETWORK_NAME } from "../../lib/marks";
   import Card from "./Card.svelte";
 
   let { id, data }: { id: string; data: { item: Extract<HomeNode, { kind: "social" }> } } =
@@ -18,21 +18,21 @@
 <Card width={item.box.width} height={item.box.height} label={m.home_elsewhere()}>
   <p class="label" style:block-size={`${SIZE.label}px`}>{m.home_elsewhere()}</p>
   <div class="grid">
-    {#each item.place.social as social (social.network)}
+    {#each item.place.social as social (social)}
       <button
         type="button"
         style:block-size={`${SIZE.section}px`}
-        {@attach at(`${id}/${social.network}`)}
+        {@attach at(`${id}/${social}`)}
         onclick={() =>
           top.intent({
             kind: "social",
             search: item.search.id,
             place: item.place.id,
-            network: social.network,
+            network: social,
           })}
       >
-        <Icon icon={NETWORK_MARK[social.network]} size={14} />
-        <span dir="auto">{social.name}</span>
+        <Icon icon={NETWORK_MARK[social]} size={14} />
+        <span>{NETWORK_NAME[social]}</span>
       </button>
     {/each}
   </div>

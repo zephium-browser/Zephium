@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { Cancel01Icon } from "@hugeicons/core-free-icons";
+  import { Cancel01Icon, Home01Icon } from "@hugeicons/core-free-icons";
   import { tabFallbackIcon } from "../lib/tab-icon";
   import type { TabView } from "$shared/ipc/bindings";
   import FavIcon from "$shared/ui/FavIcon";
@@ -27,6 +27,7 @@
     depth = 0,
     closable = true,
     class: className = "",
+    home = false,
     splitCandidate,
     onSelect,
     onClose,
@@ -46,6 +47,8 @@
     depth?: number;
     closable?: boolean;
     class?: string;
+    /** The space's Home: named Home, while its row still carries the tab's own title for native. */
+    home?: boolean;
     splitCandidate: boolean;
     onSelect: (id: string, event: MouseEvent) => void;
     onClose: (id: string) => void;
@@ -87,7 +90,7 @@
     style:padding-inline-start={`${indent}px`}
     aria-current={active ? "page" : undefined}
     aria-pressed={multiSelecting ? selected : undefined}
-    aria-label={tab.title || m.untitled_tab()}
+    aria-label={home ? m.home_entry() : tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
@@ -96,16 +99,19 @@
     onclick={(event) => onSelect(tab.id, event)}
     {...closable ? closeOnMiddleClick(() => onClose(tab.id)) : {}}
   >
-    <FavIcon
-      image={favicons.image(tab.icon)}
-      tone={favicons.tone(tab.icon)}
-      loading={tab.loading}
-      size={16}
-      lit={active}
-      {fallback}
-      notched={!!tab.audio}
-    />
-    <span data-zephium-tab-label class="tab-label">{tab.title}</span>
+    {#if home}<span class="home-mark"><Icon icon={Home01Icon} size={16} /></span><span
+        class="tab-label"
+        aria-hidden="true">{m.home_entry()}</span
+      >{:else}<FavIcon
+        image={favicons.image(tab.icon)}
+        tone={favicons.tone(tab.icon)}
+        loading={tab.loading}
+        size={16}
+        lit={active}
+        {fallback}
+        notched={!!tab.audio}
+      />{/if}
+    <span data-zephium-tab-label class="tab-label" class:sr-only={home}>{tab.title}</span>
   </button>
   {#if tab.audio}
     <AudioControl
@@ -232,6 +238,14 @@
     white-space: nowrap;
     mask-image: var(--mask-fade-end);
     transition: margin-inline-end var(--motion-fast) var(--ease-out);
+  }
+
+  .home-mark {
+    display: grid;
+    flex: none;
+    place-items: center;
+    width: 16px;
+    height: 16px;
   }
 
   .tab-label:dir(rtl) {

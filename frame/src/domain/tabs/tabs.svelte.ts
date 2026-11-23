@@ -18,6 +18,8 @@ export const spaces = () => state.spaces;
 export const activeSpaceId = () => state.active_space_id;
 export const activeSpace = () => state.spaces.find((space) => space.id === state.active_space_id);
 export const sidebarNodes = () => state.nodes;
+/** A new tab in the focused scope is Home, as native says. */
+export const homeOn = () => state.home === true;
 export const activeTab = (): TabView | undefined =>
   state.tabs.find((tab) => tab.id === state.active);
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as homeShow from "$session/home-show.svelte";
   import { installCloseService } from "$shared/lib/close";
   import "$styles/global.css";
   import { onMount, untrack } from "svelte";
@@ -165,6 +166,8 @@
     const stopStoreClicks = webext.listenForStoreClicks();
     const stopDrops = webext.listenForDrops(() => browserPage.currentPage() !== "work");
     const pagePermissionsReady = pagePermissions.init();
+    // Native may ask Home to show a search before Home's code has loaded.
+    const stopHomeShow = homeShow.init();
 
     // Rasters are emitted immediately before the projection that references
     // them, so this listener must exist before tabs asks native to bootstrap.
@@ -234,6 +237,7 @@
       void stopAccess.then((stop) => stop());
       void stopStoreClicks.then((stop) => stop());
       void stopDrops.then((stop) => stop());
+      void stopHomeShow.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();
       ui.dispose();

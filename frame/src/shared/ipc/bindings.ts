@@ -1783,6 +1783,8 @@ export type HomeSearchV1_Deserialize = {
 	text: string,
 	at_ms: number | null,
 	kind: HomeSearchKindV1,
+	/**  The engine the search was asked with, for its mark. */
+	engine: SearchEngine,
 	/**  A tab shows the search's results page. */
 	results_open: boolean,
 	map: HomeMapV1_Deserialize | null,
@@ -1794,6 +1796,8 @@ export type HomeSearchV1_Serialize = {
 	text: string,
 	at_ms: number | null,
 	kind: HomeSearchKindV1,
+	/**  The engine the search was asked with, for its mark. */
+	engine: SearchEngine,
 	/**  A tab shows the search's results page. */
 	results_open: boolean,
 	map: HomeMapV1_Serialize | null,
@@ -1802,6 +1806,13 @@ export type HomeSearchV1_Serialize = {
 
 export type HomeShowV1 = {
 	search: string,
+	/**
+	 *  The row the closed page was opened from, as the snapshot's pages
+	 *  name it (`entry` is the entry id, `site`, `social-<network>` or
+	 *  `also-<index>`); null for anything not opened from a row.
+	 */
+	slot: number | null,
+	entry: string | null,
 };
 
 /**  The searches on Home of one profile and space, newest first. */
@@ -1903,6 +1914,8 @@ export type ItemsState = {
 	tabs: TabView[],
 	active: string | null,
 	split_group: SplitGroupView | null,
+	/**  A new tab in this window's profile and space is Home. */
+	home?: boolean,
 };
 
 /**  The keymap changed; read it again. */

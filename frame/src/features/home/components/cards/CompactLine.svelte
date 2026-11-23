@@ -1,11 +1,13 @@
 <script lang="ts">
   import { getContext } from "svelte";
-  import { focusStop, thumbnail } from "$shared/canvas";
-  import FavIcon from "$shared/ui/FavIcon";
+  import { Cancel01Icon } from "@hugeicons/core-free-icons";
+  import { focusStop } from "$shared/canvas";
+  import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
+  import type { Place, Search } from "$domain/home";
   import { homeTop, type HomeTop } from "../../lib/context";
   import { SPLIT, type HomeNode } from "../../lib/layout";
-  import type { Place, Search } from "../../lib/model";
+  import PlaceMark from "./PlaceMark.svelte";
   import { clockOf } from "../../lib/time";
 
   let { data }: { data: { item: Extract<HomeNode, { kind: "compact" }> } } = $props();
@@ -18,7 +20,6 @@
   );
 
   const SUMMARY = 6;
-  const PICTURES = 3;
   function said(search: Search): string {
     if (search.kind === "pages") return search.pages.map((page) => page.title).join(" · ");
     const place = search.kind === "place" ? search.place : search.places[0];
@@ -36,73 +37,111 @@
       .join(", ");
   }
   let summary = $derived(said(search));
-  let pictures = $derived(
-    (search.kind === "pages"
-      ? search.pages.map((page) => page.picture)
-      : places.flatMap((place) => place.rows.map((row) => (row.opened ? row.picture : null)))
-    )
-      .filter((key): key is string => key !== null)
-      .slice(0, PICTURES)
-      .map((key) => top.picture(key))
-      .filter((url): url is string => url !== null),
-  );
-  let missing = $state<readonly string[]>([]);
+  const forget = () => top.intent({ kind: "forget", search: search.id });
+  function keys(event: KeyboardEvent) {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    event.preventDefault();
+    event.stopPropagation();
+    forget();
+  }
 </script>
 
-<button
-  type="button"
+<div
   class="compact"
-  aria-expanded="false"
   style:inline-size={`${item.box.width}px`}
   style:block-size={`${item.box.height}px`}
   style:--split={`${SPLIT}px`}
-  {@attach at(`s:${search.id}`)}
-  onclick={() => top.open(search.id)}
-  onfocus={() => top.open(search.id)}
 >
-  <span class="asked">
-    <span class="text" dir="auto">{search.text}</span>
-    <span class="time">{clockOf(search.at)}</span>
-  </span>
-  <span class="held">
-    {#each places as place (place.id)}
-      {@const mark = top.mark(place)}
-      {#if mark}<FavIcon image={mark} size={16} lit />{/if}
-      <span class="name" dir="auto">{place.title || place.host}</span>
-    {/each}
-    <span class="what" dir="auto">{summary}</span>
-  </span>
-  {#each pictures as url (url)}
-    {#if !missing.includes(url)}<canvas
-        class="shot"
-        aria-hidden="true"
-        use:thumbnail={{ url, width: 30, onmissing: () => (missing = [...missing, url]) }}
-      ></canvas>{/if}
-  {/each}
-</button>
+  <button
+    type="button"
+    class="line"
+    aria-expanded="false"
+    {@attach at(`s:${search.id}`)}
+    onclick={() => top.open(search.id)}
+    onfocus={() => top.open(search.id)}
+    onkeydown={keys}
+  >
+    <span class="asked">
+      <span class="text" dir="auto">{search.text}</span>
+      <span class="time">{clockOf(search.at)}</span>
+    </span>
+    <span class="held">
+      {#each places as place (place.id)}
+        <PlaceMark {place} size={16} />
+        <span class="name" dir="auto">{place.title || place.host}</span>
+      {/each}
+      <span class="what" dir="auto">{summary}</span>
+    </span>
+  </button>
+  <button
+    type="button"
+    class="forget"
+    tabindex="-1"
+    aria-label={m.home_forget({ text: search.text })}
+    onclick={forget}><Icon icon={Cancel01Icon} size={12} strokeWidth={2} /></button
+  >
+</div>
 
 <style>
   /* A search that is not in front: one line, read across like the open one,
      what was asked on the left and what it held where its place would stand. */
   .compact {
-    box-sizing: border-box;
+    position: relative;
     display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 10px 0 0;
-    border: 0;
     border-radius: var(--radius-card);
     background: var(--color-surface);
     box-shadow: var(--shadow-card);
-    color: var(--color-text);
-    font: inherit;
-    text-align: start;
-    cursor: default;
     transition: background-color var(--motion-instant) var(--ease-smooth);
   }
 
   .compact:hover {
     background: linear-gradient(var(--row-hover), var(--row-hover)), var(--color-surface);
+  }
+
+  .line {
+    box-sizing: border-box;
+    display: flex;
+    flex: 1;
+    align-items: center;
+    gap: 6px;
+    min-inline-size: 0;
+    padding: 0 34px 0 0;
+    border: 0;
+    border-radius: inherit;
+    background: none;
+    color: var(--color-text);
+    font: inherit;
+    text-align: start;
+    cursor: default;
+  }
+
+  /* Removing is there for the line in hand, and quiet. */
+  .forget {
+    position: absolute;
+    inset-block-start: 50%;
+    inset-inline-end: 8px;
+    display: grid;
+    place-items: center;
+    inline-size: 20px;
+    block-size: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-control-compact);
+    background: none;
+    color: var(--color-faint);
+    opacity: 0;
+    translate: 0 -50%;
+    cursor: default;
+  }
+
+  .forget:hover {
+    background: var(--color-fill-hover);
+    color: var(--color-text);
+  }
+
+  .compact:hover .forget,
+  .compact:focus-within .forget {
+    opacity: 1;
   }
 
   .asked {
@@ -162,13 +201,5 @@
     font-size: var(--text-label);
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .shot {
-    flex: none;
-    inline-size: 30px;
-    block-size: 19px;
-    border-radius: 4px;
-    background: var(--color-fill);
   }
 </style>

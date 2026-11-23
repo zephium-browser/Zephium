@@ -309,6 +309,7 @@ impl Shell {
             self.items.set_last_active(id, now);
         }
         self.cancel_page_permission_if_not_foreground();
+        self.home_fronted(id);
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
@@ -409,7 +410,7 @@ impl Shell {
             self.remember_closed(closed);
         }
         if was_active {
-            let next = match self.home_take_over(origin, profile, space) {
+            let next = match self.home_take_over(id, origin, profile, space) {
                 Some(home) => home,
                 None => self.take_over(profile, space, pos),
             };
@@ -613,6 +614,12 @@ impl Shell {
             let _ = self.close(id);
             return;
         }
+        self.remove_tab_quietly(id);
+    }
+
+    /// Removes a tab without a successor choice of its own or a Recently
+    /// Closed entry; a window that showed it falls back to its first tab.
+    pub(super) fn remove_tab_quietly(&mut self, id: ItemId) {
         self.forget_removed_tab_state(id);
         let affected = self
             .windows

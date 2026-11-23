@@ -15,7 +15,11 @@
 >
   <h2>
     <span class="name">{name}</span>
-    <span class="count">{m.home_day_count({ count: item.day.count })}</span>
+    <span class="count"
+      >{item.day.entries.length === 1
+        ? m.home_day_count_one()
+        : m.home_day_count({ count: item.day.entries.length })}</span
+    >
   </h2>
 </div>
 

@@ -30,7 +30,17 @@ export type SidebarDisplayUnit =
       key: string;
       tabs: SidebarTabEntry[];
       depth: number;
-    };
+    }
+  | SidebarSearchHead;
+
+/** The quiet title over the pages opened from one search on Home. */
+export type SidebarSearchHead = {
+  kind: "search";
+  key: string;
+  search: string;
+  text: string;
+  depth: 0;
+};
 
 export type SidebarTree = Record<SidebarSectionView, SidebarEntry[]>;
 
@@ -203,4 +213,80 @@ export function collapsedSidebarUnits(
     if (!hasActive) ancestors.push(unit.depth);
   }
   return hidden;
+}
+
+/**
+ * Today's rows while Home is on. The space's Home tab is drawn at the head of
+ * the column, not here. Pages opened from a search follow one quiet title,
+ * where the first of them stood; a search's results page shows among them
+ * only while it is in front. Nothing is reordered past its group, and a page
+ * inside a folder or a split stays where it is.
+ */
+export function homeDisplayUnits(
+  units: readonly SidebarDisplayUnit[],
+  activeId: string | null,
+): SidebarDisplayUnit[] {
+  const groups = new Map<string, { text: string; members: SidebarTabEntry[] }>();
+  const order: (SidebarDisplayUnit | string)[] = [];
+  for (const unit of units) {
+    if (unit.kind !== "tab") {
+      order.push(unit);
+      continue;
+    }
+    if (unit.tab.home) continue;
+    const search = unit.depth === 0 ? unit.tab.search : null;
+    if (!search) {
+      order.push(unit);
+      continue;
+    }
+    if (search.results && unit.tab.id !== activeId) continue;
+    const group = groups.get(search.id);
+    if (group) group.members.push(unit);
+    else {
+      groups.set(search.id, { text: search.text, members: [unit] });
+      order.push(search.id);
+    }
+  }
+  return order.flatMap((item) => {
+    if (typeof item !== "string") return [item];
+    const group = groups.get(item)!;
+    const head: SidebarSearchHead = {
+      kind: "search",
+      key: `search:${item}`,
+      search: item,
+      text: group.text,
+      depth: 0,
+    };
+    return [head, ...group.members];
+  });
+}
+
+/**
+ * The rail's flat list while Home is on: Home first, then the rest in order,
+ * with the pages of one search kept together where the first of them stood
+ * and a results page only while it is in front.
+ */
+export function homeRailTabs(tabs: readonly TabView[], activeId: string | null): TabView[] {
+  const home = tabs.filter((tab) => tab.home).slice(0, 1);
+  const groups = new Map<string, TabView[]>();
+  const order: (TabView | string)[] = [];
+  for (const tab of tabs) {
+    if (tab.home) continue;
+    const search = tab.search;
+    if (!search) {
+      order.push(tab);
+      continue;
+    }
+    if (search.results && tab.id !== activeId) continue;
+    const group = groups.get(search.id);
+    if (group) group.push(tab);
+    else {
+      groups.set(search.id, [tab]);
+      order.push(search.id);
+    }
+  }
+  return [
+    ...home,
+    ...order.flatMap((item) => (typeof item === "string" ? groups.get(item)! : [item])),
+  ];
 }

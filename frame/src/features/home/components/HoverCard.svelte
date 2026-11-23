@@ -1,12 +1,11 @@
 <script lang="ts">
-  import type { Row } from "../lib/model";
+  import type { Row } from "$domain/home";
   let { row, x, y }: { row: Row; x: number; y: number } = $props();
 </script>
 
 <div class="hover" role="tooltip" style:left={`${x}px`} style:top={`${y}px`}>
   <p class="title" dir="auto">{row.label}</p>
   {#if row.host}<p class="host" dir="auto">{row.host}</p>{/if}
-  {#if row.note}<p class="note" dir="auto">{row.note}</p>{/if}
   {#if row.known.length}
     <ul>
       {#each row.known as section (section.id)}<li dir="auto">{section.label}</li>{/each}
@@ -45,18 +44,6 @@
   .host {
     color: var(--color-faint);
     font-size: var(--text-label);
-  }
-
-  .note {
-    display: -webkit-box;
-    margin-block-start: 4px;
-    overflow: hidden;
-    color: var(--color-muted);
-    font-size: var(--text-label);
-    line-height: 17px;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 3;
-    line-clamp: 3;
   }
 
   ul {

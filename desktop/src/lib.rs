@@ -7886,7 +7886,18 @@ fn finish_browser_setup(
         Projection::HomeChanged { profile, space } => {
             home::emit_home_changed(&emit_handle, profile, space)
         }
-        Projection::HomeShow { search } => home::emit_home_show(&emit_handle, search),
+        Projection::HomeShow {
+            search,
+            slot,
+            entry,
+        } => home::emit_home_show(
+            &emit_handle,
+            home::HomeShowV1 {
+                search,
+                slot,
+                entry,
+            },
+        ),
     });
 
     let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());

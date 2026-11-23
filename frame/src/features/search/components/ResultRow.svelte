@@ -54,6 +54,8 @@
     icon = null,
     keys = [],
     calculation,
+    detail: given,
+    kind: named,
     id,
     index,
     setsize,
@@ -70,6 +72,9 @@
     /** A shortcut that runs this row, shown in place of its kind. */
     keys?: string[];
     calculation?: Calculation;
+    /** The line under the title and the row's kind, for a row with no native result. */
+    detail?: string;
+    kind?: string;
     id: string;
     index: number;
     setsize: number;
@@ -90,7 +95,7 @@
   }
 
   let launcher = $derived(variant === "launcher");
-  let detail = $derived(result ? resultDetail(result) : "");
+  let detail = $derived(result ? resultDetail(result) : (given ?? ""));
   let range = $derived(matchRange(title, query));
   // A site the user has reached is shown by its own mark. The clock belongs to
   // a recorded search, not to every visited page.
@@ -128,6 +133,7 @@
   // The search row already names its engine inline; everything else says what
   // it is, so a mixed list needs no section headings.
   let kind = $derived.by(() => {
+    if (named) return named;
     if (calculation) return m.launcher_kind_calculator();
     switch (result?.kind) {
       case "tab":

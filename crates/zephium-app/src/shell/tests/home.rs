@@ -13,6 +13,8 @@ struct FakeMaps {
     started: Mutex<Vec<MapStart>>,
     forgotten: Mutex<Vec<MapId>>,
     profiles: Mutex<Vec<ProfileId>>,
+    /// Maps whose driver the host has given up.
+    dropped: Mutex<Vec<MapId>>,
 }
 
 impl HomeMaps for FakeMaps {
@@ -22,6 +24,11 @@ impl HomeMaps for FakeMaps {
             .lock()
             .unwrap()
             .unwrap_or(Err(MapRefusal::NotAMap))
+    }
+    fn holds(&self, map: MapId) -> bool {
+        self.started.lock().unwrap().iter().any(|s| s.map == map)
+            && !self.dropped.lock().unwrap().contains(&map)
+            && !self.forgotten.lock().unwrap().contains(&map)
     }
     fn forget(&self, map: MapId) {
         self.forgotten.lock().unwrap().push(map);
@@ -109,7 +116,7 @@ fn shown(seen: &Seen) -> Vec<String> {
         .unwrap()
         .iter()
         .filter_map(|projection| match projection {
-            Projection::HomeShow { search } => Some(search.clone()),
+            Projection::HomeShow { search, .. } => Some(search.clone()),
             _ => None,
         })
         .collect()
@@ -879,26 +886,54 @@ fn a_tab_not_opened_from_home_follows_tabs_after_close() {
     }
 }
 
+/// Runs `text` from Home as a map and opens one page from it, so the next
+/// search does not let it go, then brings Home back to the front.
+fn kept_search(shell: &mut Shell, home: ItemId, text: &str) -> zephium_core::home::Search {
+    let _ = shell.handle_operation(Command::Activate(home));
+    run_from_home(shell, text, "search", false);
+    let search = search_of(shell, text);
+    open_page(shell, search.id, "a1");
+    let _ = shell.handle_operation(Command::Activate(home));
+    search_of(shell, text)
+}
+
+fn results_tab(shell: &mut Shell, map: MapId, text: &str) -> ItemId {
+    let _answer = read(shell, |done| HomeCommand::ReadResults {
+        map,
+        url: engine_url(text),
+        done,
+    });
+    shell
+        .home
+        .searches
+        .by_map(map)
+        .and_then(|search| search.results)
+        .expect("a results tab opened")
+}
+
 #[test]
 fn the_thirty_third_search_lets_go_of_the_oldest_and_its_tabs() {
     let (mut shell, _engine, maps, _seen) = home_shell(Ok(MapKind::Place));
     let home = front(&shell);
-    run_from_home(&mut shell, "query 0", "search", false);
-    let oldest = only_search(&shell);
-    let page = open_page(&mut shell, oldest.id, "a1");
+    let oldest = kept_search(&mut shell, home, "query 0");
+    let page = oldest.pages[0].tab;
     assert!(shell.home_tab_search(page).is_some());
-    let _ = shell.handle_operation(Command::Activate(home));
+    let unseen = results_tab(&mut shell, oldest.map.unwrap(), "query 0");
     for n in 1..=MAX_SEARCHES_PER_PROFILE {
-        run_from_home(&mut shell, &format!("query {n}"), "search", false);
+        kept_search(&mut shell, home, &format!("query {n}"));
         assert_eq!(front(&shell), home);
     }
     let kept = shell.home_records().unwrap().searches;
     assert_eq!(kept.len(), MAX_SEARCHES_PER_PROFILE);
     assert!(kept.iter().all(|search| search.id != oldest.id));
     assert!(kept.iter().any(|search| search.text == "query 1"));
-    assert!(shell.items.tab(page).is_some(), "its tabs stay open");
+    assert!(shell.items.tab(page).is_some(), "its pages stay open");
     assert!(shell.home_origin(page).is_none());
     assert!(shell.home_tab_search(page).is_none());
+    assert!(
+        shell.items.tab(unseen).is_none(),
+        "a results tab never in front closes with it"
+    );
     assert_eq!(*maps.forgotten.lock().unwrap(), vec![oldest.map.unwrap()]);
 }
 
@@ -906,11 +941,11 @@ fn the_thirty_third_search_lets_go_of_the_oldest_and_its_tabs() {
 fn at_most_eight_results_reads_wait_at_once() {
     use super::super::home::MAX_PENDING_READS;
     let (mut shell, _engine, _maps, _seen) = home_shell(Ok(MapKind::Place));
+    let home = front(&shell);
     let mut waiting = Vec::new();
     for n in 0..MAX_PENDING_READS {
         let text = format!("query {n}");
-        run_from_home(&mut shell, &text, "search", false);
-        let map = search_of(&shell, &text).map.unwrap();
+        let map = kept_search(&mut shell, home, &text).map.unwrap();
         waiting.push(read(&mut shell, |done| HomeCommand::ReadResults {
             map,
             url: engine_url(&text),
@@ -919,8 +954,8 @@ fn at_most_eight_results_reads_wait_at_once() {
     }
     let tabs = today(&shell).len();
     let text = format!("query {MAX_PENDING_READS}");
-    run_from_home(&mut shell, &text, "search", false);
-    let map = search_of(&shell, &text).map.unwrap();
+    let map = kept_search(&mut shell, home, &text).map.unwrap();
+    let tabs = tabs + 1;
     let refused = read(&mut shell, |done| HomeCommand::ReadResults {
         map,
         url: engine_url(&text),
@@ -1143,4 +1178,385 @@ fn view_source_still_works_while_home_reads_a_results_page() {
         "<main>results</main>"
     );
     assert_eq!(front(&shell), own, "the read opens nothing");
+}
+
+fn shown_rows(seen: &Seen) -> Vec<(String, Option<u8>, Option<String>)> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter_map(|projection| match projection {
+            Projection::HomeShow {
+                search,
+                slot,
+                entry,
+            } => Some((search.clone(), *slot, entry.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn asking_again_restarts_a_map_whose_driver_is_gone_and_reuses_one_still_held() {
+    let (mut shell, _engine, maps, seen) = home_shell(Ok(MapKind::Place));
+    run_from_home(&mut shell, "coffee near shibuya", "search", false);
+    let search = only_search(&shell);
+    let first = search.map.unwrap();
+
+    // Held, finished or not: shown again, nothing started.
+    let again = run_from_home(&mut shell, "coffee near shibuya", "search", false);
+    assert_eq!(again.reason, OperationReason::HomeMapStarted);
+    assert_eq!(maps.started.lock().unwrap().len(), 1);
+    assert_eq!(only_search(&shell).map, Some(first));
+
+    // The host gave up its driver: a new map for the same search.
+    let waiting = read(&mut shell, |done| HomeCommand::ReadResults {
+        map: first,
+        url: engine_url("coffee near shibuya"),
+        done,
+    });
+    maps.dropped.lock().unwrap().push(first);
+    seen.lock().unwrap().clear();
+    let restarted = run_from_home(&mut shell, "coffee near shibuya", "search", false);
+    assert_eq!(restarted.reason, OperationReason::HomeMapStarted);
+    let started = maps.started.lock().unwrap().clone();
+    assert_eq!(started.len(), 2);
+    let second = started[1].map;
+    assert_ne!(second, first);
+    assert_eq!(started[1].search, search.id);
+    let record = only_search(&shell);
+    assert_eq!(record.id, search.id);
+    assert_eq!(record.map, Some(second));
+    assert_eq!(record.kind, SearchKind::Place);
+    assert_eq!(*maps.forgotten.lock().unwrap(), vec![first]);
+    assert_eq!(waiting.try_recv().unwrap(), Err(ResultsRefusal::Unknown));
+    assert_eq!(shown(&seen), vec![search.id.to_string()]);
+
+    // The new map is held: asked again, it is shown, not started.
+    run_from_home(&mut shell, "coffee near shibuya", "search", false);
+    assert_eq!(maps.started.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn home_is_shown_at_the_row_a_closed_page_was_opened_from() {
+    let (mut shell, _engine, _maps, seen) = home_shell(Ok(MapKind::Place));
+    let home = front(&shell);
+    run_from_home(&mut shell, "coffee near shibuya", "search", false);
+    let search = only_search(&shell).id;
+    let opened = shell.handle_operation(Command::Home(Box::new(HomeCommand::OpenPage {
+        search,
+        slot: 1,
+        entry: "0123456789abcdef".into(),
+        url: Some(url::Url::parse("https://cafe.example/menu").unwrap()),
+    })));
+    assert_eq!(opened.outcome, OperationOutcome::Applied);
+    let page = front(&shell);
+    seen.lock().unwrap().clear();
+    let _ = shell.handle_operation(Command::Close(page));
+    assert_eq!(front(&shell), home);
+    assert_eq!(
+        shown_rows(&seen),
+        vec![(
+            search.to_string(),
+            Some(1),
+            Some("0123456789abcdef".to_owned())
+        )]
+    );
+
+    // The results page has no row.
+    let _ = shell.handle_operation(Command::Home(Box::new(HomeCommand::OpenResults { search })));
+    let results = front(&shell);
+    assert_ne!(results, home);
+    seen.lock().unwrap().clear();
+    let _ = shell.handle_operation(Command::Close(results));
+    assert_eq!(shown_rows(&seen), vec![(search.to_string(), None, None)]);
+
+    // Nor has a click on the group's title.
+    seen.lock().unwrap().clear();
+    let _ = shell.handle_operation(Command::Home(Box::new(HomeCommand::FocusSearch { search })));
+    assert_eq!(shown_rows(&seen), vec![(search.to_string(), None, None)]);
+
+    // Nor an address.
+    run_from_home(&mut shell, "docs.rs", "url", false);
+    let address = search_of(&shell, "docs.rs").id;
+    let docs = front(&shell);
+    let _ = shell.handle_operation(Command::Run("tab.new".into()));
+    let _ = shell.handle_operation(Command::Activate(docs));
+    seen.lock().unwrap().clear();
+    let _ = shell.handle_operation(Command::Close(docs));
+    assert_eq!(shown_rows(&seen), vec![(address.to_string(), None, None)]);
+}
+
+fn projected_home(seen: &Seen) -> bool {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|projection| match projection {
+            Projection::Items(state) => Some(state.home),
+            _ => None,
+        })
+        .expect("the items were projected")
+}
+
+#[test]
+fn the_items_say_whether_a_new_tab_here_is_home() {
+    let (mut shell, _engine, _maps, seen) = home_shell(Err(MapRefusal::NotAMap));
+    shell.project_items();
+    assert!(projected_home(&seen));
+    let set = |shell: &mut Shell, key: &str, value: &str| {
+        shell.handle(Command::SetAppSetting {
+            key: key.into(),
+            value: value.into(),
+        });
+    };
+
+    set(&mut shell, "home.mode", "classic");
+    assert!(!projected_home(&seen), "classic");
+    set(&mut shell, "home.mode", "home");
+    assert!(projected_home(&seen));
+
+    set(&mut shell, "tabs.new-page", "https://start.example/");
+    assert!(!projected_home(&seen), "a custom new-tab page");
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(projected_home(&seen), "private keeps Home");
+    let _ = shell.handle_operation(Command::Run("tab.close".into()));
+    assert!(!shell.incognito_profile(shell.windows.focused().unwrap().profile));
+    assert!(!projected_home(&seen), "back to the custom page");
+    set(&mut shell, "tabs.new-page", "");
+    assert!(projected_home(&seen));
+}
+
+#[test]
+fn showing_a_search_keeps_its_place_and_asking_it_again_moves_it() {
+    let (mut shell, _engine, _maps, _seen) = home_shell(Ok(MapKind::Place));
+    let home = front(&shell);
+    let older = kept_search(&mut shell, home, "query a");
+    kept_search(&mut shell, home, "query b");
+    let order = |shell: &Shell| -> Vec<String> {
+        shell
+            .home_records()
+            .unwrap()
+            .searches
+            .into_iter()
+            .map(|search| search.text)
+            .collect()
+    };
+    assert_eq!(order(&shell), ["query b", "query a"]);
+    let focused = shell.handle_operation(Command::Home(Box::new(HomeCommand::FocusSearch {
+        search: older.id,
+    })));
+    assert_ne!(focused.outcome, OperationOutcome::Rejected);
+    assert_eq!(order(&shell), ["query b", "query a"]);
+    assert_eq!(search_of(&shell, "query a").at_ms, older.at_ms);
+
+    let _ = shell.handle_operation(Command::Activate(home));
+    run_from_home(&mut shell, "query a", "search", false);
+    assert_eq!(order(&shell), ["query a", "query b"]);
+}
+
+#[test]
+fn a_new_search_lets_go_of_the_ones_nothing_came_of_in_its_space() {
+    let (mut shell, engine, maps, _seen) = home_shell(Ok(MapKind::Place));
+    let first_space = shell.windows.focused().unwrap().space;
+    let home = front(&shell);
+    let opened = kept_search(&mut shell, home, "opened");
+
+    // A results page loaded in place was in front.
+    *maps.answer.lock().unwrap() = Some(Err(MapRefusal::NotAMap));
+    run_from_home(&mut shell, "rust lifetimes", "search", false);
+    let in_place = search_of(&shell, "rust lifetimes");
+    assert_eq!(in_place.results, Some(home));
+    assert!(in_place.results_seen);
+    let _ = shell.handle_operation(Command::Run("tab.new".into()));
+    let home = front(&shell);
+    assert!(shell.is_home_tab(home));
+    *maps.answer.lock().unwrap() = Some(Ok(MapKind::Place));
+
+    // A background results tab the person looked at.
+    run_from_home(&mut shell, "looked at", "search", false);
+    let looked = search_of(&shell, "looked at");
+    let looked_tab = results_tab(&mut shell, looked.map.unwrap(), "looked at");
+    let _ = shell.handle_operation(Command::Activate(looked_tab));
+    let _ = shell.handle_operation(Command::Activate(home));
+    assert!(search_of(&shell, "looked at").results_seen);
+
+    run_from_home(&mut shell, "docs.rs", "url", false);
+    let _ = shell.handle_operation(Command::Run("tab.new".into()));
+
+    // Another space keeps its own idle search.
+    let _ = shell.handle_operation(Command::Space(Box::new(crate::api::SpaceCommand::Create {
+        name: "Second".into(),
+        look: zephium_core::spaces::SpaceLook::default(),
+    })));
+    run_from_home(&mut shell, "elsewhere", "search", false);
+    let elsewhere = search_of(&shell, "elsewhere");
+    let _ = shell.handle_operation(Command::Space(Box::new(crate::api::SpaceCommand::Switch(
+        first_space,
+    ))));
+    let home = front(&shell);
+    assert!(shell.is_home_tab(home));
+
+    // A results tab behind Home that was never in front.
+    run_from_home(&mut shell, "unseen", "search", false);
+    let unseen = search_of(&shell, "unseen");
+    let unseen_tab = results_tab(&mut shell, unseen.map.unwrap(), "unseen");
+    assert_eq!(front(&shell), home);
+    let forgotten = maps.forgotten.lock().unwrap().len();
+
+    run_from_home(&mut shell, "next", "search", false);
+    let texts: Vec<String> = shell
+        .home_records()
+        .unwrap()
+        .searches
+        .into_iter()
+        .map(|search| search.text)
+        .collect();
+    assert_eq!(
+        texts,
+        ["next", "docs.rs", "looked at", "rust lifetimes", "opened"]
+    );
+    assert!(shell.items.tab(unseen_tab).is_none(), "its tab closed");
+    assert!(shell.items.tab(looked_tab).is_some());
+    assert!(shell.items.tab(opened.pages[0].tab).is_some());
+    let gone = maps.forgotten.lock().unwrap()[forgotten..].to_vec();
+    assert_eq!(gone, vec![unseen.map.unwrap()]);
+    assert!(shell.home.searches.get(elsewhere.id).is_some());
+    assert!(!engine.calls().iter().any(|call| call.starts_with("read ")));
+
+    // A search with no results tab at all leaves too.
+    run_from_home(&mut shell, "after", "search", false);
+    assert!(shell
+        .home
+        .searches
+        .get(search_of(&shell, "after").id)
+        .is_some());
+    assert!(shell
+        .home_records()
+        .unwrap()
+        .searches
+        .iter()
+        .all(|search| search.text != "next"));
+}
+
+#[test]
+fn forgetting_a_search_closes_its_results_tab_only_if_never_in_front() {
+    let (mut shell, _engine, _maps, _seen) = home_shell(Ok(MapKind::Place));
+    let home = front(&shell);
+    let unseen = kept_search(&mut shell, home, "unseen");
+    let map = unseen.map.unwrap();
+    let answer = read(&mut shell, |done| HomeCommand::ReadResults {
+        map,
+        url: engine_url("unseen"),
+        done,
+    });
+    let unseen_tab = search_of(&shell, "unseen").results.unwrap();
+    let forgot = shell.handle_operation(Command::Home(Box::new(HomeCommand::ForgetSearch {
+        search: unseen.id,
+    })));
+    assert_eq!(forgot.outcome, OperationOutcome::Applied);
+    assert!(shell.items.tab(unseen_tab).is_none());
+    assert_eq!(
+        answer.try_recv().unwrap(),
+        Err(ResultsRefusal::Unavailable),
+        "settled as for a removed tab"
+    );
+    assert!(shell.home.reads.is_empty());
+    assert!(shell.items.tab(unseen.pages[0].tab).is_some(), "pages stay");
+    assert_eq!(front(&shell), home);
+
+    let looked = kept_search(&mut shell, home, "looked");
+    let looked_tab = results_tab(&mut shell, looked.map.unwrap(), "looked");
+    let _ = shell.handle_operation(Command::Activate(looked_tab));
+    let _ = shell.handle_operation(Command::Activate(home));
+    let _ = shell.handle_operation(Command::Home(Box::new(HomeCommand::ForgetSearch {
+        search: looked.id,
+    })));
+    assert!(shell.items.tab(looked_tab).is_some(), "a seen one stays");
+    assert!(shell.home_origin(looked_tab).is_none());
+
+    // One in front now stays too, whatever its flag says.
+    let front_now = kept_search(&mut shell, home, "in front");
+    let tab = results_tab(&mut shell, front_now.map.unwrap(), "in front");
+    shell
+        .home
+        .searches
+        .get_mut(front_now.id)
+        .unwrap()
+        .results_seen = false;
+    let window = shell.windows.focused_mut().unwrap();
+    window.active = Some(tab);
+    let _ = shell.handle_operation(Command::Home(Box::new(HomeCommand::ForgetSearch {
+        search: front_now.id,
+    })));
+    assert!(shell.items.tab(tab).is_some());
+}
+
+fn untouched(shell: &Shell) -> Vec<ItemId> {
+    let space = shell.windows.focused().unwrap().space;
+    shell
+        .regular_tabs(space)
+        .into_iter()
+        .filter(|id| shell.is_untouched_new_tab(*id))
+        .collect()
+}
+
+#[test]
+fn one_home_is_left_per_space_when_home_turns_on_or_after_restore() {
+    let store = Arc::new(FakeStore::default());
+    store.settings.lock().unwrap().extend([
+        ("tabs.startup".to_owned(), "continue".to_owned()),
+        ("home.mode".to_owned(), "classic".to_owned()),
+    ]);
+    let attach = |shell: &mut Shell| {
+        shell.handle(Command::Home(Box::new(HomeCommand::Attach(
+            HomeMapsAttachment(Arc::new(FakeMaps::default())),
+        ))));
+    };
+    let (mut classic, _engine, _screen) = setup_with(store.clone());
+    classic.handle(Command::Bootstrap);
+    attach(&mut classic);
+    classic.handle(Command::Open);
+    classic.handle(Command::Open);
+    let tabs = untouched(&classic);
+    assert_eq!(tabs.len(), 3, "classic opens a blank tab each time");
+    let _ = classic.handle_operation(Command::Activate(tabs[1]));
+    attach(&mut classic);
+    assert_eq!(untouched(&classic), tabs, "classic keeps them all");
+    assert!(tabs.iter().all(|id| !classic.is_home_tab(*id)));
+
+    // Turning Home on keeps the one in front.
+    classic.handle(Command::SetAppSetting {
+        key: "home.mode".into(),
+        value: "home".into(),
+    });
+    assert_eq!(untouched(&classic), vec![tabs[1]]);
+    assert_eq!(homes(&classic), vec![tabs[1]]);
+    assert_eq!(front(&classic), tabs[1]);
+    drop(classic);
+
+    // A blank tab is never saved, so a restore brings back one Home.
+    let (mut restored, _engine, _screen) = setup_with(store.clone());
+    restored.handle(Command::Bootstrap);
+    attach(&mut restored);
+    assert_eq!(homes(&restored).len(), 1);
+    assert_eq!(untouched(&restored).len(), 1);
+    drop(restored);
+
+    // Home mode before anything hosts it: blank tabs gather until Home is
+    // attached, then the first is kept when none of them is in front.
+    *store.saved.lock().unwrap() = None;
+    let (mut early, _engine, _screen) = setup_with(store);
+    early.handle(Command::Bootstrap);
+    early.handle(Command::Open);
+    early.handle(Command::Open);
+    let tabs = untouched(&early);
+    assert_eq!(tabs.len(), 3);
+    navigate_and_commit(&mut early, tabs[0], "example.com");
+    let blank = untouched(&early);
+    assert_eq!(blank, tabs[1..]);
+    let _ = early.handle_operation(Command::Activate(tabs[0]));
+    attach(&mut early);
+    assert_eq!(homes(&early), vec![blank[0]]);
+    assert_eq!(untouched(&early), vec![blank[0]]);
+    assert_eq!(front(&early), tabs[0]);
 }

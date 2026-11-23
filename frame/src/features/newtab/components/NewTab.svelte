@@ -11,7 +11,7 @@
   import { commands } from "$shared/ipc/bindings";
   import { events } from "$shared/ipc/native-events";
   import { preferences } from "$domain/preferences";
-  import { newTabImage, imageFailed } from "$session/newtab-background.svelte";
+  import { newTabBackground, newTabImage, imageFailed } from "$session/newtab-background.svelte";
   import { taskCounts } from "$domain/resources";
   import { tabs } from "$domain/tabs";
   import Icon from "$shared/ui/Icon";
@@ -39,6 +39,8 @@
 
   let {
     search,
+    canvas,
+    welcome = true,
     oncustomize,
     onaccount,
     ontasks,
@@ -46,6 +48,10 @@
   }: {
     /** The field that hangs in the notch. */
     search: Snippet;
+    /** What is drawn between the field and the figures: Home's searches. */
+    canvas?: Snippet;
+    /** The name and the time show; they leave once there are searches to draw. */
+    welcome?: boolean;
     /** Opens this page's settings. */
     oncustomize?: () => void;
     /** Opens the account in Settings, or straight onto buying credits. */
@@ -74,7 +80,8 @@
   let named = $derived(width >= 1100);
   let profile = $derived(tabs.profile()?.id ?? null);
   let picture = $derived(newTabImage());
-  let useSky = $derived(picture === null);
+  let plain = $derived(picture === null && newTabBackground() === "plain");
+  let useSky = $derived(picture === null && !plain);
   let background = $derived.by(() => {
     const selected = picture;
     return selected
@@ -84,10 +91,10 @@
         })
       : null;
   });
-  let showWordmark = $derived(preferences.value("ui.newtab-wordmark") !== "false");
+  let showWordmark = $derived(welcome && preferences.value("ui.newtab-wordmark") !== "false");
   let showTrackers = $derived(preferences.value("ui.newtab-trackers") !== "false");
-  let showGreeting = $derived(preferences.value("ui.newtab-greeting") === "true");
-  let showClock = $derived(preferences.value("ui.newtab-clock") === "true");
+  let showGreeting = $derived(welcome && preferences.value("ui.newtab-greeting") === "true");
+  let showClock = $derived(welcome && preferences.value("ui.newtab-clock") === "true");
   let showDue = $derived(
     !incognito && preferences.enabled("tasks") && preferences.value("ui.newtab-tasks") === "true",
   );
@@ -343,7 +350,8 @@
   class="newtab"
   class:arriving={useSky && arriving}
   class:entering={useSky && !arriving}
-  class:custom={!useSky}
+  class:custom={!useSky && !plain}
+  class:plain
   data-scene={scene}
   data-ready={!useSky || shown === scene}
   aria-label={m.new_tab()}
@@ -431,6 +439,8 @@
       {#if glint && useSky}<use href={`#${id}-letters`} fill={`url(#${id}-glint)`} />{/if}
     </svg>
   {/if}
+
+  {#if canvas}<div class="canvas" style:top={`${page.notch.height}px`}>{@render canvas()}</div>{/if}
 
   <!-- The band the field hangs in is the window's title bar: beside the
        field, it moves the window. -->
@@ -600,10 +610,33 @@
     --disc-rim: var(--color-border);
   }
 
+  /* Plain is the window's own layers: the page one step under the cards
+     drawn on it, solid unless the window's material lets the desktop through. */
+  .newtab.plain {
+    --sky-paper: var(--color-canvas);
+    --sky-card: var(--color-field);
+    --sky-card-rim: var(--color-border);
+    --sky-card-edge: var(--color-border);
+    --disc-fill: var(--color-surface);
+    --disc-rim: var(--color-border);
+    --sky-shadow: transparent;
+    --sky-ink: var(--color-label-secondary);
+    --sky-name: var(--color-text);
+    --sky-type-edge: transparent;
+    --sky-type-halo: transparent;
+  }
+
   .page,
   .sky {
     position: absolute;
     inset: 0;
+  }
+
+  /* Home's searches, between the field and the figures. */
+  .canvas {
+    position: absolute;
+    inset-inline: 0;
+    inset-block-end: 0;
   }
 
   .page {
@@ -613,7 +646,7 @@
   /* The picture eases off at the page's sides rather than ending at them,
      so a bright cloud sinks into the edge instead of meeting whatever the
      window's glass is showing beside it. */
-  .newtab:not(.custom) .page::after {
+  .newtab:not(.custom, .plain) .page::after {
     position: absolute;
     inset: 0;
     background: linear-gradient(
@@ -892,16 +925,16 @@
     transform-origin: left center;
   }
 
-  .custom .control {
+  :is(.custom, .plain) .control {
     --sky-ink: var(--color-text);
   }
 
-  .custom .figure {
+  :is(.custom, .plain) .figure {
     background: var(--figure-surface, var(--color-surface));
     color: var(--color-label-secondary);
   }
 
-  .custom .figure .foot:not(.late) {
+  :is(.custom, .plain) .figure .foot:not(.late) {
     color: var(--color-label-secondary);
   }
 
@@ -910,7 +943,7 @@
     --figure-surface: color-mix(in srgb, var(--color-surface) 92%, transparent);
   }
 
-  .custom button.figure:hover {
+  :is(.custom, .plain) button.figure:hover {
     background: color-mix(
       in srgb,
       var(--color-text) 9%,
@@ -989,7 +1022,7 @@
     }
 
     .custom .figure,
-    .custom button.figure:hover {
+    :is(.custom, .plain) button.figure:hover {
       background: Canvas;
       color: CanvasText;
     }
@@ -1024,5 +1057,10 @@
   :global(:root[data-reduce-motion="true"])
     :is(.arriving .sky, .arriving .mark, .arriving .control, .figures) {
     transition: none;
+  }
+
+  /* Plain lets a window's material through where the window has one. */
+  :global(:root:not([data-material="none"])[data-material]) .newtab.plain .page {
+    background: transparent;
   }
 </style>

@@ -43,6 +43,7 @@ vi.mock("$domain/account/account-model", async (original) => ({
 vi.mock("$domain/tabs", () => ({
   tabs: {
     profile: () => ({ id: "00000000000000000000000501", name: "Ada", kind: native.kind }),
+    homeOn: () => false,
   },
 }));
 

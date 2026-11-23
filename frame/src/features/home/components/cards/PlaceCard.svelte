@@ -2,12 +2,12 @@
   import { getContext, untrack } from "svelte";
   import { ArrowDown01Icon } from "@hugeicons/core-free-icons";
   import { focusStop } from "$shared/canvas";
-  import FavIcon from "$shared/ui/FavIcon";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
   import { SIZE } from "../../lib/layout";
   import type { HomeNode } from "../../lib/layout";
+  import PlaceMark from "./PlaceMark.svelte";
   import RowView from "./Row.svelte";
   import Card from "./Card.svelte";
   import { refusal } from "../../lib/refusal";
@@ -19,8 +19,9 @@
   let place = $derived(item.place);
   let search = $derived(item.search.id);
   let key = $derived(`${search}/${place.id}`);
+  // On return the row a page came from is the one marked; the asked row steps aside.
+  let chosen = $derived(place.rows.find((row) => top.marked(search, row.id))?.id ?? place.asked);
   let expanded = $derived(top.expanded(key));
-  let mark = $derived(top.mark(place));
 
   // Rows already here when the card is drawn are simply there; the ones that
   // come in after it arrive, in the order they came.
@@ -43,7 +44,7 @@
     {@attach at(id)}
     onclick={() => top.intent({ kind: "site", search, place: place.id })}
   >
-    {#if mark}<FavIcon image={mark} size={22} lit />{/if}
+    <PlaceMark {place} size={22} />
     <span class="names">
       <span class="title" dir="auto">{place.title}</span>
       <span class="host" dir="auto">{place.host}</span>
@@ -74,7 +75,7 @@
         stop={`${id}/${row.id}`}
         {search}
         height={SIZE.row}
-        selected={row.id === place.asked}
+        selected={row.id === chosen}
         arriving={late.get(row.id) ?? null}
       />
     {/each}

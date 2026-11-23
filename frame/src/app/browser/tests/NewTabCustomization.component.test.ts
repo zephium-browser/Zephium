@@ -30,7 +30,10 @@ const native = vi.hoisted(() => ({
 // The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
 vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$domain/tabs", () => ({
-  tabs: { profile: () => ({ id: native.profile, kind: "default", name: "Alex" }) },
+  tabs: {
+    profile: () => ({ id: native.profile, kind: "default", name: "Alex" }),
+    homeOn: () => false,
+  },
 }));
 vi.mock("$shared/sky", async (original) => {
   const real = await original<typeof import("$shared/sky")>();
@@ -159,6 +162,27 @@ test("defaults do no image work, and every figure and wordmark updates live and 
   expect(preferences.value("ui.newtab-clock")).toBe("true");
   expect(preferences.value("ui.newtab-clock-format")).toBe("system");
   expect(preferences.value("search.engine")).toBe("google");
+});
+
+test("Settings chooses between Home and the classic new tab, offers a plain ground, and resets both", async () => {
+  await preferences.init();
+  const ntp = await tab();
+  const settings = await settingsScreen();
+  await settings.getByRole("button", { name: "New tabs open to", exact: true }).click();
+  await expect
+    .element(page.getByRole("option", { name: "Classic new tab", exact: true }))
+    .toBeVisible();
+  await page.getByRole("option", { name: "Home", exact: true }).click();
+  await expect.poll(() => native.settings["home.mode"]).toBe("home");
+  await settings.getByRole("button", { name: "Background", exact: true }).click();
+  await page.getByRole("option", { name: "Plain", exact: true }).click();
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector(".sky")).toBeNull();
+  expect(native.media).not.toHaveBeenCalled();
+  await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
+  await expect.poll(() => preferences.value("home.mode")).toBe("classic");
+  expect(preferences.value("ui.newtab-background")).toBe("sky");
+  await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
 });
 
 test("a custom background uses one sized local image, no sky decode or frost, and dims live", async () => {

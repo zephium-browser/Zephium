@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri_specta::Event;
+use zephium_core::search::SearchEngine;
 use zephium_map_driver::wire::MapChange;
 
 /// The searches on Home of one profile and space, newest first.
@@ -26,6 +27,8 @@ pub(crate) struct HomeSearchV1 {
     #[specta(type = f64)]
     pub(crate) at_ms: u64,
     pub(crate) kind: HomeSearchKindV1,
+    /// The engine the search was asked with, for its mark.
+    pub(crate) engine: SearchEngine,
     /// A tab shows the search's results page.
     pub(crate) results_open: bool,
     pub(crate) map: Option<HomeMapV1>,
@@ -70,6 +73,11 @@ pub(crate) struct HomeChangedV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type, Event)]
 pub(crate) struct HomeShowV1 {
     pub(crate) search: String,
+    /// The row the closed page was opened from, as the snapshot's pages
+    /// name it (`entry` is the entry id, `site`, `social-<network>` or
+    /// `also-<index>`); null for anything not opened from a row.
+    pub(crate) slot: Option<u8>,
+    pub(crate) entry: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, specta::Type)]

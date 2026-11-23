@@ -1,10 +1,10 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import { focusStop } from "$shared/canvas";
-  import FavIcon from "$shared/ui/FavIcon";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
   import { SIZE, type HomeNode } from "../../lib/layout";
+  import PlaceMark from "./PlaceMark.svelte";
 
   let { id, data }: { id: string; data: { item: Extract<HomeNode, { kind: "thin" }> } } = $props();
   const top = getContext<HomeTop>(homeTop);
@@ -12,7 +12,7 @@
   let item = $derived(data.item);
   let place = $derived(item.place);
   let search = $derived(item.search.id);
-  let mark = $derived(top.mark(place));
+  let chosen = $derived(item.links.find((link) => top.marked(search, link.id))?.id ?? place.asked);
 </script>
 
 <section
@@ -28,7 +28,7 @@
     {@attach at(id)}
     onclick={() => top.intent({ kind: "site", search, place: place.id })}
   >
-    {#if mark}<FavIcon image={mark} size={20} lit />{/if}
+    <PlaceMark {place} size={20} />
     <span class="title" dir="auto">{place.title}</span>
     <span class="host" dir="auto">{place.host}</span>
   </button>
@@ -38,7 +38,7 @@
         <button
           type="button"
           class:action={link.kind === "action"}
-          aria-current={link.id === place.asked ? "true" : undefined}
+          aria-current={link.id === chosen ? "true" : undefined}
           style:inline-size={`${link.width}px`}
           style:block-size={`${SIZE.section}px`}
           {@attach at(`${id}/${link.kind === "row" ? link.id : `action:${link.id}`}`)}

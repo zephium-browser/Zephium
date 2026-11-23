@@ -120,6 +120,9 @@ pub struct Search {
     pub results: Option<ItemId>,
     /// Where the results page is, to open it again. Never shown.
     pub results_url: Option<String>,
+    /// The results tab has been the tab in front.
+    #[serde(default)]
+    pub results_seen: bool,
     pub pages: Vec<Page>,
 }
 
@@ -297,6 +300,7 @@ mod tests {
             map: None,
             results: None,
             results_url: None,
+            results_seen: false,
             pages: Vec::new(),
         }
     }

@@ -9,6 +9,7 @@
     roomy = false,
     tools = true,
     foot,
+    beside,
   }: {
     sites?: Snippet;
     /** Kept sites that did not fit beside the shelf, in rows over it. */
@@ -20,6 +21,8 @@
     tools?: boolean;
     /** What closes the rail at its very foot, below the kept sites. */
     foot?: Snippet;
+    /** Beside the profile: a place to go, such as Work while Home heads the column. */
+    beside?: Snippet;
   } = $props();
 </script>
 
@@ -40,15 +43,13 @@
   {#if above}<div class="dock-above" data-under-panel>{@render above()}</div>{/if}
   <!-- In the row the profile leads; down the rail it closes the column. -->
   <div class="dock-base">
-    {#if tools && !compact}<ToolShelf />
+    {#if tools && !compact}<ToolShelf />{#if beside}{@render beside()}{/if}
       <span class="dock-rule" aria-hidden="true"></span>{/if}
     {#if sites}<div class="dock-sites-slot">
         {@render sites()}
       </div>{/if}
-    {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
-        compact
-        {roomy}
-      />{/if}
+    {#if tools && compact}<span class="dock-rule" aria-hidden="true"
+      ></span>{#if beside}{@render beside()}{/if}<ToolShelf compact {roomy} />{/if}
     {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>
 </footer>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getContext } from "svelte";
-  import { focusStop, thumbnail } from "$shared/canvas";
+  import { focusStop } from "$shared/canvas";
   import { homeTop, type HomeTop } from "../../lib/context";
   import type { HomeNode } from "../../lib/layout";
 
@@ -9,8 +9,6 @@
   const at = focusStop();
   let item = $derived(data.item);
   let page = $derived(item.search.kind === "pages" ? item.search.pages[item.page]! : null);
-  let picture = $derived(page?.picture ? top.picture(page.picture) : null);
-  let missing = $state<string | null>(null);
 </script>
 
 {#if page}
@@ -19,6 +17,7 @@
     class="page"
     style:inline-size={`${item.box.width}px`}
     style:block-size={`${item.box.height}px`}
+    aria-disabled={!page.tab || undefined}
     {@attach at(id)}
     onclick={() => top.intent({ kind: "page", search: item.search.id, page: page.id })}
   >
@@ -26,11 +25,6 @@
       <span class="title" dir="auto">{page.title}</span>
       <span class="host" dir="auto">{page.host}</span>
     </span>
-    {#if picture && missing !== picture}<canvas
-        class="shot"
-        aria-hidden="true"
-        use:thumbnail={{ url: picture, width: 64, onmissing: () => (missing = picture) }}
-      ></canvas>{/if}
   </button>
 {/if}
 
@@ -73,13 +67,5 @@
   .host {
     color: var(--color-faint);
     font-size: var(--text-label);
-  }
-
-  .shot {
-    flex: none;
-    inline-size: 64px;
-    block-size: 40px;
-    border-radius: 5px;
-    background: var(--color-fill);
   }
 </style>

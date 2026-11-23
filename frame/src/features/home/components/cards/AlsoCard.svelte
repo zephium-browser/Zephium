@@ -12,12 +12,13 @@
   const top = getContext<HomeTop>(homeTop);
   const at = focusStop();
   let search = $derived(data.item.search);
+  let listed = $derived(search.also.slice(0, search.also.length - data.item.hidden));
   const kinds = { page: null, discussion: m.home_discussion, video: m.home_video } as const;
 </script>
 
 <Card width={data.item.box.width} height={data.item.box.height} label={m.home_also()}>
   <p class="label" style:block-size={`${SIZE.label}px`}>{m.home_also()}</p>
-  {#each search.also as also, index (also.id)}
+  {#each listed as also, index (also.id)}
     {@const mark = KIND_MARK[also.kind]}
     <button
       type="button"
@@ -33,6 +34,15 @@
       >
     </button>
   {/each}
+  {#if data.item.hidden}
+    <button
+      type="button"
+      class="more"
+      style:block-size={`${SIZE.moreAlso}px`}
+      {@attach at(`${id}/more`)}
+      onclick={() => top.all(search.id)}>{m.home_more({ count: data.item.hidden })}</button
+    >
+  {/if}
 </Card>
 
 <style>
@@ -64,6 +74,11 @@
 
   button:hover {
     background: var(--row-hover);
+  }
+
+  .more {
+    color: var(--color-muted);
+    font-size: var(--text-label);
   }
 
   .host span {

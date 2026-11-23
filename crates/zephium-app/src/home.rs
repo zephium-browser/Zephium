@@ -40,6 +40,8 @@ pub struct MapStart {
 /// Hosts the maps. Calls come from the shell's thread and never wait on it.
 pub trait HomeMaps: Send + Sync {
     fn start(&self, start: MapStart) -> Result<MapKind, MapRefusal>;
+    /// The host still holds the map's driver, running or finished.
+    fn holds(&self, map: MapId) -> bool;
     fn forget(&self, map: MapId);
     /// Drops everything the host remembers for a profile.
     fn forget_profile(&self, profile: ProfileId);

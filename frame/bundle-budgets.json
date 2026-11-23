@@ -66,6 +66,14 @@
       "js": 15972,
       "css": 4565
     },
+    "lazy:features/home/components/HomeCanvas.svelte": {
+      "js": 229324,
+      "css": 31230
+    },
+    "lazy:features/home/components/HomeFrame.svelte": {
+      "js": 15766,
+      "css": 1108
+    },
     "lazy:features/library/components/LibraryPage.svelte": {
       "js": 2257,
       "css": 0

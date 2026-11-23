@@ -1,11 +1,11 @@
 <script lang="ts">
   import { getContext } from "svelte";
   import { ArrowRight01Icon } from "@hugeicons/core-free-icons";
-  import { focusStop, thumbnail } from "$shared/canvas";
+  import { focusStop } from "$shared/canvas";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
-  import type { Row } from "../../lib/model";
+  import type { Row } from "$domain/home";
 
   let {
     row,
@@ -28,8 +28,6 @@
   } = $props();
   const top = getContext<HomeTop>(homeTop);
   const at = focusStop();
-  let picture = $derived(row.picture ? top.picture(row.picture) : null);
-  let missing = $state<string | null>(null);
   let menu = $derived(row.menu && !inner);
   let shown = $derived(menu ? top.shown(search, row.id) : !!row.inside);
   let canOpen = $derived((row.opens || menu) && !inner);
@@ -64,11 +62,6 @@
   >
     <span class="label" dir="auto">{row.label}</span>
     {#if row.host}<span class="host" dir="auto">{row.host}</span>{/if}
-    {#if picture && missing !== picture}<canvas
-        class="shot"
-        aria-hidden="true"
-        use:thumbnail={{ url: picture, width: 30, onmissing: () => (missing = picture) }}
-      ></canvas>{/if}
   </button>
   {#if canOpen}
     <button
@@ -145,15 +138,6 @@
     font-size: var(--text-label);
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .shot {
-    flex: none;
-    inline-size: 30px;
-    block-size: 19px;
-    margin-inline-start: auto;
-    border-radius: 4px;
-    background: var(--color-fill);
   }
 
   .inside {

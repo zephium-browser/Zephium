@@ -222,7 +222,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
             value,
             "auto" | "liquid_glass" | "vibrancy" | "acrylic" | "mica" | "mica_alt" | "none"
         ),
-        "ui.newtab-background" => matches!(value, "sky" | "image"),
+        "ui.newtab-background" => matches!(value, "sky" | "image" | "plain"),
         // An admitted local blob, never a URL or a filesystem path. The media
         // protocol resolves it only inside the current profile's store.
         "ui.newtab-image" => {
@@ -370,10 +370,12 @@ mod tests {
             assert!(value_allowed(key, "false"));
             assert!(!value_allowed(key, "1"));
         }
-        for value in ["sky", "image"] {
+        for value in ["sky", "image", "plain"] {
             assert!(value_allowed("ui.newtab-background", value));
         }
-        assert!(!value_allowed("ui.newtab-background", "gradient"));
+        for value in ["gradient", "Plain", ""] {
+            assert!(!value_allowed("ui.newtab-background", value));
+        }
         assert!(KEYS.contains(&"ui.newtab-background"));
         assert!(KEYS.contains(&"ui.newtab-image"));
         assert!(value_allowed("ui.newtab-image", ""));

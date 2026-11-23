@@ -10,19 +10,30 @@
   import EngineMenu from "./EngineMenu.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
   import { parkCaret } from "$shared/lib/parked-caret";
+  import type { HomeField } from "$domain/home";
 
   let {
     tabId,
     loadMenu,
     onsettings,
     onactive,
+    home,
+    onleave,
+    onready,
   }: {
     onsettings?: () => void;
     tabId: string | null;
     loadMenu?: () => Promise<typeof import("$shared/ui/Menu")>;
     /** Whether a query is in the field, so the page can make room for it. */
     onactive?: (active: boolean) => void;
+    /** Set while Home is on: what Home holds for the words typed, once Home is drawn. */
+    home?: () => HomeField | null;
+    /** ArrowDown with no list open: the keyboard goes on to the page below. */
+    onleave?: () => void;
+    /** Hands the page a way to put the keyboard here, or to ask words again. */
+    onready?: (field: { focus: () => void; ask: (text: string) => void }) => void;
   } = $props();
+  const homed = untrack(() => !!home);
 
   // The search session is bound to one blank tab for the life of this
   // component; Shell keys the surface on the active tab, so a change is a
@@ -31,6 +42,12 @@
     tabId: untrack(() => tabId),
     destinations: [],
     onTool: () => {},
+    home: homed
+      ? {
+          suggest: (query) => home?.()?.suggest(query) ?? [],
+          run: (suggestion) => home?.()?.run(suggestion),
+        }
+      : undefined,
   });
 
   let input = $state<HTMLInputElement>();
@@ -109,6 +126,9 @@
     if (surface.composing || event.isComposing || event.keyCode === 229) return;
     if (event.key === "Backspace" && surface.backspace()) {
       event.preventDefault();
+    } else if (event.key === "ArrowDown" && !visible && onleave) {
+      event.preventDefault();
+      onleave();
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
@@ -116,12 +136,20 @@
       if (surface.dismiss()) event.preventDefault();
     } else if (event.key === "Enter") {
       event.preventDefault();
-      surface.submit();
+      // ⌘Enter (Ctrl+Enter) is a plain search: its results page, never a map.
+      surface.submit(false, homed && (event.metaKey || event.ctrlKey));
     }
   }
 
   onMount(() => {
     input?.focus();
+    onready?.({
+      focus: () => input?.focus(),
+      ask: (text) => {
+        surface.ask(text);
+        input?.focus();
+      },
+    });
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
@@ -231,7 +259,7 @@
             variant="launcher"
             bind:ref={list}
             onhover={surface.hover}
-            onrun={surface.activate}
+            onrun={(row, meta) => surface.activate(row, meta, homed && meta)}
           />
         </div>
       </div>

@@ -784,6 +784,7 @@ fn empty_items() -> ItemsState {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }
 }
 

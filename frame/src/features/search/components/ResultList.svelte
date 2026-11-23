@@ -107,6 +107,8 @@
           icon={row.icon}
           keys={row.keys}
           calculation={row.calculation}
+          detail={row.detail}
+          kind={row.kind}
           {index}
           setsize={rows.length}
           selected={selected === row.id}

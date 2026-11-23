@@ -5,6 +5,8 @@ export class PreferenceFixture {
   failed = $state(false);
 
   value = (key: string) => this.values[key] ?? "";
+  chosen = (key: string) => key in this.values;
+  backgroundDefault = (home: boolean) => (home ? "plain" : "sky");
   saving = () => this.pending;
   saveFailed = () => this.failed;
   enabled = () => false;

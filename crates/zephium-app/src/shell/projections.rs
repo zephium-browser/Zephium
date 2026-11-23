@@ -341,6 +341,7 @@ impl Shell {
                 .filter(|id| sidebar.tab_ids.contains(id))
                 .map(|id| id.to_string()),
             split_group,
+            home: self.home_on() && self.new_tab_is_home(profile.id),
         })
     }
 

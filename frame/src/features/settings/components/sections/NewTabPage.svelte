@@ -3,7 +3,7 @@
   import NewTabPageRow from "../NewTabPageRow.svelte";
   import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
-  import { retryImage } from "$session/newtab-background.svelte";
+  import { newTabBackground, retryImage } from "$session/newtab-background.svelte";
   import Button from "$shared/ui/Button";
   import * as m from "$shared/i18n/messages";
   import { preferences } from "$domain/preferences";
@@ -24,7 +24,7 @@
     live = false;
   });
   let busy = $derived(importing || resetting || preferences.saving());
-  let ownImage = $derived(preferences.value("ui.newtab-background") === "image");
+  let ownImage = $derived(newTabBackground() === "image");
 
   async function importImage() {
     const owner = tabs.profile()?.id;
@@ -85,6 +85,18 @@
 </script>
 
 <SettingsGroup title={m.ntp_destination()}>
+  <SettingsRow settingId="ntp.home" title={m.ntp_home_mode()} description={m.ntp_home_mode_help()}>
+    <Select
+      label={m.ntp_home_mode()}
+      labelHidden
+      bind:value={() => preferences.value("home.mode"), (value) => set("home.mode", value)}
+      disabled={busy}
+      options={[
+        { value: "home", label: m.ntp_home_mode_home() },
+        { value: "classic", label: m.ntp_home_mode_classic() },
+      ]}
+    />
+  </SettingsRow>
   {#key destinationReset}<NewTabPageRow />{/key}
 </SettingsGroup>
 
@@ -97,10 +109,11 @@
     <Select
       label={m.ntp_background()}
       labelHidden
-      bind:value={() => preferences.value("ui.newtab-background"), chooseBackground}
+      bind:value={newTabBackground, chooseBackground}
       disabled={busy}
       options={[
         { value: "sky", label: m.ntp_sky() },
+        { value: "plain", label: m.ntp_plain() },
         { value: "image", label: m.ntp_own_image() },
       ]}
     />

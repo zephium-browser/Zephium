@@ -970,7 +970,8 @@ impl Shell {
             self.search.include_history = value == "true";
         }
         self.tab_preferences.apply(&key, &value);
-        if key == "home.mode" {
+        if key == "home.mode" || key == "tabs.new-page" {
+            self.home_keep_one_per_space();
             self.project_items();
         }
         if self.proxy.apply(&key, &value) {

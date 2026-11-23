@@ -676,6 +676,10 @@ pub struct ItemsState {
     pub tabs: Vec<TabView>,
     pub active: Option<String>,
     pub split_group: Option<SplitGroupView>,
+    /// A new tab in this window's profile and space is Home.
+    #[serde(default)]
+    #[specta(optional)]
+    pub home: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -1919,9 +1923,12 @@ pub enum Projection {
         profile: String,
         space: String,
     },
-    /// Home came back to the front for this search.
+    /// Home came back to the front for this search, at the row the closed
+    /// page was opened from when there is one.
     HomeShow {
         search: String,
+        slot: Option<u8>,
+        entry: Option<String>,
     },
 }
 

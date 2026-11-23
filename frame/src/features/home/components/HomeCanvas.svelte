@@ -6,9 +6,11 @@
   import { CanvasHost, type CanvasCamera, type CanvasKeyboard } from "$shared/canvas/host";
   import { duration, reducedMotion } from "$shared/lib/motion";
   import * as m from "$shared/i18n/messages";
+  import type { HomeModel, Place, Row } from "$domain/home";
   import { homeTop, type HomeTop } from "../lib/context";
+  import type { HomeIntent } from "../lib/intent";
   import { layout, SEARCH_X, SIZE, type HomeNode } from "../lib/layout";
-  import { admit, type HomeIntent, type HomeModel, type Place, type Row } from "../lib/model";
+  import { textMeasure } from "../lib/measure";
   import AddressLine from "./cards/AddressLine.svelte";
   import AlsoCard from "./cards/AlsoCard.svelte";
   import CompactLine from "./cards/CompactLine.svelte";
@@ -23,21 +25,33 @@
   import HoverCard from "./HoverCard.svelte";
 
   let {
-    home: given,
+    home,
+    open: opened = [],
+    lead = null,
+    centre = null,
+    marked = null,
+    onopen,
     onintent,
-    picture = () => null,
     mark = () => null,
     inset = { top: 0, bottom: 0 },
     onready,
   }: {
     home: HomeModel;
+    /** The searches drawn open; every other is a line. */
+    open?: readonly string[];
+    /** The open search the keyboard and the first view go to. */
+    lead?: string | null;
+    /** A search to go to, counted so the same one can be asked for again. */
+    centre?: { search: string; serial: number } | null;
+    /** The row a page was opened from, marked on return. */
+    marked?: { search: string; entry: string } | null;
+    /** The person opened a search drawn as a line. */
+    onopen?: (search: string) => void;
     onintent: (intent: HomeIntent) => void;
-    /** Where a kept picture is drawn from. */
-    picture?: (key: string) => string | null;
     mark?: (place: Place) => ImageData | null;
-    /** How much of the canvas's top and foot Home's own frame covers. */
+    /** How much of the canvas's top and foot the page around it covers. */
     inset?: { top: number; bottom: number };
-    /** The way in from the field: the keyboard goes to the newest search. */
+    /** The way in from the field: the keyboard goes to the search in front. */
     onready?: (enter: () => void) => void;
   } = $props();
 
@@ -55,33 +69,26 @@
     lines: Lines,
   };
 
-  let home = $derived(admit(given));
   const expanded = new SvelteSet<string>();
   const shown = new SvelteSet<string>();
-  // The newest search is in front until the person brings another there; a
-  // new search comes to the front of itself.
-  let newest = $derived(home.today.entries?.find((entry) => entry.kind !== "address")?.id ?? null);
-  let chosen = $state<{ search: string; newest: string | null } | null>(null);
-  let front = $derived.by(() => {
-    if (!chosen || chosen.newest !== newest) return newest;
-    const wanted = chosen.search;
-    const held = [home.today, ...home.earlier].some((day) =>
-      day.entries?.some((entry) => entry.id === wanted && entry.kind !== "address"),
-    );
-    return held ? wanted : newest;
-  });
+  const all = new SvelteSet<string>();
+  let root = $state<HTMLDivElement>();
+  // Where text decides a wrap, it is measured in the font it is drawn in.
+  let measure = $derived(root ? textMeasure(getComputedStyle(root).fontFamily) : undefined);
   let laid = $derived(
-    layout([home.today, ...home.earlier], home.today.key, { expanded, front, shown }),
+    layout([home.today, ...home.earlier], home.today.key, {
+      expanded,
+      open: opened,
+      lead,
+      shown,
+      all,
+      marked,
+      measure,
+    }),
   );
-  // Only the search that came to the front and the one that left it arrive; nothing else moves of itself.
-  let moved = $state<{ to: string; from: string | null } | null>(null);
-  let arriving = $derived(
-    new Set(
-      moved
-        ? [moved.to, moved.from].flatMap((lane) => (lane ? (laid.lanes[lane]?.nodes ?? []) : []))
-        : [],
-    ),
-  );
+  // Only the search that was opened arrives; nothing else moves of itself.
+  let moved = $state<string | null>(null);
+  let arriving = $derived(new Set(moved ? (laid.lanes[moved]?.nodes ?? []) : []));
   const flowOf = (node: HomeNode): Node<{ item: HomeNode }> => ({
     id: node.id,
     type: node.kind,
@@ -100,7 +107,7 @@
     nodes = laid.nodes.map(flowOf);
   });
   let byStop = $derived(new Map(laid.stops.map((stop) => [stop.id, stop])));
-  // The keyboard starts on the asked row of the newest search.
+  // The keyboard starts on the marked or asked row of the search in front.
   let stops = $derived.by(() => {
     const first = laid.first ? byStop.get(laid.first) : undefined;
     return first ? [first, ...laid.stops.filter((stop) => stop !== first)] : laid.stops;
@@ -125,30 +132,50 @@
     if (handed || !camera) return;
     handed = true;
     onready?.(async () => {
-      // Just drawn, the flow may not take focus yet; it is tried for a few frames.
-      for (let tries = 0; tries < 30; tries++) {
-        const to = laid.first ?? stops[0]?.id;
-        if (!to) return;
-        camera?.focus(to);
-        await new Promise((done) => requestAnimationFrame(done));
-        if (root?.contains(document.activeElement)) return;
+      // Just drawn, the flow may not take focus yet; it is tried for a few frames,
+      // and never again once the keyboard has been in, even if it has already left.
+      let reached = false;
+      const reach = () => (reached = true);
+      const host = root;
+      host?.addEventListener("focusin", reach);
+      try {
+        for (let tries = 0; tries < 30 && !reached; tries++) {
+          const to = laid.first ?? stops[0]?.id;
+          if (!to) return;
+          camera?.focus(to);
+          await new Promise((done) => requestAnimationFrame(done));
+        }
+      } finally {
+        host?.removeEventListener("focusin", reach);
       }
     });
   }
-  let root = $state<HTMLDivElement>();
 
-  async function open(search: string) {
-    if (search === front) return;
-    const keyed = !!root?.contains(document.activeElement);
-    moved = { to: search, from: front };
-    chosen = { search, newest };
+  async function go(search: string, keyed: boolean) {
     await tick();
     const lane = laid.lanes[search];
     if (!lane || !camera) return;
-    if (keyed) camera.focus(`s:${search}`);
+    if (keyed) camera.focus(lane.first ?? `s:${search}`);
     const next = reveal(lane.box, view, { width, height, ...inset }, 24);
     if (next) camera.glide(next, reducedMotion() ? 0 : duration("base"));
   }
+  function open(search: string) {
+    if (opened.includes(search)) return;
+    const keyed = !!root?.contains(document.activeElement);
+    moved = search;
+    onopen?.(search);
+    void go(search, false).then(() => {
+      if (keyed) camera?.focus(`s:${search}`);
+    });
+  }
+  // Native showed a search: the canvas goes to it, on its marked row when there is one.
+  let centred = 0;
+  $effect(() => {
+    const wanted = centre;
+    if (!wanted || wanted.serial <= centred || !placed) return;
+    centred = wanted.serial;
+    untrack(() => void go(wanted.search, !!root?.contains(document.activeElement)));
+  });
   // The place stands under the field; when the newest entry reaches past the
   // page it moves aside, and only when it cannot fit at all does the view step back.
   function firstView(head: { x: number; width: number }) {
@@ -197,8 +224,10 @@
     onactivate(id) {
       const action = byStop.get(id)?.activate;
       if (action?.kind === "more") top.toggle(action.place);
-      else if (action?.kind === "open") void open(action.search);
+      else if (action?.kind === "open") open(action.search);
       else if (action?.kind === "menu") top.menu(action.search, action.row);
+      else if (action?.kind === "menuAll") top.menuAll(action.search, action.row);
+      else if (action?.kind === "also") top.all(action.search);
       else if (action) intent(action);
     },
     onleave: () => intent({ kind: "field" }),
@@ -212,7 +241,7 @@
     clearTimeout(resting);
     hovered = null;
     pointed = row && stop ? { row, stop } : null;
-    if (!row || row.menu || row.inside || (!row.note && !row.known.length && !row.host)) return;
+    if (!row || row.menu || row.inside || (!row.known.length && !row.host)) return;
     resting = setTimeout(() => (hovered = pointed), 360);
   }
   onDestroy(() => clearTimeout(resting));
@@ -228,39 +257,23 @@
     };
   });
 
+  const flip = (set: SvelteSet<string>, key: string) => {
+    if (!set.delete(key)) set.add(key);
+  };
   const top: HomeTop = {
     intent,
-    open: (search) => void open(search),
-    menu(search, row) {
-      const key = `${search}/${row}`;
-      if (!shown.delete(key)) shown.add(key);
-    },
+    open,
+    menu: (search, row) => flip(shown, `${search}/${row}`),
     shown: (search, row) => shown.has(`${search}/${row}`),
-    toggle(key) {
-      if (!expanded.delete(key)) expanded.add(key);
-    },
+    menuAll: (search, row) => shown.add(`${search}/${row}/all`),
+    all: (search) => all.add(search),
+    toggle: (key) => flip(expanded, key),
     expanded: (key) => expanded.has(key),
+    marked: (search, row) => marked?.search === search && marked.entry === row,
     hover,
-    picture: (key) => picture(key),
     mark: (place) => mark(place),
   };
   setContext(homeTop, top);
-
-  // An earlier day is asked for once it comes within a screen of the view.
-  const reached: string[] = [];
-  $effect(() => {
-    const { y, zoom } = view;
-    const floor = height * 2;
-    for (const node of laid.nodes) {
-      if (node.kind !== "day" || node.day.entries !== null) continue;
-      if (node.box.y * zoom + y > floor) continue;
-      untrack(() => {
-        if (reached.includes(node.day.key)) return;
-        reached.push(node.day.key);
-        intent({ kind: "reach", day: node.day.key });
-      });
-    }
-  });
 </script>
 
 <div

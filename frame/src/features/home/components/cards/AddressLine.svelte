@@ -10,6 +10,12 @@
   const top = getContext<HomeTop>(homeTop);
   const at = focusStop();
   let item = $derived(data.item);
+  function keys(event: KeyboardEvent) {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    event.preventDefault();
+    event.stopPropagation();
+    top.intent({ kind: "forget", search: item.entry.id });
+  }
 </script>
 
 <button
@@ -19,6 +25,7 @@
   style:block-size={`${item.box.height}px`}
   {@attach at(id)}
   onclick={() => top.intent({ kind: "address", entry: item.entry.id })}
+  onkeydown={keys}
 >
   <span class="host" dir="auto">{item.entry.host}</span>
   <span class="title" dir="auto">{item.entry.title}</span>

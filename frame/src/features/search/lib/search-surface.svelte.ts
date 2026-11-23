@@ -2,12 +2,13 @@ import { preferences } from "$domain/preferences";
 import { shortcutPrefix, emptyShortcutBackspace } from "$shared/lib/search-shortcuts";
 import { tick, untrack } from "svelte";
 import type { IconSvgElement } from "@hugeicons/svelte";
-import { CheckListIcon } from "@hugeicons/core-free-icons";
+import { CheckListIcon, Clock01Icon, Home01Icon } from "@hugeicons/core-free-icons";
 import * as m from "$shared/i18n/messages";
 import type { PanelState, SearchResult, ToolKind } from "$shared/ipc/bindings";
 import { commands } from "$shared/ipc/bindings";
 import { events } from "$shared/ipc/native-events";
 import { settle } from "$domain/operations";
+import type { HomeSuggestion } from "$domain/home";
 import { createSearchController, type SearchSnapshot } from "./search-controller";
 import { calculate, type Calculation } from "./calculator";
 import {
@@ -40,7 +41,29 @@ export type SurfaceRow = {
   keys?: string[];
   /** Set on the row that answers arithmetic typed into the field. */
   calculation?: Calculation;
+  /** Something Home already holds, run there rather than by native search. */
+  home?: HomeSuggestion;
+  /** The line under the title, where the row is not a native result. */
+  detail?: string;
+  /** What the row is, said at its edge, where the row is not a native result. */
+  kind?: string;
 };
+
+/** Where Home's rows stand among native ones: after the tabs and bookmarks
+ *  already open or kept, before the search for what was typed. */
+export function withHome(native: readonly SurfaceRow[], home: readonly SurfaceRow[]): SurfaceRow[] {
+  if (!home.length) return [...native];
+  const of = (kind: string) => native.filter((row) => row.result?.kind === kind);
+  const placed = ["tab", "bookmark", "search"];
+  return [
+    ...of("tab"),
+    ...of("bookmark"),
+    ...home.filter((row) => row.home?.kind === "row"),
+    ...home.filter((row) => row.home?.kind === "search"),
+    ...of("search"),
+    ...native.filter((row) => !placed.includes(row.result?.kind ?? "")),
+  ];
+}
 
 /** Shared behaviour for both search hosts. The floating launcher and the New
  *  Tab capsule differ only in chrome; selection, coalescing, execution and
@@ -56,6 +79,11 @@ export function createSearchSurface(options: {
   captureKeys?: string[];
   /** The presentation offers only sites: no destinations and no capture. */
   sitesOnly?: () => boolean;
+  /** Home is on: what it holds is offered, and a search may start a map there. */
+  home?: {
+    suggest: (query: string) => readonly HomeSuggestion[];
+    run: (suggestion: HomeSuggestion) => void;
+  };
 }) {
   const anchored = options.tabId !== null;
 
@@ -89,6 +117,8 @@ export function createSearchSurface(options: {
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const CAPTURE_ID = "capture:task";
   const CALCULATION_ID = "calculation";
+  /** Queued for the row that searches for what was typed, wherever it stands. */
+  const TYPED = "\u0000typed";
   /** The launcher's current presentation; null while it is put away. */
   let context: PanelState | null = null;
 
@@ -97,6 +127,8 @@ export function createSearchSurface(options: {
    *  an action the newer query no longer offers. `""` means "the first row",
    *  which is the typed action. */
   let queued: string | null = null;
+  /** The queued run is a plain search, never a map on Home. */
+  let queuedPlain = false;
   /** Long enough to read, short enough to be gone before the next action. */
   const NOTICE_MS = 1600;
   /** How long a dismissed launcher keeps what was typed. */
@@ -129,7 +161,23 @@ export function createSearchSurface(options: {
   // and New Tab, which offers places rather than answers, never asks.
   const calculation = $derived(anchored ? null : calculate(query));
 
-  const rows = $derived<SurfaceRow[]>([
+  const homeRows = $derived<SurfaceRow[]>(
+    anchored && options.home && query.trim()
+      ? options.home.suggest(query).map((suggestion) => ({
+          id: `home:${suggestion.kind}:${suggestion.search}:${suggestion.kind === "row" ? suggestion.entry : ""}`,
+          title: suggestion.kind === "row" ? suggestion.label : suggestion.text,
+          section: "history" as const,
+          result: null,
+          tool: null,
+          icon: suggestion.kind === "row" ? Home01Icon : Clock01Icon,
+          home: suggestion,
+          detail: suggestion.kind === "row" ? suggestion.place : "",
+          kind: m.home_suggestion_kind(),
+        }))
+      : [],
+  );
+
+  const nativeRows = $derived<SurfaceRow[]>([
     // A sum typed into the field is a question; its answer is what Enter
     // should act on, ahead of searching the sum itself.
     ...(calculation
@@ -190,6 +238,11 @@ export function createSearchSurface(options: {
         ]
       : []),
   ]);
+  const rows = $derived(withHome(nativeRows, homeRows));
+  /** The row Enter runs until the person aims at another: the typed action. */
+  const lead = $derived(
+    homeRows.length ? (rows.find((row) => row.result?.kind === "search") ?? rows[0]) : rows[0],
+  );
 
   /** The row the field is currently showing the user, when a completion has
    *  been applied. Safari highlights this row, and Enter opens it. */
@@ -200,7 +253,7 @@ export function createSearchSurface(options: {
       ? null
       : moved && selected && rows.some((row) => row.id === selected)
         ? selected
-        : (completed?.id ?? rows[0]!.id),
+        : (completed?.id ?? lead!.id),
   );
 
   async function capture() {
@@ -236,8 +289,14 @@ export function createSearchSurface(options: {
     return row?.result?.action.type === "OpenUrl" ? row.result.action.url : null;
   }
 
-  async function run(row: SurfaceRow, background = false) {
+  async function run(row: SurfaceRow, background = false, plain = false) {
     if (running) return;
+    if (row.home) {
+      options.home?.run(row.home);
+      changed("");
+      open = false;
+      return;
+    }
     if (row.id === CAPTURE_ID) {
       await capture();
       return;
@@ -259,7 +318,9 @@ export function createSearchSurface(options: {
     failed = false;
     try {
       const admission = anchored
-        ? await settle(commands.newtabRun(row.result.action, expected))
+        ? await settle(
+            commands.newtabRun(row.result.action, plain ? { ...expected, plain: true } : expected),
+          )
         : await commands.launcherRun(row.result.action, expected, background);
       if (disposed) return;
       const rejected =
@@ -267,8 +328,14 @@ export function createSearchSurface(options: {
           ? !admission.accepted
           : admission.outcome === "failed" || admission.outcome === "rejected";
       running = false;
+      const mapped =
+        "disposition" in admission && admission.disposition?.reason === "home_map_started";
       if (rejected) failed = true;
-      else if (anchored) open = false;
+      else if (mapped) {
+        // The search went to Home as a map: the field is ready for the next one.
+        changed("");
+        open = false;
+      } else if (anchored) open = false;
       else if (background) announce("opened");
       else fulfilled = true;
     } catch {
@@ -287,19 +354,29 @@ export function createSearchSurface(options: {
    *  for the answer rather than doing nothing. */
   /** A destination, a capture or an answer does not depend on native. */
   const local = (row: SurfaceRow) =>
-    !!row.tool || row.id === CAPTURE_ID || row.id === CALCULATION_ID;
+    !!row.tool || !!row.home || row.id === CAPTURE_ID || row.id === CALCULATION_ID;
 
-  function activate(row: SurfaceRow, background = false) {
+  function activate(row: SurfaceRow, background = false, plain = false) {
     background = foregroundOnly(background);
-    if (settled || local(row)) void run(row, background);
-    else if (!background) queued = row.id;
+    if (settled || local(row)) void run(row, background, plain);
+    else if (!background) {
+      queued = row.id;
+      queuedPlain = plain;
+    }
   }
 
   function resolveQueued() {
     if (queued === null || !settled || running) return;
-    const target = queued === "" ? rows[0] : rows.find((row) => row.id === queued);
+    const target =
+      queued === ""
+        ? lead
+        : queued === TYPED
+          ? rows.find((row) => row.result?.kind === "search")
+          : rows.find((row) => row.id === queued);
+    const plain = queuedPlain;
     queued = null;
-    if (target) void run(target);
+    queuedPlain = false;
+    if (target) void run(target, false, plain);
   }
 
   async function move(offset: number) {
@@ -347,12 +424,12 @@ export function createSearchSurface(options: {
     controller?.change(value);
   }
 
-  function submit(background = false) {
+  function submit(background = false, plain = false) {
     if (composing) return;
     background = foregroundOnly(background);
     const row = rows.find((candidate) => candidate.id === selectedId);
     if (row && (settled || row.id === CALCULATION_ID || (moved && local(row)))) {
-      void run(row, background);
+      void run(row, background, plain);
       return;
     }
     // Sending something behind the current tab is a deliberate choice about
@@ -360,7 +437,19 @@ export function createSearchSurface(options: {
     // Until the user aims at a row, the row on screen is the previous query's
     // typed action, whose identity carries the previous text. Queuing that id
     // would match nothing in the answer and drop the Enter.
-    if (query.trim() && !background) queued = moved ? (row?.id ?? "") : "";
+    if (query.trim() && !background) {
+      queued = moved ? (row?.id ?? "") : "";
+      queuedPlain = plain;
+    }
+  }
+
+  /** Puts words in the field and searches for them as typed, once the answer is in. */
+  function ask(text: string) {
+    changed(text);
+    displayed = text;
+    queued = TYPED;
+    queuedPlain = false;
+    resolveQueued();
   }
 
   async function copy() {
@@ -575,6 +664,7 @@ export function createSearchSurface(options: {
     end,
     changed,
     submit,
+    ask,
     capture,
     copy,
     activate,

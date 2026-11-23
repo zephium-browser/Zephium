@@ -28,15 +28,22 @@
       <span class="bar" style:--order={1}></span>
     </div>
   {:else if inside.state === "refused"}
+    {@const gone = inside.reason === "gone"}
     <button
       type="button"
       class="refused"
       style:block-size={`${SIZE.refused}px`}
       {@attach at(id)}
-      onclick={() => top.intent({ kind: "row", search, row: item.row.id })}
+      onclick={() =>
+        top.intent(gone ? { kind: "again", search } : { kind: "row", search, row: item.row.id })}
     >
       <span class="why">{refusal(inside.reason)}</span>
-      <span class="way">{m.home_open_page()}<Icon icon={ArrowUpRight01Icon} size={12} /></span>
+      <span class="way"
+        >{gone ? m.home_search_again() : m.home_open_page()}{#if !gone}<Icon
+            icon={ArrowUpRight01Icon}
+            size={12}
+          />{/if}</span
+      >
     </button>
   {:else}
     {#each inside.rows as row (row.id)}
@@ -49,15 +56,13 @@
         style:block-size={`${SIZE.child}px`}
         {@attach at(`${id}/more`)}
         onclick={() =>
-          top.intent(
-            item.row.menu
-              ? { kind: "site", search, place: item.place }
-              : { kind: "row", search, row: item.row.id },
-          )}
-        >{item.row.menu ? m.home_more_on_site() : m.home_more_on_page()}<Icon
-          icon={ArrowUpRight01Icon}
-          size={12}
-        /></button
+          item.row.menu
+            ? top.menuAll(search, item.row.id)
+            : top.intent({ kind: "row", search, row: item.row.id })}
+        >{#if item.row.menu}{m.home_more({ count: item.rest })}{:else}{m.home_more_on_page()}<Icon
+            icon={ArrowUpRight01Icon}
+            size={12}
+          />{/if}</button
       >
     {/if}
   {/if}

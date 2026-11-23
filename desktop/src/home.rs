@@ -399,6 +399,13 @@ impl HomeMaps for HostPort {
         Ok(kind)
     }
 
+    fn holds(&self, map: MapId) -> bool {
+        self.0
+            .maps()
+            .get(&map)
+            .is_some_and(|live| live.driver.is_some())
+    }
+
     fn forget(&self, map: MapId) {
         self.0.maps().remove(&map);
     }
@@ -553,6 +560,7 @@ pub(crate) fn snapshot(host: &Host, records: HomeRecords) -> HomeSnapshotV1 {
                 SearchKind::Other => HomeSearchKindV1::Other,
                 SearchKind::Address => HomeSearchKindV1::Address,
             },
+            engine: search.engine,
             results_open: search.results.is_some(),
             map: search.map.and_then(|map| host.view(map)),
             pages: pages.iter().map(page_view).collect(),
@@ -667,8 +675,8 @@ pub(crate) fn emit_home_changed(app: &tauri::AppHandle, profile: String, space: 
     );
 }
 
-pub(crate) fn emit_home_show(app: &tauri::AppHandle, search: String) {
-    emit_to_privileged(app, MAIN_LABEL, EVENT_HOME_SHOW, &HomeShowV1 { search });
+pub(crate) fn emit_home_show(app: &tauri::AppHandle, show: HomeShowV1) {
+    emit_to_privileged(app, MAIN_LABEL, EVENT_HOME_SHOW, &show);
 }
 
 #[tauri::command]

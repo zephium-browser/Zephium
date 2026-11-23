@@ -4,8 +4,9 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Cancel01Icon, GridViewIcon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon, GridViewIcon, Home01Icon } from "@hugeicons/core-free-icons";
   import { tabFallbackIcon } from "../lib/tab-icon";
+  import { homeRailTabs } from "../lib/sidebar-model";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -112,7 +113,9 @@
       requests.openInColumn(command.id === "space.new" ? "new" : "edit");
     });
   });
-  let shape = $derived(entries.map((tab) => tab.id).join(" "));
+  let homed = $derived(tabs.homeOn());
+  let shown = $derived(homed ? homeRailTabs(entries, tabs.activeId()) : entries);
+  let shape = $derived(shown.map((tab) => tab.id).join(" "));
   $effect.pre(() => {
     void shape;
     untrack(() => {
@@ -162,9 +165,14 @@
         role="list"
         aria-label={m.open_tabs()}
       >
-        {#each entries as tab, index (tab.id)}
+        {#each shown as tab, index (tab.id)}
           {@const active = tab.id === tabs.activeId()}
+          {@const home = homed && !!tab.home}
+          <!-- Each search's pages start under a hairline, as their title does in the list. -->
+          {@const opens =
+            homed && !!tab.search && shown[index - 1]?.search?.id !== tab.search.id && index > 0}
           <li
+            class:rail-group={opens}
             data-cascade
             style:--cascade={index + 1}
             data-motion-key={`tab:${tab.id}`}
@@ -177,9 +185,9 @@
               type="button"
               class="rail-item"
               data-plate
-              title={tab.title || m.untitled_tab()}
+              title={home ? m.home_entry() : tab.title || m.untitled_tab()}
               aria-current={active ? "page" : undefined}
-              aria-label={tab.title || m.untitled_tab()}
+              aria-label={home ? m.home_entry() : tab.title || m.untitled_tab()}
               oncontextmenu={(event) => handleContextMenu(event, tab)}
               onpointerdown={(event) => drag.down(event, tab.id)}
               onpointermove={(event) => drag.move(event)}
@@ -188,15 +196,15 @@
               onclick={() => !drag.swallowClick() && onSelect(tab.id)}
               {...closable.has(tab.id) ? closeOnMiddleClick(() => tabs.close(tab.id)) : {}}
             >
-              <FavIcon
-                image={favicons.image(tab.icon)}
-                tone={favicons.tone(tab.icon)}
-                loading={tab.loading}
-                lit={active}
-                size={16}
-                fallback={tabFallbackIcon(tab.content)}
-                notched={!!tab.audio}
-              />
+              {#if home}<Icon icon={Home01Icon} size={16} />{:else}<FavIcon
+                  image={favicons.image(tab.icon)}
+                  tone={favicons.tone(tab.icon)}
+                  loading={tab.loading}
+                  lit={active}
+                  size={16}
+                  fallback={tabFallbackIcon(tab.content)}
+                  notched={!!tab.audio}
+                />{/if}
               <span data-zephium-tab-label class="sr-only">{tab.title}</span>
             </button>
             {#if tab.capture}<span class="rail-capture"
@@ -214,7 +222,7 @@
               />{/if}
             <!-- A rail has no row to put a close control in, so it rides the
              mark's corner, the way a notification's does. -->
-            {#if !tabs.loneNewTab(tab.id)}<button
+            {#if !home && !tabs.loneNewTab(tab.id)}<button
                 type="button"
                 class="rail-close"
                 title={m.close_tab()}
@@ -224,7 +232,7 @@
               >{/if}
           </li>
         {/each}
-        <li data-cascade style:--cascade={entries.length + 1}>
+        <li data-cascade style:--cascade={shown.length + 1}>
           {#if switcher}{@const label = m.tab_switcher_all({ count: tabs.tabs().length })}<button
               type="button"
               class="rail-item rail-new"
@@ -303,6 +311,21 @@
     flex-direction: column;
     align-items: center;
     gap: var(--sidebar-row-gap);
+  }
+
+  /* A search's pages begin under a hairline, the rail's form of their title. */
+  .rail-group {
+    position: relative;
+    margin-block-start: 7px;
+  }
+
+  .rail-group::before {
+    position: absolute;
+    inset-block-start: -5px;
+    inset-inline: 25%;
+    block-size: 1px;
+    background: var(--color-border);
+    content: "";
   }
 
   /* The expanded row with its label taken away: the same plate, corner, rim

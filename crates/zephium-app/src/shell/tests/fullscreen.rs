@@ -16,6 +16,7 @@ fn ready(fills_window: bool) -> (Shell, Arc<FakeEngine>, Screen, HostLog, ItemId
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let host: HostLog = Arc::new(Mutex::new(Vec::new()));
     let (sink, host_sink) = (screen.clone(), host.clone());

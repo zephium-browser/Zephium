@@ -1,6 +1,7 @@
 <script lang="ts">
   import { getContext, untrack } from "svelte";
-  import { focusStop, thumbnail } from "$shared/canvas";
+  import { focusStop } from "$shared/canvas";
+  import EngineMark from "$shared/ui/EngineMark";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
   import type { HomeNode } from "../../lib/layout";
@@ -11,9 +12,14 @@
   const top = getContext<HomeTop>(homeTop);
   const at = focusStop();
   let search = $derived(data.item.search);
-  let picture = $derived(search.results ? top.picture(search.results) : null);
-  let missing = $state<string | null>(null);
   const born = untrack(() => search.kind === "place" && search.place.state === "arriving");
+  // A line opens as it takes focus, so Delete on it lands here.
+  function keys(event: KeyboardEvent) {
+    if (event.key !== "Delete" && event.key !== "Backspace") return;
+    event.preventDefault();
+    event.stopPropagation();
+    top.intent({ kind: "forget", search: search.id });
+  }
 </script>
 
 <button
@@ -25,16 +31,14 @@
   style:block-size={`${data.item.box.height}px`}
   {@attach at(id)}
   onclick={() => top.intent({ kind: "results", search: search.id })}
+  onkeydown={keys}
 >
   <span class="words">
     <span class="text" dir="auto">{search.text}</span>
     <span class="time">{clockOf(search.at)}</span>
   </span>
-  {#if picture && missing !== picture}<canvas
-      class="results"
-      aria-hidden="true"
-      use:thumbnail={{ url: picture, width: 64, onmissing: () => (missing = picture) }}
-    ></canvas>{/if}
+  {#if search.engine}<span class="engine"><EngineMark engine={search.engine} size={16} /></span
+    >{/if}
 </button>
 
 <style>
@@ -79,11 +83,14 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .results {
+  /* The engine the search was asked of, which its results page is. */
+  .engine {
+    display: grid;
     flex: none;
-    inline-size: 64px;
-    block-size: 40px;
-    border-radius: 5px;
+    place-items: center;
+    inline-size: 28px;
+    block-size: 28px;
+    border-radius: var(--radius-control-compact);
     background: var(--color-fill);
   }
 

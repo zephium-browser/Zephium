@@ -64,6 +64,7 @@ fn mini(hosts: bool) -> Mini {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let log: Log = Arc::new(Mutex::new(Vec::new()));
     let (sink, record) = (screen.clone(), log.clone());
