@@ -796,7 +796,10 @@ impl Shell {
             })
             .take(FETCHED_ADDRESSES)
             .collect();
-        if !fetchable.is_empty() && !self.incognito_profile(profile) && self.page_prober_attached()
+        if !fetchable.is_empty()
+            && !self.incognito_profile(profile)
+            && self.page_prober_attached()
+            && self.proxy.server().is_none()
         {
             // A later report ranking another address first replaces an icon
             // already found; anything else only adds addresses to try.

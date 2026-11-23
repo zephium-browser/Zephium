@@ -1011,6 +1011,7 @@ pub(crate) fn validate_public_url(value: &str) -> Result<url::Url, WorkError> {
 pub mod read_note {
     pub const HUMAN_CHECK: &str = "The page asked for a human check";
     pub const UNSETTLED: &str = "The page did not settle while it was being read";
+    pub const UNREACHABLE: &str = "The site could not be reached";
     pub const CONSTRUCTION_TIMEOUT: &str =
         "The page did not become ready within its loading window";
     pub const SLOW_SITE: &str =

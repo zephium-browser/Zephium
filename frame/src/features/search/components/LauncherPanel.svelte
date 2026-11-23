@@ -55,6 +55,7 @@
     onTool: (tool) => onTool(tool),
     onCapture: untrack(() => onCapture),
     captureKeys: keys.capture,
+    sitesOnly: () => !!context?.mini,
   });
 
   // Geometry the native shapes are placed from. Kept as numbers rather than
@@ -125,12 +126,13 @@
     if (row)
       available.push({ id: "open", label: primary, keys: keys.open, run: () => surface.submit() });
     if (surface.addressable) {
-      available.push({
-        id: "background",
-        label: m.launcher_open_background(),
-        keys: keys.background,
-        run: () => surface.submit(true),
-      });
+      if (!context?.mini)
+        available.push({
+          id: "background",
+          label: m.launcher_open_background(),
+          keys: keys.background,
+          run: () => surface.submit(true),
+        });
       available.push({
         id: "copy",
         label: m.launcher_copy_link(),
@@ -154,7 +156,9 @@
     if (target.calculation) return m.launcher_copy_answer();
     switch (target.result?.kind) {
       case "tab":
-        return m.launcher_switch_tab();
+        return target.result.action.type === "OpenUrl"
+          ? m.launcher_open()
+          : m.launcher_switch_tab();
       case "search":
       case "suggestion":
       case "search_history":
@@ -312,7 +316,7 @@
     // A focused button activates itself instead of running the field's row.
     if (event.key === "Enter" && event.target instanceof HTMLButtonElement) return;
     const numbered = mod && !event.shiftKey && !event.altKey ? Number(key) : NaN;
-    if (numbered >= 1 && numbered <= destinations.length) {
+    if (!context?.mini && numbered >= 1 && numbered <= destinations.length) {
       event.preventDefault();
       onTool(destinations[numbered - 1]!.kind);
       return;
@@ -400,10 +404,12 @@
       autocapitalize="off"
       autocorrect="off"
       spellcheck={false}
-      placeholder={m.panel_search_placeholder()}
+      placeholder={context?.mini ? m.panel_mini_placeholder() : m.panel_search_placeholder()}
       aria-label={surface.activeShortcut
         ? m.search_shortcut_label({ name: surface.activeShortcut.name })
-        : m.panel_search_placeholder()}
+        : context?.mini
+          ? m.panel_mini_placeholder()
+          : m.panel_search_placeholder()}
       role="combobox"
       aria-haspopup={menu ? "menu" : "listbox"}
       aria-controls={menu ? ACTIONS_ID : "launcher-results"}
@@ -452,7 +458,8 @@
           >{:else if surface.notice === "copied"}<span class="status">{m.launcher_copied()}</span
           >{:else if surface.notice === "answer"}<span class="status"
             >{m.launcher_answer_copied()}</span
-          >{:else if surface.running}<span class="status">{m.panel_opening()}</span>{:else if home}
+          >{:else if surface.running}<span class="status">{m.panel_opening()}</span
+          >{:else if home && !context?.mini}
           <div class="destinations" role="group" aria-label={m.launcher_destinations()}>
             {#each destinations as destination (destination.kind)}
               <button

@@ -26,6 +26,9 @@ const native = vi.hoisted(() => ({
   blocked: vi.fn(),
   time: vi.fn(),
 }));
+
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$domain/tabs", () => ({
   tabs: { profile: () => ({ id: native.profile, kind: "default", name: "Alex" }) },
 }));
@@ -165,7 +168,7 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   await expect.poll(() => ntp.container.querySelector("img")?.naturalWidth ?? 0).toBeGreaterThan(0);
   expect(native.decode).not.toHaveBeenCalled();
   expect(native.media).toHaveBeenCalledTimes(1);
-  expect(native.media.mock.calls[0]).toEqual([native.profile, digest, 1600]);
+  expect(native.media.mock.calls[0]).toEqual([native.profile, digest, 2400]);
   expect(ntp.container.querySelector(".sky")).toBeNull();
   expect(
     ntp.container.querySelector<HTMLElement>(".newtab")!.style.getPropertyValue("--sky-frost"),

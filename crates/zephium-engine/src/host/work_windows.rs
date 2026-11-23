@@ -492,6 +492,7 @@ impl EngineHost {
         let invariant = guard.clone();
         let panic = guard.clone();
         let redirected = guard.clone();
+        let unreachable = guard.clone();
         let owned_profile = if work_data {
             AgentOwnedProfile::work(crate::work_website_data::identifier(profile))
         } else if storage == ContextProfileStorageClass::Durable {
@@ -597,6 +598,13 @@ impl EngineHost {
                 redirected.record_redirect(destination);
                 redirected.fail();
                 super::notify_work_resource(redirected.clone());
+            })
+            .with_unreachable(move || {
+                #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
+                unreachable.record_failure_cause(
+                    crate::agent_context_port::work_resource_failure_diagnostic::WorkResourceFailureCause::Unreachable,
+                );
+                unreachable.record_unreachable();
             }),
         );
         for debt in wry::pending_webview2_cleanup_debts() {

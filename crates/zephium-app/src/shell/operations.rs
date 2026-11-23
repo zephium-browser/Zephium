@@ -73,7 +73,8 @@ impl Shell {
                 action,
                 background,
                 replace,
-            } => self.operation_run_search_action(*context, action, background, replace),
+                new_mini,
+            } => self.operation_run_search_action(*context, action, background, replace, new_mini),
             Command::InvokeExtensionAction {
                 runtime,
                 revision,
@@ -81,6 +82,7 @@ impl Shell {
                 menu,
             } => self.operation_invoke_extension_action(runtime, revision, anchor, menu),
             Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
+            Command::Mini { window, action } => self.mini_action(window, action),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             #[cfg(feature = "work-planning")]
             Command::SetWorkScreenshots(change) => self.operation_set_work_screenshots(change),
@@ -284,7 +286,7 @@ impl Shell {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         revision: zephium_core::extensions::ExtensionActionRevision,
         anchor: zephium_core::extensions::ExtensionPopupAnchor,
-        menu: bool,
+        menu: Option<std::sync::Arc<[zephium_core::extensions::ExtensionButtonMenuRow]>>,
     ) -> OperationDisposition {
         match self.dispatch_extension_action(runtime, revision, anchor, menu) {
             Ok(_) => operation_result(
@@ -335,7 +337,7 @@ impl Shell {
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
-        let Some((_id, effects)) = self.open_tab_with_id() else {
+        let Some((_id, effects)) = self.open_new_tab_with_id() else {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
@@ -447,13 +449,25 @@ impl Shell {
     }
 
     /// Opens what another application handed over, each in its own tab and
-    /// the last one in front, the way a clicked link opens elsewhere.
+    /// the last one in front, the way a clicked link opens elsewhere. With
+    /// mini windows chosen, each opens in one and the main window is left
+    /// as it was; a link no mini window can take still opens as a tab.
     pub(super) fn open_external(&mut self, urls: Vec<String>) {
         let limit = zephium_core::navigation::MAX_EXTERNAL_TARGETS;
         if !self.bootstrapped {
             let room = limit.saturating_sub(self.pending_external.len());
             self.pending_external.extend(urls.into_iter().take(room));
             return;
+        }
+        let mut urls: Vec<String> = urls.into_iter().take(limit).collect();
+        if self.external_links_open_mini() {
+            urls.retain(|url| {
+                zephium_core::navigation::external_target(url)
+                    .is_some_and(|url| !self.open_mini(url.to_string()))
+            });
+            if urls.is_empty() {
+                return;
+            }
         }
         // Another application's link is not a private page: it opens with
         // the regular tabs, the way a private window leaves it to another.
@@ -470,10 +484,15 @@ impl Shell {
             .tab_preferences
             .external_position
             .unwrap_or(self.tab_preferences.new_position);
-        for url in urls.into_iter().take(limit) {
+        let mut opened = false;
+        for url in urls {
             if let Some(url) = zephium_core::navigation::external_target(&url) {
                 let _ = self.open_url_in_new_tab_at(url.to_string(), position);
+                opened = true;
             }
+        }
+        if opened {
+            (self.emit)(Projection::ExternalTabsOpened);
         }
     }
 
@@ -954,7 +973,13 @@ impl Shell {
         }
         self.tab_preferences.apply(&key, &value);
         if self.proxy.apply(&key, &value) {
-            self.engine.set_proxy(self.proxy.server());
+            let server = self.proxy.server();
+            let enabled = server.is_some();
+            self.engine.set_proxy(server);
+            self.proxy.report();
+            if enabled {
+                self.stop_network_favicon_probes();
+            }
         }
         if key == "tabs.automatic-pip" && value == "false" {
             self.engine.cancel_automatic_pip();
@@ -1024,6 +1049,15 @@ impl Shell {
         match id {
             "tab.new" => self.operation_open(),
             "window.newPrivate" => self.operation_enter_private(),
+            // The desktop opens the launcher for a mini window instead; this
+            // runs only while the private window is in front, whose pages
+            // never leave it, so the quick page is a private tab.
+            "window.newMini" => self.operation_open(),
+            // Keys a mini window answers; the desktop hands them to the one
+            // in front, and with none in front they do nothing.
+            "mini.openInMain" | "mini.keepOnTop" => {
+                operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged)
+            }
             "window.closePrivate" => self.operation_close_private(),
             "window.togglePrivate" => self.operation_toggle_private(),
             "window.showRegular" => self.operation_show_regular(),

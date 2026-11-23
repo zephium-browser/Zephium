@@ -1,6 +1,7 @@
 //! Shell ownership of effective extension toolbar actions.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
@@ -8,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRequestId,
     ExtensionActionRevision, ExtensionActionSettlement, ExtensionActionSnapshot,
     ExtensionActionSnapshotSettlement, ExtensionBrowserSurface, ExtensionBrowserSurfaceGeneration,
-    ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionButtonMenuRow, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::NativeDispatch;
@@ -205,7 +206,7 @@ impl ExtensionActionState {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
-        menu: bool,
+        menu: Option<Arc<[ExtensionButtonMenuRow]>>,
     ) -> Result<ExtensionActionRequest, ExtensionActionRejection> {
         let profile = runtime.profile();
         let surface = current_surface
@@ -232,7 +233,7 @@ impl ExtensionActionState {
             return Err(ExtensionActionRejection::RuntimeSuperseded);
         }
         // A disabled action still has its menu, as in Chrome.
-        if !action.is_enabled() && !menu {
+        if !action.is_enabled() && menu.is_none() {
             return Err(ExtensionActionRejection::ActionDisabled);
         }
         if self.pending.len() >= MAX_PENDING_EXTENSION_ACTIONS {
@@ -245,13 +246,13 @@ impl ExtensionActionState {
         self.next_request_id = id.get().checked_add(1);
         let mut request =
             ExtensionActionRequest::new(id, runtime, tab, surface.generation(), revision, anchor);
-        if menu {
-            request = request.for_menu();
+        if let Some(rows) = menu {
+            request = request.for_menu(rows);
         }
         if self.pending.contains_key(&id) {
             return Err(ExtensionActionRejection::NativeAdmissionFailed);
         }
-        self.pending.insert(id, request);
+        self.pending.insert(id, request.clone());
         Ok(request)
     }
 
@@ -380,7 +381,7 @@ impl Shell {
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
     ) -> Result<ExtensionActionRequestId, ExtensionActionRejection> {
-        self.dispatch_extension_action(runtime, revision, anchor, false)
+        self.dispatch_extension_action(runtime, revision, anchor, None)
     }
 
     /// [`Self::invoke_extension_action`], or the action's context menu.
@@ -389,7 +390,7 @@ impl Shell {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
-        menu: bool,
+        menu: Option<Arc<[ExtensionButtonMenuRow]>>,
     ) -> Result<ExtensionActionRequestId, ExtensionActionRejection> {
         let request = self.extension_actions.begin_invocation(
             self.extension_browser_surfaces
@@ -399,14 +400,15 @@ impl Shell {
             anchor,
             menu,
         )?;
+        let id = request.id();
         match self.engine.invoke_extension_action(request) {
-            NativeDispatch::Scheduled => Ok(request.id()),
+            NativeDispatch::Scheduled => Ok(id),
             NativeDispatch::Rejected => {
-                self.extension_actions.cancel_invocation(request.id());
+                self.extension_actions.cancel_invocation(id);
                 Err(ExtensionActionRejection::NativeAdmissionFailed)
             }
             NativeDispatch::Unsupported => {
-                self.extension_actions.cancel_invocation(request.id());
+                self.extension_actions.cancel_invocation(id);
                 Err(ExtensionActionRejection::UnsupportedPlatform)
             }
         }

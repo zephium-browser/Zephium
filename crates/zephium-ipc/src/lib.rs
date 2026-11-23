@@ -803,6 +803,8 @@ pub struct PanelState {
     pub seed: Option<String>,
     /// The tab whose address is being edited; it is no destination of its own.
     pub seed_tab: Option<String>,
+    /// An address chosen in this presentation opens in a new mini window.
+    pub mini: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -1308,6 +1310,47 @@ pub enum WorkFolderAdmitV1 {
     Refused { not_a_folder: bool },
 }
 
+/// A mini window's chrome: its window and the one page in it, if any yet.
+/// The page's URL and title are untrusted and only ever shown as text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub tab: Option<TabView>,
+    /// Where "Open in Zephium" can put the page: its profile's spaces, in
+    /// sidebar order.
+    pub spaces: Vec<MiniSpaceView>,
+    /// The space "Open in Zephium" uses unless the person picks another.
+    pub space: Option<String>,
+    /// The window stays above other applications' windows.
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniSpaceView {
+    pub id: String,
+    pub name: String,
+}
+
+/// The shell made a mini window; the desktop builds its native window with
+/// this content size.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct MiniOpenedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The shell let a mini window go. `reveal_main` brings the main window
+/// forward because the page just moved into it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct MiniClosedView {
+    #[specta(type = f64)]
+    pub window: u64,
+    pub reveal_main: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct LayoutState {
     pub dividers: Vec<DividerView>,
@@ -1374,6 +1417,8 @@ pub enum OperationOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum OperationReason {
     MutationApplied,
+    /// The address went to a mini window, so the main window stays behind.
+    OpenedInMini,
     StateUnchanged,
     InvalidScope,
     NoFocusedWindow,
@@ -1844,6 +1889,12 @@ pub enum Projection {
     RecentlyClosed(Vec<ClosedTabView>),
     /// The sidebar's player, sent when it changes; `None` hides it.
     MediaPlayer(Option<MediaPlayerView>),
+    MiniOpened(MiniOpenedView),
+    Mini(MiniView),
+    MiniClosed(MiniClosedView),
+    /// Links another application handed over opened as tabs, so the main
+    /// window comes forward. A link that opened a mini window does not.
+    ExternalTabsOpened,
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.

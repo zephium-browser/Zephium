@@ -45,6 +45,7 @@ These groups locate work; they do not define a dependency graph.
 | Provider and decision services | `zephium-agent-provider-transport`, `zephium-agent-model-catalog`, `zephium-decision` |
 | Account and credentials | `zephium-account`, `zephium-credentials` |
 | Sidebar assistance and voice | `zephium-page-assist`, `zephium-voice`, desktop adapters |
+| Search map | `zephium-map` (pure logic, depends only on `zephium-core`), `zephium-public-fetch` (anonymous public reads and the public-address guard) |
 | External protocol integration | `zephium-mcp` |
 | Development and qualification | `xtask`, `scripts/`, `zephium-terra-macos-probe` |
 
@@ -86,6 +87,21 @@ macOS uses WKWebView and AppKit; Windows uses WebView2 and Win32/COM adapters.
 Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
 `platform/` and `host/` modules, with application policy expressed through ports.
+
+**Mini windows.** A mini window holds one page outside the sidebar. Links
+from other apps open in one by default (`tabs.external-position = mini`);
+`window.newMini` opens the launcher in mini mode, which offers only sites, and
+a link a mini page opens gets its own mini window of the same profile. The
+page is `Placement::Mini`: never saved, kept awake while its window is open.
+`desktop/src/mini.rs` builds each window, `mini-<id>`, with a privileged
+toolbar (`frame/mini.html`) above a content stage the engine attaches to it.
+`zephium-app` owns admission (cap, profile, private refusal), the pin and the
+remembered size; "Open in Zephium" moves the live page into the main window
+without a reload, and a window that cannot be built hands its page back as a
+tab. On macOS the stage is reparented as an NSView; on Windows the page's
+WebView2 controller is reparented to the mini window's HWND, the window draws
+no frame, and its toolbar joins the launcher's privileged WebView2 browser
+instead of starting another.
 
 ## 4. State, commands, and IPC
 

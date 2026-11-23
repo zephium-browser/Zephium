@@ -212,6 +212,12 @@ export const fields = {
       { value: "compact", label: m.pref_appearance_density_option_1 },
     ],
   },
+  "ntp.page": {
+    section: "newtab",
+    label: m.ntp_page,
+    description: m.ntp_page_help,
+    initial: "",
+  },
   "ntp.background": {
     section: "newtab",
     label: m.ntp_background,
@@ -313,8 +319,9 @@ export const fields = {
     section: "tabs",
     label: m.tabs_external,
     description: m.tabs_external_help,
-    initial: "new-tab",
+    initial: "mini",
     options: [
+      { value: "mini", label: m.tabs_external_option_mini },
       { value: "new-tab", label: m.tabs_external_option_same },
       { value: "end", label: m.tabs_external_option_end },
       { value: "after-current", label: m.tabs_external_option_next },

@@ -80,6 +80,7 @@ const context: PanelState = {
   corner_radius: 20,
   seed: null,
   seed_tab: null,
+  mini: false,
 };
 const destinations = [
   { kind: "tasks" as const, label: "Tasks", icon: CheckListIcon },
@@ -152,6 +153,30 @@ test("ArrowUp from the typed action selects and runs the last suggestion", async
   await vi.waitFor(() =>
     expect(native.run).toHaveBeenCalledExactlyOnceWith(bookmark.action, owner, false),
   );
+});
+
+test("opened for a mini window, the field says where the address goes", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await expect
+    .element(screen.getByRole("combobox", { name: "Open in a mini window" }))
+    .toBeVisible();
+});
+
+test("opened for a mini window, it offers sites and no app actions", async () => {
+  const screen = await render(LauncherPanel, {
+    props: {
+      context: { ...context, mini: true },
+      destinations,
+      onCapture: async (text: string) => text,
+    },
+  });
+  await expect.element(screen.getByRole("button", { name: "Tasks" })).not.toBeInTheDocument();
+  await screen.getByRole("combobox").fill("tasks");
+  await reply("tasks", [search("tasks")]);
+  await expect.element(screen.getByRole("option", { name: /tasks/iu }).first()).toBeVisible();
+  await expect.poll(() => screen.getByRole("option").elements().length).toBe(1);
 });
 
 test("an obsolete answer cannot put its rows back on screen", async () => {
@@ -398,6 +423,39 @@ test("The primary modifier plus Enter opens behind the current tab and keeps the
   );
   await expect.element(screen.getByText("Opened in a background tab")).toBeVisible();
   expect(onDismiss).not.toHaveBeenCalled();
+});
+
+test("in a mini window's launcher the primary modifier plus Enter still opens in front", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await screen.getByRole("combobox").fill("rust");
+  const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await userEvent.keyboard(`{${primary}>}{Enter}{/${primary}}`);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(
+      { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
+      owner,
+      false,
+    ),
+  );
+  await expect.element(screen.getByText("Opened in a background tab")).not.toBeInTheDocument();
+});
+
+test("in a mini window's launcher the primary modifier plus Enter before results waits for them", async () => {
+  const screen = await render(LauncherPanel, {
+    props: { context: { ...context, mini: true }, destinations },
+  });
+  await screen.getByRole("combobox").fill("rust");
+  await userEvent.keyboard(`{${primary}>}{Enter}{/${primary}}`);
+  const owner = await reply("rust", [visit("Rust Book", "https://doc.rust-lang.org/book/")]);
+  await vi.waitFor(() =>
+    expect(native.run).toHaveBeenCalledExactlyOnceWith(
+      { type: "OpenUrl", url: "https://doc.rust-lang.org/book/" },
+      owner,
+      false,
+    ),
+  );
 });
 
 test("The primary modifier plus K lists what can be done to the selected row", async () => {

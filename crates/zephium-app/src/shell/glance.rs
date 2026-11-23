@@ -63,6 +63,7 @@ impl Shell {
                 ..
             } => GlanceSource::Pinned,
             Placement::Space { .. } => GlanceSource::Ordinary,
+            Placement::Mini { .. } => return false,
         };
         opens_in_glance(kind, &target, self.tab_preferences.glance, modifiers)
     }

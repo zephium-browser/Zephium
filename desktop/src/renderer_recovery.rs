@@ -150,6 +150,14 @@ pub(crate) fn failed(app: &AppHandle, label: &str, browser_exited: bool) {
     if crate::shutdown_started(app) {
         return;
     }
+    // A mini window's toolbar recovers on its own terms; with the whole
+    // browser gone the launcher's recovery speaks for both.
+    if crate::mini::window_of(label).is_some() {
+        if !browser_exited {
+            crate::mini::recover(app, label);
+        }
+        return;
+    }
     let Some(renderers) = app.try_state::<Renderers>() else {
         return;
     };

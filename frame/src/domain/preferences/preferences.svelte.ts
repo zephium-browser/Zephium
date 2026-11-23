@@ -41,6 +41,7 @@ const defaults = {
   "tabs.startup": "new-tab",
   "tabs.startup-pages": "",
   "tabs.home": "",
+  "tabs.new-page": "",
   "network.proxy": "system",
   "network.proxy-address": "",
   "time.track": "true",
@@ -273,7 +274,8 @@ export async function resetAll(): Promise<boolean> {
 /** Reset just this page, including choices whose feature is currently off. */
 export async function resetNewTab(): Promise<boolean> {
   for (const key of Object.keys(defaults) as PreferenceKey[]) {
-    if (!key.startsWith("ui.newtab-") || values[key] === defaults[key]) continue;
+    if ((!key.startsWith("ui.newtab-") && key !== "tabs.new-page") || values[key] === defaults[key])
+      continue;
     await set(key, defaults[key]);
     if (failed || values[key] !== defaults[key]) return false;
   }

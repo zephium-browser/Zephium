@@ -337,7 +337,7 @@ fn extension_action_is_a_tracked_operation() {
             zephium_core::geometry::Rect::new(8.0, 12.0, 28.0, 28.0),
         )
         .unwrap(),
-        menu: false,
+        menu: None,
     }));
 }
 
@@ -698,6 +698,7 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
             action: action.clone(),
             background: false,
             replace: None,
+            new_mini: false,
         }
     ));
     let Command::Operation { command, .. } = queue.try_recv().unwrap() else {

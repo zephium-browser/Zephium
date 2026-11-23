@@ -24,6 +24,7 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
     { id = "RUSTSEC-2025-0098", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
     { id = "RUSTSEC-2025-0100", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; transitive through Tauri urlpattern; awaiting upstream replacement" },
+    { id = "RUSTSEC-2026-0543", reason = "owner=security; expires=2026-12-31; expires-unix=1798675200; unmaintained chrono is required by rmcp and oauth2 with no maintained release; replace zephium-app's local-date and timestamp uses with time or jiff before expiry" },
 ]
 
 [licenses]
