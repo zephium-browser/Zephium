@@ -440,6 +440,8 @@ impl Shell {
                 },
             ),
             Placement::Favorites { space } => (space, Placement::Favorites { space: target }),
+            // A mini window's page moves only through its own window.
+            Placement::Mini { .. } => return rejected(OperationReason::InvalidScope),
         };
         if space == target {
             return unchanged();

@@ -54,6 +54,8 @@ export function createSearchSurface(options: {
   /** Saves the typed line as a task; resolves to the title saved, or null. */
   onCapture?: (text: string) => Promise<string | null>;
   captureKeys?: string[];
+  /** The presentation offers only sites: no destinations and no capture. */
+  sitesOnly?: () => boolean;
 }) {
   const anchored = options.tabId !== null;
 
@@ -114,7 +116,7 @@ export function createSearchSurface(options: {
   // At rest the host offers destinations on their own; typing their name
   // brings them into the list.
   const matchingTools = $derived(
-    anchored || !query.trim()
+    anchored || options.sitesOnly?.() || !query.trim()
       ? []
       : options.destinations.filter((destination) =>
           destination.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -174,7 +176,7 @@ export function createSearchSurface(options: {
     })),
     // Anything typed can become a task, last so it never displaces the page or
     // search the line most often means.
-    ...(query.trim() && !anchored && options.onCapture
+    ...(query.trim() && !anchored && !options.sitesOnly?.() && options.onCapture
       ? [
           {
             id: CAPTURE_ID,
@@ -203,7 +205,7 @@ export function createSearchSurface(options: {
 
   async function capture() {
     const text = query.trim();
-    if (running || !text || !options.onCapture) return;
+    if (running || !text || !options.onCapture || options.sitesOnly?.()) return;
     running = true;
     failed = false;
     try {
@@ -251,7 +253,8 @@ export function createSearchSurface(options: {
     }
     const expected = controller?.context();
     if (!row.result || !expected) return;
-    background = background && !anchored && !!addressOf(row);
+    // A mini window's launcher opens only in the foreground, as native does.
+    background = background && !anchored && !options.sitesOnly?.() && !!addressOf(row);
     running = true;
     failed = false;
     try {
@@ -276,6 +279,10 @@ export function createSearchSurface(options: {
     }
   }
 
+  /** A mini window's launcher opens only in the foreground, so a background
+   *  request there is an ordinary one, queued like it while results load. */
+  const foregroundOnly = (background: boolean) => background && !options.sitesOnly?.();
+
   /** Runs now when the visible rows answer the current query, otherwise waits
    *  for the answer rather than doing nothing. */
   /** A destination, a capture or an answer does not depend on native. */
@@ -283,6 +290,7 @@ export function createSearchSurface(options: {
     !!row.tool || row.id === CAPTURE_ID || row.id === CALCULATION_ID;
 
   function activate(row: SurfaceRow, background = false) {
+    background = foregroundOnly(background);
     if (settled || local(row)) void run(row, background);
     else if (!background) queued = row.id;
   }
@@ -341,6 +349,7 @@ export function createSearchSurface(options: {
 
   function submit(background = false) {
     if (composing) return;
+    background = foregroundOnly(background);
     const row = rows.find((candidate) => candidate.id === selectedId);
     if (row && (settled || row.id === CALCULATION_ID || (moved && local(row)))) {
       void run(row, background);
@@ -637,7 +646,13 @@ export function createSearchSurface(options: {
       return rows.find((row) => row.id === selectedId) ?? null;
     },
     get capturable() {
-      return !anchored && !!options.onCapture && !!query.trim() && query !== seededQuery;
+      return (
+        !anchored &&
+        !options.sitesOnly?.() &&
+        !!options.onCapture &&
+        !!query.trim() &&
+        query !== seededQuery
+      );
     },
     get failed() {
       return failed;
