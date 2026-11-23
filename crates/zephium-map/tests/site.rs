@@ -47,7 +47,6 @@ fn ordered_site_with_all_evidence() {
         ("Careers", Some(Careers), Footer, false),
         ("Security", Some(Security), Footer, false),
         ("Examples", Some(Examples), LinkedData, false),
-        ("Home", Some(Home), LinkedData, false),
         ("Privacy", Some(Legal), Footer, false),
     ];
     assert_eq!(
@@ -342,7 +341,8 @@ fn labelled_menus_and_deep_landings_use_observed_destinations() {
     let deep = doc("/pricing", include_str!("fixtures/section-pricing.html"));
     let p = read_site(&deep, &Default::default()).unwrap();
     assert_eq!(p.sections[0].key.as_url(), deep.page());
-    assert_eq!(labels(&p.sections[0].children), ["Plan tiers", "Questions"]);
+    assert_eq!(labels(&p.sections), ["Plan tiers", "Questions"]);
+    assert!(p.sections.iter().all(|e| e.locator != Locator::default()));
     assert_eq!(p.entry.as_url().path(), "/");
 }
 #[test]
@@ -441,7 +441,7 @@ fn metadata_and_section_page_boundaries() {
         .iter()
         .map(|d| Link {
             url: d.page().clone(),
-            title: "Guide".into(),
+            title: format!("Guide {}", d.page().path()),
         })
         .collect::<Vec<_>>();
     let (p, stats) = read_site_with_stats(

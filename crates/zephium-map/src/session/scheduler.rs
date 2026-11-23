@@ -5,7 +5,15 @@ impl Session {
         let Work::Section(i, key) = &job.work else {
             return None;
         };
-        let place = self.sites[*i].as_ref()?.place.as_ref()?;
+        let state = self.sites[*i].as_ref()?;
+        if self.cfg.sections == Sections::All {
+            return state
+                .eager
+                .iter()
+                .find(|e| e.key.page_match() == *key)
+                .map(|e| e.priority);
+        }
+        let place = state.place.as_ref()?;
         let entry = place.sections.iter().find(|e| e.key.page_match() == *key)?;
         Some(place.read_priority(entry))
     }

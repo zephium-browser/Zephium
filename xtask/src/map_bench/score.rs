@@ -169,6 +169,9 @@ pub(super) fn score(query: &CorpusQuery, outcome: &Outcome, activity: &Activity)
         .then(|| query.group.difference(&outcome.groups).copied().collect());
     let missing_count = missing_groups.as_ref().map_or(0, Vec::len);
     let matched = |entry: &super::engine::Entry| {
+        if entry.tags.contains("action") {
+            return None;
+        }
         query
             .want
             .iter()

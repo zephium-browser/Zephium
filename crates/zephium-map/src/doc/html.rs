@@ -292,7 +292,11 @@ impl DocBuilder {
                 )
             {
                 captured = true;
+                let first_link_run = n.role == Role::Link && n.text.is_empty();
                 self.append(at, &words, verbatim, gap);
+                if first_link_run {
+                    self.doc.nodes[at].link_prefix_bytes = self.doc.nodes[at].text.len();
+                }
             }
             inside_list_or_code |= matches!(
                 self.doc.nodes[at].role,
@@ -459,7 +463,27 @@ impl DocBuilder {
                     node.marks.insert(Marks::ANCILLARY);
                 }
                 if role == Role::Link {
+                    if n.has_attr("download")
+                        || n.attr("class").is_some_and(|v| {
+                            v.split_ascii_whitespace()
+                                .any(|t| t.eq_ignore_ascii_case("cta"))
+                        })
+                    {
+                        node.marks.insert(Marks::ACTION);
+                    }
                     node.destination = self.resolve(&n, "href", base);
+                    if node
+                        .destination
+                        .as_ref()
+                        .and_then(Url::domain)
+                        .and_then(|h| h.split_once('.'))
+                        .zip(n.link_language())
+                        .is_some_and(|((prefix, _), lang)| {
+                            prefix.len() == 2 && prefix.eq_ignore_ascii_case(lang)
+                        })
+                    {
+                        node.marks.insert(Marks::LANGUAGE_HOST);
+                    }
                 }
                 if role == Role::Image {
                     node.image_source = self.resolve(&n, "src", base);

@@ -48,6 +48,8 @@ pub(super) struct Capture {
     pub(super) sections: Vec<SectionAttempt>,
 }
 
+pub(super) mod quality;
+
 pub(super) fn search(
     query: &CorpusQuery,
     io: &mut dyn BenchIo,
@@ -59,6 +61,14 @@ pub(super) fn search(
         driver.outcome.needs_results_page = true;
         return driver.capture(None);
     }
+    driver.outcome.stats.insert(
+        match sections {
+            Sections::Asked => "card.asked",
+            Sections::All => "card.all",
+        }
+        .into(),
+        1,
+    );
     let config = Config {
         session_id: io.session_id(),
         engine: SearchEngine::Google,
@@ -570,6 +580,7 @@ fn flatten_stats(outcome: &mut Outcome, stats: Stats) {
     put("rejected_memos", stats.rejected_memos.into());
     for (index, notes) in stats.places {
         for (key, value) in [
+            ("probed_section", notes.probed_section),
             ("robots_truncated", notes.robots_truncated),
             ("entry_truncated", notes.entry_truncated),
             ("sections_truncated", notes.sections_truncated),
@@ -640,9 +651,12 @@ fn source_tag(source: Source) -> &'static str {
 }
 
 fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
-    let mut put = |key, value| {
+    let mut put = |key: &str, value| {
         outcome.stats.insert(format!("place.{index}.{key}"), value);
     };
+    for (class, count) in quality::CLASSES.into_iter().zip(quality::measure(&place)) {
+        put(&format!("card.{class}"), count);
+    }
     let notes = place.notes;
     for (key, value) in [
         ("shell", notes.shell),
@@ -657,7 +671,14 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
         .filter(|e| e.tier == zephium_map::Tier::Primary)
         .count();
     put("primary", primary as u64);
-    put("secondary", (place.sections.len() - primary) as u64);
+    put(
+        "secondary",
+        place
+            .sections
+            .iter()
+            .filter(|e| e.tier == zephium_map::Tier::Secondary)
+            .count() as u64,
+    );
     put("sections", place.sections.len() as u64);
     put(
         "children",
@@ -701,9 +722,14 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .iter()
                     .map(|&source| source_tag(source).into())
                     .chain(std::iter::once(
-                        match entry.tier {
+                        match if section.tier == zephium_map::Tier::Action {
+                            section.tier
+                        } else {
+                            entry.tier
+                        } {
                             zephium_map::Tier::Primary => "primary",
                             zephium_map::Tier::Secondary => "secondary",
+                            zephium_map::Tier::Action => "action",
                         }
                         .into(),
                     ))

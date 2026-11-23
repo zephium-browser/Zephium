@@ -133,6 +133,8 @@ struct SiteState {
     stale: bool,
     external: BTreeMap<PageMatch, PageKey>,
     asked: BTreeSet<site::EntryId>,
+    probed_section: bool,
+    eager: Vec<site::SectionRead>,
     memo: Option<SiteMemo>,
 }
 impl SiteState {
@@ -159,6 +161,8 @@ impl SiteState {
             stale: false,
             external: BTreeMap::new(),
             asked: BTreeSet::new(),
+            probed_section: false,
+            eager: Vec::new(),
             memo: None,
         }
     }
@@ -751,6 +755,7 @@ impl Session {
         );
     }
     fn rebuild(&mut self, i: usize, out: &mut Vec<Effect>) {
+        let probe_available = !self.sites.iter().flatten().any(|s| s.probed_section);
         let Some(state) = self.sites[i].as_mut() else {
             return;
         };
@@ -763,7 +768,7 @@ impl Session {
             sitemaps: state.maps.iter().map(|(k, v)| (k.clone(), v)).collect(),
             pages: state.pages.iter().map(|(k, v)| (k.clone(), v)).collect(),
         };
-        let Ok((mut place, mut detail)) =
+        let Ok((mut place, mut detail, eager)) =
             site::read_site_for(doc, &inputs, state.requested.as_ref())
         else {
             state.entry_failure = Some(Failure::Unreadable);
@@ -776,7 +781,7 @@ impl Session {
         detail.sitemap_truncated |= state.cut.contains(&Phase::Sitemap);
         detail.llms_truncated |= state.cut.contains(&Phase::Llms);
         place.notes.truncated |= detail.truncated();
-        self.stats.places.insert(i as u8, detail);
+
         if let Some(previous) = &state.place {
             place.keep_discovery(previous);
             if place.check_ids().is_err() {
@@ -786,18 +791,35 @@ impl Session {
             }
         }
         let candidates: BTreeSet<_> = match self.cfg.sections {
-            Sections::All => place
-                .fetch_sections()
-                .into_iter()
-                .map(|e| e.id.clone())
-                .collect(),
+            Sections::All => {
+                for read in &eager {
+                    state
+                        .discovered
+                        .entry(read.id.clone())
+                        .or_insert_with(|| read.key.page_match());
+                }
+                state.eager = eager;
+                state.eager.iter().map(|e| e.id.clone()).collect()
+            }
             Sections::Asked => {
                 state
                     .asked
                     .extend(place.asked_sections(doc.page()).map(|e| e.id.clone()));
+                if place.focus.is_none() && state.asked.is_empty() && probe_available {
+                    if let Some(entry) = state
+                        .requested
+                        .as_ref()
+                        .and_then(|role| place.likely_section(role, doc.page()))
+                    {
+                        state.asked.insert(entry.id.clone());
+                        state.probed_section = true;
+                    }
+                }
                 state.asked.clone()
             }
         };
+        detail.probed_section = state.probed_section;
+        self.stats.places.insert(i as u8, detail);
         for entry in &mut place.sections {
             if self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id) {
                 continue;
@@ -831,15 +853,26 @@ impl Session {
         let Some(place) = state.place.as_ref() else {
             return;
         };
-        let entries: Vec<_> = match self.cfg.sections {
-            Sections::All => place.fetch_sections(),
-            Sections::Asked => place.sections.iter().collect(),
+        let keys: Vec<_> = match self.cfg.sections {
+            Sections::All => state
+                .eager
+                .iter()
+                .filter(|r| {
+                    state
+                        .discovered
+                        .get(&r.id)
+                        .and_then(|key| state.reads.get(key))
+                        .is_none_or(|s| *s == ReadState::Queued)
+                })
+                .map(|r| r.key.clone())
+                .collect(),
+            Sections::Asked => place
+                .sections
+                .iter()
+                .filter(|e| e.read == Some(ReadState::Queued))
+                .map(|e| e.key.clone())
+                .collect(),
         };
-        let keys: Vec<_> = entries
-            .into_iter()
-            .filter(|e| e.read == Some(ReadState::Queued))
-            .map(|e| e.key.clone())
-            .collect();
         for key in keys {
             self.enqueue(Work::Section(i, key.page_match()), key.as_url().clone());
         }
@@ -874,26 +907,13 @@ impl Session {
             let Some(state) = &self.sites[i] else {
                 continue;
             };
-            let Some((doc, place)) = state.doc.as_ref().zip(state.place.as_ref()) else {
-                continue;
-            };
+            let Some(doc) = &state.doc else { continue };
             if state.maps_wanted >= MAX_SITEMAP_READS
-                || place
-                    .sections
-                    .iter()
-                    .filter(|e| {
-                        e.sources.iter().any(|s| {
-                            matches!(
-                                s,
-                                Source::PrimaryNav
-                                    | Source::Footer
-                                    | Source::MenuGroup
-                                    | Source::Llms
-                            )
-                        })
-                    })
-                    .count()
-                    >= SITEMAP_SECTION_THRESHOLD
+                || self
+                    .stats
+                    .places
+                    .get(&(i as u8))
+                    .is_some_and(|p| p.navigation_sections >= SITEMAP_SECTION_THRESHOLD)
             {
                 continue;
             }

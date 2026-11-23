@@ -206,14 +206,14 @@ fn place_lines(slot: u8, place: &Place) -> Vec<String> {
         COLUMNS - heading.len() - " ()".len(),
     );
     let mut lines = vec![format!("{heading}{title} ({host})")];
-    for tier in [Tier::Primary, Tier::Secondary] {
+    for tier in [Tier::Primary, Tier::Secondary, Tier::Action] {
         let mut sections = place
             .sections
             .iter()
             .filter(|entry| entry.tier == tier)
             .peekable();
-        if tier == Tier::Secondary && sections.peek().is_some() {
-            lines.push("  --- Secondary ---".into());
+        if tier != Tier::Primary && sections.peek().is_some() {
+            lines.push(format!("  --- {tier:?} ---"));
         }
         for section in sections {
             lines.push(entry_line(section, place.focus.as_deref(), "  "));
@@ -234,7 +234,15 @@ fn entry_line(entry: &Entry, focus: Option<&str>, indent: &str) -> String {
     let off_site = if entry.off_site { " [off-site]" } else { "" };
     let more = if entry.more { " [more]" } else { "" };
     let available = COLUMNS - indent.len() - mark.len() - off_site.len() - more.len() - "  ".len();
-    let (label, path) = pair(&entry.label, &entry.path, available);
+    let display = entry
+        .host
+        .as_ref()
+        .map(|host| format!("{host}{}", entry.path));
+    let (label, path) = pair(
+        &entry.label,
+        display.as_deref().unwrap_or(&entry.path),
+        available,
+    );
     format!("{indent}{mark}{label}  {path}{off_site}{more}")
 }
 

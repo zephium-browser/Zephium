@@ -12,13 +12,13 @@ use zephium_map::{
 };
 
 pub const MAX_TEXT_BYTES: usize = 300;
-pub const MAX_PATH_CHARS: usize = 128;
-pub const MAX_SECTIONS: usize = 32;
+pub use site::MAX_PATH_CHARS;
+pub const MAX_SECTIONS: usize = site::MAX_SECTIONS;
 pub const MAX_CHILDREN: usize = 12;
 pub const MAX_SOCIAL: usize = 10;
 pub const MAX_ALSO: usize = 8;
-pub const MAX_HOST_BYTES: usize = 253;
-pub const MAX_ROWS: usize = 64;
+pub use site::MAX_HOST_BYTES;
+pub const MAX_ROWS: usize = 2 * MAX_SECTIONS;
 pub const ID_BYTES: usize = 16;
 
 macro_rules! mirror {
@@ -48,7 +48,7 @@ mirror!(Role from SectionRole {
 mirror!(Network from results::Network {
     Twitter, GitHub, YouTube, LinkedIn, Discord, Reddit, Mastodon, Bluesky, Instagram, Facebook,
 });
-mirror!(Tier from site::Tier { Primary, Secondary });
+mirror!(Tier from site::Tier { Primary, Secondary, Action });
 mirror!(Confidence from query::Confidence { Low, High });
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,32 +367,7 @@ fn valid_id(id: &str) -> bool {
     id.len() == ID_BYTES && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn scheme_like(segment: &str) -> bool {
-    segment.strip_suffix(':').is_some_and(|scheme| {
-        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-    })
-}
-
-pub(crate) fn path(url: &Url) -> String {
-    let mut out = String::new();
-    for segment in url.path().split('/').filter(|s| !s.is_empty()) {
-        if scheme_like(segment) {
-            break;
-        }
-        out.push('/');
-        out.push_str(segment);
-    }
-    if out.is_empty() {
-        out.push('/');
-    }
-    match out.char_indices().nth(MAX_PATH_CHARS) {
-        Some((cut, _)) => out[..cut].to_owned(),
-        None => out,
-    }
-}
+pub(crate) use site::display_path as path;
 
 fn address(entry: &site::Entry) -> Url {
     let mut url = entry.key.as_url().clone();
@@ -405,13 +380,7 @@ fn address(entry: &site::Entry) -> Url {
 }
 
 fn hostname(url: &Url) -> Option<String> {
-    let host = url.domain()?.trim_end_matches('.');
-    (!host.is_empty()
-        && host.len() <= MAX_HOST_BYTES
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')))
-    .then(|| host.to_ascii_lowercase())
+    site::display_hostname(url).map(str::to_owned)
 }
 
 fn networks(profiles: &[Profile], social: &mut BTreeMap<Network, Url>) -> Vec<Network> {
@@ -496,10 +465,14 @@ pub(crate) fn place(
     };
     let mut seen = BTreeSet::new();
     let mut ordered: Vec<_> = source.sections.iter().collect();
-    ordered.sort_by_key(|e| e.tier != site::Tier::Primary);
+    ordered.sort_by_key(|e| e.tier);
     let mut sections = Vec::new();
     let host = hostname(source.entry.as_url());
+    let mut actions = 0;
     for section in ordered {
+        if section.tier == site::Tier::Action && actions == site::MAX_ACTIONS {
+            continue;
+        }
         if sections.len() == MAX_SECTIONS {
             break;
         }
@@ -512,6 +485,7 @@ pub(crate) fn place(
             &mut seen,
             &mut targets.entries,
         ) {
+            actions += usize::from(projected.tier == Tier::Action);
             sections.push(projected);
         }
     }

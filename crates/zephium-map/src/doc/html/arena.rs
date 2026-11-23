@@ -38,6 +38,8 @@ const ATTRIBUTE_NAMES: &[&str] = &[
     "data-testid",
     "aria-labelledby",
     "hreflang",
+    "lang",
+    "download",
 ];
 const ATTRIBUTES_PER_ELEMENT_BUDGET: usize = 4;
 
@@ -159,6 +161,17 @@ impl<'a> NodeRef<'a> {
         std::iter::successors((first != 0).then_some(self.arena.node(first)), |n| {
             let next = n.record().next;
             (next != 0).then_some(self.arena.node(next))
+        })
+    }
+    pub(super) fn link_language(self) -> Option<&'a str> {
+        self.attr("hreflang").or_else(|| {
+            std::iter::successors(Some(self), |n| {
+                n.arena
+                    .attached_parent(n.id)
+                    .filter(|&p| p != 0)
+                    .map(|p| n.arena.node(p))
+            })
+            .find_map(|n| n.attr("lang"))
         })
     }
     fn attribute(self, key: &str) -> Option<&'a Attr> {

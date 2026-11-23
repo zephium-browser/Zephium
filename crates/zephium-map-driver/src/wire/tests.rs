@@ -455,3 +455,26 @@ fn every_engine_failure_has_a_wire_class() {
         json!({"type": "end", "seq": 3, "outcome": {"kind": "failed", "failure": "no_results"}, "elapsed_ms": 7})
     );
 }
+
+#[test]
+fn action_tier_is_bounded_and_round_trips_with_its_target() {
+    let mut value = base();
+    value["sections"] = Value::Array(
+        (0..=site::MAX_ACTIONS)
+            .map(|i| {
+                section(
+                    &id(i),
+                    "Enter",
+                    &format!("https://acme.com/flow/{i}"),
+                    "Action",
+                )
+            })
+            .collect(),
+    );
+    let (card, targets) = place(&engine(value), None);
+    assert_eq!(card.sections.len(), site::MAX_ACTIONS);
+    for e in card.sections {
+        assert_eq!(serde_json::to_value(e.tier).unwrap(), "action");
+        assert!(targets.has(&e.id));
+    }
+}

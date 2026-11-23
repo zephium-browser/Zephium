@@ -80,18 +80,53 @@ impl Build<'_> {
             {
                 continue;
             }
+            let prefix = n.text.get(..n.link_prefix_bytes).filter(|s| {
+                !s.is_empty()
+                    && n.text[s.len()..].starts_with(char::is_whitespace)
+                    && s.chars().any(char::is_alphabetic)
+                    && !matches!(normal(s).as_str(), "new" | "beta")
+            });
+            let label = [Some(n.name.trim()), Some(n.text.trim()), prefix]
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .min_by_key(|s| s.chars().count())
+                .unwrap_or_default();
+            let marked_action = n.marks.has(crate::doc::Marks::ACTION);
             let parent = ancestors(nodes, i).skip(1).find_map(|a| {
                 owners
                     .get(&a)
                     .copied()
                     .filter(|_| n.parent_index() != Some(a) || nodes[a].role == Role::ListItem)
             });
+            let hint = |name: &str| LinkName {
+                text: clip(&crate::clean_text(name), TITLE_BYTES),
+                action: marked_action,
+                host_root: url.path() == "/" && url.query().is_none(),
+                language_host: n.marks.has(crate::doc::Marks::LANGUAGE_HOST),
+            };
             if nav && !footer && parent.is_none() {
-                if let Some((item, label)) = ancestors(nodes, i)
+                if let Some((item, group)) = ancestors(nodes, i)
                     .take_while(|&a| !matches!(nodes[a].role, Role::Landmark { landmark: _ }))
                     .find_map(|a| menu_labels.get(&a).map(|s| (a, *s)))
                 {
-                    if let Some(section) = self.entry_for(url, label, Source::PrimaryNav) {
+                    if let Some(section) = self.entry_for(url, group, Source::PrimaryNav) {
+                        let name = if section_role(label, url).is_some()
+                            && normal(label)
+                                == normal(
+                                    url.path()
+                                        .trim_matches('/')
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or_default(),
+                                ) {
+                            label
+                        } else {
+                            group
+                        };
+                        self.names
+                            .entry(section.id.clone())
+                            .or_insert_with(|| hint(name));
                         let index = self.section(section);
                         owners.insert(item, index);
                     }
@@ -108,6 +143,14 @@ impl Build<'_> {
             let Some(mut entry) = self.entry_for(url, n.accessible_name(), source) else {
                 continue;
             };
+            let name = self
+                .names
+                .entry(entry.id.clone())
+                .or_insert_with(|| hint(label));
+            name.action |= marked_action;
+            if card::sentence(&name.text) && !card::sentence(label) && !label.is_empty() {
+                name.text = clip(&crate::clean_text(label), TITLE_BYTES);
+            }
             if footer {
                 entry.group = ancestors(nodes, i).find_map(|a| group_labels.get(&a).cloned());
             }

@@ -165,7 +165,7 @@ pub enum Role {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub struct Marks(u8);
+pub struct Marks(u16);
 impl Marks {
     pub const SPONSORED: Self = Self(1);
     pub const ACCEPTED: Self = Self(2);
@@ -174,6 +174,8 @@ impl Marks {
     pub const FEATURED: Self = Self(16);
     pub const WIDGET: Self = Self(32);
     pub(crate) const ANCILLARY: Self = Self(64);
+    pub(crate) const LANGUAGE_HOST: Self = Self(512);
+    pub(crate) const ACTION: Self = Self(256);
     pub(crate) const PROSE: Self = Self(128);
     pub fn has(self, mark: Self) -> bool {
         self.0 & mark.0 != 0
@@ -186,6 +188,7 @@ pub struct Node {
     pub role: Role,
     pub parent: Option<u32>,
     pub name: String,
+    pub(crate) link_prefix_bytes: usize,
     pub text: String,
     pub destination: Option<Url>,
     pub image_source: Option<Url>,
@@ -221,6 +224,7 @@ impl Node {
             role,
             parent,
             name: String::new(),
+            link_prefix_bytes: 0,
             text: String::new(),
             destination: None,
             image_source: None,

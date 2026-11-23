@@ -597,6 +597,22 @@ This run used synthetic results pages. Group checks and first-layer latency were
 
 Places with at least 3 sections — 1 of 1 place and compare sites.
 
+
+### Card quality (all)
+
+| Defect | Rows | Place cards |
+|---|---:|---:|
+| action | 0 | 0 |
+| detail | 0 | 0 |
+| duplicate | 0 | 0 |
+| nameless | 0 | 0 |
+| off_host_root_children | 0 | 0 |
+| off_host_without_display | 0 | 0 |
+| order | 0 | 0 |
+| self | 0 | 0 |
+| sentence | 0 | 0 |
+| utility | 0 | 0 |
+
 | Session activity | Count |
 | --- | ---: |
 | Shells | 0 |

@@ -2018,3 +2018,41 @@ fn sitemap_fetch_requires_a_valid_media_type_essence() {
         );
     }
 }
+
+#[test]
+fn asked_probes_one_affine_section_and_focuses_only_observed_content() {
+    for has_match in [true, false] {
+        let run = run(asked(), "acme changelog", RESULT, |effect| match effect {
+            Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+                *id,
+                url,
+                "text/html",
+                "<nav><a href='/news'>News</a><a href='/releases'>Releases</a></nav>",
+            )),
+            Effect::Fetch { id, url, .. } if url.path() == "/releases" => Some(response(
+                *id,
+                url,
+                "text/html",
+                if has_match {
+                    "<aside><a href='/changes'>Changelog</a></aside>"
+                } else {
+                    "<aside><a href='/archive'>Archive</a></aside>"
+                },
+            )),
+            _ => None,
+        });
+        assert_eq!(run.stats.phases[&Phase::Section].started, 1);
+        assert!(run.stats.places[&0].probed_section);
+        assert!(!run.trace.iter().any(|s| s.ends_with("/news")));
+        let p = run.places.last().unwrap();
+        assert_eq!(p.focus.is_some(), has_match);
+        if has_match {
+            let found = section(p, "Releases")
+                .children
+                .iter()
+                .find(|e| e.label == "Changelog")
+                .unwrap();
+            assert_eq!(p.focus.as_ref(), Some(&found.id));
+        }
+    }
+}
