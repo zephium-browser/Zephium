@@ -907,7 +907,7 @@
 
   /* A wash, not a live blur: it keeps arbitrary wallpaper legible at no GPU cost. */
   :global(:root:not([data-material="none"])[data-material]) .newtab.custom {
-    --figure-surface: color-mix(in srgb, var(--color-surface) 88%, transparent);
+    --figure-surface: color-mix(in srgb, var(--color-surface) 92%, transparent);
   }
 
   .custom button.figure:hover {
