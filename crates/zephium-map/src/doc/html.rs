@@ -83,6 +83,43 @@ fn excluded(marks: Marks) -> bool {
     marks.has(Marks::GENERATED) || marks.has(Marks::SPONSORED)
 }
 
+fn disclosure_content(n: &NodeRef<'_>) -> bool {
+    !hidden(n)
+        && !excluded(marks(n))
+        && !excluded(n.lifted_marks())
+        && !matches!(
+            n.tag(),
+            "script" | "style" | "template" | "noscript" | "svg"
+        )
+}
+
+fn disclosure_text(anchor: NodeRef<'_>) -> impl Iterator<Item = &str> {
+    let mut pending: Vec<_> = anchor.children().next().map(Some).into_iter().collect();
+    std::iter::from_fn(move || {
+        while let Some(step) = pending.pop() {
+            let Some(n) = step else { return Some(" ") };
+            pending.extend(n.sibling().map(Some));
+            if !disclosure_content(&n) || n.tag() == "a" {
+                continue;
+            }
+            if n.is_text() {
+                return Some(n.text());
+            }
+            let formatting = FORMATTING_TAGS.contains(&n.tag());
+            if let Some(child) = n.children().next() {
+                if !formatting {
+                    pending.push(None);
+                }
+                pending.push(Some(child));
+            }
+            if !formatting {
+                return Some(" ");
+            }
+        }
+        None
+    })
+}
+
 impl DocBuilder {
     fn resolve(&mut self, node: &NodeRef, attr: &str, base: &Url) -> Option<Url> {
         let raw = node.attr(attr)?;
@@ -130,7 +167,7 @@ impl DocBuilder {
                     .children()
                     .find(|c| c.is_text())
                     .map_or("", |c| c.text());
-                let value = self.words(raw);
+                let value = self.words(raw.chars());
                 self.doc.head.title = self.head_text(&value, limit);
             }
             "meta"
@@ -140,7 +177,7 @@ impl DocBuilder {
                         .is_some_and(|v| v.eq_ignore_ascii_case("og:site_name")) =>
             {
                 if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
-                    let text = self.words(value);
+                    let text = self.words(value.chars());
                     self.doc.head.site_name = self.head_text(&text, limit);
                 }
             }
@@ -151,7 +188,7 @@ impl DocBuilder {
                         .is_some_and(|s| s.eq_ignore_ascii_case("application-name")) =>
             {
                 if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
-                    let text = self.words(value);
+                    let text = self.words(value.chars());
                     self.doc.head.application_name = self.head_text(&text, limit);
                 }
             }
@@ -230,26 +267,25 @@ impl DocBuilder {
         }
     }
 
-    fn words(&mut self, raw: &str) -> String {
+    fn words(&mut self, chars: impl Iterator<Item = char>) -> String {
         let mut out = String::new();
         let cap = (self.limits.node_text_bytes as usize)
             .min(self.limits.text_bytes as usize - self.text_bytes);
-        for word in raw
-            .split(|c: char| c.is_control() || c.is_whitespace())
-            .filter(|word| !word.is_empty())
-        {
-            let gap = usize::from(!out.is_empty());
-            let end = word.floor_char_boundary(cap.saturating_sub(out.len() + gap));
-            if end != 0 {
-                if gap != 0 {
-                    out.push(' ')
-                }
-                out.push_str(&word[..end]);
+        let mut gap = false;
+        for c in chars {
+            if c.is_control() || c.is_whitespace() {
+                gap = !out.is_empty();
+                continue;
             }
-            if end < word.len() {
+            if out.len() + usize::from(gap) + c.len_utf8() > cap {
                 self.mark_truncated();
                 break;
             }
+            if gap {
+                out.push(' ');
+                gap = false;
+            }
+            out.push(c);
         }
         out
     }
@@ -266,7 +302,7 @@ impl DocBuilder {
         let words = if verbatim {
             Cow::Borrowed(raw)
         } else {
-            Cow::Owned(self.words(raw))
+            Cow::Owned(self.words(raw.chars()))
         };
         if words.is_empty() {
             self.gap |= !raw.is_empty();
@@ -393,63 +429,40 @@ impl DocBuilder {
         }
         // Collapsed panel links belong to the control. Its hidden text never enters the document.
         let mut links = Vec::new();
-        let mut pending = panel
-            .children()
-            .next()
-            .map(|n| (n, None))
-            .into_iter()
-            .collect::<Vec<_>>();
-        while let Some((n, anchor)) = pending.pop() {
-            if let Some(next) = n.sibling() {
-                pending.push((next, anchor));
-            }
-            if hidden(&n)
-                || excluded(marks(&n))
-                || excluded(n.lifted_marks())
-                || matches!(
-                    n.tag(),
-                    "script" | "style" | "template" | "noscript" | "svg"
-                )
-            {
+        let mut pending: Vec<_> = panel.children().next().into_iter().collect();
+        while let Some(n) = pending.pop() {
+            pending.extend(n.sibling());
+            if !disclosure_content(&n) {
                 continue;
             }
-            let mut anchor: Option<usize> = anchor;
-            if n.tag() == "a" {
-                anchor = None;
-                if let Some(url) = self
-                    .resolve(&n, "href", base)
-                    .filter(|_| !n.has_attr("download"))
-                {
-                    let size = url.as_str().len();
-                    if size > self.limits.text_bytes as usize - self.text_bytes {
-                        self.mark_truncated();
-                        break;
-                    }
-                    self.text_bytes += size;
-                    let label = self.head_text(
-                        n.attr("aria-label").unwrap_or_default(),
-                        self.limits.node_text_bytes as usize,
-                    );
-                    anchor = Some(links.len());
-                    let language = link_language(&n)
-                        .filter(|s| s.len() <= self.limits.text_bytes as usize - self.text_bytes)
-                        .map(str::to_ascii_lowercase);
-                    self.text_bytes += language.as_deref().map_or(0, str::len);
-                    links.push(MenuLink {
-                        url,
-                        label,
-                        language,
-                    });
-                }
-            } else if let Some(i) = anchor {
-                let label = &mut links[i].label;
-                if label.is_empty() && n.is_text() && !n.text().trim().is_empty() {
-                    *label = self.head_text(n.text().trim(), self.limits.node_text_bytes as usize);
-                }
+            pending.extend(n.children().next());
+            if n.tag() != "a" || n.has_attr("download") {
+                continue;
             }
-            if let Some(child) = n.children().next() {
-                pending.push((child, anchor));
+            let Some(url) = self.resolve(&n, "href", base) else {
+                continue;
+            };
+            let size = url.as_str().len();
+            if size > self.limits.text_bytes as usize - self.text_bytes {
+                self.mark_truncated();
+                break;
             }
+            self.text_bytes += size;
+            let aria = n.attr("aria-label").unwrap_or_default();
+            let mut label = self.head_text(aria, self.limits.node_text_bytes as usize);
+            let language = link_language(&n)
+                .filter(|s| s.len() <= self.limits.text_bytes as usize - self.text_bytes)
+                .map(str::to_ascii_lowercase);
+            self.text_bytes += language.as_deref().map_or(0, str::len);
+            if aria.is_empty() {
+                label = self.words(disclosure_text(n).flat_map(str::chars));
+                self.text_bytes += label.len();
+            }
+            links.push(MenuLink {
+                url,
+                label,
+                language,
+            });
         }
         if !links.is_empty() {
             self.doc.menu_links.insert(index, links);
@@ -588,7 +601,7 @@ impl DocBuilder {
                     .filter(|v| !v.is_empty())
                     .or_else(|| (role == Role::Image).then(|| n.attr("alt")).flatten());
                 if let Some(name) = name {
-                    node.name = self.words(name);
+                    node.name = self.words(name.chars());
                 }
                 if let Some(id) = n.attr("id") {
                     if !n.clipped("id")

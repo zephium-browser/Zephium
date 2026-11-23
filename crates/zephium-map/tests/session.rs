@@ -667,6 +667,78 @@ fn a_fresh_asked_memo_is_provisional_for_an_eager_search() {
 }
 
 #[test]
+fn a_requested_section_from_an_unfocused_memo_uses_the_fresh_read_plan() {
+    let memo = run(asked(), "acme", RESULT, |_| None).memo.unwrap();
+    for (section_pages, policy) in [(1, "Allow: /"), (1, "Disallow: /pricing"), (0, "Allow: /")] {
+        let search =
+            |cached| {
+                run(
+                    Config {
+                        section_pages,
+                        ..asked()
+                    },
+                    "acme pricing",
+                    RESULT,
+                    |effect| match effect {
+                        Effect::LookupSite { id, .. } if cached => Some(Input::Cache {
+                            id: *id,
+                            memo: Some(memo.clone()),
+                        }),
+                        Effect::Fetch { id, url, .. } if url.path() == "/robots.txt" => Some(
+                            response(*id, url, "text/plain", &format!("User-agent: *\n{policy}")),
+                        ),
+                        _ => None,
+                    },
+                )
+            };
+        let fresh = search(false);
+        let replay = search(true);
+        assert_eq!(replay.stats.fresh_memos, 1);
+        assert_eq!(replay.trace[4], "place");
+        assert_eq!(replay.trace[5..], fresh.trace[4..]);
+        assert!(replay.places.last() == fresh.places.last());
+    }
+}
+
+#[test]
+fn an_open_waiting_for_landing_policy_times_out_at_the_deadline() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    let landing = Url::parse("https://docs.acme.com/price").unwrap();
+    let deadline = asked().elapsed;
+    let (mut session, effects) = open(held, "Pricing", asked());
+    let (id, _) = open_fetch(&effects, "/pricing");
+    let effects = session.handle(response(
+        id,
+        &landing,
+        "text/html",
+        "<h2 id='tiers'>Tiers</h2>",
+    ));
+    let (id, url) = open_fetch(&effects, "/robots.txt");
+    assert_eq!(url.origin(), landing.origin());
+    let effects = session.handle(Input::Elapsed { time: deadline });
+    assert!(session
+        .handle(response(id, &url, "text/plain", "User-agent: *\nAllow: /"))
+        .is_empty());
+    let (held, remembered, stats) = open_complete(session, effects);
+    let pricing = section(held.place(), "Pricing");
+    assert_eq!(
+        pricing.read,
+        Some(ReadState::Refused {
+            failure: Failure::Timeout
+        })
+    );
+    assert!(pricing.children.is_empty());
+    assert!(!remembered);
+    assert_eq!(
+        stats.phases[&Phase::Section].refused.get(&Failure::Timeout),
+        Some(&1)
+    );
+    assert!(!stats.phases[&Phase::Section]
+        .refused
+        .contains_key(&Failure::Robots));
+}
+
+#[test]
 fn landing_policy_precedes_section_acceptance_and_is_shared_by_origin() {
     let landing = Url::parse("https://docs.acme.com/private").unwrap();
     for (policy, allowed) in [

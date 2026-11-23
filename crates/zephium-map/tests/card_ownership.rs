@@ -105,7 +105,27 @@ fn menu_members_with_the_same_label_keep_their_fragment_targets() {
         "<nav><div><button>Resources</button><a href='/docs#api'>Overview</a>
         <a href='/docs#cli'>Overview</a><a href='/docs#api'>Overview</a></div></nav>",
     );
-    assert_eq!(labels(row(&p, "Resources")), ["Overview", "Overview"]);
+    let resources = row(&p, "Resources");
+    assert_eq!(labels(resources), ["Overview", "Overview"]);
+    let mut targets: Vec<_> = resources
+        .children
+        .iter()
+        .map(|e| {
+            format!(
+                "{}{}",
+                e.key.as_url(),
+                e.locator.fragment().unwrap_or_default()
+            )
+        })
+        .collect();
+    targets.sort();
+    assert_eq!(
+        targets,
+        [
+            "https://workshop.example/docs#api",
+            "https://workshop.example/docs#cli"
+        ]
+    );
 }
 
 #[test]
@@ -160,6 +180,16 @@ fn site_title_uses_only_owned_top_level_entities() {
             expected
         );
     }
+}
+
+#[test]
+fn a_foreign_website_cannot_supply_a_missing_title() {
+    let (place, _) = read(
+        r#"<script type="application/ld+json">
+        {"@type":"WebSite","name":"Other","url":"https://other.example/"}
+        </script>"#,
+    );
+    assert_eq!(place.title, "workshop.example");
 }
 
 #[test]

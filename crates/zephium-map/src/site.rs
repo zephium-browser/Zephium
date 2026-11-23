@@ -645,11 +645,6 @@ impl Build<'_> {
                     }
                 }
             }
-            if linked::typed(v, "WebSite") && self.title == self.site.as_str() {
-                if let Some(name) = v["name"].as_str() {
-                    self.title = clip(&crate::clean_text(name), TITLE_BYTES);
-                }
-            }
             let mut add = |label: Option<&str>, path: Option<&str>| {
                 if let Some((name, url)) = label.zip(path.and_then(|s| doc.page().join(s).ok())) {
                     if let Some(e) = self.entry_for(&url, name, Source::LinkedData) {

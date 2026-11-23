@@ -684,7 +684,7 @@ impl Session {
             let complete = !stale
                 && (self.cfg.sections == Sections::Asked || m.eager)
                 && state.section_hint.is_none()
-                && (state.requested.is_none() || place.focus.is_some());
+                && state.requested.is_none();
             state.complete = complete;
             if complete {
                 if let Some(pos) = shared_passage {
@@ -1239,6 +1239,10 @@ impl Session {
     }
     fn finish(&mut self, out: &mut Vec<Effect>) {
         if self.elapsed >= self.cfg.elapsed {
+            let waiting = std::mem::take(&mut self.landings)
+                .into_values()
+                .flatten()
+                .map(|(job, _)| job);
             let jobs: Vec<_> = self
                 .pending
                 .values()
@@ -1247,6 +1251,7 @@ impl Session {
                     _ => None,
                 })
                 .chain(self.queue.drain(..))
+                .chain(waiting)
                 .collect();
             for job in jobs {
                 if self.opening.is_some() && matches!(job.work, Work::Section(..)) {

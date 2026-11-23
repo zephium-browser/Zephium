@@ -21,6 +21,35 @@ fn document(bytes: &[u8], limits: DocLimits) -> Doc {
     .unwrap()
 }
 
+#[test]
+fn disclosure_labels_collect_visible_text_within_one_byte_budget() {
+    let html = b"<nav><button aria-controls='menu'>Menu</button><div aria-hidden='true' id='menu'>
+        <a href='/cloud'><span>Cloud</span> <span hidden>Skip</span> Hosting</a>
+        <a href='/other' aria-label='Override'>Other <b>label</b></a>
+        <a href='/api'>A<b>P</b>I<br>Reference</a></div></nav>";
+    for (cap, label, truncated) in [(13, "Cloud Hosting", false), (12, "Cloud Hostin", true)] {
+        let doc = document(
+            html,
+            DocLimits {
+                node_text_bytes: cap,
+                ..DocLimits::SITE_PAGE
+            },
+        );
+        let links = doc.menu_links.values().next().unwrap();
+        assert_eq!(links[0].label, label);
+        assert_eq!(links[1].label, "Override");
+        assert_eq!(
+            links[2].label,
+            if cap == 13 {
+                "API Reference"
+            } else {
+                "API Referenc"
+            }
+        );
+        assert_eq!(doc.body_truncated(), truncated);
+    }
+}
+
 fn large_page() -> String {
     const ELEMENTS: usize = 60_000;
     const BYTES: usize = 3 * 1024 * 1024;
