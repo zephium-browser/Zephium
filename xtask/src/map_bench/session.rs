@@ -698,6 +698,9 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .iter()
                     .filter(|source| **source != Source::Heading || depth == Depth::Two),
             );
+            if entry.menu_only {
+                continue;
+            }
             let mut url = entry.key.as_url().clone();
             if let Some(fragment) = entry
                 .locator

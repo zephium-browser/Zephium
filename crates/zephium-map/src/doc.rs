@@ -255,6 +255,7 @@ pub struct Alternate {
 
 pub struct Doc {
     page: Url,
+    pub(crate) menu_links: std::collections::BTreeMap<usize, Vec<(Url, String)>>,
     nodes: Vec<Node>,
     head: Head,
     truncated: bool,
@@ -291,6 +292,7 @@ impl DocBuilder {
         Ok(Self {
             doc: Doc {
                 page: page.clone(),
+                menu_links: Default::default(),
                 nodes: Vec::new(),
                 head: Head::default(),
                 truncated: false,

@@ -821,7 +821,9 @@ impl Session {
         detail.probed_section = state.probed_section;
         self.stats.places.insert(i as u8, detail);
         for entry in &mut place.sections {
-            if self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id) {
+            if entry.menu_only
+                || self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id)
+            {
                 continue;
             }
             let discovered = state

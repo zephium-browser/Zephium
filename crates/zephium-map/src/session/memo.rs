@@ -3,7 +3,7 @@ use crate::results::{MAX_SOCIAL, TITLE_BYTES};
 use crate::site::{MAX_CHILDREN, MAX_SECTIONS};
 use serde::{Deserialize, Serialize};
 
-pub const MEMO_VERSION: u16 = 4;
+pub const MEMO_VERSION: u16 = 5;
 pub const MAX_MEMO_BYTES: usize = 256 * 1024;
 pub const MEMO_TTL: u64 = 24 * 60 * 60;
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +49,13 @@ impl SiteMemo {
             || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(&p.site)
             || p.title.len() > TITLE_BYTES
             || p.focus.is_some()
+            || p.notes.thin
+                != (p
+                    .sections
+                    .iter()
+                    .filter(|e| e.tier == site::Tier::Primary)
+                    .count()
+                    < site::MIN_NAV_ROWS)
             || p.notes.shell
             || p.notes.wall
             || p.sections
@@ -134,6 +141,17 @@ fn valid_entry(e: &Entry, place: &Place, parent: Option<&Entry>) -> bool {
         .iter()
         .any(|s| matches!(s, Source::PrimaryNav | Source::MenuGroup | Source::Footer));
     if site != place.site && !delegated && !(site_nav && site::external_role(e.role)) {
+        return false;
+    }
+    if e.menu_only
+        && (parent.is_some()
+            || e.key != place.entry
+            || e.locator != Locator::default()
+            || e.tier != site::Tier::Primary
+            || e.children.is_empty()
+            || e.id != site::EntryId::menu(&place.entry, &e.label)
+            || !e.navigation_row())
+    {
         return false;
     }
     if e.off_site != (site != place.site) {

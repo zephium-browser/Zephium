@@ -1548,7 +1548,7 @@ fn sitemap_samples_obey_read_byte_and_section_bounds() {
                 .unwrap()
                 .sections
                 .iter()
-                .any(|e| e.label == "sampled"));
+                .any(|e| e.label == "Sampled"));
         }
     }
 }

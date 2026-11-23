@@ -80,18 +80,7 @@ impl Build<'_> {
             {
                 continue;
             }
-            let prefix = n.text.get(..n.link_prefix_bytes).filter(|s| {
-                !s.is_empty()
-                    && n.text[s.len()..].starts_with(char::is_whitespace)
-                    && s.chars().any(char::is_alphabetic)
-                    && !matches!(normal(s).as_str(), "new" | "beta")
-            });
-            let label = [Some(n.name.trim()), Some(n.text.trim()), prefix]
-                .into_iter()
-                .flatten()
-                .filter(|s| !s.is_empty())
-                .min_by_key(|s| s.chars().count())
-                .unwrap_or_default();
+            let label = menus::link_label(n);
             let marked_action = n.marks.has(crate::doc::Marks::ACTION);
             let parent = ancestors(nodes, i).skip(1).find_map(|a| {
                 owners

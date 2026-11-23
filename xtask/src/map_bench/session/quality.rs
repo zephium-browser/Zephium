@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use zephium_map::{site::MAX_PRIMARY_LABEL_CHARS, Place, SectionRole, Source, Tier};
 
-pub(in crate::map_bench) const CLASSES: [&str; 10] = [
+pub(in crate::map_bench) const CLASSES: [&str; 15] = [
     "action",
     "sentence",
     "self",
@@ -12,14 +12,41 @@ pub(in crate::map_bench) const CLASSES: [&str; 10] = [
     "utility",
     "detail",
     "off_host_root_children",
+    "top_level_menu_items",
+    "supplemental_only",
+    "same_role_pairs",
+    "path_names",
+    "thin_cards",
 ];
 
 pub(super) fn measure(place: &Place) -> [u64; CLASSES.len()] {
     let mut counts = [0; CLASSES.len()];
     let mut labels = BTreeSet::new();
     let mut destinations = BTreeSet::new();
+    let mut roles = std::collections::BTreeMap::new();
+    counts[14] = u64::from(
+        place
+            .sections
+            .iter()
+            .filter(|e| e.tier == Tier::Primary)
+            .count()
+            < zephium_map::site::MIN_NAV_ROWS,
+    );
     let mut lower_priority = false;
     for entry in place.sections.iter().filter(|e| e.tier == Tier::Primary) {
+        counts[10] += u64::from(entry.menu_item);
+        counts[11] += u64::from(
+            entry
+                .sources
+                .iter()
+                .all(|s| matches!(s, Source::Llms | Source::Sitemap)),
+        );
+        if let Some(role) = entry.role {
+            let previous = roles.entry(role).or_insert(0);
+            counts[12] += *previous;
+            *previous += 1;
+        }
+        counts[13] += u64::from(entry.path_name);
         let url = entry.key.as_url();
         let label = entry.label.to_lowercase();
         let path = url.path().trim_matches('/');
@@ -40,14 +67,19 @@ pub(super) fn measure(place: &Place) -> [u64; CLASSES.len()] {
         let sentence = entry.label.chars().count() > MAX_PRIMARY_LABEL_CHARS
             || label.contains(". ")
             || label.split_whitespace().count() >= 7;
-        let home = entry.key.page_match() == place.entry.page_match()
+        let home = !entry.menu_only
+            && entry.key.page_match() == place.entry.page_match()
             && entry.locator == Default::default();
         let nameless = matches!(
             label.as_str(),
             "" | "more" | "other" | "optional" | "menu" | "learn more"
         );
         let fresh_label = labels.insert(label.clone());
-        let fresh_destination = destinations.insert((entry.card_page(), entry.locator.fragment()));
+        let fresh_destination = destinations.insert((
+            entry.card_page(),
+            entry.locator.fragment(),
+            entry.menu_only.then_some(&entry.id),
+        ));
         let utility = entry.role == Some(SectionRole::Legal)
             || matches!(
                 label.as_str(),
@@ -59,8 +91,7 @@ pub(super) fn measure(place: &Place) -> [u64; CLASSES.len()] {
             && url.host_str() != place.entry.as_url().host_str()
             && path.contains('/');
         let minor = action || home || nameless || utility || detail;
-        let direct = entry.sources.contains(&Source::PrimaryNav)
-            || entry.sources.contains(&Source::MenuGroup);
+        let direct = entry.navigation_row();
         let order = !minor && direct && lower_priority;
         lower_priority |= minor || !direct;
         for (n, hit) in counts.iter_mut().zip([
@@ -119,5 +150,33 @@ mod tests {
             assert_eq!(scores[class], 1);
         }
         assert_eq!(scores["off_host_without_display"], 0);
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    use zephium_map::{site::read_site, Doc, DocLimits};
+    #[test]
+    fn provenance_and_role_pairs_are_counted_per_primary_row() {
+        let url = url::Url::parse("https://workshop.example/").unwrap();
+        let doc = Doc::from_html(
+            &url,
+            b"<nav><a href='/a'>A</a><a href='/b'>B</a><a href='/c'>C</a></nav>",
+            None,
+            DocLimits::SITE_PAGE,
+        )
+        .unwrap();
+        let mut place = read_site(&doc, &Default::default()).unwrap();
+        for e in &mut place.sections {
+            e.role = Some(SectionRole::Documentation);
+        }
+        place.sections[0].menu_item = true;
+        place.sections[0].path_name = true;
+        place.sections[0].sources = vec![Source::Sitemap, Source::Llms];
+        place.sections[1].sources = vec![Source::Llms, Source::PrimaryNav];
+        assert_eq!(measure(&place)[10..], [1, 1, 3, 1, 0]);
+        place.sections[0].tier = Tier::Secondary;
+        assert_eq!(measure(&place)[10..], [0, 0, 1, 0, 1]);
     }
 }

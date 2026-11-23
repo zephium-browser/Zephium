@@ -584,9 +584,9 @@ This run used synthetic results pages. Group checks and first-layer latency were
 | full_ns | 1 | 10 | 10 | 10 |
 | memo_bytes | 1 | 256 | — | 256 |
 | peak_rss_delta_bytes | 0 | — | — | — |
-| primary_sections_per_place | 1 | 3 | 3 | 3 |
+| primary_sections_per_place | 1 | 5 | 5 | 5 |
 | requests | 2 | 0 | 0 | 0 |
-| secondary_sections_per_place | 1 | 2 | 2 | 2 |
+| secondary_sections_per_place | 1 | 0 | 0 | 0 |
 | sections_per_place | 1 | 5 | 5 | 5 |
 | wall_ns | 2 | 0 | 0 | 0 |
 | wire_bytes | 2 | 0 | 0 | 0 |
@@ -609,8 +609,13 @@ Places with at least 3 sections — 1 of 1 place and compare sites.
 | off_host_root_children | 0 | 0 |
 | off_host_without_display | 0 | 0 |
 | order | 0 | 0 |
+| path_names | 1 | 1 |
+| same_role_pairs | 0 | 0 |
 | self | 0 | 0 |
 | sentence | 0 | 0 |
+| supplemental_only | 2 | 1 |
+| thin_cards | 0 | 0 |
+| top_level_menu_items | 0 | 0 |
 | utility | 0 | 0 |
 
 | Session activity | Count |

@@ -3,6 +3,7 @@ use zephium_map_driver::wire::{Confidence, Network, Official};
 
 fn entry(id: &str, label: &str, path: &str) -> Entry {
     Entry {
+        menu_only: false,
         id: id.into(),
         tier: Tier::Primary,
         label: label.into(),

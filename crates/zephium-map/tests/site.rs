@@ -201,7 +201,7 @@ fn sitemap_sampling_and_index_bounds() {
     .unwrap();
     assert_eq!(
         labels(&p.sections),
-        ["downloads", "docs", "examples", "news", "products"]
+        ["Downloads", "Docs", "Examples", "News", "Products"]
     );
     assert_eq!(stats.sitemap_urls, 50_000);
     let count = p.sections.len();
@@ -214,7 +214,10 @@ fn sitemap_sampling_and_index_bounds() {
         assert_eq!(e.more, 10_000 - 1 - expected as u32);
         assert_eq!(e.children.len(), expected);
         assert_eq!(e.sources[0], Source::Sitemap);
-        assert_eq!(e.key.as_url().path(), format!("/{}/0", e.label));
+        assert_eq!(
+            e.key.as_url().path(),
+            format!("/{}/0", e.label.to_lowercase())
+        );
         assert_eq!(
             labels(&e.children),
             (1..=expected).map(|n| n.to_string()).collect::<Vec<_>>()
@@ -336,8 +339,9 @@ fn labelled_menus_and_deep_landings_use_observed_destinations() {
     let home=doc("/","<header><nav><div><button>Products</button><ul><li><a href='/editor'>Editor</a></li><li><a href='/reader'>Reader</a></li></ul></div><div><a href='/a'>Alpha</a><a href='/b'>Beta</a></div></nav></header>");
     let place = read_site(&home, &Default::default()).unwrap();
     assert_eq!(labels(&place.sections), ["Products", "Alpha", "Beta"]);
-    assert_eq!(place.sections[0].key.as_url().path(), "/editor");
-    assert_eq!(labels(&place.sections[0].children), ["Reader"]);
+    assert!(place.sections[0].menu_only);
+    assert!(!place.entry_openable(&place.sections[0].id, &Default::default()));
+    assert_eq!(labels(&place.sections[0].children), ["Editor", "Reader"]);
     let deep = doc("/pricing", include_str!("fixtures/section-pricing.html"));
     let p = read_site(&deep, &Default::default()).unwrap();
     assert_eq!(p.sections[0].key.as_url(), deep.page());
@@ -386,9 +390,9 @@ fn separate_sitemaps_merge_one_cluster_regardless_of_arrival() {
     };
     let p = run([(key("/b.xml"), &b), (key("/a.xml"), &a)].into());
     assert!(p == run([(key("/a.xml"), &a), (key("/b.xml"), &b)].into()));
-    assert_eq!(labels(&p.sections), ["docs"]);
+    assert_eq!(labels(&p.sections), ["Docs"]);
     assert_eq!(p.sections[0].key.as_url().path(), "/docs/read");
-    assert_eq!(labels(&p.sections[0].children), ["print"]);
+    assert_eq!(labels(&p.sections[0].children), ["Print"]);
 }
 
 #[test]
@@ -590,10 +594,14 @@ fn landmark_free_link_rows_require_short_labels_and_little_intervening_text() {
     assert_eq!(
         p.sections
             .iter()
-            .filter(|e| e.tier == Tier::Secondary)
+            .filter(|e| e.tier == Tier::Primary && e.sources == [Source::LinkCluster])
             .count(),
         8
     );
+    assert!(p
+        .sections
+        .iter()
+        .any(|e| e.label == "Manual" && e.tier == Tier::Secondary));
 }
 
 #[test]

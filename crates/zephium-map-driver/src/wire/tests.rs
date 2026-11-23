@@ -478,3 +478,33 @@ fn action_tier_is_bounded_and_round_trips_with_its_target() {
         assert!(targets.has(&e.id));
     }
 }
+
+#[test]
+fn a_menu_only_row_projects_children_without_registering_a_page_target() {
+    let url = Url::parse("https://acme.com/").unwrap();
+    let doc = Doc::from_html(
+        &url,
+        b"<nav><div><button>Tools</button><a href='/a'>Alpha</a><a href='/b'>Beta</a></div></nav>",
+        None,
+        DocLimits::SITE_PAGE,
+    )
+    .unwrap();
+    let source = site::read_site(&doc, &Default::default()).unwrap();
+    let (card, targets) = place(&source, Some(&Default::default()));
+    let menu = &card.sections[0];
+    assert!(card.notes.thin && menu.menu_only && !menu.open && menu.path.is_empty());
+    assert!(targets.has(&menu.id));
+    assert!(targets
+        .resolve(&Target::Entry {
+            id: menu.id.clone()
+        })
+        .is_none());
+    assert_eq!(menu.children.len(), 2);
+    for child in &menu.children {
+        assert!(targets
+            .resolve(&Target::Entry {
+                id: child.id.clone()
+            })
+            .is_some());
+    }
+}

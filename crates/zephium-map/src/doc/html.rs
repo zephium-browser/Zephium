@@ -349,6 +349,91 @@ impl DocBuilder {
         }
     }
 
+    fn disclosure_links(&mut self, button: NodeRef<'_>, base: &Url, index: usize) {
+        let Some(id) = button
+            .attr("aria-controls")
+            .filter(|s| !s.is_empty() && !button.clipped("aria-controls"))
+        else {
+            return;
+        };
+        let Some(panel) =
+            std::iter::successors(button.sibling(), |n| n.sibling()).find(|n| !n.is_text())
+        else {
+            return;
+        };
+        if panel.attr("id") != Some(id)
+            || panel.clipped("id")
+            || panel.hidden_by_lift()
+            || panel.has_attr("hidden")
+            || panel.attr("aria-hidden") != Some("true")
+            || !super::super::ancestors(&self.doc.nodes, index).any(|a| {
+                matches!(
+                    self.doc.nodes[a].role,
+                    Role::Landmark {
+                        landmark: Some(Landmark::Navigation)
+                    }
+                )
+            })
+        {
+            return;
+        }
+        // Collapsed panel links belong to the control. Its hidden text never enters the document.
+        let mut links = Vec::new();
+        let mut pending = panel
+            .children()
+            .next()
+            .map(|n| (n, None))
+            .into_iter()
+            .collect::<Vec<_>>();
+        while let Some((n, anchor)) = pending.pop() {
+            if let Some(next) = n.sibling() {
+                pending.push((next, anchor));
+            }
+            if hidden(&n)
+                || excluded(marks(&n))
+                || excluded(n.lifted_marks())
+                || matches!(
+                    n.tag(),
+                    "script" | "style" | "template" | "noscript" | "svg"
+                )
+            {
+                continue;
+            }
+            let mut anchor: Option<usize> = anchor;
+            if n.tag() == "a" {
+                anchor = None;
+                if let Some(url) = self
+                    .resolve(&n, "href", base)
+                    .filter(|_| !n.has_attr("download"))
+                {
+                    let size = url.as_str().len();
+                    if size > self.limits.text_bytes as usize - self.text_bytes {
+                        self.mark_truncated();
+                        break;
+                    }
+                    self.text_bytes += size;
+                    let label = self.head_text(
+                        n.attr("aria-label").unwrap_or_default(),
+                        self.limits.node_text_bytes as usize,
+                    );
+                    anchor = Some(links.len());
+                    links.push((url, label));
+                }
+            } else if let Some(i) = anchor {
+                let label = &mut links[i].1;
+                if label.is_empty() && n.is_text() && !n.text().trim().is_empty() {
+                    *label = self.head_text(n.text().trim(), self.limits.node_text_bytes as usize);
+                }
+            }
+            if let Some(child) = n.children().next() {
+                pending.push((child, anchor));
+            }
+        }
+        if !links.is_empty() {
+            self.doc.menu_links.insert(index, links);
+        }
+    }
+
     fn walk(&mut self, body: NodeRef<'_>, base: &Url) -> Result<(), DocError> {
         let mut pending = vec![Some((body, None::<usize>, 0, false))];
         while let Some(step) = pending.pop() {
@@ -531,7 +616,11 @@ impl DocBuilder {
                         - node.element_id.as_deref().map_or(0, str::len);
                     node.language = language.filter(|s| s.len() <= room).map(str::to_owned);
                 }
-                (Some(self.push(node)? as usize), level + 1)
+                let index = self.push(node)? as usize;
+                if role == Role::Button {
+                    self.disclosure_links(n, base, index);
+                }
+                (Some(index), level + 1)
             } else {
                 (parent, level)
             };
@@ -654,6 +743,7 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 "spinbutton" => Spinbutton,
                 "slider" => Slider,
                 "tab" => Tab,
+                "menuitem" if tag == "a" && n.has_attr("href") => Link,
                 "menuitem" => MenuItem,
                 "progressbar" => Progress,
                 "status" | "alert" => Status,

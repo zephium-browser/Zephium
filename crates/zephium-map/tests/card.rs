@@ -50,7 +50,7 @@ fn names_come_from_link_text_or_an_observed_path() {
             .filter(|e| e.tier == Tier::Primary)
             .map(|e| e.label.as_str())
             .collect::<Vec<_>>(),
-        ["Hilfe", "research notes"]
+        ["Hilfe", "Research notes"]
     );
     assert_eq!(p.sections.last().unwrap().tier, Tier::Secondary);
     for n in [MAX_PRIMARY_LABEL_CHARS, MAX_PRIMARY_LABEL_CHARS + 1] {
@@ -107,14 +107,22 @@ proptest! {
     fn surviving_ids_ignore_label_noise_and_action_insertion(slugs in proptest::collection::btree_set("[a-z]{4,10}",1..10)) {
         let mut plain=String::from("<nav>");
         let mut noisy=String::from("<nav><a href='/'>Home</a><a href='/login'>Enter</a>");
-        for slug in slugs {
+        for slug in &slugs {
             plain.push_str(&format!("<a href='/pages/{slug}'>{slug}</a>"));
             noisy.push_str(&format!("<a href='/pages/{slug}'><span>{slug}</span><span>A longer explanation</span></a><a href='/de/pages/{slug}'>{slug}</a>"));
         }
         let a=card(&(plain+"</nav>"));
         let b=card(&(noisy+"</nav>"));
         let ids=|p:Place|p.sections.into_iter().filter(|e|e.tier==Tier::Primary).map(|e|(e.label,e.id)).collect::<Vec<_>>();
-        prop_assert_eq!(ids(a),ids(b));
+        let original = ids(a);
+        prop_assert_eq!(&original,&ids(b));
+        let children = slugs.iter().map(|slug| format!("<a href='/pages/{slug}'>{slug}</a>")).collect::<String>();
+        let grouped = card(&format!("<nav><div><button>Topics</button>{children}</div></nav>"));
+        if original.len()>1 {
+            prop_assert_eq!(grouped.sections.len(),1);
+            let placed:Vec<_>=grouped.sections[0].children.iter().map(|e|(e.label.clone(),e.id.clone())).collect();
+            prop_assert_eq!(original,placed);
+        } else {prop_assert_eq!(original,ids(grouped));}
     }
 }
 
@@ -176,7 +184,7 @@ fn repeated_locale_roots_are_not_sections_and_query_specific_routes_remain_disti
 fn the_word_boundary_refuses_a_teaser_and_keeps_a_short_title() {
     let p = card("<nav><a href='/one'>A B C D E F</a><a href='/two'>A B C D E F G</a></nav>");
     assert_eq!(p.sections[0].label, "A B C D E F");
-    assert_eq!(p.sections[1].label, "two");
+    assert_eq!(p.sections[1].label, "Two");
 }
 
 #[test]
@@ -195,7 +203,7 @@ fn an_observed_directory_represents_three_or_more_deep_sibling_articles() {
             .unwrap();
         assert_eq!(directory.tier, tier);
         if count == 3 {
-            assert_eq!(directory.label, "tools");
+            assert_eq!(directory.label, "Tools");
         }
     }
 }
@@ -223,7 +231,7 @@ fn version_badges_release_items_and_breadcrumbs_do_not_displace_sections() {
         .filter(|e| e.tier == Tier::Primary)
         .map(|e| e.label.as_str())
         .collect();
-    assert_eq!(primary, ["versions", "Changelog", "Feeds", "Formats"]);
+    assert_eq!(primary, ["Versions", "Changelog", "Feeds", "Formats"]);
     assert!(p
         .sections
         .iter()
@@ -241,4 +249,122 @@ fn platform_download_calls_and_markdown_sales_contacts_are_actions() {
         .collect();
     assert_eq!(actions, ["Download for Solaris", "Talk to us"]);
     assert_eq!(p.sections[0].label, "BSD");
+}
+
+#[test]
+fn a_group_uses_its_observed_index_and_flattens_nested_menus() {
+    let p=card("<nav><div><button>Tools</button><a href='/catalog'>See all tools</a><a href='/one'>First</a><div><button>Editors</button><a href='/two'>Second</a><a href='/three'>Third</a></div></div></nav>");
+    assert_eq!(p.sections.len(), 1);
+    let tools = &p.sections[0];
+    assert_eq!(tools.label, "Tools");
+    assert_eq!(tools.key.as_url().path(), "/catalog");
+    assert!(!tools.menu_only);
+    assert!(p.entry_openable(&tools.id, &Default::default()));
+    assert_eq!(
+        tools
+            .children
+            .iter()
+            .map(|c| c.label.as_str())
+            .collect::<Vec<_>>(),
+        ["First", "Second", "Third"]
+    );
+    assert!(tools.children.iter().all(|e| e.children.is_empty()));
+}
+
+#[test]
+fn a_collapsed_panel_needs_its_controls_reference_and_visible_members() {
+    for (id, expected) in [("panel", 1), ("other", 0)] {
+        let p=card(&format!("<nav><button aria-controls='panel'>Tools</button><div aria-hidden='true' id='{id}'><a href='/x'>First</a><a href='/y'>Second</a><div hidden><a href='/hidden'>Hidden</a></div></div></nav>"));
+        assert_eq!(p.sections.len(), expected);
+        if let Some(group) = p.sections.first() {
+            assert!(group.menu_only);
+            assert_eq!(group.children.len(), 2);
+        }
+    }
+}
+
+#[test]
+fn only_path_names_change_case_and_thin_counts_primary_rows() {
+    for (extra, thin) in [("", true), ("<a href='/third'>tHIRD</a>", false)] {
+        let p=card(&format!("<nav><a href='/ёж'>Here are the latest versions of this resource</a><a href='/foo'>lower case</a>{extra}<a href='/login'>Log in</a></nav>"));
+        assert_eq!(p.notes.thin, thin);
+        assert_eq!(
+            (&*p.sections[0].label, p.sections[0].path_name),
+            ("Ёж", true)
+        );
+        assert_eq!(
+            (&*p.sections[1].label, p.sections[1].path_name),
+            ("lower case", false)
+        );
+        if !thin {
+            assert_eq!(p.sections[2].label, "tHIRD");
+        }
+    }
+}
+
+#[test]
+fn supplemental_roles_keep_the_navigation_id_and_fill_sparse_cards_roles_first() {
+    use zephium_map::site::SiteInputs;
+    let url = Url::parse("https://workshop.example/").unwrap();
+    for (extra, sparse) in [("", true), ("<a href='/three'>Three</a>", false)] {
+        let html = format!("<nav><a href='/manual'>Docs</a><a href='/two'>Two</a>{extra}</nav>");
+        let d = Doc::from_html(&url, html.as_bytes(), None, DocLimits::SITE_PAGE).unwrap();
+        let base = read_site(&d, &Default::default()).unwrap();
+        let p=read_site(&d,&SiteInputs {llms:Some("## Documentation\n- [One](/help/one)\n- [Two guides](/help/two)\n## Assorted\n- [Start](/pricing)\n## Careers\n- [Open roles](/work)"),..Default::default()}).unwrap();
+        let docs = &p.sections[0];
+        assert_eq!(docs.id, base.sections[0].id);
+        assert_eq!(docs.label, "Docs");
+        assert_eq!(docs.children.len(), 2);
+        assert!(!p.sections.iter().any(|e| e.label == "Documentation"));
+        let row = |name: &str| p.sections.iter().position(|e| e.label == name).unwrap();
+        assert!(row("Careers") < row("Assorted"));
+        assert_eq!(p.sections[row("Careers")].tier, Tier::Primary);
+        assert_eq!(p.sections[row("Assorted")].tier == Tier::Primary, sparse);
+    }
+}
+
+#[test]
+fn an_index_heading_does_not_take_its_first_footer_links_role() {
+    let url = Url::parse("https://workshop.example/").unwrap();
+    let doc=Doc::from_html(&url,b"<nav><div><button>Resources</button><a href='/one'>One</a><a href='/two'>Two</a></div><a href='/three'>Three</a><a href='/four'>Four</a></nav><footer><a href='/help'>Support</a></footer>",None,DocLimits::SITE_PAGE).unwrap();
+    let p = read_site(
+        &doc,
+        &zephium_map::site::SiteInputs {
+            llms: Some("## Resources\n- [Help center](/help)\n- [Reports](/reports)"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(p.sections.iter().all(|e| e.label != "Support"));
+    let row = p.sections.iter().find(|e| e.label == "Resources").unwrap();
+    assert!(row.menu_only);
+    assert!(row
+        .children
+        .iter()
+        .any(|e| e.key.as_url().path() == "/help"));
+    assert!(row.children.iter().any(|e| e.label == "Reports"));
+}
+
+#[test]
+fn a_collapsed_menu_obeys_the_documents_text_budget() {
+    let url = Url::parse("https://workshop.example/").unwrap();
+    let html="<nav><button aria-controls='menu'>Tools</button><div id='menu' aria-hidden='true'><a href='/first'>First</a><a href='/second'>Second</a></div></nav>";
+    let room = ["/first", "/second"]
+        .iter()
+        .map(|path| url.join(path).unwrap().as_str().len())
+        .sum::<usize>()
+        + "ToolsFirstSecond".len();
+    for (limit, truncated) in [(room, false), (room - 1, true)] {
+        let d = Doc::from_html(
+            &url,
+            html.as_bytes(),
+            None,
+            DocLimits {
+                text_bytes: limit as u32,
+                ..DocLimits::SITE_PAGE
+            },
+        )
+        .unwrap();
+        assert_eq!(d.body_truncated(), truncated);
+    }
 }

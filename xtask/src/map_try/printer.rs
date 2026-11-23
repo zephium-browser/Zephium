@@ -90,6 +90,7 @@ impl Printer {
                 state.sections = place
                     .sections
                     .iter()
+                    .filter(|e| !e.menu_only)
                     .map(|entry| (entry.id.clone(), entry.label.clone()))
                     .collect();
                 if *complete
@@ -231,6 +232,12 @@ fn entry_line(entry: &Entry, focus: Option<&str>, indent: &str) -> String {
     } else {
         ""
     };
+    if entry.menu_only {
+        return format!(
+            "{indent}{mark}{} ▸",
+            clip(&entry.label, COLUMNS - indent.len() - mark.len() - 2)
+        );
+    }
     let off_site = if entry.off_site { " [off-site]" } else { "" };
     let more = if entry.more { " [more]" } else { "" };
     let available = COLUMNS - indent.len() - mark.len() - off_site.len() - more.len() - "  ".len();

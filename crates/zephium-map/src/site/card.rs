@@ -5,7 +5,6 @@ pub const MAX_PRIMARY_LABEL_CHARS: usize = 48;
 pub const MAX_HOST_BYTES: usize = 253;
 pub const MAX_PATH_CHARS: usize = 128;
 const SENTENCE_WORDS: usize = 7;
-const MIN_NAV_ROWS: usize = 3;
 const MIN_DIRECTORY_ITEMS: usize = 3;
 
 fn locale(segment: &str) -> bool {
@@ -34,7 +33,7 @@ fn localized_key(key: &PageKey) -> PageMatch {
     PageKey::from_url(&url).map_or_else(|_| key.page_match(), |k| k.page_match())
 }
 
-fn placeholder(label: &str) -> bool {
+pub(super) fn placeholder(label: &str) -> bool {
     matches!(
         normal(label).as_str(),
         "" | "other"
@@ -65,6 +64,7 @@ fn version_badge(label: &str) -> bool {
 
 fn path_name(url: &Url) -> Option<String> {
     let slug = url.path_segments()?.rfind(|s| !s.is_empty())?;
+    let slug = super::decode_fragment(slug);
     let name = slug
         .trim_end_matches(".html")
         .trim_end_matches(".md")
@@ -74,7 +74,16 @@ fn path_name(url: &Url) -> Option<String> {
         && !placeholder(&name)
         && name.chars().any(char::is_alphabetic)
         && name.chars().all(|c| c.is_alphanumeric() || c == ' '))
-    .then_some(name)
+    .then(|| capitalized(&name))
+    .filter(|s| !sentence(s))
+}
+
+pub(super) fn capitalized(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 pub(super) fn action(entry: &Entry) -> bool {
@@ -135,7 +144,7 @@ pub(super) fn action(entry: &Entry) -> bool {
         )
 }
 
-fn self_link(entry: &Entry, root: &PageKey, landing: Option<&Url>) -> bool {
+pub(super) fn self_link(entry: &Entry, root: &PageKey, landing: Option<&Url>) -> bool {
     if entry.locator != Locator::default() {
         return false;
     }
@@ -183,6 +192,7 @@ impl Build<'_> {
                     && entry.role.is_some()
                 {
                     if let Some(name) = path_name(entry.key.as_url()) {
+                        entry.path_name = true;
                         entry.label = name;
                     }
                 }
@@ -199,9 +209,6 @@ impl Build<'_> {
     pub(super) fn edit_card(&mut self, landing: Option<&Url>) {
         let mut candidates = Vec::new();
         let entries = std::mem::take(&mut self.sections);
-        let saw_nav = entries
-            .iter()
-            .any(|e| e.sources.contains(&Source::PrimaryNav));
         let locale_paths: BTreeSet<_> = entries
             .iter()
             .flat_map(|e| std::iter::once(e).chain(&e.children))
@@ -236,7 +243,7 @@ impl Build<'_> {
             for child in &mut entry.children {
                 self.apply_link_name(child);
             }
-            let remove = home(&entry) || placeholder(&entry.label);
+            let remove = !entry.menu_only && (home(&entry) || placeholder(&entry.label));
             let keep_members = !placeholder(&entry.label) || !entry.sources.contains(&Source::Llms);
             for mut child in entry
                 .children
@@ -259,7 +266,7 @@ impl Build<'_> {
             }
         }
         // Prefer the site's navigation over a second representation in a list or result.
-        candidates.sort_by_key(|e| e.tier);
+        candidates.sort_by_key(|e| (!e.navigation_row(), e.tier));
         let roots: BTreeSet<_> = candidates
             .iter()
             .filter(|e| {
@@ -283,12 +290,17 @@ impl Build<'_> {
                 e.tier = Tier::Secondary;
             } else if e.tier == Tier::Primary && (sentence(&e.label) || version_badge(&e.label)) {
                 if let Some(name) = path_name(e.key.as_url()) {
+                    e.path_name = true;
                     e.label = name;
                 } else {
                     e.tier = Tier::Secondary;
                 }
             }
-            let destination = (localized_key(&e.key), e.locator.clone());
+            let destination = (
+                localized_key(&e.key),
+                e.locator.clone(),
+                e.menu_only.then(|| e.id.clone()),
+            );
             let label = crate::flatten(&e.label).to_lowercase();
             let edition = self
                 .link_name(&e)
@@ -319,7 +331,13 @@ impl Build<'_> {
                     tier.min(e.tier)
                 };
                 let children = std::mem::take(&mut e.children);
-                if destination != (localized_key(&kept.key), kept.locator.clone()) {
+                if destination
+                    != (
+                        localized_key(&kept.key),
+                        kept.locator.clone(),
+                        kept.menu_only.then(|| kept.id.clone()),
+                    )
+                {
                     kept.child(e, self.requested);
                 }
                 for child in children {
@@ -341,11 +359,13 @@ impl Build<'_> {
             }
         }
         self.prefer_observed_directories();
+    }
+    pub(super) fn fill_from_footer(&mut self, saw_nav: bool) {
         if saw_nav
             && self
                 .sections
                 .iter()
-                .filter(|e| e.tier == Tier::Primary && !e.utility())
+                .filter(|e| e.tier == Tier::Primary && e.navigation_row() && !e.utility())
                 .count()
                 < MIN_NAV_ROWS
         {
@@ -414,6 +434,7 @@ impl Build<'_> {
             {
                 if let Some(name) = path_name(parent.key.as_url()) {
                     if parent.label.starts_with(char::is_numeric) || sentence(&parent.label) {
+                        parent.path_name = true;
                         parent.label = name;
                     }
                     parent.tier = Tier::Primary;
@@ -430,7 +451,9 @@ impl Build<'_> {
 }
 
 pub(super) fn child_self(child: &Entry, parent: &Entry) -> bool {
-    child.locator == parent.locator && localized_key(&child.key) == localized_key(&parent.key)
+    !parent.menu_only
+        && child.locator == parent.locator
+        && localized_key(&child.key) == localized_key(&parent.key)
 }
 
 fn scheme_like(segment: &str) -> bool {
@@ -487,4 +510,113 @@ pub fn display_hostname(url: &Url) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')))
     .then_some(host)
+}
+
+impl Entry {
+    pub fn navigation_row(&self) -> bool {
+        self.sources.iter().any(|s| {
+            matches!(
+                s,
+                Source::PrimaryNav | Source::MenuGroup | Source::LinkCluster
+            )
+        })
+    }
+}
+
+impl Build<'_> {
+    pub(super) fn merge_supplements(&mut self) {
+        let sparse = self
+            .sections
+            .iter()
+            .filter(|e| e.tier == Tier::Primary && e.navigation_row() && !e.utility())
+            .count()
+            < MIN_NAV_ROWS;
+        let mut roles = BTreeMap::new();
+        let mut names = BTreeMap::new();
+        let mut docs = None;
+        let mut merged = BTreeMap::new();
+        for (i, e) in self
+            .sections
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.tier == Tier::Primary && e.navigation_row() && !e.utility())
+        {
+            let label = normal(&e.label);
+            if matches!(label.as_str(), "docs" | "documentation") {
+                if let Some(parent) = docs {
+                    names.entry(label).or_insert(parent);
+                    merged.insert(i, parent);
+                    continue;
+                } else {
+                    docs = Some(i);
+                }
+            }
+            names.entry(label).or_insert(i);
+            if let Some(role) = e.role {
+                roles.entry(role).or_insert(i);
+            }
+        }
+        let headings = &self.llms_headings;
+        for (i, e) in self.place.sections.iter_mut().enumerate() {
+            if e.navigation_row()
+                || e.tier == Tier::Action
+                || e.utility()
+                || !e
+                    .sources
+                    .iter()
+                    .any(|s| matches!(s, Source::Llms | Source::Sitemap))
+            {
+                continue;
+            }
+            let heading = headings.get(&e.id);
+            if let Some(parent) = heading.and_then(|name| names.get(name)) {
+                merged.insert(i, *parent);
+                continue;
+            }
+            let role = heading.map_or(e.role, |name| label_role(name));
+            if let Some(role) = role {
+                if let Some(&parent) = roles.get(&role) {
+                    merged.insert(i, parent);
+                } else if !sentence(&e.label)
+                    && (e.tier == Tier::Primary
+                        || e.sources.first() == Some(&Source::Sitemap)
+                            && SECTION_WORDS
+                                .iter()
+                                .any(|(name, r)| *r == role && e.label.eq_ignore_ascii_case(name)))
+                {
+                    e.tier = Tier::Primary;
+                    roles.insert(role, i);
+                }
+            } else if !sparse {
+                e.tier = Tier::Secondary;
+            }
+        }
+        if merged.is_empty() {
+            return;
+        }
+        let mut rows: Vec<_> = std::mem::take(&mut self.sections)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for (index, owner) in merged {
+            let Some(mut entry) = rows[index].take() else {
+                continue;
+            };
+            let Some(kept) = &mut rows[owner] else {
+                continue;
+            };
+            let mut children = std::mem::take(&mut entry.children);
+            kept.add_sources(entry.sources.iter().copied());
+            let prior = entry.id.clone();
+            if let Some(i) = children.iter().position(|c| child_self(c, &entry)) {
+                kept.insert_child(children.remove(i), self.requested, Some(prior));
+            } else if !entry.menu_only && !child_self(&entry, kept) {
+                kept.insert_child(entry, self.requested, Some(prior));
+            }
+            for child in children {
+                kept.child(child, self.requested);
+            }
+        }
+        self.sections = rows.into_iter().flatten().collect();
+    }
 }

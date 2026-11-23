@@ -170,6 +170,8 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub off_site: bool,
+    #[serde(default)]
+    pub menu_only: bool,
     pub open: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
@@ -183,6 +185,8 @@ pub struct Entry {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct Notes {
+    #[serde(default)]
+    pub thin: bool,
     pub shell: bool,
     pub wall: bool,
     pub robots_disallowed: bool,
@@ -308,7 +312,7 @@ pub enum Target {
 
 #[derive(Default)]
 pub(crate) struct Targets {
-    entries: BTreeMap<String, Url>,
+    entries: BTreeMap<String, Option<Url>>,
     site: Option<Url>,
     social: BTreeMap<Network, Url>,
 }
@@ -316,7 +320,7 @@ pub(crate) struct Targets {
 impl Targets {
     pub(crate) fn resolve(&self, target: &Target) -> Option<Url> {
         let url = match target {
-            Target::Entry { id } => self.entries.get(id),
+            Target::Entry { id } => self.entries.get(id)?.as_ref(),
             Target::Site => self.site.as_ref(),
             Target::Social { network } => self.social.get(network),
             Target::Also { .. } => None,
@@ -404,25 +408,29 @@ fn entry(
     place_host: Option<&str>,
     open: bool,
     seen: &mut BTreeSet<String>,
-    targets: &mut BTreeMap<String, Url>,
+    targets: &mut BTreeMap<String, Option<Url>>,
 ) -> Option<Entry> {
     let id = source.id.as_str();
     if !valid_id(id) || seen.contains(id) {
         return None;
     }
-    let path = path(source.key.as_url());
+    let path = if source.menu_only {
+        String::new()
+    } else {
+        path(source.key.as_url())
+    };
     let label = text(&source.label);
     let label = if label.is_empty() {
         return None;
     } else if !address_shaped(&label) {
         label
-    } else if path != "/" {
+    } else if !path.is_empty() && path != "/" {
         path.clone()
     } else {
         return None;
     };
     seen.insert(id.to_owned());
-    targets.insert(id.to_owned(), address(source));
+    targets.insert(id.to_owned(), (!source.menu_only).then(|| address(source)));
     let mut children = Vec::new();
     let mut more = source.more > 0;
     if child {
@@ -446,6 +454,7 @@ fn entry(
         role: source.role.map(Role::from),
         group: source.group.as_deref().and_then(shown),
         off_site: source.off_site,
+        menu_only: source.menu_only,
         open,
         host: hostname(source.key.as_url()).filter(|host| Some(host.as_str()) != place_host),
         path,
@@ -503,6 +512,7 @@ pub(crate) fn place(
             .map(str::to_owned),
         social: networks(&source.social, &mut targets.social),
         notes: Notes {
+            thin: source.notes.thin,
             shell: source.notes.shell,
             wall: source.notes.wall,
             robots_disallowed: source.notes.robots_disallowed,

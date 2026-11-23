@@ -37,6 +37,7 @@ const ATTRIBUTE_NAMES: &[&str] = &[
     "data-type",
     "data-testid",
     "aria-labelledby",
+    "aria-controls",
     "hreflang",
     "lang",
     "download",
