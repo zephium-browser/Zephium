@@ -39,11 +39,6 @@ impl Drop for Delegate {
     }
 }
 pub(super) type Timer = timer::DownloadTimer;
-pub(super) type UiWake = timer::UiWake;
-pub(super) type WakeWindow = timer::WakeWindow;
-pub(super) fn create_wake(callback: impl Fn() + 'static) -> (Arc<UiWake>, Option<WakeWindow>) {
-    UiWake::create(callback)
-}
 pub(super) type SavePanel = IFileDialog;
 pub(super) type DirectoryPanel = IFileDialog;
 thread_local! { static DIALOG_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
@@ -377,6 +372,13 @@ enum CancelSettlement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InitialInterruptState {
+    None,
+    Interrupted(COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON),
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AdmissionDisposition {
     Admit,
     SuppressFollowup,
@@ -384,18 +386,21 @@ enum AdmissionDisposition {
 }
 
 fn classify_admission(
-    followup_reason: Option<COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON>,
+    initial_interrupt: InitialInterruptState,
     at_capacity: bool,
     source_intent_ok: bool,
 ) -> AdmissionDisposition {
-    if followup_reason.is_some() {
-        AdmissionDisposition::SuppressFollowup
-    } else if at_capacity {
-        AdmissionDisposition::Refuse(DownloadError::Capacity)
-    } else if !source_intent_ok {
-        AdmissionDisposition::Refuse(DownloadError::Unavailable)
-    } else {
-        AdmissionDisposition::Admit
+    match initial_interrupt {
+        InitialInterruptState::Interrupted(_) | InitialInterruptState::Unknown => {
+            AdmissionDisposition::SuppressFollowup
+        }
+        InitialInterruptState::None if at_capacity => {
+            AdmissionDisposition::Refuse(DownloadError::Capacity)
+        }
+        InitialInterruptState::None if !source_intent_ok => {
+            AdmissionDisposition::Refuse(DownloadError::Unavailable)
+        }
+        InitialInterruptState::None => AdmissionDisposition::Admit,
     }
 }
 
@@ -410,16 +415,17 @@ fn operation_identity(operation: &ICoreWebView2DownloadOperation) -> Option<usiz
         .map(|unknown| unknown.as_raw() as usize)
 }
 
-fn initial_interrupt_reason(
-    operation: &ICoreWebView2DownloadOperation,
-) -> Option<COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON> {
+fn initial_interrupt_state(operation: &ICoreWebView2DownloadOperation) -> InitialInterruptState {
     let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
     // SAFETY: `operation` is a live WebView2 COM interface accessed on its owning
     // UI STA thread, and `reason` is a valid stack out-pointer for the call.
-    unsafe { operation.InterruptReason(&mut reason) }
-        .ok()
-        .filter(|_| reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE)
-        .map(|_| reason)
+    match unsafe { operation.InterruptReason(&mut reason) } {
+        Ok(()) if reason == COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE => {
+            InitialInterruptState::None
+        }
+        Ok(()) => InitialInterruptState::Interrupted(reason),
+        Err(_) => InitialInterruptState::Unknown,
+    }
 }
 
 fn operation_snapshot(operation: &ICoreWebView2DownloadOperation) -> Option<OperationSnapshot> {
@@ -550,13 +556,6 @@ impl Downloads {
         });
         if timer.is_none() {
             self.persistence_failed.set(true);
-            if self.has_pending_activity() {
-                self.wake.arm(false);
-            } else {
-                self.wake.disarm();
-            }
-        } else {
-            self.wake.disarm();
         }
         *self.timer.borrow_mut() = timer;
     }
@@ -591,12 +590,12 @@ impl Downloads {
         let Ok(operation) = (unsafe { args.DownloadOperation() }) else {
             return;
         };
-        let followup_reason = initial_interrupt_reason(&operation);
+        let initial_interrupt = initial_interrupt_state(&operation);
         let at_capacity = self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition);
         let source_intent_ok = initial_open || surface_intent.load(Ordering::Acquire);
-        match classify_admission(followup_reason, at_capacity, source_intent_ok) {
+        match classify_admission(initial_interrupt, at_capacity, source_intent_ok) {
             AdmissionDisposition::SuppressFollowup => {
                 self.suppress_followup_admission(args, &operation);
                 return;
@@ -696,6 +695,8 @@ impl Downloads {
             unsafe { operation.State(&mut state) }?;
             if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
                 manager.native_finished(id);
+            } else if state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS {
+                manager.note_native_in_progress(id);
             } else if state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED {
                 let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
                 unsafe { operation.InterruptReason(&mut reason) }?;
@@ -1095,6 +1096,32 @@ impl Downloads {
         }
     }
 
+    fn note_native_in_progress(self: &Rc<Self>, id: DownloadId) {
+        let changed_profile = {
+            let mut active = self.active.borrow_mut();
+            let Some(transfer) = active.get_mut(&id) else {
+                return;
+            };
+            transfer.orphaned_since = None;
+            transfer.write_probe_in_flight = false;
+            transfer.write_probe_generation = transfer.write_probe_generation.wrapping_add(1);
+            transfer.write_release_observed = None;
+            if transfer.record.state == DownloadState::Paused && !transfer.cancelling {
+                transfer.user_pausing = false;
+                transfer.record.state = DownloadState::Receiving;
+                transfer.record.error = None;
+                transfer.record.revision += 1;
+                Some(transfer.partition.profile())
+            } else {
+                None
+            }
+        };
+        if let Some(profile) = changed_profile {
+            self.ensure_timer();
+            self.changed(profile);
+        }
+    }
+
     pub(super) fn abandon_unresolved(
         &self,
         id: DownloadId,
@@ -1166,11 +1193,6 @@ impl Downloads {
             .collect();
         for id in remaining {
             self.cancel(id, Some(DownloadError::Unavailable));
-        }
-        if self.has_pending_activity() {
-            self.wake.arm(false);
-        } else {
-            self.wake.disarm();
         }
     }
 
@@ -1311,6 +1333,51 @@ impl Downloads {
                     .remove_StateChanged(transfer._delegate.token);
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::host) fn write_release_state_for_test(
+        self: &Rc<Self>,
+        id: DownloadId,
+        spawn_if_needed: bool,
+    ) -> Option<(u64, Option<bool>)> {
+        if spawn_if_needed {
+            let _ = self.write_release_status_or_spawn(id);
+            self.ensure_timer();
+        }
+        self.active.borrow().get(&id).map(|transfer| {
+            (
+                transfer.write_probe_generation,
+                transfer.write_release_observed,
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::host) fn write_release_reply_for_test(
+        &self,
+        id: DownloadId,
+        generation: u64,
+        released: bool,
+    ) {
+        self.write_release_checked(id, generation, released);
+    }
+
+    #[cfg(test)]
+    pub(in crate::host) fn native_resume_for_test(&self, id: DownloadId) -> Option<u64> {
+        let operation = self
+            .active
+            .borrow()
+            .get(&id)
+            .map(|transfer| transfer.native.operation.clone());
+        let operation = operation?;
+        let mut received = 0;
+        // SAFETY: `operation` is a live WebView2 COM interface on its owning UI STA.
+        unsafe {
+            operation.BytesReceived(&mut received).ok()?;
+            operation.Resume().ok()?;
+        }
+        u64::try_from(received).ok()
     }
 
     /// The person paused a download. WebView2 stops the transfer and reports
@@ -1923,22 +1990,32 @@ mod tests {
     fn followup_interrupt_suppresses_before_capacity_refusal_and_keeps_unrelated_grace() {
         assert_eq!(
             classify_admission(
-                Some(COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE),
+                InitialInterruptState::Interrupted(
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE,
+                ),
                 true,
                 false,
             ),
             AdmissionDisposition::SuppressFollowup
         );
         assert_eq!(
-            classify_admission(None, true, true),
+            classify_admission(InitialInterruptState::Unknown, true, false),
+            AdmissionDisposition::SuppressFollowup
+        );
+        assert_eq!(
+            classify_admission(InitialInterruptState::Unknown, false, true),
+            AdmissionDisposition::SuppressFollowup
+        );
+        assert_eq!(
+            classify_admission(InitialInterruptState::None, true, true),
             AdmissionDisposition::Refuse(DownloadError::Capacity)
         );
         assert_eq!(
-            classify_admission(None, false, false),
+            classify_admission(InitialInterruptState::None, false, false),
             AdmissionDisposition::Refuse(DownloadError::Unavailable)
         );
         assert_eq!(
-            classify_admission(None, false, true),
+            classify_admission(InitialInterruptState::None, false, true),
             AdmissionDisposition::Admit
         );
 

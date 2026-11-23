@@ -884,6 +884,59 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
                             break;
                         }
                     }
+                } else if head.starts_with("GET /restart.zip HTTP") {
+                    let total = 524_288usize;
+                    let range_start = head
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("range") {
+                                value
+                                    .trim()
+                                    .strip_prefix("bytes=")?
+                                    .split('-')
+                                    .next()?
+                                    .parse::<usize>()
+                                    .ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|start| *start < total);
+                    let start = range_start.unwrap_or(0);
+                    let remaining = total - start;
+                    let status = if range_start.is_some() {
+                        format!(
+                            "206 Partial Content\r\nContent-Range: bytes {start}-{}/{total}",
+                            total - 1
+                        )
+                    } else {
+                        "200 OK".into()
+                    };
+                    let header = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"restart.zip\"\r\nAccept-Ranges: bytes\r\nETag: \"restart-v1\"\r\nContent-Length: {remaining}\r\nConnection: close\r\n\r\n"
+                    );
+                    if socket.write_all(header.as_bytes()).is_err() {
+                        return;
+                    }
+                    // Keep a real writer active until the test pauses/cancels it.
+                    // Truncation is covered above; it does not reliably enter Paused.
+                    let initial = remaining.min(65_536);
+                    if socket.write_all(&vec![b'R'; initial]).is_err() {
+                        return;
+                    }
+                    let chunk = [b'R'; 512];
+                    let mut sent = initial;
+                    while sent < remaining
+                        && !worker_stop.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        std::thread::sleep(Duration::from_millis(50));
+                        let count = (remaining - sent).min(chunk.len());
+                        if socket.write_all(&chunk[..count]).is_err() {
+                            break;
+                        }
+                        sent += count;
+                    }
                 } else {
                     let _ = socket.write_all(
                         b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1121,6 +1174,130 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
         .find(|entry| entry.filename == "fallback.zip")
         .unwrap();
     assert_eq!(fallback.state, DownloadState::Cancelled);
+    drop(view3);
+
+    // 4) Resume the native operation directly (not Downloads::resume) so its
+    // IN_PROGRESS callback must invalidate cached and late writer-probe replies.
+    let view4 = build_loaded_view(&mut context);
+    view4
+        .evaluate_script("location.href='/restart.zip'")
+        .unwrap();
+    until(|| {
+        list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "restart.zip"
+                && entry.state == DownloadState::Receiving
+                && entry
+                    .received
+                    .bytes()
+                    .any(|byte| matches!(byte, b'1'..=b'9'))
+        })
+    });
+    let restart_id_str = list_downloads(&downloads)
+        .into_iter()
+        .find(|entry| entry.filename == "restart.zip")
+        .unwrap()
+        .id;
+    let restart_id = zephium_core::ids::DownloadId::parse(&restart_id_str).unwrap();
+    let pause_ack = Arc::new(Mutex::new(None));
+    let pause_slot = pause_ack.clone();
+    downloads.call(
+        partition,
+        DownloadCall::Pause {
+            id: restart_id_str.clone(),
+        },
+        DownloadCompletion::new(Box::new(move |response| {
+            *pause_slot.lock().unwrap() = Some(response);
+        })),
+    );
+    until(|| pause_ack.lock().unwrap().is_some());
+    assert!(!matches!(
+        *pause_ack.lock().unwrap(),
+        Some(DownloadResponse::Error { .. })
+    ));
+    until(|| {
+        list_downloads(&downloads)
+            .iter()
+            .any(|entry| entry.filename == "restart.zip" && entry.state == DownloadState::Paused)
+    });
+
+    // Pause may retain the native writer handle. Inject the old successful
+    // observation at the worker-reply boundary instead of waiting for release
+    // that WebView2 does not promise. The pause/resume and fresh probe are real.
+    let gen_released = downloads
+        .write_release_state_for_test(restart_id, false)
+        .unwrap()
+        .0;
+    downloads.write_release_reply_for_test(restart_id, gen_released, true);
+    assert_eq!(
+        downloads.write_release_state_for_test(restart_id, false),
+        Some((gen_released, Some(true)))
+    );
+    let received_before_resume = downloads
+        .native_resume_for_test(restart_id)
+        .expect("native resume");
+    let mut gen_restarted = None;
+    until(|| {
+        let state_receiving = list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "restart.zip" && entry.state == DownloadState::Receiving
+        });
+        let Some((generation, observed)) =
+            downloads.write_release_state_for_test(restart_id, false)
+        else {
+            return false;
+        };
+        if state_receiving && generation > gen_released && observed.is_none() {
+            gen_restarted = Some(generation);
+            true
+        } else {
+            false
+        }
+    });
+    let gen_restarted = gen_restarted.unwrap();
+    // A worker reply from before restart must not restore the stale proof.
+    downloads.write_release_reply_for_test(restart_id, gen_released, true);
+    assert_eq!(
+        downloads.write_release_state_for_test(restart_id, false),
+        Some((gen_restarted, None))
+    );
+    // IN_PROGRESS precedes the writer reopening its payload. Wait for bytes
+    // actually written after Resume before checking that the new writer is held.
+    until(|| {
+        list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "restart.zip"
+                && entry.state == DownloadState::Receiving
+                && entry
+                    .received
+                    .parse::<u64>()
+                    .is_ok_and(|bytes| bytes > received_before_resume)
+        })
+    });
+    until(|| {
+        let Some((generation, observed)) = downloads.write_release_state_for_test(restart_id, true)
+        else {
+            return false;
+        };
+        generation > gen_restarted && observed == Some(false)
+    });
+
+    downloads.detach_native_delegate_for_test(restart_id);
+    let restart_cancel_ack = Arc::new(Mutex::new(None));
+    let restart_cancel_slot = restart_cancel_ack.clone();
+    downloads.call(
+        partition,
+        DownloadCall::Cancel { id: restart_id_str },
+        DownloadCompletion::new(Box::new(move |response| {
+            *restart_cancel_slot.lock().unwrap() = Some(response);
+        })),
+    );
+    until(|| restart_cancel_ack.lock().unwrap().is_some());
+    until(|| {
+        list_downloads(&downloads)
+            .iter()
+            .any(|entry| entry.filename == "restart.zip" && entry.state == DownloadState::Cancelled)
+    });
+
+    let after_restart = list_downloads(&downloads);
+    assert_eq!(after_restart.len(), 4, "unexpected rows: {after_restart:?}");
 
     until(|| {
         let Ok(entries) = std::fs::read_dir(download_dir.path()) else {
@@ -1151,7 +1328,7 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
             .starts_with(".zephium-download-")
     }));
 
-    drop(view3);
+    drop(view4);
     drop(context);
     drop(_server_guard);
 }
