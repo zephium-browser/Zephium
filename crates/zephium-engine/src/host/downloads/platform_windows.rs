@@ -39,6 +39,11 @@ impl Drop for Delegate {
     }
 }
 pub(super) type Timer = timer::DownloadTimer;
+pub(super) type UiWake = timer::UiWake;
+pub(super) type WakeWindow = timer::WakeWindow;
+pub(super) fn create_wake(callback: impl Fn() + 'static) -> (Arc<UiWake>, Option<WakeWindow>) {
+    UiWake::create(callback)
+}
 pub(super) type SavePanel = IFileDialog;
 pub(super) type DirectoryPanel = IFileDialog;
 thread_local! { static DIALOG_ACTIVE: Cell<bool> = const { Cell::new(false) }; }
@@ -545,6 +550,13 @@ impl Downloads {
         });
         if timer.is_none() {
             self.persistence_failed.set(true);
+            if self.has_pending_activity() {
+                self.wake.arm(false);
+            } else {
+                self.wake.disarm();
+            }
+        } else {
+            self.wake.disarm();
         }
         *self.timer.borrow_mut() = timer;
     }
@@ -705,12 +717,12 @@ impl Downloads {
                         let cancel_failed = unsafe { operation.Cancel() }.is_err();
                         manager.note_native_error(id, interrupt_error(reason));
                         let timer_armed = manager.arm_timer();
-                        if let Some(native) = manager
+                        let native = manager
                             .active
                             .borrow()
                             .get(&id)
-                            .map(|transfer| transfer.native.clone())
-                        {
+                            .map(|transfer| transfer.native.clone());
+                        if let Some(native) = native {
                             manager.settle_cancelling_transfer(
                                 id,
                                 &native,
@@ -1154,6 +1166,11 @@ impl Downloads {
             .collect();
         for id in remaining {
             self.cancel(id, Some(DownloadError::Unavailable));
+        }
+        if self.has_pending_activity() {
+            self.wake.arm(false);
+        } else {
+            self.wake.disarm();
         }
     }
 

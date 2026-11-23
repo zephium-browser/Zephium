@@ -12,6 +12,8 @@ mod recovery;
 mod site;
 mod ui;
 use platform::{Delegate, DialogLease, DirectoryPanel, Native, SavePanel, Source, Timer};
+#[cfg(target_os = "windows")]
+use platform::{UiWake, WakeWindow};
 pub(in crate::host) use site::SiteAsk;
 
 use std::cell::{Cell, RefCell};
@@ -256,8 +258,12 @@ pub(crate) struct Downloads {
     preferences: RefCell<HashMap<ProfileId, DownloadPreferences>>,
     calls: RefCell<HashMap<u64, UiCall>>,
     next_call: Cell<u64>,
-    sender: mpsc::Sender<Message>,
+    sender: MessageSender,
     receiver: RefCell<mpsc::Receiver<Message>>,
+    #[cfg(target_os = "windows")]
+    wake: Arc<UiWake>,
+    #[cfg(target_os = "windows")]
+    _wake_window: Option<WakeWindow>,
     timer: RefCell<Option<Timer>>,
     /// The running timer is the slow one: nothing is moving, only waiting.
     timer_slow: Cell<bool>,
@@ -284,7 +290,30 @@ pub(crate) struct Downloads {
     next_prompt: Cell<u32>,
 }
 
+#[derive(Clone)]
+struct MessageSender {
+    sender: mpsc::Sender<Message>,
+    #[cfg(target_os = "windows")]
+    wake: Arc<UiWake>,
+}
+impl MessageSender {
+    fn send(&self, message: Message) -> Result<(), ()> {
+        self.sender.send(message).map_err(|_| ())?;
+        #[cfg(target_os = "windows")]
+        self.wake.on_message_sent();
+        Ok(())
+    }
+}
+
 impl Downloads {
+    #[cfg(target_os = "windows")]
+    fn has_pending_activity(&self) -> bool {
+        !self.active.borrow().is_empty()
+            || !self.calls.borrow().is_empty()
+            || self.work.get() > 0
+            || !self.waiters.borrow().is_empty()
+    }
+
     pub(crate) fn in_progress(&self) -> bool {
         self.active.try_borrow().map_or(true, |active| {
             active
@@ -348,39 +377,58 @@ impl Downloads {
 
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
         let (sender, receiver) = mpsc::channel();
-        let manager = Rc::new_cyclic(|self_weak| Self {
-            self_weak: self_weak.clone(),
-            session: DownloadId::generate(),
-            store,
-            notify,
-            active: RefCell::new(HashMap::new()),
-            recent: RefCell::new(VecDeque::new()),
-            forgotten: RefCell::new(VecDeque::new()),
-            preferences: RefCell::new(HashMap::new()),
-            calls: RefCell::new(HashMap::new()),
-            next_call: Cell::new(1),
-            sender,
-            receiver: RefCell::new(receiver),
-            timer: RefCell::new(None),
-            timer_slow: Cell::new(false),
+        let manager = Rc::new_cyclic(|self_weak: &Weak<Self>| {
             #[cfg(target_os = "windows")]
-            timer_due: Cell::new(None),
-            stopping: Cell::new(false),
-            retired: RefCell::new(HashSet::new()),
-            drained_profiles: RefCell::new(HashSet::new()),
-            waiters: RefCell::new(Vec::new()),
-            persistence_failed: Cell::new(false),
-            recovery: RefCell::default(),
-            work: Cell::new(0),
-            directory_panels: RefCell::new(HashMap::new()),
-            #[cfg(target_os = "windows")]
-            retained_views: RefCell::new(Vec::new()),
-            watch: RefCell::new(None),
-            #[cfg(target_os = "macos")]
-            extension_admission: Cell::new(false),
-            sites: RefCell::new(HashMap::new()),
-            prompts: RefCell::new(HashMap::new()),
-            next_prompt: Cell::new(1),
+            let (wake, wake_window) = platform::create_wake({
+                let weak = self_weak.clone();
+                move || {
+                    if let Some(manager) = weak.upgrade() {
+                        manager.tick();
+                    }
+                }
+            });
+            Self {
+                self_weak: self_weak.clone(),
+                session: DownloadId::generate(),
+                store,
+                notify,
+                active: RefCell::new(HashMap::new()),
+                recent: RefCell::new(VecDeque::new()),
+                forgotten: RefCell::new(VecDeque::new()),
+                preferences: RefCell::new(HashMap::new()),
+                calls: RefCell::new(HashMap::new()),
+                next_call: Cell::new(1),
+                sender: MessageSender {
+                    sender,
+                    #[cfg(target_os = "windows")]
+                    wake: wake.clone(),
+                },
+                receiver: RefCell::new(receiver),
+                #[cfg(target_os = "windows")]
+                wake,
+                #[cfg(target_os = "windows")]
+                _wake_window: wake_window,
+                timer: RefCell::new(None),
+                timer_slow: Cell::new(false),
+                #[cfg(target_os = "windows")]
+                timer_due: Cell::new(None),
+                stopping: Cell::new(false),
+                retired: RefCell::new(HashSet::new()),
+                drained_profiles: RefCell::new(HashSet::new()),
+                waiters: RefCell::new(Vec::new()),
+                persistence_failed: Cell::new(false),
+                recovery: RefCell::default(),
+                work: Cell::new(0),
+                directory_panels: RefCell::new(HashMap::new()),
+                #[cfg(target_os = "windows")]
+                retained_views: RefCell::new(Vec::new()),
+                watch: RefCell::new(None),
+                #[cfg(target_os = "macos")]
+                extension_admission: Cell::new(false),
+                sites: RefCell::new(HashMap::new()),
+                prompts: RefCell::new(HashMap::new()),
+                next_prompt: Cell::new(1),
+            }
         });
         manager.initialize_recovery();
         manager
@@ -762,11 +810,19 @@ impl Downloads {
     }
 
     fn tick(self: &Rc<Self>) {
+        #[cfg(target_os = "windows")]
+        self.wake.begin_drain();
+        let mut drained = 0usize;
         for _ in 0..64 {
             let message = self.receiver.borrow().try_recv().ok();
             let Some(message) = message else { break };
+            drained += 1;
             self.message(message);
         }
+        #[cfg(target_os = "windows")]
+        let hit_message_budget = drained == 64;
+        #[cfg(not(target_os = "windows"))]
+        let _ = drained;
         let mut cancel = Vec::new();
         let mut changed = Vec::new();
         let samples: Vec<_> = self
@@ -905,6 +961,15 @@ impl Downloads {
             if let Some(timer) = self.timer.borrow_mut().take() {
                 platform::stop_timer(timer);
             }
+            #[cfg(target_os = "windows")]
+            if hit_message_budget {
+                self.ensure_timer();
+                if self.timer.borrow().is_none() {
+                    self.wake.arm(true);
+                }
+            } else {
+                self.wake.disarm();
+            }
         } else {
             self.ensure_timer();
             #[cfg(target_os = "windows")]
@@ -912,6 +977,11 @@ impl Downloads {
                 self.ensure_timer();
                 if self.timer.borrow().is_none() {
                     self.settle_without_timer();
+                    if self.has_pending_activity() || hit_message_budget {
+                        self.wake.arm(hit_message_budget);
+                    } else {
+                        self.wake.disarm();
+                    }
                 }
             }
         }
