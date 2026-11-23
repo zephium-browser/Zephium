@@ -97,6 +97,33 @@ test("a failed section reset keeps the destination draft", async () => {
   await expect.element(screen.getByRole("alert")).toBeVisible();
 });
 
+test("a pending section reset blocks edits and submissions until it settles", async () => {
+  let settleReset!: (ok: boolean) => void;
+  vi.mocked(preferences.resetNewTab).mockReturnValueOnce(
+    new Promise<boolean>((resolve) => {
+      settleReset = resolve;
+    }),
+  );
+  const screen = await render(NewTabPage);
+  const field = screen.getByRole("textbox", { name: "New tab URL" });
+  const save = screen.getByRole("button", { name: "Save", exact: true });
+  await field.fill("https://draft.example/");
+  await screen.getByRole("button", { name: "Reset to default", exact: true }).click();
+  try {
+    expect(field.element()).toBeDisabled();
+    expect(save.element()).toBeDisabled();
+    const form = (field.element() as HTMLInputElement).form!;
+    form.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    expect(preferences.set).not.toHaveBeenCalled();
+  } finally {
+    settleReset(false);
+  }
+  await expect.element(field).toBeEnabled();
+  await expect.element(save).toBeEnabled();
+  await expect.element(field).toHaveValue("https://draft.example/");
+  await expect.element(screen.getByRole("alert")).toBeVisible();
+});
+
 test.each([507, 360])("the full description wraps above the URL at %s px", async (width) => {
   await page.viewport(width, 300);
   const screen = await render(NewTabPageRow);
