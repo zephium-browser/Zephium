@@ -153,7 +153,11 @@ pub(super) fn link_label(n: &Node) -> &str {
             && s.chars().any(char::is_alphabetic)
             && !matches!(normal(s).as_str(), "new" | "beta")
     });
-    [Some(n.name.trim()), Some(n.text.trim()), prefix]
+    choose_link_label(&n.name, &n.text, prefix)
+}
+
+fn choose_link_label<'a>(name: &'a str, text: &'a str, prefix: Option<&'a str>) -> &'a str {
+    [Some(name.trim()), Some(text.trim()), prefix]
         .into_iter()
         .flatten()
         .filter(|s| !s.is_empty())
@@ -383,13 +387,14 @@ impl Menus {
             });
             if let Some(links) = panel {
                 for link in links {
-                    if card::skip_link(&link.url, &[&link.label], doc.page()) {
+                    let label = choose_link_label(&link.name, &link.text, None);
+                    if card::skip_link(&link.url, &[&link.name, label], doc.page()) {
                         continue;
                     }
                     targets.push((
                         i,
                         Some(owner),
-                        ObservedLink::new(build, &link.url, &link.label, link.action),
+                        ObservedLink::new(build, &link.url, label, link.action),
                     ));
                 }
             }

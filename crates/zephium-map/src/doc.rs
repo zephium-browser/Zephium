@@ -279,7 +279,8 @@ pub struct Doc {
 }
 pub(crate) struct MenuLink {
     pub url: Url,
-    pub label: String,
+    pub name: String,
+    pub text: String,
     pub language: Option<String>,
     pub action: bool,
 }

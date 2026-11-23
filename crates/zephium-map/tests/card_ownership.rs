@@ -483,6 +483,53 @@ fn panel(control: &str, content: &str) -> String {
 const TOPICS: &str = "<button aria-controls='panel'>Topics</button>";
 const GUIDE: &str = "<a href='/guide'>Guide</a>";
 
+fn menu_presentations(links: &str) -> [String; 2] {
+    [
+        format!("<nav><div><button>Topics</button>{links}</div></nav>"),
+        panel(TOPICS, links),
+    ]
+}
+
+#[test]
+fn disclosure_uses_the_shorter_text_to_classify_an_action() {
+    let links =
+        format!("{GUIDE}<a href='/session/new' aria-label='Access your account'>Sign in</a>");
+    for html in menu_presentations(&links) {
+        let (place, _) = read(&html);
+        assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+        let account: Vec<_> = place
+            .sections
+            .iter()
+            .filter(|entry| entry.key.as_url().path() == "/session/new")
+            .map(|entry| (entry.tier, entry.label.as_str()))
+            .collect();
+        assert_eq!(account, [(Tier::Action, "Sign in")]);
+    }
+}
+
+#[test]
+fn disclosure_uses_the_shorter_text_for_a_navigation_label() {
+    let links = format!("{GUIDE}<a href='/api' aria-label='Browse the API reference'>API</a>");
+    for html in menu_presentations(&links) {
+        assert_eq!(labels(row(&read(&html).0, "Topics")), ["Guide", "API"]);
+    }
+}
+
+#[test]
+fn disclosure_skips_on_the_accessible_name_or_the_chosen_label() {
+    for (name, text) in [
+        ("Skip to main content", "Main"),
+        ("Read the main page content", "Jump to content"),
+    ] {
+        let links = format!("{GUIDE}<a href='#main' aria-label='{name}'>{text}</a>");
+        for html in menu_presentations(&links) {
+            let (place, _) = read(&html);
+            assert_eq!(labels(row(&place, "Topics")), ["Guide"]);
+            assert_eq!(place.sections.len(), 1);
+        }
+    }
+}
+
 #[test]
 fn disclosure_case_matches_the_hidden_walk() {
     let (place, _) = read(&panel(TOPICS, GUIDE).replace("'true'", "'TRUE'"));

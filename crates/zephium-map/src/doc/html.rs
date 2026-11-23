@@ -310,9 +310,12 @@ impl DocBuilder {
     }
 
     fn words(&mut self, chars: impl Iterator<Item = char>) -> String {
+        self.words_with_room(chars, self.limits.node_text_bytes as usize)
+    }
+
+    fn words_with_room(&mut self, chars: impl Iterator<Item = char>, room: usize) -> String {
         let mut out = String::new();
-        let cap = (self.limits.node_text_bytes as usize)
-            .min(self.limits.text_bytes as usize - self.text_bytes);
+        let cap = room.min(self.limits.text_bytes as usize - self.text_bytes);
         let mut gap = false;
         for c in chars {
             if c.is_control() || c.is_whitespace() {
@@ -501,29 +504,30 @@ impl DocBuilder {
                 break;
             }
             self.text_bytes += size;
-            let mut label = self.words(
+            let name = self.words(
                 n.attr("aria-label")
                     .unwrap_or_default()
                     .chars()
                     .filter(|&c| crate::visible_char(c)),
             );
-            if label.is_empty() {
-                label = self.words(
-                    disclosure_text(n)
-                        .flat_map(str::chars)
-                        .filter(|&c| crate::visible_char(c)),
-                );
-            }
-            self.text_bytes += label.len();
-            let room = (self.limits.node_text_bytes as usize - label.len())
-                .min(self.limits.text_bytes as usize - self.text_bytes);
+            self.text_bytes += name.len();
+            let room = self.limits.node_text_bytes as usize - name.len();
+            let text = self.words_with_room(
+                disclosure_text(n)
+                    .flat_map(str::chars)
+                    .filter(|&c| crate::visible_char(c)),
+                room,
+            );
+            self.text_bytes += text.len();
+            let room = (room - text.len()).min(self.limits.text_bytes as usize - self.text_bytes);
             let language = link_language(&n)
                 .filter(|s| s.len() <= room)
                 .map(str::to_ascii_lowercase);
             self.text_bytes += language.as_deref().map_or(0, str::len);
             links.push(MenuLink {
                 url,
-                label,
+                name,
+                text,
                 language,
                 action: marked_action(&n),
             });
