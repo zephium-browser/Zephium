@@ -197,6 +197,12 @@ struct Transfer {
     confirmed: bool,
     #[cfg(target_os = "windows")]
     orphaned_since: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    write_probe_in_flight: bool,
+    #[cfg(target_os = "windows")]
+    write_probe_generation: u64,
+    #[cfg(target_os = "windows")]
+    write_release_observed: Option<bool>,
     deadline: DecisionDeadline,
 }
 
@@ -210,6 +216,12 @@ enum Message {
     Cleaned,
     #[cfg(target_os = "windows")]
     RuntimeExited(bool),
+    #[cfg(target_os = "windows")]
+    WriteReleaseChecked {
+        id: DownloadId,
+        generation: u64,
+        released: bool,
+    },
     RecoveryProfiles(DownloadStoreReply),
     RecoveryPage(ProfileId, DownloadStoreReply),
     Recovered(
@@ -321,10 +333,17 @@ impl Downloads {
         *self.watch.borrow_mut() = Some(watch);
     }
 
-    fn arm_timer(&self) {
-        if let Some(manager) = self.self_weak.upgrade() {
+    #[must_use]
+    fn arm_timer(&self) -> bool {
+        let Some(manager) = self.self_weak.upgrade() else {
+            return false;
+        };
+        manager.ensure_timer();
+        if manager.timer.borrow().is_none() {
             manager.ensure_timer();
         }
+        let armed = manager.timer.borrow().is_some();
+        armed
     }
 
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
@@ -888,6 +907,13 @@ impl Downloads {
             }
         } else {
             self.ensure_timer();
+            #[cfg(target_os = "windows")]
+            if self.timer.borrow().is_none() {
+                self.ensure_timer();
+                if self.timer.borrow().is_none() {
+                    self.settle_without_timer();
+                }
+            }
         }
     }
 
@@ -910,7 +936,10 @@ impl Downloads {
         #[cfg(target_os = "macos")]
         let native_notice = matches!(message, Message::Cancelled(_));
         #[cfg(target_os = "windows")]
-        let native_notice = matches!(message, Message::RuntimeExited(_));
+        let native_notice = matches!(
+            message,
+            Message::RuntimeExited(_) | Message::WriteReleaseChecked { .. }
+        );
         if !native_notice {
             self.work.set(self.work.get().saturating_sub(1));
         }
@@ -926,6 +955,12 @@ impl Downloads {
             Message::Cleaned => {}
             #[cfg(target_os = "windows")]
             Message::RuntimeExited(clean) => self.runtime_exit_result(clean),
+            #[cfg(target_os = "windows")]
+            Message::WriteReleaseChecked {
+                id,
+                generation,
+                released,
+            } => self.write_release_checked(id, generation, released),
             Message::Preferences(id, DownloadStoreReply::Preferences(preferences)) => {
                 self.decide(id, preferences)
             }

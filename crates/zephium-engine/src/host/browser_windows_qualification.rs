@@ -717,6 +717,63 @@ impl zephium_core::ports::store::Store for QualificationDownloadStore {
     }
 }
 
+fn read_http_request_head(reader: &mut impl std::io::Read) -> Option<String> {
+    const MAX_REQUEST_HEAD: usize = 4096;
+    let mut buf = [0u8; MAX_REQUEST_HEAD];
+    let mut total = 0usize;
+    while total < MAX_REQUEST_HEAD {
+        match reader.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(read) => {
+                total += read;
+                if buf[..total].windows(2).any(|w| w == b"\r\n") || buf[..total].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    (total > 0).then(|| String::from_utf8_lossy(&buf[..total]).into_owned())
+}
+
+#[test]
+fn qualification_http_head_handles_split_request_lines() {
+    struct SplitReader<'a> {
+        chunks: &'a [&'a [u8]],
+        index: usize,
+    }
+    impl std::io::Read for SplitReader<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let Some(chunk) = self.chunks.get(self.index) else {
+                return Ok(0);
+            };
+            self.index += 1;
+            let count = chunk.len().min(out.len());
+            out[..count].copy_from_slice(&chunk[..count]);
+            Ok(count)
+        }
+    }
+
+    let mut single = SplitReader {
+        chunks: &[b"GET /trunc.zip HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"],
+        index: 0,
+    };
+    let mut split = SplitReader {
+        chunks: &[
+            b"GET /tru",
+            b"nc.zip ",
+            b"HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        ],
+        index: 0,
+    };
+    assert!(read_http_request_head(&mut single)
+        .unwrap()
+        .starts_with("GET /trunc.zip HTTP"));
+    assert!(read_http_request_head(&mut split)
+        .unwrap()
+        .starts_with("GET /trunc.zip HTTP"));
+}
+
 #[test]
 #[ignore = "requires installed WebView2; verifies live coordinator cancel and truncation recovery"]
 fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates() {
@@ -730,9 +787,35 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
     use zephium_core::permissions::PageOrigin;
     use zephium_core::ports::engine::Partition;
 
+    struct ComGuard;
+    impl Drop for ComGuard {
+        fn drop(&mut self) {
+            // SAFETY: pairs with the apartment-threaded `CoInitializeEx` call below on this test thread.
+            unsafe {
+                windows::Win32::System::Com::CoUninitialize();
+            }
+        }
+    }
+    // SAFETY: test runs on an STA thread with no prior COM initialization.
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
     }
+    let _com_guard = ComGuard;
+
+    struct FixtureServerGuard {
+        stop_server: Arc<AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for FixtureServerGuard {
+        fn drop(&mut self) {
+            self.stop_server
+                .store(true, std::sync::atomic::Ordering::Release);
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+        }
+    }
+
     let profile_dir = tempfile::tempdir().unwrap();
     let download_dir = tempfile::tempdir().unwrap();
     let (directory, identity) =
@@ -756,17 +839,16 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
             };
+            let worker_stop = stop_flag.clone();
             let worker = std::thread::spawn(move || {
                 socket.set_nonblocking(false).unwrap();
                 let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
-                let mut req = [0u8; 4096];
-                let Ok(read) = socket.read(&mut req) else {
+                let Some(head) = read_http_request_head(&mut socket) else {
                     return;
                 };
-                let head = String::from_utf8_lossy(&req[..read]);
                 if head.starts_with("GET / HTTP") {
-                    let body = b"<!doctype html><a id='t' href='/trunc.zip' download='trunc.zip'>t</a><a id='s' href='/slow.zip' download='slow.zip'>s</a>";
+                    let body = b"<!doctype html><a id='t' href='/trunc.zip' download='trunc.zip'>t</a><a id='s' href='/slow.zip' download='slow.zip'>s</a><a id='f' href='/fallback.zip' download='fallback.zip'>f</a>";
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
@@ -777,14 +859,26 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
                     let header = "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"trunc.zip\"\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n";
                     let _ = socket.write_all(header.as_bytes());
                     let _ = socket.write_all(&vec![b'T'; 65536]);
-                } else if head.starts_with("GET /slow.zip HTTP") {
-                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"slow.zip\"\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n";
+                } else if head.starts_with("GET /slow.zip HTTP")
+                    || head.starts_with("GET /fallback.zip HTTP")
+                {
+                    let filename = if head.starts_with("GET /fallback.zip HTTP") {
+                        "fallback.zip"
+                    } else {
+                        "slow.zip"
+                    };
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"{filename}\"\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n"
+                    );
                     let _ = socket.write_all(header.as_bytes());
                     if socket.write_all(&vec![b'S'; 65536]).is_err() {
                         return;
                     }
                     let chunk = vec![b'S'; 512];
                     for _ in 0..200 {
+                        if worker_stop.load(std::sync::atomic::Ordering::Acquire) {
+                            break;
+                        }
                         std::thread::sleep(Duration::from_millis(50));
                         if socket.write_all(&chunk).is_err() {
                             break;
@@ -802,6 +896,10 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
             let _ = worker.join();
         }
     });
+    let _server_guard = FixtureServerGuard {
+        stop_server: stop_server.clone(),
+        server: Some(server),
+    };
 
     let profile = ProfileId::generate();
     let partition = Partition::Persistent(profile);
@@ -923,6 +1021,7 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
     assert_eq!(entries[0].filename, "trunc.zip");
     assert_eq!(entries[0].state, DownloadState::Failed);
     assert_eq!(entries[0].error, Some(DownloadError::Integrity));
+    drop(view);
 
     let view2 = build_loaded_view(&mut context);
 
@@ -967,24 +1066,92 @@ fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates(
         .find(|entry| entry.filename == "slow.zip")
         .unwrap();
     assert_eq!(slow.state, DownloadState::Cancelled);
+    drop(view2);
+
+    // 3) Controlled cancellation-fallback case: withhold WebView2's native
+    // StateChanged callback before cancelling and verify polling settles it.
+    let view3 = build_loaded_view(&mut context);
+    view3
+        .evaluate_script("location.href='/fallback.zip'")
+        .unwrap();
     until(|| {
-        std::fs::read_dir(download_dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .all(|entry| {
-                !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".zephium-download-")
-            })
+        list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "fallback.zip"
+                && entry.state == DownloadState::Receiving
+                && entry
+                    .received
+                    .bytes()
+                    .any(|byte| matches!(byte, b'1'..=b'9'))
+        })
+    });
+    let fallback_id_str = list_downloads(&downloads)
+        .into_iter()
+        .find(|entry| entry.filename == "fallback.zip")
+        .unwrap()
+        .id;
+    let fallback_id = zephium_core::ids::DownloadId::parse(&fallback_id_str).unwrap();
+    downloads.detach_native_delegate_for_test(fallback_id);
+
+    let fallback_ack = Arc::new(Mutex::new(None));
+    let fallback_slot = fallback_ack.clone();
+    downloads.call(
+        partition,
+        DownloadCall::Cancel {
+            id: fallback_id_str,
+        },
+        DownloadCompletion::new(Box::new(move |response| {
+            *fallback_slot.lock().unwrap() = Some(response);
+        })),
+    );
+    until(|| fallback_ack.lock().unwrap().is_some());
+    until(|| {
+        list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "fallback.zip" && entry.state == DownloadState::Cancelled
+        })
     });
 
-    stop_server.store(true, std::sync::atomic::Ordering::Release);
-    drop(view2);
-    drop(view);
+    let after_fallback = list_downloads(&downloads);
+    assert_eq!(
+        after_fallback.len(),
+        3,
+        "unexpected rows: {after_fallback:?}"
+    );
+    let fallback = after_fallback
+        .iter()
+        .find(|entry| entry.filename == "fallback.zip")
+        .unwrap();
+    assert_eq!(fallback.state, DownloadState::Cancelled);
+
+    until(|| {
+        let Ok(entries) = std::fs::read_dir(download_dir.path()) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".zephium-download-")
+            {
+                return false;
+            }
+        }
+        true
+    });
+    let clean_scan: Vec<_> = std::fs::read_dir(download_dir.path())
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(clean_scan.iter().all(|entry| {
+        !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".zephium-download-")
+    }));
+
+    drop(view3);
     drop(context);
-    server.join().unwrap();
-    unsafe {
-        windows::Win32::System::Com::CoUninitialize();
-    }
+    drop(_server_guard);
 }

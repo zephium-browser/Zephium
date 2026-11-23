@@ -416,17 +416,27 @@ impl Destination {
     }
     /// True once no handle holds write access to the staged payload file (or
     /// the payload file no longer exists), so cleanup can proceed safely.
+    #[cfg(test)]
     pub(super) fn payload_write_released(&self) -> bool {
-        match OpenOptions::new()
-            .read(true)
-            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
-            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(&self.payload)
-        {
-            Ok(_) => true,
-            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        }
+        payload_write_released_at(&self.payload)
     }
+}
+
+/// True once no handle holds write access to `payload` (or it no longer
+/// exists), so cleanup can proceed safely. Safe to run off the UI thread.
+pub(super) fn payload_write_released_at(payload: &Path) -> bool {
+    match OpenOptions::new()
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(payload)
+    {
+        Ok(_) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+impl Destination {
     fn verify_namespace(&self) -> Result<(), DownloadError> {
         // The original stage handle requests DELETE and denies delete sharing.
         // A read-only observer must share DELETE to coexist with that lease;
