@@ -899,17 +899,15 @@
   .custom .figure {
     background: var(--figure-surface, var(--color-surface));
     color: var(--color-label-secondary);
-    backdrop-filter: var(--figure-filter, none);
   }
 
   .custom .figure .foot:not(.late) {
     color: var(--color-label-secondary);
   }
 
-  /* Frost only the capsules; the wash keeps arbitrary wallpaper legible. */
+  /* A wash, not a live blur: it keeps arbitrary wallpaper legible at no GPU cost. */
   :global(:root:not([data-material="none"])[data-material]) .newtab.custom {
     --figure-surface: color-mix(in srgb, var(--color-surface) 88%, transparent);
-    --figure-filter: blur(24px);
   }
 
   .custom button.figure:hover {
@@ -994,7 +992,6 @@
     .custom button.figure:hover {
       background: Canvas;
       color: CanvasText;
-      backdrop-filter: none;
     }
 
     .name {

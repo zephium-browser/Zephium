@@ -214,9 +214,7 @@ test.each(["light", "dark"])(
       const translucent = material !== null && material !== "none";
       for (const figure of figures) {
         const style = getComputedStyle(figure);
-        expect(style.backdropFilter, material ?? "bootstrap").toBe(
-          translucent ? "blur(24px)" : "none",
-        );
+        expect(style.backdropFilter, material ?? "bootstrap").toBe("none");
         const alpha = () => {
           paint.clearRect(0, 0, 1, 1);
           paint.fillStyle = getComputedStyle(figure).backgroundColor;
