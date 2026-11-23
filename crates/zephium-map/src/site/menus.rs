@@ -354,7 +354,7 @@ impl Menus {
                                     || e.off_site && site_profile(url).is_some())
                             })
                         {
-                            if card::action(&e) {
+                            if link.action || card::action(&e) {
                                 e.tier = Tier::Action;
                                 menus.actions.push(e);
                             } else {

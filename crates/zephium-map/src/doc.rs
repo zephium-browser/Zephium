@@ -267,6 +267,7 @@ pub(crate) struct MenuLink {
     pub url: Url,
     pub label: String,
     pub language: Option<String>,
+    pub action: bool,
 }
 impl Doc {
     pub fn page(&self) -> &Url {

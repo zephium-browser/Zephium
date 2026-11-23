@@ -91,6 +91,20 @@ fn disclosure_actions_leave_the_named_single_item_menu_intact() {
 }
 
 #[test]
+fn a_marked_action_in_a_collapsed_panel_is_not_a_menu_item() {
+    let (place, _) = read("<nav><button aria-controls='items'>Resources</button>
+        <div aria-hidden='true' id='items'><a class='btn cta' href='/start'>Start building</a><a href='/guides'>Guides</a></div></nav>");
+    assert_eq!(labels(row(&place, "Resources")), ["Guides"]);
+    let start: Vec<_> = place
+        .sections
+        .iter()
+        .filter(|e| e.key.as_url().path() == "/start")
+        .map(|e| e.tier)
+        .collect();
+    assert_eq!(start, [Tier::Action]);
+}
+
+#[test]
 fn marked_disclosure_panels_supply_no_destinations() {
     for mark in ["data-type='ad'", "aria-label='AI-generated overview'"] {
         let (place, _) = read(&format!("<nav><button aria-controls='items'>Resources</button>

@@ -435,6 +435,23 @@ mod tests {
     }
 
     #[test]
+    fn an_action_entry_is_neither_a_destination_nor_a_right_focus() {
+        let q = fixture("[[query]]\nid='a'\ntext='Example docs'\nkind='place'\nsite='example.com'\nwant=['example.com/docs']");
+        let mut outcome = Outcome::empty(Kind::Place);
+        outcome
+            .entries
+            .push(entry("https://example.com/docs", Depth::One, "nav"));
+        outcome.entries[0].focus = true;
+        let plain = score(&q, &outcome, &Activity::default());
+        assert!(plain.destination.is_some());
+        assert_eq!(plain.focus_right, Some(true));
+        outcome.entries[0].tags.insert("action".into());
+        let action = score(&q, &outcome, &Activity::default());
+        assert_eq!(action.destination, None);
+        assert_eq!(action.focus_right, Some(false));
+    }
+
+    #[test]
     fn passage_subcases_include_registrable_domains_and_mixed_results() {
         let query = query("kind='passage'\nanswer='The Answer'\nfrom=['example.co.uk']");
         for (input, expected, verdict) in [

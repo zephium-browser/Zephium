@@ -83,6 +83,13 @@ fn excluded(marks: Marks) -> bool {
     marks.has(Marks::GENERATED) || marks.has(Marks::SPONSORED)
 }
 
+fn call_to_action(n: &NodeRef) -> bool {
+    n.attr("class").is_some_and(|v| {
+        v.split_ascii_whitespace()
+            .any(|t| t.eq_ignore_ascii_case("cta"))
+    })
+}
+
 fn disclosure_content(n: &NodeRef<'_>) -> bool {
     !hidden(n)
         && !excluded(marks(n))
@@ -462,6 +469,7 @@ impl DocBuilder {
                 url,
                 label,
                 language,
+                action: call_to_action(&n),
             });
         }
         if !links.is_empty() {
@@ -583,12 +591,7 @@ impl DocBuilder {
                     node.marks.insert(Marks::ANCILLARY);
                 }
                 if role == Role::Link {
-                    if n.has_attr("download")
-                        || n.attr("class").is_some_and(|v| {
-                            v.split_ascii_whitespace()
-                                .any(|t| t.eq_ignore_ascii_case("cta"))
-                        })
-                    {
+                    if n.has_attr("download") || call_to_action(&n) {
                         node.marks.insert(Marks::ACTION);
                     }
                     node.destination = self.resolve(&n, "href", base);
