@@ -18,6 +18,11 @@ let serial = 0;
 
 export const latest = () => shown;
 
+/** Home went to it, so a Home drawn later does not go there again. */
+export function taken(serial: number) {
+  if (shown?.serial === serial) shown = null;
+}
+
 export function init(): Promise<() => void> {
   return events.homeShow.listen(({ payload }) => {
     const { search, slot, entry } = payload;

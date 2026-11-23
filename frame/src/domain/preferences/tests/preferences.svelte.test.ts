@@ -303,6 +303,20 @@ describe("new-tab section reset", () => {
     preferences.dispose();
   });
 
+  it("puts a chosen background back to the one Home ships with", async () => {
+    const stored: Record<string, string> = { "ui.newtab-background": "sky" };
+    native.get.mockImplementation(async (key: string) => stored[key] ?? null);
+    native.set.mockImplementation(async (key: string, value: string) => {
+      stored[key] = value;
+      return { accepted: true, operation_id: "0000000000000001" };
+    });
+    const preferences = await import("../preferences.svelte");
+    await preferences.init();
+    expect(await preferences.resetNewTab()).toBe(true);
+    expect(stored["ui.newtab-background"]).toBe("plain");
+    preferences.dispose();
+  });
+
   it.each(["rejected", "unconfirmed"])(
     "reports a %s reset without claiming success",
     async (failure) => {

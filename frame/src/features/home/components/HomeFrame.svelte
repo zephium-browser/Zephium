@@ -14,7 +14,7 @@
   } from "$domain/home";
   import { favicons } from "$domain/favicons";
   import { tabs } from "$domain/tabs";
-  import { latest as shownByNative } from "$session/home-show.svelte";
+  import { latest as shownByNative, taken as shownTaken } from "$session/home-show.svelte";
   import type HomeCanvas from "./HomeCanvas.svelte";
   import { Front } from "../lib/front.svelte";
   import type { HomeIntent } from "../lib/intent";
@@ -103,17 +103,16 @@
   });
 
   // Native shows a search after a page of it closes or its group title is clicked.
-  let seen = 0;
   let marked = $state.raw<{ search: string; entry: string } | null>(null);
   $effect(() => {
     const shown = shownByNative();
-    if (!shown || shown.serial <= seen || !home.ready()) return;
+    if (!shown || !home.ready()) return;
     if (!entries.some((entry) => entry.id === shown.search)) return;
-    seen = shown.serial;
     untrack(() => {
       front.show(shown.search);
       marked = shown.row ? { search: shown.search, entry: shown.row.entry } : null;
     });
+    shownTaken(shown.serial);
   });
 
   let notice = $state<Refused | null>(null);

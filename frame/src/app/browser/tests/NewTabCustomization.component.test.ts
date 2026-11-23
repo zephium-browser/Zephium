@@ -169,20 +169,22 @@ test("Settings chooses between Home and the classic new tab, offers a plain grou
   const ntp = await tab();
   const settings = await settingsScreen();
   await settings.getByRole("button", { name: "New tabs open to", exact: true }).click();
-  await expect
-    .element(page.getByRole("option", { name: "Classic new tab", exact: true }))
-    .toBeVisible();
-  await page.getByRole("option", { name: "Home", exact: true }).click();
-  await expect.poll(() => native.settings["home.mode"]).toBe("home");
+  await expect.element(page.getByRole("option", { name: "Home", exact: true })).toBeVisible();
+  await page.getByRole("option", { name: "Classic new tab", exact: true }).click();
+  await expect.poll(() => native.settings["home.mode"]).toBe("classic");
   await settings.getByRole("button", { name: "Background", exact: true }).click();
   await page.getByRole("option", { name: "Plain", exact: true }).click();
   await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
   expect(ntp.container.querySelector(".sky")).toBeNull();
   expect(native.media).not.toHaveBeenCalled();
-  await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
-  await expect.poll(() => preferences.value("home.mode")).toBe("classic");
-  expect(preferences.value("ui.newtab-background")).toBe("sky");
+  await settings.getByRole("button", { name: "Background", exact: true }).click();
+  await page.getByRole("option", { name: "Zephium sky", exact: true }).click();
   await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+  await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
+  await expect.poll(() => preferences.value("home.mode")).toBe("home");
+  expect(preferences.value("ui.newtab-background")).toBe("plain");
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector(".sky")).toBeNull();
 });
 
 test("a custom background uses one sized local image, no sky decode or frost, and dims live", async () => {
@@ -206,7 +208,8 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   expect(ntp.container.querySelector("img")).toBe(image);
   expect(native.media).toHaveBeenCalledTimes(1);
   await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
-  await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector("img")).toBeNull();
   expect(preferences.value("ui.newtab-image")).toBe("");
   expect(preferences.value("ui.newtab-dim")).toBe("false");
 });

@@ -269,6 +269,27 @@ test("the keyboard goes from the field down into the searches and back", async (
   expect(document.activeElement).toBe(field);
 });
 
+test("a search native showed is not shown again when Home is drawn anew", async () => {
+  await page.viewport(1440, 900);
+  native.searches = fixture.todayWire();
+  const screen = await open();
+  await canvasDrawn();
+  const marked = () =>
+    document
+      .querySelector('[data-canvas-stop="p:q-raycast/0/teams"]')
+      ?.getAttribute("aria-current");
+  emitNativeEvent("homeShow", { search: "q-raycast", slot: 0, entry: "teams" });
+  await expect.poll(marked).toBe("true");
+  screen.unmount();
+  tabs.dispose();
+  surface.dispose();
+
+  await open();
+  await canvasDrawn();
+  await new Promise((done) => setTimeout(done, 300));
+  expect(marked()).not.toBe("true");
+});
+
 const shots = "../../../../../target/home-app-look";
 const SIZES = [
   [1440, 900],

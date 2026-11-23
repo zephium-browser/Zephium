@@ -21,7 +21,7 @@ const defaults = {
   "ui.newtab-clock-format": "system",
   "ui.newtab-tasks": "true",
   "ui.newtab-background": "sky",
-  "home.mode": "classic",
+  "home.mode": "home",
   "ui.newtab-image": "",
   "ui.newtab-dim": "false",
   "ui.newtab-wordmark": "true",
@@ -290,6 +290,7 @@ export async function resetNewTab(): Promise<boolean> {
     if (!key.startsWith("ui.newtab-") && key !== "tabs.new-page" && key !== "home.mode") continue;
     const target = key === "ui.newtab-background" ? backgroundDefault(home) : defaults[key];
     if (values[key] === target) continue;
+    if (key === "ui.newtab-background" && !chosenKeys[key]) continue;
     await set(key, target);
     if (failed || values[key] !== target) return false;
   }

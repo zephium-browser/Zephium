@@ -222,7 +222,7 @@ export const fields = {
     section: "newtab",
     label: m.ntp_home_mode,
     description: m.ntp_home_mode_help,
-    initial: "classic",
+    initial: "home",
     options: [
       { value: "home", label: m.ntp_home_mode_home },
       { value: "classic", label: m.ntp_home_mode_classic },

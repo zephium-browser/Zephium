@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{ItemId, ProfileId, SpaceId};
 use crate::search::SearchEngine;
 
-/// What a profile gets until it chooses. Home's frame flips this to `Home`.
-pub const DEFAULT_HOME_MODE: HomeMode = HomeMode::Classic;
+/// What a profile gets until it chooses.
+pub const DEFAULT_HOME_MODE: HomeMode = HomeMode::Home;
 pub const MAX_SEARCHES_PER_PROFILE: usize = 32;
 pub const MAX_PAGES_PER_SEARCH: usize = 24;
 pub const MAX_SEARCH_TEXT_BYTES: usize = 2048;
@@ -23,8 +23,8 @@ pub const ID_HEX_BYTES: usize = 16;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HomeMode {
-    Home,
     #[default]
+    Home,
     Classic,
 }
 
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn modes_read_only_their_two_values_and_start_classic() {
+    fn modes_read_only_their_two_values_and_start_as_home() {
         assert_eq!(HomeMode::from_setting("home"), Some(HomeMode::Home));
         assert_eq!(HomeMode::from_setting("classic"), Some(HomeMode::Classic));
         assert_eq!(HomeMode::from_setting("Home"), None);
