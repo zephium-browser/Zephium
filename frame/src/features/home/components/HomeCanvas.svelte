@@ -1,14 +1,17 @@
 <script lang="ts">
   import type { Node } from "@xyflow/svelte";
-  import { onDestroy, setContext, untrack } from "svelte";
+  import { onDestroy, setContext, tick, untrack } from "svelte";
   import { SvelteSet } from "svelte/reactivity";
+  import { reveal } from "$shared/canvas";
   import { CanvasHost, type CanvasCamera, type CanvasKeyboard } from "$shared/canvas/host";
+  import { duration, reducedMotion } from "$shared/lib/motion";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../lib/context";
   import { layout, SEARCH_X, SIZE, type HomeNode } from "../lib/layout";
   import { admit, type HomeIntent, type HomeModel, type Place, type Row } from "../lib/model";
   import AddressLine from "./cards/AddressLine.svelte";
   import AlsoCard from "./cards/AlsoCard.svelte";
+  import CompactLine from "./cards/CompactLine.svelte";
   import DayMark from "./cards/DayMark.svelte";
   import InsideCard from "./cards/InsideCard.svelte";
   import Lines from "./cards/Lines.svelte";
@@ -16,6 +19,7 @@
   import PlaceCard from "./cards/PlaceCard.svelte";
   import SearchCard from "./cards/SearchCard.svelte";
   import SocialCard from "./cards/SocialCard.svelte";
+  import ThinPlace from "./cards/ThinPlace.svelte";
   import HoverCard from "./HoverCard.svelte";
 
   let {
@@ -39,7 +43,9 @@
 
   const nodeTypes = {
     search: SearchCard,
+    compact: CompactLine,
     place: PlaceCard,
+    thin: ThinPlace,
     inside: InsideCard,
     also: AlsoCard,
     social: SocialCard,
@@ -51,7 +57,31 @@
 
   let home = $derived(admit(given));
   const expanded = new SvelteSet<string>();
-  let laid = $derived(layout([home.today, ...home.earlier], home.today.key, { expanded }));
+  const shown = new SvelteSet<string>();
+  // The newest search is in front until the person brings another there; a
+  // new search comes to the front of itself.
+  let newest = $derived(home.today.entries?.find((entry) => entry.kind !== "address")?.id ?? null);
+  let chosen = $state<{ search: string; newest: string | null } | null>(null);
+  let front = $derived.by(() => {
+    if (!chosen || chosen.newest !== newest) return newest;
+    const wanted = chosen.search;
+    const held = [home.today, ...home.earlier].some((day) =>
+      day.entries?.some((entry) => entry.id === wanted && entry.kind !== "address"),
+    );
+    return held ? wanted : newest;
+  });
+  let laid = $derived(
+    layout([home.today, ...home.earlier], home.today.key, { expanded, front, shown }),
+  );
+  // Only the search that came to the front and the one that left it arrive; nothing else moves of itself.
+  let moved = $state<{ to: string; from: string | null } | null>(null);
+  let arriving = $derived(
+    new Set(
+      moved
+        ? [moved.to, moved.from].flatMap((lane) => (lane ? (laid.lanes[lane]?.nodes ?? []) : []))
+        : [],
+    ),
+  );
   const flowOf = (node: HomeNode): Node<{ item: HomeNode }> => ({
     id: node.id,
     type: node.kind,
@@ -63,6 +93,7 @@
     selectable: false,
     focusable: false,
     zIndex: node.kind === "lines" ? 0 : 1,
+    class: arriving.has(node.id) ? "home-arrive" : undefined,
   });
   let nodes = $state.raw<Node[]>([]);
   $effect.pre(() => {
@@ -87,6 +118,37 @@
     placed = true;
   });
   let camera: CanvasCamera | undefined;
+  // The way in is handed over once the camera can move and the first items are drawn to land on.
+  let drawn = false;
+  let handed = false;
+  function handOver() {
+    if (handed || !camera) return;
+    handed = true;
+    onready?.(async () => {
+      // Just drawn, the flow may not take focus yet; it is tried for a few frames.
+      for (let tries = 0; tries < 30; tries++) {
+        const to = laid.first ?? stops[0]?.id;
+        if (!to) return;
+        camera?.focus(to);
+        await new Promise((done) => requestAnimationFrame(done));
+        if (root?.contains(document.activeElement)) return;
+      }
+    });
+  }
+  let root = $state<HTMLDivElement>();
+
+  async function open(search: string) {
+    if (search === front) return;
+    const keyed = !!root?.contains(document.activeElement);
+    moved = { to: search, from: front };
+    chosen = { search, newest };
+    await tick();
+    const lane = laid.lanes[search];
+    if (!lane || !camera) return;
+    if (keyed) camera.focus(`s:${search}`);
+    const next = reveal(lane.box, view, { width, height, ...inset }, 24);
+    if (next) camera.glide(next, reducedMotion() ? 0 : duration("base"));
+  }
   // The place stands under the field; when the newest entry reaches past the
   // page it moves aside, and only when it cannot fit at all does the view step back.
   function firstView(head: { x: number; width: number }) {
@@ -114,9 +176,11 @@
       const stop = byStop.get(id);
       if (!stop) return false;
       if (direction === "right" && stop.row) {
-        const { inside, first, search, row } = stop.row;
-        if (!inside) intent({ kind: "inside", search, row });
-        else if (first) camera?.focus(first);
+        const { inside, first, search, row, menu } = stop.row;
+        if (!inside) {
+          if (menu) top.menu(search, row);
+          else intent({ kind: "inside", search, row });
+        } else if (first) camera?.focus(first);
         return true;
       }
       if (direction === "left" && stop.parent) {
@@ -124,7 +188,8 @@
         return true;
       }
       if (direction === "left" && stop.row?.inside) {
-        intent({ kind: "fold", search: stop.row.search, row: stop.row.row });
+        if (stop.row.menu) top.menu(stop.row.search, stop.row.row);
+        else intent({ kind: "fold", search: stop.row.search, row: stop.row.row });
         return true;
       }
       return false;
@@ -132,6 +197,8 @@
     onactivate(id) {
       const action = byStop.get(id)?.activate;
       if (action?.kind === "more") top.toggle(action.place);
+      else if (action?.kind === "open") void open(action.search);
+      else if (action?.kind === "menu") top.menu(action.search, action.row);
       else if (action) intent(action);
     },
     onleave: () => intent({ kind: "field" }),
@@ -145,7 +212,7 @@
     clearTimeout(resting);
     hovered = null;
     pointed = row && stop ? { row, stop } : null;
-    if (!row || row.inside || (!row.note && !row.known.length && !row.host)) return;
+    if (!row || row.menu || row.inside || (!row.note && !row.known.length && !row.host)) return;
     resting = setTimeout(() => (hovered = pointed), 360);
   }
   onDestroy(() => clearTimeout(resting));
@@ -163,6 +230,12 @@
 
   const top: HomeTop = {
     intent,
+    open: (search) => void open(search),
+    menu(search, row) {
+      const key = `${search}/${row}`;
+      if (!shown.delete(key)) shown.add(key);
+    },
+    shown: (search, row) => shown.has(`${search}/${row}`),
     toggle(key) {
       if (!expanded.delete(key)) expanded.add(key);
     },
@@ -192,10 +265,10 @@
 
 <div
   class="home-canvas"
+  bind:this={root}
   bind:clientWidth={width}
   bind:clientHeight={height}
   style:--home-pad={`${SIZE.pad}px`}
-  style:--home-tray={`${SIZE.tray}px`}
 >
   {#if placed}
     <CanvasHost
@@ -209,9 +282,11 @@
       onmovestart={() => hover(null)}
       oncamera={(ready) => {
         camera = ready;
-        onready?.(() => {
-          if (laid.first ?? stops[0]) ready.focus(laid.first ?? stops[0]!.id);
-        });
+        if (drawn) handOver();
+      }}
+      oninit={() => {
+        drawn = true;
+        if (camera) handOver();
       }}
     />
   {/if}
@@ -232,15 +307,30 @@
     transition: transform var(--motion-base) var(--ease-emphasized);
   }
 
+  /* A search coming to the front opens where its line was; the one leaving
+     closes to a line. */
+  /* stylelint-disable-next-line selector-class-pattern */
+  .home-canvas :global(.svelte-flow__node.home-arrive) {
+    animation: lane-in var(--motion-base) var(--ease-out) backwards;
+  }
+
+  @keyframes lane-in {
+    from {
+      opacity: 0;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     /* stylelint-disable-next-line selector-class-pattern */
     .home-canvas :global(.svelte-flow__node) {
       transition: none;
+      animation: none;
     }
   }
 
   /* stylelint-disable-next-line selector-class-pattern */
   :global(:root[data-reduce-motion="true"]) .home-canvas :global(.svelte-flow__node) {
     transition: none;
+    animation: none;
   }
 </style>

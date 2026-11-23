@@ -17,11 +17,11 @@
 
 <Card width={data.item.box.width} height={data.item.box.height} label={m.home_also()}>
   <p class="label" style:block-size={`${SIZE.label}px`}>{m.home_also()}</p>
-  {#each search.also as also (also.id)}
+  {#each search.also as also, index (also.id)}
     {@const mark = KIND_MARK[also.kind]}
     <button
       type="button"
-      style:block-size={`${SIZE.also}px`}
+      style:block-size={`${data.item.heights[index] ?? SIZE.also}px`}
       {@attach at(`${id}/${also.id}`)}
       onclick={() => top.intent({ kind: "result", search: search.id, result: also.id })}
     >
@@ -66,16 +66,22 @@
     background: var(--row-hover);
   }
 
-  .title,
   .host span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
+  /* A title takes two lines before it is cut. */
   .title {
+    display: -webkit-box;
+    overflow: hidden;
     font-size: var(--text-label);
     line-height: 16px;
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
 
   .host {

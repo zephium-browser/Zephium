@@ -5,6 +5,11 @@ export const homeTop = Symbol("home-top");
 
 export type HomeTop = {
   intent(intent: HomeIntent): void;
+  /** Brings a search to the front, drawn open; the one there before becomes a line. */
+  open(search: string): void;
+  /** Shows or hides what a menu row holds; it asks for nothing. */
+  menu(search: string, row: string): void;
+  shown(search: string, row: string): boolean;
   /** Shows or hides a place's full list of known sections. */
   toggle(place: string): void;
   expanded(place: string): boolean;

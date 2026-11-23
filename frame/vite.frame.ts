@@ -93,6 +93,25 @@ export function frameConfig(pages: readonly Page[]): UserConfig {
                 test: /[\\/]src[\\/](?:shared[\\/](ipc[\\/]|platform\.ts|lib[\\/]motion\.ts|i18n[\\/]runtime\.js)|domain[\\/]preferences[\\/])/u,
                 tags: ["$initial"],
               },
+              {
+                // Lazy icons follow the destinations that draw them, so one
+                // destination never loads another's chunk for an icon.
+                name: "icons-lazy",
+                test: /[\\/]@hugeicons[\\/]core-free-icons[\\/]/u,
+                entriesAware: true,
+                entriesAwareMergeThreshold: 0,
+              },
+              {
+                // The canvas and its flow library serve Work and Home; grouped
+                // by the destinations that use them, neither loads the other.
+                name: "canvas",
+                priority: 1,
+                test: /[\\/](?:@xyflow[\\/]|@svelte-put[\\/]|d3-[a-z]+[\\/])|[\\/]src[\\/]shared[\\/]canvas[\\/]/u,
+                entriesAware: true,
+                entriesAwareMergeThreshold: 0,
+                // Svelte's runtime under the flow library stays where the startup graph has it.
+                includeDependenciesRecursively: false,
+              },
             ],
           },
         },

@@ -5,7 +5,6 @@
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { homeTop, type HomeTop } from "../../lib/context";
-  import { ROLE_MARK } from "../../lib/marks";
   import type { Row } from "../../lib/model";
 
   let {
@@ -31,9 +30,18 @@
   const at = focusStop();
   let picture = $derived(row.picture ? top.picture(row.picture) : null);
   let missing = $state<string | null>(null);
-  let shown = $derived(!!row.inside);
-  let canOpen = $derived(row.opens && !inner);
-  let mark = $derived(row.role && !inner ? ROLE_MARK[row.role] : null);
+  let menu = $derived(row.menu && !inner);
+  let shown = $derived(menu ? top.shown(search, row.id) : !!row.inside);
+  let canOpen = $derived((row.opens || menu) && !inner);
+  // A menu is only what it holds: the row itself shows or hides it.
+  function choose() {
+    if (menu) top.menu(search, row.id);
+    else top.intent({ kind: "row", search, row: row.id });
+  }
+  function reveal() {
+    if (menu) top.menu(search, row.id);
+    else top.intent({ kind: shown ? "fold" : "inside", search, row: row.id });
+  }
 </script>
 
 <div
@@ -47,16 +55,15 @@
   <button
     type="button"
     class="open"
-    class:marked={!!mark}
     aria-current={selected ? "true" : undefined}
+    aria-expanded={menu ? shown : undefined}
     {@attach at(stop)}
-    onclick={() => top.intent({ kind: "row", search, row: row.id })}
+    onclick={choose}
     onpointerenter={() => top.hover(row, stop)}
     onpointerleave={() => top.hover(null)}
   >
     <span class="label" dir="auto">{row.label}</span>
     {#if row.host}<span class="host" dir="auto">{row.host}</span>{/if}
-    {#if mark}<Icon icon={mark} size={13} class="mark" />{/if}
     {#if picture && missing !== picture}<canvas
         class="shot"
         aria-hidden="true"
@@ -73,7 +80,7 @@
       aria-label={shown
         ? m.home_hide_inside({ label: row.label })
         : m.home_open_inside({ label: row.label })}
-      onclick={() => top.intent({ kind: shown ? "fold" : "inside", search, row: row.id })}
+      onclick={reveal}
     >
       <Icon icon={ArrowRight01Icon} size={14} strokeWidth={2} />
     </button>
@@ -140,12 +147,6 @@
     white-space: nowrap;
   }
 
-  .open :global(.mark) {
-    flex: none;
-    margin-inline-start: auto;
-    color: var(--color-faint);
-  }
-
   .shot {
     flex: none;
     inline-size: 30px;
@@ -153,10 +154,6 @@
     margin-inline-start: auto;
     border-radius: 4px;
     background: var(--color-fill);
-  }
-
-  .marked .shot {
-    margin-inline-start: 0;
   }
 
   .inside {

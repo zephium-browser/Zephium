@@ -28,6 +28,7 @@ export const row = (id: string, label: string, shape: RowShape = {}): Row => ({
   note: null,
   known: [],
   opens: false,
+  menu: false,
   inside: null,
   picture: null,
   opened: false,
@@ -44,6 +45,7 @@ export function place(id: string, shape: Partial<Place> & Pick<Place, "title" | 
   return {
     id,
     state: "settled",
+    thin: false,
     failure: null,
     rows: [],
     more: [],
@@ -86,23 +88,105 @@ const docs: Inside = {
   ].map((label, index) => row(`docs${index}`, label)),
 };
 
-/** A large site: twelve rows, twenty more, actions, profiles, and one inside opened. */
-export const stripe = (inside: Inside | null = docs): Kind<"place"> => ({
+const STRIPE_ALSO = [
+  also("a1", "Stripe fees explained: every charge in one place", "nerdwallet.com"),
+  also("a2", "Is Stripe worth it for a small shop?", "reddit.com", "discussion"),
+  also("a3", "Stripe vs PayPal vs Square in 2026", "forbes.com"),
+  also("a4", "How Stripe pricing actually works", "youtube.com", "video"),
+  also("a5", "Stripe Billing pricing calculator", "chargebee.com"),
+  also("a6", "Negotiating custom Stripe rates", "news.ycombinator.com", "discussion"),
+  also("a7", "Stripe pricing and fees", "en.wikipedia.org"),
+  also("a8", "Stripe alternatives with lower fees", "g2.com"),
+];
+
+/** A site's menu with no page of its own, and the children it already holds. */
+const menu = (id: string, label: string, children: readonly string[]): Row =>
+  row(id, label, {
+    menu: true,
+    inside: {
+      state: "open",
+      more: children.length > 7,
+      rows: children.map((child, index) => row(`${id}${index}`, child)),
+    },
+  });
+
+/** A large site as it now arrives: its menu, and the row that was asked for. */
+export const stripe = (): Kind<"place"> => ({
+  kind: "place",
+  id: "q-payments",
+  text: "stripe pricing",
+  at: 14 * 60 + 32,
+  results: "results:stripe",
+  also: STRIPE_ALSO,
+  place: place("stripe.com", {
+    title: "Stripe",
+    host: "stripe.com",
+    asked: "pricing",
+    rows: [
+      menu("products", "Products", [
+        "Payments",
+        "Billing",
+        "Connect",
+        "Terminal",
+        "Radar",
+        "Atlas",
+        "Issuing",
+        "Tax",
+      ]),
+      menu("solutions", "Solutions", [
+        "Startups",
+        "Enterprises",
+        "SaaS",
+        "Platforms",
+        "Ecommerce",
+        "Marketplaces",
+        "Embedded finance",
+      ]),
+      menu("developers", "Developers", [
+        "Documentation",
+        "API reference",
+        "API status",
+        "Changelog",
+        "Libraries and SDKs",
+        "Stripe Apps",
+        "Sample projects",
+        "Testing",
+      ]),
+      menu("resources", "Resources", [
+        "Guides",
+        "Customer stories",
+        "Blog",
+        "Sessions",
+        "Partners",
+        "Support center",
+        "Jobs",
+      ]),
+      row("pricing", "Pricing", {
+        note: "Integrated per-transaction pricing with no hidden fees.",
+        known: sections("prk", ["Standard", "Custom", "Payments", "Billing", "Tax"]),
+        opened: true,
+        picture: "page:stripe-pricing",
+      }),
+    ],
+    more: sections("m", ["Privacy", "Terms", "Sitemap", "Status", "Press", "Security"]),
+    actions: actions(["signin", "Sign in"], ["sales", "Contact sales"], ["trial", "Start now"]),
+    social: social(
+      ["x", "@stripe"],
+      ["github", "stripe"],
+      ["youtube", "Stripe"],
+      ["linkedin", "Stripe"],
+    ),
+  }),
+});
+
+/** A large flat site: twelve rows, twenty more, actions, profiles, and one inside opened. */
+export const large = (inside: Inside | null = docs): Kind<"place"> => ({
   kind: "place",
   id: "q-stripe",
   text: "stripe pricing",
   at: 14 * 60 + 32,
   results: "results:stripe",
-  also: [
-    also("a1", "Stripe fees explained: every charge in one place", "nerdwallet.com"),
-    also("a2", "Is Stripe worth it for a small shop?", "reddit.com", "discussion"),
-    also("a3", "Stripe vs PayPal vs Square in 2026", "forbes.com"),
-    also("a4", "How Stripe pricing actually works", "youtube.com", "video"),
-    also("a5", "Stripe Billing pricing calculator", "chargebee.com"),
-    also("a6", "Negotiating custom Stripe rates", "news.ycombinator.com", "discussion"),
-    also("a7", "Stripe pricing and fees", "en.wikipedia.org"),
-    also("a8", "Stripe alternatives with lower fees", "g2.com"),
-  ],
+  also: STRIPE_ALSO,
   place: place("stripe.com", {
     title: "Stripe",
     host: "stripe.com",
@@ -168,7 +252,7 @@ export const stripe = (inside: Inside | null = docs): Kind<"place"> => ({
   }),
 });
 
-/** A small site: five rows, nothing more to know. */
+/** A flat site: six plain rows, nothing more to know. */
 export const raycast: Kind<"place"> = {
   kind: "place",
   id: "q-raycast",
@@ -185,14 +269,12 @@ export const raycast: Kind<"place"> = {
     host: "raycast.com",
     asked: "pro",
     rows: [
-      roled("store", "Store", "product", { opens: true }),
+      roled("store", "Store", "product"),
       roled("pro", "Pro", "pricing", { note: "AI, cloud sync, custom themes and more." }),
       row("teams", "Teams"),
-      roled("developers", "Developers", "developers", {
-        host: "developers.raycast.com",
-        opens: true,
-      }),
+      roled("developers", "Developers", "developers", { host: "developers.raycast.com" }),
       roled("changelog", "Changelog", "changelog"),
+      row("blog", "Blog"),
     ],
     actions: actions(["download", "Download"], ["signin", "Log in"]),
     social: social(["x", "@raycast"], ["github", "raycast"], ["youtube", "Raycast"]),
@@ -355,6 +437,50 @@ export const failed: Kind<"place"> = {
   }),
 };
 
+/** A place with too little to read for a card: two rows and a booking link. */
+export const studio: Kind<"place"> = {
+  kind: "place",
+  id: "q-studio",
+  text: "ana clay studio hours",
+  at: 16 * 60 + 10,
+  results: "results:studio",
+  also: [
+    also(
+      "s1",
+      "Ana Clay Studio: reviews and opening hours for the pottery studio on Rua da Rosa",
+      "maps.example",
+    ),
+    also("s2", "Pottery classes, Lisbon", "timeout.com"),
+  ],
+  place: place("anaclay.example", {
+    title: "Ana Clay Studio",
+    host: "anaclay.example",
+    thin: true,
+    asked: "s-visit",
+    rows: [
+      row("s-classes", "Classes"),
+      row("s-visit", "Visit", { note: "Open Tuesday to Saturday, ten to six." }),
+    ],
+    actions: actions(["signup", "Book a class"]),
+    social: social(["instagram", "@anaclaystudio"]),
+  }),
+};
+
+/** A place that is only its name. */
+const bare: Kind<"place"> = {
+  kind: "place",
+  id: "q-bare",
+  text: "mira okafor portfolio",
+  at: 15 * 60 + 40,
+  results: null,
+  also: [],
+  place: place("miraokafor.example", {
+    title: "Mira Okafor",
+    host: "miraokafor.example",
+    thin: true,
+  }),
+};
+
 const LONG =
   "Enterprise-grade observability for distributed systems with end-to-end tracing across every region";
 
@@ -502,11 +628,7 @@ export const busy = (): HomeModel => ({
   today: day(
     TODAY,
     Array.from({ length: 30 }, (_, index) =>
-      index === 0
-        ? stripe(null)
-        : index === 1
-          ? grinders
-          : filler(index, "t", 18 * 60 - index * 20),
+      index === 0 ? stripe() : index === 1 ? grinders : filler(index, "t", 18 * 60 - index * 20),
     ),
   ),
   earlier: [
@@ -532,5 +654,9 @@ export const today = (): HomeModel =>
 export const states = (): HomeModel => home([arriving(), figma(), failed]);
 
 export const edges = (): HomeModel => home([long, rtl]);
+
+export const rtlFirst = (): HomeModel => home([rtl, long]);
+
+export const thinPlaces = (): HomeModel => home([studio, bare, raycast]);
 
 export const comparing = (): HomeModel => home([compare, raycast]);

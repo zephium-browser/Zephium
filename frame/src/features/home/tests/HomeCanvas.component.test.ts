@@ -37,7 +37,7 @@ async function mount(home: HomeModel) {
 const settle = () => new Promise((done) => setTimeout(done, 600));
 
 test("every click is an intent naming ids, and nothing opens by itself", async () => {
-  const { intents } = await mount(fixture.today());
+  const { intents } = await mount(fixture.home([fixture.large(), fixture.grinders]));
   expect(intents).toEqual([]);
   stop("p:q-stripe/stripe.com/pricing")!.click();
   stop("p:q-stripe/stripe.com")!.click();
@@ -65,7 +65,7 @@ test("every click is an intent naming ids, and nothing opens by itself", async (
 });
 
 test("the known sections show without asking for anything", async () => {
-  const { intents } = await mount(fixture.home([fixture.stripe(null)]));
+  const { intents } = await mount(fixture.home([fixture.large(null)]));
   expect(stop("p:q-stripe/stripe.com/more:m0")).toBeNull();
   stop("p:q-stripe/stripe.com/more")!.click();
   await expect.poll(() => stop("p:q-stripe/stripe.com/more:m19")).not.toBeNull();
@@ -75,7 +75,7 @@ test("the known sections show without asking for anything", async () => {
 });
 
 test("resting on a row shows only what is held, and asks for nothing", async () => {
-  const { intents } = await mount(fixture.home([fixture.stripe(null)]));
+  const { intents } = await mount(fixture.home([fixture.large(null)]));
   stop("p:q-stripe/stripe.com/pricing")!.dispatchEvent(new PointerEvent("pointerenter"));
   await expect
     .poll(() => document.querySelector(".hover")?.textContent ?? "")
@@ -92,27 +92,27 @@ test("resting on a row shows only what is held, and asks for nothing", async () 
 
 test("a row being read says so, then shows its inside or why it could not", async () => {
   const opening: Inside = { state: "opening" };
-  const { screen } = await mount(fixture.home([fixture.stripe(opening)]));
+  const { screen } = await mount(fixture.home([fixture.large(opening)]));
   const inside = () => document.querySelector('[aria-label="Documentation"]');
   await expect.poll(() => inside()?.querySelector('[role="status"]')).not.toBeNull();
   expect(stop("i:q-stripe/documentation/docs0")).toBeNull();
   expect(document.querySelector(".lines .opening")).not.toBeNull();
 
   await screen.rerender({
-    home: fixture.home([fixture.stripe({ state: "refused", reason: "blocked" })]),
+    home: fixture.home([fixture.large({ state: "refused", reason: "blocked" })]),
   });
   await expect.poll(() => inside()?.textContent ?? "").toContain("does not allow");
   expect(inside()!.querySelector('[role="status"]')).toBeNull();
   expect(document.querySelector(".lines .refused")).not.toBeNull();
   expect(stop("i:q-stripe/documentation/docs0")).toBeNull();
 
-  await screen.rerender({ home: fixture.home([fixture.stripe()]) });
+  await screen.rerender({ home: fixture.home([fixture.large()]) });
   await expect.poll(() => stop("i:q-stripe/documentation/docs11")).not.toBeNull();
   expect(document.querySelector(".lines .opening, .lines .refused")).toBeNull();
 });
 
 test("the keyboard starts on the asked row and walks rows, insides and cards", async () => {
-  const { intents, enter } = await mount(fixture.home([fixture.stripe(), fixture.raycast]));
+  const { intents, enter } = await mount(fixture.home([fixture.large(), fixture.raycast]));
   expect(stop("p:q-stripe/stripe.com/pricing")!.tabIndex).toBe(0);
   enter();
   await expect.poll(() => document.activeElement).toBe(stop("p:q-stripe/stripe.com/pricing"));
@@ -228,4 +228,108 @@ test("page text is shown as text, never as markup", async () => {
   expect(canvas.querySelector("img, script, a[href]")).toBeNull();
   expect(canvas.textContent).toContain("<script>alert(1)</script>");
   expect(canvas.textContent).not.toContain("‮");
+});
+
+test("one search is open at a time; another comes to the front when its line is chosen", async () => {
+  const { intents } = await mount(fixture.today());
+  expect(stop("p:q-payments/stripe.com")).not.toBeNull();
+  expect(stop("p:q-raycast/raycast.com")).toBeNull();
+  expect(stop("s:q-raycast")!.getAttribute("aria-expanded")).toBe("false");
+  expect(stop("s:q-raycast")!.textContent).toContain("Store, Pro, Teams");
+
+  stop("s:q-raycast")!.click();
+  await expect.poll(() => stop("p:q-raycast/raycast.com")).not.toBeNull();
+  expect(stop("p:q-payments/stripe.com")).toBeNull();
+  expect(stop("s:q-payments")!.getAttribute("aria-expanded")).toBe("false");
+  // Bringing a search to the front opens nothing and asks for nothing.
+  expect(intents).toEqual([]);
+  stop("p:q-raycast/raycast.com/action:act0")!.click();
+  expect(intents).toEqual([{ kind: "row", search: "q-raycast", row: "act0" }]);
+});
+
+test("the keyboard walks through the day's searches, each opening as it is reached", async () => {
+  await mount(fixture.home([fixture.large(null), fixture.grinders, fixture.raycast]));
+  stop("s:q-grinders")!.focus();
+  await expect.poll(() => stop("o:q-grinders/g1")).not.toBeNull();
+  await expect.poll(() => document.activeElement).toBe(stop("s:q-grinders"));
+  expect(stop("p:q-payments/stripe.com")).toBeNull();
+
+  // Down goes through what the search in front holds, then on to the next line.
+  const at = () => document.activeElement?.getAttribute("data-canvas-stop");
+  const walked: (string | null | undefined)[] = [];
+  for (let step = 0; step < 4 && !stop("p:q-raycast/raycast.com"); step++) {
+    await userEvent.keyboard("{ArrowDown}");
+    await settle();
+    walked.push(at());
+  }
+  expect(walked).toEqual(["o:q-grinders/g2", "o:q-grinders/g3", "s:q-raycast"]);
+  await expect.poll(() => stop("p:q-raycast/raycast.com")).not.toBeNull();
+  await expect.poll(() => document.activeElement).toBe(stop("s:q-raycast"));
+  expect(stop("o:q-grinders/g1")).toBeNull();
+
+  await userEvent.keyboard("{ArrowUp}");
+  await expect.poll(() => stop("o:q-grinders/g1")).not.toBeNull();
+  await expect.poll(() => document.activeElement).toBe(stop("s:q-grinders"));
+});
+
+test("with reduced motion a search opens and closes without moving", async () => {
+  document.documentElement.dataset.reduceMotion = "true";
+  try {
+    await mount(fixture.today());
+    stop("s:q-raycast")!.click();
+    await expect.poll(() => stop("p:q-raycast/raycast.com")).not.toBeNull();
+    expect(document.getAnimations().filter((motion) => motion.playState === "running")).toEqual([]);
+  } finally {
+    delete document.documentElement.dataset.reduceMotion;
+  }
+});
+
+test("a place too small for a card is a line whose links are intents", async () => {
+  const { intents } = await mount(fixture.thinPlaces());
+  expect(document.querySelector('[aria-label="Ana Clay Studio"]')!.classList).toContain("thin");
+  stop("p:q-studio/anaclay.example/s-visit")!.click();
+  stop("p:q-studio/anaclay.example/action:act0")!.click();
+  stop("p:q-studio/anaclay.example")!.click();
+  expect(intents).toEqual([
+    { kind: "row", search: "q-studio", row: "s-visit" },
+    { kind: "row", search: "q-studio", row: "act0" },
+    { kind: "site", search: "q-studio", place: "anaclay.example" },
+  ]);
+});
+
+test("a menu row shows what the site already holds under it, asking for nothing", async () => {
+  const { intents } = await mount(fixture.today());
+  const developers = stop("p:q-payments/stripe.com/developers")!;
+  expect(stop("i:q-payments/developers/developers0")).toBeNull();
+  const row = developers.closest(".row")!;
+  expect(row.querySelector(".host, .shot")).toBeNull();
+  expect(row.querySelector('[aria-label="Show what is in Developers"]')).not.toBeNull();
+  expect(developers.getAttribute("aria-expanded")).toBe("false");
+
+  developers.click();
+  await expect.poll(() => stop("i:q-payments/developers/developers7")).not.toBeNull();
+  expect(document.querySelector('[aria-label="Developers"] [role="status"]')).toBeNull();
+  expect(document.querySelector(".lines .opening")).toBeNull();
+  expect(developers.getAttribute("aria-expanded")).toBe("true");
+  expect(intents).toEqual([]);
+
+  stop("i:q-payments/developers/developers1")!.click();
+  stop("i:q-payments/developers/more")!.click();
+  stop("p:q-payments/stripe.com/pricing")!.click();
+  expect(intents).toEqual([
+    { kind: "row", search: "q-payments", row: "developers1" },
+    { kind: "site", search: "q-payments", place: "stripe.com" },
+    { kind: "row", search: "q-payments", row: "pricing" },
+  ]);
+
+  developers.focus();
+  await userEvent.keyboard("{ArrowRight}");
+  await expect.poll(() => document.activeElement).toBe(stop("i:q-payments/developers/developers0"));
+  await userEvent.keyboard("{ArrowLeft}");
+  await expect.poll(() => document.activeElement).toBe(developers);
+  await userEvent.keyboard("{ArrowLeft}");
+  await expect.poll(() => stop("i:q-payments/developers/developers0")).toBeNull();
+  await userEvent.keyboard("{Enter}");
+  await expect.poll(() => stop("i:q-payments/developers/developers0")).not.toBeNull();
+  expect(intents).toHaveLength(3);
 });

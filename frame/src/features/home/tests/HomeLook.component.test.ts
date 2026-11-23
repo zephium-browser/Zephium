@@ -23,7 +23,7 @@ const SIZES = [
   [1100, 700],
 ] as const;
 
-const SCENES: Record<string, { home: () => HomeModel; backdrop?: boolean; all?: boolean }> = {
+const SCENES: Record<string, { home: () => HomeModel; backdrop?: boolean; wide?: boolean }> = {
   rest: {
     home: () => fixture.home([], [{ key: "2026-11-22", count: 1, entries: [fixture.compare] }]),
   },
@@ -32,6 +32,12 @@ const SCENES: Record<string, { home: () => HomeModel; backdrop?: boolean; all?: 
   states: { home: fixture.states },
   edges: { home: fixture.edges },
   picture: { home: fixture.today, backdrop: true },
+  day: { home: fixture.busy, wide: true },
+  large: { home: () => fixture.home([fixture.large(), fixture.raycast]), wide: true },
+  thin: { home: fixture.thinPlaces, wide: true },
+  arriving: { home: () => fixture.home([fixture.arriving(), fixture.figma()]), wide: true },
+  failed: { home: () => fixture.home([fixture.failed, fixture.raycast]), wide: true },
+  rtl: { home: fixture.rtlFirst, wide: true },
 };
 
 async function stage(
@@ -40,12 +46,13 @@ async function stage(
   width: number,
   height: number,
   backdrop = false,
+  load?: () => Promise<never>,
 ) {
   await page.viewport(width, height);
   document.documentElement.dataset.theme = theme;
   document.documentElement.dataset.material = "none";
-  const screen = await render(HomeStage, { home, backdrop });
-  if (home.today.entries?.length)
+  const screen = await render(HomeStage, { home, backdrop, ...(load ? { load } : {}) });
+  if (home.today.entries?.length && !load)
     await expect
       .poll(() => screen.container.querySelectorAll(".svelte-flow__node").length, {
         timeout: 10_000,
@@ -55,9 +62,9 @@ async function stage(
   return screen;
 }
 
-for (const [scene, { home, backdrop }] of Object.entries(SCENES))
+for (const [scene, { home, backdrop, wide }] of Object.entries(SCENES))
   for (const theme of ["light", "dark"])
-    for (const [width, height] of SIZES)
+    for (const [width, height] of wide ? SIZES.slice(0, 1) : SIZES)
       test(`Home ${scene}, ${theme}, ${width}×${height}`, async () => {
         await stage(home(), theme, width, height, backdrop);
         await page.screenshot({ path: `${shots}/${scene}-${theme}-${width}.png` });
@@ -66,7 +73,7 @@ for (const [scene, { home, backdrop }] of Object.entries(SCENES))
 for (const theme of ["light", "dark"]) {
   test(`Home with a row's known links on hover, ${theme}`, async () => {
     const screen = await stage(
-      fixture.home([fixture.stripe(null), fixture.raycast]),
+      fixture.home([fixture.large(null), fixture.raycast]),
       theme,
       1440,
       900,
@@ -82,7 +89,7 @@ for (const theme of ["light", "dark"]) {
 
   test(`Home with every known section shown, ${theme}`, async () => {
     const screen = await stage(
-      fixture.home([fixture.stripe(null), fixture.raycast]),
+      fixture.home([fixture.large(null), fixture.raycast]),
       theme,
       1440,
       900,
@@ -94,11 +101,38 @@ for (const theme of ["light", "dark"]) {
     await page.screenshot({ path: `${shots}/sections-${theme}-1440.png` });
   });
 
+  test(`Home with a menu row's children shown, ${theme}`, async () => {
+    const screen = await stage(fixture.today(), theme, 1440, 900);
+    screen.container
+      .querySelector<HTMLElement>('[data-canvas-stop="p:q-payments/stripe.com/developers"]')!
+      .click();
+    await new Promise((done) => setTimeout(done, 500));
+    await page.screenshot({ path: `${shots}/menu-${theme}-1440.png` });
+  });
+
+  test(`Home with an older search brought to the front, ${theme}`, async () => {
+    const screen = await stage(fixture.today(), theme, 1440, 900);
+    screen.container.querySelector<HTMLElement>('[data-canvas-stop="s:q-raycast"]')!.click();
+    await expect
+      .poll(() => screen.container.querySelector('[data-canvas-stop="p:q-raycast/raycast.com"]'))
+      .not.toBeNull();
+    await new Promise((done) => setTimeout(done, 700));
+    await page.screenshot({ path: `${shots}/opened-${theme}-1440.png` });
+  });
+
+  test(`Home when its canvas could not load, ${theme}`, async () => {
+    await stage(fixture.today(), theme, 1440, 900, false, () => Promise.reject(new Error("gone")));
+    await expect.poll(() => document.querySelector(".failed button")).not.toBeNull();
+    await page.screenshot({ path: `${shots}/unloaded-${theme}-1440.png` });
+  });
+
   test(`Home a day back, ${theme}`, async () => {
     const screen = await stage(fixture.busy(), theme, 1440, 900);
     const home = admit(fixture.busy());
     const day = layout([home.today, ...home.earlier], home.today.key, {
       expanded: new Set(),
+      front: "q-payments",
+      shown: new Set(),
     }).nodes.find((node) => node.id === "d:2026-11-22")!;
     const pane = screen.container.querySelector(".svelte-flow__pane")!;
     for (let left = day.box.y - 80; left > 0; left -= 400)

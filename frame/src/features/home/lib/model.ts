@@ -54,6 +54,11 @@ export type Row = {
   known: readonly Section[];
   /** Its inside can be read on demand. */
   opens: boolean;
+  /**
+   * A site's menu with no page of its own: its inside is the children already
+   * held, shown and hidden here without asking for anything.
+   */
+  menu: boolean;
   inside: Inside | null;
   /** The person opened this page: its small picture's key, if one was kept. */
   picture: string | null;
@@ -74,6 +79,8 @@ export type Place = {
   host: string;
   /** Arriving while the first rows come in; failed when nothing could be read. */
   state: "arriving" | "settled" | "failed";
+  /** Too little to read for a card, as the engine judged it: drawn as one line. */
+  thin: boolean;
   failure: Refusal | null;
   rows: readonly Row[];
   /** The rest of the known sections, shown without a request. */
@@ -179,19 +186,31 @@ function admitRow(row: Row, depth: number): Row {
             more: row.inside.more || row.inside.rows.length > MAX_CHILDREN,
           }
         : row.inside;
+  const menu = depth === 0 && row.menu;
   return {
     ...row,
     label: clean(row.label, MAX_LABEL),
-    host: row.host === null ? null : clean(row.host, MAX_LABEL) || null,
+    // A menu has no page: nothing of its own to open, to show on another host or to picture.
+    host: menu || row.host === null ? null : clean(row.host, MAX_LABEL) || null,
     note: cleanNote(row.note),
     known: sections(row.known, MAX_KNOWN),
-    opens: depth === 0 && row.opens,
-    inside,
+    opens: depth === 0 && !menu && row.opens,
+    menu,
+    inside: menu && inside?.state !== "open" ? null : inside,
+    picture: menu ? null : row.picture,
+    opened: !menu && row.opened,
   };
 }
 
+/** A menu with nothing held under it leads nowhere, and is not drawn. */
+const leads = (row: Row) =>
+  !row.menu || (row.inside?.state === "open" && row.inside.rows.length > 0);
+
 function admitPlace(place: Place): Place {
-  const rows = place.rows.slice(0, MAX_ROWS).map((row) => admitRow(row, 0));
+  const rows = place.rows
+    .slice(0, MAX_ROWS)
+    .map((row) => admitRow(row, 0))
+    .filter(leads);
   return {
     ...place,
     title: clean(place.title, MAX_LABEL),

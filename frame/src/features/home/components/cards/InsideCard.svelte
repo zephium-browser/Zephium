@@ -48,8 +48,16 @@
         class="more"
         style:block-size={`${SIZE.child}px`}
         {@attach at(`${id}/more`)}
-        onclick={() => top.intent({ kind: "row", search, row: item.row.id })}
-        >{m.home_more_on_page()}<Icon icon={ArrowUpRight01Icon} size={12} /></button
+        onclick={() =>
+          top.intent(
+            item.row.menu
+              ? { kind: "site", search, place: item.place }
+              : { kind: "row", search, row: item.row.id },
+          )}
+        >{item.row.menu ? m.home_more_on_site() : m.home_more_on_page()}<Icon
+          icon={ArrowUpRight01Icon}
+          size={12}
+        /></button
       >
     {/if}
   {/if}

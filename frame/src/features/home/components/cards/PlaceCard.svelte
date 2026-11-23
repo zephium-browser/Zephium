@@ -64,21 +64,19 @@
       </div>
     </div>
   {:else}
-    {#each item.rows as row, index (row?.id ?? `empty-${index}`)}
-      {#if row}
-        <RowView
-          {row}
-          stop={`${id}/${row.id}`}
-          {search}
-          height={SIZE.row}
-          selected={row.id === place.asked}
-          arriving={late.get(row.id) ?? null}
-        />
-      {:else}
-        <div class="unpaired" style:block-size={`${SIZE.row}px`} aria-label={m.home_unpaired()}>
-          <span></span>
-        </div>
-      {/if}
+    {#each item.rows as row, index (row.id)}
+      {#if index === item.split && index > 0}<hr
+          class="divide"
+          style:block-size={`${SIZE.divide}px`}
+        />{/if}
+      <RowView
+        {row}
+        stop={`${id}/${row.id}`}
+        {search}
+        height={SIZE.row}
+        selected={row.id === place.asked}
+        arriving={late.get(row.id) ?? null}
+      />
     {/each}
     {#if place.state === "arriving"}
       <p class="reading" role="status" style:block-size={`${SIZE.row * SIZE.coming}px`}>
@@ -113,10 +111,16 @@
       {/if}
     {/if}
     {#if place.actions.length}
-      <div class="tray" role="group" aria-label={m.home_on_site()}>
-        {#each place.actions as action (action.id)}
+      <div
+        class="foot"
+        role="group"
+        aria-label={m.home_on_site()}
+        style:block-size={`${SIZE.foot}px`}
+      >
+        {#each place.actions as action, index (action.id)}
           <button
             type="button"
+            style:inline-size={`${item.actions[index]}px`}
             style:block-size={`${SIZE.section}px`}
             {@attach at(`${id}/action:${action.id}`)}
             onclick={() => top.intent({ kind: "row", search, row: action.id })}
@@ -203,7 +207,7 @@
   .ways button,
   .more,
   .sections button,
-  .tray button {
+  .foot button {
     min-inline-size: 0;
     border: 0;
     background: none;
@@ -225,18 +229,14 @@
     color: var(--color-text);
   }
 
-  .unpaired {
-    display: flex;
-    align-items: center;
-    padding-inline: 10px;
-  }
-
-  .unpaired span {
-    inline-size: 14px;
-    block-size: 1.5px;
-    border-radius: var(--radius-capsule);
-    background: var(--color-fill-strong);
-    opacity: 0.6;
+  /* Rows both places have stand above it; each place's own below. */
+  .divide {
+    box-sizing: border-box;
+    flex: none;
+    margin: 0 10px;
+    border: 0;
+    background: linear-gradient(var(--color-border), var(--color-border)) center / 100% 1px
+      no-repeat;
   }
 
   /* Rows still on their way: said once, quietly, where they will stand. */
@@ -283,41 +283,44 @@
     padding-block-end: 4px;
   }
 
-  .sections button,
-  .tray button {
+  .sections button {
     overflow: hidden;
     padding-inline: 10px;
     border-radius: var(--radius-control-compact);
   }
 
   .sections span,
-  .tray span {
+  .foot span {
     display: block;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  /* What the site asks of the person, apart from its sections: a quiet tray
-     at the card's foot. */
-  .tray {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0 var(--home-tray);
-    margin-block-start: var(--home-tray);
-    padding: var(--home-tray);
-    border-radius: var(--radius-row);
-    background: var(--color-fill);
+  /* What the site asks of the person, apart from its sections: one quiet
+     line of links under a hairline at the card's foot. */
+  .foot {
+    box-sizing: border-box;
+    display: flex;
+    flex: none;
+    gap: 4px;
+    margin-inline: 4px;
+    padding-block-start: 4px;
+    border-block-start: 1px solid var(--color-border);
   }
 
-  .tray button {
-    color: var(--color-label-secondary);
+  .foot button {
+    flex: none;
+    overflow: hidden;
+    padding-inline: 6px;
+    border-radius: var(--radius-control-compact);
+    color: var(--color-muted);
   }
 
   .ways button:hover,
   .more:hover,
   .sections button:hover,
-  .tray button:hover {
+  .foot button:hover {
     background: var(--color-fill-hover);
     color: var(--color-text);
   }

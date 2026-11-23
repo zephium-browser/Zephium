@@ -4017,6 +4017,7 @@
   "home_failed": "{name} could not be read",
   "home_open_page": "Open the page",
   "home_more_on_page": "More on this page",
+  "home_more_on_site": "More on the site",
   "home_open_results": "Open results",
   "home_open_site": "Open site",
   "home_elsewhere": "Elsewhere",
@@ -4024,8 +4025,9 @@
   "home_results_of": "Results for {text}",
   "home_open_inside": "Show what is in {label}",
   "home_hide_inside": "Hide what is in {label}",
-  "home_unpaired": "Nothing to match",
   "home_on_site": "On this site",
   "home_discussion": "Discussion",
-  "home_video": "Video"
+  "home_video": "Video",
+  "home_canvas_failed": "Your searches could not be shown.",
+  "home_try_again": "Try again"
 }

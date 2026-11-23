@@ -15,9 +15,10 @@ import {
   MAX_SOCIAL,
   MAX_TEXT,
   type Place,
+  type Row,
   type Search,
 } from "../lib/model";
-import { compare, grinders, home, place, row, stripe } from "./fixtures";
+import { compare, grinders, home, large, place, row } from "./fixtures";
 
 const many = <T>(count: number, make: (index: number) => T) =>
   Array.from({ length: count }, (_, index) => make(index));
@@ -30,7 +31,7 @@ const placeOf = (search: Search): Place => {
 
 describe("Home's model", () => {
   it("keeps each list at its limit and refuses the one past it", () => {
-    const base = stripe(null);
+    const base = large(null);
     const at = (count: number) =>
       placeOf(
         admitted({
@@ -118,11 +119,47 @@ describe("Home's model", () => {
       inside: { state: "open", more: false, rows: [deep] },
     });
     const kept = placeOf(
-      admitted({ ...stripe(null), place: place("p", { title: "P", host: "h", rows: [top] }) }),
+      admitted({ ...large(null), place: place("p", { title: "P", host: "h", rows: [top] }) }),
     );
     const inside = kept.rows[0]!.inside;
     if (inside?.state !== "open") throw new Error("open");
     expect(inside.rows[0]).toMatchObject({ opens: false, inside: null });
+  });
+
+  it("keeps a menu to what it holds: no page, no host, no picture, and none at all when empty", () => {
+    const menu = (id: string, inside: Row["inside"]) =>
+      row(id, id, {
+        menu: true,
+        opens: true,
+        host: "h.example",
+        picture: "p",
+        opened: true,
+        inside,
+      });
+    const kept = placeOf(
+      admitted({
+        ...large(null),
+        place: place("p", {
+          title: "P",
+          host: "h",
+          rows: [
+            menu("full", { state: "open", more: false, rows: [row("c", "Child", { menu: true })] }),
+            menu("empty", { state: "open", more: false, rows: [] }),
+            menu("asked", { state: "opening" }),
+          ],
+        }),
+      }),
+    );
+    expect(kept.rows.map((each) => each.id)).toEqual(["full"]);
+    expect(kept.rows[0]).toMatchObject({
+      menu: true,
+      opens: false,
+      host: null,
+      picture: null,
+      opened: false,
+    });
+    const inside = kept.rows[0]!.inside;
+    expect(inside?.state === "open" && inside.rows[0]!.menu).toBe(false);
   });
 
   it("drops pairs and the asked row that point at nothing kept", () => {
@@ -138,7 +175,7 @@ describe("Home's model", () => {
     expect(search.pairs).toHaveLength(compare.pairs.length + 1);
     expect(search.pairs.at(-1)).toEqual({ left: null, right: "o-sync" });
     const asked = placeOf(
-      admitted({ ...stripe(null), place: { ...stripe(null).place, asked: "nowhere" } }),
+      admitted({ ...large(null), place: { ...large(null).place, asked: "nowhere" } }),
     );
     expect(asked.asked).toBeNull();
   });
@@ -152,7 +189,7 @@ describe("Home's model", () => {
     expect(clean("y".repeat(MAX_TEXT))).toBe("y".repeat(MAX_TEXT));
     const label = placeOf(
       admitted({
-        ...stripe(null),
+        ...large(null),
         place: place("p", { title: "t".repeat(500), host: "h", rows: [row("r", "r".repeat(500))] }),
       }),
     );
