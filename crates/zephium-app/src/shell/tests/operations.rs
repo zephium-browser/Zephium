@@ -1033,6 +1033,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: String::new(),
         context: Box::new(context.clone()),
     });
@@ -1044,6 +1045,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         },
         background: false,
         replace: None,
+        new_mini: false,
     });
     assert_eq!(forged.reason, OperationReason::InvalidScope);
     shell.handle(Command::CancelSearch {
@@ -1054,6 +1056,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         action: SearchAction::ActivateTab { id: id.to_string() },
         background: false,
         replace: None,
+        new_mini: false,
     });
     assert_eq!(stale.reason, OperationReason::InvalidScope);
 }
@@ -1072,6 +1075,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -1089,6 +1093,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
             action: action.clone(),
             background: true,
             replace: None,
+            new_mini: false,
         });
         // Deferred: the new view settles once native has created it.
         assert!(matches!(
@@ -1116,6 +1121,7 @@ fn an_address_chosen_while_editing_replaces_the_page_in_front() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -1142,6 +1148,7 @@ fn an_address_chosen_while_editing_replaces_the_page_in_front() {
         action,
         background: false,
         replace: Some(active.to_string()),
+        new_mini: false,
     });
     assert!(matches!(
         opened.outcome,

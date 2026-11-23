@@ -1767,6 +1767,19 @@ pub fn install_privileged_environment_registration(
     }
 }
 
+/// The browser process of the privileged environment registered for
+/// `label`, whose exit the final teardown proves. A WebView that joins that
+/// process, as a mini window's toolbar joins the launcher's, is covered by
+/// that proof and registers nothing of its own.
+pub fn privileged_environment_process(label: &str) -> Option<u32> {
+    PRIVILEGED_ENVIRONMENT_REGISTRATIONS.with(|registrations| {
+        let registrations = registrations.try_borrow().ok()?;
+        registrations
+            .get(label)
+            .map(|registration| registration.exit_guard.expected_process_id())
+    })
+}
+
 /// Remove only the runtime-update event when a privileged window is
 /// destroyed. Its exact Environment5/HANDLE proof stays registered through
 /// `run_return` and the bounded final apartment pump.

@@ -687,6 +687,7 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
             action: action.clone(),
             background: false,
             replace: None,
+            new_mini: false,
         }
     ));
     let Command::Operation { command, .. } = queue.try_recv().unwrap() else {
