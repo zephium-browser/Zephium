@@ -5,7 +5,15 @@ impl Session {
         let Work::Section(i, key) = &job.work else {
             return None;
         };
-        let place = self.sites[*i].as_ref()?.place.as_ref()?;
+        let state = self.sites[*i].as_ref()?;
+        if self.cfg.sections == Sections::All {
+            return state
+                .eager
+                .iter()
+                .find(|e| e.key.page_match() == *key)
+                .map(|e| e.priority);
+        }
+        let place = state.place.as_ref()?;
         let entry = place.sections.iter().find(|e| e.key.page_match() == *key)?;
         Some(place.read_priority(entry))
     }
@@ -130,7 +138,7 @@ impl Session {
                             out,
                         );
                         self.refused(phase, Failure::Robots);
-                        if let Some(i) = job.work.side() {
+                        if let Some(i) = job.work.side().filter(|_| self.opening.is_none()) {
                             if let Some(s) = self.sites[i].as_mut() {
                                 s.denied = true;
                                 if !matches!(
@@ -192,6 +200,31 @@ impl Session {
         }
     }
     pub(super) fn set_read(&mut self, job: &Job, read: ReadState, out: &mut Vec<Effect>) {
+        if let Some(open) = &mut self.opening {
+            if matches!(job.work, Work::Section(..)) {
+                let failure = match read {
+                    ReadState::Refused { failure } => failure,
+                    ReadState::Skipped {
+                        budget: Budget::Elapsed,
+                    } => Failure::Timeout,
+                    _ => Failure::Limit,
+                };
+                let place = &mut open.held.payload.place;
+                place.sections[open.index].read = Some(ReadState::Refused { failure });
+                place.notes.robots_disallowed |= failure == Failure::Robots;
+                place.notes.truncated |= failure == Failure::Limit;
+                self.stats
+                    .places
+                    .entry(open.slot)
+                    .or_default()
+                    .section_page_truncated |= read
+                    == ReadState::Refused {
+                        failure: Failure::Limit,
+                    };
+                open.clean &= matches!(failure, Failure::Missing | Failure::Client);
+            }
+            return;
+        }
         match &job.work {
             Work::Section(i, key) => {
                 if let Some(s) = &mut self.sites[*i] {
@@ -207,6 +240,13 @@ impl Session {
                         _ => None,
                     };
                 }
+            }
+            Work::Anonymous(i, _) if self.unseeded[*i].is_some() => {
+                let failure = match read {
+                    ReadState::Refused { failure } => failure,
+                    _ => Failure::Limit,
+                };
+                self.unseeded[*i] = Some(Unseeded::Failed(failure));
             }
             _ => {}
         }
@@ -274,13 +314,30 @@ impl Session {
                 return Err(Failure::ContentType);
             }
             if let Work::Section(i, ref key) = job.work {
-                let other_tenant = self.sites[i].as_ref().is_some_and(|s| {
-                    let place = s.place.as_ref().map_or(&s.seed.site, |p| &p.key);
+                let place_key = if let Some(open) = &self.opening {
+                    Some(&open.held.place().key)
+                } else {
+                    self.sites[i]
+                        .as_ref()
+                        .map(|s| s.place.as_ref().map_or(&s.seed.site, |p| &p.key))
+                };
+                let other_tenant = place_key.is_some_and(|place| {
                     place.tenant.is_some()
                         && PlaceKey::from_url(&r.final_url).as_ref() != Some(place)
                 });
                 if other_tenant || SiteKey::from_url(&job.url) != SiteKey::from_url(&r.final_url) {
-                    if let Some((s, landing)) = self.sites[i]
+                    if let Some(open) = &mut self.opening {
+                        open.held.payload.place.sections[open.index].off_site = true;
+                        if let Ok(landing) = PageKey::from_url(&r.final_url) {
+                            let mut updated = open.held.clone();
+                            let entry = &mut updated.payload.place.sections[open.index];
+                            entry.key = landing;
+                            entry.locator = Locator::default();
+                            if let Some(updated) = updated.bounded() {
+                                open.held = updated;
+                            }
+                        }
+                    } else if let Some((s, landing)) = self.sites[i]
                         .as_mut()
                         .zip(PageKey::from_url(&r.final_url).ok())
                     {
@@ -325,6 +382,15 @@ impl Session {
                 }
             };
             *self.stats.robots.entry(policy.outcome).or_default() += 1;
+            if let Some(open) = &mut self.opening {
+                let truncated = policy.truncated || policy.outcome == RobotsOutcome::Limit;
+                open.held.payload.place.notes.truncated |= truncated;
+                self.stats
+                    .places
+                    .entry(open.slot)
+                    .or_default()
+                    .robots_truncated |= truncated;
+            }
             if let Some(landing) = landing {
                 self.robots.insert(landing, policy.clone());
             }
@@ -336,7 +402,7 @@ impl Session {
         if let Err(f) = applied {
             self.set_read(&job, ReadState::Refused { failure: f }, out);
             self.refused(phase, f);
-            if let Some(i) = side {
+            if let Some(i) = side.filter(|_| self.opening.is_none()) {
                 if let Some(s) = self.sites[i].as_mut() {
                     if f == Failure::Limit {
                         s.cut.insert(phase);
@@ -358,6 +424,52 @@ impl Session {
                 if crate::site::challenge(&doc) {
                     self.stats.walls += 1;
                     return Err(Failure::Challenge);
+                }
+                if let Some(open) = &mut self.opening {
+                    let (mut place, mut detail) = site::enrich_held(
+                        open.held.place().clone(),
+                        open.index,
+                        &doc,
+                        site::MAX_CHILDREN,
+                    );
+                    place.check_ids().map_err(|_| Failure::Unreadable)?;
+                    place.sections[open.index].read = Some(ReadState::Read);
+                    let mut updated = open.held.clone();
+                    updated.payload.place = place;
+                    if let Some(memo) = &mut updated.memo {
+                        if let Some(index) = memo
+                            .payload
+                            .place
+                            .sections
+                            .iter()
+                            .position(|e| e.key.page_match() == key)
+                        {
+                            let occupied = memo
+                                .payload
+                                .place
+                                .sections
+                                .iter()
+                                .enumerate()
+                                .filter(|(other, _)| *other != index)
+                                .map(|(_, entry)| entry.children.len())
+                                .sum::<usize>();
+                            let cap = site::MAX_CHILDREN
+                                .min(site::MAX_PLACE_CHILDREN.saturating_sub(occupied));
+                            let (place, _) =
+                                site::enrich_held(memo.payload.place.clone(), index, &doc, cap);
+                            if place.check_ids().is_ok() {
+                                memo.payload.place = place;
+                            }
+                        }
+                    }
+                    open.held = updated.bounded().ok_or(Failure::Limit)?;
+                    detail.robots_truncated = self
+                        .stats
+                        .places
+                        .get(&open.slot)
+                        .is_some_and(|prior| prior.robots_truncated);
+                    self.stats.places.insert(open.slot, detail);
+                    return Ok(());
                 }
                 if let Some(s) = self.sites[i].as_mut() {
                     s.reads.insert(key, ReadState::Read);

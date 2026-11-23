@@ -3,7 +3,7 @@ use crate::results::{MAX_SOCIAL, TITLE_BYTES};
 use crate::site::{MAX_CHILDREN, MAX_SECTIONS};
 use serde::{Deserialize, Serialize};
 
-pub const MEMO_VERSION: u16 = 3;
+pub const MEMO_VERSION: u16 = 5;
 pub const MAX_MEMO_BYTES: usize = 256 * 1024;
 pub const MEMO_TTL: u64 = 24 * 60 * 60;
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,6 +49,13 @@ impl SiteMemo {
             || SiteKey::from_url(p.entry.as_url()).as_ref() != Some(&p.site)
             || p.title.len() > TITLE_BYTES
             || p.focus.is_some()
+            || p.notes.thin
+                != (p
+                    .sections
+                    .iter()
+                    .filter(|e| e.tier == site::Tier::Primary)
+                    .count()
+                    < site::MIN_NAV_ROWS)
             || p.notes.shell
             || p.notes.wall
             || p.sections
@@ -65,6 +72,15 @@ impl SiteMemo {
                 .windows(2)
                 .any(|pair| pair[0].tier > pair[1].tier)
             || p.sections.iter().map(|e| e.children.len()).sum::<usize>() > site::MAX_PLACE_CHILDREN
+            || p.sections
+                .iter()
+                .filter(|e| e.tier == site::Tier::Action)
+                .count()
+                > site::MAX_ACTIONS
+            || p.sections.iter().any(|e| {
+                e.tier == site::Tier::Primary
+                    && e.label.chars().count() > site::MAX_PRIMARY_LABEL_CHARS
+            })
             || p.sections.len() > MAX_SECTIONS
             || p.social.len() > MAX_SOCIAL
             || !p.social.iter().all(|v| {
@@ -92,23 +108,27 @@ impl SiteMemo {
             return Err(MemoError::Version);
         }
         self.validate(&self.payload.place.key)?;
-        let mut bytes = Vec::new();
-        struct Limited<'a>(&'a mut Vec<u8>);
-        impl std::io::Write for Limited<'_> {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                if b.len() > MAX_MEMO_BYTES - self.0.len() {
-                    return Err(std::io::ErrorKind::FileTooLarge.into());
-                }
-                self.0.extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        serde_json::to_writer(Limited(&mut bytes), self).map_err(|_| MemoError::Limit)?;
-        Ok(bytes)
+        encode_bounded(self)
     }
+}
+
+pub(super) fn encode_bounded(value: &impl Serialize) -> Result<Vec<u8>, MemoError> {
+    let mut bytes = Vec::new();
+    struct Limited<'a>(&'a mut Vec<u8>);
+    impl std::io::Write for Limited<'_> {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if b.len() > MAX_MEMO_BYTES - self.0.len() {
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.0.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Limited(&mut bytes), value).map_err(|_| MemoError::Limit)?;
+    Ok(bytes)
 }
 fn valid_entry(e: &Entry, place: &Place, parent: Option<&Entry>) -> bool {
     let Some(site) = SiteKey::from_url(e.key.as_url()) else {
@@ -121,6 +141,17 @@ fn valid_entry(e: &Entry, place: &Place, parent: Option<&Entry>) -> bool {
         .iter()
         .any(|s| matches!(s, Source::PrimaryNav | Source::MenuGroup | Source::Footer));
     if site != place.site && !delegated && !(site_nav && site::external_role(e.role)) {
+        return false;
+    }
+    if e.menu_only
+        && (parent.is_some()
+            || e.key != place.entry
+            || e.locator != Locator::default()
+            || e.tier != site::Tier::Primary
+            || e.children.is_empty()
+            || e.id != site::EntryId::menu(&place.entry, &e.label)
+            || !e.navigation_row())
+    {
         return false;
     }
     if e.off_site != (site != place.site) {

@@ -18,6 +18,13 @@ pub const LAST_START: Duration = Duration::from_secs(10);
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(4);
 pub const MAX_MEDIA_TYPE_BYTES: usize = 256;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sections {
+    #[default]
+    All,
+    Asked,
+}
+
 #[derive(Clone)]
 pub struct Config {
     /// The caller assigns a distinct namespace to each live search and reuses it for replay.
@@ -33,6 +40,7 @@ pub struct Config {
     pub html_bytes: u32,
     pub xml_bytes: u32,
     pub text_bytes: u32,
+    pub sections: Sections,
     pub section_pages: u32,
     pub result_pages: u32,
     pub elapsed: Duration,
@@ -54,6 +62,7 @@ impl Default for Config {
             html_bytes: MAX_HTML_BYTES as u32,
             xml_bytes: MAX_XML_BYTES as u32,
             text_bytes: MAX_TEXT_BYTES as u32,
+            sections: Sections::All,
             section_pages: MAX_SECTION_PAGES as u32,
             result_pages: MAX_RESULT_PAGES as u32,
             elapsed: MAX_ELAPSED,
@@ -194,6 +203,12 @@ pub enum ReadState {
     Read,
     Refused { failure: Failure },
     Skipped { budget: Budget },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenRefusal {
+    UnknownEntry,
+    NotOpenable,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndOutcome {
