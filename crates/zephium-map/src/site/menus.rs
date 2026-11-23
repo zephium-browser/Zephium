@@ -3,11 +3,68 @@ use crate::Node;
 
 const MIN_MENU_ITEMS: usize = 2;
 
+mod editions;
+use editions::{edition_path, Editions};
+#[cfg(test)]
+mod tests;
+
 #[derive(Default)]
 pub(super) struct Menus {
     members: BTreeSet<EntryId>,
     groups: BTreeMap<usize, Menu>,
     order: BTreeMap<EntryId, usize>,
+    direct: BTreeMap<(crate::PageMatch, Option<String>), (usize, Entry)>,
+    excluded: BTreeSet<EntryId>,
+    evidence: Evidence,
+}
+
+#[derive(Default)]
+pub(super) struct Evidence {
+    direct: BTreeMap<EntryId, (crate::PageMatch, Option<String>)>,
+    pages: BTreeMap<String, Option<EntryId>>,
+    languages: BTreeSet<String>,
+    editions: std::collections::HashSet<(crate::PageMatch, Locator)>,
+}
+
+impl Evidence {
+    pub(super) fn measure(&self, place: &Place, stats: &mut PlaceStats) {
+        let primary: BTreeSet<_> = place
+            .sections
+            .iter()
+            .filter(|e| e.tier == Tier::Primary)
+            .flat_map(|e| [e.id.clone(), EntryId::new(None, &e.key, &e.locator)])
+            .collect();
+        let primary_routes: BTreeSet<_> = place
+            .sections
+            .iter()
+            .filter(|e| e.tier == Tier::Primary && !e.menu_only)
+            .map(Entry::card_route)
+            .collect();
+        stats.missing_header_links = self
+            .direct
+            .iter()
+            .filter(|(id, route)| !primary.contains(id) && !primary_routes.contains(route))
+            .count();
+        for e in &place.sections {
+            let label = normal(&e.label);
+            let language_group = self.languages.contains(&label) && !e.children.is_empty()
+                || e.children.len() >= MIN_MENU_ITEMS
+                    && e.children
+                        .iter()
+                        .all(|c| self.editions.contains(&(c.card_page(), c.locator.clone())));
+            stats.language_groups += usize::from(language_group);
+            if !e.menu_only
+                && (e.children.iter().any(|c| c.card_route() == e.card_route())
+                    || self.pages.get(&label).is_some_and(|page| {
+                        page.as_ref().is_none_or(|id| {
+                            *id != e.id && *id != EntryId::new(None, &e.key, &e.locator)
+                        })
+                    }))
+            {
+                stats.invalid_group_pages += 1;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq)]
@@ -22,9 +79,37 @@ enum Region {
 struct Menu {
     label: String,
     page: Option<Entry>,
+    index: Option<Entry>,
     items: Vec<Entry>,
     trigger: Option<EntryId>,
     source: Source,
+    editions: Editions,
+}
+
+impl Menu {
+    fn add_item(&mut self, mut item: Entry) {
+        let label = normal(&item.label);
+        let group = normal(&self.label);
+        if label == group
+            || group_page(&label) == Some(group.as_str())
+            || matches!(
+                label.as_str(),
+                "see all" | "view all" | "browse all" | "explore all"
+            )
+            || label == "overview"
+                && item
+                    .key
+                    .as_url()
+                    .path_segments()
+                    .and_then(|mut s| s.next_back())
+                    .is_some_and(|s| normal(s) == group)
+        {
+            self.index.get_or_insert(item);
+        } else {
+            item.menu_item = true;
+            self.items.push(item);
+        }
+    }
 }
 
 pub(super) fn link_label(n: &Node) -> &str {
@@ -55,8 +140,22 @@ impl Menus {
         let mut scopes = BTreeMap::new();
         let mut named = BTreeMap::new();
         let mut footer = BTreeMap::new();
-        let mut direct = BTreeSet::new();
         let mut first_nav = None;
+        let alternates: BTreeSet<_> = doc
+            .head()
+            .alternates
+            .iter()
+            .filter(|a| !a.language.is_empty())
+            .filter_map(|a| PageKey::from_url(&a.url).ok().map(|k| k.page_match()))
+            .collect();
+        let mut standalone = Vec::new();
+        let actions: BTreeSet<_> = build
+            .sections
+            .iter()
+            .flat_map(|e| std::iter::once(e).chain(&e.children))
+            .filter(|e| card::action(e))
+            .map(Entry::card_route)
+            .collect();
         let clusters: BTreeSet<_> = build
             .sections
             .iter()
@@ -65,9 +164,11 @@ impl Menus {
             .collect();
         let mut following = vec![None; nodes.len()];
         let mut sibling = vec![None; nodes.len()];
+        let mut peer_buttons = vec![0; nodes.len()];
         for (i, n) in nodes.iter().enumerate().rev() {
             if let Some(p) = n.parent_index() {
                 following[i] = sibling[p].replace(i);
+                peer_buttons[p] += usize::from(n.role == Role::Button && visible(nodes, i));
             }
         }
         let mut regions = Vec::with_capacity(nodes.len());
@@ -75,6 +176,7 @@ impl Menus {
             let inherited = n.parent_index().map(|p| regions[p]).unwrap_or_default();
             let region = match (inherited, n.role) {
                 (Region::Excluded, _)
+                | (_, Role::Document)
                 | (
                     _,
                     Role::Landmark {
@@ -111,7 +213,27 @@ impl Menus {
             }
             let nav = region == Region::Navigation;
             let parent = n.parent_index();
-            let label = n.accessible_name().trim();
+            let label = if n.role == Role::Text {
+                n.text.trim()
+            } else {
+                n.accessible_name().trim()
+            };
+            if n.destination
+                .as_ref()
+                .is_some_and(|u| card::skip_link(u, link_label(n), doc.page()))
+            {
+                continue;
+            }
+            if n.role == Role::Link
+                && n.destination.as_ref().is_some_and(|u| {
+                    u.fragment().is_none()
+                        && build
+                            .entry_for(u, label, Source::PrimaryNav)
+                            .is_some_and(|e| card::self_link(&e, &build.entry, Some(doc.page())))
+                })
+            {
+                continue;
+            }
             if region == Region::Footer {
                 if matches!(n.role, Role::Text | Role::Heading { .. } | Role::Button)
                     && !n.text.trim().is_empty()
@@ -123,18 +245,46 @@ impl Menus {
                 }
                 continue;
             }
+            let paired_panel = |control: usize| {
+                let p = nodes[control].parent_index()?;
+                let panel = following[control]?;
+                (matches!(nodes[p].role, Role::Group | Role::ListItem)
+                    && sibling[p] == Some(control)
+                    && following[panel].is_none()
+                    && matches!(
+                        nodes[panel].role,
+                        Role::List
+                            | Role::Group
+                            | Role::Landmark {
+                                landmark: Some(Landmark::Navigation)
+                            }
+                    ))
+                .then_some(panel)
+            };
             let scope = match n.role {
                 Role::Group | Role::List if !label.is_empty() => Some(i),
-                Role::Button if doc.menu_links.contains_key(&i) => Some(i),
+                Role::Button | Role::Link if doc.menu_links.contains_key(&i) => Some(i),
                 Role::Button | Role::Heading { .. } => parent
-                    .filter(|&p| matches!(nodes[p].role, Role::Group | Role::ListItem))
+                    .filter(|&p| {
+                        matches!(nodes[p].role, Role::Group | Role::ListItem)
+                            && (n.role != Role::Button || peer_buttons[p] == 1)
+                    })
                     .or_else(|| {
                         following[i]
                             .filter(|&next| matches!(nodes[next].role, Role::Group | Role::List))
                     }),
-                Role::Link => {
-                    parent.filter(|&p| nodes[p].role == Role::ListItem && !scopes.contains_key(&p))
-                }
+                Role::Link => parent
+                    .filter(|&p| nodes[p].role == Role::ListItem && !scopes.contains_key(&p))
+                    .or_else(|| paired_panel(i)),
+                Role::Text if nav => paired_panel(i).or_else(|| {
+                    parent
+                        .filter(|&p| {
+                            nodes[p].role == Role::Group
+                                && sibling[p] == Some(i)
+                                && following[i].is_none()
+                        })
+                        .and_then(paired_panel)
+                }),
                 _ => None,
             };
             let Some(scope) = scope else { continue };
@@ -170,6 +320,7 @@ impl Menus {
             menus.groups.entry(owner).or_insert_with(|| Menu {
                 label: clip(&crate::clean_text(label), TITLE_BYTES),
                 page,
+                index: None,
                 trigger,
                 source: if nav {
                     Source::PrimaryNav
@@ -177,11 +328,22 @@ impl Menus {
                     Source::LinkCluster
                 },
                 items: Vec::new(),
+                editions: Editions::default(),
             });
             if let Some(links) = doc.menu_links.get(&i) {
                 if let Some(menu) = menus.groups.get_mut(&owner) {
-                    for (url, label) in links {
-                        if let Some(mut e) =
+                    for link in links {
+                        let (url, label) = (&link.url, link.label.as_str());
+                        if card::skip_link(url, label, doc.page()) {
+                            continue;
+                        }
+                        menu.editions.observe(
+                            url,
+                            link.language.as_deref(),
+                            doc.page(),
+                            &alternates,
+                        );
+                        if let Some(e) =
                             build.entry_for(url, label, Source::MenuGroup).filter(|e| {
                                 !(card::action(e)
                                     || card::placeholder(label)
@@ -189,8 +351,7 @@ impl Menus {
                                     || e.off_site && site_profile(url).is_some())
                             })
                         {
-                            e.menu_item = true;
-                            menu.items.push(e);
+                            menu.add_item(e);
                         }
                     }
                 }
@@ -206,9 +367,25 @@ impl Menus {
         }
         let mut footer_links = Vec::new();
         let mut seen = BTreeSet::new();
+        let mut flat_scopes = vec![None; nodes.len()];
+        let mut flat_headings = BTreeMap::new();
         for (i, n) in nodes.iter().enumerate() {
             let region = regions[i];
             let nav = region == Region::Navigation;
+            if nav {
+                if let Some(p) = n.parent_index() {
+                    if matches!(n.role, Role::Text | Role::ListItem)
+                        && (sibling[p] == Some(i) || flat_headings.contains_key(&p))
+                        && !n.text.is_empty()
+                        && visible(nodes, i)
+                    {
+                        if let Some(&owner) = named.get(&normal(&n.text)) {
+                            flat_headings.insert(p, owner);
+                        }
+                    }
+                    flat_scopes[i] = flat_headings.get(&p).copied().or(flat_scopes[p]);
+                }
+            }
             let Some(url) = &n.destination else { continue };
             if region == Region::Excluded
                 || region == Region::Other && clusters.is_empty()
@@ -217,20 +394,40 @@ impl Menus {
                 continue;
             }
             let label = link_label(n);
+            if card::skip_link(url, label, doc.page()) {
+                if let Some(entry) = build.entry_for(url, label, Source::MenuGroup) {
+                    menus.excluded.insert(entry.id);
+                }
+                continue;
+            }
+            let owner = ancestors(nodes, i)
+                .filter_map(|a| scopes.get(&a).copied().flatten())
+                .last();
+            if let Some(menu) = owner
+                .filter(|&o| o != i)
+                .and_then(|o| menus.groups.get_mut(&o))
+            {
+                menu.editions
+                    .observe(url, n.link_language.as_deref(), doc.page(), &alternates);
+            }
             if SiteKey::from_url(url).as_ref() != Some(&build.site) && site_profile(url).is_some() {
                 continue;
             }
-            let Some(mut entry) = build.entry_for(url, label, Source::MenuGroup) else {
+            let Some(entry) = build.entry_for(url, label, Source::MenuGroup) else {
                 continue;
             };
             if n.marks.has(crate::doc::Marks::ACTION)
                 || card::action(&entry)
+                || actions.contains(&entry.card_route())
                 || card::self_link(&entry, &build.entry, Some(doc.page()))
                 || card::placeholder(label)
             {
                 continue;
             }
             if region == Region::Footer {
+                if entry.footer_utility() {
+                    continue;
+                }
                 let group = ancestors(nodes, i).find_map(|a| footer.get(&a));
                 if let Some(owner) = group.and_then(|g| {
                     named.get(g).or_else(|| {
@@ -238,7 +435,7 @@ impl Menus {
                             .and_then(|(first, _)| named.get(first))
                     })
                 }) {
-                    footer_links.push((*owner, entry));
+                    footer_links.push((*owner, entry, n.link_language.as_deref()));
                 }
                 continue;
             }
@@ -247,95 +444,196 @@ impl Menus {
             }
             menus.order.entry(entry.id.clone()).or_insert(i);
             let label = normal(label);
-            let owner = ancestors(nodes, i)
-                .filter_map(|a| scopes.get(&a).copied().flatten())
-                .last();
             let all = group_page(&label).and_then(|g| named.get(g)).copied();
             if let Some(owner) = all {
                 if let Some(menu) = menus.groups.get_mut(&owner) {
-                    menu.page.get_or_insert(entry);
+                    menu.index.get_or_insert(entry);
                 }
             } else if let Some(owner) = owner.filter(|&o| o != i) {
-                if let Some(menu) = menus.groups.get_mut(&owner) {
-                    let group = normal(&menu.label);
-                    if label == group
-                        || label == "overview"
-                            && entry
-                                .key
-                                .as_url()
-                                .path_segments()
-                                .and_then(|mut p| p.next_back())
-                                .is_some_and(|s| normal(s) == group)
-                    {
-                        menu.page.get_or_insert(entry);
-                        continue;
-                    }
-                }
                 if seen.insert((owner, entry.id.clone())) {
-                    entry.menu_item = true;
                     if let Some(menu) = menus.groups.get_mut(&owner) {
-                        menu.items.push(entry);
+                        menu.add_item(entry);
                     }
                 }
-            } else {
-                direct.insert(entry.id);
+            } else if nav {
+                standalone.push((i, entry));
             }
         }
-        let empty: BTreeSet<_> = menus
-            .groups
-            .iter()
-            .filter(|(_, m)| m.items.is_empty())
-            .map(|(&i, _)| i)
-            .collect();
-        for (owner, mut entry) in footer_links {
-            if !empty.contains(&owner) {
-                continue;
-            }
-            let Some(menu) = menus.groups.get_mut(&owner) else {
-                continue;
-            };
-            if !direct.contains(&entry.id) && seen.insert((owner, entry.id.clone())) {
-                entry.menu_item = true;
-                entry.sources = vec![Source::Footer, Source::MenuGroup];
-                menu.items.push(entry);
-            }
-        }
-        let mut unique = BTreeMap::new();
         let mut by_label = BTreeMap::new();
         let mut joined = BTreeMap::<usize, Menu>::new();
+        let mut owners = BTreeMap::new();
         for (i, menu) in menus.groups {
-            let identity = menu
-                .page
-                .as_ref()
-                .map(|p| p.id.clone())
-                .unwrap_or_else(|| EntryId::menu(&build.entry, &menu.label));
             let key = normal(&menu.label);
-            let owner = *by_label
-                .entry(key)
-                .or_insert_with(|| *unique.entry(identity).or_insert(i));
+            let owner = *by_label.entry(key).or_insert(i);
+            owners.insert(i, owner);
             if let Some(kept) = joined.get_mut(&owner) {
                 if kept.page.is_none() {
                     kept.page = menu.page;
                 }
+                if kept.index.is_none() {
+                    kept.index = menu.index;
+                }
                 kept.items.extend(menu.items);
+                kept.editions.merge(menu.editions);
             } else {
                 joined.insert(owner, menu);
             }
         }
         menus.groups = joined;
+        let header_items: BTreeSet<_> = menus
+            .groups
+            .iter()
+            .flat_map(|(&i, menu)| menu.items.iter().map(move |e| (i, e.card_route())))
+            .collect();
+        let empty: BTreeSet<_> = menus
+            .groups
+            .iter()
+            .filter(|(_, m)| m.editions.targets.is_empty())
+            .map(|(&i, _)| i)
+            .collect();
+        for (owner, mut entry, language) in footer_links {
+            if let Some(menu) = owners
+                .get(&owner)
+                .filter(|o| empty.contains(o))
+                .and_then(|o| menus.groups.get_mut(o))
+            {
+                menu.editions
+                    .observe(entry.key.as_url(), language, doc.page(), &alternates);
+                entry.sources = vec![Source::Footer, Source::MenuGroup];
+                menu.add_item(entry);
+            }
+        }
+        for (i, entry) in standalone {
+            if flat_scopes[i]
+                .map(|owner| {
+                    ancestors(nodes, owner)
+                        .filter_map(|a| scopes.get(&a).copied().flatten())
+                        .last()
+                        .unwrap_or(owner)
+                })
+                .and_then(|owner| owners.get(&owner))
+                .is_some_and(|owner| header_items.contains(&(*owner, entry.card_route())))
+            {
+                continue;
+            }
+            let control = owners
+                .get(&i)
+                .and_then(|o| menus.groups.get(o))
+                .is_some_and(|m| !m.items.is_empty() || m.editions.is_picker());
+            if !control {
+                menus.direct.entry(entry.card_route()).or_insert((i, entry));
+            }
+        }
+        let editions: BTreeSet<_> = menus
+            .groups
+            .values()
+            .filter(|m| m.editions.is_picker())
+            .flat_map(|m| m.items.iter().map(|e| e.id.clone()))
+            .collect();
+        menus.groups.retain(|_, m| {
+            if m.editions.is_picker()
+                || m.items.len() >= MIN_MENU_ITEMS
+                    && m.items.iter().all(|e| editions.contains(&e.id))
+            {
+                menus.evidence.languages.insert(normal(&m.label));
+                menus
+                    .evidence
+                    .editions
+                    .extend(m.items.iter().map(|e| (e.card_page(), e.locator.clone())));
+                menus
+                    .excluded
+                    .extend(m.items.iter().chain(&m.page).map(|e| e.id.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        let landings: BTreeMap<_, _> = build
+            .sections
+            .iter()
+            .filter(|e| e.id != EntryId::new(None, &e.key, &e.locator))
+            .map(|e| (&e.id, e.card_route()))
+            .collect();
+        let route = |e: &Entry| {
+            landings
+                .get(&e.id)
+                .cloned()
+                .unwrap_or_else(|| e.card_route())
+        };
+        let mut claimed = BTreeMap::new();
+        let mut ambiguous = BTreeSet::new();
+        for (owner, menu) in menus.groups.iter().filter(|(_, m)| !m.items.is_empty()) {
+            for page in menu.page.iter().chain(&menu.index) {
+                let destination = route(page);
+                if claimed
+                    .insert(destination.clone(), owner)
+                    .is_some_and(|previous| previous != owner)
+                {
+                    ambiguous.insert(destination);
+                }
+            }
+        }
         for menu in menus.groups.values_mut() {
+            let items: BTreeSet<_> = menu.items.iter().map(&route).collect();
+            menu.page = menu
+                .page
+                .take()
+                .into_iter()
+                .chain(menu.index.take())
+                .find(|p| {
+                    let target = route(p);
+                    !menus.direct.contains_key(&p.card_route())
+                        && !ambiguous.contains(&target)
+                        && !items.contains(&target)
+                });
             let mut distinct = BTreeSet::new();
             menu.items.retain(|e| {
-                distinct.insert(e.id.clone())
-                    && !direct.contains(&e.id)
-                    && menu.page.as_ref().is_none_or(|p| p.id != e.id)
+                distinct.insert(e.card_route()) && !menus.direct.contains_key(&e.card_route())
             });
-            if menu.items.len() >= MIN_MENU_ITEMS {
+            if menu.items.len() >= MIN_MENU_ITEMS || menu.page.is_some() && !menu.items.is_empty() {
+                menus.evidence.pages.insert(
+                    normal(&menu.label),
+                    menu.page.as_ref().map(|e| e.id.clone()),
+                );
                 menus
                     .members
                     .extend(menu.items.iter().map(|e| e.id.clone()));
             }
         }
+        let locale_roots: BTreeSet<_> = menus
+            .direct
+            .values()
+            .filter_map(|(_, e)| {
+                let url = e.key.as_url();
+                let path = url.path().trim_matches('/');
+                (card::locale(path)
+                    && !path.eq_ignore_ascii_case(&e.label)
+                    && url.query().is_none()
+                    && edition_path(url) == edition_path(doc.page()))
+                .then_some(path.to_owned())
+            })
+            .collect();
+        let triggers: BTreeSet<_> = menus
+            .groups
+            .values()
+            .filter(|m| !m.items.is_empty())
+            .filter_map(|m| m.trigger.as_ref())
+            .collect();
+        menus.direct.retain(|_, (_, e)| {
+            !(e.utility()
+                || card::sentence(&e.label)
+                || build.link_is_edition(e)
+                || menus.excluded.contains(&e.id)
+                || triggers.contains(&e.id)
+                || locale_roots.len() >= MIN_MENU_ITEMS
+                    && locale_roots.contains(e.key.as_url().path().trim_matches('/')))
+        });
+        menus.evidence.direct.extend(
+            menus
+                .direct
+                .values()
+                .map(|(_, e)| (e.id.clone(), e.card_route())),
+        );
         for e in build
             .sections
             .iter()
@@ -350,10 +648,71 @@ impl Menus {
         }
         menus
     }
+
+    pub(super) fn take_evidence(&mut self) -> Evidence {
+        std::mem::take(&mut self.evidence)
+    }
 }
 
 impl Menus {
     pub(super) fn apply(mut self, build: &mut Build<'_>) {
+        let mut direct_routes = BTreeSet::new();
+        let member_routes: BTreeSet<_> = self
+            .groups
+            .values()
+            .filter(|m| m.items.len() >= MIN_MENU_ITEMS || m.page.is_some())
+            .flat_map(|m| m.items.iter().map(Entry::card_route))
+            .collect();
+        build.sections.retain(|e| {
+            !self
+                .excluded
+                .contains(&EntryId::new(None, &e.key, &e.locator))
+        });
+        for e in &mut build.sections {
+            e.children.retain(|c| {
+                !self
+                    .excluded
+                    .contains(&EntryId::new(None, &c.key, &c.locator))
+            });
+        }
+        let available: BTreeMap<_, _> = build
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.card_route(), i))
+            .collect();
+        let discovered: BTreeMap<_, _> = build
+            .sections
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.id.clone(), i))
+            .collect();
+        let mut named_rows: BTreeSet<_> = build.sections.iter().map(|e| normal(&e.label)).collect();
+        for (route, (position, mut entry)) in self.direct {
+            if let Some(i) = discovered
+                .get(&entry.id)
+                .or_else(|| available.get(&route))
+                .copied()
+            {
+                let e = &mut build.sections[i];
+                if e.tier != Tier::Action {
+                    e.add_sources([Source::PrimaryNav]);
+                    if !e.path_name {
+                        e.label = entry.label;
+                        e.role = entry.role;
+                    }
+                    direct_routes.insert(route);
+                }
+                continue;
+            }
+            if named_rows.insert(normal(&entry.label)) {
+                entry.sources = vec![Source::PrimaryNav];
+                entry.tier = Tier::Primary;
+                self.order.insert(entry.id.clone(), position);
+                direct_routes.insert(route);
+                build.sections.push(entry);
+            }
+        }
         let mut old: BTreeMap<_, _> = std::mem::take(&mut build.sections)
             .into_iter()
             .enumerate()
@@ -364,6 +723,10 @@ impl Menus {
             .map(|(id, (_, e))| (EntryId::new(None, &e.key, &e.locator), id.clone()))
             .collect();
         let prior_id = |id: &EntryId| routes.get(id).cloned().unwrap_or_else(|| id.clone());
+        let localized: BTreeMap<_, _> = old
+            .values()
+            .map(|(_, e)| (e.card_route(), e.id.clone()))
+            .collect();
         let mut rows = Vec::new();
         let mut taken: BTreeSet<_> = self
             .groups
@@ -438,7 +801,12 @@ impl Menus {
             }
             for mut item in items {
                 let original = item.id.clone();
-                if let Some((_, e)) = old.remove(&prior_id(&original)) {
+                let prior = routes
+                    .get(&original)
+                    .or_else(|| localized.get(&item.card_route()))
+                    .cloned()
+                    .unwrap_or_else(|| original.clone());
+                if let Some((_, e)) = old.remove(&prior) {
                     if build
                         .llms_headings
                         .get(&e.id)
@@ -450,23 +818,28 @@ impl Menus {
                                 .filter(|c| c.sources.contains(&Source::Llms)),
                         );
                     }
-                    item.key = e.key;
-                    item.off_site = e.off_site;
-                    item.locator = e.locator;
+                    if prior == original || routes.contains_key(&original) {
+                        item.key = e.key;
+                        item.off_site = e.off_site;
+                        item.locator = e.locator;
+                    }
                     item.add_sources(e.sources);
                 }
-                let prior = extra
+                let existing = extra
                     .iter()
-                    .find(|c| c.key == item.key && c.locator == item.locator)
+                    .find(|c| c.card_route() == item.card_route())
                     .map(|c| c.id.clone());
                 let discovered = taken
-                    .insert(original.clone())
-                    .then(|| prior.unwrap_or_else(|| prior_id(&original)));
+                    .insert(prior.clone())
+                    .then(|| existing.unwrap_or(prior));
                 parent.insert_child(item, build.requested, discovered);
             }
             for mut child in extra {
                 let route = EntryId::new(None, &child.key, &child.locator);
-                if self.members.contains(&route) {
+                if self.members.contains(&route)
+                    || direct_routes.contains(&child.card_route())
+                    || child.sources.first() == Some(&Source::Footer)
+                {
                     continue;
                 }
                 let previous = prior_id(&route);
@@ -500,28 +873,28 @@ impl Menus {
                 .filter(|_| e.tier != Tier::Action)
             {
                 let group = &mut rows[i].1;
-                // The old discovery pass can use a menu label on its first linked item.
-                let children = std::mem::take(&mut e.children);
-                for child in children {
-                    group.child(child, build.requested);
-                }
-                if group.menu_only
-                    && !self.members.contains(&e.id)
-                    && !e.menu_only
-                    && e.navigation_row()
-                    && normal(e.key.as_url().path().trim_matches('/')) == normal(&e.label)
+                if build
+                    .llms_headings
+                    .get(&e.id)
+                    .is_some_and(|name| *name == normal(&group.label))
                 {
-                    group.key = e.key;
-                    group.id = e.id;
-                    group.locator = e.locator;
-                    group.menu_only = false;
-                    group.off_site = e.off_site;
+                    for child in e.children.into_iter().filter(|c| {
+                        c.sources.contains(&Source::Llms)
+                            && !direct_routes.contains(&c.card_route())
+                    }) {
+                        group.child(child, build.requested);
+                    }
                 }
                 continue;
             }
+            if member_routes.contains(&e.card_route()) {
+                continue;
+            }
             // Menu destinations can also occur in result, footer or index sections.
-            e.children
-                .retain(|c| !taken.contains(&EntryId::new(None, &c.key, &c.locator)));
+            e.children.retain(|c| {
+                !taken.contains(&EntryId::new(None, &c.key, &c.locator))
+                    && !direct_routes.contains(&c.card_route())
+            });
             e.menu_item |= self.members.contains(&e.id);
             let order = self
                 .order

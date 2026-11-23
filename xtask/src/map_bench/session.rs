@@ -579,6 +579,13 @@ fn flatten_stats(outcome: &mut Outcome, stats: Stats) {
     put("stale_memos", stats.stale_memos.into());
     put("rejected_memos", stats.rejected_memos.into());
     for (index, notes) in stats.places {
+        for (key, count) in [
+            ("invalid_group_pages", notes.invalid_group_pages),
+            ("missing_header_links", notes.missing_header_links),
+            ("language_groups", notes.language_groups),
+        ] {
+            put(&format!("place.{index}.card.{key}"), count as u64);
+        }
         for (key, value) in [
             ("probed_section", notes.probed_section),
             ("robots_truncated", notes.robots_truncated),

@@ -195,6 +195,7 @@ pub struct Node {
     pub hidden: bool,
     pub marks: Marks,
     pub language: Option<String>,
+    pub(crate) link_language: Option<String>,
     pub element_id: Option<String>,
     pub element_id_cleaned: bool,
 }
@@ -231,6 +232,7 @@ impl Node {
             hidden: false,
             marks: Marks::default(),
             language: None,
+            link_language: None,
             element_id: None,
             element_id_cleaned: false,
         }
@@ -243,6 +245,7 @@ pub struct Head {
     pub title: String,
     pub canonical: Option<Url>,
     pub site_name: String,
+    pub application_name: String,
     pub alternates: Vec<Alternate>,
     pub linked_data: Vec<String>,
 }
@@ -255,10 +258,15 @@ pub struct Alternate {
 
 pub struct Doc {
     page: Url,
-    pub(crate) menu_links: std::collections::BTreeMap<usize, Vec<(Url, String)>>,
+    pub(crate) menu_links: std::collections::BTreeMap<usize, Vec<MenuLink>>,
     nodes: Vec<Node>,
     head: Head,
     truncated: bool,
+}
+pub(crate) struct MenuLink {
+    pub url: Url,
+    pub label: String,
+    pub language: Option<String>,
 }
 impl Doc {
     pub fn page(&self) -> &Url {
@@ -347,6 +355,7 @@ impl DocBuilder {
             .len()
             .saturating_add(node.text.len())
             .saturating_add(node.language.as_deref().map_or(0, str::len))
+            .saturating_add(node.link_language.as_deref().map_or(0, str::len))
             .saturating_add(node.element_id.as_deref().map_or(0, str::len));
         if size > self.limits.node_text_bytes as usize
             || size > self.limits.text_bytes as usize - self.text_bytes
@@ -372,6 +381,7 @@ impl DocBuilder {
         }
         self.doc.head.title.retain(crate::visible_char);
         self.doc.head.site_name.retain(crate::visible_char);
+        self.doc.head.application_name.retain(crate::visible_char);
         for a in &mut self.doc.head.alternates {
             a.title.retain(crate::visible_char);
         }

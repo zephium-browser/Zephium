@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use zephium_map::{site::MAX_PRIMARY_LABEL_CHARS, Place, SectionRole, Source, Tier};
 
-pub(in crate::map_bench) const CLASSES: [&str; 15] = [
+const SHORT_TITLE_WORDS: usize = 3;
+const CARD_MEASURES: usize = 18;
+pub(in crate::map_bench) const CLASSES: [&str; 21] = [
     "action",
     "sentence",
     "self",
@@ -17,10 +19,37 @@ pub(in crate::map_bench) const CLASSES: [&str; 15] = [
     "same_role_pairs",
     "path_names",
     "thin_cards",
+    "duplicate_children",
+    "skip_links",
+    "long_compound_titles",
+    "invalid_group_pages",
+    "missing_header_links",
+    "language_groups",
 ];
 
-pub(super) fn measure(place: &Place) -> [u64; CLASSES.len()] {
-    let mut counts = [0; CLASSES.len()];
+pub(super) fn measure(place: &Place) -> [u64; CARD_MEASURES] {
+    let mut counts = [0; CARD_MEASURES];
+    counts[17] = u64::from(
+        zephium_map::site::title_segments(&place.title).count() > 1
+            && zephium_map::site::title_segments(&place.title)
+                .flat_map(str::split_whitespace)
+                .count()
+                > SHORT_TITLE_WORDS,
+    );
+    for row in &place.sections {
+        let mut children = BTreeSet::new();
+        for child in &row.children {
+            counts[15] +=
+                u64::from(!children.insert((child.card_page(), child.locator.fragment())));
+        }
+        for e in std::iter::once(row).chain(&row.children) {
+            counts[16] += u64::from(
+                e.locator.element.is_some()
+                    && e.key.page_match() == place.entry.page_match()
+                    && zephium_map::site::skip_label(&e.label),
+            );
+        }
+    }
     let mut labels = BTreeSet::new();
     let mut destinations = BTreeSet::new();
     let mut roles = std::collections::BTreeMap::new();
@@ -158,6 +187,31 @@ mod extended_tests {
     use super::*;
     use zephium_map::{site::read_site, Doc, DocLimits};
     #[test]
+    fn counts_locale_duplicates_skip_links_and_compound_titles_across_tiers() {
+        let url = url::Url::parse("https://workshop.example/").unwrap();
+        let doc = Doc::from_html(
+            &url,
+            b"<nav><a href='/a'>One</a><a href='/b'>Two</a></nav>",
+            None,
+            DocLimits::SITE_PAGE,
+        )
+        .unwrap();
+        let mut place = read_site(&doc, &Default::default()).unwrap();
+        let first = place.sections.pop().unwrap();
+        let mut alias = first.clone();
+        alias.key = zephium_map::PageKey::from_url(&url.join("/de/b").unwrap()).unwrap();
+        let row = &mut place.sections[0];
+        row.tier = Tier::Secondary;
+        row.key = place.entry.clone();
+        row.locator.element = Some(zephium_map::key::LocatorText::new("main").unwrap());
+        row.label = "Skip to content".into();
+        row.children = vec![first, alias];
+        place.title = "Site | Three Words".into();
+        assert_eq!(measure(&place)[15..], [1, 1, 0]);
+        place.title.push_str(" Four");
+        assert_eq!(measure(&place)[15..], [1, 1, 1]);
+    }
+    #[test]
     fn provenance_and_role_pairs_are_counted_per_primary_row() {
         let url = url::Url::parse("https://workshop.example/").unwrap();
         let doc = Doc::from_html(
@@ -175,8 +229,8 @@ mod extended_tests {
         place.sections[0].path_name = true;
         place.sections[0].sources = vec![Source::Sitemap, Source::Llms];
         place.sections[1].sources = vec![Source::Llms, Source::PrimaryNav];
-        assert_eq!(measure(&place)[10..], [1, 1, 3, 1, 0]);
+        assert_eq!(measure(&place)[10..15], [1, 1, 3, 1, 0]);
         place.sections[0].tier = Tier::Secondary;
-        assert_eq!(measure(&place)[10..], [0, 0, 1, 0, 1]);
+        assert_eq!(measure(&place)[10..15], [0, 0, 1, 0, 1]);
     }
 }
