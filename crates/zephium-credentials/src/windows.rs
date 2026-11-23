@@ -1,22 +1,26 @@
-use crate::VaultError;
+use crate::{
+    windows_target::{TargetNamespace, MAX_TARGET_UNITS},
+    VaultError,
+};
 use std::ptr;
+use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
 use windows_sys::Win32::Security::Credentials::*;
 use zeroize::{Zeroize, Zeroizing};
 
-fn wide(target: &str, filter: bool) -> Result<Vec<u16>, VaultError> {
-    if !target.starts_with("app.zephium.") || target.contains('\0') || target.contains('*') {
-        return Err(VaultError::Invalid);
-    }
-    let mut value: Vec<u16> = target.encode_utf16().collect();
-    if value.len() > CRED_MAX_GENERIC_TARGET_NAME_LENGTH as usize - usize::from(filter) {
-        return Err(VaultError::Invalid);
-    }
-    if filter {
-        value.push(b'*' as u16);
-    }
-    value.push(0);
-    Ok(value)
+const _: () = assert!(MAX_TARGET_UNITS == CRED_MAX_GENERIC_TARGET_NAME_LENGTH as usize);
+static NAMESPACE: OnceLock<TargetNamespace> = OnceLock::new();
+
+/// Sets the vault namespace from the app's build identifier, once at startup.
+/// Vault operations fail until a valid identity is set.
+pub fn set_windows_identity(identifier: &str) -> Result<(), VaultError> {
+    NAMESPACE
+        .set(TargetNamespace::new(identifier)?)
+        .map_err(|_| VaultError::Inaccessible)
+}
+
+fn namespace() -> Result<&'static TargetNamespace, VaultError> {
+    NAMESPACE.get().ok_or(VaultError::Inaccessible)
 }
 
 fn error() -> VaultError {
@@ -74,7 +78,7 @@ impl Drop for Records {
 }
 
 fn record(target: &str) -> Result<Records, VaultError> {
-    let name = wide(target, false)?;
+    let name = namespace()?.wide(target, false)?;
     let mut credential = ptr::null_mut();
     // SAFETY: name is a live terminated UTF-16 target; output points to live storage.
     if unsafe { CredReadW(name.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
@@ -126,7 +130,7 @@ pub fn present(target: &str) -> Result<bool, VaultError> {
 
 /// Atomically replaces one generic credential, persisting for this Windows user.
 pub fn write(target: &str, bytes: &[u8]) -> Result<(), VaultError> {
-    let mut name = wide(target, false)?;
+    let mut name = namespace()?.wide(target, false)?;
     if bytes.len() > CRED_MAX_CREDENTIAL_BLOB_SIZE as usize {
         return Err(VaultError::Invalid);
     }
@@ -149,7 +153,7 @@ pub fn write(target: &str, bytes: &[u8]) -> Result<(), VaultError> {
 
 /// Deletes the exact generic item; deleting a missing item succeeds.
 pub fn delete(target: &str) -> Result<(), VaultError> {
-    let name = wide(target, false)?;
+    let name = namespace()?.wide(target, false)?;
     // SAFETY: name is a live terminated UTF-16 target; flags and type are fixed.
     if unsafe { CredDeleteW(name.as_ptr(), CRED_TYPE_GENERIC, 0) } != 0 {
         return Ok(());
@@ -160,9 +164,10 @@ pub fn delete(target: &str) -> Result<(), VaultError> {
     }
 }
 
-/// Enumerates only a Zephium namespace, returning target names, never secret copies.
+/// Enumerates this build's namespace, returning logical target names.
 pub fn list(prefix: &str) -> Result<Vec<String>, VaultError> {
-    let filter = wide(prefix, true)?;
+    let namespace = namespace()?;
+    let filter = namespace.wide(prefix, true)?;
     let mut count = 0;
     let mut allocation = ptr::null_mut();
     // SAFETY: filter is terminated UTF-16; output pointers are live local storage.
@@ -200,21 +205,19 @@ pub fn list(prefix: &str) -> Result<Vec<String>, VaultError> {
         let mut len = 0;
         // SAFETY: Native target names are terminated UTF-16 strings; scan respects the API bound.
         unsafe {
-            while len <= CRED_MAX_GENERIC_TARGET_NAME_LENGTH as usize
-                && *record.TargetName.add(len) != 0
-            {
+            while len <= MAX_TARGET_UNITS && *record.TargetName.add(len) != 0 {
                 len += 1;
             }
         }
-        if len > CRED_MAX_GENERIC_TARGET_NAME_LENGTH as usize {
+        if len > MAX_TARGET_UNITS {
             return Err(VaultError::Invalid);
         }
         // SAFETY: The preceding bounded scan found the native string's terminator.
         let target =
             String::from_utf16(unsafe { std::slice::from_raw_parts(record.TargetName, len) })
                 .map_err(|_| VaultError::Invalid)?;
-        if target.starts_with(prefix) {
-            targets.push(target);
+        if let Some(target) = namespace.listed_target(prefix, &target) {
+            targets.push(target.to_owned());
         }
     }
     Ok(targets)
@@ -239,6 +242,7 @@ mod tests {
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         );
         let target = format!("app.zephium.test.{generated_id}");
+        set_windows_identity(&target).expect("isolated fixture identity");
         let _turn = crate::turn();
         assert!(
             !present(&target).expect("exact fixture absence"),
@@ -263,13 +267,5 @@ mod tests {
         assert!(!present(&cleanup.0).expect("native fixture absence after deletion"));
         assert!(matches!(read(&cleanup.0), Err(VaultError::Missing)));
         // This test never enumerates or modifies any pre-existing target.
-    }
-
-    #[test]
-    fn target_validation_prevents_wildcards_nuls_and_external_namespaces() {
-        for name in ["other.application", "app.zephium.a*", "app.zephium.a\0b"] {
-            assert_eq!(wide(name, false), Err(VaultError::Invalid));
-        }
-        assert_eq!(wide("app.zephium.test", true).unwrap().last(), Some(&0));
     }
 }

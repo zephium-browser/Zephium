@@ -1292,7 +1292,7 @@ fn export_eval(
 /// The lead and helper turns of a page check: start one browser part, browse
 /// the start page toward the goal with records, then finish.
 pub(super) use super::loopback_support::Scripted;
-pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
+pub(super) const LEAD_SCENARIOS: [LeadScenario; 26] = [
     LeadScenario { name: "blocks-checklist", requests: &["In this checklist, mark Pack passport done and append Book taxi due 2026-11-21. Preserve the other dates and completion flags. Update the existing block."], answer:"", folder:false, site:None },
     LeadScenario { name: "blocks-table", requests: &["In this table, update the row named Item120 so Status is Ready, then append Item200 with Owner Ada and Status Todo. Preserve every existing column and all other rows. Update the existing block."], answer:"", folder:false, site:None },
     LeadScenario { name: "blocks-calendar", requests: &["In my calendar, move Lunch to 2026-11-22 at 13:00 and append Walk on 2026-11-23 at 09:00. Preserve Train unchanged. Update the existing block."], answer:"", folder:false, site:None },
@@ -1419,6 +1419,30 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
         folder: false,
         site: None,
     },
+    // The owner's own request: official pricing pages on three sites.
+    LeadScenario {
+        name: "hosting",
+        requests: &["Compare current pricing, free tier limits, and regions for Vercel, Cloudflare and Hetzner"],
+        answer: "Use your judgment.",
+        folder: false,
+        site: None,
+    },
+    // A research question answered from pages read and cited.
+    LeadScenario {
+        name: "sources",
+        requests: &["What did the Rust 2024 edition change? Cite the official sources"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
+    // One task across several sites, ending in one object.
+    LeadScenario {
+        name: "sites",
+        requests: &["Find the latest stable release of Python, Node.js and Go and when each came out"],
+        answer: "",
+        folder: false,
+        site: None,
+    },
     LeadScenario {
         name: "explain",
         requests: &["Explain this Rust function:\n\nfn runs<T: PartialEq + Clone>(items: &[T], min: usize) -> Vec<(T, usize)> {\n    let mut out: Vec<(T, usize)> = Vec::new();\n    for item in items {\n        match out.last_mut() {\n            Some((last, n)) if last == item => *n += 1,\n            _ => out.push((item.clone(), 1)),\n        }\n    }\n    out.retain(|(_, n)| *n >= min);\n    out\n}"],
@@ -1450,7 +1474,7 @@ pub(super) const LEAD_SCENARIOS: [LeadScenario; 23] = [
     LeadScenario {
         name: "exam",
         requests: &["Help me prepare for my algorithms final (MIT 6.006)"],
-        answer: "The exam is on 16 October 2026; 2 to 3 hours a day.",
+        answer: "The exam is in four weeks; 2 to 3 hours a day.",
         folder: false,
         site: None,
     },
@@ -1536,12 +1560,16 @@ async fn seed_tasks(
     Ok(())
 }
 
+/// Where the probe's throwaway folders live under home. Work refuses any
+/// folder named `app.zephium…` as the app's own data, so the name avoids it.
+pub(super) const PROBE_FOLDERS: &str = "Library/Caches/zephium-work-probe";
+
 /// A small throwaway repository under the home folder: a web app with a
 /// manifest, sources, a README and one uncommitted change.
 fn project_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("tidepool-{}", std::process::id()));
     let write = |path: &str, text: &str| {
         let path = folder.join(path);
@@ -1615,7 +1643,7 @@ test('tides', () => {});
 fn save_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-save-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "save_folder")?;
     Ok(folder)
@@ -1624,7 +1652,7 @@ fn save_folder() -> Result<std::path::PathBuf, &'static str> {
 fn bug_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(PROBE_FOLDERS)
         .join(format!("lead-bug-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "bug_folder")?;
     std::fs::write(
@@ -1759,10 +1787,19 @@ async fn stand_in(
                 WorkStepKindV1::Ask { options, .. } => {
                     let reply = if public_eval {
                         match &step.kind {
+                            // A request with no scripted answer takes the
+                            // question's first option, as the bench mode does.
                             WorkStepKindV1::Ask {
                                 purpose: Some(WorkAskPurposeV1::Question),
                                 ..
-                            } => answer.to_owned(),
+                            } if !answer.is_empty() => answer.to_owned(),
+                            WorkStepKindV1::Ask {
+                                purpose: Some(WorkAskPurposeV1::Question),
+                                ..
+                            } => options
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "Go ahead".into()),
                             _ => options
                                 .iter()
                                 .find(|option| {
@@ -1922,7 +1959,7 @@ pub(super) use super::loopback_support::{part_rows, run_row};
 /// Probe-only public reachability check. These bytes are not stored or rendered;
 /// canvas image coverage requires an actual record-media reference.
 pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecutionFact) {
-    use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError};
+    use zephium_agentic::public_asset::{fetch_public_image, PublicAssetError, RouteSource};
     use zephium_core::work::artifact::WorkArtifactDataV1 as Data;
     let mut urls: Vec<String> = Vec::new();
     for step in &execution.steps {
@@ -1952,8 +1989,11 @@ pub(super) async fn media_row(execution: &zephium_core::work::runtime::WorkExecu
     urls.dedup();
     let candidates = urls.len();
     let (mut admitted, mut too_large, mut other, mut scaled) = (0, 0, 0, 0);
+    let routes = RouteSource::new(&tokio::runtime::Handle::current());
+    routes.set_app_proxy(None);
+    routes.settled().await;
     for url in urls.into_iter().take(16) {
-        match fetch_public_image(&url).await {
+        match fetch_public_image(&routes, &url).await {
             Ok(bytes) => {
                 admitted += 1;
                 // Admission scales these to display size before storing them.
@@ -2463,11 +2503,15 @@ pub(super) async fn lead_workflow(
                 result = running => result,
                 _ = account.person(handle, composition, profile, work) => Err(WorkError::Unavailable),
             }
-        } else {
+        } else if std::env::var_os("ZEPHIUM_PROBE_PERSON").is_some() {
             tokio::select! {
                 result = running => result,
                 () = super::work_account::present_human_pages(composition, profile, work) => Err(WorkError::Unavailable),
             }
+        } else {
+            // Nobody sits at the window: a check stays unopened, as in the
+            // app until the person opens it, and its own short wait applies.
+            running.await
         };
         let projection = match result {
             Ok(projection) => projection,

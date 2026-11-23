@@ -45,6 +45,7 @@ These groups locate work; they do not define a dependency graph.
 | Provider and decision services | `zephium-agent-provider-transport`, `zephium-agent-model-catalog`, `zephium-decision` |
 | Account and credentials | `zephium-account`, `zephium-credentials` |
 | Sidebar assistance and voice | `zephium-page-assist`, `zephium-voice`, desktop adapters |
+| Search map | `zephium-map` (pure logic, depends only on `zephium-core`), `zephium-public-fetch` (anonymous public reads and the public-address guard) |
 | External protocol integration | `zephium-mcp` |
 | Development and qualification | `xtask`, `scripts/`, `zephium-terra-macos-probe` |
 

@@ -686,7 +686,8 @@ impl Shell {
                     }));
                 }
             }
-            EngineEvent::ShortcutPressed { .. } => {}
+            EngineEvent::ShortcutPressed { .. }
+            | EngineEvent::ExtensionActionMenuSelected { .. } => {}
             EngineEvent::TitleChanged { id, title } => {
                 self.crash.presentations.remove(&id);
                 // Pages re-publish the title they already have (counters,
@@ -749,6 +750,10 @@ impl Shell {
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
+                // The destination's first load may redirect. An explicit
+                // navigation elsewhere can supersede that load before it commits.
+                let adopt_new_tab_destination =
+                    first_committed_url && self.new_tab_destination_is_current(id);
                 let uncovered = self
                     .items
                     .tab(id)
@@ -762,6 +767,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                self.update_new_tab_destination(id, &committed_url, adopt_new_tab_destination);
                 if uncovered {
                     // The view holds a real document again; lay it out before
                     // its presentation is acknowledged.
@@ -847,6 +853,7 @@ impl Shell {
             EngineEvent::ExtensionPageChanged { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+            EngineEvent::ExtensionActionMenuSelected { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
             EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),

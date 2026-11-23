@@ -85,8 +85,8 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 - Regenerate IPC from Rust with
   `cargo test -p zephium-desktop --locked export_typescript_bindings` on a
   supported host. Review `frame/src/shared/ipc/bindings.ts`, `work-constants.ts`
-  and `theme-presets.json`. The current hosted drift check names only bindings.ts;
-  inspect all outputs. Never hand-edit generated contracts.
+  and `theme-presets.json`. The hosted macOS drift check covers all three
+  files, including untracked outputs. Never hand-edit generated contracts.
 - Regenerate `frame/src/shared/i18n` from the message catalogs/project config
   with `pnpm --dir frame run i18n`; typecheck also runs it.
 - Regenerate blocker seeds only through the

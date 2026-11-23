@@ -1,0 +1,7 @@
+# Workshop
+> A sample workshop for builders.
+## Documentation
+- [Syntax](https://docs.workshop.example/syntax): Complete reference.
+## Courses
+- [Orientation](/courses/start): Start here.
+- [Field guide](/courses/guide): More detail.

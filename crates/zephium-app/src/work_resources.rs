@@ -352,7 +352,7 @@ impl WorkResourceOwner {
         now: AgentPolicyInstant,
     ) -> Result<PendingLifecycle, Refusal> {
         self.construct_isolated(
-            id, context, storage, target, policy, false, false, None, None, None, None, now,
+            id, context, storage, target, policy, false, false, None, None, None, None, None, now,
         )
     }
     #[allow(clippy::too_many_arguments)]
@@ -368,6 +368,7 @@ impl WorkResourceOwner {
         anonymous_read_authority: Option<zephium_agentic::WorkBrowserAnonymousReadAuthority>,
         anonymous_session: Option<zephium_agentic::WorkBrowserSession>,
         redirect: Option<zephium_agentic::WorkBrowserRedirect>,
+        unreachable: Option<zephium_agentic::WorkBrowserUnreachable>,
         construction_window: Option<(
             zephium_agentic::WorkBrowserConstructionAttempt,
             std::time::Instant,
@@ -417,6 +418,12 @@ impl WorkResourceOwner {
         let request = match redirect {
             Some(redirect) => request
                 .with_redirect(redirect)
+                .map_err(|_| Refusal::Uncertain)?,
+            None => request,
+        };
+        let request = match unreachable {
+            Some(unreachable) => request
+                .with_unreachable(unreachable)
                 .map_err(|_| Refusal::Uncertain)?,
             None => request,
         };

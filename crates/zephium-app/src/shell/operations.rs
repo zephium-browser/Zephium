@@ -283,7 +283,7 @@ impl Shell {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         revision: zephium_core::extensions::ExtensionActionRevision,
         anchor: zephium_core::extensions::ExtensionPopupAnchor,
-        menu: bool,
+        menu: Option<std::sync::Arc<[zephium_core::extensions::ExtensionButtonMenuRow]>>,
     ) -> OperationDisposition {
         match self.dispatch_extension_action(runtime, revision, anchor, menu) {
             Ok(_) => operation_result(
@@ -334,7 +334,7 @@ impl Shell {
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
-        let Some((_id, effects)) = self.open_tab_with_id() else {
+        let Some((_id, effects)) = self.open_new_tab_with_id() else {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
@@ -950,7 +950,13 @@ impl Shell {
         }
         self.tab_preferences.apply(&key, &value);
         if self.proxy.apply(&key, &value) {
-            self.engine.set_proxy(self.proxy.server());
+            let server = self.proxy.server();
+            let enabled = server.is_some();
+            self.engine.set_proxy(server);
+            self.proxy.report();
+            if enabled {
+                self.stop_network_favicon_probes();
+            }
         }
         if key == "tabs.automatic-pip" && value == "false" {
             self.engine.cancel_automatic_pip();

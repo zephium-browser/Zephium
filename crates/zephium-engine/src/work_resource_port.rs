@@ -113,6 +113,7 @@ pub(crate) struct WorkResourceGuard {
     document_policy: zephium_agentic::WorkBrowserDocumentPolicy,
     construction_window: Option<(zephium_agentic::WorkBrowserConstructionAttempt, Instant)>,
     redirect: Option<zephium_agentic::WorkBrowserRedirect>,
+    unreachable: Option<zephium_agentic::WorkBrowserUnreachable>,
     state: Mutex<State>,
     image_receipt: Mutex<image_receipt::NativeImageSlot>,
     fresh_native_store: Mutex<Option<crate::host::FreshNativeStore>>,
@@ -169,6 +170,7 @@ impl WorkResourceGuard {
             document_policy: request.document_policy(),
             construction_window: request.construction_window(),
             redirect: request.redirect().cloned(),
+            unreachable: request.unreachable().cloned(),
             health: None,
             health_permit: None,
             #[cfg(test)]
@@ -203,6 +205,14 @@ impl WorkResourceGuard {
     pub(crate) fn record_redirect(&self, destination: ContextNavigationTarget) {
         if let Some(redirect) = &self.redirect {
             redirect.record(destination);
+        }
+    }
+    /// Tells the construction's owner that its main-frame load could not
+    /// reach the site; the document still fails. The platform calls it only
+    /// for the construction load's own failure, never for a later load.
+    pub(crate) fn record_unreachable(&self) {
+        if let Some(unreachable) = &self.unreachable {
+            unreachable.record();
         }
     }
     pub(crate) fn notify_frame_projection(&self) {

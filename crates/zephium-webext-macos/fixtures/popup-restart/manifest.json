@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Popup worker restart fixture",
+  "description": "Checks a popup's worker response across native runtime launches.",
+  "version": "1.0",
+  "permissions": ["storage"],
+  "background": { "service_worker": "worker.js" },
+  "action": { "default_popup": "popup.html" }
+}

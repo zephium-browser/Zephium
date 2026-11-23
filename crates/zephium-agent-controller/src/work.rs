@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+#[cfg(feature = "probe-harness")]
+use std::io::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -5100,7 +5102,7 @@ impl AgentWorkController {
         // The task assesses only the look it last evaluated.
         if state.task_progress(observation)? == AgentWorkTaskProgress::Complete {
             #[cfg(feature = "probe-harness")]
-            eprintln!("owned-read: none=complete");
+            let _ = writeln!(std::io::stderr(), "owned-read: none=complete");
             return Ok(None);
         }
         let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
@@ -5115,7 +5117,7 @@ impl AgentWorkController {
             crate::AgentBrowserActionProposal::bind_code_owned(recipe, observation, &frames, batch)
         else {
             #[cfg(feature = "probe-harness")]
-            eprintln!("owned-read: none=bind");
+            let _ = writeln!(std::io::stderr(), "owned-read: none=bind");
             return Ok(None);
         };
         let assessment = match state.task.assess_observed(proposal.action(), observation) {
@@ -5128,7 +5130,7 @@ impl AgentWorkController {
                 | AgentWorkFailure::WrongRecipient),
             ) => {
                 #[cfg(feature = "probe-harness")]
-                eprintln!("owned-read: none=assess {error:?}");
+                let _ = writeln!(std::io::stderr(), "owned-read: none=assess {error:?}");
                 let _ = error;
                 return Ok(None);
             }
@@ -5176,7 +5178,7 @@ impl AgentWorkController {
                     return Err(AgentWorkFailure::Browser(error));
                 }
                 #[cfg(feature = "probe-harness")]
-                eprintln!("owned-read: none=browser {error:?}");
+                let _ = writeln!(std::io::stderr(), "owned-read: none=browser {error:?}");
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -5290,7 +5292,7 @@ impl AgentWorkController {
                 .is_some_and(|browser| !browser.supports_screenshots())
         {
             #[cfg(feature = "probe-harness")]
-            eprintln!("browser-screenshot: stage=preflight capability_or_busy=true enabled={} pending={} content=redacted", state.viewport_screenshot, state.native.screenshot_pending.is_some());
+            let _ = writeln!(std::io::stderr(), "browser-screenshot: stage=preflight capability_or_busy=true enabled={} pending={} content=redacted", state.viewport_screenshot, state.native.screenshot_pending.is_some());
             return Ok(false);
         }
         let now = state
@@ -5315,7 +5317,10 @@ impl AgentWorkController {
         );
         #[cfg(feature = "probe-harness")]
         if let Err(error) = &prepared {
-            eprintln!("browser-screenshot: stage=preflight reason={error:?} content=redacted");
+            let _ = writeln!(
+                std::io::stderr(),
+                "browser-screenshot: stage=preflight reason={error:?} content=redacted"
+            );
         }
         Ok(prepared.is_ok())
     }
@@ -7644,6 +7649,9 @@ pub enum AgentWorkFailure {
     /// The public page's first load was redirected before it was ready.
     /// The gate refused it; the destination stays with the read's owner.
     Redirected,
+    /// The page's main-frame load never reached its site: no connection, an
+    /// unknown host, a refused or insecure connection.
+    Unreachable,
     /// Provider or action authority returned a closed refusal.
     Browser(AgentBrowserProviderError),
     /// A progress/receipt/metric join was refused.
