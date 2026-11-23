@@ -172,6 +172,7 @@ pub(crate) fn handle(
             }
             crate::worker_gone(shared, &id);
             crate::lifetime::started(shared, &id);
+            crate::background::started(shared, context);
             Ok(Value::Null)
         }
         Some("offscreen.close") => Ok(Value::Bool(offscreen::close(shared, &extension(context)))),

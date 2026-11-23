@@ -38,6 +38,14 @@
   });
   let saved = $derived(preferences.value("search.custom-url"));
   let engine = $derived(preferences.value("search.engine"));
+
+  async function saveCustomUrl(event: SubmitEvent) {
+    event.preventDefault();
+    if (invalid || preferences.saving()) return;
+    const submitted = customUrl;
+    await preferences.set("search.custom-url", submitted);
+    if (customUrl === submitted && !preferences.saveFailed()) editing = false;
+  }
 </script>
 
 <SettingsGroup title={m.section_search()} description={m.search_local_description()}>
@@ -86,15 +94,7 @@
     title={m.search_custom()}
     description={m.search_custom_description()}
   >
-    <form
-      onsubmit={(event) => {
-        event.preventDefault();
-        if (invalid) return;
-        void preferences.set("search.custom-url", customUrl).then(() => {
-          if (!preferences.saveFailed()) editing = false;
-        });
-      }}
-    >
+    <form onsubmit={saveCustomUrl}>
       <Field
         label={m.search_custom()}
         labelHidden

@@ -7,7 +7,7 @@
 use super::*;
 
 use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
-use crate::{FaviconPageSource, FaviconProbe};
+use crate::{FaviconPageSource, FaviconProbe, FaviconProberAttachment};
 use favicons::{FailedIcons, IconTarget, TRACKED_ICON_ORIGIN_CAPACITY};
 use zephium_ipc::IconSurface;
 
@@ -26,9 +26,11 @@ pub(super) struct PageJob {
 }
 
 pub(super) struct FaviconProbeState {
-    pub(super) prober: Option<crate::FaviconProber>,
+    prober: Option<FaviconProberAttachment>,
     queued: std::collections::VecDeque<ProbeKey>,
     in_flight: std::collections::HashSet<ProbeKey>,
+    /// In flight when a proxy stopped the prober; their replies are not failures.
+    cancelled: std::collections::HashSet<ProbeKey>,
     failed: FailedIcons,
     lookups: std::collections::BTreeMap<u64, ProfileId>,
     lookup_generation: u64,
@@ -49,6 +51,7 @@ impl Default for FaviconProbeState {
             prober: None,
             queued: Default::default(),
             in_flight: Default::default(),
+            cancelled: Default::default(),
             failed: FailedIcons::with_limits(
                 TRACKED_ICON_ORIGIN_CAPACITY,
                 FAVICON_PROBE_FAILURE_TTL,
@@ -123,9 +126,36 @@ impl Shell {
         }
     }
 
-    pub(super) fn attach_favicon_prober(&mut self, prober: crate::FaviconProber) {
+    pub(super) fn attach_favicon_prober(&mut self, prober: FaviconProberAttachment) {
         self.favicons.probe.prober.get_or_insert(prober);
         self.pump_favicon_probes();
+    }
+
+    pub(super) fn stop_network_favicon_probes(&mut self) {
+        let probe = &mut self.favicons.probe;
+        if let Some(prober) = &probe.prober {
+            (prober.cancel_network)();
+        }
+        probe.cancelled.extend(probe.in_flight.iter().cloned());
+        for key in probe.queued.drain(..) {
+            probe.wanted.remove(&key);
+        }
+        let mut cancelled = Vec::new();
+        probe.queued_jobs.retain(|ticket| {
+            if probe
+                .jobs
+                .get(ticket)
+                .is_some_and(|job| matches!(job.source, FaviconPageSource::Addresses(_)))
+            {
+                cancelled.push(*ticket);
+                false
+            } else {
+                true
+            }
+        });
+        for ticket in cancelled {
+            self.favicon_fetched(ticket, None, None, Vec::new());
+        }
     }
 
     pub(super) fn probe_favicons(&mut self, profile: ProfileId, origins: Vec<String>) {
@@ -250,6 +280,12 @@ impl Shell {
 
     fn queue_favicon_probes(&mut self, profile: ProfileId, origins: Vec<String>) {
         let probe = &mut self.favicons.probe;
+        if self.proxy.server().is_some() {
+            for origin in origins {
+                probe.wanted.remove(&(profile, origin));
+            }
+            return;
+        }
         for origin in origins {
             let key = (profile, origin);
             if probe.queued.len() >= MAX_FAVICON_BATCH_ORIGINS
@@ -275,7 +311,7 @@ impl Shell {
                     continue;
                 };
                 probe.in_flight_jobs.insert(ticket);
-                prober(FaviconProbe::Page {
+                (prober.probe)(FaviconProbe::Page {
                     ticket,
                     profile: job.target.profile,
                     origin: job.target.origin.clone(),
@@ -287,7 +323,7 @@ impl Shell {
                 break;
             };
             probe.in_flight.insert(key.clone());
-            prober(FaviconProbe::Origin {
+            (prober.probe)(FaviconProbe::Origin {
                 profile: key.0,
                 origin: key.1,
             });
@@ -359,6 +395,7 @@ impl Shell {
         if !self.favicons.probe.in_flight.remove(&key) {
             return;
         }
+        let cancelled = self.favicons.probe.cancelled.remove(&key);
         let admitted = self.profiles.get(profile).is_some()
             && rgba
                 .as_deref()
@@ -368,7 +405,9 @@ impl Shell {
             self.publish_icons();
         } else {
             self.favicons.probe.wanted.remove(&key);
-            self.remember_failed_probe(key);
+            if !cancelled && self.proxy.server().is_none() {
+                self.remember_failed_probe(key);
+            }
         }
         self.pump_favicon_probes();
     }

@@ -85,6 +85,7 @@ pub use actor::{
 pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};
 #[cfg(feature = "agentic-browser")]
 pub use api::AgentLifecycle;
+pub use api::{AppProxyAttachment, AppProxyReport};
 pub use api::{
     BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
     Command, ContentPolicyStatusQueryOutcome, EmitFn, MiniAction, PagePermissionPromptDecision,

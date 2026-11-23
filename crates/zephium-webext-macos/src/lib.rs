@@ -9,6 +9,7 @@
 mod access;
 mod api;
 mod auth;
+mod background;
 mod bookmarks;
 mod bridge;
 pub mod compat;

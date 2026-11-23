@@ -495,6 +495,10 @@ impl Items {
             .map(|pending| pending.request)
     }
 
+    pub fn pending_navigation_url(&self, id: ItemId) -> Option<&Url> {
+        self.pending_navigations.get(&id)?.url.as_ref()
+    }
+
     fn mint_navigation_request(&mut self) -> NavigationRequestId {
         self.next_navigation_request = self.next_navigation_request.wrapping_add(1);
         if self.next_navigation_request == 0 {

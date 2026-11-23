@@ -8018,12 +8018,28 @@ fn finish_browser_setup(
         return Err(error.into());
     }
     #[cfg(feature = "work-product")]
+    let public_routes = {
+        let routes =
+            zephium_agentic::public_asset::RouteSource::new(tauri::async_runtime::handle().inner());
+        let reported = routes.clone();
+        if !shell.dispatch(Command::AttachAppProxy(zephium_app::AppProxyAttachment(
+            Arc::new(move |proxy| reported.set_app_proxy(proxy)),
+        ))) {
+            write_diagnostic(format_args!(
+                "public route: the shell refused its proxy port"
+            ));
+        }
+        app.manage(routes.clone());
+        routes
+    };
+    #[cfg(feature = "work-product")]
     if !work_product::install(
         app,
         engine.clone(),
         store.clone(),
         app.try_state::<work_product::WorkFrames>()
             .map(|frames| frames.0.clone()),
+        public_routes.clone(),
     ) {
         let error = std::io::Error::other("Work product owner is already installed");
         shutdown.request_terminal_startup_failure(
@@ -8047,7 +8063,7 @@ fn finish_browser_setup(
     notes::install(app, &data_dir, store.clone(), &shell);
     external_links::adopt(app);
     #[cfg(feature = "work-product")]
-    favicon_probe::install(&shell);
+    favicon_probe::install(&shell, public_routes);
     let web_extensions = webext::WebExtensions::new(&data_dir);
     web_extensions.restore(&shell);
     app.manage(web_extensions);

@@ -297,6 +297,8 @@ impl Shell {
         let removed_spaces = self.spaces.remove_for_profile(profile);
         let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
         self.sources.retain(|id| self.items.tab(id).is_some());
+        self.new_tab_destinations
+            .retain(|id, _| self.items.tab(*id).is_some());
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 

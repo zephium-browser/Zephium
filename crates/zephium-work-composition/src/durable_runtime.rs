@@ -2034,7 +2034,7 @@ impl NativeWorkComposition {
                     }
                     if let Some(request) = guard.0.take_public_asset() {
                         let bytes = bounded_public_record_fetch(
-                            zephium_agentic::public_asset::fetch_public_record_image(request.url()),
+                            public_record_image(self.public_routes.get(), request.url()),
                             || {
                                 original_spec
                                     .clock
@@ -5099,6 +5099,16 @@ mod public_asset_retry_tests {
     }
 }
 
+async fn public_record_image(
+    routes: Option<&zephium_agentic::public_asset::RouteSource>,
+    url: &str,
+) -> Result<Vec<u8>, zephium_agentic::public_asset::PublicAssetError> {
+    match routes {
+        Some(routes) => zephium_agentic::public_asset::fetch_public_record_image(routes, url).await,
+        None => Err(zephium_agentic::public_asset::PublicAssetError::RouteRefused),
+    }
+}
+
 async fn bounded_public_record_fetch(
     fetch: impl std::future::Future<
         Output = Result<Vec<u8>, zephium_agentic::public_asset::PublicAssetError>,
@@ -5173,6 +5183,28 @@ mod public_record_fetch_stop_tests {
             bounded_public_record_fetch(fetch, || current.load(Ordering::SeqCst))
                 .await
                 .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn a_public_record_picture_needs_a_direct_route_from_the_composition_root() {
+        use zephium_agentic::public_asset::{PublicAssetError, RouteSource};
+        let url = "https://images.example.com/a.png";
+        assert_eq!(
+            public_record_image(None, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        assert_eq!(
+            public_record_image(Some(&routes), url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(
+            public_record_image(Some(&routes), url).await,
+            Err(PublicAssetError::RouteRefused)
         );
     }
 }
