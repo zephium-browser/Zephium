@@ -173,12 +173,26 @@ impl crate::Shell {
         }
         let refused = reply.clone();
         use zephium_core::work::port::{WorkReply, WorkRequest};
+        if matches!(
+            &request,
+            WorkRequest::Environment {
+                call: zephium_core::work::environment::WorkEnvironmentCall::ComposerRead { .. }
+                    | zephium_core::work::environment::WorkEnvironmentCall::ComposerSave { .. },
+                ..
+            }
+        ) {
+            // Publish the exact current scope before a draft may acknowledge
+            // durability. The Store flushes this mailbox before composer I/O.
+            self.publish_current_session();
+        }
         let changes = !matches!(
             &request,
             WorkRequest::Read { .. }
                 | WorkRequest::Environment {
                     call: zephium_core::work::environment::WorkEnvironmentCall::Read { .. }
-                        | zephium_core::work::environment::WorkEnvironmentCall::List { .. },
+                        | zephium_core::work::environment::WorkEnvironmentCall::List { .. }
+                        | zephium_core::work::environment::WorkEnvironmentCall::ComposerRead { .. }
+                        | zephium_core::work::environment::WorkEnvironmentCall::ComposerSave { .. },
                     ..
                 }
                 | WorkRequest::List { .. }
@@ -346,6 +360,80 @@ mod tests {
         time::{Duration, Instant},
     };
     use zephium_core::work::{port::*, *};
+
+    #[test]
+    fn composer_scope_is_durable_and_private_selection_cannot_overwrite_it() {
+        use zephium_core::{ports::store::Store, work::environment::*};
+        let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+        let mut shell = Shell::new(
+            Arc::new(crate::shell::tests::FakeEngine::default()),
+            store.clone(),
+            Arc::new(crate::shell::tests::FakeChrome),
+            Box::new(|_| {}),
+        );
+        shell.handle(Command::Bootstrap);
+        let profile = shell.windows.focused().unwrap().profile;
+        let space = shell.windows.focused().unwrap().space;
+        let submit = |shell: &Shell, call| {
+            let (submission, receipt) = WorkDocumentSubmission::prepare_bound(
+                &crate::work_authoring::Pending::default(),
+                WorkRequest::Environment {
+                    call,
+                    space_available: true,
+                    browser_available: true,
+                    note_available: true,
+                },
+                Some(profile),
+            )
+            .unwrap();
+            shell.work_document(submission);
+            wait(&receipt).map(|projection| projection.reply)
+        };
+        let WorkReply::Environment(WorkEnvironmentReply::Composer { draft }) = submit(
+            &shell,
+            WorkEnvironmentCall::ComposerSave {
+                space,
+                expected: WorkRevision::INITIAL,
+                text: "regular profile words".into(),
+            },
+        )
+        .unwrap() else {
+            panic!("expected native draft");
+        };
+        let mut selected = shell.profiles.remove(profile).unwrap();
+        selected.kind = zephium_core::profiles::ProfileKind::Incognito;
+        assert!(shell.profiles.insert(selected));
+        assert!(matches!(
+            submit(
+                &shell,
+                WorkEnvironmentCall::ComposerSave {
+                    space,
+                    expected: draft.revision,
+                    text: "private words must not persist".into(),
+                }
+            ),
+            Err(WorkError::ProfileUnavailable)
+        ));
+        let (send, receive) = std::sync::mpsc::channel();
+        store
+            .work_document(
+                profile,
+                WorkRequest::Environment {
+                    call: WorkEnvironmentCall::ComposerRead { space },
+                    space_available: true,
+                    browser_available: false,
+                    note_available: false,
+                },
+                Box::new(move |result| {
+                    send.send(result).unwrap();
+                }),
+            )
+            .unwrap();
+        assert!(
+            matches!(receive.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(), WorkReply::Environment(WorkEnvironmentReply::Composer { draft }) if draft.text == "regular profile words")
+        );
+        assert!(store.flush());
+    }
 
     #[test]
     fn queued_record_media_revalidates_active_profile_before_bytes_leave_actor() {

@@ -12,6 +12,7 @@
   import Button from "$shared/ui/Button";
   import FavIcon from "$shared/ui/FavIcon";
   import Ring from "$shared/ui/data/Ring";
+  import { everyWhileVisible } from "$shared/lib/visible-interval";
 
   let { site }: { site: string } = $props();
 
@@ -20,17 +21,7 @@
   let session = $derived(focus.session());
   let mark = $derived(favicons.mark(null, `https://${site}/`));
 
-  onMount(() => {
-    const tick = () => {
-      if (document.visibilityState === "visible") now = Date.now();
-    };
-    const timer = setInterval(tick, 1000);
-    document.addEventListener("visibilitychange", tick);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", tick);
-    };
-  });
+  onMount(() => everyWhileVisible(1000, () => (now = Date.now())));
 
   function end() {
     if (!confirming) {

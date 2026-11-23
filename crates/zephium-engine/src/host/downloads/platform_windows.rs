@@ -141,13 +141,17 @@ fn operation_uri(operation: &ICoreWebView2DownloadOperation) -> Option<String> {
         drop(TaskMemory(text));
         return Some("data:".into());
     }
-    take_string(text, 8192)
+    take_string(text, zephium_core::navigation::MAX_URL_BYTES)
 }
 fn current_origin(controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
     let core = unsafe { controller.CoreWebView2() }.ok()?;
     let mut value = PWSTR::null();
     unsafe { core.Source(&mut value) }.ok()?;
-    let url = url::Url::parse(&take_string(value, 8192)?).ok()?;
+    let url = url::Url::parse(&take_string(
+        value,
+        zephium_core::navigation::MAX_URL_BYTES,
+    )?)
+    .ok()?;
     PageOrigin::from_url(&url).ok()
 }
 fn source_origin(uri: &str, controller: &ICoreWebView2Controller) -> Option<PageOrigin> {
@@ -402,12 +406,22 @@ impl Downloads {
         let initial_open = initial.is_some();
         if self.stopping.get()
             || self.retired.borrow().contains(&partition.profile())
-            || self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
+            || permit.active_token().is_none()
+        {
+            return;
+        }
+        let refusal = if self.active.borrow().len() >= MAX_ACTIVE_DOWNLOADS
             || self.work.get() >= MAX_BACKGROUND_WORK
             || !self.private_cleanup_capacity(partition)
-            || permit.active_token().is_none()
-            || (!initial_open && !surface_intent.load(Ordering::Acquire))
         {
+            Some(DownloadError::Capacity)
+        } else if !initial_open && !surface_intent.load(Ordering::Acquire) {
+            Some(DownloadError::Unavailable)
+        } else {
+            None
+        };
+        if let Some(error) = refusal {
+            self.refused(partition, &navigation, error);
             return;
         }
         self.ensure_timer();
@@ -433,6 +447,7 @@ impl Downloads {
             ask_destination,
         };
         if !source.live() {
+            self.refused(partition, &source.navigation, DownloadError::Unavailable);
             return;
         }
         let Ok(operation) = (unsafe { args.DownloadOperation() }) else {

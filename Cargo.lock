@@ -1526,9 +1526,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -6419,9 +6419,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -7371,6 +7371,8 @@ dependencies = [
  "flate2",
  "libc",
  "minisign",
+ "nix",
+ "psl",
  "regex",
  "ring",
  "semver",
@@ -7379,10 +7381,14 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "time",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "url",
  "windows",
  "zephium-blocker",
  "zephium-core",
+ "zephium-map",
+ "zephium-public-fetch",
 ]
 
 [[package]]
@@ -7546,6 +7552,7 @@ dependencies = [
  "zephium-core",
  "zephium-credentials",
  "zephium-decision",
+ "zephium-public-fetch",
  "zeroize",
 ]
 
@@ -7554,13 +7561,13 @@ name = "zephium-app"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "chrono",
  "flate2",
  "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
  "ignore",
+ "jiff",
  "libc",
  "lopdf",
  "objc2",
@@ -7654,6 +7661,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "proptest",
+ "psl",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7745,6 +7753,7 @@ dependencies = [
  "zephium-blocker",
  "zephium-blocker-service",
  "zephium-core",
+ "zephium-credentials",
  "zephium-engine",
  "zephium-import",
  "zephium-ipc",
@@ -7820,6 +7829,23 @@ dependencies = [
  "specta",
  "specta-serde",
  "specta-typescript",
+ "url",
+ "zephium-core",
+]
+
+[[package]]
+name = "zephium-map"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "html5ever 0.39.0",
+ "proptest",
+ "psl",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
  "zephium-core",
 ]
 
@@ -7828,6 +7854,7 @@ name = "zephium-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "core-foundation 0.10.1",
  "http",
  "libc",
  "reqwest",
@@ -7858,6 +7885,7 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "zephium-core",
+ "zephium-private-fs",
 ]
 
 [[package]]
@@ -7879,6 +7907,25 @@ dependencies = [
  "thiserror 2.0.18",
  "unicode-normalization",
  "windows",
+]
+
+[[package]]
+name = "zephium-public-fetch"
+version = "0.1.0"
+dependencies = [
+ "brotli",
+ "brotli-decompressor",
+ "flate2",
+ "proptest",
+ "psl",
+ "reqwest",
+ "system-configuration",
+ "tokio",
+ "tower-layer",
+ "tower-service",
+ "url",
+ "windows-sys 0.61.2",
+ "zephium-core",
 ]
 
 [[package]]
@@ -7973,6 +8020,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "dispatch2",
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

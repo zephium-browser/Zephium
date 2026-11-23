@@ -63,3 +63,16 @@ pub use transition::PrivateFsTransitionError;
 /// prevents a caller-provided limit from silently becoming an unbounded memory
 /// allocation.
 pub const MAX_IN_MEMORY_FILE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Moves a regular file without replacing any existing destination.
+///
+/// This ambient filesystem primitive grants no private-namespace authority.
+/// The caller owns path validation and lifecycle coordination. Failure leaves
+/// the source in place; a case-only same-file rename is permitted.
+#[cfg(target_os = "windows")]
+pub fn rename_file_no_replace(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    platform::rename_file_no_replace(source, target)
+}

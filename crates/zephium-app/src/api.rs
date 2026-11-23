@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
@@ -584,8 +584,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
-        /// Opens the action's context menu rather than clicking it.
-        menu: bool,
+        /// Browser rows included when opening the action's context menu.
+        menu: Option<Arc<[ExtensionButtonMenuRow]>>,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
@@ -813,6 +813,9 @@ pub enum Command {
     },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
+    /// Hands the shell the port anonymous readers learn the app's proxy
+    /// setting from, once, after startup.
+    AttachAppProxy(AppProxyAttachment),
     /// Icons for origins shown outside a tab: cached or stored rasters are
     /// delivered to chrome, the rest are queued for the origin probe.
     ProbeFavicons {
@@ -982,10 +985,26 @@ pub enum FaviconProbe {
 pub type FaviconProber = Arc<dyn Fn(FaviconProbe) + Send + Sync>;
 
 #[derive(Clone)]
-pub struct FaviconProberAttachment(pub FaviconProber);
+pub struct FaviconProberAttachment {
+    pub probe: FaviconProber,
+    /// Cancels active network requests, which still send their ordinary replies.
+    pub cancel_network: Arc<dyn Fn() + Send + Sync>,
+}
 impl fmt::Debug for FaviconProberAttachment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FaviconProberAttachment")
+    }
+}
+
+/// Told the proxy chosen in Zephium, or `None` for the system's: when
+/// attached, then on every change.
+pub type AppProxyReport = Arc<dyn Fn(Option<zephium_core::proxy::ProxyServer>) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AppProxyAttachment(pub AppProxyReport);
+impl fmt::Debug for AppProxyAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AppProxyAttachment")
     }
 }
 

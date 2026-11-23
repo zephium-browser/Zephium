@@ -212,6 +212,12 @@ impl CanonicalHost {
         }
 
         match parsed.host() {
+            // Chromium strips trailing dots before comparing hosts. Removing
+            // them can expose an IP literal, so canonicalize once more.
+            Some(Host::Domain(host)) if host.ends_with('.') => match without_trailing_dots(host) {
+                "" => Err(MatchPatternError::InvalidHost),
+                trimmed => Self::parse(trimmed),
+            },
             Some(Host::Domain(host)) if !host.is_empty() => {
                 Ok(Self::Domain(host.to_owned().into_boxed_str()))
             }
@@ -223,7 +229,9 @@ impl CanonicalHost {
 
     fn matches(&self, candidate: Host<&str>) -> bool {
         match (self, candidate) {
-            (Self::Domain(expected), Host::Domain(actual)) => expected.as_ref() == actual,
+            (Self::Domain(expected), Host::Domain(actual)) => {
+                expected.as_ref() == without_trailing_dots(actual)
+            }
             (Self::Ipv4(expected), Host::Ipv4(actual)) => *expected == actual,
             (Self::Ipv6(expected), Host::Ipv6(actual)) => *expected == actual,
             _ => false,
@@ -280,6 +288,7 @@ impl HostPattern {
                 let Some(Host::Domain(actual)) = url.host() else {
                     return false;
                 };
+                let actual = without_trailing_dots(actual);
                 actual == expected.as_ref()
                     || actual
                         .strip_suffix(expected.as_ref())
@@ -1264,6 +1273,10 @@ fn canonicalize_path(path: &str) -> Result<String, MatchPatternError> {
     Ok(canonical)
 }
 
+fn without_trailing_dots(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
 fn is_supported_content_scheme(scheme: &str) -> bool {
     matches!(scheme, "http" | "https" | "file")
 }
@@ -1386,6 +1399,121 @@ mod tests {
     }
 
     #[test]
+    fn exclusions_cannot_be_bypassed_with_a_fully_qualified_host() {
+        let patterns = set(
+            &["<all_urls>"],
+            &["*://bank.test/*", "*://*.private.test/*"],
+            MatchOptions::default(),
+        );
+        for excluded in [
+            "https://bank.test./",
+            "https://BANK.test.:443/login",
+            "http://bank.test../",
+            "https://private.test./",
+            "https://a.private.test./",
+        ] {
+            assert!(!patterns.matches_url(&url(excluded)), "{excluded}");
+        }
+        assert!(patterns.matches_url(&url("https://other.test./")));
+        assert!(patterns.matches_url(&url("https://bank.test.example/")));
+        assert!(patterns.matches_url(&url("https://notprivate.test./")));
+    }
+
+    #[test]
+    fn trailing_dots_are_ignored_on_both_hosts() {
+        for source in [
+            "https://bank.test/*",
+            "https://bank.test./*",
+            "https://BANK.TEST../*",
+        ] {
+            let parsed = pattern(source);
+            assert_eq!(parsed.as_str(), "https://bank.test/*");
+            for candidate in ["https://bank.test/", "https://bank.test./a"] {
+                assert!(
+                    parsed.matches_url(&url(candidate)),
+                    "{source} != {candidate}"
+                );
+            }
+            assert!(!parsed.matches_url(&url("https://sub.bank.test./")));
+            assert!(!parsed.matches_url(&url("https://bank.test.example./")));
+        }
+
+        let subdomains = pattern("https://*.example.com./*");
+        assert_eq!(subdomains.as_str(), "https://*.example.com/*");
+        for candidate in [
+            "https://example.com/",
+            "https://example.com./",
+            "https://sub.example.com./",
+            "https://a.b.example.com../",
+        ] {
+            assert!(subdomains.matches_url(&url(candidate)), "{candidate}");
+        }
+        assert!(!subdomains.matches_url(&url("https://notexample.com./")));
+        assert!(!subdomains.matches_url(&url("https://example.com.evil./")));
+
+        let single_label = pattern("http://localhost./*");
+        assert_eq!(single_label.as_str(), "http://localhost/*");
+        assert!(single_label.matches_url(&url("http://localhost/")));
+        assert!(single_label.matches_url(&url("http://localhost./")));
+
+        let international = pattern("https://BÜCHER.example./*");
+        assert_eq!(international.as_str(), "https://xn--bcher-kva.example/*");
+        assert!(international.matches_url(&url("https://bücher.example./")));
+        assert!(international.matches_url(&url("https://xn--bcher-kva.example./")));
+    }
+
+    #[test]
+    fn url_authority_spellings_cannot_bypass_exclusions() {
+        let patterns = set(
+            &["<all_urls>"],
+            &["https://bank.test:443/*", "http://bank.test:80/*"],
+            MatchOptions::default(),
+        );
+        for excluded in [
+            "HTTPS://BANK.TEST/",
+            "https://user:secret@bank.test/",
+            "https://b%61nk.test/",
+            "https:\\\\bank.test\\login",
+            "https://bank.test:443/",
+            "http://bank.test/",
+            "http://bank.test.:80/",
+        ] {
+            assert!(!patterns.matches_url(&url(excluded)), "{excluded}");
+        }
+        assert!(patterns.matches_url(&url("https://bank.test:8443/")));
+    }
+
+    #[test]
+    fn trailing_dot_hosts_keep_ip_and_file_semantics() {
+        for source in ["http://127.0.0.1./*", "http://127.0.0.1../*"] {
+            let parsed = pattern(source);
+            assert_eq!(parsed.as_str(), "http://127.0.0.1/*");
+            assert_eq!(
+                parsed.components(),
+                MatchPatternComponents::Standard {
+                    scheme: MatchPatternScheme::Http,
+                    host: Some(MatchPatternHost::ExactIpv4(Ipv4Addr::LOCALHOST)),
+                    port: MatchPatternPort::Any,
+                    path: MatchPatternPath("/*"),
+                }
+            );
+            assert!(parsed.matches_url(&url("http://127.0.0.1./")));
+            assert!(!parsed.matches_url(&url("http://127.0.0.2/")));
+        }
+        assert!(matches!(
+            MatchPattern::parse("https://*.127.0.0.1../*"),
+            Err(MatchPatternError::InvalidHostWildcard)
+        ));
+
+        let ipv6 = pattern("http://[::1]/*");
+        assert!(ipv6.matches_url(&url("http://[::1]/")));
+
+        let file = pattern("file:///tmp/*");
+        assert!(file.matches_url(&url("file:///tmp/a")));
+        assert!(!pattern("https://*.example.com/*").matches_url(&url("file:///tmp/a")));
+    }
+
+    #[test]
     fn typed_components_expose_canonical_semantics_without_reparsing() {
         let international = pattern("*://*.BÜCHER.example:8443/a/../🐱*?q=*");
         assert_eq!(
@@ -1479,6 +1607,10 @@ mod tests {
             "https://example.com/path#fragment",
             "https://example.com/\n",
             "https://*.127.0.0.1/*",
+            "https://./*",
+            "https://../*",
+            "https://*../*",
+            "https://[::1]./*",
         ];
         for candidate in cases {
             assert!(
@@ -1605,6 +1737,35 @@ mod tests {
             },
         )
         .is_unconditional_all_urls());
+    }
+
+    #[test]
+    fn host_dependent_sets_never_pass_the_native_unconditional_gate() {
+        // Native adapters admit only unconditional sets, so host comparison
+        // is never consulted for delivery while this holds.
+        let host_dependent = [
+            set(
+                &["<all_urls>"],
+                &["*://bank.test/*"],
+                MatchOptions::default(),
+            ),
+            set(
+                &["<all_urls>"],
+                &["*://bank.test./*"],
+                MatchOptions::default(),
+            ),
+            set(&["*://bank.test/*"], &[], MatchOptions::default()),
+            set(&["*://*.bank.test/*"], &[], MatchOptions::default()),
+            set(
+                &["*://*/*"],
+                &["*://*.bank.test/*"],
+                MatchOptions::default(),
+            ),
+        ];
+        for candidate in host_dependent {
+            assert!(!candidate.is_unconditional_all_urls(), "{candidate:?}");
+        }
+        assert!(MatchSet::all_urls().matches_url(&url("https://bank.test./")));
     }
 
     #[test]

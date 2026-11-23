@@ -979,7 +979,7 @@ impl Drop for TestGrantHome {
 }
 
 #[cfg(not(windows))]
-fn grant_home() -> Option<PathBuf> {
+pub(crate) fn grant_home() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
         return Some(home);
@@ -988,7 +988,7 @@ fn grant_home() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
-fn grant_home() -> Option<PathBuf> {
+pub(crate) fn grant_home() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(home) = TEST_GRANT_HOME.with(|slot| slot.borrow().clone()) {
         return Some(home);

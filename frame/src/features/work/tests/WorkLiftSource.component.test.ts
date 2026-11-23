@@ -6,8 +6,8 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ workCall: native.call });
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({ workCall: native.call });
 });
 
 test("the lift grows from the card it was opened on, even with another card on the same spot", async () => {

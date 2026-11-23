@@ -524,6 +524,13 @@ fn protected_deletion_hooks_preserve_tombstone_on_purge_and_restart_failure() {
         Some(selector),
     )
     .unwrap();
+    // Restart exposes the obligation again; only a finalize retires it.
+    assert_eq!(
+        reopened.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    assert_eq!(reopened.pending_profile_deletions().unwrap().len(), 1);
+    assert!(reopened.finalize_profile_deletion(profile).unwrap());
     assert!(reopened
         .completed_profile_deletion_tombstones()
         .unwrap()

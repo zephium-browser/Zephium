@@ -13,7 +13,9 @@ use objc2::runtime::AnyObject;
 use objc2::AnyThread;
 use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSImage, NSImageCompressionFactor};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{MainThreadMarker, NSData, NSDictionary, NSError, NSNumber, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSData, NSDictionary, NSError, NSNumber, NSSize, NSString,
+};
 use objc2_web_kit::{WKContentWorld, WKSnapshotConfiguration};
 use wry::WebViewExtMacOS;
 use zephium_core::ids::ItemId;
@@ -31,34 +33,52 @@ const FIRST_FRAME: &str = "await new Promise(resolve => { const settle = () => r
 // until the document has parsed and painted twice, within a short bound.
 const MAX_RESTORE_COVER_TIME: Duration = Duration::from_millis(1500);
 const RESTORED_FRAME: &str = "if (document.readyState === 'loading') await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once: true})); await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))); return true;";
-const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 2 * 1024 * 1024;
+const SNAPSHOT_QUALITY: f64 = 0.7;
 
-/// The last frame of a tab about to be discarded, JPEG-compressed at half
-/// resolution. Volatile: never written to disk or IPC, and painted only over
-/// the same tab while its restored history reloads.
-pub(crate) struct PageSnapshot(Retained<NSData>);
+/// The last frame of a page, JPEG-compressed at the display's resolution.
+/// Volatile: never written to disk or IPC, and painted only over the same
+/// page while it reloads or repaints, at the size it was taken.
+pub(crate) struct PageSnapshot {
+    data: Retained<NSData>,
+    size: NSSize,
+    scale: f64,
+}
 
 impl PageSnapshot {
     pub(crate) fn bytes(&self) -> usize {
-        self.0.len()
+        self.data.len()
+    }
+
+    /// A frame drawn at another size or backing scale would scale or crop
+    /// the page.
+    pub(crate) fn fits(&self, size: NSSize, scale: Option<f64>) -> bool {
+        same_frame((self.size, self.scale), size, scale)
     }
 
     /// Returns false when no completion will be delivered.
     pub(crate) fn capture(view: &wry::WebView, done: impl FnOnce(Option<Self>) + 'static) -> bool {
+        Self::capture_page(&view.webview(), done)
+    }
+
+    /// As `capture`, for a page the caller holds as its WebKit view.
+    pub(crate) fn capture_page(
+        page: &objc2_web_kit::WKWebView,
+        done: impl FnOnce(Option<Self>) + 'static,
+    ) -> bool {
         let Some(mtm) = MainThreadMarker::new() else {
             return false;
         };
-        let page = view.webview();
         let bounds = page.bounds();
         if !(bounds.size.width >= 2.0 && bounds.size.height >= 2.0) {
             return false;
         }
-        // SAFETY: main-thread WebKit object creation and configuration.
+        let size = bounds.size;
+        // SAFETY: main-thread WebKit object creation and configuration. With
+        // no snapshot width, WebKit draws the rect at the backing scale.
         let configuration = unsafe { WKSnapshotConfiguration::new(mtm) };
-        let width = NSNumber::new_f64((bounds.size.width / 2.0).round());
         unsafe {
             configuration.setRect(bounds);
-            configuration.setSnapshotWidth(Some(&width));
             configuration.setAfterScreenUpdates(false);
         }
         let pending = RefCell::new(Some(done));
@@ -70,7 +90,7 @@ impl PageSnapshot {
                 .then(|| {
                     objc2::exception::catch(AssertUnwindSafe(|| {
                         // SAFETY: WebKit keeps a non-null image valid for the callback.
-                        encode(unsafe { &*image })
+                        encode(unsafe { &*image }, size)
                     }))
                     .ok()
                     .flatten()
@@ -85,18 +105,28 @@ impl PageSnapshot {
         .is_ok()
     }
 
-    fn image(&self) -> Option<Retained<CGImage>> {
-        let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &self.0)?;
+    pub(crate) fn image(&self) -> Option<Retained<CGImage>> {
+        let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &self.data)?;
         rep.CGImage()
     }
 }
 
-fn encode(image: &NSImage) -> Option<PageSnapshot> {
+/// Equal only when the frame would land on the same device pixels.
+fn same_frame(taken: (NSSize, f64), size: NSSize, scale: Option<f64>) -> bool {
+    let pixels =
+        |size: NSSize, scale: f64| ((size.width * scale).round(), (size.height * scale).round());
+    scale.is_some_and(|scale| {
+        (taken.1 - scale).abs() < 0.01 && pixels(taken.0, taken.1) == pixels(size, scale)
+    })
+}
+
+fn encode(image: &NSImage, size: NSSize) -> Option<PageSnapshot> {
     // SAFETY: AppKit accepts a null proposed rectangle; nothing is retained.
     let cg =
         unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }?;
+    let scale = CGImage::width(Some(&cg)) as f64 / size.width;
     let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), &cg);
-    let quality = NSNumber::new_f64(0.6);
+    let quality = NSNumber::new_f64(SNAPSHOT_QUALITY);
     // SAFETY: the key is an immutable AppKit constant.
     let properties = NSDictionary::from_slices(
         &[unsafe { NSImageCompressionFactor }],
@@ -105,7 +135,11 @@ fn encode(image: &NSImage) -> Option<PageSnapshot> {
     let data = unsafe {
         rep.representationUsingType_properties(NSBitmapImageFileType::JPEG, &properties)
     }?;
-    (!data.is_empty() && data.len() <= MAX_SNAPSHOT_BYTES).then_some(PageSnapshot(data))
+    (!data.is_empty() && data.len() <= MAX_SNAPSHOT_BYTES).then_some(PageSnapshot {
+        data,
+        size,
+        scale,
+    })
 }
 
 struct State {
@@ -144,9 +178,8 @@ impl PaintCover {
         let token = NEXT_TOKEN
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .ok()?;
-        let image = snapshot.as_ref().and_then(PageSnapshot::image);
         let stages: Vec<_> = stages
-            .filter(|stage| stage.cover(id, token, image.as_deref()))
+            .filter(|stage| stage.cover(id, token, snapshot.as_ref()))
             .map(|stage| Weak::from_retained(&stage))
             .collect();
         if stages.is_empty() {
@@ -160,7 +193,7 @@ impl PaintCover {
             timeout: RefCell::new(None),
         });
         let timeout_state = MainThreadBound::new(state.clone(), mtm);
-        let (limit, script) = if image.is_some() {
+        let (limit, script) = if snapshot.is_some() {
             (MAX_RESTORE_COVER_TIME, RESTORED_FRAME)
         } else {
             (MAX_COVER_TIME, FIRST_FRAME)
@@ -204,5 +237,24 @@ impl PaintCover {
 impl Drop for PaintCover {
     fn drop(&mut self) {
         self.0.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_fits_only_the_size_and_scale_it_was_taken_at() {
+        let size = NSSize::new(1280.0, 800.0);
+        let taken = (size, 2.0);
+        assert!(same_frame(taken, NSSize::new(1280.2, 799.8), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1280.5, 800.0), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1000.0, 800.0), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(1280.0, 760.0), Some(2.0)));
+        assert!(!same_frame(taken, NSSize::new(640.0, 400.0), Some(2.0)));
+        assert!(!same_frame(taken, size, Some(1.0)));
+        assert!(!same_frame((size, 1.0), size, Some(2.0)));
+        assert!(!same_frame(taken, size, None));
     }
 }

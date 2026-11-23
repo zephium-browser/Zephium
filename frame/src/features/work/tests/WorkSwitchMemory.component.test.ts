@@ -37,7 +37,8 @@ const native = vi.hoisted(() => ({
   unmocked: new Set<string>(),
   minted: 0,
 }));
-vi.mock("$shared/ipc/bindings", () => {
+vi.mock("$shared/ipc/bindings", async () => {
+  const { composerCall } = await import("./composer-fixtures");
   const reply = (profile: string, body: unknown) => ({ version: 1, profile, reply: body });
   const known: Record<string, (...args: never[]) => Promise<unknown>> = {
     faviconProbe: async () => true,
@@ -160,6 +161,7 @@ vi.mock("$shared/ipc/bindings", () => {
       return reply(profile, { kind: "error", error: "not_found" });
     },
   };
+  known.workCall = composerCall(known.workCall as Parameters<typeof composerCall>[0]);
   return {
     commands: new Proxy(known, {
       get(target, key) {
