@@ -150,6 +150,7 @@ impl Mini {
             request_id: "one".into(),
             profile_id: window.profile.to_string(),
             space_id: window.space.to_string(),
+            plain: None,
         };
         self.shell.handle(Command::SearchScoped {
             mini: new_mini,
@@ -181,6 +182,7 @@ impl Mini {
             request_id: "one".into(),
             profile_id: window.profile.to_string(),
             space_id: window.space.to_string(),
+            plain: None,
         };
         self.shell.handle(Command::SearchScoped {
             mini,

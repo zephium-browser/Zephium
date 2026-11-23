@@ -1,6 +1,7 @@
 use zephium_core::ids::ItemId;
 use zephium_core::ports::engine::{
-    EngineEvent, FindRequest, HistoryEntries, HistoryRequestId, ZoomRequestId,
+    DocumentReadId, EngineEvent, FindRequest, HistoryEntries, HistoryRequestId, PageHtml,
+    ZoomRequestId,
 };
 
 use super::scripts::{EXTRACT_HTML_JS, MAX_HTML_CHARS, MAX_HTML_RESULT_BYTES};
@@ -113,6 +114,40 @@ impl EngineHost {
                     EngineEvent::HtmlExtracted {
                         id,
                         html,
+                        truncated,
+                    },
+                );
+            }
+        });
+    }
+
+    /// Reads the committed document for the shell. Nothing is reported when
+    /// the view has since left that document, so a read never pairs one
+    /// address with another page's markup.
+    pub(crate) fn read_document(&self, id: ItemId, read: DocumentReadId) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        let Some((epoch, url)) = view.navigation.committed_snapshot() else {
+            return;
+        };
+        let (sink, permit, navigation) = (
+            self.sink.clone(),
+            view.event_permit.clone(),
+            view.navigation.clone(),
+        );
+        self.read_html(id, move |html| {
+            let Some((html, truncated)) = html else {
+                return;
+            };
+            if navigation.matches_committed_snapshot(epoch, &url) {
+                permit.emit(
+                    &sink,
+                    EngineEvent::DocumentRead {
+                        id,
+                        read,
+                        url,
+                        html: PageHtml(html),
                         truncated,
                     },
                 );

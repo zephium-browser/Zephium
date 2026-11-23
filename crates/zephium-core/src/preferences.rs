@@ -70,6 +70,7 @@ pub const KEYS: &[&str] = &[
     "work.favourite-models",
     "zoom.default",
     "privacy.smartscreen",
+    "home.mode",
 ];
 
 /// SmartScreen ships on. Only an explicit persisted false disables the
@@ -275,6 +276,7 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         "network.proxy-address" => value.is_empty() || crate::proxy::parse_address(value).is_some(),
         "tabs.home" => value.is_empty() || home_page(value).is_some(),
         "tabs.new-page" => value.is_empty() || new_tab_page(value).is_some(),
+        "home.mode" => crate::home::HomeMode::from_setting(value).is_some(),
         // Native writes `pending` on a fresh install; chrome only ever
         // finishes it, or asks for it again to replay.
         "onboarding" => matches!(value, "pending" | "done"),
@@ -387,6 +389,16 @@ mod tests {
             &"a".repeat(65),
         ] {
             assert!(!value_allowed("ui.newtab-image", value));
+        }
+    }
+
+    #[test]
+    fn home_mode_is_one_of_two_closed_choices() {
+        assert!(KEYS.contains(&"home.mode"));
+        assert!(value_allowed("home.mode", "home"));
+        assert!(value_allowed("home.mode", "classic"));
+        for refused in ["", "Home", "new-tab", "home "] {
+            assert!(!value_allowed("home.mode", refused));
         }
     }
 

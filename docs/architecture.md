@@ -45,7 +45,7 @@ These groups locate work; they do not define a dependency graph.
 | Provider and decision services | `zephium-agent-provider-transport`, `zephium-agent-model-catalog`, `zephium-decision` |
 | Account and credentials | `zephium-account`, `zephium-credentials` |
 | Sidebar assistance and voice | `zephium-page-assist`, `zephium-voice`, desktop adapters |
-| Search map | `zephium-map` (pure logic, depends only on `zephium-core`), `zephium-public-fetch` (anonymous public reads and the public-address guard) |
+| Search map | `zephium-map` (pure logic, depends only on `zephium-core`), `zephium-map-driver` (runs one map), `zephium-public-fetch` (anonymous public reads and the public-address guard), `desktop/src/home.rs` (hosts Home's maps) |
 | External protocol integration | `zephium-mcp` |
 | Development and qualification | `xtask`, `scripts/`, `zephium-terra-macos-probe` |
 
@@ -158,6 +158,14 @@ The launcher combines a trusted interface with native activation and focus.
 desktop command handlers and the application own search/action dispatch.
 Frontend selection or a result label must not become arbitrary command, path,
 or navigation authority. Use validated targets and the command registry.
+
+Home (`home.mode`) is the space's untouched new tab. `zephium-app/src/shell/home.rs`
+owns the searches asked from its field, the tabs opened from them and the
+background tab a map's results page loads in; `zephium-core::home` owns their
+types and bounds. `desktop/src/home.rs` owns each running map, folds its changes
+for snapshots, resolves the pages it offers and keeps those addresses natively.
+The frame receives map changes and records without addresses and asks for pages
+by row; neither crate below the desktop depends on the map crates.
 
 Launcher appearance follows application preferences; keyboard capture,
 activation, dismissal, and return of focus require native coordination.

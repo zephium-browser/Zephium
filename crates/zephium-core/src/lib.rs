@@ -13,6 +13,8 @@ pub mod export;
 pub mod extension_data;
 pub mod extensions;
 pub mod geometry;
+/// Searches asked from Home and where the pages opened from them came from.
+pub mod home;
 pub mod http_auth;
 pub mod icon;
 pub mod ids;

@@ -509,6 +509,8 @@ impl Shell {
     ) -> TabView {
         let mut view = tab_view(id, tab, icon, self.next_projection_revision());
         view.zoom = self.zoom_view(id, tab);
+        view.home = self.is_home_tab(id);
+        view.search = self.home_tab_search(id);
         view.audio = (tab.audio.muted || tab.audio.shown()).then(|| zephium_ipc::TabAudioView {
             muted: tab.audio.muted,
             can_mute: self.engine.can_mute(),
@@ -874,5 +876,7 @@ fn tab_view(
         ),
         zoom: None,
         audio: None,
+        home: false,
+        search: None,
     }
 }

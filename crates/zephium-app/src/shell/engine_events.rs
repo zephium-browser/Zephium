@@ -571,6 +571,7 @@ impl Shell {
                 // URL was never changed optimistically, so a stale native
                 // rejection cannot roll chrome or persistence forward or back.
                 if self.items.navigation_failed(id, request) {
+                    self.home_results_failed(id);
                     self.project_tab(id);
                 }
             }
@@ -580,6 +581,7 @@ impl Shell {
                 url,
                 replaced_page,
             } => {
+                self.home_results_failed(id);
                 // A certificate refusal names its own address, which is where
                 // the way past it, if any, leads; so does a failure whose
                 // error document replaced the page.
@@ -662,6 +664,13 @@ impl Shell {
                 html,
                 truncated,
             } => self.on_html_extracted(id, html, truncated),
+            EngineEvent::DocumentRead {
+                id,
+                read,
+                url,
+                html,
+                truncated,
+            } => self.on_document_read(id, read, url, html, truncated),
             EngineEvent::HistoryEntries {
                 id,
                 request,
@@ -731,6 +740,7 @@ impl Shell {
                     self.favicon_load_completed(id);
                     self.warm_spare_after_load(id);
                     self.capture_loaded_tab_preview(id);
+                    self.home_results_loaded(id);
                 }
                 self.sync_extension_browser_surface_metadata(id);
             }
@@ -904,6 +914,7 @@ impl Shell {
             | EngineEvent::Crashed { id }
             | EngineEvent::Captured { id, .. }
             | EngineEvent::HtmlExtracted { id, .. }
+            | EngineEvent::DocumentRead { id, .. }
             | EngineEvent::HistoryEntries { id, .. }
             | EngineEvent::FindResult { id, .. }
             | EngineEvent::StoreButtonClicked { id, .. } => self.profile_of_item(*id),

@@ -1000,6 +1000,14 @@ impl Engine for FakeEngine {
         self.log(format!("extract {id}"));
         self.native_admission()
     }
+    fn read_document(
+        &self,
+        id: ItemId,
+        read: zephium_core::ports::engine::DocumentReadId,
+    ) -> NativeDispatch {
+        self.log(format!("read {id} {}", read.0));
+        self.native_admission()
+    }
     fn save_page(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("save {id}"));
         self.native_admission()
@@ -2357,6 +2365,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         | Projection::Mini(_)
         | Projection::MiniClosed(_)
         | Projection::ExternalTabsOpened => {}
+        Projection::HomeChanged { .. } | Projection::HomeShow { .. } => {}
     }
 }
 
@@ -2689,6 +2698,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod home;
 mod lookup;
 mod media;
 mod mini;

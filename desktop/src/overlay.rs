@@ -45,6 +45,7 @@ impl ContextCache {
             space_id: owner.space,
             session_id: format!("newtab:{tab_id}:{session}"),
             request_id: String::new(),
+            plain: None,
         })
     }
 }

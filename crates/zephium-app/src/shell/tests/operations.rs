@@ -1031,6 +1031,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         request_id: "one".into(),
         profile_id: window.profile.to_string(),
         space_id: window.space.to_string(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -1073,6 +1074,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
         request_id: "one".into(),
         profile_id: window.profile.to_string(),
         space_id: window.space.to_string(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -1119,6 +1121,7 @@ fn an_address_chosen_while_editing_replaces_the_page_in_front() {
         request_id: "one".into(),
         profile_id: window.profile.to_string(),
         space_id: window.space.to_string(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,

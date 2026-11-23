@@ -255,7 +255,11 @@ impl Shell {
         new_mini: bool,
     ) -> OperationDisposition {
         if !self.search_context_current(&context)
-            || self.search.context.as_ref() != Some(&context)
+            || !self
+                .search
+                .context
+                .as_ref()
+                .is_some_and(|current| current.same_search(&context))
             || !self
                 .search
                 .results
@@ -264,6 +268,7 @@ impl Shell {
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        let mut asked: Option<Option<String>> = None;
         if let SearchAction::OpenUrl { url } = &action {
             if let Some(result) = self
                 .search
@@ -278,6 +283,11 @@ impl Shell {
                     Some(parsed.query.as_ref())
                 } else {
                     None
+                };
+                asked = match (query, result.kind.as_str()) {
+                    (Some(query), _) => Some(Some(query.to_owned())),
+                    (None, "url" | "history" | "search_history") => Some(None),
+                    _ => None,
                 };
                 if let Some(query) = query {
                     if let Some(profile) = ProfileId::parse(&context.profile_id) {
@@ -319,7 +329,7 @@ impl Shell {
                     .and_then(|value| value.split_once(':'))
                     .and_then(|(id, _)| ItemId::parse(id))
                 {
-                    self.operation_navigate(id, url)
+                    self.home_run(id, &context, asked, url)
                 } else if let Some(id) = replace
                     .as_deref()
                     .and_then(ItemId::parse)
@@ -350,6 +360,34 @@ impl Shell {
             }
             SearchAction::RunCommand { id } => self.operation_run_command(&id),
         }
+    }
+
+    /// A row run from New Tab's field: on Home, a search may stay there as a
+    /// map, and what it opens is remembered with the search.
+    fn home_run(
+        &mut self,
+        id: ItemId,
+        context: &zephium_ipc::SearchContext,
+        asked: Option<Option<String>>,
+        url: String,
+    ) -> OperationDisposition {
+        if !self.is_home_tab(id) {
+            return self.operation_navigate(id, url);
+        }
+        if let Some(Some(query)) = &asked {
+            if let Some(stayed) = self.home_try_map(context, query, &url) {
+                return stayed;
+            }
+        }
+        let opened = self.operation_navigate(id, url.clone());
+        if opened.outcome != OperationOutcome::Rejected {
+            match &asked {
+                Some(Some(query)) => self.home_ran(id, super::home::HomeAsk::Search(query), &url),
+                Some(None) => self.home_ran(id, super::home::HomeAsk::Address, &url),
+                None => {}
+            }
+        }
+        opened
     }
 
     pub(super) fn search(&mut self, query: &str) {

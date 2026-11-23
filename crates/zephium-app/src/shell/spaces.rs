@@ -322,16 +322,19 @@ impl Shell {
                 |item| matches!(item.placement, Placement::Space { space, .. } if space == leaving),
             ) && self.is_untouched_new_tab(*id)
         });
+        self.home_left_space(leaving, blank.is_some());
         if let Some(window) = self.windows.focused_mut() {
             window.space = space;
             window.splits = None;
         }
         self.space_memory.last.insert(profile, space);
+        let home_returns = self.home_returns_to(profile, space);
         let returning = self
             .space_memory
             .left_at
             .get(&space)
             .copied()
+            .filter(|_| !home_returns)
             .filter(|id| Some(*id) != blank && self.item_in_scope(*id, profile, space))
             .or_else(|| {
                 self.space_roots(space)
@@ -350,6 +353,7 @@ impl Shell {
                     })
                     .next()
             });
+        let returning = returning.filter(|_| !home_returns);
         let effects = match returning {
             Some(id) => self.focus_tab(id),
             None => self.open_tab(),

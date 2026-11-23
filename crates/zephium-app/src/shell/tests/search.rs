@@ -314,6 +314,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         space_id: window.space.to_string(),
         session_id: format!("newtab:{id}:1"),
         request_id: "request-1".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -376,6 +377,7 @@ fn empty_local_scope_stays_pending_until_its_providers_finish() {
         space_id: window.space.to_string(),
         session_id: "panel-session".into(),
         request_id: "first".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -437,6 +439,7 @@ fn late_providers_extend_their_own_section_without_reordering_the_list() {
         space_id: window.space.to_string(),
         session_id: "panel-session".into(),
         request_id: "first".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -519,6 +522,7 @@ fn one_talkative_provider_cannot_starve_the_other_sections() {
         space_id: window.space.to_string(),
         session_id: "panel-session".into(),
         request_id: "first".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -571,6 +575,7 @@ fn new_tab_offers_places_to_go_and_leaves_commands_to_the_launcher() {
         space_id: window.space.to_string(),
         session_id: format!("newtab:{id}:1"),
         request_id: "request-1".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,
@@ -642,6 +647,7 @@ fn history_reaches_the_field_through_the_real_store_and_read_queue() {
         space_id: window.space.to_string(),
         session_id: format!("newtab:{id}:1"),
         request_id: "request-1".into(),
+        plain: None,
     };
     shell.handle(Command::SearchScoped {
         mini: false,

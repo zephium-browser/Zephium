@@ -1025,6 +1025,12 @@ pub trait Engine {
     fn capture(&self, id: ItemId) -> NativeDispatch;
     /// Result arrives as `EngineEvent::HtmlExtracted`.
     fn extract_html(&self, id: ItemId) -> NativeDispatch;
+    /// Reads the committed document of `id` for the shell itself, never for
+    /// display. The result arrives as `EngineEvent::DocumentRead` only when
+    /// the same document is still committed once the read returns.
+    fn read_document(&self, _id: ItemId, _read: DocumentReadId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// Saves the page in front through the engine's own Save As: the web
     /// engine's dialog on Windows, a save panel offering a web archive or the
     /// page's source on macOS. Only a page a person reads is ever saved, and
@@ -1368,6 +1374,21 @@ pub trait Engine {
 /// request and all use the same authoritative `UrlChanged` path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NavigationRequestId(pub u64);
+
+/// Process-local correlation identity for one shell read of a document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DocumentReadId(pub u64);
+
+/// A page's markup. Its `Debug` names only its length, so no page text reaches
+/// a log through an event.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PageHtml(pub String);
+
+impl std::fmt::Debug for PageHtml {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PageHtml({} bytes)", self.0.len())
+    }
+}
 
 /// Process-local correlation identity for one native page-zoom request.
 ///
@@ -2032,6 +2053,14 @@ pub enum EngineEvent {
     HtmlExtracted {
         id: ItemId,
         html: String,
+        truncated: bool,
+    },
+    /// The document `read` asked for, with the address it was committed at.
+    DocumentRead {
+        id: ItemId,
+        read: DocumentReadId,
+        url: String,
+        html: PageHtml,
         truncated: bool,
     },
     /// Where a find in `id` landed. `query` names the search it answers, so a

@@ -20,6 +20,9 @@ import type {
   ExtensionActionShortcut,
   ExtensionActionsChanged,
   FindResultView,
+  HomeChangedV1,
+  HomeMapChangedV1,
+  HomeShowV1,
   ImportJobView,
   ItemsChanged,
   KeymapChanged,
@@ -103,6 +106,9 @@ export const nativeEventNames = {
   voiceLevels: "zephium:voice-levels",
   swipeScroll: "zephium:swipe",
   profilesChanged: "zephium:profiles",
+  homeMapChanged: "zephium:home-map-changed",
+  homeChanged: "zephium:home-changed",
+  homeShow: "zephium:home-show",
 } as const;
 
 export const events = {
@@ -120,6 +126,9 @@ export const events = {
   accountChanged: scopedEvent<AccountChanged>(nativeEventNames.accountChanged),
   favicons: scopedEvent<FaviconsView>(nativeEventNames.favicons),
   noteOpenRequested: scopedEvent<NoteOpenRequested>(nativeEventNames.noteOpenRequested),
+  homeMapChanged: scopedEvent<HomeMapChangedV1>(nativeEventNames.homeMapChanged),
+  homeChanged: scopedEvent<HomeChangedV1>(nativeEventNames.homeChanged),
+  homeShow: scopedEvent<HomeShowV1>(nativeEventNames.homeShow),
   resourceClose: scopedEvent<string>(nativeEventNames.resourceClose),
   resourceCloseCancelled: scopedEvent<string>(nativeEventNames.resourceCloseCancelled),
   resourceChanged: scopedEvent<ResourceChanged>(nativeEventNames.resourceChanged),

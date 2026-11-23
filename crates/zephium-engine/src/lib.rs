@@ -615,9 +615,10 @@ use zephium_core::geometry::Rect;
 use zephium_core::ids::{ItemId, ProfileId, WindowId};
 use zephium_core::permissions::{PagePermissionRequestId, PagePermissionRequestSettlement};
 use zephium_core::ports::engine::{
-    ContentScope, DiscardProbeId, Engine, EngineEvent, HistoryRequestId, NativeDispatch,
-    NavigationPresentationId, NavigationRequestId, Partition, ProfileDataErasureOutcome, Shortcut,
-    StageMotion, UserContent, UserContentGeneration, ZoomRequestId,
+    ContentScope, DiscardProbeId, DocumentReadId, Engine, EngineEvent, HistoryRequestId,
+    NativeDispatch, NavigationPresentationId, NavigationRequestId, Partition,
+    ProfileDataErasureOutcome, Shortcut, StageMotion, UserContent, UserContentGeneration,
+    ZoomRequestId,
 };
 use zephium_core::runtime_security::RuntimeSecurityAdvisories;
 use zephium_core::split::Pane;
@@ -1215,6 +1216,7 @@ impl RetirementGate {
             | event @ EngineEvent::DownloadRequested { id, .. }
             | event @ EngineEvent::Captured { id, .. }
             | event @ EngineEvent::HtmlExtracted { id, .. }
+            | event @ EngineEvent::DocumentRead { id, .. }
             | event @ EngineEvent::FindResult { id, .. }
             | event @ EngineEvent::StoreButtonClicked { id, .. }
             | event @ EngineEvent::ShortcutPressed { item: id, .. } => item_token
@@ -3576,6 +3578,10 @@ impl Engine for WebviewEngine {
         self.run_for_active_item(id, move |h| h.extract_html(id))
     }
 
+    fn read_document(&self, id: ItemId, read: DocumentReadId) -> NativeDispatch {
+        self.run_for_active_item(id, move |h| h.read_document(id, read))
+    }
+
     fn save_page(&self, id: ItemId) -> NativeDispatch {
         self.run_for_active_item(id, move |h| h.save_page(id))
     }
@@ -5136,6 +5142,13 @@ mod tests {
             EngineEvent::HtmlExtracted {
                 id,
                 html: "<p>late</p>".into(),
+                truncated: false,
+            },
+            EngineEvent::DocumentRead {
+                id,
+                read: DocumentReadId(1),
+                url: "https://late.invalid/".into(),
+                html: zephium_core::ports::engine::PageHtml("<p>late</p>".into()),
                 truncated: false,
             },
             EngineEvent::SplitChanged {

@@ -912,6 +912,7 @@ fn the_launcher_is_sent_its_icons_again_only_after_its_page_loads_afresh() {
                 space_id: space.to_string(),
                 session_id: session.into(),
                 request_id: session.into(),
+                plain: None,
             }),
         });
         shell.want_icons(

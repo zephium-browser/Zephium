@@ -200,6 +200,7 @@ impl Model {
             request_id: request_id.into(),
             profile_id: owner.profile.clone(),
             space_id: owner.space.clone(),
+            plain: None,
         })
     }
     pub fn admits(&self, context: &SearchContext) -> bool {

@@ -21,6 +21,26 @@ pub use site::MAX_HOST_BYTES;
 pub const MAX_ROWS: usize = 2 * MAX_SECTIONS;
 pub const ID_BYTES: usize = 16;
 
+pub type Role = MapRole;
+pub type Network = MapNetwork;
+pub type Tier = MapTier;
+pub type Confidence = MapConfidence;
+pub type StartRefusal = MapStartRefusal;
+pub type OpenRefusal = MapOpenRefusal;
+pub type Failure = MapFailure;
+pub type Read = MapRead;
+pub type Official = MapOfficial;
+pub type AlsoKind = MapAlsoKind;
+pub type Also = MapAlso;
+pub type Entry = MapEntry;
+pub type Notes = MapNotes;
+pub type Place = MapPlace;
+pub type Row = MapRow;
+pub type Outcome = MapOutcome;
+pub type OpenResult = MapOpenResult;
+pub type Change = MapChange;
+pub type Target = MapTarget;
+
 macro_rules! mirror {
     ($name:ident from $engine:path { $($variant:ident),+ $(,)? }) => {
         #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,22 +59,22 @@ macro_rules! mirror {
     };
 }
 
-mirror!(Role from SectionRole {
+mirror!(MapRole from SectionRole {
     News, Product, Features, Solutions, Enterprise, Customers, Community, Security, Legal,
     Contact, SignUp, Learn, Examples, Playground, Integrations, Home, Pricing, Documentation,
     Api, Reference, Changelog, Releases, Status, Download, Install, Login, Blog, About, Careers,
     Support,
 });
-mirror!(Network from results::Network {
+mirror!(MapNetwork from results::Network {
     Twitter, GitHub, YouTube, LinkedIn, Discord, Reddit, Mastodon, Bluesky, Instagram, Facebook,
 });
-mirror!(Tier from site::Tier { Primary, Secondary, Action });
-mirror!(Confidence from query::Confidence { Low, High });
+mirror!(MapTier from site::Tier { Primary, Secondary, Action });
+mirror!(MapConfidence from query::Confidence { Low, High });
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
-pub enum StartRefusal {
+pub enum MapStartRefusal {
     NotAMap,
     UnsupportedEngine,
     Invalid,
@@ -63,7 +83,7 @@ pub enum StartRefusal {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
-pub enum OpenRefusal {
+pub enum MapOpenRefusal {
     NoPlace,
     UnknownEntry,
     NotOpenable,
@@ -83,7 +103,7 @@ impl From<session::OpenRefusal> for OpenRefusal {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
-pub enum Failure {
+pub enum MapFailure {
     Cancelled,
     Blocked,
     Challenge,
@@ -117,7 +137,7 @@ impl From<session::Failure> for Failure {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
-pub enum Read {
+pub enum MapRead {
     Queued,
     Read,
     Refused,
@@ -137,7 +157,7 @@ impl From<ReadState> for Read {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Official {
+pub struct MapOfficial {
     pub title: String,
     pub site: String,
 }
@@ -145,7 +165,7 @@ pub struct Official {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
-pub enum AlsoKind {
+pub enum MapAlsoKind {
     Page,
     Discussion,
     Video,
@@ -153,7 +173,7 @@ pub enum AlsoKind {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Also {
+pub struct MapAlso {
     pub title: String,
     pub host: String,
     pub kind: AlsoKind,
@@ -161,7 +181,7 @@ pub struct Also {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Entry {
+pub struct MapEntry {
     pub id: String,
     pub tier: Tier,
     pub label: String,
@@ -184,7 +204,7 @@ pub struct Entry {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Notes {
+pub struct MapNotes {
     #[serde(default)]
     pub thin: bool,
     pub shell: bool,
@@ -195,7 +215,7 @@ pub struct Notes {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Place {
+pub struct MapPlace {
     pub title: String,
     pub site: String,
     pub host: String,
@@ -207,7 +227,7 @@ pub struct Place {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
-pub struct Row {
+pub struct MapRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
     pub label: String,
@@ -220,7 +240,7 @@ pub struct Row {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Outcome {
+pub enum MapOutcome {
     Done,
     Cancelled,
     Failed { failure: Failure },
@@ -241,7 +261,7 @@ impl From<session::EndOutcome> for Outcome {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OpenResult {
+pub enum MapOpenResult {
     Read,
     Refused { failure: Failure },
 }
@@ -249,7 +269,7 @@ pub enum OpenResult {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Change {
+pub enum MapChange {
     FirstLayer {
         seq: u32,
         official: Option<Official>,
@@ -303,7 +323,7 @@ impl Change {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Target {
+pub enum MapTarget {
     Entry { id: String },
     Site,
     Social { network: Network },
@@ -333,7 +353,8 @@ impl Targets {
     }
 }
 
-pub(crate) fn text(raw: &str) -> String {
+/// Page text as the wire shows it: cleaned, one line, at most `MAX_TEXT_BYTES`.
+pub fn text(raw: &str) -> String {
     let mut out = String::new();
     let mut space = false;
     for c in zephium_map::clean_text(raw).chars() {
@@ -362,7 +383,8 @@ fn address_shaped(text: &str) -> bool {
         })
 }
 
-fn shown(raw: &str) -> Option<String> {
+/// `text`, or nothing when that is empty or reads as an address.
+pub fn shown(raw: &str) -> Option<String> {
     let text = text(raw);
     (!text.is_empty() && !address_shaped(&text)).then_some(text)
 }

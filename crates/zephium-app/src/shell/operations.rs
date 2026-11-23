@@ -67,6 +67,7 @@ impl Shell {
             Command::DropTab { id, x, y } => self.operation_drop_tab(id, x, y),
             Command::DividerRelease { x, y } => self.operation_divider_release(x.zip(y)),
             Command::Run(id) => self.operation_run_command(&id),
+            Command::Home(command) if command.is_intent() => self.home_intent(*command),
             Command::RunSearchAction {
                 context,
                 action,
@@ -160,6 +161,7 @@ impl Shell {
         if !self.items.move_tab_to_root(id, placement, before) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         }
+        self.home_tab_moved(id);
         mutation_result(self.commit(Vec::new()))
     }
 
@@ -968,6 +970,9 @@ impl Shell {
             self.search.include_history = value == "true";
         }
         self.tab_preferences.apply(&key, &value);
+        if key == "home.mode" {
+            self.project_items();
+        }
         if self.proxy.apply(&key, &value) {
             let server = self.proxy.server();
             let enabled = server.is_some();

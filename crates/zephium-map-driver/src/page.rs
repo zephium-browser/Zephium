@@ -1,4 +1,5 @@
-use zephium_map::{session::Failure, Doc, DocLimits};
+use zephium_core::search::SearchEngine;
+use zephium_map::{read_query, read_results, session::Failure, Doc, DocLimits, ResultsRead, Wall};
 
 use crate::io::ResultsPage;
 
@@ -24,6 +25,23 @@ pub(crate) fn parse(page: &ResultsPage) -> Result<Doc, Failure> {
         DocLimits::RESULTS,
     )
     .map_err(|_| Failure::Unreadable)
+}
+
+/// The engine's page loaded but the map's own results reader finds nothing
+/// in it yet, no results and no wall: worth reading again once it has drawn.
+/// A page that says it has no results, or asks for consent, is final.
+pub fn awaits_results(page: &ResultsPage, engine: SearchEngine, query: &str) -> bool {
+    let Ok(query) = read_query(query) else {
+        return false;
+    };
+    parse(page).is_ok_and(|doc| {
+        matches!(
+            read_results(engine, None, &query, &doc),
+            ResultsRead::Wall {
+                wall: Wall::Unreadable
+            }
+        )
+    })
 }
 
 pub(crate) fn floor_boundary(text: &str, at: usize) -> usize {
@@ -195,6 +213,35 @@ fn script_end(bytes: &[u8], from: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn results(html: &str) -> ResultsPage {
+        ResultsPage {
+            html: html.to_owned(),
+            url: url::Url::parse("https://duckduckgo.com/?q=acme").unwrap(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn only_a_page_without_results_yet_awaits_them() {
+        let engine = SearchEngine::DuckDuckGo;
+        let drawn = "<main><article><h2><a href='https://acme.com/'>Acme workshop</a></h2></article></main>";
+        assert!(!awaits_results(&results(drawn), engine, "acme"));
+        assert!(awaits_results(&results("<main></main>"), engine, "acme"));
+        assert!(awaits_results(
+            &results("<main><script>render()</script></main>"),
+            engine,
+            "acme"
+        ));
+        assert!(!awaits_results(
+            &results("<main><p>No results found for acme.</p></main>"),
+            engine,
+            "acme"
+        ));
+        assert!(!awaits_results(&results("<main></main>"), engine, ""));
+        let over = "x".repeat(MAX_RESULTS_PAGE_BYTES + 1);
+        assert!(!awaits_results(&results(&over), engine, "acme"));
+    }
 
     #[test]
     fn script_and_style_contents_are_dropped_and_their_tags_kept() {

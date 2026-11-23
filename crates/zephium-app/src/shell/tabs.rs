@@ -93,6 +93,7 @@ pub(super) struct TabPreferences {
     pub(super) home: Option<String>,
     /// A regular new tab opens this page; none keeps the built-in page.
     pub(super) new_page: Option<url::Url>,
+    pub(super) home_mode: zephium_core::home::HomeMode,
 }
 
 impl Default for TabPreferences {
@@ -110,6 +111,7 @@ impl Default for TabPreferences {
             startup_pages: Vec::new(),
             home: None,
             new_page: None,
+            home_mode: zephium_core::home::DEFAULT_HOME_MODE,
         }
     }
 }
@@ -133,6 +135,7 @@ impl TabPreferences {
             "tabs.new-page",
             "tabs.external-position",
             "tabs.archive",
+            "home.mode",
         ] {
             if let Some(value) = store.app_setting(key) {
                 preferences.apply(key, &value);
@@ -161,6 +164,10 @@ impl TabPreferences {
                 self.startup_pages = zephium_core::preferences::startup_pages(value)
             }
             ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
+            ("home.mode", value) => {
+                self.home_mode = zephium_core::home::HomeMode::from_setting(value)
+                    .unwrap_or(zephium_core::home::DEFAULT_HOME_MODE);
+            }
             ("tabs.new-page", value) => {
                 self.new_page = zephium_core::preferences::new_tab_page(value)
                     .and_then(|page| url::Url::parse(&page).ok());
@@ -207,6 +214,9 @@ impl Shell {
     /// Apply the destination only to a new-tab intent, never to an intermediate
     /// tab allocated for a link, duplicate, extension page or explicit URL.
     pub(super) fn open_new_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        if let Some(home) = self.open_home_tab() {
+            return Some((home, self.focus_tab(home)));
+        }
         let (id, mut effects) = self.open_tab_with_id()?;
         if let Some(page) = self.tab_preferences.new_page.clone().filter(|_| {
             self.windows
@@ -342,11 +352,12 @@ impl Shell {
     }
 
     pub(super) fn close(&mut self, id: ItemId) -> NativeWork {
-        if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
+        if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) || self.home_stays(id) {
             return NativeWork::default();
         }
         // A stand-in New Tab leaves nothing worth reopening.
         let stand_in = self.is_new_tab_stand_in(id);
+        let origin = self.home_origin(id);
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
         self.forget_tab_media(id);
@@ -398,7 +409,11 @@ impl Shell {
             self.remember_closed(closed);
         }
         if was_active {
-            fx.extend(self.take_over(profile, space, pos));
+            let next = match self.home_take_over(origin, profile, space) {
+                Some(home) => home,
+                None => self.take_over(profile, space, pos),
+            };
+            fx.extend(next);
         }
         // Put back after the successor is chosen, so closing never refocuses
         // and reloads the Essential it just ended.
@@ -656,6 +671,7 @@ impl Shell {
             self.tab_previews.forget(item);
             self.new_tab_destinations.remove(&item);
             self.sources.retain(|held| held != item);
+            self.home_tab_removed(item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));
             }
@@ -943,6 +959,7 @@ impl Shell {
             .and_then(|index| siblings.get(index + 1))
             .copied();
         self.items.move_tab_to_root(child, placement, next);
+        self.home_link_opened(source, child);
         // Keep the source selected while the native response is unresolved.
         // A download never presents a document and therefore never selects
         // this transient tab or flashes the privileged New Tab surface.
@@ -1034,6 +1051,7 @@ impl Shell {
         ) {
             return;
         }
+        self.home_link_opened(source, id);
         let mut fx = self.focus_tab(id);
         fx.extend(self.items.navigate(id, url));
         self.commit(fx);

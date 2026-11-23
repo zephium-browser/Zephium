@@ -1261,6 +1261,14 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::WebExtensionStatus { reply, .. } => {
             let _ = reply.try_send(Vec::new());
         }
+        Command::Home(home) => match *home {
+            crate::home::HomeCommand::ReadResults { done, .. }
+            | crate::home::HomeCommand::ReadAgain { done, .. } => {
+                done.finish(Err(crate::home::ResultsRefusal::Unavailable))
+            }
+            crate::home::HomeCommand::Records { done } => done.finish(None),
+            _ => {}
+        },
         _ => {}
     }
 }
@@ -1269,6 +1277,9 @@ fn tracked_operation_command(command: &Command) -> bool {
     #[cfg(feature = "work-planning")]
     if matches!(command, Command::SetWorkScreenshots(_)) {
         return true;
+    }
+    if let Command::Home(home) = command {
+        return home.is_intent();
     }
     matches!(
         command,
