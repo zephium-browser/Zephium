@@ -293,6 +293,7 @@ impl Build<'_> {
         if !crate::key::same_page(doc.page(), self.sections[index].key.as_url())
             || doc.page().fragment().is_some()
         {
+            self.sections[index].localized = self.localized.contains(&key.page_match());
             self.sections[index].locator = element_locator(doc.page()).unwrap_or_default();
         }
         self.sections[index].key = key.clone();

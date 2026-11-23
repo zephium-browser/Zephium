@@ -6,8 +6,9 @@ use crate::{
     Reading,
 };
 use std::sync::atomic::AtomicUsize;
+use tokio::sync::oneshot;
 use zephium_map::{
-    session::{FetchResult, FETCH_TIMEOUT, MAX_ELAPSED},
+    session::{FetchResult, FETCH_TIMEOUT, LAST_START, MAX_ELAPSED},
     PlaceKey,
 };
 
@@ -34,6 +35,7 @@ struct Seen {
 
 struct Fake {
     results: Plan,
+    results_wait: Option<mpsc::Sender<oneshot::Sender<()>>>,
     pages: BTreeMap<String, Plan>,
     delay: Duration,
     seen: Mutex<Seen>,
@@ -47,6 +49,7 @@ impl Fake {
     fn new(results: Plan) -> Self {
         Self {
             results,
+            results_wait: None,
             pages: BTreeMap::new(),
             delay: Duration::from_millis(5),
             seen: Mutex::default(),
@@ -101,7 +104,13 @@ impl ResultsSource for Fake {
     fn load(&self, url: Url) -> Reading<Result<ResultsPage, Failure>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let plan = self.results.clone();
+        let wait = self.results_wait.clone();
         Box::pin(async move {
+            if let Some(wait) = wait {
+                let (deliver, delivery) = oneshot::channel();
+                wait.send(deliver).await.unwrap();
+                delivery.await.unwrap();
+            }
             match plan {
                 Plan::Page(_, html) => Ok(ResultsPage {
                     html,
@@ -441,7 +450,7 @@ async fn the_driver_refuses_reads_over_the_ceilings() {
         hosts: BTreeMap::new(),
         immediate: VecDeque::new(),
         seq: 0,
-        started: Duration::ZERO,
+        started: Some(Duration::ZERO),
         cancelled: watch::channel(false).1,
         cancelling: false,
         unsent: None,
@@ -534,10 +543,29 @@ async fn cancel_ends_once_and_starts_nothing_after() {
     checked(&changes, 1);
     assert_eq!(changes.len(), 1);
     assert_eq!(outcome(&changes).0, Outcome::Cancelled);
+    assert!(tokio::time::timeout(FETCH_TIMEOUT, rx.recv())
+        .await
+        .unwrap()
+        .is_none());
     tokio::time::sleep(Duration::from_secs(30)).await;
     assert_eq!(active(&fake), 0);
     assert_eq!(fake.seen().fetches.len(), fetched);
     driver.cancel();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_blocked_place_cannot_dispatch_a_fetch_after_the_deadline() {
+    for deadline in [zephium_map::session::LAST_START, MAX_ELAPSED] {
+        let fake = Arc::new(acme(Fake::new(html(RESULT))));
+        let (driver, mut rx) = stalled(&fake);
+        while driver.counts().bytes < NAV.len() as u64 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::advance(deadline).await;
+        let changes = rest(&mut rx).await;
+        assert_eq!(outcome(&changes).0, Outcome::Done);
+        assert_eq!(driver.counts().fetches, 2);
+    }
 }
 
 fn stalled(fake: &Arc<Fake>) -> (Driver, mpsc::Receiver<Change>) {
@@ -601,22 +629,110 @@ async fn dropping_the_driver_or_the_receiver_stops_reads_silently() {
     }
 }
 
+async fn waiting_for_results(
+    plan: Plan,
+) -> (
+    Arc<Fake>,
+    Driver,
+    mpsc::Receiver<Change>,
+    oneshot::Sender<()>,
+) {
+    let (wait, mut pending) = mpsc::channel(1);
+    let mut fake = acme(Fake::new(plan));
+    fake.results_wait = Some(wait);
+    let fake = Arc::new(fake);
+    let (driver, rx) = stalled(&fake);
+    let deliver = pending.recv().await.unwrap();
+    (fake, driver, rx, deliver)
+}
+
 #[tokio::test(start_paused = true)]
-async fn a_hanging_results_page_is_ended_by_the_elapsed_budget() {
-    let fake = Arc::new(Fake::new(Plan::Hang));
-    let (_driver, mut rx) = start(&fake, request("acme"));
+async fn delayed_results_leave_the_site_read_budget_intact() {
+    for pause in [LAST_START - Duration::from_secs(1), LAST_START, MAX_ELAPSED] {
+        let (_fake, driver, mut rx, deliver) = waiting_for_results(html(RESULT)).await;
+        tokio::time::advance(Duration::from_secs(11)).await;
+        deliver.send(()).unwrap();
+        // A full change buffer holds the first place before its follow-up reads.
+        tokio::time::timeout(FETCH_TIMEOUT, async {
+            while driver.counts().bytes < NAV.len() as u64 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the initial site reads should start after results delivery");
+        assert_eq!(driver.counts().fetches, 2);
+        tokio::time::advance(pause).await;
+        let changes = rest(&mut rx).await;
+        checked(&changes, 0);
+        let (result, elapsed_ms) = outcome(&changes);
+        assert_eq!(result, Outcome::Done);
+        assert!((pause..pause + TICK).contains(&Duration::from_millis(elapsed_ms.into())));
+        assert_eq!(driver.counts().fetches > 2, pause < LAST_START);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_late_results_failure_keeps_the_source_failure() {
+    let (fake, _driver, mut rx, deliver) = waiting_for_results(Plan::Fail(Failure::Consent)).await;
+    tokio::time::advance(MAX_ELAPSED * 2).await;
+    deliver.send(()).unwrap();
     let changes = rest(&mut rx).await;
     checked(&changes, 0);
-    let (outcome, elapsed) = outcome(&changes);
     assert_eq!(
-        outcome,
-        Outcome::Failed {
-            failure: WireFailure::Timeout
-        }
+        outcome(&changes),
+        (
+            Outcome::Failed {
+                failure: WireFailure::Consent
+            },
+            0
+        )
     );
-    let budget = MAX_ELAPSED.as_millis() as u32;
-    assert!((budget..=budget + TICK.as_millis() as u32).contains(&elapsed));
     assert!(fake.seen().fetches.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_results_page_that_never_arrives_ends_as_a_timeout() {
+    let (fake, _driver, mut rx, mut deliver) = waiting_for_results(html(RESULT)).await;
+    assert!(tokio::time::timeout(RESULTS_WAIT - TICK, rx.recv())
+        .await
+        .is_err());
+    let changes = rest(&mut rx).await;
+    checked(&changes, 0);
+    assert_eq!(
+        outcome(&changes),
+        (
+            Outcome::Failed {
+                failure: WireFailure::Timeout
+            },
+            0
+        )
+    );
+    tokio::time::timeout(TICK, deliver.closed()).await.unwrap();
+    assert!(fake.seen().fetches.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancel_or_drop_releases_a_pending_first_results_page() {
+    for cancel in [true, false] {
+        let (fake, driver, mut rx, mut deliver) = waiting_for_results(html(RESULT)).await;
+        assert!(tokio::time::timeout(MAX_ELAPSED * 2, rx.recv())
+            .await
+            .is_err());
+        if cancel {
+            driver.cancel();
+            driver.cancel();
+            let changes = rest(&mut rx).await;
+            assert_eq!(changes.len(), 1);
+            checked(&changes, 0);
+            assert_eq!(outcome(&changes), (Outcome::Cancelled, 0));
+        } else {
+            drop(driver);
+        }
+        assert_eq!(rx.recv().await, None);
+        tokio::time::timeout(TICK, deliver.closed()).await.unwrap();
+        assert!(fake.seen().fetches.is_empty());
+        assert_eq!(fake.memo_calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -811,6 +927,45 @@ async fn opens_wait_for_search_end_and_the_queue_refuses_at_capacity() {
             .count(),
         1
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_after_a_long_idle_gets_its_full_fetch_timeout() {
+    let fake =
+        Arc::new(acme(Fake::new(html(RESULT))).site("acme.com", &[("/pricing", Plan::Hang)]));
+    let (driver, mut rx) = start(&fake, request("acme"));
+    let changes = rest(&mut rx).await;
+    let Some(Change::Place { place, .. }) = last_for(&changes, 0) else {
+        panic!("expected place");
+    };
+    let id = &place
+        .sections
+        .iter()
+        .find(|entry| entry.label == "Pricing")
+        .unwrap()
+        .id;
+    tokio::time::advance(MAX_ELAPSED * 2).await;
+    let opened = fake.clock.now();
+    driver.open(0, id).unwrap();
+    assert!(matches!(
+        rx.recv().await,
+        Some(Change::Place { complete: true, .. })
+    ));
+    assert!(matches!(
+        rx.recv().await,
+        Some(Change::Opened {
+            result: OpenResult::Refused {
+                failure: WireFailure::Timeout
+            },
+            ..
+        })
+    ));
+    assert!(fake
+        .seen()
+        .fetches
+        .iter()
+        .any(|path| path == "acme.com/pricing"));
+    assert_eq!(fake.clock.now() - opened, FETCH_TIMEOUT);
 }
 
 #[tokio::test(start_paused = true)]

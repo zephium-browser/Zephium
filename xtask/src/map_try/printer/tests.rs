@@ -43,6 +43,27 @@ fn changed(slot: u8, place: Place, complete: bool) -> Change {
 }
 
 #[test]
+fn comparison_sides_disambiguate_an_open_label() {
+    let mut printer = Printer::default();
+    for (slot, id) in [(0, "first"), (1, "second")] {
+        let mut rows = vec![entry(id, "Pricing", "/pricing")];
+        if slot == 1 {
+            rows.push(entry("docs", "Docs", "/docs"));
+        }
+        printer.lines(
+            &changed(slot, place("Site", "example.com", rows), true),
+            Duration::ZERO,
+            Counts::default(),
+        );
+    }
+    assert_eq!(printer.section("Pricing"), Err("ambiguous label"));
+    assert_eq!(printer.section("left::Pricing"), Ok((0, "first")));
+    assert_eq!(printer.section("right::Pricing"), Ok((1, "second")));
+    assert_eq!(printer.section("Docs"), Ok((1, "docs")));
+    assert_eq!(printer.section("left::Docs"), Err("unknown label"));
+}
+
+#[test]
 fn place_stream_golden() {
     let first = Change::FirstLayer {
         seq: 0,

@@ -5,7 +5,7 @@ impl Session {
         let Work::Section(i, key) = &job.work else {
             return None;
         };
-        let state = self.sites[*i].as_ref()?;
+        let state = self.sites.get(*i)?.as_ref()?;
         if self.cfg.sections == Sections::All {
             return state
                 .eager
@@ -64,11 +64,7 @@ impl Session {
                 .iter()
                 .filter_map(|job| self.section_rank(job))
                 .min();
-            let received = self
-                .stats
-                .phases
-                .values()
-                .fold(0u64, |bytes, phase| bytes.saturating_add(phase.bytes));
+            let received = self.received_bytes();
             let mut progressed = false;
             for _ in 0..self.queue.len() {
                 let Some(job) = self.queue.pop_front() else {
@@ -85,10 +81,20 @@ impl Session {
                 let host = origin(&job.url);
                 let hostname = job.url.host_str().unwrap_or_default();
                 let phase = job.work.phase();
+                let landing_policy = job.work == Work::Robots;
+                if landing_policy && self.robots.contains_key(&host) {
+                    self.resolve_landings(&host, out);
+                    progressed = true;
+                    continue;
+                }
                 let blocked = if received >= self.cfg.total_bytes
                     && matches!(
                         job.work,
-                        Work::Section(..) | Work::Sitemap(_) | Work::Llms(_) | Work::Passage(_)
+                        Work::Robots
+                            | Work::Section(..)
+                            | Work::Sitemap(_)
+                            | Work::Llms(_)
+                            | Work::Passage(_)
                     ) {
                     Some(Budget::TotalBytes)
                 } else if self.started >= self.cfg.fetches {
@@ -127,6 +133,15 @@ impl Session {
                 if busy >= self.cfg.host_concurrent as usize {
                     self.queue.push_back(job);
                     continue;
+                }
+                if landing_policy {
+                    if active.iter().any(|(h, robots)| h == &host && *robots) {
+                        self.queue.push_back(job);
+                        continue;
+                    }
+                    self.start_job(job, out);
+                    progressed = true;
+                    break;
                 }
                 if let Some(policy) = self.robots.get(&host) {
                     if !policy.allows(&job.url[Position::BeforePath..Position::AfterQuery]) {
@@ -200,6 +215,10 @@ impl Session {
         }
     }
     pub(super) fn set_read(&mut self, job: &Job, read: ReadState, out: &mut Vec<Effect>) {
+        if job.work == Work::Robots {
+            self.resolve_landings(&origin(&job.url), out);
+            return;
+        }
         if let Some(open) = &mut self.opening {
             if matches!(job.work, Work::Section(..)) {
                 let failure = match read {
@@ -210,7 +229,10 @@ impl Session {
                     _ => Failure::Limit,
                 };
                 let place = &mut open.held.payload.place;
-                place.sections[open.index].read = Some(ReadState::Refused { failure });
+                place.sections[open.index].read = Some(match read {
+                    ReadState::Skipped { budget } if budget != Budget::Elapsed => read,
+                    _ => ReadState::Refused { failure },
+                });
                 place.notes.robots_disallowed |= failure == Failure::Robots;
                 place.notes.truncated |= failure == Failure::Limit;
                 self.stats
@@ -274,9 +296,15 @@ impl Session {
         } else {
             Effect::Fetch {
                 id,
-                url,
                 expect,
-                max_bytes: job.work.byte_cap(&self.cfg),
+                max_bytes: if job.work == Work::Robots && self.landings.contains_key(&origin(&url))
+                {
+                    let remaining = self.cfg.total_bytes.saturating_sub(self.received_bytes());
+                    u64::from(job.work.byte_cap(&self.cfg)).min(remaining) as u32
+                } else {
+                    job.work.byte_cap(&self.cfg)
+                },
+                url,
                 timeout: self
                     .cfg
                     .timeout
@@ -332,6 +360,7 @@ impl Session {
                             let mut updated = open.held.clone();
                             let entry = &mut updated.payload.place.sections[open.index];
                             entry.key = landing;
+                            entry.localized = false;
                             entry.locator = Locator::default();
                             if let Some(updated) = updated.bounded() {
                                 open.held = updated;
@@ -355,13 +384,6 @@ impl Session {
             if job.work == Work::Robots && !r.final_url.path().ends_with("/robots.txt") {
                 return Err(Failure::External);
             }
-            if job.work != Work::Robots
-                && self.robots.get(&origin(&r.final_url)).is_some_and(|p| {
-                    !p.allows(&r.final_url[Position::BeforePath..Position::AfterQuery])
-                })
-            {
-                return Err(Failure::Robots);
-            }
             Ok(r)
         });
         if job.work == Work::Robots {
@@ -370,7 +392,18 @@ impl Session {
                 (r.final_url.as_str().strip_prefix(landing.as_str()) == Some("/robots.txt"))
                     .then_some(landing)
             });
+            let host = origin(&job.url);
+            let received = self.received_bytes();
+            let over_budget = self.landings.contains_key(&host)
+                && (received > self.cfg.total_bytes
+                    || received == self.cfg.total_bytes
+                        && result.as_ref().is_ok_and(|r| r.truncated));
             let policy = match result {
+                Ok(_) if over_budget => {
+                    self.budget(Budget::TotalBytes);
+                    self.refused(phase, Failure::Limit);
+                    Robots::limited()
+                }
                 Ok(r) => Robots::from_sample(&r.bytes, r.truncated),
                 Err(f) => {
                     self.refused(phase, f);
@@ -392,11 +425,68 @@ impl Session {
                     .robots_truncated |= truncated;
             }
             if let Some(landing) = landing {
-                self.robots.insert(landing, policy.clone());
+                self.robots
+                    .entry(landing.clone())
+                    .or_insert_with(|| policy.clone());
+                if landing != host {
+                    self.resolve_landings(&landing, out);
+                }
             }
-            self.robots.insert(origin(&job.url), policy);
+            self.robots.insert(host.clone(), policy);
+            self.resolve_landings(&host, out);
             return;
         }
+        let Ok(r) = result else {
+            self.settle(job, result, out);
+            return;
+        };
+        let host = origin(&r.final_url);
+        if self.robots.contains_key(&host) {
+            self.accept_landing(job, r, out);
+            return;
+        }
+        let Ok(url) = r.final_url.join("/robots.txt") else {
+            self.settle(job, Err(Failure::Robots), out);
+            return;
+        };
+        let in_flight = self.pending.values().any(|p| {
+            matches!(p, Pending::Job(j) if j.work == Work::Robots && j.url.origin() == url.origin())
+        });
+        let waiting = self.landings.entry(host).or_default();
+        if waiting.is_empty() && !in_flight {
+            self.queue.push_front(Job {
+                work: Work::Robots,
+                url,
+            });
+        }
+        waiting.push((job, r));
+    }
+
+    fn received_bytes(&self) -> u64 {
+        self.stats
+            .phases
+            .values()
+            .fold(0, |sum, phase| sum.saturating_add(phase.bytes))
+    }
+
+    fn resolve_landings(&mut self, host: &str, out: &mut Vec<Effect>) {
+        for (job, result) in self.landings.remove(host).into_iter().flatten() {
+            self.accept_landing(job, result, out);
+        }
+    }
+
+    fn accept_landing(&mut self, job: Job, r: FetchResult, out: &mut Vec<Effect>) {
+        let allowed = self
+            .robots
+            .get(&origin(&r.final_url))
+            .is_some_and(|policy| {
+                policy.allows(&r.final_url[Position::BeforePath..Position::AfterQuery])
+            });
+        self.settle(job, if allowed { Ok(r) } else { Err(Failure::Robots) }, out);
+    }
+
+    fn settle(&mut self, job: Job, result: Result<FetchResult, Failure>, out: &mut Vec<Effect>) {
+        let phase = job.work.phase();
         let side = job.work.side();
         let applied = result.and_then(|r| self.apply(job.clone(), r, out));
         if let Err(f) = applied {
@@ -442,7 +532,7 @@ impl Session {
                             .place
                             .sections
                             .iter()
-                            .position(|e| e.key.page_match() == key)
+                            .position(|e| e.id == open.held.place().sections[open.index].id)
                         {
                             let occupied = memo
                                 .payload
@@ -479,6 +569,7 @@ impl Session {
                     );
                 }
                 self.rebuild(i, out);
+                self.plan_sections(i);
             }
             Work::Passage(pos) => {
                 let doc = html(&r, DocLimits::ARTICLE)?;

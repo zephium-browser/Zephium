@@ -22,6 +22,147 @@ fn labels(e: &Entry) -> Vec<&str> {
 }
 
 #[test]
+fn short_topical_paths_are_independent_destinations() {
+    let (p, _) =
+        read("<nav><a href='/go/install'>Install Go</a><a href='/js/install'>Install JS</a></nav>");
+    assert_eq!(row(&p, "Install Go").key.as_url().path(), "/go/install");
+    assert_eq!(row(&p, "Install JS").key.as_url().path(), "/js/install");
+    let (p, _) = read("<nav><div><button>Install</button><a lang='en' href='/go/install'>Go</a><a lang='en' href='/js/install'>JS</a></div></nav>");
+    assert_eq!(labels(row(&p, "Install")), ["Go", "JS"]);
+}
+
+#[test]
+fn topical_root_links_do_not_make_an_edition_picker() {
+    let (p, _) = read(
+        "<nav><div><button>Topics</button><a href='/ai'>AI</a><a href='/ml'>ML</a></div></nav>",
+    );
+    assert_eq!(labels(row(&p, "Topics")), ["AI", "ML"]);
+}
+
+#[test]
+fn a_counterpart_under_the_entry_locale_confirms_only_its_own_remainder() {
+    let url = Url::parse("https://workshop.example/en/").unwrap();
+    let doc = Doc::from_html(
+        &url,
+        b"<nav><div><button>Guides</button>
+        <a href='/en/install'>Setup</a><a href='/de/install'>Installation</a>
+        <a href='/go/guide'>Go</a><a href='/js/guide'>JS</a></div></nav>",
+        None,
+        DocLimits::SITE_PAGE,
+    )
+    .unwrap();
+    let (p, _) = read_site_with_stats(&doc, &Default::default()).unwrap();
+    assert_eq!(labels(row(&p, "Guides")), ["Setup", "Go", "JS"]);
+}
+
+#[test]
+fn a_menu_and_a_direct_page_can_share_a_label() {
+    let (place, stats) = read(
+        "<nav><a href='/catalog'>Products</a><div><button>Products</button>
+        <a href='/one'>First</a><a href='/two'>Second</a></div></nav>",
+    );
+    let rows: Vec<_> = place
+        .sections
+        .iter()
+        .filter(|e| e.label == "Products")
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|e| e.menu_only && labels(e) == ["First", "Second"]));
+    assert!(rows
+        .iter()
+        .any(|e| !e.menu_only && e.key.as_url().path() == "/catalog"));
+    assert_eq!(
+        (stats.missing_header_links, stats.invalid_group_pages),
+        (0, 0)
+    );
+}
+
+#[test]
+fn disclosure_actions_leave_the_named_single_item_menu_intact() {
+    let (place, _) = read("<nav><button aria-controls='items'>Resources</button>
+        <div aria-hidden='true' id='items'><a href='/signin'>Sign in</a><a href='/guides'>Guides</a></div></nav>");
+    assert_eq!(labels(row(&place, "Resources")), ["Guides"]);
+    assert!(place
+        .sections
+        .iter()
+        .any(|e| e.label == "Sign in" && e.tier == Tier::Action));
+}
+
+#[test]
+fn marked_disclosure_panels_supply_no_destinations() {
+    for mark in ["data-type='ad'", "aria-label='AI-generated overview'"] {
+        let (place, _) = read(&format!("<nav><button aria-controls='items'>Resources</button>
+            <div {mark} aria-hidden='true' id='items'><a href='/a'>First</a><a href='/b'>Second</a></div></nav>"));
+        assert!(place.sections.is_empty(), "{mark}");
+    }
+}
+
+#[test]
+fn menu_members_with_the_same_label_keep_their_fragment_targets() {
+    let (p, _) = read(
+        "<nav><div><button>Resources</button><a href='/docs#api'>Overview</a>
+        <a href='/docs#cli'>Overview</a><a href='/docs#api'>Overview</a></div></nav>",
+    );
+    assert_eq!(labels(row(&p, "Resources")), ["Overview", "Overview"]);
+}
+
+#[test]
+fn a_mixed_menu_keeps_its_unrelated_language_tagged_guide() {
+    for guide in ["/guide", "/fr#guide"] {
+        let (p, _) = read(&format!(
+            "<link rel='alternate' hreflang='fr' href='/fr'><nav><div><button>Resources</button>
+            <a href='/fr'>French</a><a href='{guide}' hreflang='de'>Guide</a></div></nav>"
+        ));
+        assert!(labels(row(&p, "Resources")).contains(&"Guide"));
+    }
+}
+
+#[test]
+fn the_document_language_does_not_declare_a_link_target_language() {
+    let (p, _) = read(
+        "<html lang='en'><nav><a href='https://en.workshop.example/docs'>Docs</a></nav></html>",
+    );
+    assert_eq!(row(&p, "Docs").tier, Tier::Primary);
+}
+
+#[test]
+fn cleaned_link_prefix_keeps_its_byte_boundary() {
+    let (p, _) = read(
+        "<nav><a href='/guide'><span>Docs\u{200b}</span><span> API reference</span></a></nav>",
+    );
+    assert_eq!(p.sections[0].label, "Docs");
+}
+
+#[test]
+fn site_title_uses_only_owned_top_level_entities() {
+    for (json, expected) in [
+        (
+            r#"{"@type":"JobPosting","hiringOrganization":{"@type":"Organization","name":"Recruiter"}}"#,
+            "Workshop",
+        ),
+        (
+            r#"{"@type":"WebSite","url":"https://other.example","name":"Other"}"#,
+            "Workshop",
+        ),
+        (
+            r#"{"@graph":[{"@type":"WebSite","url":"https://www.workshop.example","name":"Workshop tools"}]}"#,
+            "Workshop tools",
+        ),
+    ] {
+        assert_eq!(
+            read(&format!(
+                "<title>Home | Workshop</title><script type='application/ld+json'>{json}</script>"
+            ))
+            .0
+            .title,
+            expected
+        );
+    }
+}
+
+#[test]
 fn a_control_that_repeats_an_item_cannot_supply_the_group_page() {
     for (href, index, expected) in [
         ("/one", "", None),
@@ -190,11 +331,11 @@ fn separate_navigation_representations_agree_on_members_and_independent_links() 
 fn language_controls_need_evidence_from_their_destinations() {
     let alternates = "<link rel='alternate' hreflang='de' href='/eins'><link rel='alternate' hreflang='fr' href='/deux'>";
     for (head, links, picker) in [
-        ("", "<a hreflang='de' href='/eins'>First</a><a hreflang='fr' href='/deux'>Second</a>", true),
-        ("", "<a lang='de' href='/eins'>First</a><a lang='fr' href='/deux'>Second</a>", true),
+        ("", "<a hreflang='de' href='/eins'>First</a><a hreflang='fr' href='/deux'>Second</a>", false),
+        ("", "<a lang='de' href='/de'>First</a><a lang='fr' href='/fr'>Second</a>", true),
         (alternates, "<a href='/eins'>First</a><a href='/deux'>Second</a>", true),
-        ("", "<a href='/pt-BR/'>First</a><a href='/fr/'>Second</a>", true),
-        ("", "<a href='/zh-Hant-TW/'>First</a><a href='/es-419/'>Second</a>", true),
+        ("", "<a hreflang='pt-BR' href='/pt-BR/'>First</a><a hreflang='fr' href='/fr/'>Second</a>", true),
+        ("", "<a lang='zh-Hant-TW' href='/zh-Hant-TW/'>First</a><a lang='es-419' href='/es-419/'>Second</a>", true),
         ("", "<a href='https://de.workshop.example/'>First</a><a href='https://fr.workshop.example/'>Second</a>", true),
         ("", "<a lang='en' href='/docs/rust'>Rust</a><a lang='en' href='/docs/go'>Go</a>", false),
     ] {
@@ -204,7 +345,7 @@ fn language_controls_need_evidence_from_their_destinations() {
             assert_eq!(p.sections.len(), 1);
             assert!(row(&p, "About").children.is_empty());
         } else {
-            assert_eq!(labels(row(&p, "Languages")), ["Rust", "Go"]);
+            assert_eq!(labels(row(&p, "Languages")).len(), 2);
         }
     }
 }

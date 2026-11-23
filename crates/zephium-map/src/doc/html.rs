@@ -376,6 +376,8 @@ impl DocBuilder {
         if panel.attr("id") != Some(id)
             || panel.clipped("id")
             || panel.hidden_by_lift()
+            || excluded(marks(&panel))
+            || excluded(panel.lifted_marks())
             || panel.has_attr("hidden")
             || panel.attr("aria-hidden") != Some("true")
             || !super::super::ancestors(&self.doc.nodes, index).any(|a| {
@@ -577,18 +579,6 @@ impl DocBuilder {
                         node.marks.insert(Marks::ACTION);
                     }
                     node.destination = self.resolve(&n, "href", base);
-                    if node
-                        .destination
-                        .as_ref()
-                        .and_then(Url::domain)
-                        .and_then(|h| h.split_once('.'))
-                        .zip(n.link_language())
-                        .is_some_and(|((prefix, _), lang)| {
-                            prefix.len() == 2 && prefix.eq_ignore_ascii_case(lang)
-                        })
-                    {
-                        node.marks.insert(Marks::LANGUAGE_HOST);
-                    }
                 }
                 if role == Role::Image {
                     node.image_source = self.resolve(&n, "src", base);
@@ -644,6 +634,18 @@ impl DocBuilder {
                     node.link_language = link_language(&n)
                         .filter(|s| s.len() <= room)
                         .map(str::to_ascii_lowercase);
+                    if node
+                        .destination
+                        .as_ref()
+                        .and_then(Url::domain)
+                        .and_then(|h| h.split_once('.'))
+                        .zip(node.link_language.as_deref())
+                        .is_some_and(|((prefix, _), lang)| {
+                            prefix.len() == 2 && prefix.eq_ignore_ascii_case(lang)
+                        })
+                    {
+                        node.marks.insert(Marks::LANGUAGE_HOST);
+                    }
                 }
                 let index = self.push(node)? as usize;
                 if matches!(role, Role::Button | Role::Link) {

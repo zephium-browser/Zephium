@@ -1112,8 +1112,13 @@ pub(super) fn replay(
                 super::corpus::Kind::Place | super::corpus::Kind::Compare
             )
         {
-            let comparisons = compare_sections(root, query, recorded.clock(), index)?;
-            write_json(&path.join(SECTION_COMPARISON), &comparisons)?;
+            match compare_sections(root, query, recorded.clock(), index) {
+                Ok(comparisons) => write_json(&path.join(SECTION_COMPARISON), &comparisons)?,
+                Err(error) => {
+                    write_json(&path.join("sections-error.json"), &error.class)?;
+                    eprintln!("map bench: {}", error.for_query(&query.label.id));
+                }
+            }
         }
     }
     let manifest = ReplayManifest {

@@ -371,6 +371,13 @@ impl DocBuilder {
 
     pub fn finish(mut self) -> Doc {
         for n in &mut self.doc.nodes {
+            n.link_prefix_bytes = n.text.get(..n.link_prefix_bytes).map_or(0, |prefix| {
+                prefix
+                    .chars()
+                    .filter(|&c| crate::visible_char(c))
+                    .map(char::len_utf8)
+                    .sum()
+            });
             n.text.retain(crate::visible_char);
             n.name.retain(crate::visible_char);
             if let Some(id) = &mut n.element_id {

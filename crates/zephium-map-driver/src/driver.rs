@@ -30,6 +30,9 @@ use crate::{
 pub const TICK: Duration = Duration::from_millis(250);
 pub const CHANGE_BUFFER: usize = 64;
 pub const MAX_WAITING_OPENS: usize = 4;
+/// The longest a run waits for its first results page when its source sets
+/// no bound of its own.
+pub const RESULTS_WAIT: Duration = Duration::from_secs(60);
 const SLOTS: usize = 2;
 
 pub struct MapRequest {
@@ -145,7 +148,7 @@ impl Driver {
         let (opens, open_requests) = mpsc::channel(MAX_WAITING_OPENS);
         let shared = Arc::new(Shared::default());
         let run = Run {
-            started: io.clock.now(),
+            started: None,
             session: Some(session),
             io,
             profile: request.profile,
@@ -276,7 +279,7 @@ struct Run {
     hosts: BTreeMap<Id, String>,
     immediate: VecDeque<Input>,
     seq: u32,
-    started: Duration,
+    started: Option<Duration>,
     cancelled: watch::Receiver<bool>,
     cancelling: bool,
     unsent: Option<Publication>,
@@ -367,7 +370,7 @@ impl Run {
                 {
                     self.session = Some(session);
                     self.opening = Some(request);
-                    self.started = self.io.clock.now();
+                    self.started = Some(self.io.clock.now());
                     return Some(effects);
                 }
                 let (place, _) = wire::place(held.place(), Some(held.robots()));
@@ -412,6 +415,9 @@ impl Run {
             Some(ReadState::Refused { failure }) => OpenResult::Refused {
                 failure: failure.into(),
             },
+            Some(ReadState::Skipped { .. }) => OpenResult::Refused {
+                failure: wire::Failure::Limit,
+            },
             _ => OpenResult::Refused {
                 failure: if entry.is_some() {
                     wire::Failure::Blocked
@@ -433,7 +439,7 @@ impl Run {
             }
             () = self.tx.closed() => return Next::Stop,
             Some(done) = self.reads.join_next_with_id() => done,
-            () = tokio::time::sleep(TICK) => return Next::Tick,
+            () = tokio::time::sleep(TICK), if self.started.is_some() => return Next::Tick,
         };
         match self.completed(done) {
             Some(input) => {
@@ -464,11 +470,16 @@ impl Run {
     }
 
     fn elapsed(&self) -> Duration {
-        self.io.clock.now().saturating_sub(self.started)
+        self.started.map_or(Duration::ZERO, |start| {
+            self.io.clock.now().saturating_sub(start)
+        })
     }
 
     async fn handle(&mut self, input: Option<Input>) -> Option<Vec<Effect>> {
         let mut session = self.session.take()?;
+        if matches!(input, Some(Input::Results { .. })) {
+            self.started.get_or_insert_with(|| self.io.clock.now());
+        }
         let time = self.elapsed();
         let cancelling = self.cancelling;
         let shared = Arc::clone(&self.shared);
@@ -659,7 +670,10 @@ impl Run {
         let source = Arc::clone(&self.io.results);
         let shared = Arc::clone(&self.shared);
         let read = self.reads.spawn(async move {
-            let result = match source.load(url).await {
+            let loaded = tokio::time::timeout(RESULTS_WAIT, source.load(url))
+                .await
+                .unwrap_or(Err(Failure::Timeout));
+            let result = match loaded {
                 Ok(page) => {
                     if page.truncated || page.html.len() > page::MAX_RESULTS_SOURCE_BYTES {
                         bump(&shared.truncated_results);
@@ -675,7 +689,14 @@ impl Run {
         self.tasks.insert(read.id(), (id, Kind::Results));
     }
 
-    fn fetch(&mut self, id: Id, request: FetchRequest) {
+    fn fetch(&mut self, id: Id, mut request: FetchRequest) {
+        let Some(started) = self.started else {
+            self.immediate.push_back(Input::Fetch {
+                id,
+                result: Err(Failure::Unavailable),
+            });
+            return;
+        };
         let host = request.url.host_str().unwrap_or_default().to_owned();
         if self.hosts.len() >= MAX_CONCURRENT
             || self.hosts.values().filter(|h| **h == host).count() >= MAX_HOST_CONCURRENT
@@ -688,10 +709,20 @@ impl Run {
             return;
         }
         let fetcher = Arc::clone(&self.io.fetch);
-        let timeout = request.timeout;
-        bump(&self.shared.fetches);
+        let clock = Arc::clone(&self.io.clock);
+        let shared = Arc::clone(&self.shared);
         let read = self.reads.spawn(async move {
-            let result = tokio::time::timeout(timeout, fetcher.fetch(request))
+            let elapsed = clock.now().saturating_sub(started);
+            let remaining = zephium_map::session::MAX_ELAPSED.saturating_sub(elapsed);
+            if elapsed >= zephium_map::session::LAST_START || remaining.is_zero() {
+                return Input::Fetch {
+                    id,
+                    result: Err(Failure::Timeout),
+                };
+            }
+            request.timeout = request.timeout.min(remaining);
+            bump(&shared.fetches);
+            let result = tokio::time::timeout(request.timeout, fetcher.fetch(request))
                 .await
                 .unwrap_or(Err(Failure::Timeout));
             Input::Fetch { id, result }

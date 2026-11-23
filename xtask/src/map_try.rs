@@ -50,6 +50,7 @@ enum Error {
     Runtime,
     Interrupt,
     Stream,
+    OpenFailed,
     Output,
 }
 
@@ -73,7 +74,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::MissingQuery => {
-                "Usage: cargo xtask map <query> --site <host> [--site <host>] [--private] [--open <label>]..."
+                "Usage: cargo xtask map <query> --site <host> [--site <host>] [--private] [--open <label|left::label|right::label>]..."
             }
             Self::MissingSite => "Usage error: specify a host with --site",
             Self::BadHost => "Usage error: --site needs a bare public hostname",
@@ -89,6 +90,7 @@ impl fmt::Display for Error {
             Self::Runtime => "Could not start the map runtime.",
             Self::Interrupt => "Could not listen for Ctrl-C.",
             Self::Stream => "The map stopped without an outcome.",
+            Self::OpenFailed => "One or more requested sections could not be read.",
             Self::Output => "Could not write the map to the terminal.",
         })
     }
@@ -369,9 +371,10 @@ async fn stream(
     let mut watching = true;
     let mut interrupted_by = None;
     let mut opens = opens.into_iter();
+    let mut open_failed = false;
     let mut open_started = None;
     loop {
-        let change = tokio::select! {
+        let mut change = tokio::select! {
             biased;
             signal = &mut interrupt, if !cancelling => {
                 interrupted_by = signal.err().map(|_| Error::Interrupt);
@@ -397,7 +400,11 @@ async fn stream(
             }
             change = changes.recv() => change.ok_or(Error::Stream)?,
         };
-        if let Change::End { outcome, .. } = change {
+        if let Change::End { outcome, .. } = &mut change {
+            if cancelling {
+                *outcome = Outcome::Cancelled;
+            }
+            let outcome = *outcome;
             print_lines(
                 output,
                 printer.lines(&change, started.elapsed(), driver.counts()),
@@ -405,9 +412,13 @@ async fn stream(
             if outcome != Outcome::Done || cancelling {
                 return interrupted_by.map_or(Ok(outcome), Err);
             }
-            open_started = start_open(driver, &printer, &mut opens, output)?;
+            open_started = start_open(driver, &printer, &mut opens, &mut open_failed, output)?;
             if open_started.is_none() {
-                return Ok(outcome);
+                return if open_failed {
+                    Err(Error::OpenFailed)
+                } else {
+                    Ok(outcome)
+                };
             }
             continue;
         }
@@ -417,6 +428,7 @@ async fn stream(
                 let status = match result {
                     OpenResult::Read => "read".to_owned(),
                     OpenResult::Refused { failure } => {
+                        open_failed = true;
                         format!("refused ({})", printer::failure_text(failure))
                     }
                 };
@@ -430,9 +442,13 @@ async fn stream(
                     )],
                 )?;
             }
-            open_started = start_open(driver, &printer, &mut opens, output)?;
+            open_started = start_open(driver, &printer, &mut opens, &mut open_failed, output)?;
             if open_started.is_none() {
-                return Ok(Outcome::Done);
+                return if open_failed {
+                    Err(Error::OpenFailed)
+                } else {
+                    Ok(Outcome::Done)
+                };
             }
             continue;
         }
@@ -449,6 +465,7 @@ fn start_open<'a>(
     driver: &Driver,
     printer: &Printer,
     opens: &mut impl Iterator<Item = &'a str>,
+    failed: &mut bool,
     output: &mut impl Write,
 ) -> Result<Option<(Instant, Counts)>, Error> {
     for label in opens {
@@ -461,6 +478,7 @@ fn start_open<'a>(
             },
             Err(reason) => format!("Open refused ({reason})"),
         };
+        *failed = true;
         print_lines(output, [message])?;
     }
     Ok(None)

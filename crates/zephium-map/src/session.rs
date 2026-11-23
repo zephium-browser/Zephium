@@ -19,6 +19,8 @@ mod types;
 pub use memo::*;
 pub use types::*;
 
+const SEARCH_SLOTS: usize = 2;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Work {
     Robots,
@@ -197,11 +199,12 @@ pub struct Session {
     queue: VecDeque<Job>,
     seen: BTreeSet<(Work, PageMatch)>,
     robots: BTreeMap<String, Robots>,
+    landings: BTreeMap<String, Vec<(Job, FetchResult)>>,
     hosts: BTreeMap<String, u32>,
     started: u32,
     sections: u32,
-    sites: [Option<SiteState>; 2],
-    unseeded: [Option<Unseeded>; 2],
+    sites: [Option<SiteState>; SEARCH_SLOTS],
+    unseeded: [Option<Unseeded>; SEARCH_SLOTS],
     articles: BTreeMap<usize, Doc>,
     first_passage: Option<Passage>,
     passages: Vec<Passage>,
@@ -321,6 +324,9 @@ impl Session {
         confidence: Confidence,
         stale: bool,
     ) -> Result<(Self, Vec<Effect>), OpenRefusal> {
+        if usize::from(slot) >= SEARCH_SLOTS {
+            return Err(OpenRefusal::NotOpenable);
+        }
         let index = held.open_index(id)?;
         let url = held.place().sections[index].key.as_url().clone();
         let key = held.place().sections[index].key.page_match();
@@ -375,10 +381,23 @@ impl Session {
             return None;
         };
         let site = self.sites.get(*slot)?.as_ref()?;
-        let entry = site.place.as_ref()?.sections.iter().find(|entry| {
-            entry.read == Some(ReadState::Queued) && site.discovered.get(&entry.id) == Some(key)
-        })?;
-        Some((*slot as u8, &entry.id))
+        let id = site
+            .place
+            .as_ref()?
+            .sections
+            .iter()
+            .flat_map(|e| std::iter::once(e).chain(&e.children))
+            .find(|entry| {
+                entry.read == Some(ReadState::Queued) && site.discovered.get(&entry.id) == Some(key)
+            })
+            .map(|entry| &entry.id)
+            .or_else(|| {
+                site.discovered
+                    .iter()
+                    .find(|(_, discovered)| *discovered == key)
+                    .map(|(id, _)| id)
+            })?;
+        Some((*slot as u8, id))
     }
 
     fn place_robots(&self, place: &Place) -> BTreeMap<String, Robots> {
@@ -409,6 +428,7 @@ impl Session {
             queue: VecDeque::new(),
             seen: BTreeSet::new(),
             robots: BTreeMap::new(),
+            landings: BTreeMap::new(),
             hosts: BTreeMap::new(),
             started: 0,
             sections: 0,
@@ -662,6 +682,7 @@ impl Session {
             };
             state.place = Some(place.clone());
             let complete = !stale
+                && (self.cfg.sections == Sections::Asked || m.eager)
                 && state.section_hint.is_none()
                 && (state.requested.is_none() || place.focus.is_some());
             state.complete = complete;
@@ -820,11 +841,11 @@ impl Session {
         };
         detail.probed_section = state.probed_section;
         self.stats.places.insert(i as u8, detail);
-        for entry in &mut place.sections {
+        let mut update_read = |entry: &mut site::Entry| {
             if entry.menu_only
                 || self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id)
             {
-                continue;
+                return;
             }
             let discovered = state
                 .discovered
@@ -838,7 +859,14 @@ impl Session {
             if let Some(key) = state.external.get(discovered) {
                 entry.off_site = SiteKey::from_url(key.as_url()).as_ref() != Some(&place.site);
                 entry.key = key.clone();
+                entry.localized = false;
                 entry.locator = Locator::default();
+            }
+        };
+        for entry in &mut place.sections {
+            update_read(entry);
+            if self.cfg.sections == Sections::Asked {
+                entry.children.iter_mut().for_each(&mut update_read);
             }
         }
         if !std::mem::take(&mut state.stale) && state.place.as_ref() == Some(&place) {
@@ -871,6 +899,7 @@ impl Session {
             Sections::Asked => place
                 .sections
                 .iter()
+                .flat_map(|e| std::iter::once(e).chain(&e.children))
                 .filter(|e| e.read == Some(ReadState::Queued))
                 .map(|e| e.key.clone())
                 .collect(),
@@ -1118,6 +1147,7 @@ impl Session {
         self.finished = true;
         self.pending.clear();
         self.queue.clear();
+        self.landings.clear();
         self.emit(
             MapEvent::End {
                 outcome: if self.stats.cancelled {
@@ -1286,6 +1316,7 @@ impl Session {
                 let site = s.seed.site.clone();
                 let memo = SiteMemo {
                     version: MEMO_VERSION,
+                    eager: self.cfg.sections == Sections::All,
                     read_at: self.cfg.now,
                     payload: SitePayload { place, robots },
                 };
