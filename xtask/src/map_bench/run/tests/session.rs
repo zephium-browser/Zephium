@@ -728,6 +728,43 @@ fn replay_refuses_a_different_engine_before_writing_a_run() {
     assert!(!root.path().join("replay").exists());
 }
 
+#[test]
+fn section_comparison_finishes_after_one_corrupt_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("corpus.toml");
+    let entries: String = ["first", "second"]
+        .iter()
+        .map(|id| format!("[[query]]\nid='{id}'\ntext='Acme docs'\n{ACME}\n"))
+        .collect();
+    fs::write(&path, entries).unwrap();
+    let corpus = Corpus::load(std::slice::from_ref(&path)).unwrap();
+    init_engine(root.path(), &corpus, EngineKind::Session);
+    let mut source = ScriptedSource::new(site);
+    for query in &corpus.queries {
+        run_session(root.path(), query, &mut source);
+    }
+    fs::write(
+        root.path().join("queries/first/requests.jsonl"),
+        b"incomplete",
+    )
+    .unwrap();
+    crate::map_bench_section_flags::run(&[
+        "replay".into(),
+        "--compare-sections".into(),
+        "--engine".into(),
+        "session".into(),
+        "--from".into(),
+        root.path().display().to_string(),
+        "--corpus".into(),
+        path.display().to_string(),
+    ])
+    .unwrap();
+    let (run, manifest) = latest_replay(root.path()).unwrap().unwrap();
+    assert_eq!(manifest.queries.len(), 2);
+    assert!(run.join("queries/first/sections-error.json").is_file());
+    assert!(run.join("queries/second/sections.json").is_file());
+}
+
 fn save_row(root: &Path, path: &Path, request: &FetchRequest, result: FetchResult) {
     let mut journal = Journal::load(path).unwrap();
     let start = Duration::from_secs(10);

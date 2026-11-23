@@ -164,17 +164,6 @@ impl<'a> NodeRef<'a> {
             (next != 0).then_some(self.arena.node(next))
         })
     }
-    pub(super) fn link_language(self) -> Option<&'a str> {
-        self.attr("hreflang").or_else(|| {
-            std::iter::successors(Some(self), |n| {
-                n.arena
-                    .attached_parent(n.id)
-                    .filter(|&p| p != 0)
-                    .map(|p| n.arena.node(p))
-            })
-            .find_map(|n| n.attr("lang"))
-        })
-    }
     fn attribute(self, key: &str) -> Option<&'a Attr> {
         if self.is_text() {
             return None;

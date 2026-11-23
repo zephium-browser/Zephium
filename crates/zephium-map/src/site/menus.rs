@@ -4,12 +4,13 @@ use crate::Node;
 const MIN_MENU_ITEMS: usize = 2;
 
 mod editions;
-use editions::{edition_path, Editions};
+use editions::Editions;
 #[cfg(test)]
 mod tests;
 
 #[derive(Default)]
 pub(super) struct Menus {
+    actions: Vec<Entry>,
     members: BTreeSet<EntryId>,
     groups: BTreeMap<usize, Menu>,
     order: BTreeMap<EntryId, usize>,
@@ -55,11 +56,12 @@ impl Evidence {
             stats.language_groups += usize::from(language_group);
             if !e.menu_only
                 && (e.children.iter().any(|c| c.card_route() == e.card_route())
-                    || self.pages.get(&label).is_some_and(|page| {
-                        page.as_ref().is_none_or(|id| {
-                            *id != e.id && *id != EntryId::new(None, &e.key, &e.locator)
-                        })
-                    }))
+                    || !self.direct.contains_key(&e.id)
+                        && self.pages.get(&label).is_some_and(|page| {
+                            page.as_ref().is_none_or(|id| {
+                                *id != e.id && *id != EntryId::new(None, &e.key, &e.locator)
+                            })
+                        }))
             {
                 stats.invalid_group_pages += 1;
             }
@@ -146,7 +148,12 @@ impl Menus {
             .alternates
             .iter()
             .filter(|a| !a.language.is_empty())
-            .filter_map(|a| PageKey::from_url(&a.url).ok().map(|k| k.page_match()))
+            .filter_map(|a| {
+                Some((
+                    PageKey::from_url(&a.url).ok()?.page_match(),
+                    a.url.fragment().map(str::to_owned),
+                ))
+            })
             .collect();
         let mut standalone = Vec::new();
         let actions: BTreeSet<_> = build
@@ -303,10 +310,11 @@ impl Menus {
             let page = n
                 .destination
                 .as_ref()
-                .and_then(|u| build.entry_for(u, label, Source::PrimaryNav))
-                .filter(|e| {
-                    !card::self_link(e, &build.entry, Some(doc.page())) && !card::action(e)
-                });
+                .and_then(|u| build.entry_for(u, label, Source::PrimaryNav));
+            if page.as_ref().is_some_and(card::action) {
+                continue;
+            }
+            let page = page.filter(|e| !card::self_link(e, &build.entry, Some(doc.page())));
             let trigger = page
                 .as_ref()
                 .filter(|e| e.key.page_match() == build.entry.page_match())
@@ -337,21 +345,21 @@ impl Menus {
                         if card::skip_link(url, label, doc.page()) {
                             continue;
                         }
-                        menu.editions.observe(
-                            url,
-                            link.language.as_deref(),
-                            doc.page(),
-                            &alternates,
-                        );
-                        if let Some(e) =
+                        menu.editions
+                            .observe(url, &build.localized, doc.page(), &alternates);
+                        if let Some(mut e) =
                             build.entry_for(url, label, Source::MenuGroup).filter(|e| {
-                                !(card::action(e)
-                                    || card::placeholder(label)
+                                !(card::placeholder(label)
                                     || card::self_link(e, &build.entry, Some(doc.page()))
                                     || e.off_site && site_profile(url).is_some())
                             })
                         {
-                            menu.add_item(e);
+                            if card::action(&e) {
+                                e.tier = Tier::Action;
+                                menus.actions.push(e);
+                            } else {
+                                menu.add_item(e);
+                            }
                         }
                     }
                 }
@@ -408,7 +416,7 @@ impl Menus {
                 .and_then(|o| menus.groups.get_mut(&o))
             {
                 menu.editions
-                    .observe(url, n.link_language.as_deref(), doc.page(), &alternates);
+                    .observe(url, &build.localized, doc.page(), &alternates);
             }
             if SiteKey::from_url(url).as_ref() != Some(&build.site) && site_profile(url).is_some() {
                 continue;
@@ -435,7 +443,7 @@ impl Menus {
                             .and_then(|(first, _)| named.get(first))
                     })
                 }) {
-                    footer_links.push((*owner, entry, n.link_language.as_deref()));
+                    footer_links.push((*owner, entry));
                 }
                 continue;
             }
@@ -491,14 +499,18 @@ impl Menus {
             .filter(|(_, m)| m.editions.targets.is_empty())
             .map(|(&i, _)| i)
             .collect();
-        for (owner, mut entry, language) in footer_links {
+        for (owner, mut entry) in footer_links {
             if let Some(menu) = owners
                 .get(&owner)
                 .filter(|o| empty.contains(o))
                 .and_then(|o| menus.groups.get_mut(o))
             {
-                menu.editions
-                    .observe(entry.key.as_url(), language, doc.page(), &alternates);
+                menu.editions.observe(
+                    entry.key.as_url(),
+                    &build.localized,
+                    doc.page(),
+                    &alternates,
+                );
                 entry.sources = vec![Source::Footer, Source::MenuGroup];
                 menu.add_item(entry);
             }
@@ -524,17 +536,8 @@ impl Menus {
                 menus.direct.entry(entry.card_route()).or_insert((i, entry));
             }
         }
-        let editions: BTreeSet<_> = menus
-            .groups
-            .values()
-            .filter(|m| m.editions.is_picker())
-            .flat_map(|m| m.items.iter().map(|e| e.id.clone()))
-            .collect();
         menus.groups.retain(|_, m| {
-            if m.editions.is_picker()
-                || m.items.len() >= MIN_MENU_ITEMS
-                    && m.items.iter().all(|e| editions.contains(&e.id))
-            {
+            if m.editions.is_picker() {
                 menus.evidence.languages.insert(normal(&m.label));
                 menus
                     .evidence
@@ -590,7 +593,7 @@ impl Menus {
             menu.items.retain(|e| {
                 distinct.insert(e.card_route()) && !menus.direct.contains_key(&e.card_route())
             });
-            if menu.items.len() >= MIN_MENU_ITEMS || menu.page.is_some() && !menu.items.is_empty() {
+            if !menu.items.is_empty() {
                 menus.evidence.pages.insert(
                     normal(&menu.label),
                     menu.page.as_ref().map(|e| e.id.clone()),
@@ -600,19 +603,6 @@ impl Menus {
                     .extend(menu.items.iter().map(|e| e.id.clone()));
             }
         }
-        let locale_roots: BTreeSet<_> = menus
-            .direct
-            .values()
-            .filter_map(|(_, e)| {
-                let url = e.key.as_url();
-                let path = url.path().trim_matches('/');
-                (card::locale(path)
-                    && !path.eq_ignore_ascii_case(&e.label)
-                    && url.query().is_none()
-                    && edition_path(url) == edition_path(doc.page()))
-                .then_some(path.to_owned())
-            })
-            .collect();
         let triggers: BTreeSet<_> = menus
             .groups
             .values()
@@ -624,9 +614,7 @@ impl Menus {
                 || card::sentence(&e.label)
                 || build.link_is_edition(e)
                 || menus.excluded.contains(&e.id)
-                || triggers.contains(&e.id)
-                || locale_roots.len() >= MIN_MENU_ITEMS
-                    && locale_roots.contains(e.key.as_url().path().trim_matches('/')))
+                || triggers.contains(&e.id))
         });
         menus.evidence.direct.extend(
             menus
@@ -652,6 +640,9 @@ impl Menus {
     pub(super) fn take_evidence(&mut self) -> Evidence {
         std::mem::take(&mut self.evidence)
     }
+    pub(super) fn take_actions(&mut self) -> Vec<Entry> {
+        std::mem::take(&mut self.actions)
+    }
 }
 
 impl Menus {
@@ -660,7 +651,6 @@ impl Menus {
         let member_routes: BTreeSet<_> = self
             .groups
             .values()
-            .filter(|m| m.items.len() >= MIN_MENU_ITEMS || m.page.is_some())
             .flat_map(|m| m.items.iter().map(Entry::card_route))
             .collect();
         build.sections.retain(|e| {
@@ -735,20 +725,7 @@ impl Menus {
             .filter_map(|m| m.page.as_ref().map(|e| e.id.clone()))
             .collect();
         for (position, menu) in self.groups {
-            if menu.items.is_empty() || menu.items.len() < MIN_MENU_ITEMS && menu.page.is_none() {
-                // A lone link underneath a toggle keeps its own name and destination.
-                if menu.page.is_none() {
-                    if let Some(mut item) = menu.items.into_iter().next() {
-                        if let Some((_, e)) = old.get_mut(&prior_id(&item.id)) {
-                            e.label = item.label;
-                            e.role = item.role;
-                        } else {
-                            item.menu_item = false;
-                            item.add_sources([menu.source]);
-                            rows.push((position, item));
-                        }
-                    }
-                }
+            if menu.items.is_empty() {
                 continue;
             }
             if let Some(id) = &menu.trigger {
@@ -820,6 +797,7 @@ impl Menus {
                     }
                     if prior == original || routes.contains_key(&original) {
                         item.key = e.key;
+                        item.localized = e.localized;
                         item.off_site = e.off_site;
                         item.locator = e.locator;
                     }
@@ -870,7 +848,7 @@ impl Menus {
         for (_, mut e) in original {
             if let Some(&i) = labels
                 .get(&normal(&e.label))
-                .filter(|_| e.tier != Tier::Action)
+                .filter(|_| e.tier != Tier::Action && !direct_routes.contains(&e.card_route()))
             {
                 let group = &mut rows[i].1;
                 if build

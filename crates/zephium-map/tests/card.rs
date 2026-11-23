@@ -88,16 +88,16 @@ fn destination_label_and_localized_duplicates_keep_the_first_representative() {
 }
 
 #[test]
-fn sibling_identity_uses_display_host_and_path() {
+fn sibling_identity_includes_query_and_host() {
     let p=card("<nav><ul><li><a href='/learn'>Learn</a><ul><li><a href='https://alpha.workshop.example/?mode=1'>Manual</a></li><li><a href='https://alpha.workshop.example/?mode=2'>Manual</a></li><li><a href='https://beta.workshop.example/'>Manual</a></li></ul></li></ul></nav>");
     let children = &p.sections[0].children;
-    assert_eq!(children.len(), 2);
+    assert_eq!(children.len(), 3);
     assert_eq!(
         children[0].key.as_url().domain(),
         Some("alpha.workshop.example")
     );
     assert_eq!(
-        children[1].key.as_url().domain(),
+        children[2].key.as_url().domain(),
         Some("beta.workshop.example")
     );
 }
@@ -116,19 +116,31 @@ proptest! {
         let ids=|p:Place|p.sections.into_iter().filter(|e|e.tier==Tier::Primary).map(|e|(e.label,e.id)).collect::<Vec<_>>();
         let original = ids(a);
         prop_assert_eq!(&original,&ids(b));
-        let children = slugs.iter().map(|slug| format!("<a href='/pages/{slug}'>{slug}</a>")).collect::<String>();
+        let children = original.iter().map(|(slug, _)| format!("<a href='/pages/{slug}'>{slug}</a>")).collect::<String>();
         let grouped = card(&format!("<nav><div><button>Topics</button>{children}</div></nav>"));
-        if original.len()>1 {
-            prop_assert_eq!(grouped.sections.len(),1);
-            let placed:Vec<_>=grouped.sections[0].children.iter().map(|e|(e.label.clone(),e.id.clone())).collect();
-            prop_assert_eq!(original,placed);
-        } else {prop_assert_eq!(original,ids(grouped));}
+        let placed: std::collections::BTreeSet<_> = grouped.sections.iter()
+            .flat_map(|e| std::iter::once(e).chain(&e.children))
+            .filter(|e| !e.menu_only && e.tier == Tier::Primary)
+            .map(|e| e.id.clone()).collect();
+        prop_assert_eq!(original.into_iter().map(|(_, id)| id).collect::<std::collections::BTreeSet<_>>(), placed);
     }
 }
 
 #[test]
+fn the_generated_topics_destination_can_be_the_menu_index() {
+    let p = card(
+        "<nav><div><button>Topics</button><a href='/pages/aaaa'>aaaa</a>
+        <a href='/pages/topics'>topics</a></div></nav>",
+    );
+    assert_eq!(p.sections.len(), 1);
+    assert_eq!(p.sections[0].key.as_url().path(), "/pages/topics");
+    assert_eq!(p.sections[0].children.len(), 1);
+    assert_eq!(p.sections[0].children[0].key.as_url().path(), "/pages/aaaa");
+}
+
+#[test]
 fn language_editions_need_a_matching_language_declaration() {
-    let p=card("<nav><div lang='ja'><a href='https://ja.workshop.example/'>日本語</a></div><a hreflang='de' href='https://de.workshop.example/'>Deutsch</a><a href='https://ai.workshop.example/'>Studio</a><a href='/go/'>Go</a></nav>");
+    let p=card("<nav><a lang='ja' href='https://ja.workshop.example/'>日本語</a><a hreflang='de' href='https://de.workshop.example/'>Deutsch</a><a href='https://ai.workshop.example/'>Studio</a><a href='/go/'>Go</a></nav>");
     assert_eq!(
         p.sections
             .iter()
@@ -170,7 +182,7 @@ fn sparse_navigation_uses_a_named_footer_section_without_promoting_ancillary_lin
 
 #[test]
 fn repeated_locale_roots_are_not_sections_and_query_specific_routes_remain_distinct() {
-    let p=card("<nav><a href='/fr/'>Français</a><a href='/de'>Deutsch</a><a href='/products?t=one'>First</a><a href='/products?t=two'>Second</a></nav>");
+    let p=card("<nav><a hreflang='fr' href='/fr/'>Français</a><a hreflang='de' href='/de'>Deutsch</a><a href='/products?t=one'>First</a><a href='/products?t=two'>Second</a></nav>");
     assert_eq!(
         p.sections
             .iter()
@@ -209,7 +221,7 @@ fn an_observed_directory_represents_three_or_more_deep_sibling_articles() {
 }
 
 #[test]
-fn a_shared_clipped_path_does_not_create_indistinguishable_children() {
+fn a_shared_clipped_display_path_preserves_distinct_destinations() {
     let common = "x".repeat(zephium_map::site::MAX_PATH_CHARS);
     let p=card(&format!("<nav><ul><li><a href='/guide'>Guide</a><ul><li><a href='/{common}1'>Index</a></li><li><a href='/{common}2'>Index</a></li><li><a href='/{common}3'>Index C#</a></li><li><a href='/{common}4'>Index C++</a></li></ul></li></ul></nav>"));
     assert_eq!(
@@ -218,7 +230,7 @@ fn a_shared_clipped_path_does_not_create_indistinguishable_children() {
             .iter()
             .map(|e| e.label.as_str())
             .collect::<Vec<_>>(),
-        ["Index", "Index C#", "Index C++"]
+        ["Index", "Index", "Index C#", "Index C++"]
     );
 }
 

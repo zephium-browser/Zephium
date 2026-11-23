@@ -191,7 +191,7 @@ mod extended_tests {
         let url = url::Url::parse("https://workshop.example/").unwrap();
         let doc = Doc::from_html(
             &url,
-            b"<nav><a href='/a'>One</a><a href='/b'>Two</a></nav>",
+            b"<nav><a href='/a'>One</a><a hreflang='de' href='/de/b'>Two</a></nav>",
             None,
             DocLimits::SITE_PAGE,
         )
@@ -199,7 +199,7 @@ mod extended_tests {
         let mut place = read_site(&doc, &Default::default()).unwrap();
         let first = place.sections.pop().unwrap();
         let mut alias = first.clone();
-        alias.key = zephium_map::PageKey::from_url(&url.join("/de/b").unwrap()).unwrap();
+        alias.key = zephium_map::PageKey::from_url(&url.join("/b").unwrap()).unwrap();
         let row = &mut place.sections[0];
         row.tier = Tier::Secondary;
         row.key = place.entry.clone();

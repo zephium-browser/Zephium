@@ -137,6 +137,8 @@ pub struct Entry {
     pub menu_item: bool,
     #[serde(default)]
     pub path_name: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) localized: bool,
     pub off_site: bool,
     pub group: Option<String>,
     pub children: Vec<Entry>,
@@ -352,6 +354,7 @@ struct LinkName {
     host_root: bool,
 }
 struct Build<'a> {
+    localized: BTreeSet<crate::PageMatch>,
     llms_headings: BTreeMap<EntryId, String>,
     names: std::collections::HashMap<EntryId, LinkName>,
     place: Place,
@@ -416,6 +419,7 @@ impl Build<'_> {
             menu_only: false,
             menu_item: false,
             path_name: false,
+            localized: self.localized.contains(&key.page_match()),
             read: None,
             tier: source.tier(),
             key,
@@ -497,13 +501,9 @@ impl Build<'_> {
                     c.sources.contains(&Source::Heading) || !globals.contains(&c.card_route())
                 }
             });
-            let mut distinct = Vec::new();
-            for child in children {
-                if !distinct.iter().any(|c| card::same_display(c, &child)) {
-                    distinct.push(child);
-                }
-            }
-            e.children = distinct;
+            let mut distinct = BTreeSet::new();
+            children.retain(|c| distinct.insert(c.card_route()));
+            e.children = children;
         }
         self.sections
             .retain(|e| !e.menu_only || !e.children.is_empty());
@@ -884,12 +884,21 @@ impl Place {
         &'a self,
         landing: &'a Url,
     ) -> impl Iterator<Item = &'a Entry> {
-        self.sections.iter().filter(move |entry| {
-            !entry.menu_only
-                && entry.key.page_match() != self.entry.page_match()
-                && !crate::key::same_page(entry.key.as_url(), landing)
-                && (self.focuses(entry) || entry.sources.contains(&Source::EngineResult))
-        })
+        self.sections
+            .iter()
+            .flat_map(|e| {
+                std::iter::once(e).chain(
+                    e.children
+                        .iter()
+                        .filter(|c| c.sources.contains(&Source::EngineResult)),
+                )
+            })
+            .filter(move |entry| {
+                !entry.menu_only
+                    && entry.key.page_match() != self.entry.page_match()
+                    && !crate::key::same_page(entry.key.as_url(), landing)
+                    && (self.focuses(entry) || entry.sources.contains(&Source::EngineResult))
+            })
     }
     pub(crate) fn likely_section(&self, request: &Focus, landing: &Url) -> Option<&Entry> {
         use SectionRole::*;
@@ -1069,6 +1078,7 @@ impl Entry {
             menu_only: false,
             menu_item: false,
             path_name: false,
+            localized: self.localized,
             read: None,
             tier: source.tier(),
             key: self.key.clone(),
@@ -1133,9 +1143,6 @@ impl Entry {
             }
             return;
         }
-        if self.children.iter().any(|c| card::same_display(c, &entry)) {
-            return;
-        }
         if self.children.len() == MAX_CHILDREN
             && requested.is_some_and(|request| {
                 request.rank(&entry).is_some_and(|rank| {
@@ -1182,6 +1189,7 @@ pub(crate) fn enrich_held(
     child_cap: usize,
 ) -> (Place, PlaceStats) {
     let mut build = Build {
+        localized: card::localized_pages(page),
         names: Default::default(),
         llms_headings: Default::default(),
         place,
@@ -1239,6 +1247,7 @@ pub(crate) fn with_results(
     requested: Option<&Focus>,
 ) -> Result<Place, KeyError> {
     let mut build = Build {
+        localized: Default::default(),
         names: Default::default(),
         llms_headings: Default::default(),
         index: place
@@ -1297,8 +1306,9 @@ pub(crate) fn read_site_for(
 ) -> Result<(Place, PlaceStats, Vec<SectionRead>), KeyError> {
     let key = PlaceKey::from_url(doc.page()).ok_or(KeyError::Url)?;
     let site = SiteKey::from_url(doc.page()).ok_or(KeyError::Url)?;
-    let title = title::site_title(doc.head(), &site);
+    let title = title::site_title(doc.head(), &site, doc.page());
     let mut place = Build {
+        localized: card::localized_pages(doc),
         names: Default::default(),
         llms_headings: Default::default(),
         index: Default::default(),
@@ -1381,7 +1391,9 @@ pub(crate) fn read_site_for(
         })
         .collect();
     for (i, page) in page_sections {
+        let home_paths = std::mem::replace(&mut place.localized, card::localized_pages(page));
         place.enrich_section(i, page);
+        place.localized = home_paths;
     }
     place.stats.section_page_truncated |= inputs.pages.len() > MAX_SECTION_PAGES;
     if let Some(robots) = inputs.robots {
@@ -1403,10 +1415,22 @@ pub(crate) fn read_site_for(
             })
         })
         .count();
-    let eager = place.eager_reads();
+    let mut eager = place.eager_reads();
     let mut menus = (!place.notes.wall).then(|| menus::Menus::read(&place, doc));
-    let evidence = menus.as_mut().map(menus::Menus::take_evidence);
+    let evidence = menus.as_mut().map(|menus| {
+        for action in menus.take_actions() {
+            place.section(action);
+        }
+        menus.take_evidence()
+    });
     place.finish_sections(Some(doc.page()), menus);
+    let mut discovered: BTreeSet<_> = eager.iter().map(|r| r.id.clone()).collect();
+    eager.extend(
+        place
+            .eager_reads()
+            .into_iter()
+            .filter(|r| discovered.insert(r.id.clone())),
+    );
     if let Some(evidence) = evidence {
         evidence.measure(&place.place, &mut place.stats);
     }
@@ -1502,6 +1526,24 @@ mod tests {
 #[cfg(test)]
 mod review_tests {
     use super::*;
+
+    #[test]
+    fn the_final_card_admits_eager_rows_displaced_from_the_first_shortlist() {
+        let mut html = String::from("<nav>");
+        for i in 0..MAX_PRIMARY_SECTIONS {
+            html.push_str(&format!("<a href='/docs/{i}'>Docs</a>"));
+        }
+        html.push_str("<a href='/pricing'>Pricing</a></nav>");
+        let url = Url::parse("https://example.com/").unwrap();
+        let doc = Doc::from_html(&url, html.as_bytes(), None, crate::DocLimits::SITE_PAGE).unwrap();
+        let (place, _, eager) = read_site_for(&doc, &SiteInputs::default(), None).unwrap();
+        let pricing = place
+            .sections
+            .iter()
+            .find(|e| e.label == "Pricing")
+            .unwrap();
+        assert!(eager.iter().any(|r| r.id == pricing.id));
+    }
 
     #[test]
     fn result_sitelink_merges_with_the_discovered_id_after_a_redirect() {

@@ -26,7 +26,16 @@ pub(super) fn locale(segment: &str) -> bool {
 
 impl Entry {
     pub fn card_page(&self) -> PageMatch {
-        localized_key(&self.key)
+        if self.localized {
+            if let Some((_, rest)) = locale_path(self.key.as_url()) {
+                let mut url = self.key.as_url().clone();
+                url.set_path(&format!("/{rest}"));
+                if let Ok(key) = PageKey::from_url(&url) {
+                    return key.page_match();
+                }
+            }
+        }
+        self.key.page_match()
     }
     pub(super) fn card_route(&self) -> (PageMatch, Option<String>) {
         (self.card_page(), self.locator.fragment())
@@ -51,15 +60,73 @@ pub fn skip_label(label: &str) -> bool {
         )
 }
 
-fn localized_key(key: &PageKey) -> PageMatch {
-    let mut url = key.as_url().clone();
-    if let Some((first, rest)) = url.path().trim_matches('/').split_once('/') {
-        if locale(first) {
-            let path = format!("/{rest}");
-            url.set_path(&path);
-        }
+fn locale_path(url: &Url) -> Option<(&str, &str)> {
+    let path = url.path().trim_matches('/');
+    let (first, rest) = path.split_once('/').unwrap_or((path, ""));
+    locale(first).then_some((first, rest))
+}
+
+pub(super) fn localized_pages(doc: &Doc) -> BTreeSet<PageMatch> {
+    fn primary(tag: &str) -> &str {
+        tag.split_once('-').map_or(tag, |(language, _)| language)
     }
-    PageKey::from_url(&url).map_or_else(|_| key.page_match(), |k| k.page_match())
+    let links = doc
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let url = n.destination.as_ref()?;
+            visible(doc.nodes(), i).then_some((url, n.link_language.as_deref()))
+        })
+        .chain(
+            doc.menu_links
+                .iter()
+                .filter(|(i, _)| visible(doc.nodes(), **i))
+                .flat_map(|(_, links)| links.iter())
+                .map(|l| (&l.url, l.language.as_deref())),
+        )
+        .map(|(url, language)| {
+            let tagged = language
+                .zip(locale_path(url))
+                .is_some_and(|(tag, (prefix, _))| {
+                    primary(tag).eq_ignore_ascii_case(primary(prefix))
+                });
+            (url, tagged)
+        })
+        .chain(
+            doc.head()
+                .alternates
+                .iter()
+                .filter(|a| !a.language.is_empty())
+                .map(|a| (&a.url, true)),
+        );
+    let observed: BTreeSet<_> = links
+        .clone()
+        .map(|(u, _)| u)
+        .chain([doc.page()])
+        .filter_map(|u| PageKey::from_url(u).ok().map(|k| k.page_match()))
+        .collect();
+    let current = locale_path(doc.page()).map(|(lang, _)| lang);
+    links
+        .filter_map(|(url, tagged)| {
+            let (prefix, rest) = locale_path(url)?;
+            let key = PageKey::from_url(url).ok()?.page_match();
+            if tagged || current.is_some_and(|c| c.eq_ignore_ascii_case(prefix)) {
+                return Some(key);
+            }
+            if rest.is_empty() && current.is_none() {
+                return None;
+            }
+            let mut counterpart = url.clone();
+            counterpart.set_path(&match current {
+                Some(lang) => format!("/{lang}/{rest}"),
+                None => format!("/{rest}"),
+            });
+            observed
+                .contains(&PageKey::from_url(&counterpart).ok()?.page_match())
+                .then_some(key)
+        })
+        .collect()
 }
 
 pub(super) fn placeholder(label: &str) -> bool {
@@ -178,7 +245,7 @@ pub(super) fn self_link(entry: &Entry, root: &PageKey, landing: Option<&Url>) ->
         return false;
     }
     let url = entry.key.as_url();
-    if localized_key(&entry.key) == root.page_match()
+    if entry.card_page() == root.page_match()
         || landing.is_some_and(|u| crate::key::same_page(u, url))
     {
         return true;
@@ -241,34 +308,12 @@ impl Build<'_> {
     pub(super) fn edit_card(&mut self, landing: Option<&Url>) {
         let mut candidates = Vec::new();
         let entries = std::mem::take(&mut self.sections);
-        let locale_paths: BTreeSet<_> = entries
-            .iter()
-            .flat_map(|e| std::iter::once(e).chain(&e.children))
-            .filter_map(|e| {
-                let u = e.key.as_url();
-                let path = u.path().trim_matches('/');
-                (locale(path)
-                    && u.domain().map(|h| h.trim_start_matches("www."))
-                        == Some(self.key.host.as_str())
-                    && !e.label.eq_ignore_ascii_case(path))
-                .then_some(path.to_owned())
-            })
-            .collect();
         let home = |e: &Entry| {
             self_link(e, &self.entry, landing)
                 || e.locator.element.is_some()
                     && skip_label(&e.label)
                     && (e.key.page_match() == self.entry.page_match()
                         || landing.is_some_and(|u| crate::key::same_page(u, e.key.as_url())))
-                || (locale_paths.len() > 1
-                    && e.locator == Locator::default()
-                    && e.key.as_url().query().is_none()
-                    && e.key
-                        .as_url()
-                        .domain()
-                        .map(|h| h.trim_start_matches("www."))
-                        == Some(self.key.host.as_str())
-                    && locale_paths.contains(e.key.as_url().path().trim_matches('/')))
         };
         let originals: std::collections::HashMap<_, _> = entries
             .iter()
@@ -333,7 +378,7 @@ impl Build<'_> {
                 }
             }
             let destination = (
-                localized_key(&e.key),
+                e.card_page(),
                 e.locator.clone(),
                 e.menu_only.then(|| e.id.clone()),
             );
@@ -355,7 +400,7 @@ impl Build<'_> {
             let existing = destinations
                 .get(&destination)
                 .or_else(|| edition.as_ref().and_then(|key| editions.get(key)))
-                .or_else(|| labels.get(&label))
+                .or_else(|| labels.get(&(label.clone(), e.menu_only)))
                 .copied();
             if let Some(i) = existing {
                 let kept: &mut Entry = &mut self.place.sections[i];
@@ -369,7 +414,7 @@ impl Build<'_> {
                 let children = std::mem::take(&mut e.children);
                 if destination
                     != (
-                        localized_key(&kept.key),
+                        kept.card_page(),
                         kept.locator.clone(),
                         kept.menu_only.then(|| kept.id.clone()),
                     )
@@ -379,15 +424,15 @@ impl Build<'_> {
                 for child in children {
                     kept.child(child, self.requested);
                 }
+                labels.insert((label, destination.2.is_some()), i);
                 destinations.insert(destination, i);
-                labels.insert(label, i);
                 if let Some(key) = edition {
                     editions.insert(key, i);
                 }
             } else {
                 let index = self.sections.len();
                 destinations.insert(destination, index);
-                labels.insert(label, index);
+                labels.insert((label, e.menu_only), index);
                 if let Some(key) = edition {
                     editions.insert(key, index);
                 }
@@ -487,9 +532,7 @@ impl Build<'_> {
 }
 
 pub(super) fn child_self(child: &Entry, parent: &Entry) -> bool {
-    !parent.menu_only
-        && child.locator == parent.locator
-        && localized_key(&child.key) == localized_key(&parent.key)
+    !parent.menu_only && child.locator == parent.locator && child.card_page() == parent.card_page()
 }
 
 fn scheme_like(segment: &str) -> bool {
@@ -517,25 +560,6 @@ pub fn display_path(url: &Url) -> String {
         Some((cut, _)) => out[..cut].to_owned(),
         None => out,
     }
-}
-
-pub(super) fn same_display(left: &Entry, right: &Entry) -> bool {
-    if left.key.as_url().domain() != right.key.as_url().domain() {
-        return false;
-    }
-    let name = |e: &Entry| {
-        let label = crate::flatten(&e.label).to_lowercase();
-        if label.contains("://")
-            || label
-                .split_whitespace()
-                .any(|w| w.starts_with("http:") || w.starts_with("https:") || w.starts_with("www."))
-        {
-            display_path(e.key.as_url()).to_lowercase()
-        } else {
-            label
-        }
-    };
-    name(left) == name(right) && display_path(left.key.as_url()) == display_path(right.key.as_url())
 }
 
 pub fn display_hostname(url: &Url) -> Option<&str> {

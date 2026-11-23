@@ -3,12 +3,13 @@ use crate::results::{MAX_SOCIAL, TITLE_BYTES};
 use crate::site::{MAX_CHILDREN, MAX_SECTIONS};
 use serde::{Deserialize, Serialize};
 
-pub const MEMO_VERSION: u16 = 6;
+pub const MEMO_VERSION: u16 = 7;
 pub const MAX_MEMO_BYTES: usize = 256 * 1024;
 pub const MEMO_TTL: u64 = 24 * 60 * 60;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SiteMemo {
     pub version: u16,
+    pub eager: bool,
     pub read_at: u64,
     pub payload: SitePayload,
 }

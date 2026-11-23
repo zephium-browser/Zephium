@@ -266,32 +266,44 @@ async fn an_interrupt_cancels_the_driver_and_prints_its_end() {
         }
     }
 
-    let arguments = args(&["Stripe Pricing", "--site", "stripe.com"]);
-    let (request, results) = Options::parse(&arguments).unwrap().prepare().unwrap();
-    let io = Io {
-        results: Arc::new(results),
-        fetch: Arc::new(NoFetch),
-        memo: Arc::new(MemoryMemo::new()),
-        clock: Arc::new(SystemClock::new()),
-    };
-    let (driver, changes) = Driver::start(request, io, &Handle::current()).unwrap();
-    let (_route, direct) = watch::channel(PublicRoute::Direct);
-    let mut output = Vec::new();
-    let outcome = stream(
-        &driver,
-        changes,
-        direct,
-        std::future::ready(Ok(())),
-        &mut output,
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(outcome, Ok(Outcome::Cancelled));
-    assert_eq!(driver.counts(), Counts::default());
-    let printed = std::str::from_utf8(&output).unwrap();
-    assert_eq!(printed.lines().count(), 1);
-    assert!(printed.starts_with("Cancelled  "));
-    assert!(printed.ends_with("ms  reads 0  data 0.0 MB  renders wanted 0\n"));
+    for buffered in [false, true] {
+        let arguments = args(&["Stripe Pricing", "--site", "stripe.com"]);
+        let (request, results) = Options::parse(&arguments).unwrap().prepare().unwrap();
+        let io = Io {
+            results: Arc::new(results),
+            fetch: Arc::new(NoFetch),
+            memo: Arc::new(MemoryMemo::new()),
+            clock: Arc::new(SystemClock::new()),
+        };
+        let (driver, mut changes) = Driver::start(request, io, &Handle::current()).unwrap();
+        if buffered {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(Change::End {
+                seq: 0,
+                outcome: Outcome::Done,
+                elapsed_ms: 0,
+            })
+            .unwrap();
+            changes = rx;
+        }
+        let (_route, direct) = watch::channel(PublicRoute::Direct);
+        let mut output = Vec::new();
+        let outcome = stream(
+            &driver,
+            changes,
+            direct,
+            std::future::ready(Ok(())),
+            &mut output,
+            vec!["Pricing"],
+        )
+        .await;
+        assert_eq!(outcome, Ok(Outcome::Cancelled));
+        assert_eq!(driver.counts(), Counts::default());
+        let printed = std::str::from_utf8(&output).unwrap();
+        assert_eq!(printed.lines().count(), 1);
+        assert!(printed.starts_with("Cancelled  "));
+        assert!(printed.ends_with("ms  reads 0  data 0.0 MB  renders wanted 0\n"));
+    }
 }
 
 #[tokio::test]
@@ -395,4 +407,58 @@ async fn labelled_opens_after_end_reprint_the_card_and_each_read_cost() {
         .collect();
     assert_eq!(opens.len(), 2);
     assert!(opens.iter().all(|line| line.contains("reads 1  bytes ")));
+}
+
+#[tokio::test]
+async fn failed_opens_affect_status_and_remaining_opens_still_run() {
+    struct Fixture;
+    impl Fetcher for Fixture {
+        fn fetch(&self, request: FetchRequest) -> Reading<Result<FetchResult, Failure>> {
+            Box::pin(async move {
+                let body = match request.url.path() {
+                    "/" => "<nav><a href='/docs'>Docs</a><a href='/pricing'>Pricing</a></nav>",
+                    "/pricing" => "<h2 id='annual'>Annual</h2>",
+                    "/docs" => return Err(Failure::Timeout),
+                    _ => return Err(Failure::Missing),
+                };
+                Ok(FetchResult {
+                    final_url: request.url,
+                    bytes: body.as_bytes().into(),
+                    content_type: "text/html".into(),
+                    charset: None,
+                    truncated: false,
+                })
+            })
+        }
+    }
+    for labels in [
+        vec!["Unknown", "Pricing"],
+        vec!["Docs", "Pricing"],
+        vec!["Pricing", "Pricing"],
+    ] {
+        let args = args(&["Stripe", "--site", "stripe.com"]);
+        let (request, results) = Options::parse(&args).unwrap().prepare().unwrap();
+        let io = Io {
+            results: Arc::new(results),
+            fetch: Arc::new(Fixture),
+            memo: Arc::new(MemoryMemo::new()),
+            clock: Arc::new(SystemClock::new()),
+        };
+        let (driver, changes) = Driver::start(request, io, &Handle::current()).unwrap();
+        let (_route, direct) = watch::channel(PublicRoute::Direct);
+        let mut output = Vec::new();
+        let outcome = stream(
+            &driver,
+            changes,
+            direct,
+            std::future::pending(),
+            &mut output,
+            labels,
+        )
+        .await;
+        assert!(matches!(outcome, Err(_) | Ok(Outcome::Failed { .. })));
+        let printed = String::from_utf8(output).unwrap();
+        assert!(printed.contains("Opened read"));
+        assert!(printed.contains("refused"));
+    }
 }

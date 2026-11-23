@@ -25,12 +25,22 @@ pub(super) struct Printer {
 
 impl Printer {
     pub(super) fn section(&self, label: &str) -> Result<(u8, &str), &'static str> {
-        let mut matches = self.slots.iter().enumerate().flat_map(|(index, slot)| {
-            slot.sections.iter().filter_map(move |(id, name)| {
-                name.eq_ignore_ascii_case(label.trim())
-                    .then_some((index as u8, id.as_str()))
-            })
-        });
+        let (side, label) = match label.trim().split_once("::") {
+            Some(("left", label)) => (Some(0), label.trim()),
+            Some(("right", label)) => (Some(1), label.trim()),
+            _ => (None, label.trim()),
+        };
+        let mut matches = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| side.is_none_or(|side| *i == side))
+            .flat_map(|(index, slot)| {
+                slot.sections.iter().filter_map(move |(id, name)| {
+                    name.eq_ignore_ascii_case(label)
+                        .then_some((index as u8, id.as_str()))
+                })
+            });
         let section = matches.next().ok_or("unknown label")?;
         if matches.next().is_some() {
             return Err("ambiguous label");
