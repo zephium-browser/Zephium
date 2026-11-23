@@ -30,7 +30,10 @@ const native = vi.hoisted(() => ({
 // The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
 vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$domain/tabs", () => ({
-  tabs: { profile: () => ({ id: native.profile, kind: "default", name: "Alex" }) },
+  tabs: {
+    profile: () => ({ id: native.profile, kind: "default", name: "Alex" }),
+    homeOn: () => false,
+  },
 }));
 vi.mock("$shared/sky", async (original) => {
   const real = await original<typeof import("$shared/sky")>();
@@ -161,6 +164,29 @@ test("defaults do no image work, and every figure and wordmark updates live and 
   expect(preferences.value("search.engine")).toBe("google");
 });
 
+test("Settings chooses between Home and the classic new tab, offers a plain ground, and resets both", async () => {
+  await preferences.init();
+  const ntp = await tab();
+  const settings = await settingsScreen();
+  await settings.getByRole("button", { name: "New tabs open to", exact: true }).click();
+  await expect.element(page.getByRole("option", { name: "Home", exact: true })).toBeVisible();
+  await page.getByRole("option", { name: "Classic new tab", exact: true }).click();
+  await expect.poll(() => native.settings["home.mode"]).toBe("classic");
+  await settings.getByRole("button", { name: "Background", exact: true }).click();
+  await page.getByRole("option", { name: "Plain", exact: true }).click();
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector(".sky")).toBeNull();
+  expect(native.media).not.toHaveBeenCalled();
+  await settings.getByRole("button", { name: "Background", exact: true }).click();
+  await page.getByRole("option", { name: "Zephium sky", exact: true }).click();
+  await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+  await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
+  await expect.poll(() => preferences.value("home.mode")).toBe("home");
+  expect(preferences.value("ui.newtab-background")).toBe("plain");
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector(".sky")).toBeNull();
+});
+
 test("a custom background uses one sized local image, no sky decode or frost, and dims live", async () => {
   native.settings = { "ui.newtab-background": "image", "ui.newtab-image": digest };
   await preferences.init();
@@ -182,7 +208,8 @@ test("a custom background uses one sized local image, no sky decode or frost, an
   expect(ntp.container.querySelector("img")).toBe(image);
   expect(native.media).toHaveBeenCalledTimes(1);
   await settings.getByRole("button", { name: "Reset to default", exact: true }).click();
-  await expect.poll(() => ntp.container.querySelector(".sky")).not.toBeNull();
+  await expect.poll(() => ntp.container.querySelector(".newtab.plain")).not.toBeNull();
+  expect(ntp.container.querySelector("img")).toBeNull();
   expect(preferences.value("ui.newtab-image")).toBe("");
   expect(preferences.value("ui.newtab-dim")).toBe("false");
 });

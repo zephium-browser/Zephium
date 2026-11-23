@@ -64,6 +64,23 @@ pub struct TabView {
     #[serde(default)]
     #[specta(optional)]
     pub audio: Option<TabAudioView>,
+    /// The tab is the space's Home: an untouched new tab while Home is on.
+    #[serde(default)]
+    #[specta(optional)]
+    pub home: bool,
+    /// The search on Home this tab was opened from.
+    #[serde(default)]
+    #[specta(optional)]
+    pub search: Option<TabSearchView>,
+}
+
+/// The search a tab came from: its id on Home, the words asked and whether
+/// the tab is that search's results page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TabSearchView {
+    pub id: String,
+    pub text: String,
+    pub results: bool,
 }
 
 /// The sidebar's player: the media of the tab that most recently started
@@ -659,6 +676,10 @@ pub struct ItemsState {
     pub tabs: Vec<TabView>,
     pub active: Option<String>,
     pub split_group: Option<SplitGroupView>,
+    /// A new tab in this window's profile and space is Home.
+    #[serde(default)]
+    #[specta(optional)]
+    pub home: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
@@ -689,6 +710,26 @@ pub struct SearchContext {
     pub request_id: String,
     pub profile_id: String,
     pub space_id: String,
+    /// Run the words as a plain search, never as a map on Home. Not part of
+    /// the search the context names.
+    #[serde(default)]
+    #[specta(optional)]
+    pub plain: Option<bool>,
+}
+
+impl SearchContext {
+    /// The same search session, whatever way a run was asked for.
+    pub fn same_search(&self, other: &Self) -> bool {
+        self.window_id == other.window_id
+            && self.session_id == other.session_id
+            && self.request_id == other.request_id
+            && self.profile_id == other.profile_id
+            && self.space_id == other.space_id
+    }
+
+    pub fn plain(&self) -> bool {
+        self.plain == Some(true)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1419,6 +1460,14 @@ pub enum OperationReason {
     ProfileDeletionCompleted,
     /// Work and AI features are switched off.
     FeatureDisabled,
+    /// The search opened as a map on Home instead of a results page.
+    HomeMapStarted,
+    /// Home is off, or nothing hosts its maps.
+    HomeUnavailable,
+    /// No search on Home has that id.
+    HomeSearchUnknown,
+    /// The page asked for is not one the search's map offers.
+    HomeTargetUnavailable,
 }
 
 /// The shell has processed an admitted operation in actor order. Consumers
@@ -1869,6 +1918,18 @@ pub enum Projection {
     /// Links another application handed over opened as tabs, so the main
     /// window comes forward. A link that opened a mini window does not.
     ExternalTabsOpened,
+    /// The searches on Home in this profile and space changed.
+    HomeChanged {
+        profile: String,
+        space: String,
+    },
+    /// Home came back to the front for this search, at the row the closed
+    /// page was opened from when there is one.
+    HomeShow {
+        search: String,
+        slot: Option<u8>,
+        entry: Option<String>,
+    },
 }
 
 /// Shared Rust-owned Notes/Tasks wire model.

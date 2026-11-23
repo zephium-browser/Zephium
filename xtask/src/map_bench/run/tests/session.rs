@@ -584,9 +584,9 @@ This run used synthetic results pages. Group checks and first-layer latency were
 | full_ns | 1 | 10 | 10 | 10 |
 | memo_bytes | 1 | 256 | — | 256 |
 | peak_rss_delta_bytes | 0 | — | — | — |
-| primary_sections_per_place | 1 | 3 | 3 | 3 |
+| primary_sections_per_place | 1 | 5 | 5 | 5 |
 | requests | 2 | 0 | 0 | 0 |
-| secondary_sections_per_place | 1 | 2 | 2 | 2 |
+| secondary_sections_per_place | 1 | 0 | 0 | 0 |
 | sections_per_place | 1 | 5 | 5 | 5 |
 | wall_ns | 2 | 0 | 0 | 0 |
 | wire_bytes | 2 | 0 | 0 | 0 |
@@ -596,6 +596,33 @@ This run used synthetic results pages. Group checks and first-layer latency were
 | — | 0 |
 
 Places with at least 3 sections — 1 of 1 place and compare sites.
+
+
+### Card quality (all)
+
+| Defect | Rows | Place cards |
+|---|---:|---:|
+| action | 0 | 0 |
+| detail | 0 | 0 |
+| duplicate | 0 | 0 |
+| duplicate_children | 0 | 0 |
+| invalid_group_pages | 0 | 0 |
+| language_groups | 0 | 0 |
+| long_compound_titles | 0 | 0 |
+| missing_header_links | 0 | 0 |
+| nameless | 0 | 0 |
+| off_host_root_children | 0 | 0 |
+| off_host_without_display | 0 | 0 |
+| order | 0 | 0 |
+| path_names | 1 | 1 |
+| same_role_pairs | 0 | 0 |
+| self | 0 | 0 |
+| sentence | 0 | 0 |
+| skip_links | 0 | 0 |
+| supplemental_only | 2 | 1 |
+| thin_cards | 0 | 0 |
+| top_level_menu_items | 0 | 0 |
+| utility | 0 | 0 |
 
 | Session activity | Count |
 | --- | ---: |
@@ -699,6 +726,43 @@ fn replay_refuses_a_different_engine_before_writing_a_run() {
     .unwrap_err();
     assert_eq!(error.class, "replay_engine_mismatch");
     assert!(!root.path().join("replay").exists());
+}
+
+#[test]
+fn section_comparison_finishes_after_one_corrupt_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("corpus.toml");
+    let entries: String = ["first", "second"]
+        .iter()
+        .map(|id| format!("[[query]]\nid='{id}'\ntext='Acme docs'\n{ACME}\n"))
+        .collect();
+    fs::write(&path, entries).unwrap();
+    let corpus = Corpus::load(std::slice::from_ref(&path)).unwrap();
+    init_engine(root.path(), &corpus, EngineKind::Session);
+    let mut source = ScriptedSource::new(site);
+    for query in &corpus.queries {
+        run_session(root.path(), query, &mut source);
+    }
+    fs::write(
+        root.path().join("queries/first/requests.jsonl"),
+        b"incomplete",
+    )
+    .unwrap();
+    crate::map_bench_section_flags::run(&[
+        "replay".into(),
+        "--compare-sections".into(),
+        "--engine".into(),
+        "session".into(),
+        "--from".into(),
+        root.path().display().to_string(),
+        "--corpus".into(),
+        path.display().to_string(),
+    ])
+    .unwrap();
+    let (run, manifest) = latest_replay(root.path()).unwrap().unwrap();
+    assert_eq!(manifest.queries.len(), 2);
+    assert!(run.join("queries/first/sections-error.json").is_file());
+    assert!(run.join("queries/second/sections.json").is_file());
 }
 
 fn save_row(root: &Path, path: &Path, request: &FetchRequest, result: FetchResult) {

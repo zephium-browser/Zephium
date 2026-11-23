@@ -551,6 +551,11 @@ export const commands = {
 	request_id: string,
 	profile_id: string,
 	space_id: string,
+	/**
+	 *  Run the words as a plain search, never as a map on Home. Not part of
+	 *  the search the context names.
+	 */
+	plain?: boolean | null,
 } | null>("newtab_search_context", { tabId }),
 	newtabSearch: (query: string, context: SearchContext) => __TAURI_INVOKE<boolean>("newtab_search", { query, context }),
 	newtabRun: (action: SearchAction, context: SearchContext) => __TAURI_INVOKE<OperationAdmission>("newtab_run", { action, context }),
@@ -693,6 +698,16 @@ export const commands = {
 	/**  The page was longer than the engine reads. */
 	truncated: boolean,
 } | null>("page_source", { id }),
+	homeSnapshot: () => __TAURI_INVOKE<{
+	profile: string,
+	space: string,
+	searches: HomeSearchV1_Serialize[],
+} | null>("home_snapshot"),
+	homeOpenTarget: (search: string, slot: number, target: MapTarget) => __TAURI_INVOKE<OperationAdmission>("home_open_target", { search, slot, target }),
+	homeOpenInside: (search: string, slot: number, entry: string) => __TAURI_INVOKE<HomeInsideAdmissionV1>("home_open_inside", { search, slot, entry }),
+	homeOpenResults: (search: string) => __TAURI_INVOKE<OperationAdmission>("home_open_results", { search }),
+	homeFocusSearch: (search: string) => __TAURI_INVOKE<OperationAdmission>("home_focus_search", { search }),
+	homeForgetSearch: (search: string) => __TAURI_INVOKE<OperationAdmission>("home_forget_search", { search }),
 	resourceCloseReady: (token: string, success: boolean) => __TAURI_INVOKE<boolean>("resource_close_ready", { token, success }),
 	tabDrop: (id: string, x: number | null, y: number | null) => __TAURI_INVOKE<OperationAdmission>("tab_drop", { id, x, y }),
 	dividerGrab: (x: number | null, y: number | null) => __TAURI_INVOKE<void>("divider_grab", { x, y }),
@@ -733,6 +748,9 @@ export const events = {
 	faviconsChanged: makeEvent<FaviconsChanged>("favicons-changed"),
 	findChanged: makeEvent<FindChanged>("find-changed"),
 	focusChanged: makeEvent<FocusChanged>("focus-changed"),
+	homeChangedV1: makeEvent<HomeChangedV1>("home-changed-v1"),
+	homeMapChangedV1: makeEvent<HomeMapChangedV1_Deserialize>("home-map-changed-v1"),
+	homeShowV1: makeEvent<HomeShowV1>("home-show-v1"),
 	itemsChanged: makeEvent<ItemsChanged>("items-changed"),
 	layoutChanged: makeEvent<LayoutChanged>("layout-changed"),
 	mediaPlayerChanged: makeEvent<MediaPlayerChanged>("media-player-changed"),
@@ -1688,6 +1706,132 @@ export type HistoryVisitView = {
 	icon: IconRef | null,
 };
 
+export type HomeChangedV1 = {
+	profile: string,
+	space: string,
+};
+
+export type HomeInsideAdmissionV1 = {
+	accepted: boolean,
+	refusal: HomeInsideRefusalV1 | null,
+};
+
+export type HomeInsideRefusalV1 =
+/**  The search has no running map any more. */
+"map_gone" | "search_unknown" | "no_place" | "unknown_entry" | "not_openable" | "too_many_waiting";
+
+export type HomeMapChangedV1 = HomeMapChangedV1_Serialize | HomeMapChangedV1_Deserialize;
+
+export type HomeMapChangedV1_Deserialize = {
+	map: string,
+	search: string,
+	change: MapChange_Deserialize,
+};
+
+export type HomeMapChangedV1_Serialize = {
+	map: string,
+	search: string,
+	change: MapChange_Serialize,
+};
+
+/**
+ *  A map as folded so far: replaying `changes` in order gives what the
+ *  stream showed; a streamed change at or below `seq` is already in it.
+ */
+export type HomeMapV1 = HomeMapV1_Serialize | HomeMapV1_Deserialize;
+
+/**
+ *  A map as folded so far: replaying `changes` in order gives what the
+ *  stream showed; a streamed change at or below `seq` is already in it.
+ */
+export type HomeMapV1_Deserialize = {
+	id: string,
+	seq: number | null,
+	/**  The map can still open a page inside itself. */
+	live: boolean,
+	changes: MapChange_Deserialize[],
+};
+
+/**
+ *  A map as folded so far: replaying `changes` in order gives what the
+ *  stream showed; a streamed change at or below `seq` is already in it.
+ */
+export type HomeMapV1_Serialize = {
+	id: string,
+	seq: number | null,
+	/**  The map can still open a page inside itself. */
+	live: boolean,
+	changes: MapChange_Serialize[],
+};
+
+export type HomePageV1 = {
+	/**  The tab while it is open. */
+	tab: string | null,
+	slot: number | null,
+	entry: string | null,
+	open: boolean,
+	title: string,
+	host: string,
+};
+
+export type HomeSearchKindV1 = "place" | "compare" | "other" | "address";
+
+export type HomeSearchV1 = HomeSearchV1_Serialize | HomeSearchV1_Deserialize;
+
+export type HomeSearchV1_Deserialize = {
+	id: string,
+	text: string,
+	at_ms: number | null,
+	kind: HomeSearchKindV1,
+	/**  The engine the search was asked with, for its mark. */
+	engine: SearchEngine,
+	/**  A tab shows the search's results page. */
+	results_open: boolean,
+	map: HomeMapV1_Deserialize | null,
+	pages: HomePageV1[],
+};
+
+export type HomeSearchV1_Serialize = {
+	id: string,
+	text: string,
+	at_ms: number | null,
+	kind: HomeSearchKindV1,
+	/**  The engine the search was asked with, for its mark. */
+	engine: SearchEngine,
+	/**  A tab shows the search's results page. */
+	results_open: boolean,
+	map: HomeMapV1_Serialize | null,
+	pages: HomePageV1[],
+};
+
+export type HomeShowV1 = {
+	search: string,
+	/**
+	 *  The row the closed page was opened from, as the snapshot's pages
+	 *  name it (`entry` is the entry id, `site`, `social-<network>` or
+	 *  `also-<index>`); null for anything not opened from a row.
+	 */
+	slot: number | null,
+	entry: string | null,
+};
+
+/**  The searches on Home of one profile and space, newest first. */
+export type HomeSnapshotV1 = HomeSnapshotV1_Serialize | HomeSnapshotV1_Deserialize;
+
+/**  The searches on Home of one profile and space, newest first. */
+export type HomeSnapshotV1_Deserialize = {
+	profile: string,
+	space: string,
+	searches: HomeSearchV1_Deserialize[],
+};
+
+/**  The searches on Home of one profile and space, newest first. */
+export type HomeSnapshotV1_Serialize = {
+	profile: string,
+	space: string,
+	searches: HomeSearchV1_Serialize[],
+};
+
 /**
  *  Names a cached site icon without carrying its pixels. Chrome keeps rasters
  *  by key and repaints only when `revision` changes, so a projection costs
@@ -1770,6 +1914,8 @@ export type ItemsState = {
 	tabs: TabView[],
 	active: string | null,
 	split_group: SplitGroupView | null,
+	/**  A new tab in this window's profile and space is Home. */
+	home?: boolean,
 };
 
 /**  The keymap changed; read it again. */
@@ -1827,6 +1973,123 @@ export type LoginItemStatus = {
 	/**  Registered, but the person still has to allow it in System Settings. */
 	needs_approval: boolean,
 };
+
+export type MapAlso = {
+	title: string,
+	host: string,
+	kind: MapAlsoKind,
+};
+
+export type MapAlsoKind = "page" | "discussion" | "video";
+
+export type MapChange = MapChange_Serialize | MapChange_Deserialize;
+
+export type MapChange_Deserialize = ({ type: "first_layer"; seq: number; official: MapOfficial | null; social: MapNetwork[]; organic: number; also: MapAlso[] }) & { complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; id?: never; outcome?: never; place?: never; result?: never; rows?: never; slot?: never; stale?: never } | ({ type: "place"; seq: number; slot: number; place: MapPlace_Deserialize; stale: boolean; confidence: MapConfidence; complete: boolean }) & { also?: never; elapsed_ms?: never; failure?: never; id?: never; official?: never; organic?: never; outcome?: never; result?: never; rows?: never; social?: never } | ({ type: "place_failed"; seq: number; slot: number; failure: MapFailure }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; id?: never; official?: never; organic?: never; outcome?: never; place?: never; result?: never; rows?: never; social?: never; stale?: never } | ({ type: "compare"; seq: number; rows: MapRow_Deserialize[] }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; id?: never; official?: never; organic?: never; outcome?: never; place?: never; result?: never; slot?: never; social?: never; stale?: never } | ({ type: "end"; seq: number; outcome: MapOutcome; elapsed_ms: number }) & { also?: never; complete?: never; confidence?: never; failure?: never; id?: never; official?: never; organic?: never; place?: never; result?: never; rows?: never; slot?: never; social?: never; stale?: never } | ({ type: "opened"; seq: number; slot: number; id: string; result: MapOpenResult }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; official?: never; organic?: never; outcome?: never; place?: never; rows?: never; social?: never; stale?: never };
+
+export type MapChange_Serialize = ({ type: "first_layer"; seq: number; official: MapOfficial | null; social: MapNetwork[]; organic: number; also: MapAlso[] }) & { complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; id?: never; outcome?: never; place?: never; result?: never; rows?: never; slot?: never; stale?: never } | ({ type: "place"; seq: number; slot: number; place: MapPlace_Serialize; stale: boolean; confidence: MapConfidence; complete: boolean }) & { also?: never; elapsed_ms?: never; failure?: never; id?: never; official?: never; organic?: never; outcome?: never; result?: never; rows?: never; social?: never } | ({ type: "place_failed"; seq: number; slot: number; failure: MapFailure }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; id?: never; official?: never; organic?: never; outcome?: never; place?: never; result?: never; rows?: never; social?: never; stale?: never } | ({ type: "compare"; seq: number; rows: MapRow_Serialize[] }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; id?: never; official?: never; organic?: never; outcome?: never; place?: never; result?: never; slot?: never; social?: never; stale?: never } | ({ type: "end"; seq: number; outcome: MapOutcome; elapsed_ms: number }) & { also?: never; complete?: never; confidence?: never; failure?: never; id?: never; official?: never; organic?: never; place?: never; result?: never; rows?: never; slot?: never; social?: never; stale?: never } | ({ type: "opened"; seq: number; slot: number; id: string; result: MapOpenResult }) & { also?: never; complete?: never; confidence?: never; elapsed_ms?: never; failure?: never; official?: never; organic?: never; outcome?: never; place?: never; rows?: never; social?: never; stale?: never };
+
+export type MapConfidence = "low" | "high";
+
+export type MapEntry = MapEntry_Serialize | MapEntry_Deserialize;
+
+export type MapEntry_Deserialize = {
+	id: string,
+	tier: MapTier,
+	label: string,
+	role?: MapRole | null,
+	group?: string | null,
+	off_site: boolean,
+	menu_only?: boolean,
+	open: boolean,
+	host?: string | null,
+	path: string,
+	read?: MapRead | null,
+	children: MapEntry_Deserialize[],
+	more: boolean,
+};
+
+export type MapEntry_Serialize = {
+	id: string,
+	tier: MapTier,
+	label: string,
+	role?: MapRole | null,
+	group?: string | null,
+	off_site: boolean,
+	menu_only: boolean,
+	open: boolean,
+	host?: string | null,
+	path: string,
+	read?: MapRead | null,
+	children: MapEntry_Serialize[],
+	more: boolean,
+};
+
+export type MapFailure = "cancelled" | "blocked" | "challenge" | "consent" | "no_results" | "unreadable" | "unavailable" | "timeout" | "limit" | "missing";
+
+export type MapNetwork = "twitter" | "git_hub" | "you_tube" | "linked_in" | "discord" | "reddit" | "mastodon" | "bluesky" | "instagram" | "facebook";
+
+export type MapNotes = {
+	thin?: boolean,
+	shell: boolean,
+	wall: boolean,
+	robots_disallowed: boolean,
+	truncated: boolean,
+};
+
+export type MapOfficial = {
+	title: string,
+	site: string,
+};
+
+export type MapOpenResult = { kind: "read" } | { kind: "refused"; failure: MapFailure };
+
+export type MapOutcome = { kind: "done" } | { kind: "cancelled" } | { kind: "failed"; failure: MapFailure };
+
+export type MapPlace = MapPlace_Serialize | MapPlace_Deserialize;
+
+export type MapPlace_Deserialize = {
+	title: string,
+	site: string,
+	host: string,
+	sections: MapEntry_Deserialize[],
+	focus: string | null,
+	social: MapNetwork[],
+	notes: MapNotes,
+};
+
+export type MapPlace_Serialize = {
+	title: string,
+	site: string,
+	host: string,
+	sections: MapEntry_Serialize[],
+	focus: string | null,
+	social: MapNetwork[],
+	notes: MapNotes,
+};
+
+export type MapRead = "queued" | "read" | "refused" | "skipped";
+
+export type MapRole = "news" | "product" | "features" | "solutions" | "enterprise" | "customers" | "community" | "security" | "legal" | "contact" | "sign_up" | "learn" | "examples" | "playground" | "integrations" | "home" | "pricing" | "documentation" | "api" | "reference" | "changelog" | "releases" | "status" | "download" | "install" | "login" | "blog" | "about" | "careers" | "support";
+
+export type MapRow = MapRow_Serialize | MapRow_Deserialize;
+
+export type MapRow_Deserialize = {
+	role?: MapRole | null,
+	label: string,
+	left?: string | null,
+	right?: string | null,
+};
+
+export type MapRow_Serialize = {
+	role?: MapRole | null,
+	label: string,
+	left?: string | null,
+	right?: string | null,
+};
+
+export type MapTarget = { kind: "entry"; id: string } | { kind: "site" } | { kind: "social"; network: MapNetwork } | { kind: "also"; index: number };
+
+export type MapTier = "primary" | "secondary" | "action";
 
 export type Material = "none" | "vibrancy" | "liquid_glass" | "acrylic" | "mica" | "mica_alt";
 
@@ -2111,7 +2374,15 @@ export type OperationReason = "mutation_applied" |
 /**  The address went to a mini window, so the main window stays behind. */
 "opened_in_mini" | "state_unchanged" | "invalid_scope" | "no_focused_window" | "item_limit_reached" | "invalid_input" | "history_unavailable" | "layout_unavailable" | "unsupported_command" | "native_dispatch_rejected" | "native_work_pending" | "discard_completion_pending" | "store_work_pending" | "store_admission_rejected" | "store_conflict" | "store_outcome_unknown" | "store_reconciliation_failed" | "content_policy_apply_failed" | "content_policy_source_unavailable" | "content_policy_source_refresh_pending" | "content_policy_source_refresh_failed" | "content_policy_sources_refreshed" | "profile_deletion_policy_rejected" | "profile_deletion_in_progress" | "profile_deletion_completed" |
 /**  Work and AI features are switched off. */
-"feature_disabled";
+"feature_disabled" |
+/**  The search opened as a map on Home instead of a results page. */
+"home_map_started" |
+/**  Home is off, or nothing hosts its maps. */
+"home_unavailable" |
+/**  No search on Home has that id. */
+"home_search_unknown" |
+/**  The page asked for is not one the search's map offers. */
+"home_target_unavailable";
 
 /**
  *  Process-local reconciliation state for an admitted mutation. Pending and
@@ -3095,6 +3366,11 @@ export type SearchContext = {
 	request_id: string,
 	profile_id: string,
 	space_id: string,
+	/**
+	 *  Run the words as a plain search, never as a map on Home. Not part of
+	 *  the search the context names.
+	 */
+	plain?: boolean | null,
 };
 
 export type SearchEngine = "google" | "duckduckgo" | "bing" | "brave" | "custom";
@@ -3391,6 +3667,16 @@ export type TabMenuContext = {
 	media_only: boolean,
 };
 
+/**
+ *  The search a tab came from: its id on Home, the words asked and whether
+ *  the tab is that search's results page.
+ */
+export type TabSearchView = {
+	id: string,
+	text: string,
+	results: boolean,
+};
+
 export type TabSwitcherAction = { type: "step"; reverse: boolean } | { type: "select"; index: number } | { type: "commit" } | { type: "cancel" } | { type: "close" } |
 /**  Leaves the switcher for a new tab in its window. */
 { type: "new_tab" } |
@@ -3460,6 +3746,10 @@ export type TabView = {
 	zoom?: number | null,
 	/**  Present while the page plays sound, and for as long as it is muted. */
 	audio?: TabAudioView | null,
+	/**  The tab is the space's Home: an untouched new tab while Home is on. */
+	home?: boolean,
+	/**  The search on Home this tab was opened from. */
+	search?: TabSearchView | null,
 };
 
 /**

@@ -21,6 +21,7 @@ const defaults = {
   "ui.newtab-clock-format": "system",
   "ui.newtab-tasks": "true",
   "ui.newtab-background": "sky",
+  "home.mode": "home",
   "ui.newtab-image": "",
   "ui.newtab-dim": "false",
   "ui.newtab-wordmark": "true",
@@ -78,6 +79,8 @@ const WEBKITGTK_STARTUP_CONCURRENCY = 8;
 const STARTUP_TIMEOUT_MS = 2000;
 let shortcutDefaults = $state.raw<SearchShortcut[]>([]);
 const values = $state<Record<PreferenceKey, string>>({ ...defaults });
+// Keys the person has a stored value for; the rest still follow how Zephium ships.
+const chosenKeys = $state<Partial<Record<PreferenceKey, true>>>({});
 let pending = $state<PreferenceKey | null>(null);
 let failed = $state(false);
 let epoch = 0;
@@ -97,6 +100,8 @@ const shortcuts = $derived.by(() => {
 });
 export const searchShortcuts = () => shortcuts;
 export const value = (key: PreferenceKey) => values[key];
+/** The person has chosen a value for `key`, rather than taking the shipped one. */
+export const chosen = (key: PreferenceKey) => chosenKeys[key] === true;
 export const saving = () => pending !== null;
 export const saveFailed = () => failed;
 /** AI: models, agents and dictation. Off, no AI surface is shown. */
@@ -123,8 +128,10 @@ export function commandOffered(command: string) {
   const feature = featureOf(command);
   return feature === null || (feature === "ai" ? aiEnabled() : enabled(feature));
 }
-function apply(key: PreferenceKey, next: string) {
+function apply(key: PreferenceKey, next: string, stored = true) {
   values[key] = next;
+  if (stored) chosenKeys[key] = true;
+  else delete chosenKeys[key];
   versions[key] = (versions[key] ?? 0) + 1;
 }
 async function initialize(generation: number, signal: AbortSignal) {
@@ -169,7 +176,7 @@ async function initialize(generation: number, signal: AbortSignal) {
           const stored = await observe(commands.settingGet(key), remaining, signal);
           if (stored.state === "timeout") return;
           if (generation === epoch && !updated[key] && stored.state === "received")
-            apply(key, stored.value ?? defaults[key]);
+            apply(key, stored.value ?? defaults[key], stored.value !== null);
         }
       } catch {
         /* Retain safe defaults if a read is unavailable. */
@@ -217,6 +224,7 @@ export function dispose() {
   for (const key of Object.keys(defaults) as PreferenceKey[]) {
     values[key] = defaults[key];
     delete versions[key];
+    delete chosenKeys[key];
   }
 }
 export async function set(key: PreferenceKey, next: string) {
@@ -270,13 +278,21 @@ export async function resetAll(): Promise<boolean> {
   return true;
 }
 
+/** The ground a new tab shows when the person never chose one: plain under Home, else the sky. */
+export const backgroundDefault = (home: boolean) =>
+  home ? "plain" : defaults["ui.newtab-background"];
+const homeMode = (mode: string) => mode === "home";
+
 /** Reset just this page, including choices whose feature is currently off. */
 export async function resetNewTab(): Promise<boolean> {
+  const home = homeMode(defaults["home.mode"]);
   for (const key of Object.keys(defaults) as PreferenceKey[]) {
-    if ((!key.startsWith("ui.newtab-") && key !== "tabs.new-page") || values[key] === defaults[key])
-      continue;
-    await set(key, defaults[key]);
-    if (failed || values[key] !== defaults[key]) return false;
+    if (!key.startsWith("ui.newtab-") && key !== "tabs.new-page" && key !== "home.mode") continue;
+    const target = key === "ui.newtab-background" ? backgroundDefault(home) : defaults[key];
+    if (values[key] === target) continue;
+    if (key === "ui.newtab-background" && !chosenKeys[key]) continue;
+    await set(key, target);
+    if (failed || values[key] !== target) return false;
   }
   return true;
 }

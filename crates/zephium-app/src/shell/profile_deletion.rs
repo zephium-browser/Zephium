@@ -247,6 +247,7 @@ impl Shell {
         self.recently_closed
             .retain(|entry| entry.profile != profile);
         self.zoom.forget_profile(profile);
+        self.home_forget_profile(profile);
         self.app_link_sites.remove(&profile);
         self.popup_sites.remove(&profile);
         self.download_sites.remove(&profile);

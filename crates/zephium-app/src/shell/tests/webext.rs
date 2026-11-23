@@ -149,6 +149,7 @@ fn the_store_button_answers_only_for_the_listing_in_front() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let (sink, view) = (clicks.clone(), screen.clone());
     let mut shell = Shell::new_with_failure(

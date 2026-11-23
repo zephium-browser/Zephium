@@ -64,6 +64,7 @@ fn mini(hosts: bool) -> Mini {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let log: Log = Arc::new(Mutex::new(Vec::new()));
     let (sink, record) = (screen.clone(), log.clone());
@@ -150,6 +151,7 @@ impl Mini {
             request_id: "one".into(),
             profile_id: window.profile.to_string(),
             space_id: window.space.to_string(),
+            plain: None,
         };
         self.shell.handle(Command::SearchScoped {
             mini: new_mini,
@@ -181,6 +183,7 @@ impl Mini {
             request_id: "one".into(),
             profile_id: window.profile.to_string(),
             space_id: window.space.to_string(),
+            plain: None,
         };
         self.shell.handle(Command::SearchScoped {
             mini,

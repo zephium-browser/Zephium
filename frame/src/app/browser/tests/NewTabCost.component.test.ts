@@ -43,7 +43,10 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 vi.mock("$domain/tabs", () => ({
-  tabs: { profile: () => ({ id: "00000000000000000000000901", name: "", kind: "default" }) },
+  tabs: {
+    profile: () => ({ id: "00000000000000000000000901", name: "", kind: "default" }),
+    homeOn: () => false,
+  },
 }));
 
 const counter = wakeupCounter();

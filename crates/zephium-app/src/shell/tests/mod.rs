@@ -1000,6 +1000,14 @@ impl Engine for FakeEngine {
         self.log(format!("extract {id}"));
         self.native_admission()
     }
+    fn read_document(
+        &self,
+        id: ItemId,
+        read: zephium_core::ports::engine::DocumentReadId,
+    ) -> NativeDispatch {
+        self.log(format!("read {id} {}", read.0));
+        self.native_admission()
+    }
     fn save_page(&self, id: ItemId) -> NativeDispatch {
         self.log(format!("save {id}"));
         self.native_admission()
@@ -2357,6 +2365,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         | Projection::Mini(_)
         | Projection::MiniClosed(_)
         | Projection::ExternalTabsOpened => {}
+        Projection::HomeChanged { .. } | Projection::HomeShow { .. } => {}
     }
 }
 
@@ -2382,6 +2391,7 @@ fn setup_with(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen) {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new_with_failure(
@@ -2448,6 +2458,7 @@ fn setup_with_icon_log(store: Arc<FakeStore>) -> (Shell, Arc<FakeEngine>, Screen
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let icons: IconLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
@@ -2484,6 +2495,7 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -2521,6 +2533,7 @@ pub(super) fn setup_with_operation_log_and_failure(
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let operations: OperationLog = Arc::new(Mutex::new(Vec::new()));
     let sink = screen.clone();
@@ -2689,6 +2702,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod home;
 mod lookup;
 mod media;
 mod mini;

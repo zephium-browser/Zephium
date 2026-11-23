@@ -676,6 +676,7 @@ fn scoped_launcher_actions_cross_the_real_operation_admission_boundary() {
         request_id: "request-1".into(),
         profile_id: "p".into(),
         space_id: "s".into(),
+        plain: None,
     };
     let action = zephium_ipc::SearchAction::OpenUrl {
         url: "https://example.com/".into(),

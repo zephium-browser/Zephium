@@ -6,3 +6,4 @@ export const loadNavigationError = () => import("./components/NavigationError.sv
 export { sidebarTree } from "./lib/sidebar-model";
 export * as selectionGlide from "./lib/selection-glide";
 export { applySpaceTheme, spaceThemeValues } from "./lib/space-theme";
+export { default as HomeEntry } from "./components/HomeEntry.svelte";

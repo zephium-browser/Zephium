@@ -11,7 +11,7 @@
   import { unrepeated } from "../../lib/board/text";
   import PlayMark from "./PlayMark.svelte";
   import { youtubeId } from "../../lib/link-media";
-  import { thumbnail } from "../../lib/frame-thumbs";
+  import { thumbnail } from "$shared/canvas";
   import { getContext } from "svelte";
   import { canvasFar } from "../../lib/canvas-context";
   /**

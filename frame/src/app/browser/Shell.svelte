@@ -11,7 +11,7 @@
   const loadNotesPage = () => import("$features/notes").then((notes) => notes.loadNotesPage());
   import LazyView from "$shared/ui/LazyView";
   import { commands, type TabView } from "$shared/ipc/bindings";
-  import { newTabImage } from "$session/newtab-background.svelte";
+  import { newTabBackground, newTabImage } from "$session/newtab-background.svelte";
   import SkyLight from "./SkyLight.svelte";
   import RenderBoundary from "$shared/ui/RenderBoundary";
   import { loadClearSiteData, loadSettings } from "$features/settings";
@@ -29,7 +29,8 @@
   import { sidebarTree } from "$features/tabs";
   import { SidebarBody } from "$features/tabs";
   import { TabList } from "$features/tabs";
-  import { TabRail } from "$features/tabs";
+  import { TabRail, HomeEntry } from "$features/tabs";
+  import { loadHome } from "$features/home";
   import { loadNavigationError, loadTabCapacityState } from "$features/tabs";
   import { selectionGlide } from "$features/tabs";
   import * as tabDrag from "$session/tab-drag.svelte";
@@ -67,10 +68,12 @@
     SidebarSearch,
     SidebarNotice,
     UtilityTray,
+    WorkEntry,
   } from "$features/sidebar";
   import { IS_WINDOWS } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
   import { tabs } from "$domain/tabs";
+  import type { HomeField } from "$domain/home";
   import { preferences } from "$domain/preferences";
   /** The new tab field's menu, kept out of the graph the launcher shares. */
   const loadMenu = () => import("$shared/ui/Menu");
@@ -234,6 +237,18 @@
     releaseSplit?.();
   });
   let inWork = $derived(browserPage.currentPage() === "work");
+  // Home heads the column in place of the Browse | Work switch, and the new
+  // tab that is the space's Home draws its searches.
+  let homeOn = $derived(tabs.homeOn());
+  let homeShown = $derived(homeOn && !!tabs.activeTab()?.home);
+  let homeSearching = $state(false);
+  let homeHeld = $state<HomeField | null>(null);
+  let homeField: { focus: () => void; ask: (text: string) => void } | null = null;
+  let homeEnter: (() => void) | null = null;
+  function selectHome(id: string) {
+    if (inWork) void browserPage.open(null);
+    tabs.activate(id);
+  }
   // Settings stands beside the rail the way a tool panel does.
   let paneled = $derived(
     toolHost.activeTool() !== null || browserPage.currentPage() === "settings",
@@ -375,7 +390,7 @@
   });
   // Beside a new tab the window, whatever it is made of, takes on the
   // sky's light; it gives it back as a page arrives.
-  let skyShown = $derived(newTabShown && newTabImage() === null);
+  let skyShown = $derived(newTabShown && newTabBackground() === "sky");
 
   $effect(() => {
     const tab = tabs.activeTab();
@@ -442,6 +457,23 @@
 
 <!-- The player of a tab playing behind the page in front; its code loads the
      first time there is one. -->
+{#snippet workBeside()}<WorkEntry />{/snippet}
+{#snippet workBesideRail()}<WorkEntry compact />{/snippet}
+{#snippet homeCanvas()}<LazyView
+    loader={loadHome}
+    loadingLabel={m.surface_loading()}
+    failureLabel={m.surface_render_failed()}
+    retryLabel={m.surface_retry()}
+    >{#snippet children(Home)}<Home
+        kept={!incognito}
+        onfield={() => homeField?.focus()}
+        onask={(text) => homeField?.ask(text)}
+        onsearching={(searching) => (homeSearching = searching)}
+        onheld={(held) => (homeHeld = held)}
+        onready={(enter) => (homeEnter = enter)}
+      />{/snippet}</LazyView
+  >{/snippet}
+
 {#snippet player(
   compact: boolean,
 )}{#if mediaPlayer.view()}{#await loadMediaPlayer() then { default: MediaPlayer }}<MediaPlayer
@@ -469,6 +501,7 @@
           <div class="rail-search"><SidebarSearch /></div>
         {:else if paneled}<ModeTabs compact standalone />{/if}
       {:else if compact}<AddressField {compact} /><StoreInstallRail />
+      {:else if homeOn}<div class="sidebar-head"><HomeEntry onSelect={selectHome} /></div>
       {:else if !incognito && preferences.enabled("work")}<div class="sidebar-head">
           <ModeTabs />
         </div>{/if}
@@ -554,6 +587,7 @@
           roomy={besideRail}
           tools={!inWork}
           foot={inWork ? accountFoot : undefined}
+          beside={homeOn ? workBesideRail : undefined}
         >
           {#snippet sites()}<EssentialsRail
               entries={railEssentials}
@@ -562,7 +596,7 @@
         </Dock>{:else if incognito}
         <!-- A private window keeps nothing, so it has no tools or kept sites;
              its foot names the scope and closes it. -->
-        <PrivateBar />{:else}<Dock>
+        <PrivateBar />{:else}<Dock beside={homeOn ? workBeside : undefined}>
           {#snippet above()}
             <div
               class="dock-sites"
@@ -681,6 +715,8 @@
             failureLabel={m.surface_render_failed()}
             retryLabel={m.surface_retry()}
             >{#snippet children(NewTab)}<NewTab
+                canvas={homeShown ? homeCanvas : undefined}
+                welcome={!(homeShown && homeSearching)}
                 oncustomize={openSettings}
                 onaccount={openAccount}
                 ontasks={() => void browserPage.open("tasks")}
@@ -694,6 +730,9 @@
                           tabId={tabs.activeId()}
                           {loadMenu}
                           onsettings={openSearchSettings}
+                          home={homeShown ? () => homeHeld : undefined}
+                          onleave={homeShown ? () => homeEnter?.() : undefined}
+                          onready={(field) => (homeField = field)}
                         />{/snippet}</LazyView
                     >{/key}{/snippet}</NewTab
               >{/snippet}</LazyView

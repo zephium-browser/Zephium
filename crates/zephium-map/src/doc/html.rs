@@ -139,9 +139,20 @@ impl DocBuilder {
                         .attr("property")
                         .is_some_and(|v| v.eq_ignore_ascii_case("og:site_name")) =>
             {
-                if let Some(value) = node.attr("content") {
+                if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
                     let text = self.words(value);
                     self.doc.head.site_name = self.head_text(&text, limit);
+                }
+            }
+            "meta"
+                if self.doc.head.application_name.is_empty()
+                    && node
+                        .attr("name")
+                        .is_some_and(|s| s.eq_ignore_ascii_case("application-name")) =>
+            {
+                if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
+                    let text = self.words(value);
+                    self.doc.head.application_name = self.head_text(&text, limit);
                 }
             }
             "link" => {
@@ -198,6 +209,7 @@ impl DocBuilder {
         let node = &self.doc.nodes[at];
         let room = self.limits.node_text_bytes as usize
             - node.language.as_deref().map_or(0, str::len)
+            - node.link_language.as_deref().map_or(0, str::len)
             - node.text.len()
             - node.name.len()
             - node.element_id.as_deref().map_or(0, str::len);
@@ -292,7 +304,11 @@ impl DocBuilder {
                 )
             {
                 captured = true;
+                let first_link_run = n.role == Role::Link && n.text.is_empty();
                 self.append(at, &words, verbatim, gap);
+                if first_link_run {
+                    self.doc.nodes[at].link_prefix_bytes = self.doc.nodes[at].text.len();
+                }
             }
             inside_list_or_code |= matches!(
                 self.doc.nodes[at].role,
@@ -342,6 +358,101 @@ impl DocBuilder {
             )
         } else {
             (parent, level)
+        }
+    }
+
+    fn disclosure_links(&mut self, button: NodeRef<'_>, base: &Url, index: usize) {
+        let Some(id) = button
+            .attr("aria-controls")
+            .filter(|s| !s.is_empty() && !button.clipped("aria-controls"))
+        else {
+            return;
+        };
+        let Some(panel) =
+            std::iter::successors(button.sibling(), |n| n.sibling()).find(|n| !n.is_text())
+        else {
+            return;
+        };
+        if panel.attr("id") != Some(id)
+            || panel.clipped("id")
+            || panel.hidden_by_lift()
+            || excluded(marks(&panel))
+            || excluded(panel.lifted_marks())
+            || panel.has_attr("hidden")
+            || panel.attr("aria-hidden") != Some("true")
+            || !super::super::ancestors(&self.doc.nodes, index).any(|a| {
+                matches!(
+                    self.doc.nodes[a].role,
+                    Role::Landmark {
+                        landmark: Some(Landmark::Navigation)
+                    }
+                )
+            })
+        {
+            return;
+        }
+        // Collapsed panel links belong to the control. Its hidden text never enters the document.
+        let mut links = Vec::new();
+        let mut pending = panel
+            .children()
+            .next()
+            .map(|n| (n, None))
+            .into_iter()
+            .collect::<Vec<_>>();
+        while let Some((n, anchor)) = pending.pop() {
+            if let Some(next) = n.sibling() {
+                pending.push((next, anchor));
+            }
+            if hidden(&n)
+                || excluded(marks(&n))
+                || excluded(n.lifted_marks())
+                || matches!(
+                    n.tag(),
+                    "script" | "style" | "template" | "noscript" | "svg"
+                )
+            {
+                continue;
+            }
+            let mut anchor: Option<usize> = anchor;
+            if n.tag() == "a" {
+                anchor = None;
+                if let Some(url) = self
+                    .resolve(&n, "href", base)
+                    .filter(|_| !n.has_attr("download"))
+                {
+                    let size = url.as_str().len();
+                    if size > self.limits.text_bytes as usize - self.text_bytes {
+                        self.mark_truncated();
+                        break;
+                    }
+                    self.text_bytes += size;
+                    let label = self.head_text(
+                        n.attr("aria-label").unwrap_or_default(),
+                        self.limits.node_text_bytes as usize,
+                    );
+                    anchor = Some(links.len());
+                    let language = link_language(&n)
+                        .filter(|s| s.len() <= self.limits.text_bytes as usize - self.text_bytes)
+                        .map(str::to_ascii_lowercase);
+                    self.text_bytes += language.as_deref().map_or(0, str::len);
+                    links.push(MenuLink {
+                        url,
+                        label,
+                        language,
+                    });
+                }
+            } else if let Some(i) = anchor {
+                let label = &mut links[i].label;
+                if label.is_empty() && n.is_text() && !n.text().trim().is_empty() {
+                    *label = self.head_text(n.text().trim(), self.limits.node_text_bytes as usize);
+                }
+            }
+            if let Some(child) = n.children().next() {
+                pending.push((child, anchor));
+            }
+        }
+        if !links.is_empty() {
+            self.doc.menu_links.insert(index, links);
         }
     }
 
@@ -459,6 +570,14 @@ impl DocBuilder {
                     node.marks.insert(Marks::ANCILLARY);
                 }
                 if role == Role::Link {
+                    if n.has_attr("download")
+                        || n.attr("class").is_some_and(|v| {
+                            v.split_ascii_whitespace()
+                                .any(|t| t.eq_ignore_ascii_case("cta"))
+                        })
+                    {
+                        node.marks.insert(Marks::ACTION);
+                    }
                     node.destination = self.resolve(&n, "href", base);
                 }
                 if role == Role::Image {
@@ -507,7 +626,32 @@ impl DocBuilder {
                         - node.element_id.as_deref().map_or(0, str::len);
                     node.language = language.filter(|s| s.len() <= room).map(str::to_owned);
                 }
-                (Some(self.push(node)? as usize), level + 1)
+                if role == Role::Link {
+                    let room = (self.limits.node_text_bytes as usize)
+                        .min(self.limits.text_bytes as usize - self.text_bytes)
+                        - node.name.len()
+                        - node.element_id.as_deref().map_or(0, str::len);
+                    node.link_language = link_language(&n)
+                        .filter(|s| s.len() <= room)
+                        .map(str::to_ascii_lowercase);
+                    if node
+                        .destination
+                        .as_ref()
+                        .and_then(Url::domain)
+                        .and_then(|h| h.split_once('.'))
+                        .zip(node.link_language.as_deref())
+                        .is_some_and(|((prefix, _), lang)| {
+                            prefix.len() == 2 && prefix.eq_ignore_ascii_case(lang)
+                        })
+                    {
+                        node.marks.insert(Marks::LANGUAGE_HOST);
+                    }
+                }
+                let index = self.push(node)? as usize;
+                if matches!(role, Role::Button | Role::Link) {
+                    self.disclosure_links(n, base, index);
+                }
+                (Some(index), level + 1)
             } else {
                 (parent, level)
             };
@@ -566,6 +710,17 @@ fn marks(n: &NodeRef) -> Marks {
     marks
 }
 
+fn link_language<'a>(n: &NodeRef<'a>) -> Option<&'a str> {
+    ["hreflang", "lang"].into_iter().find_map(|attr| {
+        n.attr(attr).filter(|s| {
+            !n.clipped(attr)
+                && s.len() <= MAX_LANGUAGE_BYTES
+                && s.split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
+        })
+    })
+}
+
 fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
     use super::Landmark as L;
     use Role::*;
@@ -611,6 +766,7 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 },
                 "paragraph" => Paragraph,
                 "link" => Link,
+                "button" if tag == "a" && n.has_attr("href") => Link,
                 "button" => Button,
                 "dialog" | "alertdialog" => Dialog,
                 "list" | "feed" => List,
@@ -630,6 +786,7 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 "spinbutton" => Spinbutton,
                 "slider" => Slider,
                 "tab" => Tab,
+                "menuitem" if tag == "a" && n.has_attr("href") => Link,
                 "menuitem" => MenuItem,
                 "progressbar" => Progress,
                 "status" | "alert" => Status,

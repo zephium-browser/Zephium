@@ -3,7 +3,7 @@
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import HostGlyph from "../cards/HostGlyph.svelte";
-  import { thumbnail } from "../../lib/frame-thumbs";
+  import { thumbnail } from "$shared/canvas";
   import AskReceipt from "./AskReceipt.svelte";
   import AskShell from "./AskShell.svelte";
   import { siteName, type ConfirmAsk } from "./asks";

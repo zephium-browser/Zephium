@@ -307,6 +307,7 @@ fn divider_drag_updates_ratio_and_projects_strips() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let (sink, strip_sink) = (screen.clone(), strips.clone());
     let mut shell = Shell::new(

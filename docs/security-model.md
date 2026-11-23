@@ -250,7 +250,12 @@ Any change that breaks one of these invariants must fail review and release:
    reported as clean teardown.
 9. Page-derived values remain untrusted and bounded before crossing into application
    state. Titles are stripped of control characters and limited to 512 characters, and
-   HTML extraction has character and serialized-result limits. The Wry adapter accepts
+   HTML extraction has character and serialized-result limits. A Home map's results
+   page is read the same way from a background tab of its own profile, only for the
+   engine address its search names, and only while that document is still committed;
+   the markup goes to the map host and is never logged or sent to the frame. The map
+   reads the sites it lists through the anonymous public reader, which follows the
+   Zephium or system HTTPS proxy and refuses any other. The Wry adapter accepts
    only primitive-string IPC and enforces a shared 64-KiB UTF-16/UTF-8 ceiling before
    constructing a Rust `String`; raw tabs have no IPC handler at all. Privileged local
    protocol requests independently cap method, header count/name/value/aggregate size,

@@ -20,6 +20,8 @@ pub const SRC_FEATURES_SIDEBAR_TABS_TABLIST_SVELTE: &str =
     include_str!("../../frame/src/features/tabs/components/TabList.svelte");
 pub const SRC_DOMAIN_TABS_TABS_SVELTE_TS: &str =
     include_str!("../../frame/src/domain/tabs/tabs.svelte.ts");
+pub const SRC_SHARED_IPC_NATIVE_EVENTS_TS: &str =
+    include_str!("../../frame/src/shared/ipc/native-events.ts");
 pub const SRC_MAIN_TS: &str = include_str!("../../frame/src/entries/browser.ts");
 pub const SRC_APP_SHELL_SVELTE: &str = include_str!("../../frame/src/app/browser/Shell.svelte");
 pub const SRC_FEATURES_SIDEBAR_TABS_TABROW_SVELTE: &str =

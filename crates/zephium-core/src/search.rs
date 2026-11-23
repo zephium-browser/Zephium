@@ -66,6 +66,39 @@ impl SearchEngine {
         navigation::is_allowed(&url).then_some(url)
     }
 
+    /// The built-in engine whose results page `url` is, judged by host and
+    /// path: a consent, sign-in or regional host is no engine's results.
+    pub fn of_results_url(url: &Url) -> Option<Self> {
+        if url.scheme() != "https"
+            || url.port().is_some()
+            || !url.query_pairs().any(|(k, _)| k == "q")
+        {
+            return None;
+        }
+        [Self::Google, Self::DuckDuckGo, Self::Bing, Self::Brave]
+            .into_iter()
+            .find(|engine| {
+                engine.search("q").is_some_and(|base| {
+                    base.host_str() == url.host_str() && base.path() == url.path()
+                })
+            })
+    }
+
+    /// `url` is this engine's results page for `query`: the engine's own
+    /// results address, asking the words this engine's builder sends for it.
+    pub fn shows_results_for(self, url: &Url, query: &str) -> bool {
+        let asked = |url: &Url| {
+            url.query_pairs()
+                .find(|(key, _)| key == "q")
+                .map(|(_, value)| value.into_owned())
+        };
+        Self::of_results_url(url) == Some(self)
+            && self
+                .search(query)
+                .and_then(|built| asked(&built))
+                .is_some_and(|sent| asked(url) == Some(sent))
+    }
+
     /// The engine's own suggestion endpoint, which answers in the OpenSearch
     /// JSON form browsers read (`["query", ["suggestion", ...]]`). A custom
     /// engine names none.
@@ -313,6 +346,85 @@ pub fn interleave_bookmarks<T>(mut bookmarks: Vec<(u16, T)>, pages: Vec<(u16, T)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_results_page_is_for_a_search_only_when_it_asks_the_same_words() {
+        let pages = [
+            (SearchEngine::Google, "https://www.google.com/search"),
+            (SearchEngine::DuckDuckGo, "https://duckduckgo.com/"),
+            (SearchEngine::Bing, "https://www.bing.com/search"),
+            (SearchEngine::Brave, "https://search.brave.com/search"),
+        ];
+        for (engine, base) in pages {
+            let built = engine.search("stripe pricing").unwrap();
+            assert!(engine.shows_results_for(&built, "stripe pricing"));
+            assert!(
+                engine.shows_results_for(&built, "  stripe pricing "),
+                "{base}"
+            );
+            for same in [
+                format!("{base}?q=stripe+pricing&ia=web&ei=x"),
+                format!("{base}?hl=en&q=stripe%20pricing"),
+            ] {
+                let url = Url::parse(&same).unwrap();
+                assert!(engine.shows_results_for(&url, "stripe pricing"), "{same}");
+            }
+            for other in [
+                format!("{base}?q=stripe+fees"),
+                format!("{base}?q=stripe+pricing+"),
+                format!("{base}?q=Stripe+Pricing"),
+                format!("{base}?p=stripe+pricing"),
+                format!("{base}?q=stripe%2Bpricing"),
+            ] {
+                let url = Url::parse(&other).unwrap();
+                assert!(!engine.shows_results_for(&url, "stripe pricing"), "{other}");
+            }
+            for (elsewhere, _) in pages.iter().filter(|(e, _)| *e != engine) {
+                let theirs = elsewhere.search("stripe pricing").unwrap();
+                assert!(!engine.shows_results_for(&theirs, "stripe pricing"));
+            }
+            let consent = Url::parse(&format!(
+                "https://consent.google.com/ml?continue={}&q=stripe+pricing",
+                built
+            ))
+            .unwrap();
+            assert!(!engine.shows_results_for(&consent, "stripe pricing"));
+            assert!(!engine.shows_results_for(&built, ""));
+        }
+        let plus = SearchEngine::DuckDuckGo.search("c++ tips").unwrap();
+        assert!(SearchEngine::DuckDuckGo.shows_results_for(&plus, "c++ tips"));
+        let spaces = Url::parse("https://duckduckgo.com/?q=c++tips").unwrap();
+        assert!(!SearchEngine::DuckDuckGo.shows_results_for(&spaces, "c++ tips"));
+        let custom = Url::parse("https://example.com/?q=x").unwrap();
+        assert!(!SearchEngine::Custom.shows_results_for(&custom, "x"));
+    }
+
+    #[test]
+    fn a_results_page_names_its_engine_by_host_and_path_only() {
+        for engine in [
+            SearchEngine::Google,
+            SearchEngine::DuckDuckGo,
+            SearchEngine::Bing,
+            SearchEngine::Brave,
+        ] {
+            let url = engine.search("stripe pricing").unwrap();
+            assert_eq!(SearchEngine::of_results_url(&url), Some(engine));
+        }
+        for refused in [
+            "https://consent.google.com/ml?continue=https://www.google.com/search?q=x&q=x",
+            "https://accounts.google.com/search?q=x",
+            "https://www.google.de/search?q=x",
+            "https://www.google.com/sorry/index?q=x",
+            "https://www.google.com/search?p=x",
+            "http://duckduckgo.com/?q=x",
+            "https://duckduckgo.com:8443/?q=x",
+            "https://html.duckduckgo.com/html/?q=x",
+            "https://www.bing.com/images/search?q=x",
+        ] {
+            let url = Url::parse(refused).unwrap();
+            assert_eq!(SearchEngine::of_results_url(&url), None, "{refused}");
+        }
+    }
     #[test]
     fn every_named_engine_suggests_over_https_and_a_custom_one_does_not() {
         for engine in [

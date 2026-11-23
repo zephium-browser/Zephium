@@ -542,6 +542,7 @@ pub(super) enum MatchPolicy {
 pub(super) struct RecordedMatch {
     pub(super) index: usize,
     pub(super) end: Duration,
+    pub(super) duration: Duration,
     pub(super) order: usize,
     pub(super) relaxed_cap: Option<usize>,
 }
@@ -619,6 +620,9 @@ impl Journal {
             let matched = |relaxed_cap| RecordedMatch {
                 index,
                 end: row.elapsed_at_return,
+                duration: row.elapsed_at_start.map_or(row.timings.total, |start| {
+                    row.elapsed_at_return.saturating_sub(start)
+                }),
                 order: row.completion_order.unwrap_or(index),
                 relaxed_cap,
             };

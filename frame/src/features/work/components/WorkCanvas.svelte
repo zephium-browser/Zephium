@@ -1,9 +1,9 @@
 <script lang="ts">
-  import "@xyflow/svelte/dist/base.css";
+  import { CanvasHost, type CanvasCamera } from "$shared/canvas/host";
   import { pointerTool as currentTool, setPointerTool } from "../lib/pointer-tool.svelte";
   const pointerTool = $derived(currentTool());
-  import { SvelteFlow, Background, type Edge, type useSvelteFlow } from "@xyflow/svelte";
-  import { NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
+  import { type Edge } from "@xyflow/svelte";
+  import { Background, NodeToolbar, Position, SelectionMode } from "@xyflow/svelte";
   import { untrack, setContext, tick } from "svelte";
   import { fade } from "svelte/transition";
   import Icon from "$shared/ui/Icon";
@@ -23,8 +23,6 @@
     canvasArrival,
     canvasProbe,
     canvasBoard,
-    canvasSeen,
-    canvasFar,
     canvasWork,
     type BoardActions,
     type DraftReview,
@@ -33,17 +31,17 @@
   import AreaNode from "./AreaNode.svelte";
   import AgentMark from "./AgentMark.svelte";
   import WorkEdge from "./WorkEdge.svelte";
-  import { arrivals } from "../lib/arrival";
+  import { arrivals, centreOn, frameSpan, toCanvas, toScreen } from "$shared/canvas";
   import {
     followMove,
     glideMs,
     settleMove,
+    ZoomLevel,
     type CameraMove,
     type CameraView,
-  } from "../lib/camera-follow";
-  import { duration, easing, reducedMotion } from "$shared/lib/motion";
+  } from "$shared/canvas/capabilities";
+  import { duration, reducedMotion } from "$shared/lib/motion";
   import { IS_MAC } from "$shared/platform";
-  import CanvasControls from "./CanvasControls.svelte";
   import SelectionBar from "./SelectionBar.svelte";
   import {
     alignTo,
@@ -54,7 +52,6 @@
     type Alignment,
     type Arrangement,
   } from "../lib/selection";
-  import CanvasFlowHandle from "./CanvasFlowHandle.svelte";
   import {
     reconcileNodes,
     applyRemoteView,
@@ -81,7 +78,6 @@
   import * as m from "$shared/i18n/messages";
   import type { EvidenceReference } from "$shared/ui/data/Artifact";
   import type { WorkRuntimeProjection } from "$shared/ipc/bindings";
-  import { layerRelease } from "../lib/workspace/layers";
   let {
     items,
     links,
@@ -209,53 +205,26 @@
   let canvasWidth = $state(0);
   let canvasHeight = $state(0);
   let host = $state<HTMLDivElement>();
-  let layers: ReturnType<typeof layerRelease> | undefined;
-  $effect(() => {
-    const root = host;
-    if (!root) return;
-    const release = layerRelease(root);
-    layers = release;
-    return () => {
-      release.destroy();
-      if (layers === release) layers = undefined;
-    };
-  });
-  // Whatever arrives, leaves or settles on the canvas moves: the layer is let go once it is still.
-  $effect(() => {
-    void nodes;
-    void edges;
-    untrack(() => layers?.moved());
-  });
   const nodeFor = (id: string) => nodes.find((node) => node.id === id);
   function center(id: string) {
     const node = nodeFor(id);
     if (!node) return;
     homed = false;
-    const position = absolutePosition(node, nodes);
-    viewport = {
-      x: Math.max(24, (canvasWidth - (node.width ?? 480)) / 2) - position.x,
-      y:
-        fitTopInset +
-        Math.max(0, (canvasHeight - fitBottomInset - fitTopInset - (node.height ?? 360)) / 2) -
-        position.y,
-      zoom: 1,
-    };
+    viewport = centreOn(
+      { ...absolutePosition(node, nodes), width: node.width ?? 480, height: node.height ?? 360 },
+      { width: canvasWidth, height: canvasHeight, top: fitTopInset, bottom: fitBottomInset },
+    );
     publishView();
   }
   setContext(canvasFocusResult, center);
-  const AIR = 64;
   const HOME_SETTLE = 1500;
   /**
    * The view that holds a span of the canvas across its width: at 100% when
    * it fits, down to 50%; wider still, its right end stays in view, so a
    * run's result is never cut.
    */
-  function framing(rect: { x: number; y: number; width: number }) {
-    const room = Math.max(1, canvasWidth - AIR * 2);
-    const zoom = Math.max(0.5, Math.min(1, room / Math.max(1, rect.width)));
-    const over = Math.max(0, rect.width * zoom - room);
-    return { x: AIR - rect.x * zoom - over, y: fitTopInset + 40 - rect.y * zoom, zoom };
-  }
+  const framing = (rect: { x: number; y: number; width: number }) =>
+    frameSpan(rect, { width: canvasWidth, top: fitTopInset });
   /**
    * A run that ends while the person follows it: the result's top comes into
    * view if it is not, with one pan at the zoom they have. Never a re-fit.
@@ -267,7 +236,7 @@
       requestAnimationFrame(() => settle(id, span, tries - 1));
       return;
     }
-    if (!node || !flow) return;
+    if (!node || !camera) return;
     homed = false;
     const position = absolutePosition(node, nodes);
     const move = settleMove({
@@ -302,52 +271,6 @@
     if (!homed || !canvasWidth) return;
     const settle = setTimeout(() => (homed = false), HOME_SETTLE);
     return () => clearTimeout(settle);
-  });
-  /**
-   * The nodes that have come within a screen of the view. Until one has, it
-   * is an empty box of its size: a large work opens drawing what can be seen,
-   * not every object once before the flow culls it. Once near, a node stays
-   * drawn while the flow keeps it; the set only grows, and only changes when
-   * something new comes near.
-   */
-  let near = $state.raw<ReadonlySet<string>>(new Set());
-  $effect(() => {
-    const view = viewport;
-    // Before the canvas has measured itself, the window stands in for it.
-    const width = canvasWidth || window.innerWidth;
-    const height = canvasHeight || window.innerHeight;
-    const list = nodes;
-    untrack(() => {
-      const left = -view.x / view.zoom - width / view.zoom;
-      const top = -view.y / view.zoom - height / view.zoom;
-      const right = left + (width * 3) / view.zoom;
-      const bottom = top + (height * 3) / view.zoom;
-      const added: string[] = [];
-      for (const node of list) {
-        if (near.has(node.id)) continue;
-        const at = absolutePosition(node, list);
-        const w = node.width ?? node.measured?.width ?? 0;
-        const h = node.height ?? node.measured?.height ?? 0;
-        if (at.x > right || at.y > bottom || at.x + w < left || at.y + h < top) continue;
-        added.push(node.id);
-      }
-      if (added.length) near = new Set([...near, ...added]);
-    });
-  });
-  setContext(canvasSeen, (id: string) => near.has(id));
-  /** Seen from far, with a margin either way so a pinch around the line doesn't flicker. */
-  let far = $state(false);
-  $effect(() => {
-    const zoom = viewport.zoom;
-    untrack(() => {
-      if (!far && zoom < 0.5) far = true;
-      else if (far && zoom > 0.6) far = false;
-    });
-  });
-  setContext(canvasFar, {
-    get far() {
-      return far;
-    },
   });
   // One bad card never hides the canvas: the scene is repaired, then guarded.
   const scene = $derived(sanitizeScene(items, links));
@@ -605,13 +528,8 @@
     const origin = host?.getBoundingClientRect();
     if (!node || !origin) return null;
     const z = viewport.zoom;
-    const position = absolutePosition(node, nodes);
-    return new DOMRect(
-      origin.left + position.x * z + viewport.x,
-      origin.top + position.y * z + viewport.y,
-      (node.width ?? 280) * z,
-      (node.height ?? 160) * z,
-    );
+    const at = toScreen(absolutePosition(node, nodes), { x: origin.left, y: origin.top }, viewport);
+    return new DOMRect(at.x, at.y, (node.width ?? 280) * z, (node.height ?? 160) * z);
   }
   /** Pans to a card and puts the keyboard on it; the node itself is the stop. */
   async function focusCard(id: string) {
@@ -625,10 +543,7 @@
   function flowPosition(clientX: number, clientY: number): CanvasPosition | null {
     const origin = host?.getBoundingClientRect();
     if (!origin) return null;
-    return {
-      x: (clientX - origin.left - viewport.x) / viewport.zoom,
-      y: (clientY - origin.top - viewport.y) / viewport.zoom,
-    };
+    return toCanvas({ x: clientX, y: clientY }, { x: origin.left, y: origin.top }, viewport);
   }
   $effect(() => {
     expose?.({
@@ -650,7 +565,7 @@
   // or the fit control, never on its own.
   /** The orb and the widest caption it usually carries. */
   const MARK_REACH = { width: 220, height: 24 };
-  let flow: ReturnType<typeof useSvelteFlow> | undefined;
+  let camera: CanvasCamera | undefined;
   let following = $state(true);
   /** Where the camera is bound while a glide runs, so a second move starts from it, not from mid-flight. */
   let aim: CameraView | undefined;
@@ -662,13 +577,9 @@
   });
   /** The only way the follow moves the camera: one eased glide, which replaces any still running. */
   function glide(move: CameraMove) {
-    if (!flow) return;
+    if (!camera) return;
     aim = move.view;
-    void flow.setViewport(move.view, {
-      duration: move.ms,
-      ease: curve(easing("smooth")),
-      interpolate: "linear",
-    });
+    camera.glide(move.view, move.ms);
   }
   let fitted = false;
   let requestsSeen = false;
@@ -679,30 +590,13 @@
     const marks = nodes.filter(isAgentNode).filter((node) => !node.class);
     if (marks.length) followMarks(marks.map((node) => node.position));
   }
-  /** A `cubic-bezier()` token as a function of time, for the flow's own tween. */
-  function curve(token: string): (t: number) => number {
-    const [a, b, c, d] = (token.match(/-?[\d.]+/gu) ?? []).map(Number);
-    if ([a, b, c, d].some((value) => value === undefined || Number.isNaN(value))) return (t) => t;
-    const bezier = (p: number, q: number, u: number) =>
-      3 * p * u * (1 - u) ** 2 + 3 * q * u ** 2 * (1 - u) + u ** 3;
-    return (t) => {
-      let low = 0;
-      let high = 1;
-      for (let step = 0; step < 24; step++) {
-        const mid = (low + high) / 2;
-        if (bezier(a!, c!, mid) < t) low = mid;
-        else high = mid;
-      }
-      return bezier(b!, d!, (low + high) / 2);
-    };
-  }
   /**
    * A request just sent stands in the middle of what can be seen: between
    * the island and the composer, at the zoom the person reads at.
    */
   function centreRequest(id: string, tries = 12) {
     const node = nodeFor(id);
-    if (!node || !flow || !canvasWidth || !(node.width ?? node.measured?.width)) {
+    if (!node || !camera || !canvasWidth || !(node.width ?? node.measured?.width)) {
       // A just-sent card is placed and measured a few frames after it exists.
       if (tries > 0) requestAnimationFrame(() => centreRequest(id, tries - 1));
       return;
@@ -726,7 +620,7 @@
   /** Brings the mark that moved into view, by the shortest pan, when it has left it. */
   function followMarks(positions: readonly CanvasPosition[], lead?: CanvasPosition) {
     const at = lead ?? positions.at(-1);
-    if (!at || !flow) return;
+    if (!at || !camera) return;
     const move = followMove({
       view: cameraView(),
       room: cameraRoom(),
@@ -881,55 +775,66 @@
   class="work-canvas"
   class:multi={selectedItems.length > 1}
   bind:this={host}
-  bind:clientWidth={canvasWidth}
-  bind:clientHeight={canvasHeight}
   aria-label={m.work_canvas_label()}
 >
   {#if valid}
-    <SvelteFlow
+    <CanvasHost
       bind:nodes
       {edges}
       {nodeTypes}
       {edgeTypes}
       bind:viewport
+      bind:width={canvasWidth}
+      bind:height={canvasHeight}
       fitView={scene.items.length > 0 && !restoredViewport && !home}
       fitViewOptions={{ padding: 0.2, duration: 0 }}
-      minZoom={0.2}
-      maxZoom={2}
-      nodeExtent={[
-        [-1_000_000, -1_000_000],
-        [1_000_000, 1_000_000],
-      ]}
-      proOptions={{ hideAttribution: true }}
-      nodesConnectable={false}
-      edgesFocusable={false}
-      panOnScroll
-      panOnScrollSpeed={1}
-      zoomOnScroll={false}
-      zoomOnPinch
-      zoomOnDoubleClick={false}
       panOnDrag={pointerTool === "hand"}
-      selectionOnDrag={pointerTool === "select"}
-      selectionKey="Shift"
-      multiSelectionKey={[IS_MAC ? "Meta" : "Control", "Shift"]}
-      panActivationKey=" "
-      selectionMode={SelectionMode.Partial}
-      onselectionstart={() => (marquee = true)}
-      onselectionend={() => {
-        marquee = false;
-        // A marquee that caught cards leaves the areas it touched alone.
-        if (selectedItems.length && nodes.some((node) => node.selected && isAreaNode(node)))
-          nodes = nodes.map((node) =>
-            node.selected && isAreaNode(node) ? { ...node, selected: false } : node,
-          );
+      edgeDescription={m.work_env_edge_readonly()}
+      virtualize={scene.items.length >= virtualizeFrom}
+      capabilities={{
+        drag: {
+          threshold: 3,
+          autoPan: true,
+          onstart: () => {
+            following = false;
+            homed = false;
+            aim = undefined;
+          },
+          onstop: ({ targetNode, nodes: carried }) => {
+            onmoved?.(carried.map((node) => node.id));
+            settleDrop(carried.map((node) => node.id));
+            if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
+            const node = nodes.find((candidate) => candidate.id === targetNode.id);
+            if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
+            const area = containingArea(node, nodes);
+            const current = node.parentId ? node.parentId.slice("area:".length) : null;
+            if (area !== current) onareachange?.(node.id, area);
+          },
+        },
+        select: {
+          multiKey: [IS_MAC ? "Meta" : "Control", "Shift"],
+          elevate: true,
+          onchange: ({ nodes: selected }) => {
+            selection = selected.map((node) => node.id);
+            selectedIds = new Set(selection);
+            onselectionchange?.(selection);
+          },
+        },
+        marquee: {
+          active: pointerTool === "select",
+          key: "Shift",
+          mode: SelectionMode.Partial,
+          onstart: () => (marquee = true),
+          onend: () => {
+            marquee = false;
+            // A marquee that caught cards leaves the areas it touched alone.
+            if (selectedItems.length && nodes.some((node) => node.selected && isAreaNode(node)))
+              nodes = nodes.map((node) =>
+                node.selected && isAreaNode(node) ? { ...node, selected: false } : node,
+              );
+          },
+        },
       }}
-      autoPanOnNodeDrag
-      elevateNodesOnSelect
-      nodeDragThreshold={3}
-      ariaLabelConfig={{ "edge.a11yDescription.default": m.work_env_edge_readonly() }}
-      onlyRenderVisibleElements={scene.items.length >= virtualizeFrom}
-      elementsSelectable
-      deleteKey={[]}
       onnodeclick={({ node, event }) => {
         if (
           event.target instanceof Element &&
@@ -957,21 +862,6 @@
         lastClick = { id: "", at: 0 };
         onselectionchange?.([]);
       }}
-      onselectionchange={({ nodes: selected }) => {
-        selection = selected.map((node) => node.id);
-        selectedIds = new Set(selection);
-        onselectionchange?.(selection);
-      }}
-      onnodedragstop={({ targetNode, nodes: carried }) => {
-        onmoved?.(carried.map((node) => node.id));
-        settleDrop(carried.map((node) => node.id));
-        if (!targetNode || !isItemNode(targetNode as WorkNode)) return;
-        const node = nodes.find((candidate) => candidate.id === targetNode.id);
-        if (!node || !isItemNode(node) || !authoritative.has(node.id)) return;
-        const area = containingArea(node, nodes);
-        const current = node.parentId ? node.parentId.slice("area:".length) : null;
-        if (area !== current) onareachange?.(node.id, area);
-      }}
       onmoveend={() => {
         aim = undefined;
         publishView();
@@ -983,16 +873,16 @@
         homed = false;
         aim = undefined;
       }}
-      onmove={() => layers?.engage()}
-      onnodedragstart={() => {
-        following = false;
-        homed = false;
-        aim = undefined;
-      }}
+      oncamera={(ready) => (camera = ready)}
     >
-      <CanvasFlowHandle onready={(handle) => (flow = handle)} />
       <Background patternColor="var(--work-canvas-dot)" gap={20} size={1.5} />
-      <CanvasControls bottomInset={fitBottomInset} onfit={() => (following = true)} />
+      <ZoomLevel
+        label={m.work_canvas_controls()}
+        fitLabel={m.work_fit()}
+        dock="[data-work-zoom-slot]"
+        bottomInset={fitBottomInset}
+        onfit={() => (following = true)}
+      />
       <NodeToolbar
         nodeId={selectedItems}
         isVisible={selectedItems.length > 1 && !dragging && !marquee}
@@ -1009,7 +899,7 @@
           onremove={() => onselectionaction?.("remove", selectedItems)}
         />
       </NodeToolbar>
-    </SvelteFlow>
+    </CanvasHost>
     {#if live && !following && !still}<button
         type="button"
         class="follow"
@@ -1029,36 +919,12 @@
     height: 100%;
     min-height: 240px;
 
-    --xy-edge-stroke-default: var(--color-border-strong);
-    --xy-edge-stroke-width-default: 1.5;
-    --xy-handle-background-color-default: transparent;
-    --xy-handle-border-color-default: transparent;
-    --xy-selection-background-color-default: var(--color-accent-soft);
-    --xy-selection-border-default: 1px solid var(--color-accent);
-    --xy-background-color-default: transparent;
     --work-canvas-dot: color-mix(in srgb, var(--color-text) 16%, transparent);
-  }
-
-  .work-canvas :global(.svelte-flow) {
-    min-height: 240px;
-    background: transparent;
   }
 
   /* stylelint-disable-next-line selector-class-pattern */
   .work-canvas :global(.svelte-flow__node) {
     transition: none;
-  }
-
-  /* While a person is at the canvas each card is a layer (see layers.ts). */
-  /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.svelte-flow__viewport[data-held] .svelte-flow__node) {
-    will-change: transform;
-  }
-
-  /* A handle is where a line meets a card, never a thing to see. */
-  /* stylelint-disable-next-line selector-class-pattern */
-  .work-canvas :global(.svelte-flow__handle) {
-    opacity: 0;
   }
 
   /* A board's block glides where its board makes room; a dragged one follows the pointer. */

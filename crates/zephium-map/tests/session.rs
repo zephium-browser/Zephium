@@ -79,11 +79,13 @@ fn name(e: &Effect) -> String {
 }
 struct Run {
     trace: Vec<String>,
+    identified_sections: BTreeSet<String>,
     stats: Stats,
     places: Vec<Place>,
     conf: Vec<Confidence>,
     memo: Option<Vec<u8>>,
     passages: Vec<Vec<String>>,
+    held: Option<HeldSite>,
 }
 fn run(
     c: Config,
@@ -95,17 +97,24 @@ fn run(
     let mut queue: VecDeque<_> = effects.into();
     let mut run = Run {
         trace: Vec::new(),
+        identified_sections: BTreeSet::new(),
         stats: Stats::default(),
         places: Vec::new(),
         conf: Vec::new(),
         memo: None,
         passages: Vec::new(),
+        held: None,
     };
     let mut ids = BTreeSet::new();
     while let Some(effect) = queue.pop_front() {
         let id = effect.id();
         assert!(ids.insert(id));
         run.trace.push(name(&effect));
+        if let Effect::Fetch { id, url, .. } = &effect {
+            if session.section_fetch(*id).is_some() {
+                run.identified_sections.insert(url.path().to_owned());
+            }
+        }
         let input = reply(&effect).or_else(|| {
             Some(match &effect {
                 Effect::LoadResults { .. } => Input::Results {
@@ -173,6 +182,10 @@ fn run(
         }
     }
     assert_eq!(run.trace.last().unwrap(), "done");
+    run.held = run
+        .places
+        .last()
+        .and_then(|place| session.hold_place(0, place.clone()));
     run
 }
 #[test]
@@ -190,6 +203,709 @@ fn engine_only_and_no_site_evidence() {
         |_| None,
     );
     assert!(low.conf.iter().all(|c| *c == Confidence::Low) && !low.conf.is_empty());
+}
+
+fn asked() -> Config {
+    Config {
+        sections: Sections::Asked,
+        ..cfg()
+    }
+}
+
+fn section<'a>(place: &'a Place, label: &str) -> &'a Entry {
+    place
+        .sections
+        .iter()
+        .find(|entry| entry.label == label)
+        .unwrap()
+}
+
+fn open(held: HeldSite, label: &str, cfg: Config) -> (Session, Vec<Effect>) {
+    let id = section(held.place(), label).id.clone();
+    Session::open(cfg, held, 0, id.as_str(), Confidence::High, false)
+        .ok()
+        .unwrap()
+}
+
+fn open_complete(mut session: Session, effects: Vec<Effect>) -> (HeldSite, bool, Stats) {
+    let mut events = effects.into_iter();
+    let Some(Effect::Emit {
+        event:
+            MapEvent::Place {
+                place,
+                slot: 0,
+                complete: true,
+                ..
+            },
+        ..
+    }) = events.next()
+    else {
+        panic!("open must emit one complete place");
+    };
+    let next = events.next().unwrap();
+    let (remembered, end) = if matches!(next, Effect::RememberSite { .. }) {
+        (true, events.next().unwrap())
+    } else {
+        (false, next)
+    };
+    let Effect::Emit {
+        event: MapEvent::End {
+            outcome: EndOutcome::Done,
+            stats,
+        },
+        ..
+    } = end
+    else {
+        panic!("open must end done");
+    };
+    assert!(events.next().is_none());
+    assert!(session.handle(Input::Cancel).is_empty());
+    (session.hold_place(0, place).unwrap(), remembered, stats)
+}
+
+fn open_fetch(effects: &[Effect], path: &str) -> (Id, Url) {
+    let [Effect::Fetch { id, url, .. }] = effects else {
+        panic!("expected one read")
+    };
+    assert_eq!(url.path(), path);
+    (*id, url.clone())
+}
+
+#[test]
+fn asked_reads_only_focus_and_the_results_section_link() {
+    let unfocused = run(asked(), "acme", RESULT, |_| None);
+    assert!(!unfocused
+        .trace
+        .iter()
+        .any(|event| event.ends_with("/pricing") || event.ends_with("/news")));
+    assert!(unfocused
+        .held
+        .unwrap()
+        .place()
+        .sections
+        .iter()
+        .all(|entry| entry.read.is_none()));
+
+    let focused = run(asked(), "acme pricing", RESULT, |_| None);
+    let place = focused.held.as_ref().unwrap().place();
+    assert_eq!(section(place, "Pricing").read, Some(ReadState::Read));
+    assert_eq!(section(place, "News").read, None);
+    assert_eq!(focused.stats.phases[&Phase::Section].started, 1);
+
+    let result = RESULT.replace(
+        "https://acme.com/'>Acme workshop",
+        "https://acme.com/guide'>Acme Docs",
+    );
+    let both = run(asked(), "acme docs", &result, |effect| match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+            *id,
+            url,
+            "text/html",
+            "<title>Acme</title><nav><a href='/docs'>Docs</a><a href='/pricing'>Pricing</a></nav>",
+        )),
+        Effect::Fetch { id, url, .. } if matches!(url.path(), "/docs" | "/guide") => Some(
+            response(*id, url, "text/html", "<h2 id='intro'>Introduction</h2>"),
+        ),
+        _ => None,
+    });
+    let place = both.held.as_ref().unwrap().place();
+    assert_eq!(place.focus.as_ref(), Some(&section(place, "Docs").id));
+    assert_eq!(section(place, "Docs").read, Some(ReadState::Read));
+    assert!(section(place, "Acme Docs")
+        .sources
+        .contains(&Source::EngineResult));
+    assert_eq!(section(place, "Acme Docs").read, Some(ReadState::Read));
+    assert_eq!(section(place, "Pricing").read, None);
+    assert_eq!(both.stats.phases[&Phase::Section].started, 2);
+}
+
+#[test]
+fn eager_capture_identifies_a_read_displaced_from_the_card() {
+    let run = run(cfg(), "acme", RESULT, |effect| match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+            *id,
+            url,
+            "text/html",
+            "<nav><a href='/docs'>More</a><a href='/pricing'>Pricing</a></nav>",
+        )),
+        _ => None,
+    });
+    assert!(run
+        .held
+        .unwrap()
+        .place()
+        .sections
+        .iter()
+        .all(|e| e.key.as_url().path() != "/docs"));
+    assert!(run.identified_sections.contains("/docs"));
+}
+
+#[test]
+fn open_from_a_fresh_memo_matches_the_eager_section_and_keeps_other_rows() {
+    let eager = run(cfg(), "acme", RESULT, |_| None);
+    let memo = run(asked(), "acme", RESULT, |_| None).memo.unwrap();
+    let cached = run(asked(), "acme", RESULT, |effect| match effect {
+        Effect::LookupSite { id, .. } => Some(Input::Cache {
+            id: *id,
+            memo: Some(memo.clone()),
+        }),
+        _ => None,
+    });
+    assert_eq!(cached.stats.fresh_memos, 1);
+    assert!(!cached.trace.iter().any(|event| event.starts_with("fetch")));
+    let held = cached.held.unwrap();
+    let entry_id = section(held.place(), "Pricing").id.clone();
+    assert_eq!(held.check_open("unknown"), Err(OpenRefusal::UnknownEntry));
+    assert!(matches!(
+        Session::open(asked(), held.clone(), 0, "unknown", Confidence::High, false),
+        Err(OpenRefusal::UnknownEntry)
+    ));
+    let news = serde_json::to_vec(section(held.place(), "News")).unwrap();
+    let (mut session, effects) = open(held, "Pricing", asked());
+    let (id, url) = open_fetch(&effects, "/pricing");
+    let effects = session.handle(response(
+        id,
+        &url,
+        "text/html",
+        include_str!("fixtures/section-pricing.html"),
+    ));
+    let (opened, remembered, stats) = open_complete(session, effects);
+    assert!(remembered);
+    assert_eq!(
+        stats.phases.keys().copied().collect::<Vec<_>>(),
+        [Phase::Section]
+    );
+    let pricing = section(opened.place(), "Pricing");
+    let eager = section(eager.held.as_ref().unwrap().place(), "Pricing");
+    assert_eq!(pricing.id, entry_id);
+    assert!(pricing.children == eager.children);
+    assert_eq!(pricing.more, eager.more);
+    assert_eq!(
+        serde_json::to_vec(section(opened.place(), "News")).unwrap(),
+        news
+    );
+    assert_eq!(
+        opened.check_open(entry_id.as_str()),
+        Err(OpenRefusal::NotOpenable)
+    );
+    assert_eq!(
+        opened.check_open(pricing.children[0].id.as_str()),
+        Err(OpenRefusal::NotOpenable)
+    );
+}
+
+#[test]
+fn opening_can_show_children_on_a_card_that_filled_its_discovery_budget() {
+    use zephium_map::site::{MAX_CHILDREN, MAX_PLACE_CHILDREN};
+    let mut markup = String::from("<nav><a href='/pricing'>Pricing</a><ul>");
+    for group in 0..MAX_PLACE_CHILDREN / MAX_CHILDREN {
+        markup.push_str(&format!(
+            "<li><a href='/group{group}'>Group {group}</a><ul>"
+        ));
+        for child in 0..MAX_CHILDREN {
+            markup.push_str(&format!(
+                "<li><a href='/group{group}/{child}'>Child {child}</a></li>"
+            ));
+        }
+        markup.push_str("</ul></li>");
+    }
+    markup.push_str("</ul></nav>");
+    let discovery = run(asked(), "acme", RESULT, |effect| match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => {
+            Some(response(*id, url, "text/html", &markup))
+        }
+        _ => None,
+    });
+    let held = discovery.held.unwrap();
+    let children = |place: &Place| {
+        place
+            .sections
+            .iter()
+            .map(|e| e.children.len())
+            .sum::<usize>()
+    };
+    assert_eq!(children(held.place()), MAX_PLACE_CHILDREN);
+    let (mut session, effects) = open(held, "Pricing", asked());
+    let (id, url) = open_fetch(&effects, "/pricing");
+    let effects = session.handle(response(id, &url, "text/html", "<h2 id='plans'>Plans</h2>"));
+    let (opened, remembered, _) = open_complete(session, effects);
+    assert!(remembered);
+    assert_eq!(children(opened.place()), MAX_PLACE_CHILDREN + 1);
+    assert_eq!(section(opened.place(), "Pricing").children.len(), 1);
+}
+
+#[test]
+fn a_held_place_over_the_memo_ceiling_cannot_be_retained() {
+    let mut place = run(asked(), "acme", RESULT, |_| None).places.pop().unwrap();
+    let (session, _) = Session::start(asked(), "acme").unwrap();
+    assert!(session.hold_place(0, place.clone()).is_some());
+    place.title = "X".repeat(MAX_MEMO_BYTES);
+    assert!(session.hold_place(0, place).is_none());
+}
+
+#[test]
+fn open_fetches_robots_for_a_new_origin_and_never_retries_its_denial() {
+    let held =
+        run(asked(), "acme", RESULT, |effect| {
+            match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(*id, url, "text/html",
+            "<nav><a href='https://docs.acme.com/guide'>Docs</a><a href='/about'>About</a></nav>")),
+        _ => None,
+    }
+        })
+        .held
+        .unwrap();
+    let entry_id = section(held.place(), "Docs").id.clone();
+    let (mut session, effects) = open(held, "Docs", asked());
+    let (id, url) = open_fetch(&effects, "/robots.txt");
+    assert_eq!(url.host_str(), Some("docs.acme.com"));
+    let effects = session.handle(response(
+        id,
+        &url,
+        "text/plain",
+        "User-agent: *\nDisallow: /guide",
+    ));
+    let (refused, remembered, stats) = open_complete(session, effects);
+    assert!(!remembered);
+    assert_eq!(stats.phases[&Phase::Section].started, 0);
+    assert_eq!(
+        section(refused.place(), "Docs").read,
+        Some(ReadState::Refused {
+            failure: Failure::Robots
+        })
+    );
+    assert_eq!(
+        refused.check_open(entry_id.as_str()),
+        Err(OpenRefusal::NotOpenable)
+    );
+    assert!(matches!(
+        Session::open(
+            asked(),
+            refused,
+            0,
+            entry_id.as_str(),
+            Confidence::High,
+            false
+        ),
+        Err(OpenRefusal::NotOpenable)
+    ));
+}
+
+#[test]
+fn an_open_can_retry_a_transient_section_failure() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    let entry_id = section(held.place(), "Pricing").id.clone();
+    let (mut session, effects) = open(held, "Pricing", asked());
+    let (id, _) = open_fetch(&effects, "/pricing");
+    let effects = session.handle(Input::Fetch {
+        id,
+        result: Err(Failure::Timeout),
+    });
+    let (held, remembered, _) = open_complete(session, effects);
+    assert!(!remembered);
+    assert_eq!(held.check_open(entry_id.as_str()), Ok(()));
+    let (_, effects) = open(held, "Pricing", asked());
+    open_fetch(&effects, "/pricing");
+}
+
+#[test]
+fn off_place_redirects_and_other_tenants_do_not_enrich_the_row() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    let tenant = run(asked(), "github",
+        "<main><h2><a href='https://github.com/org/first'>GitHub First</a></h2></main>",
+        |effect| match effect {
+            Effect::Fetch { id, url, .. } if url.path() == "/org/first" => Some(response(*id, url, "text/html",
+                "<nav><a href='/org/first/pricing'>Pricing</a><a href='/org/second/news'>News</a></nav>")),
+            _ => None,
+        }).held.unwrap();
+    assert_eq!(
+        tenant.check_open(section(tenant.place(), "News").id.as_str()),
+        Err(OpenRefusal::NotOpenable)
+    );
+    for (held, path, landing) in [
+        (held, "/pricing", "https://other.example/plans"),
+        (
+            tenant,
+            "/org/first/pricing",
+            "https://github.com/org/second/plans",
+        ),
+    ] {
+        let before = section(held.place(), "Pricing").id.clone();
+        let (mut session, effects) = open(held, "Pricing", asked());
+        let (id, _) = open_fetch(&effects, path);
+        let landing = Url::parse(landing).unwrap();
+        let effects = session.handle(response(
+            id,
+            &landing,
+            "text/html",
+            "<h2 id='bad'>Other place</h2>",
+        ));
+        let (opened, remembered, _) = open_complete(session, effects);
+        let entry = section(opened.place(), "Pricing");
+        assert_eq!(entry.id, before);
+        assert_eq!(entry.key.as_url(), &landing);
+        assert!(entry.off_site && entry.children.is_empty());
+        assert_eq!(
+            entry.read,
+            Some(ReadState::Refused {
+                failure: Failure::External
+            })
+        );
+        assert!(!remembered);
+    }
+}
+
+#[test]
+fn open_respects_read_ceilings_media_and_truncation() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    for (config, budget) in [
+        (
+            Config {
+                section_pages: 0,
+                ..asked()
+            },
+            Budget::SectionPages,
+        ),
+        (
+            Config {
+                fetches: 0,
+                ..asked()
+            },
+            Budget::Fetches,
+        ),
+        (
+            Config {
+                html_bytes: 0,
+                ..asked()
+            },
+            Budget::HtmlBytes,
+        ),
+        (
+            Config {
+                timeout: Duration::ZERO,
+                ..asked()
+            },
+            Budget::Timeout,
+        ),
+    ] {
+        let (session, effects) = open(held.clone(), "Pricing", config);
+        let (place, _, stats) = open_complete(session, effects);
+        assert!(stats.budgets.contains(&budget));
+        assert_eq!(
+            section(place.place(), "Pricing").read,
+            Some(ReadState::Skipped { budget })
+        );
+        open_fetch(&open(place, "Pricing", asked()).1, "/pricing");
+    }
+    for (bytes, truncated, media, failure) in [
+        (9, false, "text/html", Failure::Limit),
+        (8, true, "text/html", Failure::Limit),
+        (8, false, "text/plain", Failure::ContentType),
+    ] {
+        let (mut session, effects) = open(
+            held.clone(),
+            "Pricing",
+            Config {
+                html_bytes: 8,
+                ..asked()
+            },
+        );
+        let (id, url) = open_fetch(&effects, "/pricing");
+        let effects = session.handle(Input::Fetch {
+            id,
+            result: Ok(FetchResult {
+                final_url: url,
+                content_type: media.into(),
+                charset: None,
+                bytes: vec![b'a'; bytes],
+                truncated,
+            }),
+        });
+        let (place, remembered, _) = open_complete(session, effects);
+        assert_eq!(
+            section(place.place(), "Pricing").read,
+            Some(ReadState::Refused { failure })
+        );
+        assert_eq!(place.place().notes.truncated, failure == Failure::Limit);
+        assert!(!remembered);
+    }
+    let (mut session, effects) = open(held, "Pricing", asked());
+    assert!(
+        matches!(effects.as_slice(), [Effect::Fetch { max_bytes, timeout, .. }]
+        if *max_bytes == MAX_HTML_BYTES as u32 && *timeout == FETCH_TIMEOUT)
+    );
+    let effects = session.handle(Input::Elapsed { time: MAX_ELAPSED });
+    let (place, _, stats) = open_complete(session, effects);
+    assert!(stats.budgets.contains(&Budget::Elapsed));
+    assert_eq!(
+        section(place.place(), "Pricing").read,
+        Some(ReadState::Refused {
+            failure: Failure::Timeout
+        })
+    );
+}
+
+#[test]
+fn open_refuses_an_out_of_range_slot() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    let id = section(held.place(), "Pricing").id.clone();
+    assert!(Session::open(cfg(), held, 2, id.as_str(), Confidence::High, false).is_err());
+}
+
+#[test]
+fn a_fresh_asked_memo_is_provisional_for_an_eager_search() {
+    let prior = run(asked(), "acme", RESULT, |_| None).memo.unwrap();
+    let replay = run(cfg(), "acme", RESULT, |effect| match effect {
+        Effect::LookupSite { id, .. } => Some(Input::Cache {
+            id: *id,
+            memo: Some(prior.clone()),
+        }),
+        _ => None,
+    });
+    assert_eq!(replay.stats.fresh_memos, 1);
+    assert_eq!(replay.stats.phases[&Phase::Section].started, 2);
+}
+
+#[test]
+fn landing_policy_precedes_section_acceptance_and_is_shared_by_origin() {
+    let landing = Url::parse("https://docs.acme.com/private").unwrap();
+    for (policy, allowed) in [
+        (Ok("User-agent: *\nAllow: /"), true),
+        (Ok("User-agent: *\nDisallow: /private"), false),
+        (Err(Failure::Unavailable), false),
+    ] {
+        let result = run(cfg(), "acme", RESULT, |effect| match effect {
+            Effect::Fetch { id, url, .. } if matches!(url.path(), "/news" | "/pricing") => Some(
+                response(*id, &landing, "text/html", "<h2 id='member'>Member</h2>"),
+            ),
+            Effect::Fetch { id, url, .. } if url.origin() == landing.origin() => {
+                Some(match policy {
+                    Ok(text) => response(*id, url, "text/plain", text),
+                    Err(failure) => Input::Fetch {
+                        id: *id,
+                        result: Err(failure),
+                    },
+                })
+            }
+            _ => None,
+        });
+        assert_eq!(
+            result
+                .trace
+                .iter()
+                .filter(|e| *e == "fetch docs.acme.com/robots.txt")
+                .count(),
+            1
+        );
+        let reads = &result.stats.phases[&Phase::Section];
+        assert_eq!(reads.completed, 2);
+        assert_eq!(
+            reads.refused.get(&Failure::Robots).copied().unwrap_or(0),
+            if allowed { 0 } else { 2 }
+        );
+        if allowed {
+            let place = result.held.as_ref().unwrap().place();
+            assert!(place
+                .sections
+                .iter()
+                .any(|e| e.read == Some(ReadState::Read)
+                    && e.children.iter().any(|c| c.label == "Member")));
+        } else {
+            assert!(result.memo.is_none());
+            assert!(result
+                .places
+                .iter()
+                .flat_map(|p| &p.sections)
+                .all(|e| e.children.is_empty()));
+        }
+    }
+}
+
+#[test]
+fn an_open_charges_its_landing_policy_to_both_budgets() {
+    let held = run(asked(), "acme", RESULT, |_| None).held.unwrap();
+    let landing = Url::parse("https://docs.acme.com/price").unwrap();
+    let body = "<h2 id='tiers'>Tiers</h2>";
+    for config in [
+        Config {
+            fetches: 1,
+            ..asked()
+        },
+        Config {
+            total_bytes: body.len() as u64,
+            ..asked()
+        },
+    ] {
+        let (mut session, effects) = open(held.clone(), "Pricing", config);
+        let (id, _) = open_fetch(&effects, "/pricing");
+        let effects = session.handle(response(id, &landing, "text/html", body));
+        let (after, remembered, stats) = open_complete(session, effects);
+        assert_eq!(
+            section(after.place(), "Pricing").read,
+            Some(ReadState::Refused {
+                failure: Failure::Robots
+            })
+        );
+        assert!(!remembered && !stats.budgets.is_empty());
+    }
+    let rules = "User-agent: *\nAllow: /\n";
+    for (room, truncated, accepted) in [(rules.len(), false, true), (rules.len(), true, false)] {
+        let (mut session, effects) = open(
+            held.clone(),
+            "Pricing",
+            Config {
+                total_bytes: (body.len() + room) as u64,
+                ..asked()
+            },
+        );
+        let (id, _) = open_fetch(&effects, "/pricing");
+        let effects = session.handle(response(id, &landing, "text/html", body));
+        let (id, url) = open_fetch(&effects, "/robots.txt");
+        assert!(
+            matches!(&effects[0], Effect::Fetch { max_bytes, .. } if *max_bytes as usize == room)
+        );
+        let mut input = response(id, &url, "text/plain", rules);
+        if let Input::Fetch {
+            result: Ok(result), ..
+        } = &mut input
+        {
+            result.truncated = truncated;
+        }
+        let effects = session.handle(input);
+        let (after, remembered, stats) = open_complete(session, effects);
+        assert_eq!(remembered, accepted);
+        assert_eq!(
+            section(after.place(), "Pricing").read == Some(ReadState::Read),
+            accepted
+        );
+        assert_eq!(stats.budgets.contains(&Budget::TotalBytes), !accepted);
+    }
+    let (mut session, effects) = open(held, "Pricing", asked());
+    let (id, _) = open_fetch(&effects, "/pricing");
+    let effects = session.handle(response(id, &landing, "text/html", body));
+    let (id, url) = open_fetch(&effects, "/robots.txt");
+    assert_eq!(url.origin(), landing.origin());
+    let rules = "User-agent: *\nDisallow: /price";
+    let policy_landing = Url::parse("https://rules.acme.com/robots.txt").unwrap();
+    let effects = session.handle(response(id, &policy_landing, "text/plain", rules));
+    let (after, remembered, stats) = open_complete(session, effects);
+    assert_eq!(stats.phases[&Phase::Robots].bytes, rules.len() as u64);
+    assert_eq!(
+        section(after.place(), "Pricing").read,
+        Some(ReadState::Refused {
+            failure: Failure::Robots
+        })
+    );
+    assert!(!remembered);
+}
+
+#[test]
+fn search_landing_policy_obeys_search_caps_and_coalesces_concurrent_redirects() {
+    let landing = Url::parse("https://docs.acme.com/private").unwrap();
+    let body = "<h2 id='private'>Restricted</h2>";
+    for (config, budget) in [
+        (
+            Config {
+                fetches: 3,
+                ..cfg()
+            },
+            Some(Budget::Fetches),
+        ),
+        (
+            Config {
+                total_bytes: (NAV.len() + body.len()) as u64,
+                ..cfg()
+            },
+            Some(Budget::TotalBytes),
+        ),
+        (
+            Config {
+                concurrent: 4,
+                host_concurrent: 2,
+                ..cfg()
+            },
+            None,
+        ),
+    ] {
+        let run =
+            run(config, "acme", RESULT, |effect| match effect {
+                Effect::Fetch { id, url, .. } if matches!(url.path(), "/pricing" | "/news") => {
+                    Some(response(*id, &landing, "text/html", body))
+                }
+                Effect::Fetch { id, url, .. } if url.origin() == landing.origin() => Some(
+                    response(*id, url, "text/plain", "User-agent: *\nDisallow: /"),
+                ),
+                _ => None,
+            });
+        assert!(run.memo.is_none());
+        let denials = run.stats.phases[&Phase::Section].refused[&Failure::Robots];
+        if let Some(budget) = budget {
+            assert!(run.stats.budgets.contains(&budget));
+            assert_eq!(run.stats.phases[&Phase::Robots].started, 1);
+            assert_eq!(denials, 1);
+        } else {
+            assert_eq!(run.stats.phases[&Phase::Robots].started, 2);
+            assert_eq!(denials, 2);
+        }
+    }
+}
+
+#[test]
+fn opening_a_fragment_enriches_the_same_memo_row() {
+    let initial = run(asked(), "acme", RESULT, |effect| match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+            *id,
+            url,
+            "text/html",
+            "<nav><a href='/docs#setup'>Setup</a><a href='/docs#reference'>Reference</a></nav>",
+        )),
+        _ => None,
+    });
+    let (mut session, effects) = open(initial.held.unwrap(), "Reference", asked());
+    let (id, url) = open_fetch(&effects, "/docs");
+    let effects = session.handle(response(id, &url, "text/html", "<h2 id='cli'>CLI</h2>"));
+    let memo = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::RememberSite { site, memo, .. } => Some(SiteMemo::decode(memo, site).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(section(&memo.payload.place, "Setup").children.is_empty());
+    assert!(!section(&memo.payload.place, "Reference")
+        .children
+        .is_empty());
+}
+
+#[test]
+fn asked_reads_the_result_child_under_a_menu_only_parent() {
+    let result = RESULT.replace(
+        "https://acme.com/'>Acme workshop",
+        "https://acme.com/guide'>Acme Docs",
+    );
+    let run = run(asked(), "acme docs", &result, |effect| {
+        match effect {
+        Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(*id, url, "text/html",
+            "<nav><div><button>Resources</button><a href='/guide'>Docs</a><a href='/news'>News</a></div></nav>")),
+        Effect::Fetch { id, url, .. } if url.path() == "/guide" => Some(response(*id, url, "text/html", "<h2>Reference</h2>")),
+        _ => None,
+    }
+    });
+    assert_eq!(
+        run.trace.iter().filter(|e| e.ends_with("/guide")).count(),
+        1
+    );
+    let place = run.held.unwrap();
+    let menu = section(place.place(), "Resources");
+    assert!(menu.menu_only);
+    assert_eq!(
+        menu.children
+            .iter()
+            .find(|c| c.key.as_url().path() == "/guide")
+            .unwrap()
+            .read,
+        Some(ReadState::Read)
+    );
 }
 #[test]
 fn fresh_place_streams_complete_replacements() {
@@ -738,7 +1454,7 @@ fn late_time_limits_allow_only_completions_and_one_terminal_event() {
     });
     assert_eq!(
         end.iter().map(name).collect::<Vec<_>>(),
-        ["layer", "place_failed", "done"]
+        ["layer", "place_failed", "place_failed", "done"]
     );
     assert!(
         matches!(end.last(),Some(Effect::Emit{event:MapEvent::End{stats:s,..},..}) if s.budgets.contains(&Budget::LastStart))
@@ -1122,7 +1838,7 @@ fn sitemap_samples_obey_read_byte_and_section_bounds() {
                 .unwrap()
                 .sections
                 .iter()
-                .any(|e| e.label == "sampled"));
+                .any(|e| e.label == "Sampled"));
         }
     }
 }
@@ -1590,5 +2306,43 @@ fn sitemap_fetch_requires_a_valid_media_type_essence() {
             Some(&1),
             "{media}"
         );
+    }
+}
+
+#[test]
+fn asked_probes_one_affine_section_and_focuses_only_observed_content() {
+    for has_match in [true, false] {
+        let run = run(asked(), "acme changelog", RESULT, |effect| match effect {
+            Effect::Fetch { id, url, .. } if url.path() == "/" => Some(response(
+                *id,
+                url,
+                "text/html",
+                "<nav><a href='/news'>News</a><a href='/releases'>Releases</a></nav>",
+            )),
+            Effect::Fetch { id, url, .. } if url.path() == "/releases" => Some(response(
+                *id,
+                url,
+                "text/html",
+                if has_match {
+                    "<aside><a href='/changes'>Changelog</a></aside>"
+                } else {
+                    "<aside><a href='/archive'>Archive</a></aside>"
+                },
+            )),
+            _ => None,
+        });
+        assert_eq!(run.stats.phases[&Phase::Section].started, 1);
+        assert!(run.stats.places[&0].probed_section);
+        assert!(!run.trace.iter().any(|s| s.ends_with("/news")));
+        let p = run.places.last().unwrap();
+        assert_eq!(p.focus.is_some(), has_match);
+        if has_match {
+            let found = section(p, "Releases")
+                .children
+                .iter()
+                .find(|e| e.label == "Changelog")
+                .unwrap();
+            assert_eq!(p.focus.as_ref(), Some(&found.id));
+        }
     }
 }

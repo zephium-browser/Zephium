@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use url::Url;
 use zephium_core::search::SearchEngine;
 use zephium_map::session::{
-    EndOutcome, Expect, Failure, FetchResult as SessionFetch, Id, Phase, Stats, MAX_CONCURRENT,
-    MAX_HOST_CONCURRENT, MAX_MEMO_BYTES,
+    EndOutcome, Expect, Failure, FetchResult as SessionFetch, HeldSite, Id, Phase, Sections, Stats,
+    MAX_CONCURRENT, MAX_HOST_CONCURRENT, MAX_MEMO_BYTES,
 };
+use zephium_map::{query::Confidence, site::EntryId};
 use zephium_map::{
     read_query, Config, Doc, DocLimits, Effect, FirstLayer, Input, MapEvent, Place, QueryKind,
     Session, SiteKey, Source,
@@ -25,23 +26,77 @@ pub(super) struct SessionEngine;
 
 impl Engine for SessionEngine {
     fn run(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Outcome {
-        let mut driver = Driver::new(query);
-        if query.label.kind == Kind::Passage && query.pages.is_empty() {
-            driver.outcome.needs_results_page = true;
-            return driver.outcome;
-        }
-        let config = Config {
-            session_id: io.session_id(),
-            engine: SearchEngine::Google,
-            now: io.now(),
-            ..Config::default()
-        };
-        let Ok((session, effects)) = Session::start(config, &query.text) else {
-            driver.outcome.failure = Some(EngineFailure::InvalidInput);
-            return driver.outcome;
-        };
-        driver.run(session, effects, query, io)
+        search(
+            query,
+            io,
+            crate::map_bench_section_flags::get().sections,
+            false,
+        )
+        .outcome
     }
+}
+
+pub(super) struct SectionAttempt {
+    pub(super) token: usize,
+    pub(super) slot: u8,
+    pub(super) id: EntryId,
+}
+
+pub(super) struct Capture {
+    pub(super) outcome: Outcome,
+    pub(super) places: [Option<HeldSite>; MAX_PLACES],
+    pub(super) sections: Vec<SectionAttempt>,
+}
+
+pub(super) mod quality;
+
+pub(super) fn search(
+    query: &CorpusQuery,
+    io: &mut dyn BenchIo,
+    sections: Sections,
+    capture: bool,
+) -> Capture {
+    let mut driver = Driver::new(query);
+    if query.label.kind == Kind::Passage && query.pages.is_empty() {
+        driver.outcome.needs_results_page = true;
+        return driver.capture(None);
+    }
+    driver.outcome.stats.insert(
+        match sections {
+            Sections::Asked => "card.asked",
+            Sections::All => "card.all",
+        }
+        .into(),
+        1,
+    );
+    let config = Config {
+        session_id: io.session_id(),
+        engine: SearchEngine::Google,
+        now: io.now(),
+        sections,
+        ..Config::default()
+    };
+    let Ok((session, effects)) = Session::start(config, &query.text) else {
+        driver.outcome.failure = Some(EngineFailure::InvalidInput);
+        return driver.capture(None);
+    };
+    driver.run(session, effects, query, io, capture)
+}
+
+pub(super) fn open(
+    query: &CorpusQuery,
+    io: &mut dyn BenchIo,
+    held: HeldSite,
+    slot: u8,
+    id: &str,
+) -> Result<Capture, zephium_map::session::OpenRefusal> {
+    let config = Config {
+        session_id: io.session_id(),
+        now: io.now(),
+        ..Config::default()
+    };
+    let (session, effects) = Session::open(config, held, slot, id, Confidence::High, false)?;
+    Ok(Driver::new(query).run(session, effects, query, io, true))
 }
 
 struct Driver {
@@ -52,6 +107,7 @@ struct Driver {
     terminal: bool,
     immediate: VecDeque<Input>,
     in_flight: BTreeMap<usize, (Id, Url, Expectation)>,
+    sections: Vec<SectionAttempt>,
 }
 
 impl Driver {
@@ -64,6 +120,7 @@ impl Driver {
             terminal: false,
             immediate: VecDeque::new(),
             in_flight: BTreeMap::new(),
+            sections: Vec::new(),
         }
     }
 
@@ -73,10 +130,26 @@ impl Driver {
         mut effects: Vec<Effect>,
         query: &CorpusQuery,
         io: &mut dyn BenchIo,
-    ) -> Outcome {
+        capture: bool,
+    ) -> Capture {
         loop {
             for effect in effects {
+                let effect_id = effect.id();
+                let section = capture.then(|| session.section_fetch(effect_id)).flatten();
                 self.effect(effect, query, io);
+                if let Some((slot, id)) = section {
+                    if let Some((&token, _)) = self
+                        .in_flight
+                        .iter()
+                        .find(|(_, (id, _, _))| *id == effect_id)
+                    {
+                        self.sections.push(SectionAttempt {
+                            token,
+                            slot,
+                            id: id.clone(),
+                        });
+                    }
+                }
                 if self
                     .outcome
                     .failure
@@ -128,12 +201,24 @@ impl Driver {
         self.outcome
             .stats
             .insert("official_sites".into(), self.lookups as u64);
+        self.capture(capture.then_some(&session))
+    }
+
+    fn capture(mut self, session: Option<&Session>) -> Capture {
+        let mut places = [None, None];
         for (index, place) in self.places.into_iter().enumerate() {
             if let Some(place) = place {
+                if let Some(session) = session {
+                    places[index] = session.hold_place(index as u8, place.clone());
+                }
                 flatten_place(&mut self.outcome, index, place);
             }
         }
-        self.outcome
+        Capture {
+            outcome: self.outcome,
+            places,
+            sections: self.sections,
+        }
     }
 
     fn completion(&mut self, query: &CorpusQuery, io: &mut dyn BenchIo) -> Option<(Input, bool)> {
@@ -494,7 +579,15 @@ fn flatten_stats(outcome: &mut Outcome, stats: Stats) {
     put("stale_memos", stats.stale_memos.into());
     put("rejected_memos", stats.rejected_memos.into());
     for (index, notes) in stats.places {
+        for (key, count) in [
+            ("invalid_group_pages", notes.invalid_group_pages),
+            ("missing_header_links", notes.missing_header_links),
+            ("language_groups", notes.language_groups),
+        ] {
+            put(&format!("place.{index}.card.{key}"), count as u64);
+        }
         for (key, value) in [
+            ("probed_section", notes.probed_section),
             ("robots_truncated", notes.robots_truncated),
             ("entry_truncated", notes.entry_truncated),
             ("sections_truncated", notes.sections_truncated),
@@ -565,9 +658,12 @@ fn source_tag(source: Source) -> &'static str {
 }
 
 fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
-    let mut put = |key, value| {
+    let mut put = |key: &str, value| {
         outcome.stats.insert(format!("place.{index}.{key}"), value);
     };
+    for (class, count) in quality::CLASSES.into_iter().zip(quality::measure(&place)) {
+        put(&format!("card.{class}"), count);
+    }
     let notes = place.notes;
     for (key, value) in [
         ("shell", notes.shell),
@@ -582,7 +678,14 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
         .filter(|e| e.tier == zephium_map::Tier::Primary)
         .count();
     put("primary", primary as u64);
-    put("secondary", (place.sections.len() - primary) as u64);
+    put(
+        "secondary",
+        place
+            .sections
+            .iter()
+            .filter(|e| e.tier == zephium_map::Tier::Secondary)
+            .count() as u64,
+    );
     put("sections", place.sections.len() as u64);
     put(
         "children",
@@ -602,6 +705,9 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .iter()
                     .filter(|source| **source != Source::Heading || depth == Depth::Two),
             );
+            if entry.menu_only {
+                continue;
+            }
             let mut url = entry.key.as_url().clone();
             if let Some(fragment) = entry
                 .locator
@@ -626,9 +732,14 @@ fn flatten_place(outcome: &mut Outcome, index: usize, place: Place) {
                     .iter()
                     .map(|&source| source_tag(source).into())
                     .chain(std::iter::once(
-                        match entry.tier {
+                        match if section.tier == zephium_map::Tier::Action {
+                            section.tier
+                        } else {
+                            entry.tier
+                        } {
                             zephium_map::Tier::Primary => "primary",
                             zephium_map::Tier::Secondary => "secondary",
+                            zephium_map::Tier::Action => "action",
                         }
                         .into(),
                     ))

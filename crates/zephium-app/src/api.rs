@@ -866,6 +866,8 @@ pub enum Command {
     /// Hands the shell the port anonymous readers learn the app's proxy
     /// setting from, once, after startup.
     AttachAppProxy(AppProxyAttachment),
+    /// Searches on Home and the maps answering them.
+    Home(Box<crate::home::HomeCommand>),
     /// Icons for origins shown outside a tab: cached or stored rasters are
     /// delivered to chrome, the rest are queued for the origin probe.
     ProbeFavicons {

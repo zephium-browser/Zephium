@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { followMove, settleMove, glideMs } from "../lib/camera-follow";
+import { followMove, settleMove, glideMs } from "../capabilities/camera-follow";
 
 const room = { width: 1200, top: 100, bottom: 800 };
 const view = { x: 0, y: 0, zoom: 1 };

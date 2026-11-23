@@ -33,6 +33,7 @@ pub(crate) use contract_failure;
 
 mod actor;
 mod api;
+pub mod home;
 mod lookup;
 mod onboarding;
 pub mod profile_cleanup;

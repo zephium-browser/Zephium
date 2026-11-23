@@ -7388,6 +7388,7 @@ dependencies = [
  "zephium-blocker",
  "zephium-core",
  "zephium-map",
+ "zephium-map-driver",
  "zephium-public-fetch",
 ]
 
@@ -7757,7 +7758,10 @@ dependencies = [
  "zephium-engine",
  "zephium-import",
  "zephium-ipc",
+ "zephium-map",
+ "zephium-map-driver",
  "zephium-notes",
+ "zephium-public-fetch",
  "zephium-store",
  "zephium-voice",
  "zephium-webext",
@@ -7847,6 +7851,20 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "zephium-core",
+]
+
+[[package]]
+name = "zephium-map-driver"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "specta",
+ "tokio",
+ "url",
+ "zephium-core",
+ "zephium-map",
+ "zephium-public-fetch",
 ]
 
 [[package]]

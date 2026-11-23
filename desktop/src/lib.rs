@@ -86,6 +86,7 @@ mod focus_alerts;
 mod haptics;
 mod help;
 mod history_menu;
+mod home;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -2237,6 +2238,12 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data_export::export_browser_data,
             history_menu::history_menu_popup,
             page_source::page_source,
+            home::home_snapshot,
+            home::home_open_target,
+            home::home_open_inside,
+            home::home_open_results,
+            home::home_focus_search,
+            home::home_forget_search,
             resource_close_ready,
             tab_drop,
             divider_grab,
@@ -2266,6 +2273,9 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             notes::NotesChanged,
             DownloadsChanged,
             NoteOpenRequested,
+            home::HomeMapChangedV1,
+            home::HomeChangedV1,
+            home::HomeShowV1,
             TabChanged,
             MiniChanged,
             ExtensionActionsChanged,
@@ -7873,6 +7883,21 @@ fn finish_browser_setup(
         Projection::Mini(view) => mini::project(&emit_handle, &view),
         Projection::MiniClosed(closed) => mini::close(&emit_handle, closed),
         Projection::ExternalTabsOpened => external_links::forward_pending(&emit_handle),
+        Projection::HomeChanged { profile, space } => {
+            home::emit_home_changed(&emit_handle, profile, space)
+        }
+        Projection::HomeShow {
+            search,
+            slot,
+            entry,
+        } => home::emit_home_show(
+            &emit_handle,
+            home::HomeShowV1 {
+                search,
+                slot,
+                entry,
+            },
+        ),
     });
 
     let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
@@ -8017,10 +8042,8 @@ fn finish_browser_setup(
         );
         return Err(error.into());
     }
-    #[cfg(feature = "work-product")]
     let public_routes = {
-        let routes =
-            zephium_agentic::public_asset::RouteSource::new(tauri::async_runtime::handle().inner());
+        let routes = zephium_public_fetch::RouteSource::new(tauri::async_runtime::handle().inner());
         let reported = routes.clone();
         if !shell.dispatch(Command::AttachAppProxy(zephium_app::AppProxyAttachment(
             Arc::new(move |proxy| reported.set_app_proxy(proxy)),
@@ -8032,6 +8055,9 @@ fn finish_browser_setup(
         app.manage(routes.clone());
         routes
     };
+    if !home::install(app, &shell, public_routes.clone()) {
+        write_diagnostic(format_args!("home: the shell refused its map host"));
+    }
     #[cfg(feature = "work-product")]
     if !work_product::install(
         app,

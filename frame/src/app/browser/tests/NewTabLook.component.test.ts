@@ -76,7 +76,10 @@ vi.mock("$shared/ipc/bindings", async () => {
   });
 });
 vi.mock("$domain/tabs", () => ({
-  tabs: { profile: () => ({ id: native.profile, name: "Alex Rivera", kind: "default" }) },
+  tabs: {
+    profile: () => ({ id: native.profile, name: "Alex Rivera", kind: "default" }),
+    homeOn: () => false,
+  },
 }));
 const ontasks = vi.fn();
 

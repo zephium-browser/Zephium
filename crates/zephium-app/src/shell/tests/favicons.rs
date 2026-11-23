@@ -15,6 +15,7 @@ fn favicon_pipeline_accepts_only_fixed_renderer_rasters_for_current_origin() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -258,6 +259,7 @@ fn private_favicon_is_visible_but_never_written_to_persistent_storage() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(
@@ -912,6 +914,7 @@ fn the_launcher_is_sent_its_icons_again_only_after_its_page_loads_afresh() {
                 space_id: space.to_string(),
                 session_id: session.into(),
                 request_id: session.into(),
+                plain: None,
             }),
         });
         shell.want_icons(
@@ -1245,6 +1248,7 @@ fn a_private_pages_own_icon_is_drawn_but_never_written() {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new(

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { branch, merge, roundedPath } from "../lib/run/lines";
+import { branch, merge, roundedPath } from "$shared/canvas";
 import { registrableSite, siteKey, siteName } from "../lib/run/site";
 
 test("parallel parts fork from one branch point, up and down alike, never over each other", () => {

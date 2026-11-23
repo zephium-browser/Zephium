@@ -218,6 +218,16 @@ export const fields = {
     description: m.ntp_page_help,
     initial: "",
   },
+  "ntp.home": {
+    section: "newtab",
+    label: m.ntp_home_mode,
+    description: m.ntp_home_mode_help,
+    initial: "home",
+    options: [
+      { value: "home", label: m.ntp_home_mode_home },
+      { value: "classic", label: m.ntp_home_mode_classic },
+    ],
+  },
   "ntp.background": {
     section: "newtab",
     label: m.ntp_background,
@@ -225,6 +235,7 @@ export const fields = {
     initial: "sky",
     options: [
       { value: "sky", label: m.ntp_sky },
+      { value: "plain", label: m.ntp_plain },
       { value: "image", label: m.ntp_own_image },
     ],
   },

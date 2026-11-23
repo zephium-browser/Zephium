@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { SidebarNodeView, SplitGroupView, TabView } from "$shared/ipc/bindings";
-import { sidebarDisplayUnits, sidebarTree } from "../lib/sidebar-model";
+import {
+  homeDisplayUnits,
+  homeRailTabs,
+  sidebarDisplayUnits,
+  sidebarTree,
+} from "../lib/sidebar-model";
 
 function tab(id: string): TabView {
   return {
@@ -75,5 +80,84 @@ describe("authoritative sidebar model", () => {
     expect(
       sidebarDisplayUnits("today", tree.today, { members: ["a", "b"] }).map((unit) => unit.kind),
     ).toEqual(["tab"]);
+  });
+});
+
+describe("the left side while Home is on", () => {
+  const found = (id: string, search: string, results = false): TabView => ({
+    ...tab(id),
+    search: { id: search, text: `words ${search}`, results },
+  });
+  const all = [
+    { ...tab("home"), url: null, home: true },
+    tab("plain"),
+    found("a1", "q-a"),
+    found("b1", "q-b"),
+    found("ar", "q-a", true),
+    found("a2", "q-a"),
+    tab("later"),
+  ];
+  const units = (active: string | null) => {
+    const tree = sidebarTree(
+      all.map((one) => tabNode(one.id)),
+      all,
+    );
+    return homeDisplayUnits(sidebarDisplayUnits("today", tree.today, null), active);
+  };
+  const keys = (list: ReturnType<typeof units>) => list.map((unit) => unit.key);
+
+  it("leaves Home out and gathers a search's pages under one head where its first page stood", () => {
+    expect(keys(units("plain"))).toEqual([
+      "tab:plain",
+      "search:q-a",
+      "tab:a1",
+      "tab:a2",
+      "search:q-b",
+      "tab:b1",
+      "tab:later",
+    ]);
+    expect(units("plain")[1]).toMatchObject({ kind: "search", text: "words q-a", depth: 0 });
+  });
+
+  it("lists a results page only while it is in front", () => {
+    expect(keys(units("ar"))).toEqual([
+      "tab:plain",
+      "search:q-a",
+      "tab:a1",
+      "tab:ar",
+      "tab:a2",
+      "search:q-b",
+      "tab:b1",
+      "tab:later",
+    ]);
+  });
+
+  it("keeps a page inside a folder where it is, ungathered", () => {
+    const nodes: SidebarNodeView[] = [
+      { id: "f", parent_id: null, section: "today", kind: { type: "folder", name: "Kept" } },
+      tabNode("a1", "today", "f"),
+      tabNode("a2"),
+    ];
+    const tree = sidebarTree(
+      nodes,
+      all.filter((one) => one.id === "a1" || one.id === "a2"),
+    );
+    const shown = homeDisplayUnits(sidebarDisplayUnits("today", tree.today, null), null);
+    expect(shown.map((unit) => unit.key)).toContain("tab:a1");
+    expect(shown.filter((unit) => unit.kind === "search").map((unit) => unit.key)).toEqual([
+      "search:q-a",
+    ]);
+  });
+
+  it("puts Home first in the rail and the groups' pages together", () => {
+    expect(homeRailTabs(all, null).map((one) => one.id)).toEqual([
+      "home",
+      "plain",
+      "a1",
+      "a2",
+      "b1",
+      "later",
+    ]);
+    expect(homeRailTabs(all, "ar").map((one) => one.id)).toContain("ar");
   });
 });

@@ -362,6 +362,7 @@ fn controlled_shell() -> (
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let sink = screen.clone();
     let mut shell = Shell::new_with_blocker(

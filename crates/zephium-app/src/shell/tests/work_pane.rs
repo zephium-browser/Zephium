@@ -16,6 +16,7 @@ fn setup_with_layout_sink() -> (Shell, Arc<FakeEngine>, Screen, LayoutSink) {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let (sink, layout_sink) = (screen.clone(), layouts.clone());
     let mut shell = Shell::new(

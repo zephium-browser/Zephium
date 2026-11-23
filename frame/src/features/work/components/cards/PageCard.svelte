@@ -3,7 +3,7 @@
   import CardFrame from "./CardFrame.svelte";
   import HostGlyph from "./HostGlyph.svelte";
   import AccountBadge from "./AccountBadge.svelte";
-  import { thumbnail } from "../../lib/frame-thumbs";
+  import { thumbnail } from "$shared/canvas";
   import type { CanvasItem } from "../../lib/canvas-model";
   import NeedsYou from "../run/NeedsYou.svelte";
   let {

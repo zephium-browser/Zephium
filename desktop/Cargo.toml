@@ -132,6 +132,9 @@ zephium-agent-controller = { workspace = true, optional = true }
 zephium-agent-runtime = { workspace = true, optional = true }
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-engine.workspace = true
+zephium-map = { version = "=0.1.0", path = "../crates/zephium-map" }
+zephium-map-driver = { version = "=0.1.0", path = "../crates/zephium-map-driver", features = ["ipc-types"] }
+zephium-public-fetch = { version = "=0.1.0", path = "../crates/zephium-public-fetch" }
 zephium-store.workspace = true
 zephium-notes.workspace = true
 zephium-import.workspace = true

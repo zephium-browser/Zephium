@@ -5,7 +5,15 @@ impl Session {
         let Work::Section(i, key) = &job.work else {
             return None;
         };
-        let place = self.sites[*i].as_ref()?.place.as_ref()?;
+        let state = self.sites.get(*i)?.as_ref()?;
+        if self.cfg.sections == Sections::All {
+            return state
+                .eager
+                .iter()
+                .find(|e| e.key.page_match() == *key)
+                .map(|e| e.priority);
+        }
+        let place = state.place.as_ref()?;
         let entry = place.sections.iter().find(|e| e.key.page_match() == *key)?;
         Some(place.read_priority(entry))
     }
@@ -56,11 +64,7 @@ impl Session {
                 .iter()
                 .filter_map(|job| self.section_rank(job))
                 .min();
-            let received = self
-                .stats
-                .phases
-                .values()
-                .fold(0u64, |bytes, phase| bytes.saturating_add(phase.bytes));
+            let received = self.received_bytes();
             let mut progressed = false;
             for _ in 0..self.queue.len() {
                 let Some(job) = self.queue.pop_front() else {
@@ -77,10 +81,20 @@ impl Session {
                 let host = origin(&job.url);
                 let hostname = job.url.host_str().unwrap_or_default();
                 let phase = job.work.phase();
+                let landing_policy = job.work == Work::Robots;
+                if landing_policy && self.robots.contains_key(&host) {
+                    self.resolve_landings(&host, out);
+                    progressed = true;
+                    continue;
+                }
                 let blocked = if received >= self.cfg.total_bytes
                     && matches!(
                         job.work,
-                        Work::Section(..) | Work::Sitemap(_) | Work::Llms(_) | Work::Passage(_)
+                        Work::Robots
+                            | Work::Section(..)
+                            | Work::Sitemap(_)
+                            | Work::Llms(_)
+                            | Work::Passage(_)
                     ) {
                     Some(Budget::TotalBytes)
                 } else if self.started >= self.cfg.fetches {
@@ -120,6 +134,15 @@ impl Session {
                     self.queue.push_back(job);
                     continue;
                 }
+                if landing_policy {
+                    if active.iter().any(|(h, robots)| h == &host && *robots) {
+                        self.queue.push_back(job);
+                        continue;
+                    }
+                    self.start_job(job, out);
+                    progressed = true;
+                    break;
+                }
                 if let Some(policy) = self.robots.get(&host) {
                     if !policy.allows(&job.url[Position::BeforePath..Position::AfterQuery]) {
                         self.set_read(
@@ -130,7 +153,7 @@ impl Session {
                             out,
                         );
                         self.refused(phase, Failure::Robots);
-                        if let Some(i) = job.work.side() {
+                        if let Some(i) = job.work.side().filter(|_| self.opening.is_none()) {
                             if let Some(s) = self.sites[i].as_mut() {
                                 s.denied = true;
                                 if !matches!(
@@ -192,6 +215,38 @@ impl Session {
         }
     }
     pub(super) fn set_read(&mut self, job: &Job, read: ReadState, out: &mut Vec<Effect>) {
+        if job.work == Work::Robots {
+            self.resolve_landings(&origin(&job.url), out);
+            return;
+        }
+        if let Some(open) = &mut self.opening {
+            if matches!(job.work, Work::Section(..)) {
+                let failure = match read {
+                    ReadState::Refused { failure } => failure,
+                    ReadState::Skipped {
+                        budget: Budget::Elapsed,
+                    } => Failure::Timeout,
+                    _ => Failure::Limit,
+                };
+                let place = &mut open.held.payload.place;
+                place.sections[open.index].read = Some(match read {
+                    ReadState::Skipped { budget } if budget != Budget::Elapsed => read,
+                    _ => ReadState::Refused { failure },
+                });
+                place.notes.robots_disallowed |= failure == Failure::Robots;
+                place.notes.truncated |= failure == Failure::Limit;
+                self.stats
+                    .places
+                    .entry(open.slot)
+                    .or_default()
+                    .section_page_truncated |= read
+                    == ReadState::Refused {
+                        failure: Failure::Limit,
+                    };
+                open.clean &= matches!(failure, Failure::Missing | Failure::Client);
+            }
+            return;
+        }
         match &job.work {
             Work::Section(i, key) => {
                 if let Some(s) = &mut self.sites[*i] {
@@ -207,6 +262,13 @@ impl Session {
                         _ => None,
                     };
                 }
+            }
+            Work::Anonymous(i, _) if self.unseeded[*i].is_some() => {
+                let failure = match read {
+                    ReadState::Refused { failure } => failure,
+                    _ => Failure::Limit,
+                };
+                self.unseeded[*i] = Some(Unseeded::Failed(failure));
             }
             _ => {}
         }
@@ -234,9 +296,15 @@ impl Session {
         } else {
             Effect::Fetch {
                 id,
-                url,
                 expect,
-                max_bytes: job.work.byte_cap(&self.cfg),
+                max_bytes: if job.work == Work::Robots && self.landings.contains_key(&origin(&url))
+                {
+                    let remaining = self.cfg.total_bytes.saturating_sub(self.received_bytes());
+                    u64::from(job.work.byte_cap(&self.cfg)).min(remaining) as u32
+                } else {
+                    job.work.byte_cap(&self.cfg)
+                },
+                url,
                 timeout: self
                     .cfg
                     .timeout
@@ -274,13 +342,31 @@ impl Session {
                 return Err(Failure::ContentType);
             }
             if let Work::Section(i, ref key) = job.work {
-                let other_tenant = self.sites[i].as_ref().is_some_and(|s| {
-                    let place = s.place.as_ref().map_or(&s.seed.site, |p| &p.key);
+                let place_key = if let Some(open) = &self.opening {
+                    Some(&open.held.place().key)
+                } else {
+                    self.sites[i]
+                        .as_ref()
+                        .map(|s| s.place.as_ref().map_or(&s.seed.site, |p| &p.key))
+                };
+                let other_tenant = place_key.is_some_and(|place| {
                     place.tenant.is_some()
                         && PlaceKey::from_url(&r.final_url).as_ref() != Some(place)
                 });
                 if other_tenant || SiteKey::from_url(&job.url) != SiteKey::from_url(&r.final_url) {
-                    if let Some((s, landing)) = self.sites[i]
+                    if let Some(open) = &mut self.opening {
+                        open.held.payload.place.sections[open.index].off_site = true;
+                        if let Ok(landing) = PageKey::from_url(&r.final_url) {
+                            let mut updated = open.held.clone();
+                            let entry = &mut updated.payload.place.sections[open.index];
+                            entry.key = landing;
+                            entry.localized = false;
+                            entry.locator = Locator::default();
+                            if let Some(updated) = updated.bounded() {
+                                open.held = updated;
+                            }
+                        }
+                    } else if let Some((s, landing)) = self.sites[i]
                         .as_mut()
                         .zip(PageKey::from_url(&r.final_url).ok())
                     {
@@ -298,13 +384,6 @@ impl Session {
             if job.work == Work::Robots && !r.final_url.path().ends_with("/robots.txt") {
                 return Err(Failure::External);
             }
-            if job.work != Work::Robots
-                && self.robots.get(&origin(&r.final_url)).is_some_and(|p| {
-                    !p.allows(&r.final_url[Position::BeforePath..Position::AfterQuery])
-                })
-            {
-                return Err(Failure::Robots);
-            }
             Ok(r)
         });
         if job.work == Work::Robots {
@@ -313,7 +392,18 @@ impl Session {
                 (r.final_url.as_str().strip_prefix(landing.as_str()) == Some("/robots.txt"))
                     .then_some(landing)
             });
+            let host = origin(&job.url);
+            let received = self.received_bytes();
+            let over_budget = self.landings.contains_key(&host)
+                && (received > self.cfg.total_bytes
+                    || received == self.cfg.total_bytes
+                        && result.as_ref().is_ok_and(|r| r.truncated));
             let policy = match result {
+                Ok(_) if over_budget => {
+                    self.budget(Budget::TotalBytes);
+                    self.refused(phase, Failure::Limit);
+                    Robots::limited()
+                }
                 Ok(r) => Robots::from_sample(&r.bytes, r.truncated),
                 Err(f) => {
                     self.refused(phase, f);
@@ -325,18 +415,84 @@ impl Session {
                 }
             };
             *self.stats.robots.entry(policy.outcome).or_default() += 1;
-            if let Some(landing) = landing {
-                self.robots.insert(landing, policy.clone());
+            if let Some(open) = &mut self.opening {
+                let truncated = policy.truncated || policy.outcome == RobotsOutcome::Limit;
+                open.held.payload.place.notes.truncated |= truncated;
+                self.stats
+                    .places
+                    .entry(open.slot)
+                    .or_default()
+                    .robots_truncated |= truncated;
             }
-            self.robots.insert(origin(&job.url), policy);
+            if let Some(landing) = landing {
+                self.robots
+                    .entry(landing.clone())
+                    .or_insert_with(|| policy.clone());
+                if landing != host {
+                    self.resolve_landings(&landing, out);
+                }
+            }
+            self.robots.insert(host.clone(), policy);
+            self.resolve_landings(&host, out);
             return;
         }
+        let Ok(r) = result else {
+            self.settle(job, result, out);
+            return;
+        };
+        let host = origin(&r.final_url);
+        if self.robots.contains_key(&host) {
+            self.accept_landing(job, r, out);
+            return;
+        }
+        let Ok(url) = r.final_url.join("/robots.txt") else {
+            self.settle(job, Err(Failure::Robots), out);
+            return;
+        };
+        let in_flight = self.pending.values().any(|p| {
+            matches!(p, Pending::Job(j) if j.work == Work::Robots && j.url.origin() == url.origin())
+        });
+        let waiting = self.landings.entry(host).or_default();
+        if waiting.is_empty() && !in_flight {
+            self.queue.push_front(Job {
+                work: Work::Robots,
+                url,
+            });
+        }
+        waiting.push((job, r));
+    }
+
+    fn received_bytes(&self) -> u64 {
+        self.stats
+            .phases
+            .values()
+            .fold(0, |sum, phase| sum.saturating_add(phase.bytes))
+    }
+
+    fn resolve_landings(&mut self, host: &str, out: &mut Vec<Effect>) {
+        for (job, result) in self.landings.remove(host).into_iter().flatten() {
+            self.accept_landing(job, result, out);
+        }
+    }
+
+    fn accept_landing(&mut self, job: Job, r: FetchResult, out: &mut Vec<Effect>) {
+        let allowed = self
+            .robots
+            .get(&origin(&r.final_url))
+            .is_some_and(|policy| {
+                policy.allows(&r.final_url[Position::BeforePath..Position::AfterQuery])
+            });
+        self.settle(job, if allowed { Ok(r) } else { Err(Failure::Robots) }, out);
+    }
+
+    fn settle(&mut self, job: Job, result: Result<FetchResult, Failure>, out: &mut Vec<Effect>) {
+        let phase = job.work.phase();
         let side = job.work.side();
         let applied = result.and_then(|r| self.apply(job.clone(), r, out));
         if let Err(f) = applied {
             self.set_read(&job, ReadState::Refused { failure: f }, out);
             self.refused(phase, f);
-            if let Some(i) = side {
+            if let Some(i) = side.filter(|_| self.opening.is_none()) {
                 if let Some(s) = self.sites[i].as_mut() {
                     if f == Failure::Limit {
                         s.cut.insert(phase);
@@ -359,6 +515,52 @@ impl Session {
                     self.stats.walls += 1;
                     return Err(Failure::Challenge);
                 }
+                if let Some(open) = &mut self.opening {
+                    let (mut place, mut detail) = site::enrich_held(
+                        open.held.place().clone(),
+                        open.index,
+                        &doc,
+                        site::MAX_CHILDREN,
+                    );
+                    place.check_ids().map_err(|_| Failure::Unreadable)?;
+                    place.sections[open.index].read = Some(ReadState::Read);
+                    let mut updated = open.held.clone();
+                    updated.payload.place = place;
+                    if let Some(memo) = &mut updated.memo {
+                        if let Some(index) = memo
+                            .payload
+                            .place
+                            .sections
+                            .iter()
+                            .position(|e| e.id == open.held.place().sections[open.index].id)
+                        {
+                            let occupied = memo
+                                .payload
+                                .place
+                                .sections
+                                .iter()
+                                .enumerate()
+                                .filter(|(other, _)| *other != index)
+                                .map(|(_, entry)| entry.children.len())
+                                .sum::<usize>();
+                            let cap = site::MAX_CHILDREN
+                                .min(site::MAX_PLACE_CHILDREN.saturating_sub(occupied));
+                            let (place, _) =
+                                site::enrich_held(memo.payload.place.clone(), index, &doc, cap);
+                            if place.check_ids().is_ok() {
+                                memo.payload.place = place;
+                            }
+                        }
+                    }
+                    open.held = updated.bounded().ok_or(Failure::Limit)?;
+                    detail.robots_truncated = self
+                        .stats
+                        .places
+                        .get(&open.slot)
+                        .is_some_and(|prior| prior.robots_truncated);
+                    self.stats.places.insert(open.slot, detail);
+                    return Ok(());
+                }
                 if let Some(s) = self.sites[i].as_mut() {
                     s.reads.insert(key, ReadState::Read);
                     s.pages.insert(
@@ -367,6 +569,7 @@ impl Session {
                     );
                 }
                 self.rebuild(i, out);
+                self.plan_sections(i);
             }
             Work::Passage(pos) => {
                 let doc = html(&r, DocLimits::ARTICLE)?;

@@ -10,8 +10,10 @@
   import {
     sidebarDisplayUnits,
     collapsedSidebarUnits,
+    homeDisplayUnits,
     type SidebarEntry,
   } from "../lib/sidebar-model";
+  import SearchGroupHead from "./SearchGroupHead.svelte";
   import SplitGroupRow from "./SplitGroupRow.svelte";
   import TabRow from "./TabRow.svelte";
   import { untrack } from "svelte";
@@ -55,7 +57,12 @@
     onSelect: (id: string) => void;
   } = $props();
 
-  let displayUnits = $derived(sidebarDisplayUnits(section, entries, tabs.splitGroup()));
+  // While Home is on, today's pages gather under the searches they came from.
+  let homed = $derived(section === "today" && variant === "list" && tabs.homeOn());
+  let displayUnits = $derived.by(() => {
+    const units = sidebarDisplayUnits(section, entries, tabs.splitGroup());
+    return homed ? homeDisplayUnits(units, tabs.activeId()) : units;
+  });
   const folded = new SvelteSet<string>();
   let hiddenUnits = $derived(collapsedSidebarUnits(displayUnits, folded, tabs.activeId()));
 
@@ -63,7 +70,7 @@
   const selectedIds = $derived(selectable ? (selection?.value.ids ?? []) : []);
   const visibleOrder = $derived(
     displayUnits.flatMap((unit) => {
-      if (hiddenUnits.has(unit.key) || unit.kind === "folder") return [];
+      if (hiddenUnits.has(unit.key) || unit.kind === "folder" || unit.kind === "search") return [];
       return unit.kind === "split" ? unit.tabs.map((entry) => entry.tab.id) : [unit.tab.id];
     }),
   );
@@ -217,7 +224,7 @@
 <nav
   class={["tab-list", variant === "essentials" && "tab-list-flush"]}
   aria-label={label}
-  hidden={entries.length === 0}
+  hidden={displayUnits.length === 0}
   data-close-buttons={preferences.value("tabs.close-button")}
   data-tab-list-background={variant === "list" || undefined}
 >
@@ -244,6 +251,13 @@
             variant === "essentials" ? "col-span-full" : "",
             hiddenUnits.has(unit.key) ? "hidden" : "",
           ].join(" ")}
+        />
+      {:else if unit.kind === "search"}
+        <SearchGroupHead
+          motionKey={unit.key}
+          search={unit.search}
+          text={unit.text}
+          class={hiddenUnits.has(unit.key) ? "hidden" : ""}
         />
       {:else if unit.kind === "split"}
         <SplitGroupRow

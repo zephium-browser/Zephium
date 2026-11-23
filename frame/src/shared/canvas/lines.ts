@@ -91,3 +91,64 @@ export function merge(starts: readonly Point[], collector: number, end: Point): 
     starts.map((start) => ({ x: -start.x, y: start.y })),
   ).map((route) => route.map((point) => ({ x: -point.x, y: point.y })).reverse());
 }
+
+export type Side = "top" | "right" | "bottom" | "left";
+const OUT: Record<Side, readonly [number, number]> = {
+  top: [0, -1],
+  right: [1, 0],
+  bottom: [0, 1],
+  left: [-1, 0],
+};
+
+/** A tie between two things nothing laid out: a cubic along their handles. */
+export function tiePath(sx: number, sy: number, from: Side, tx: number, ty: number, to: Side) {
+  const upright = from === "top" || from === "bottom";
+  const along = Math.max(24, (upright ? Math.abs(ty - sy) : Math.abs(tx - sx)) / 2);
+  const [ax, ay] = OUT[from];
+  const [bx, by] = OUT[to];
+  return `M ${sx},${sy} C ${sx + ax * along},${sy + ay * along} ${tx + bx * along},${ty + by * along} ${tx},${ty}`;
+}
+
+/** Between two ends that no longer stand where their layout put them: across, down, across. */
+export function elbow(from: Point, to: Point): Point[] {
+  if (Math.abs(from.y - to.y) < 1) return [from, to];
+  if (Math.abs(from.x - to.x) < 1) return [from, to];
+  const x = to.x > from.x + 24 ? Math.round((from.x + to.x) / 2) : from.x + 24;
+  return to.x > from.x + 24
+    ? [from, { x, y: from.y }, { x, y: to.y }, to]
+    : [
+        from,
+        { x, y: from.y },
+        { x, y: (from.y + to.y) / 2 },
+        { x: to.x - 24, y: (from.y + to.y) / 2 },
+        { x: to.x - 24, y: to.y },
+        to,
+      ];
+}
+
+/** A line as its layout routed it, and where it truly meets the corners of its two ends. */
+export type Route = {
+  points: readonly Point[];
+  from: Point;
+  to: Point;
+  laid: { source: Point; target: Point };
+};
+
+/**
+ * A routed line follows its route while both ends stand where the layout put
+ * them, moves with them when they move together, and takes an elbow between
+ * where they stand once one moves alone.
+ */
+export function routedPoints(route: Route, source?: Point, target?: Point): readonly Point[] {
+  if (!source || !target) return route.points;
+  const da = { x: source.x - route.laid.source.x, y: source.y - route.laid.source.y };
+  const db = { x: target.x - route.laid.target.x, y: target.y - route.laid.target.y };
+  const still = (d: Point) => Math.abs(d.x) < 0.5 && Math.abs(d.y) < 0.5;
+  if (still(da) && still(db)) return route.points;
+  if (Math.abs(da.x - db.x) < 0.5 && Math.abs(da.y - db.y) < 0.5)
+    return route.points.map((point) => ({ x: point.x + da.x, y: point.y + da.y }));
+  return elbow(
+    { x: source.x + route.from.x, y: source.y + route.from.y },
+    { x: target.x + route.to.x, y: target.y + route.to.y },
+  );
+}

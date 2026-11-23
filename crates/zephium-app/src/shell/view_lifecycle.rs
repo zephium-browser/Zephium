@@ -999,6 +999,7 @@ impl Shell {
 
     pub(super) fn discard_protected_leaves(&self) -> std::collections::HashSet<ItemId> {
         let mut protected: std::collections::HashSet<ItemId> = self.mini_pages().collect();
+        protected.extend(self.home_reading_tabs());
         let Some(window) = self.windows.focused() else {
             return protected;
         };

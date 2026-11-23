@@ -22,6 +22,7 @@ mod favicons;
 mod fullscreen;
 mod history;
 mod history_list;
+mod home;
 mod https_first;
 mod media;
 mod mini;
@@ -265,6 +266,7 @@ pub struct Shell {
     extension_data: extension_data::ExtensionDataState,
     history_lists: history_list::HistoryListState,
     sources: page_source::SourceState,
+    home: home::HomeState,
     search: SearchState,
     tab_preferences: tabs::TabPreferences,
     new_tab_destinations: std::collections::HashMap<ItemId, url::Url>,
@@ -541,6 +543,7 @@ impl Shell {
             extension_data: Default::default(),
             history_lists: history_list::HistoryListState::default(),
             sources: page_source::SourceState::default(),
+            home: home::HomeState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
                 shortcuts: store
@@ -1197,6 +1200,7 @@ impl Shell {
             Command::Export { kind, done } => self.export_from_focused(kind, done),
             Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment),
             Command::AttachAppProxy(attachment) => self.proxy.attach(attachment.0),
+            Command::Home(command) => self.home_command(*command),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
                 profile,

@@ -879,6 +879,7 @@ fn setup_with_raises() -> (Shell, Arc<FakeEngine>, Screen, RaiseLog) {
         tabs: Vec::new(),
         active: None,
         split_group: None,
+        home: false,
     }));
     let raises: RaiseLog = Arc::new(Mutex::new(0));
     let (sink, raise_sink) = (screen.clone(), raises.clone());
