@@ -17,9 +17,7 @@ pub(in crate::host) use site::SiteAsk;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::rc::Rc;
-#[cfg(target_os = "macos")]
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -82,6 +80,8 @@ enum DecisionPhase {
     KeepDecision,
     /// The site's question waits for the person under the address field.
     SitePermission,
+    /// Native cancellation was sent and waits for final settlement.
+    Cancelling,
 }
 
 #[derive(Clone, Copy)]
@@ -109,6 +109,7 @@ impl DecisionDeadline {
             }
             DecisionPhase::KeepDecision => Duration::from_secs(60 * 60),
             DecisionPhase::SitePermission => zephium_core::permissions::DOWNLOAD_PERMISSION_TIMEOUT,
+            DecisionPhase::Cancelling => Duration::from_secs(3),
         };
         Self {
             phase,
@@ -194,6 +195,8 @@ struct Transfer {
     /// The person answered for this download on its card, which counts as
     /// their click.
     confirmed: bool,
+    #[cfg(target_os = "windows")]
+    orphaned_since: Option<Instant>,
     deadline: DecisionDeadline,
 }
 
@@ -231,6 +234,7 @@ struct UiCall {
 }
 
 pub(crate) struct Downloads {
+    self_weak: Weak<Self>,
     session: DownloadId,
     store: SharedStore,
     notify: Notify,
@@ -317,9 +321,16 @@ impl Downloads {
         *self.watch.borrow_mut() = Some(watch);
     }
 
+    fn arm_timer(&self) {
+        if let Some(manager) = self.self_weak.upgrade() {
+            manager.ensure_timer();
+        }
+    }
+
     pub(crate) fn new(store: SharedStore, notify: Notify) -> Rc<Self> {
         let (sender, receiver) = mpsc::channel();
-        let manager = Rc::new(Self {
+        let manager = Rc::new_cyclic(|self_weak| Self {
+            self_weak: self_weak.clone(),
             session: DownloadId::generate(),
             store,
             notify,
@@ -791,6 +802,8 @@ impl Downloads {
         for (id, error) in cancel {
             self.cancel(id, Some(error));
         }
+        #[cfg(target_os = "windows")]
+        self.poll_windows_transfers();
         // Retry queued pickers on the existing pending-transfer timer. Taking
         // the request before entering native UI prevents reentrant presentation.
         let pickers: Vec<_> = self
@@ -1483,5 +1496,13 @@ mod state_tests {
             native_terminal_transition(DownloadState::Receiving, false, true),
             Some(DownloadState::Finalizing)
         );
+    }
+
+    #[test]
+    fn cancelling_deadline_is_bounded() {
+        let now = Instant::now();
+        let deadline = DecisionDeadline::new(DecisionPhase::Cancelling, now);
+        assert!(!deadline.expired(now + Duration::from_secs(2)));
+        assert!(deadline.expired(now + Duration::from_secs(4)));
     }
 }

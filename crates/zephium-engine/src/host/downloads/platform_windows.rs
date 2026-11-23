@@ -354,6 +354,82 @@ fn automatically_restarting(reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON) -> b
     )
 }
 
+const ORPHANED_INTERRUPT_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancelSettlement {
+    Wait,
+    NativeInterrupted,
+    ForceCancelled,
+}
+
+fn operation_state_and_reason(
+    operation: &ICoreWebView2DownloadOperation,
+) -> Option<(
+    COREWEBVIEW2_DOWNLOAD_STATE,
+    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+)> {
+    let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
+    let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+    unsafe {
+        operation
+            .State(&mut state)
+            .and_then(|_| operation.InterruptReason(&mut reason))
+    }
+    .ok()
+    .map(|_| (state, reason))
+}
+
+fn cancel_settlement(
+    state_result: Option<(
+        COREWEBVIEW2_DOWNLOAD_STATE,
+        COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+    )>,
+    write_released: bool,
+    deadline_expired: bool,
+    cancel_failed: bool,
+) -> CancelSettlement {
+    match state_result {
+        Some((COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED, _)) => CancelSettlement::NativeInterrupted,
+        Some((COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED, _)) => CancelSettlement::ForceCancelled,
+        Some((COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS, reason)) => {
+            if write_released
+                && (cancel_failed
+                    || deadline_expired
+                    || reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE)
+            {
+                CancelSettlement::ForceCancelled
+            } else {
+                CancelSettlement::Wait
+            }
+        }
+        None => {
+            if write_released {
+                CancelSettlement::ForceCancelled
+            } else {
+                CancelSettlement::Wait
+            }
+        }
+        _ => CancelSettlement::Wait,
+    }
+}
+
+fn orphaned_interrupt_error(
+    state: COREWEBVIEW2_DOWNLOAD_STATE,
+    reason: COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+    write_released: bool,
+) -> Option<DownloadError> {
+    if state == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS
+        && reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE
+        && !automatically_restarting(reason)
+        && write_released
+    {
+        Some(interrupt_error(reason))
+    } else {
+        None
+    }
+}
+
 impl Downloads {
     pub(super) fn ensure_timer(self: &Rc<Self>) {
         let (mut period, slow) = self.tick_period();
@@ -453,6 +529,21 @@ impl Downloads {
         let Ok(operation) = (unsafe { args.DownloadOperation() }) else {
             return;
         };
+        let mut initial_reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
+        if unsafe { operation.InterruptReason(&mut initial_reason) }.is_ok()
+            && initial_reason != COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE
+        {
+            // WebView2 emits follow-up DownloadStarting events with a non-zero
+            // interrupt reason when auto-restarting a failed transfer, leaving
+            // the original operation orphaned in IN_PROGRESS. Refuse the
+            // duplicate row and settle any orphaned transfer whose writer closed.
+            unsafe {
+                let _ = args.SetCancel(true);
+                let _ = operation.Cancel();
+            }
+            self.settle_orphaned_receiving(true);
+            return;
+        }
         let Some(uri) = operation_uri(&operation) else {
             return;
         };
@@ -536,6 +627,7 @@ impl Downloads {
                         unsafe {
                             let _ = operation.Cancel();
                         }
+                        manager.native_failed(id);
                     }
                     return Ok(());
                 }
@@ -620,6 +712,7 @@ impl Downloads {
                 user_pausing: false,
                 site,
                 confirmed: false,
+                orphaned_since: None,
                 deadline: DecisionDeadline::new(DecisionPhase::Admission, Instant::now()),
             },
         );
@@ -782,6 +875,7 @@ impl Downloads {
             transfer.record.state = DownloadState::Cancelling;
             transfer.record.revision += 1;
             transfer.record.error = error;
+            transfer.deadline = DecisionDeadline::new(DecisionPhase::Cancelling, Instant::now());
             self.changed(transfer.partition.profile());
             (
                 transfer.native.clone(),
@@ -801,26 +895,131 @@ impl Downloads {
             self.terminal(id, DownloadState::Cancelled, None);
             return;
         }
-        unsafe {
-            let _ = entry.0.operation.Cancel();
+        self.arm_timer();
+        let cancel_failed = unsafe { entry.0.operation.Cancel() }.is_err();
+        self.settle_cancelling_transfer(id, &entry.0, cancel_failed, false);
+    }
+
+    fn settle_cancelling_transfer(
+        &self,
+        id: DownloadId,
+        native: &Native,
+        cancel_failed: bool,
+        deadline_expired: bool,
+    ) {
+        let state_result = operation_state_and_reason(&native.operation);
+        let write_released = self.active.borrow().get(&id).is_some_and(|transfer| {
+            transfer.cancelling
+                && !transfer.persisting_terminal
+                && transfer
+                    .destination
+                    .as_ref()
+                    .is_none_or(Destination::payload_write_released)
+        });
+        match cancel_settlement(
+            state_result,
+            write_released,
+            deadline_expired,
+            cancel_failed,
+        ) {
+            CancelSettlement::Wait => {
+                if deadline_expired {
+                    unsafe {
+                        let _ = native.operation.Cancel();
+                    }
+                }
+            }
+            CancelSettlement::NativeInterrupted => {
+                self.native_failed(id);
+            }
+            CancelSettlement::ForceCancelled => {
+                self.terminal(id, DownloadState::Cancelled, None);
+            }
         }
-        let mut state = COREWEBVIEW2_DOWNLOAD_STATE::default();
-        let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON::default();
-        if unsafe {
-            entry
-                .0
-                .operation
-                .State(&mut state)
-                .and_then(|_| entry.0.operation.InterruptReason(&mut reason))
+    }
+
+    fn settle_orphaned_receiving(&self, immediate: bool) {
+        let receiving: Vec<_> = self
+            .active
+            .borrow()
+            .iter()
+            .filter(|(_, transfer)| {
+                transfer.record.state == DownloadState::Receiving
+                    && !transfer.cancelling
+                    && !transfer.persisting_terminal
+            })
+            .map(|(id, transfer)| (*id, transfer.native.clone()))
+            .collect();
+        let now = Instant::now();
+        for (id, native) in receiving {
+            let Some((state, reason)) = operation_state_and_reason(&native.operation) else {
+                continue;
+            };
+            if orphaned_interrupt_error(state, reason, true).is_none() {
+                let mut active = self.active.borrow_mut();
+                if let Some(transfer) = active
+                    .get_mut(&id)
+                    .filter(|transfer| transfer.orphaned_since.is_some())
+                {
+                    transfer.orphaned_since = None;
+                }
+                continue;
+            }
+            let write_released = self.active.borrow().get(&id).is_some_and(|transfer| {
+                transfer
+                    .destination
+                    .as_ref()
+                    .is_none_or(Destination::payload_write_released)
+            });
+            let Some(error) = orphaned_interrupt_error(state, reason, write_released) else {
+                let mut active = self.active.borrow_mut();
+                if let Some(transfer) = active
+                    .get_mut(&id)
+                    .filter(|transfer| transfer.orphaned_since.is_some())
+                {
+                    transfer.orphaned_since = None;
+                }
+                continue;
+            };
+            let ready = {
+                let mut active = self.active.borrow_mut();
+                let Some(transfer) = active.get_mut(&id).filter(|transfer| {
+                    transfer.record.state == DownloadState::Receiving
+                        && !transfer.cancelling
+                        && !transfer.persisting_terminal
+                }) else {
+                    continue;
+                };
+                if immediate {
+                    true
+                } else {
+                    let since = *transfer.orphaned_since.get_or_insert(now);
+                    now.saturating_duration_since(since) >= ORPHANED_INTERRUPT_GRACE
+                }
+            };
+            if ready {
+                self.note_native_error(id, error);
+                unsafe {
+                    let _ = native.operation.Cancel();
+                }
+                self.native_failed_with_error(id, error);
+            }
         }
-        .is_ok()
-            && state == COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED
-            && !automatically_restarting(reason)
-        {
-            self.native_failed(id);
-        } else if state == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED {
-            self.terminal(id, DownloadState::Cancelled, None);
+    }
+
+    pub(super) fn poll_windows_transfers(&self) {
+        let now = Instant::now();
+        let cancelling: Vec<_> = self
+            .active
+            .borrow()
+            .iter()
+            .filter(|(_, transfer)| transfer.cancelling && !transfer.persisting_terminal)
+            .map(|(id, transfer)| (*id, transfer.native.clone(), transfer.deadline.expired(now)))
+            .collect();
+        for (id, native, deadline_expired) in cancelling {
+            self.settle_cancelling_transfer(id, &native, false, deadline_expired);
         }
+        self.settle_orphaned_receiving(false);
     }
 
     /// The person paused a download. WebView2 stops the transfer and reports
@@ -1296,5 +1495,128 @@ mod tests {
         ] {
             assert!(!resumable_reason(reason));
         }
+    }
+
+    #[test]
+    fn cancelling_settlement_handles_stalled_interrupts_without_releasing_active_writers() {
+        // Interrupted state (even automatically_restarting) settles immediately via native interrupt.
+        for reason in [
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_USER_CANCELED,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE,
+            COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+        ] {
+            assert_eq!(
+                cancel_settlement(
+                    Some((COREWEBVIEW2_DOWNLOAD_STATE_INTERRUPTED, reason)),
+                    false,
+                    false,
+                    false,
+                ),
+                CancelSettlement::NativeInterrupted
+            );
+        }
+        // In-progress operation with a non-zero interrupt reason settles once write handle is gone.
+        assert_eq!(
+            cancel_settlement(
+                Some((
+                    COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                )),
+                false,
+                false,
+                false,
+            ),
+            CancelSettlement::Wait
+        );
+        assert_eq!(
+            cancel_settlement(
+                Some((
+                    COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                )),
+                true,
+                false,
+                false,
+            ),
+            CancelSettlement::ForceCancelled
+        );
+        // Active healthy download with expired deadline settles only once payload writer is released.
+        assert_eq!(
+            cancel_settlement(
+                Some((
+                    COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE,
+                )),
+                false,
+                true,
+                false,
+            ),
+            CancelSettlement::Wait
+        );
+        assert_eq!(
+            cancel_settlement(
+                Some((
+                    COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE,
+                )),
+                true,
+                true,
+                false,
+            ),
+            CancelSettlement::ForceCancelled
+        );
+        // Missing/completed operation settles cleanly.
+        assert_eq!(
+            cancel_settlement(
+                Some((
+                    COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED,
+                    COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE,
+                )),
+                false,
+                false,
+                false,
+            ),
+            CancelSettlement::ForceCancelled
+        );
+        assert_eq!(
+            cancel_settlement(None, true, false, false),
+            CancelSettlement::ForceCancelled
+        );
+    }
+
+    #[test]
+    fn orphaned_interrupt_detects_stuck_in_progress_failures_only_when_writer_closed() {
+        assert_eq!(
+            orphaned_interrupt_error(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                true,
+            ),
+            Some(DownloadError::Integrity)
+        );
+        assert_eq!(
+            orphaned_interrupt_error(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_CONTENT_LENGTH_MISMATCH,
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            orphaned_interrupt_error(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            orphaned_interrupt_error(
+                COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS,
+                COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_SERVER_NO_RANGE,
+                true,
+            ),
+            None
+        );
     }
 }

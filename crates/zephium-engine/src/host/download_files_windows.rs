@@ -414,6 +414,19 @@ impl Destination {
     pub(super) fn payload(&self) -> PathBuf {
         self.payload.clone()
     }
+    /// True once no handle holds write access to the staged payload file (or
+    /// the payload file no longer exists), so cleanup can proceed safely.
+    pub(super) fn payload_write_released(&self) -> bool {
+        match OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+            .open(&self.payload)
+        {
+            Ok(_) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
     fn verify_namespace(&self) -> Result<(), DownloadError> {
         // The original stage handle requests DELETE and denies delete sharing.
         // A read-only observer must share DELETE to coexist with that lease;
@@ -870,5 +883,27 @@ mod tests {
             Err(DownloadError::Integrity)
         ));
         assert!(!output.exists());
+    }
+    #[test]
+    fn payload_write_released_waits_for_open_writer_and_allows_missing_payload() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+
+        let root = tempfile::tempdir().unwrap();
+        let pending =
+            Destination::prepare(DownloadId::generate(), root.path().join("file.txt"), None)
+                .unwrap();
+        assert!(pending.payload_write_released());
+
+        let writer = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_DELETE).0)
+            .open(pending.payload())
+            .unwrap();
+        assert!(!pending.payload_write_released());
+
+        drop(writer);
+        assert!(pending.payload_write_released());
     }
 }

@@ -611,3 +611,380 @@ fn native_resource_save_reaches_broker_only_for_current_foreground_menu() {
         assert_eq!(started.get(), expected);
     }
 }
+
+struct QualificationDownloadStore {
+    origin: zephium_core::permissions::PageOrigin,
+    preferences: zephium_core::downloads::DownloadPreferences,
+    records: Mutex<Vec<zephium_core::downloads::DownloadRecord>>,
+}
+
+impl zephium_core::ports::store::Store for QualificationDownloadStore {
+    fn save_session(&self, _: zephium_core::session::SessionState) {}
+    fn flush(&self) -> bool {
+        true
+    }
+    fn load_session(&self) -> zephium_core::ports::store::SessionLoad {
+        zephium_core::ports::store::SessionLoad::Absent
+    }
+    fn record_visit(&self, _: zephium_core::ids::ProfileId, _: String, _: String) {}
+    fn app_setting(&self, _: &str) -> Option<String> {
+        None
+    }
+    fn set_app_setting(&self, _: String, _: String) -> bool {
+        true
+    }
+    fn search_history(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        _: &str,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryHit> {
+        Vec::new()
+    }
+    fn history_page(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        _: &str,
+        _: Option<i64>,
+        _: Option<i64>,
+        _: u32,
+    ) -> Vec<zephium_core::ports::store::HistoryVisit> {
+        Vec::new()
+    }
+    fn forget_history_urls(&self, _: zephium_core::ids::ProfileId, _: &[String]) -> u32 {
+        0
+    }
+    fn clear_history(&self, _: zephium_core::ids::ProfileId, _: Option<i64>) -> u32 {
+        0
+    }
+    fn amend_visit_title(&self, _: zephium_core::ids::ProfileId, _: String, _: String) -> bool {
+        false
+    }
+    fn favicon_age(&self, _: zephium_core::ids::ProfileId, _: &str) -> Option<i64> {
+        None
+    }
+    fn save_favicon(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        _: String,
+        _: Option<String>,
+        _: Vec<u8>,
+    ) {
+    }
+    fn favicon_bytes(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        _: &str,
+    ) -> Option<(Option<String>, Vec<u8>)> {
+        None
+    }
+    fn download_sites(
+        &self,
+        _: zephium_core::ids::ProfileId,
+    ) -> Option<Vec<(zephium_core::permissions::PageOrigin, bool)>> {
+        Some(vec![(self.origin.clone(), true)])
+    }
+    fn download_call(
+        &self,
+        _: zephium_core::ids::ProfileId,
+        call: zephium_core::downloads::DownloadStoreCall,
+        done: Box<dyn FnOnce(zephium_core::downloads::DownloadStoreReply) + Send>,
+    ) -> bool {
+        use zephium_core::downloads::{DownloadStoreCall, DownloadStoreReply};
+        let reply = match call {
+            DownloadStoreCall::Preferences => {
+                DownloadStoreReply::Preferences(self.preferences.clone())
+            }
+            DownloadStoreCall::Save(record) => {
+                let mut records = self.records.lock().unwrap();
+                if let Some(existing) = records.iter_mut().find(|item| item.id == record.id) {
+                    *existing = *record;
+                } else {
+                    records.push(*record);
+                }
+                DownloadStoreReply::Saved
+            }
+            DownloadStoreCall::List { .. } => {
+                let mut records = self.records.lock().unwrap().clone();
+                records.sort_by_key(|right| std::cmp::Reverse(right.created_at));
+                DownloadStoreReply::Page(records)
+            }
+            DownloadStoreCall::RecoveryPage { .. } => DownloadStoreReply::Page(Vec::new()),
+            _ => DownloadStoreReply::Saved,
+        };
+        done(reply);
+        true
+    }
+}
+
+#[test]
+#[ignore = "requires installed WebView2; verifies live coordinator cancel and truncation recovery"]
+fn native_download_coordinator_settles_truncation_and_cancel_without_duplicates() {
+    use std::cell::Cell;
+    use std::sync::atomic::AtomicBool;
+    use zephium_core::downloads::{
+        DownloadCall, DownloadCompletion, DownloadError, DownloadPreferences, DownloadResponse,
+        DownloadState, DownloadView,
+    };
+    use zephium_core::ids::{ItemId, ProfileId};
+    use zephium_core::permissions::PageOrigin;
+    use zephium_core::ports::engine::Partition;
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
+    }
+    let profile_dir = tempfile::tempdir().unwrap();
+    let download_dir = tempfile::tempdir().unwrap();
+    let (directory, identity) =
+        super::download_files::select_directory(download_dir.path().to_path_buf()).unwrap();
+    let host = Host::new();
+    unsafe {
+        let _ = ShowWindow(host.0, SW_SHOWNOACTIVATE);
+    }
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let base_url = format!("http://127.0.0.1:{port}/");
+    let origin = PageOrigin::from_url(&url::Url::parse(&base_url).unwrap()).unwrap();
+    let stop_server = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop_server.clone();
+    let server = std::thread::spawn(move || {
+        let mut workers = Vec::new();
+        while !stop_flag.load(std::sync::atomic::Ordering::Acquire) {
+            let Ok((mut socket, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            let worker = std::thread::spawn(move || {
+                socket.set_nonblocking(false).unwrap();
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+                let mut req = [0u8; 4096];
+                let Ok(read) = socket.read(&mut req) else {
+                    return;
+                };
+                let head = String::from_utf8_lossy(&req[..read]);
+                if head.starts_with("GET / HTTP") {
+                    let body = b"<!doctype html><a id='t' href='/trunc.zip' download='trunc.zip'>t</a><a id='s' href='/slow.zip' download='slow.zip'>s</a>";
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(header.as_bytes());
+                    let _ = socket.write_all(body);
+                } else if head.starts_with("GET /trunc.zip HTTP") {
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"trunc.zip\"\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(header.as_bytes());
+                    let _ = socket.write_all(&vec![b'T'; 65536]);
+                } else if head.starts_with("GET /slow.zip HTTP") {
+                    let header = "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"slow.zip\"\r\nContent-Length: 524288\r\nConnection: close\r\n\r\n";
+                    let _ = socket.write_all(header.as_bytes());
+                    if socket.write_all(&vec![b'S'; 65536]).is_err() {
+                        return;
+                    }
+                    let chunk = vec![b'S'; 512];
+                    for _ in 0..200 {
+                        std::thread::sleep(Duration::from_millis(50));
+                        if socket.write_all(&chunk).is_err() {
+                            break;
+                        }
+                    }
+                } else {
+                    let _ = socket.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            });
+            workers.push(worker);
+        }
+        for worker in workers {
+            let _ = worker.join();
+        }
+    });
+
+    let profile = ProfileId::generate();
+    let partition = Partition::Persistent(profile);
+    let store = Arc::new(QualificationDownloadStore {
+        origin: origin.clone(),
+        preferences: DownloadPreferences {
+            directory: Some(directory),
+            directory_identity: Some(identity),
+            ask_destination: false,
+        },
+        records: Mutex::new(Vec::new()),
+    });
+    let changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let changed_hits = changed.clone();
+    let downloads = super::downloads::Downloads::new(
+        store.clone(),
+        Arc::new(move |_| {
+            changed_hits.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }),
+    );
+    downloads.set_sites(profile, vec![(origin.clone(), true)]);
+
+    let list_downloads = |manager: &Rc<super::downloads::Downloads>| -> Vec<DownloadView> {
+        let reply = Arc::new(Mutex::new(None));
+        let slot = reply.clone();
+        manager.call(
+            partition,
+            DownloadCall::List {
+                before: None,
+                limit: 20,
+            },
+            DownloadCompletion::new(Box::new(move |response| {
+                if let DownloadResponse::Page { entries, .. } = response {
+                    *slot.lock().unwrap() = Some(entries);
+                } else {
+                    *slot.lock().unwrap() = Some(Vec::new());
+                }
+            })),
+        );
+        until(|| reply.lock().unwrap().is_some());
+        let entries = reply.lock().unwrap().take().unwrap();
+        entries
+    };
+
+    let mut context = wry::WebContext::new(Some(profile_dir.path().to_owned()));
+    let permit_token = Arc::new(AtomicBool::new(true));
+    let permit = super::permits::EventPermit::bound(&permit_token);
+    let surface_intent = Arc::new(AtomicBool::new(true));
+    let sink = super::permits::Sink::new(Arc::new(|_| {}));
+    let item = Rc::new(Cell::new(ItemId::generate()));
+
+    let build_loaded_view = |context: &mut wry::WebContext| {
+        let navigation = crate::navigation_epoch::NavigationEpochTracker::new();
+        let _ = navigation.begin(&base_url);
+        let loaded = Arc::new(Mutex::new(false));
+        let page_loaded = loaded.clone();
+        let admit_downloads = Rc::downgrade(&downloads);
+        let admit_permit = permit.clone();
+        let admit_intent = surface_intent.clone();
+        let admit_origin = origin.clone();
+        let view_item = item.clone();
+        let view_sink = sink.clone();
+        let view = WebViewBuilder::new_with_web_context(context)
+            .with_visible(true)
+            .with_focused(false)
+            .with_devtools(false)
+            .with_on_page_load_handler(move |event, url| {
+                if matches!(event, wry::PageLoadEvent::Finished)
+                    && url.starts_with("http://127.0.0.1:")
+                {
+                    *page_loaded.lock().unwrap() = true;
+                }
+            })
+            .with_download_policy(wry::DownloadPolicy::UseHandlers)
+            .with_native_download_handler(move |controller, args| {
+                if let Some(manager) = admit_downloads.upgrade() {
+                    manager.admit(
+                        partition,
+                        admit_permit.clone(),
+                        admit_intent.clone(),
+                        navigation.clone(),
+                        (
+                            controller,
+                            args,
+                            Some(super::downloads::SiteAsk {
+                                item: view_item.clone(),
+                                permit: admit_permit.clone(),
+                                sink: view_sink.clone(),
+                                site: Some(admit_origin.clone()),
+                                opened_by_click: false,
+                            }),
+                        ),
+                        None,
+                    );
+                }
+            })
+            .build_as_child(&host)
+            .unwrap();
+        view.load_url(&base_url).unwrap();
+        until(|| *loaded.lock().unwrap());
+        view
+    };
+
+    let view = build_loaded_view(&mut context);
+
+    // 1) Server truncation / Content-Length mismatch must settle cleanly as one
+    // Failed (Integrity) entry without spawning duplicate auto-restart rows.
+    view.evaluate_script("location.href='/trunc.zip'").unwrap();
+    until(|| {
+        list_downloads(&downloads)
+            .iter()
+            .any(|entry| entry.filename == "trunc.zip" && entry.state.terminal())
+    });
+    // Wait briefly to confirm WebView2 auto-restart duplicates were suppressed.
+    let settle_until = Instant::now() + Duration::from_millis(700);
+    until(|| Instant::now() >= settle_until);
+    let entries = list_downloads(&downloads);
+    assert_eq!(entries.len(), 1, "unexpected duplicate rows: {entries:?}");
+    assert_eq!(entries[0].filename, "trunc.zip");
+    assert_eq!(entries[0].state, DownloadState::Failed);
+    assert_eq!(entries[0].error, Some(DownloadError::Integrity));
+
+    let view2 = build_loaded_view(&mut context);
+
+    // 2) Cancelling an active receiving transfer must settle cleanly to Cancelled
+    // rather than stalling indefinitely in Cancelling.
+    view2.evaluate_script("location.href='/slow.zip'").unwrap();
+    until(|| {
+        list_downloads(&downloads).iter().any(|entry| {
+            entry.filename == "slow.zip"
+                && entry.state == DownloadState::Receiving
+                && entry
+                    .received
+                    .bytes()
+                    .any(|byte| matches!(byte, b'1'..=b'9'))
+        })
+    });
+    let slow_id = list_downloads(&downloads)
+        .into_iter()
+        .find(|entry| entry.filename == "slow.zip")
+        .unwrap()
+        .id;
+    let cancelled_ack = Arc::new(Mutex::new(None));
+    let cancel_slot = cancelled_ack.clone();
+    downloads.call(
+        partition,
+        DownloadCall::Cancel { id: slow_id },
+        DownloadCompletion::new(Box::new(move |response| {
+            *cancel_slot.lock().unwrap() = Some(response);
+        })),
+    );
+    until(|| cancelled_ack.lock().unwrap().is_some());
+    until(|| {
+        list_downloads(&downloads)
+            .iter()
+            .any(|entry| entry.filename == "slow.zip" && entry.state == DownloadState::Cancelled)
+    });
+
+    let final_entries = list_downloads(&downloads);
+    assert_eq!(final_entries.len(), 2, "unexpected rows: {final_entries:?}");
+    let slow = final_entries
+        .iter()
+        .find(|entry| entry.filename == "slow.zip")
+        .unwrap();
+    assert_eq!(slow.state, DownloadState::Cancelled);
+    until(|| {
+        std::fs::read_dir(download_dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".zephium-download-")
+            })
+    });
+
+    stop_server.store(true, std::sync::atomic::Ordering::Release);
+    drop(view2);
+    drop(view);
+    drop(context);
+    server.join().unwrap();
+    unsafe {
+        windows::Win32::System::Com::CoUninitialize();
+    }
+}
