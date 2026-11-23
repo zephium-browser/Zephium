@@ -9,7 +9,7 @@ use crate::{
         clip, site_profile, Link, Profile, CHALLENGE, MAX_SITELINKS, MAX_SOCIAL, TITLE_BYTES,
     },
     robots::{Robots, RobotsOutcome, MAX_SITEMAPS},
-    session::ReadState,
+    session::{origin, Failure, ReadState},
     visible, Doc, Locator, PageKey, PlaceKey, SectionRole, SiteKey,
 };
 use serde::{Deserialize, Serialize};
@@ -717,8 +717,41 @@ impl Place {
             entry.id == *focus || entry.children.iter().any(|child| child.id == *focus)
         })
     }
+    pub fn entry_openable(&self, id: &EntryId, robots: &BTreeMap<String, Robots>) -> bool {
+        let Some(entry) = self.sections.iter().find(|entry| &entry.id == id) else {
+            return false;
+        };
+        !entry.off_site
+            && SiteKey::from_url(entry.key.as_url()).as_ref() == Some(&self.site)
+            && (self.key.tenant.is_none()
+                || PlaceKey::from_url(entry.key.as_url()).as_ref() == Some(&self.key))
+            && entry.key.page_match() != self.entry.page_match()
+            && matches!(
+                entry.read,
+                None | Some(ReadState::Queued | ReadState::Skipped { .. })
+                    | Some(ReadState::Refused {
+                        failure: Failure::Timeout | Failure::Unavailable | Failure::Server,
+                    })
+            )
+            && robots.get(&origin(entry.key.as_url())).is_none_or(|rules| {
+                rules.allows(
+                    &entry.key.as_url()[url::Position::BeforePath..url::Position::AfterQuery],
+                )
+            })
+    }
+
     pub(crate) fn read_priority(&self, entry: &Entry) -> (bool, bool) {
         (!self.focuses(entry), entry.role.is_none())
+    }
+    pub(crate) fn asked_sections<'a>(
+        &'a self,
+        landing: &'a Url,
+    ) -> impl Iterator<Item = &'a Entry> {
+        self.sections.iter().filter(move |entry| {
+            entry.key.page_match() != self.entry.page_match()
+                && !crate::key::same_page(entry.key.as_url(), landing)
+                && (self.focuses(entry) || entry.sources.contains(&Source::EngineResult))
+        })
     }
     pub(crate) fn fetch_sections(&self) -> Vec<&Entry> {
         let mut entries: Vec<_> = self
@@ -892,6 +925,71 @@ impl Entry {
     }
 }
 
+impl Build<'_> {
+    fn enrich_section(&mut self, index: usize, page: &Doc) {
+        let (mut preferred, others): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.sections[index].children)
+                .into_iter()
+                .partition(|e| e.sources.first() == Some(&Source::MenuGroup));
+        self.sections[index].children.append(&mut preferred);
+        self.section_page(index, page);
+        for child in others {
+            self.child(index, child);
+        }
+    }
+}
+
+pub(crate) fn enrich_held(
+    place: Place,
+    index: usize,
+    page: &Doc,
+    child_cap: usize,
+) -> (Place, PlaceStats) {
+    let mut build = Build {
+        place,
+        index: Default::default(),
+        requested: None,
+        stats: PlaceStats::default(),
+    };
+    let focus = build.focus.clone();
+    let focused_child = build.sections[index]
+        .children
+        .iter()
+        .find(|entry| Some(&entry.id) == focus.as_ref())
+        .cloned();
+    build.enrich_section(index, page);
+    let siblings: BTreeSet<_> = build
+        .sections
+        .iter()
+        .map(|entry| (entry.key.page_match(), entry.locator.fragment()))
+        .chain(std::iter::once((build.entry.page_match(), None)))
+        .collect();
+    let section = &mut build.sections[index];
+    section.children.retain(|child| {
+        focus.as_ref() == Some(&child.id)
+            || child.sources.contains(&Source::Heading)
+            || !siblings.contains(&(child.key.page_match(), child.locator.fragment()))
+    });
+    if let Some(focused) = focused_child {
+        if !section.children.iter().any(|e| e.id == focused.id) {
+            section.children.push(focused);
+        }
+    }
+    while section.children.len() > child_cap {
+        let Some(index) = section
+            .children
+            .iter()
+            .rposition(|e| Some(&e.id) != focus.as_ref())
+        else {
+            break;
+        };
+        section.children.remove(index);
+        section.more = section.more.saturating_add(1);
+    }
+    build.notes.truncated |= build.stats.truncated() || build.sections[index].more > 0;
+    (build.place, build.stats)
+}
+
 pub(crate) fn with_results(
     place: Place,
     links: &[Link],
@@ -1038,15 +1136,7 @@ pub(crate) fn read_site_for(
         })
         .collect();
     for (i, page) in page_sections {
-        let (mut preferred, others): (Vec<_>, Vec<_>) =
-            std::mem::take(&mut place.sections[i].children)
-                .into_iter()
-                .partition(|e| e.sources.first() == Some(&Source::MenuGroup));
-        place.sections[i].children.append(&mut preferred);
-        place.section_page(i, page);
-        for c in others {
-            place.child(i, c);
-        }
+        place.enrich_section(i, page);
     }
     place.stats.section_page_truncated |= inputs.pages.len() > MAX_SECTION_PAGES;
     if let Some(robots) = inputs.robots {

@@ -205,7 +205,11 @@ fn start(fake: &Arc<Fake>, request: MapRequest) -> (Driver, mpsc::Receiver<Chang
 async fn rest(rx: &mut mpsc::Receiver<Change>) -> Vec<Change> {
     let mut out = Vec::new();
     while let Some(change) = rx.recv().await {
+        let end = matches!(change, Change::End { .. });
         out.push(change);
+        if end {
+            break;
+        }
     }
     out
 }
@@ -289,6 +293,34 @@ async fn a_place_streams_first_layer_then_places_then_one_end() {
         .iter()
         .find(|e| e.label == "Pricing")
         .unwrap();
+    assert!(pricing.open && pricing.read.is_none() && pricing.children.is_empty());
+    let before = driver.counts();
+    driver.open(0, &pricing.id).unwrap();
+    let Some(Change::Place {
+        slot: 0,
+        place,
+        complete: true,
+        seq,
+        ..
+    }) = rx.recv().await
+    else {
+        panic!("expected complete replacement");
+    };
+    assert_eq!(seq, changes.last().unwrap().seq() + 1);
+    let opened = rx.recv().await.unwrap();
+    assert_eq!(
+        opened,
+        Change::Opened {
+            seq: seq + 1,
+            slot: 0,
+            id: pricing.id.clone(),
+            result: OpenResult::Read,
+        }
+    );
+    let pricing = place.sections.iter().find(|e| e.id == pricing.id).unwrap();
+    assert!(!pricing.open);
+    assert_eq!(driver.counts().fetches, before.fetches + 1);
+    assert!(driver.counts().bytes > before.bytes);
     let tiers = pricing
         .children
         .iter()
@@ -413,6 +445,9 @@ async fn the_driver_refuses_reads_over_the_ceilings() {
         cancelled: watch::channel(false).1,
         cancelling: false,
         unsent: None,
+        open_requests: mpsc::channel(MAX_WAITING_OPENS).1,
+        opening: None,
+        session_id: 0,
     };
     for (n, host) in ["a.com", "a.com", "a.com", "b.com", "c.com", "d.com"]
         .into_iter()
@@ -677,7 +712,7 @@ async fn a_private_map_never_reads_or_writes_the_memo() {
     ));
     assert_eq!(fake.seen().fetches.len(), fetched);
     let calls = fake.memo_calls.load(Ordering::SeqCst);
-    let (_driver, mut rx) = start(
+    let (driver, mut rx) = start(
         &fake,
         MapRequest {
             private: true,
@@ -688,4 +723,181 @@ async fn a_private_map_never_reads_or_writes_the_memo() {
     checked(&private, 0);
     assert!(fake.seen().fetches.len() > fetched);
     assert_eq!(fake.memo_calls.load(Ordering::SeqCst), calls);
+    let Some(Change::Place { place, .. }) = last_for(&private, 0) else {
+        panic!("expected place")
+    };
+    let pricing = place
+        .sections
+        .iter()
+        .find(|entry| entry.label == "Pricing")
+        .unwrap();
+    driver.open(0, &pricing.id).unwrap();
+    assert!(matches!(
+        rx.recv().await,
+        Some(Change::Place { complete: true, .. })
+    ));
+    assert!(matches!(
+        rx.recv().await,
+        Some(Change::Opened {
+            result: OpenResult::Read,
+            ..
+        })
+    ));
+    assert_eq!(fake.memo_calls.load(Ordering::SeqCst), calls);
+}
+
+#[tokio::test(start_paused = true)]
+async fn opens_wait_for_search_end_and_the_queue_refuses_at_capacity() {
+    let fake =
+        Arc::new(acme(Fake::new(html(RESULT))).site("acme.com", &[("/llms.txt", Plan::Hang)]));
+    let (driver, mut rx) = start(&fake, request("acme"));
+    assert_eq!(
+        driver.open(1, "0000000000000000"),
+        Err(OpenRefusal::NoPlace)
+    );
+    assert!(matches!(rx.recv().await, Some(Change::FirstLayer { .. })));
+    let Some(Change::Place {
+        slot: 0,
+        place,
+        complete: false,
+        ..
+    }) = rx.recv().await
+    else {
+        panic!("expected a partial place");
+    };
+    assert_eq!(
+        driver.open(0, "0000000000000000"),
+        Err(OpenRefusal::UnknownEntry)
+    );
+    let id = &place
+        .sections
+        .iter()
+        .find(|entry| entry.label == "Pricing")
+        .unwrap()
+        .id;
+    for _ in 0..MAX_WAITING_OPENS {
+        assert_eq!(driver.open(0, id), Ok(()));
+    }
+    assert_eq!(driver.open(0, id), Err(OpenRefusal::TooManyWaiting));
+    assert!(!fake
+        .seen()
+        .fetches
+        .iter()
+        .any(|path| path.ends_with("/pricing")));
+    let changes = rest(&mut rx).await;
+    let mut seq = changes.last().unwrap().seq();
+    for _ in 0..MAX_WAITING_OPENS {
+        let place = rx.recv().await.unwrap();
+        assert!(matches!(place, Change::Place { complete: true, .. }));
+        assert_eq!(place.seq(), seq + 1);
+        let opened = rx.recv().await.unwrap();
+        seq += 2;
+        assert_eq!(
+            opened,
+            Change::Opened {
+                seq,
+                slot: 0,
+                id: id.clone(),
+                result: OpenResult::Read
+            }
+        );
+    }
+    assert_eq!(driver.open(0, id), Err(OpenRefusal::NotOpenable));
+    assert_eq!(
+        fake.seen()
+            .fetches
+            .iter()
+            .filter(|path| path.ends_with("/pricing"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_or_dropping_during_an_open_aborts_it_silently() {
+    for cancel in [true, false] {
+        let fake =
+            Arc::new(acme(Fake::new(html(RESULT))).site("acme.com", &[("/pricing", Plan::Hang)]));
+        let (driver, mut rx) = start(&fake, request("acme"));
+        let changes = rest(&mut rx).await;
+        let Some(Change::Place { place, .. }) = last_for(&changes, 0) else {
+            panic!("expected place")
+        };
+        let id = &place
+            .sections
+            .iter()
+            .find(|entry| entry.label == "Pricing")
+            .unwrap()
+            .id;
+        driver.open(0, id).unwrap();
+        until(&fake, "acme.com/pricing").await;
+        assert_eq!(active(&fake), 1);
+        if cancel {
+            driver.cancel();
+            assert_eq!(driver.open(0, id), Err(OpenRefusal::Cancelled));
+            assert_eq!(rx.recv().await, None);
+        } else {
+            drop(driver);
+            assert_eq!(rx.recv().await, None);
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(active(&fake), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_idle_map_keeps_no_periodic_clock_or_io_activity() {
+    let fake = Arc::new(acme(Fake::new(html(RESULT))));
+    let (driver, mut rx) = start(&fake, request("acme"));
+    let changes = rest(&mut rx).await;
+    let calls = fake.calls.load(Ordering::SeqCst);
+    let memo_calls = fake.memo_calls.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        tokio::time::advance(TICK).await;
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(fake.memo_calls.load(Ordering::SeqCst), memo_calls);
+    assert_eq!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty));
+    checked(&changes, 0);
+    driver.cancel();
+    assert_eq!(rx.recv().await, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn comparison_also_targets_use_the_original_results_without_fetching_them() {
+    let results = BOTH.replace(
+        "</main>",
+        concat!(
+            "<article><h2><a href='https://reddit.com/r/example'>A discussion</a></h2></article>",
+            "<article><h2><a href='http://reviews.example/review'>A review</a></h2></article>",
+            "</main>"
+        ),
+    );
+    let fake = Arc::new(acme(Fake::new(html(&results))));
+    let (driver, mut rx) = start(&fake, request("acme vs other"));
+    let Some(Change::FirstLayer { also, .. }) = rx.recv().await else {
+        panic!("expected results")
+    };
+    assert_eq!(
+        also.iter()
+            .map(|item| item.host.as_str())
+            .collect::<Vec<_>>(),
+        ["reddit.com", "reviews.example"]
+    );
+    assert_eq!(
+        driver
+            .target(0, &Target::Also { index: 0 })
+            .unwrap()
+            .host_str(),
+        Some("reddit.com")
+    );
+    assert_eq!(driver.target(1, &Target::Also { index: 1 }), None);
+    assert_eq!(driver.target(0, &Target::Also { index: 2 }), None);
+    let _ = rest(&mut rx).await;
+    assert!(!fake
+        .seen()
+        .fetches
+        .iter()
+        .any(|path| path.starts_with("reddit.com") || path.starts_with("reviews.example")));
 }

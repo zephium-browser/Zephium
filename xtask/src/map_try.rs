@@ -19,7 +19,7 @@ use zephium_map::{
     QueryKind,
 };
 use zephium_map_driver::{
-    wire::{Change, Outcome, StartRefusal},
+    wire::{Change, OpenResult, Outcome, StartRefusal, MAX_SECTIONS, MAX_TEXT_BYTES},
     Counts, Driver, FetchRequest, Fetcher, Io, MapRequest, MemoryMemo, PublicIo, Reading,
     ResultsPage, ResultsSource, SystemClock,
 };
@@ -33,12 +33,14 @@ use self::printer::{intro, refusal, Printer};
 const ENGINE: SearchEngine = SearchEngine::DuckDuckGo;
 const MAX_SITES: usize = 2;
 const MAX_DNS_LABEL_BYTES: usize = 63;
+const MAX_OPEN_LABELS: usize = MAX_SECTIONS * MAX_SITES;
 
 #[derive(Debug, PartialEq, Eq)]
 enum Error {
     MissingQuery,
     MissingSite,
     BadHost,
+    BadOpenLabel,
     TooManySites,
     UnexpectedOption,
     PlaceArity,
@@ -58,6 +60,7 @@ impl Error {
             Self::MissingQuery
                 | Self::MissingSite
                 | Self::BadHost
+                | Self::BadOpenLabel
                 | Self::TooManySites
                 | Self::UnexpectedOption
                 | Self::PlaceArity
@@ -70,13 +73,14 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::MissingQuery => {
-                "Usage: cargo xtask map <query> --site <host> [--site <host>] [--private]"
+                "Usage: cargo xtask map <query> --site <host> [--site <host>] [--private] [--open <label>]..."
             }
             Self::MissingSite => "Usage error: specify a host with --site",
             Self::BadHost => "Usage error: --site needs a bare public hostname",
+            Self::BadOpenLabel => "Usage error: invalid --open label or too many labels",
             Self::TooManySites => "Usage error: specify at most two sites",
             Self::UnexpectedOption => {
-                "Usage error: only --site and one --private flag are supported"
+                "Usage error: supported flags are --site, --private and --open"
             }
             Self::PlaceArity => "Usage error: a place query needs one --site",
             Self::CompareArity => "Usage error: a comparison needs two --site flags",
@@ -94,6 +98,7 @@ struct Options<'a> {
     query: &'a str,
     sites: Vec<Url>,
     private: bool,
+    opens: Vec<&'a str>,
 }
 
 impl<'a> Options<'a> {
@@ -107,6 +112,7 @@ impl<'a> Options<'a> {
             query,
             sites: Vec::new(),
             private: false,
+            opens: Vec::new(),
         };
         let mut args = rest.iter();
         while let Some(arg) = args.next() {
@@ -122,6 +128,21 @@ impl<'a> Options<'a> {
                     options.sites.push(site_url(raw).ok_or(Error::BadHost)?);
                 }
                 "--private" if !options.private => options.private = true,
+                "--open" => {
+                    let label = args
+                        .next()
+                        .filter(|label| {
+                            !label.starts_with("--")
+                                && !label.trim().is_empty()
+                                && label.len() <= MAX_TEXT_BYTES
+                                && !label.chars().any(char::is_control)
+                        })
+                        .ok_or(Error::BadOpenLabel)?;
+                    if options.opens.len() == MAX_OPEN_LABELS {
+                        return Err(Error::BadOpenLabel);
+                    }
+                    options.opens.push(label);
+                }
                 _ => return Err(Error::UnexpectedOption),
             }
         }
@@ -292,6 +313,7 @@ fn print_lines(
 async fn live(
     request: MapRequest,
     results: StandIn,
+    opens: Vec<&str>,
     output: &mut impl Write,
 ) -> Result<Outcome, Error> {
     print_lines(output, [intro(&request.query)])?;
@@ -326,7 +348,7 @@ async fn live(
         };
         Driver::start(request, io, &runtime).map_err(Error::Refused)
     })?;
-    stream(&driver, changes, changed, interrupt, output).await
+    stream(&driver, changes, changed, interrupt, output, opens).await
 }
 
 fn elapsed_ms(started: Instant) -> u32 {
@@ -339,18 +361,24 @@ async fn stream(
     mut route: watch::Receiver<PublicRoute>,
     mut interrupt: impl Future<Output = io::Result<()>> + Unpin,
     output: &mut impl Write,
+    opens: Vec<&str>,
 ) -> Result<Outcome, Error> {
     let started = Instant::now();
     let mut printer = Printer::default();
     let mut cancelling = false;
     let mut watching = true;
     let mut interrupted_by = None;
+    let mut opens = opens.into_iter();
+    let mut open_started = None;
     loop {
         let change = tokio::select! {
             biased;
             signal = &mut interrupt, if !cancelling => {
                 interrupted_by = signal.err().map(|_| Error::Interrupt);
                 driver.cancel();
+                if open_started.is_some() {
+                    return interrupted_by.map_or(Ok(Outcome::Cancelled), Err);
+                }
                 cancelling = true;
                 continue;
             }
@@ -361,6 +389,9 @@ async fn stream(
                 }
                 interrupted_by = Some(Error::Proxy);
                 driver.cancel();
+                if open_started.is_some() {
+                    return Err(Error::Proxy);
+                }
                 cancelling = true;
                 continue;
             }
@@ -371,7 +402,39 @@ async fn stream(
                 output,
                 printer.lines(&change, started.elapsed(), driver.counts()),
             )?;
-            return interrupted_by.map_or(Ok(outcome), Err);
+            if outcome != Outcome::Done || cancelling {
+                return interrupted_by.map_or(Ok(outcome), Err);
+            }
+            open_started = start_open(driver, &printer, &mut opens, output)?;
+            if open_started.is_none() {
+                return Ok(outcome);
+            }
+            continue;
+        }
+        if let Change::Opened { result, .. } = change {
+            if let Some((time, before)) = open_started.take() {
+                let after = driver.counts();
+                let status = match result {
+                    OpenResult::Read => "read".to_owned(),
+                    OpenResult::Refused { failure } => {
+                        format!("refused ({})", printer::failure_text(failure))
+                    }
+                };
+                print_lines(
+                    output,
+                    [format!(
+                        "Opened {status}  {}ms  reads {}  bytes {}",
+                        time.elapsed().as_millis(),
+                        after.fetches.saturating_sub(before.fetches),
+                        after.bytes.saturating_sub(before.bytes),
+                    )],
+                )?;
+            }
+            open_started = start_open(driver, &printer, &mut opens, output)?;
+            if open_started.is_none() {
+                return Ok(Outcome::Done);
+            }
+            continue;
         }
         if !cancelling {
             let lines = printer.lines(&change, started.elapsed(), Counts::default());
@@ -382,13 +445,36 @@ async fn stream(
     }
 }
 
+fn start_open<'a>(
+    driver: &Driver,
+    printer: &Printer,
+    opens: &mut impl Iterator<Item = &'a str>,
+    output: &mut impl Write,
+) -> Result<Option<(Instant, Counts)>, Error> {
+    for label in opens {
+        let before = driver.counts();
+        let started = Instant::now();
+        let message = match printer.section(label) {
+            Ok((slot, id)) => match driver.open(slot, id) {
+                Ok(()) => return Ok(Some((started, before))),
+                Err(refusal) => format!("Open refused ({refusal:?})"),
+            },
+            Err(reason) => format!("Open refused ({reason})"),
+        };
+        print_lines(output, [message])?;
+    }
+    Ok(None)
+}
+
 fn execute(arguments: &[String]) -> Result<Outcome, Error> {
-    let (request, results) = Options::parse(arguments)?.prepare()?;
+    let options = Options::parse(arguments)?;
+    let opens = options.opens.clone();
+    let (request, results) = options.prepare()?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|_| Error::Runtime)?;
-    let result = runtime.block_on(live(request, results, &mut io::stdout().lock()));
+    let result = runtime.block_on(live(request, results, opens, &mut io::stdout().lock()));
     runtime.shutdown_background();
     result
 }

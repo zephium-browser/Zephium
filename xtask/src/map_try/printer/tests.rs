@@ -9,6 +9,8 @@ fn entry(id: &str, label: &str, path: &str) -> Entry {
         role: None,
         group: None,
         off_site: false,
+        open: false,
+        host: None,
         path: path.into(),
         read: None,
         children: Vec::new(),
@@ -49,6 +51,7 @@ fn place_stream_golden() {
         }),
         social: vec![Network::GitHub],
         organic: 1,
+        also: Vec::new(),
     };
     let mut place = place(
         "Stripe",

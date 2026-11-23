@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use zephium_map::{site::SiteInputs, Doc, DocLimits};
 
+fn long_host() -> String {
+    format!("{}example.com", "ab.".repeat(MAX_HOST_BYTES / 3))
+}
+
 fn base() -> Value {
     let url = Url::parse("https://acme.com/").unwrap();
     let doc = Doc::from_html(
@@ -101,6 +105,18 @@ fn hostile() -> site::Place {
         &format!("https://acme.com/{}", "p".repeat(300)),
         "Primary",
     ));
+    sections.push(section(
+        &id(9),
+        "Guide",
+        "https://docs.acme.com/guide",
+        "Primary",
+    ));
+    sections.push(section(
+        &id(10),
+        "Oversized host",
+        &format!("https://{}/guide", long_host()),
+        "Primary",
+    ));
     let mut parent = section(&id(7), "Parent", "https://acme.com/parent", "Primary");
     let mut children = Vec::new();
     for n in 0..20 {
@@ -150,7 +166,11 @@ fn entries(place: &Place) -> impl Iterator<Item = &Entry> {
 #[test]
 fn the_projection_bounds_a_hostile_place() {
     let source = hostile();
-    let (projected, targets) = place(&source);
+    let rules = BTreeMap::from([(
+        "https://acme.com".to_owned(),
+        Robots::parse("User-agent: *\nDisallow: /parent"),
+    )]);
+    let (projected, targets) = place(&source, Some(&rules));
     let json = serde_json::to_string(&projected).unwrap();
     for banned in [
         "http", "://", "?", "token", "hidden", "evil", "frag", "secret",
@@ -186,6 +206,7 @@ fn the_projection_bounds_a_hostile_place() {
         .unwrap();
     assert_eq!(parent.children.len(), MAX_CHILDREN);
     assert!(parent.more && parent.children[0].more);
+    assert!(!parent.open && parent.children.iter().all(|child| !child.open));
     assert!(!ids.contains(&id(999)) && !ids.contains(&id(8)));
     let label = |n: usize| {
         entries(&projected)
@@ -196,6 +217,12 @@ fn the_projection_bounds_a_hostile_place() {
     assert_eq!(label(3).as_deref(), Some("/b"));
     assert!(!json.contains("Duplicate") && !json.contains("Upper") && !json.contains("Bad"));
     let long = entries(&projected).find(|e| e.id == id(1)).unwrap();
+    assert!(long.open && long.host.is_none());
+    let guide = entries(&projected).find(|e| e.id == id(9)).unwrap();
+    assert!(guide.open);
+    assert_eq!(guide.host.as_deref(), Some("docs.acme.com"));
+    let oversized = entries(&projected).find(|e| e.id == id(10)).unwrap();
+    assert!(!oversized.open && oversized.host.is_none());
     assert!(long.label.len() > MAX_TEXT_BYTES - 2);
     assert_eq!(long.group.as_ref().map(String::len), Some(MAX_TEXT_BYTES));
     let redirect = entries(&projected).find(|e| e.id == id(5)).unwrap();
@@ -209,6 +236,93 @@ fn the_projection_bounds_a_hostile_place() {
         Some("https://acme.com/long?token=secret#frag".into())
     );
     assert_eq!(targets.resolve(&Target::Entry { id: id(999) }), None);
+
+    let organic = |raw: &str, title: String, discussion: bool, rank: u32| {
+        let url = Url::parse(raw).unwrap();
+        results::Organic {
+            key: PageKey::from_url(&url).unwrap(),
+            url,
+            title,
+            rank,
+            discussion,
+            snippet: Some("secret snippet".into()),
+            official: None,
+            sitelinks: Vec::new(),
+        }
+    };
+    let mut layer = FirstLayer {
+        social: source.social.clone(),
+        organic: vec![
+            organic("https://acme.com/official", "Official".into(), false, 1),
+            organic("https://github.com/acme", "Social profile".into(), false, 2),
+            organic(
+                &format!("https://{}/oversized", long_host()),
+                "Oversized".into(),
+                false,
+                3,
+            ),
+            organic(
+                "http://plain.example/hidden",
+                "https://abuse.example/secret".into(),
+                false,
+                4,
+            ),
+            organic(
+                "https://FORUM.example/hidden",
+                format!("Line\u{7}\nHere {}", "é".repeat(MAX_TEXT_BYTES)),
+                true,
+                5,
+            ),
+        ],
+        video: vec![results::Link {
+            url: Url::parse("https://video.example/movie").unwrap(),
+            title: "Film".into(),
+        }],
+        ..FirstLayer::default()
+    };
+    let places = [(&source.key, source.site.clone())];
+    let preview = first_layer(&layer, &places);
+    assert_eq!(
+        preview
+            .also
+            .iter()
+            .map(|result| result.kind)
+            .collect::<Vec<_>>(),
+        [AlsoKind::Page, AlsoKind::Discussion, AlsoKind::Video]
+    );
+    for rank in 6..6 + MAX_ALSO {
+        layer.organic.push(organic(
+            &format!("https://result.example/{rank}"),
+            "Result".into(),
+            false,
+            rank as u32,
+        ));
+    }
+    let projected = first_layer(&layer, &places);
+    assert_eq!(projected.also.len(), MAX_ALSO);
+    assert_eq!(projected.also[0].title, "plain.example");
+    assert_eq!(projected.also[1].host, "forum.example");
+    assert!(projected.also[1].title.starts_with("Line Here "));
+    assert!(projected.also[1].title.len() <= MAX_TEXT_BYTES);
+    assert_eq!(also_target(&projected.targets, 0), None);
+    assert_eq!(
+        also_target(&projected.targets, 1).unwrap().host_str(),
+        Some("forum.example")
+    );
+    assert_eq!(also_target(&projected.targets, MAX_ALSO as u8), None);
+    let json = serde_json::to_string(&projected.also).unwrap();
+    for banned in [
+        "http",
+        "://",
+        "hidden",
+        "secret",
+        "video.example",
+        "github.com",
+        "acme.com",
+    ] {
+        assert!(!json.contains(banned));
+    }
+    assert!(!json.contains("\\u0007") && !json.contains("\\n"));
 }
 
 #[test]
@@ -240,7 +354,7 @@ fn targets_open_only_known_https_addresses() {
         {"basis": "Navigation", "network": "GitHub", "url": "https://github.com/acme"},
         {"basis": "Navigation", "network": "Reddit", "url": "http://reddit.com/r/acme"},
     ]);
-    let (_, targets) = place(&engine(value));
+    let (_, targets) = place(&engine(value), None);
     let open = |t: Target| targets.resolve(&t).map(|u| u.to_string());
     assert_eq!(
         open(Target::Entry { id: id(1) }),
@@ -262,7 +376,7 @@ fn targets_open_only_known_https_addresses() {
     for network in [Network::Reddit, Network::Discord] {
         assert_eq!(open(Target::Social { network }), None);
     }
-    let (_, targets) = place(&engine(base()));
+    let (_, targets) = place(&engine(base()), None);
     assert_eq!(
         targets.resolve(&Target::Site).map(|u| u.to_string()),
         Some("https://acme.com/".into())
@@ -271,7 +385,7 @@ fn targets_open_only_known_https_addresses() {
 
 #[test]
 fn rows_keep_only_projected_ids_and_are_capped() {
-    let (_, left) = place(&engine(base()));
+    let (_, left) = place(&engine(base()), None);
     let known = base()["sections"][0]["id"].as_str().unwrap().to_owned();
     let entry_id = |s: &str| -> Option<site::EntryId> { serde_json::from_value(json!(s)).ok() };
     let row = |label: &str, left: &str, right: &str| compare::Row {

@@ -14,6 +14,8 @@ mod foreground_rendering_boundary;
 mod macos_imports;
 mod macos_process_family;
 mod map_bench;
+#[path = "map_bench/section_flags.rs"]
+mod map_bench_section_flags;
 mod map_try;
 mod page_assist_boundary;
 mod page_reader_boundary;
@@ -97,7 +99,7 @@ fn main() {
             }
         }
         Some("map-bench") => {
-            if let Err(error) = map_bench::run(&arguments[1..]) {
+            if let Err(error) = map_bench_section_flags::run(&arguments[1..]) {
                 eprintln!("map bench: {error}");
                 exit(1);
             }

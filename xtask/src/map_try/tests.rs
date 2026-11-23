@@ -30,6 +30,41 @@ fn accepts_one_or_two_public_sites_in_order_and_passes_private_through() {
 }
 
 #[test]
+fn accepts_repeated_open_labels_and_enforces_their_bounds() {
+    let mut arguments = args(&[
+        "Stripe",
+        "--site",
+        "stripe.com",
+        "--open",
+        "Docs",
+        "--open",
+        "Pricing",
+    ]);
+    assert_eq!(
+        Options::parse(&arguments).unwrap().opens,
+        ["Docs", "Pricing"]
+    );
+    arguments.truncate(3);
+    for _ in 0..MAX_OPEN_LABELS {
+        arguments.extend(args(&["--open", "Docs"]));
+    }
+    assert!(Options::parse(&arguments).is_ok());
+    arguments.extend(args(&["--open", "Docs"]));
+    assert_eq!(Options::parse(&arguments).err(), Some(Error::BadOpenLabel));
+    arguments.truncate(4);
+    for label in [
+        "".to_owned(),
+        "Docs\nPricing".to_owned(),
+        "x".repeat(MAX_TEXT_BYTES + 1),
+    ] {
+        arguments.push(label);
+        assert_eq!(Options::parse(&arguments).err(), Some(Error::BadOpenLabel));
+        arguments.pop();
+    }
+    assert_eq!(Options::parse(&arguments).err(), Some(Error::BadOpenLabel));
+}
+
+#[test]
 fn refuses_malformed_options_and_arity() {
     for (raw, error) in [
         (&[][..], Error::MissingQuery),
@@ -248,6 +283,7 @@ async fn an_interrupt_cancels_the_driver_and_prints_its_end() {
         direct,
         std::future::ready(Ok(())),
         &mut output,
+        Vec::new(),
     )
     .await;
     assert_eq!(outcome, Ok(Outcome::Cancelled));
@@ -285,9 +321,78 @@ async fn a_closed_route_watch_is_not_a_proxy() {
         direct,
         std::future::pending(),
         &mut output,
+        Vec::new(),
     )
     .await;
     assert!(outcome.is_ok(), "{outcome:?}");
     let printed = std::str::from_utf8(&output).unwrap();
     assert!(printed.lines().count() > 1, "{printed}");
+}
+
+#[tokio::test]
+async fn labelled_opens_after_end_reprint_the_card_and_each_read_cost() {
+    struct Fixture;
+    impl Fetcher for Fixture {
+        fn fetch(&self, request: FetchRequest) -> Reading<Result<FetchResult, Failure>> {
+            Box::pin(async move {
+                let html = match request.url.path() {
+                    "/" => "<nav><a href='/docs'>Docs</a><a href='/pricing'>Pricing</a></nav>",
+                    "/docs" => "<h2 id='first'>First guide</h2>",
+                    "/pricing" => "<h2 id='teams'>Team plans</h2>",
+                    _ => return Err(Failure::Missing),
+                };
+                Ok(FetchResult {
+                    final_url: request.url,
+                    content_type: "text/html".into(),
+                    charset: None,
+                    bytes: html.as_bytes().to_vec(),
+                    truncated: false,
+                })
+            })
+        }
+    }
+    let arguments = args(&[
+        "Stripe",
+        "--site",
+        "stripe.com",
+        "--open",
+        "Docs",
+        "--open",
+        "Pricing",
+    ]);
+    let options = Options::parse(&arguments).unwrap();
+    let opens = options.opens.clone();
+    let (request, results) = options.prepare().unwrap();
+    let io = Io {
+        results: Arc::new(results),
+        fetch: Arc::new(Fixture),
+        memo: Arc::new(MemoryMemo::new()),
+        clock: Arc::new(SystemClock::new()),
+    };
+    let (driver, changes) = Driver::start(request, io, &Handle::current()).unwrap();
+    let (_route, direct) = watch::channel(PublicRoute::Direct);
+    let mut output = Vec::new();
+    assert_eq!(
+        stream(
+            &driver,
+            changes,
+            direct,
+            std::future::pending(),
+            &mut output,
+            opens
+        )
+        .await,
+        Ok(Outcome::Done)
+    );
+    let printed = std::str::from_utf8(&output).unwrap();
+    let end = printed.find("Done").unwrap();
+    let docs = printed.find("First guide").unwrap();
+    let plans = printed.find("Team plans").unwrap();
+    assert!(end < docs && docs < plans);
+    let opens: Vec<_> = printed
+        .lines()
+        .filter(|line| line.starts_with("Opened read"))
+        .collect();
+    assert_eq!(opens.len(), 2);
+    assert!(opens.iter().all(|line| line.contains("reads 1  bytes ")));
 }

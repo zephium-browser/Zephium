@@ -92,23 +92,27 @@ impl SiteMemo {
             return Err(MemoError::Version);
         }
         self.validate(&self.payload.place.key)?;
-        let mut bytes = Vec::new();
-        struct Limited<'a>(&'a mut Vec<u8>);
-        impl std::io::Write for Limited<'_> {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                if b.len() > MAX_MEMO_BYTES - self.0.len() {
-                    return Err(std::io::ErrorKind::FileTooLarge.into());
-                }
-                self.0.extend_from_slice(b);
-                Ok(b.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        serde_json::to_writer(Limited(&mut bytes), self).map_err(|_| MemoError::Limit)?;
-        Ok(bytes)
+        encode_bounded(self)
     }
+}
+
+pub(super) fn encode_bounded(value: &impl Serialize) -> Result<Vec<u8>, MemoError> {
+    let mut bytes = Vec::new();
+    struct Limited<'a>(&'a mut Vec<u8>);
+    impl std::io::Write for Limited<'_> {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if b.len() > MAX_MEMO_BYTES - self.0.len() {
+                return Err(std::io::ErrorKind::FileTooLarge.into());
+            }
+            self.0.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Limited(&mut bytes), value).map_err(|_| MemoError::Limit)?;
+    Ok(bytes)
 }
 fn valid_entry(e: &Entry, place: &Place, parent: Option<&Entry>) -> bool {
     let Some(site) = SiteKey::from_url(e.key.as_url()) else {

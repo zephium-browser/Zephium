@@ -15,19 +15,21 @@ use tokio::{
 use url::Url;
 use zephium_core::search::SearchEngine;
 use zephium_map::{
+    query::Confidence,
     read_query,
-    session::{Failure, Id, MAX_CONCURRENT, MAX_HOST_CONCURRENT},
+    session::{Failure, HeldSite, Id, ReadState, Sections, MAX_CONCURRENT, MAX_HOST_CONCURRENT},
     Config, Effect, Input, MapEvent, QueryKind, Session,
 };
 
 use crate::{
     io::{FetchRequest, Io},
     page,
-    wire::{self, Change, StartRefusal, Target, Targets},
+    wire::{self, Change, OpenRefusal, OpenResult, StartRefusal, Target, Targets},
 };
 
 pub const TICK: Duration = Duration::from_millis(250);
 pub const CHANGE_BUFFER: usize = 64;
+pub const MAX_WAITING_OPENS: usize = 4;
 const SLOTS: usize = 2;
 
 pub struct MapRequest {
@@ -52,7 +54,7 @@ pub struct Counts {
 
 #[derive(Default)]
 struct Shared {
-    targets: Mutex<[Option<Targets>; SLOTS]>,
+    published: Mutex<Published>,
     fetches: AtomicU32,
     bytes: AtomicU64,
     render_unavailable: AtomicU32,
@@ -62,8 +64,10 @@ struct Shared {
 }
 
 impl Shared {
-    fn targets(&self) -> MutexGuard<'_, [Option<Targets>; SLOTS]> {
-        self.targets.lock().unwrap_or_else(PoisonError::into_inner)
+    fn published(&self) -> MutexGuard<'_, Published> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -71,10 +75,35 @@ fn bump(counter: &AtomicU32) {
     let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1));
 }
 
+#[derive(Default)]
+struct Published {
+    slots: [Option<PublishedPlace>; SLOTS],
+    also: Vec<Url>,
+}
+
+struct PublishedPlace {
+    targets: Targets,
+    held: Option<Arc<HeldSite>>,
+    confidence: Confidence,
+    stale: bool,
+}
+
+struct OpenRequest {
+    slot: u8,
+    id: String,
+}
+
+enum Publication {
+    Place(usize, Box<PublishedPlace>),
+    PlaceFailed(usize),
+    Also(Vec<Url>),
+}
+
 pub struct Driver {
     cancel: watch::Sender<bool>,
     task: JoinHandle<()>,
     shared: Arc<Shared>,
+    opens: mpsc::Sender<OpenRequest>,
 }
 
 impl Driver {
@@ -106,12 +135,14 @@ impl Driver {
             session_id: request.session_id,
             engine: request.engine,
             now: io.clock.unix(),
+            sections: Sections::Asked,
             ..Config::default()
         };
         let (session, effects) =
             Session::start(config, &request.query).map_err(|_| StartRefusal::Invalid)?;
         let (tx, rx) = mpsc::channel(buffer);
         let (cancel, cancelled) = watch::channel(false);
+        let (opens, open_requests) = mpsc::channel(MAX_WAITING_OPENS);
         let shared = Arc::new(Shared::default());
         let run = Run {
             started: io.clock.now(),
@@ -129,6 +160,9 @@ impl Driver {
             cancelled,
             cancelling: false,
             unsent: None,
+            open_requests,
+            opening: None,
+            session_id: request.session_id,
         };
         let task = runtime.spawn(run.run(effects));
         Ok((
@@ -136,21 +170,56 @@ impl Driver {
                 cancel,
                 task,
                 shared,
+                opens,
             },
             rx,
         ))
     }
 
     pub fn cancel(&self) {
+        let _published = self.shared.published();
         self.cancel.send_replace(true);
     }
 
-    /// Resolves against the last place emitted for `slot`; only `https` addresses come back.
+    pub fn open(&self, slot: u8, id: &str) -> Result<(), OpenRefusal> {
+        let published = self.shared.published();
+        if *self.cancel.borrow() || self.opens.is_closed() {
+            return Err(OpenRefusal::Cancelled);
+        }
+        let place = published
+            .slots
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .ok_or(OpenRefusal::NoPlace)?;
+        if !place.targets.has(id) {
+            return Err(OpenRefusal::UnknownEntry);
+        }
+        place
+            .held
+            .as_ref()
+            .ok_or(OpenRefusal::NotOpenable)?
+            .check_open(id)?;
+        self.opens
+            .try_send(OpenRequest {
+                slot,
+                id: id.to_owned(),
+            })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => OpenRefusal::TooManyWaiting,
+                mpsc::error::TrySendError::Closed(_) => OpenRefusal::Cancelled,
+            })
+    }
+
     pub fn target(&self, slot: u8, target: &Target) -> Option<Url> {
-        self.shared
-            .targets()
+        let published = self.shared.published();
+        if let Target::Also { index } = target {
+            return wire::also_target(&published.also, *index);
+        }
+        published
+            .slots
             .get(usize::from(slot))?
             .as_ref()?
+            .targets
             .resolve(target)
     }
 
@@ -169,7 +238,9 @@ impl Driver {
 
 impl Drop for Driver {
     fn drop(&mut self) {
+        let _published = self.shared.published();
         self.task.abort();
+        self.cancel.send_replace(true);
     }
 }
 
@@ -208,7 +279,10 @@ struct Run {
     started: Duration,
     cancelled: watch::Receiver<bool>,
     cancelling: bool,
-    unsent: Option<(usize, Targets)>,
+    unsent: Option<Publication>,
+    open_requests: mpsc::Receiver<OpenRequest>,
+    opening: Option<OpenRequest>,
+    session_id: u64,
 }
 
 fn is_end(effect: &Effect) -> bool {
@@ -226,6 +300,13 @@ impl Run {
         loop {
             let next = match self.apply(effects).await {
                 Applied::Stop => return,
+                Applied::Continue if self.session.is_none() => {
+                    let Some(next) = self.next_open().await else {
+                        return;
+                    };
+                    effects = next;
+                    continue;
+                }
                 Applied::Cancel => Next::Cancel,
                 Applied::Continue if *self.cancelled.borrow() => Next::Cancel,
                 Applied::Continue if self.immediate.is_empty() => self.wait().await,
@@ -234,10 +315,10 @@ impl Run {
             let input = match next {
                 Next::Stop => return,
                 Next::Cancel => {
-                    self.reads.abort_all();
-                    self.tasks.clear();
-                    self.hosts.clear();
-                    self.immediate.clear();
+                    self.clear_reads();
+                    if self.opening.is_some() {
+                        return;
+                    }
                     self.cancelling = true;
                     Some(Input::Cancel)
                 }
@@ -248,6 +329,96 @@ impl Run {
                 Some(next) => effects = next,
                 None => return,
             }
+        }
+    }
+
+    fn clear_reads(&mut self) {
+        self.reads = JoinSet::new();
+        self.tasks.clear();
+        self.hosts.clear();
+        self.immediate.clear();
+    }
+
+    async fn next_open(&mut self) -> Option<Vec<Effect>> {
+        loop {
+            let request = tokio::select! {
+                biased;
+                _ = self.cancelled.wait_for(|cancelled| *cancelled) => return None,
+                () = self.tx.closed() => return None,
+                request = self.open_requests.recv() => request?,
+            };
+            let slot = request.slot;
+            let place = {
+                let published = self.shared.published();
+                published.slots[usize::from(slot)]
+                    .as_ref()
+                    .and_then(|item| {
+                        Some((item.held.as_ref()?.clone(), item.confidence, item.stale))
+                    })
+            };
+            if let Some((held, confidence, stale)) = place {
+                let cfg = Config {
+                    session_id: self.session_id,
+                    now: self.io.clock.unix(),
+                    ..Config::default()
+                };
+                if let Ok((session, effects)) =
+                    Session::open(cfg, (*held).clone(), slot, &request.id, confidence, stale)
+                {
+                    self.session = Some(session);
+                    self.opening = Some(request);
+                    self.started = self.io.clock.now();
+                    return Some(effects);
+                }
+                let (place, _) = wire::place(held.place(), Some(held.robots()));
+                let change = Change::Place {
+                    seq: self.next_seq(),
+                    slot,
+                    place,
+                    stale,
+                    confidence: confidence.into(),
+                    complete: true,
+                };
+                if self.deliver(change).await != Applied::Continue {
+                    return None;
+                }
+            }
+            let result = self.open_result(&request);
+            let change = Change::Opened {
+                seq: self.next_seq(),
+                slot,
+                id: request.id,
+                result,
+            };
+            if self.deliver(change).await != Applied::Continue {
+                return None;
+            }
+        }
+    }
+
+    fn open_result(&self, request: &OpenRequest) -> OpenResult {
+        let published = self.shared.published();
+        let entry = published.slots[usize::from(request.slot)]
+            .as_ref()
+            .and_then(|slot| slot.held.as_ref())
+            .and_then(|held| {
+                held.place()
+                    .sections
+                    .iter()
+                    .find(|entry| entry.id.as_str() == request.id)
+            });
+        match entry.and_then(|entry| entry.read) {
+            Some(ReadState::Read) => OpenResult::Read,
+            Some(ReadState::Refused { failure }) => OpenResult::Refused {
+                failure: failure.into(),
+            },
+            _ => OpenResult::Refused {
+                failure: if entry.is_some() {
+                    wire::Failure::Blocked
+                } else {
+                    wire::Failure::Missing
+                },
+            },
         }
     }
 
@@ -333,10 +504,12 @@ impl Run {
                 Some(effects)
             }
             Err(_) => {
-                let end = self.end(wire::Outcome::Failed {
-                    failure: wire::Failure::Unavailable,
-                });
-                let _ = self.tx.send(end).await;
+                if self.opening.is_none() {
+                    let end = self.end(wire::Outcome::Failed {
+                        failure: wire::Failure::Unavailable,
+                    });
+                    self.deliver(end).await;
+                }
                 None
             }
         }
@@ -350,20 +523,31 @@ impl Run {
             };
         }
         let seq = change.seq();
+        if seq == u32::MAX {
+            return Applied::Stop;
+        }
         tokio::select! {
             biased;
-            cancelled = self.cancelled.wait_for(|cancelled| *cancelled) => {
+            cancelled = async { self.cancelled.wait_for(|cancelled| *cancelled).await.is_ok() } => {
                 self.seq = seq;
                 self.unsent = None;
-                if cancelled.is_ok() { Applied::Cancel } else { Applied::Stop }
+                if cancelled { Applied::Cancel } else { Applied::Stop }
             }
-            sent = self.tx.send(change) => {
-                if sent.is_err() {
-                    return Applied::Stop;
+            permit = self.tx.reserve() => {
+                let Ok(permit) = permit else { return Applied::Stop };
+                let mut published = self.shared.published();
+                if *self.cancelled.borrow() {
+                    self.seq = seq;
+                    self.unsent = None;
+                    return Applied::Cancel;
                 }
-                if let Some((index, targets)) = self.unsent.take() {
-                    self.shared.targets()[index] = Some(targets);
+                match self.unsent.take() {
+                    Some(Publication::Place(index, place)) => published.slots[index] = Some(*place),
+                    Some(Publication::PlaceFailed(index)) => published.slots[index] = None,
+                    Some(Publication::Also(targets)) => published.also = targets,
+                    None => {}
                 }
+                permit.send(change);
                 Applied::Continue
             }
         }
@@ -432,15 +616,33 @@ impl Run {
                     }
                 }
                 Effect::Emit { event, .. } => {
-                    let end = matches!(event, MapEvent::End { .. });
+                    if matches!(event, MapEvent::End { .. }) {
+                        if let Some(request) = self.opening.take() {
+                            let result = self.open_result(&request);
+                            let change = Change::Opened {
+                                seq: self.next_seq(),
+                                slot: request.slot,
+                                id: request.id,
+                                result,
+                            };
+                            if self.deliver(change).await != Applied::Continue {
+                                return Applied::Stop;
+                            }
+                        } else if let Some(change) = self.project(event) {
+                            let applied = self.deliver(change).await;
+                            if applied != Applied::Continue {
+                                return applied;
+                            }
+                        }
+                        self.clear_reads();
+                        self.session = None;
+                        return Applied::Continue;
+                    }
                     if let Some(change) = self.project(event) {
                         let applied = self.deliver(change).await;
                         if applied != Applied::Continue {
                             return applied;
                         }
-                    }
-                    if end {
-                        return Applied::Stop;
                     }
                 }
             }
@@ -516,12 +718,25 @@ impl Run {
     fn project(&mut self, event: MapEvent) -> Option<Change> {
         Some(match event {
             MapEvent::FirstLayer { layer } => {
-                let (official, social, organic) = wire::first_layer(&layer);
+                let places = self
+                    .session
+                    .as_ref()
+                    .map(|session| session.result_places().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let wire::Layer {
+                    official,
+                    social,
+                    organic,
+                    also,
+                    targets,
+                } = wire::first_layer(&layer, &places);
+                self.unsent = Some(Publication::Also(targets));
                 Change::FirstLayer {
                     seq: self.next_seq(),
                     official,
                     social,
                     organic,
+                    also,
                 }
             }
             MapEvent::Place {
@@ -535,8 +750,20 @@ impl Run {
                 if index >= SLOTS {
                     return None;
                 }
-                let (place, targets) = wire::place(&place);
-                self.unsent = Some((index, targets));
+                let held = self
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.hold_place(slot, place.clone()));
+                let (place, targets) = wire::place(&place, held.as_ref().map(HeldSite::robots));
+                self.unsent = Some(Publication::Place(
+                    index,
+                    Box::new(PublishedPlace {
+                        targets,
+                        held: held.map(Arc::new),
+                        confidence,
+                        stale,
+                    }),
+                ));
                 Change::Place {
                     seq: self.next_seq(),
                     slot,
@@ -550,6 +777,7 @@ impl Run {
                 if usize::from(slot) >= SLOTS {
                     return None;
                 }
+                self.unsent = Some(Publication::PlaceFailed(usize::from(slot)));
                 Change::PlaceFailed {
                     seq: self.next_seq(),
                     slot,
@@ -558,12 +786,16 @@ impl Run {
             }
             MapEvent::Compare { rows } => {
                 let rows = {
-                    let targets = self.shared.targets();
+                    let published = self.shared.published();
                     let none = Targets::default();
                     wire::rows(
                         &rows,
-                        targets[0].as_ref().unwrap_or(&none),
-                        targets[1].as_ref().unwrap_or(&none),
+                        published.slots[0]
+                            .as_ref()
+                            .map_or(&none, |slot| &slot.targets),
+                        published.slots[1]
+                            .as_ref()
+                            .map_or(&none, |slot| &slot.targets),
                     )
                 };
                 Change::Compare {

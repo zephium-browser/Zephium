@@ -15,6 +15,7 @@ const ELLIPSIS: char = '…';
 struct Slot {
     printed: Option<Duration>,
     labels: BTreeMap<String, String>,
+    sections: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -23,6 +24,20 @@ pub(super) struct Printer {
 }
 
 impl Printer {
+    pub(super) fn section(&self, label: &str) -> Result<(u8, &str), &'static str> {
+        let mut matches = self.slots.iter().enumerate().flat_map(|(index, slot)| {
+            slot.sections.iter().filter_map(move |(id, name)| {
+                name.eq_ignore_ascii_case(label.trim())
+                    .then_some((index as u8, id.as_str()))
+            })
+        });
+        let section = matches.next().ok_or("unknown label")?;
+        if matches.next().is_some() {
+            return Err("ambiguous label");
+        }
+        Ok(section)
+    }
+
     pub(super) fn lines(
         &mut self,
         change: &Change,
@@ -34,6 +49,7 @@ impl Printer {
                 official,
                 social,
                 organic,
+                also,
                 ..
             } => {
                 let mut line = format!("First layer  {organic} organic");
@@ -50,7 +66,14 @@ impl Printer {
                         .collect::<Vec<_>>();
                     line.push_str(&format!("  social {}", networks.join(", ")));
                 }
-                vec![clip(&line, COLUMNS)]
+                let mut lines = vec![clip(&line, COLUMNS)];
+                lines.extend(also.iter().map(|result| {
+                    clip(
+                        &format!("  {:?}  {} ({})", result.kind, result.title, result.host),
+                        COLUMNS,
+                    )
+                }));
+                lines
             }
             Change::Place {
                 slot,
@@ -62,6 +85,11 @@ impl Printer {
                     return Vec::new();
                 };
                 state.labels = entries(place)
+                    .map(|entry| (entry.id.clone(), entry.label.clone()))
+                    .collect();
+                state.sections = place
+                    .sections
+                    .iter()
                     .map(|entry| (entry.id.clone(), entry.label.clone()))
                     .collect();
                 if *complete
@@ -78,6 +106,7 @@ impl Printer {
             Change::PlaceFailed { slot, failure, .. } => {
                 if let Some(state) = self.slots.get_mut(usize::from(*slot)) {
                     state.labels.clear();
+                    state.sections.clear();
                     state.printed = Some(elapsed);
                 }
                 vec![format!(
@@ -96,6 +125,7 @@ impl Printer {
                 elapsed_ms,
                 ..
             } => vec![end_line(*outcome, *elapsed_ms, counts)],
+            Change::Opened { .. } => Vec::new(),
         }
     }
 
@@ -126,7 +156,7 @@ pub(super) fn refusal(reason: StartRefusal) -> &'static str {
     }
 }
 
-fn failure_text(failure: Failure) -> &'static str {
+pub(super) fn failure_text(failure: Failure) -> &'static str {
     match failure {
         Failure::Cancelled => "cancelled",
         Failure::Blocked => "access blocked",

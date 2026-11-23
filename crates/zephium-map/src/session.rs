@@ -132,6 +132,8 @@ struct SiteState {
     clean: bool,
     stale: bool,
     external: BTreeMap<PageMatch, PageKey>,
+    asked: BTreeSet<site::EntryId>,
+    memo: Option<SiteMemo>,
 }
 impl SiteState {
     fn new(seed: Seed) -> Self {
@@ -156,6 +158,8 @@ impl SiteState {
             clean: true,
             stale: false,
             external: BTreeMap::new(),
+            asked: BTreeSet::new(),
+            memo: None,
         }
     }
 }
@@ -179,7 +183,8 @@ impl SiteState {
 }
 pub struct Session {
     cfg: Config,
-    query: QueryRead,
+    query: Option<QueryRead>,
+    opening: Option<Opening>,
     sequence: u32,
     elapsed: Duration,
     finished: bool,
@@ -197,8 +202,94 @@ pub struct Session {
     first_passage: Option<Passage>,
     passages: Vec<Passage>,
 }
+
+#[derive(Clone, serde::Serialize)]
+pub struct HeldSite {
+    payload: SitePayload,
+    memo: Option<SiteMemo>,
+}
+
+impl HeldSite {
+    pub fn place(&self) -> &Place {
+        &self.payload.place
+    }
+
+    pub fn robots(&self) -> &BTreeMap<String, Robots> {
+        &self.payload.robots
+    }
+
+    pub fn check_open(&self, id: &str) -> Result<(), OpenRefusal> {
+        self.open_index(id).map(|_| ())
+    }
+
+    fn open_index(&self, id: &str) -> Result<usize, OpenRefusal> {
+        let place = self.place();
+        if let Some(index) = place.sections.iter().position(|e| e.id.as_str() == id) {
+            return place
+                .entry_openable(&place.sections[index].id, self.robots())
+                .then_some(index)
+                .ok_or(OpenRefusal::NotOpenable);
+        }
+        if place
+            .sections
+            .iter()
+            .flat_map(|e| &e.children)
+            .any(|e| e.id.as_str() == id)
+        {
+            return Err(OpenRefusal::NotOpenable);
+        }
+        Err(OpenRefusal::UnknownEntry)
+    }
+
+    fn bounded(mut self) -> Option<Self> {
+        let place = self.place();
+        if place.sections.len() > site::MAX_SECTIONS
+            || !place.sections.iter().all(|entry| {
+                entry.children.len() <= site::MAX_CHILDREN
+                    && entry.children.iter().all(|child| child.children.is_empty())
+            })
+            || place.check_ids().is_err()
+        {
+            return None;
+        }
+        if !self.fits() {
+            self.memo = None;
+            if !self.fits() {
+                return None;
+            }
+        }
+        Some(self)
+    }
+
+    fn fits(&mut self) -> bool {
+        // Reserve space for the longest serialized read state on every top-level row.
+        let state = ReadState::Skipped {
+            budget: Budget::HostConcurrent,
+        };
+        let sections = &mut self.payload.place.sections;
+        let reads: Vec<_> = sections
+            .iter_mut()
+            .map(|entry| entry.read.replace(state))
+            .collect();
+        let fits = memo::encode_bounded(self).is_ok();
+        for (entry, read) in self.payload.place.sections.iter_mut().zip(reads) {
+            entry.read = read;
+        }
+        fits
+    }
+}
+
+struct Opening {
+    held: HeldSite,
+    slot: u8,
+    index: usize,
+    confidence: Confidence,
+    stale: bool,
+    clean: bool,
+}
+
 impl Session {
-    pub fn start(mut cfg: Config, query_text: &str) -> Result<(Self, Vec<Effect>), QueryError> {
+    pub fn start(cfg: Config, query_text: &str) -> Result<(Self, Vec<Effect>), QueryError> {
         let query = read_query(query_text)?;
         if cfg.custom_template.len() > crate::key::MAX_URL_BYTES {
             return Err(QueryError::Search);
@@ -207,11 +298,105 @@ impl Session {
             .engine
             .configured_search(query_text, &cfg.custom_template)
             .ok_or(QueryError::Search)?;
-        cfg.tighten();
         let kind = query.kind().clone();
-        let mut s = Self {
+        let mut s = Self::new(cfg, Some(query));
+        let mut out = Vec::new();
+        s.emit(MapEvent::Kind { kind }, &mut out);
+        let id = s.id();
+        s.pending.insert(id, Pending::Results);
+        s.counts(Phase::Results).started += 1;
+        out.push(Effect::LoadResults { id, url });
+        Ok((s, out))
+    }
+
+    pub fn open(
+        cfg: Config,
+        held: HeldSite,
+        slot: u8,
+        id: &str,
+        confidence: Confidence,
+        stale: bool,
+    ) -> Result<(Self, Vec<Effect>), OpenRefusal> {
+        let index = held.open_index(id)?;
+        let url = held.place().sections[index].key.as_url().clone();
+        let key = held.place().sections[index].key.page_match();
+        let mut s = Self::new(cfg, None);
+        s.robots = held.robots().clone();
+        s.opening = Some(Opening {
+            held,
+            slot,
+            index,
+            confidence,
+            stale,
+            clean: true,
+        });
+        s.enqueue(Work::Section(usize::from(slot), key), url);
+        let mut out = Vec::new();
+        s.schedule(&mut out);
+        Ok((s, out))
+    }
+
+    pub fn hold_place(&self, slot: u8, place: Place) -> Option<HeldSite> {
+        if let Some(open) = self.opening.as_ref().filter(|open| open.slot == slot) {
+            return Some(open.held.clone());
+        }
+        let memo = self
+            .sites
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .and_then(|site| site.memo.clone());
+        HeldSite {
+            payload: SitePayload {
+                robots: self.place_robots(&place),
+                place,
+            },
+            memo,
+        }
+        .bounded()
+    }
+
+    pub fn result_places(&self) -> impl Iterator<Item = (&PlaceKey, SiteKey)> {
+        self.sites
+            .iter()
+            .flatten()
+            .filter_map(|site| Some((&site.seed.site, SiteKey::from_url(&site.seed.url)?)))
+    }
+
+    pub fn section_fetch(&self, id: Id) -> Option<(u8, &site::EntryId)> {
+        let Some(Pending::Job(Job {
+            work: Work::Section(slot, key),
+            ..
+        })) = self.pending.get(&id)
+        else {
+            return None;
+        };
+        let site = self.sites.get(*slot)?.as_ref()?;
+        let entry = site.place.as_ref()?.sections.iter().find(|entry| {
+            entry.read == Some(ReadState::Queued) && site.discovered.get(&entry.id) == Some(key)
+        })?;
+        Some((*slot as u8, &entry.id))
+    }
+
+    fn place_robots(&self, place: &Place) -> BTreeMap<String, Robots> {
+        self.robots
+            .iter()
+            .filter(|(host, _)| {
+                Url::parse(host)
+                    .ok()
+                    .and_then(|url| SiteKey::from_url(&url))
+                    .as_ref()
+                    == Some(&place.site)
+            })
+            .map(|(host, rules)| (host.clone(), rules.clone()))
+            .collect()
+    }
+
+    fn new(mut cfg: Config, query: Option<QueryRead>) -> Self {
+        cfg.tighten();
+        Self {
             cfg,
             query,
+            opening: None,
             sequence: 0,
             elapsed: Duration::ZERO,
             finished: false,
@@ -228,14 +413,7 @@ impl Session {
             articles: BTreeMap::new(),
             first_passage: None,
             passages: Vec::new(),
-        };
-        let mut out = Vec::new();
-        s.emit(MapEvent::Kind { kind }, &mut out);
-        let id = s.id();
-        s.pending.insert(id, Pending::Results);
-        s.counts(Phase::Results).started += 1;
-        out.push(Effect::LoadResults { id, url });
-        Ok((s, out))
+        }
     }
     fn id(&mut self) -> Id {
         self.sequence += 1;
@@ -281,6 +459,7 @@ impl Session {
         self.queue.push_back(Job { work, url });
     }
     fn lookup(&mut self, side: usize, seed: Seed, out: &mut Vec<Effect>) {
+        let Some(query) = &self.query else { return };
         self.unseeded[side] = None;
         if self.elapsed >= self.cfg.last_start {
             self.budget(Budget::LastStart);
@@ -294,7 +473,7 @@ impl Session {
             return;
         }
         let site = seed.site.clone();
-        let role = match self.query.kind() {
+        let role = match query.kind() {
             QueryKind::Place { section, .. } => section.map(|s| s.role),
             QueryKind::Compare { shared, .. } => shared.map(|s| s.role),
             _ => None,
@@ -307,7 +486,7 @@ impl Session {
                 entity,
                 fresh: is_fresh,
                 ..
-            } = self.query.kind()
+            } = query.kind()
             {
                 fresh = *is_fresh;
                 if let Some((brand, rest)) = entity.split_first() {
@@ -359,10 +538,11 @@ impl Session {
         Seed::official(&self.read(doc, &read).ok()?)
     }
     fn results(&mut self, doc: Doc, out: &mut Vec<Effect>) -> Result<(), Failure> {
+        let query = self.query.as_ref().ok_or(Failure::Unreadable)?;
         let layer = match results::read_results_with_stats(
             self.cfg.engine,
             None,
-            &self.query,
+            query,
             &doc,
             &mut self.stats.results,
         ) {
@@ -371,12 +551,12 @@ impl Session {
         };
         let mut seeds = Vec::new();
         let mut missing = Vec::new();
-        match self.query.kind() {
+        match query.kind() {
             QueryKind::Instant | QueryKind::List => {}
             QueryKind::Place { .. } => {
                 let seed = Seed::official(&layer).or_else(|| {
                     let hit = layer.organic.first()?;
-                    (self.query.confidence() == Confidence::High && !hit.sitelinks.is_empty())
+                    (query.confidence() == Confidence::High && !hit.sitelinks.is_empty())
                         .then(|| Seed::new(hit, Confidence::Low))
                         .flatten()
                 });
@@ -400,19 +580,13 @@ impl Session {
                         .organic
                         .iter()
                         .find(|hit| hit.key.page_match() == f.cites.page_match())
-                        .and_then(|r| passage::featured(&self.query, f, r));
+                        .and_then(|r| passage::featured(query, f, r));
                 }
                 let count = self.cfg.result_pages as usize;
-                if layer.organic.len() > count {
-                    self.budget(Budget::ResultPages);
-                }
-                for (i, r) in layer.organic.iter().take(count).enumerate() {
-                    self.enqueue(Work::Passage(i), r.url.clone());
-                }
                 if let Some(hit) = layer.organic.first() {
                     if let Some(site) = SiteKey::from_url(&hit.url) {
                         let name = site.as_str().split('.').next().unwrap_or_default();
-                        if self.query.terms().iter().any(|w| {
+                        if query.terms().iter().any(|w| {
                             w.trim_end_matches('?') == site.as_str()
                                 || !hit.sitelinks.is_empty() && w == name
                         }) {
@@ -421,6 +595,12 @@ impl Session {
                             }
                         }
                     }
+                }
+                if layer.organic.len() > count {
+                    self.budget(Budget::ResultPages);
+                }
+                for (i, r) in layer.organic.iter().take(count).enumerate() {
+                    self.enqueue(Work::Passage(i), r.url.clone());
                 }
             }
         }
@@ -467,7 +647,7 @@ impl Session {
             }
             state.stale = stale;
             let Ok(place) = site::with_results(
-                m.payload.place,
+                m.payload.place.clone(),
                 &state.seed.links,
                 state.section_hint.as_ref(),
                 state.requested.as_ref(),
@@ -481,19 +661,22 @@ impl Session {
                 && state.section_hint.is_none()
                 && (state.requested.is_none() || place.focus.is_some());
             state.complete = complete;
-            self.emit_place(i, place, stale, confidence, complete, out);
             if complete {
                 if let Some(pos) = shared_passage {
                     self.queue.push_back(Job {
                         work: Work::Passage(pos),
-                        url,
+                        url: url.clone(),
                     });
                 }
-                for (host, rules) in m.payload.robots {
-                    if !self.pending.values().any(|p|matches!(p,Pending::Job(j) if j.work==Work::Robots && origin(&j.url)==host)){
-                        self.robots.entry(host).or_insert(rules);
+                for (host, rules) in &m.payload.robots {
+                    if !self.pending.values().any(|p|matches!(p,Pending::Job(j) if j.work==Work::Robots && origin(&j.url)==*host)){
+                        self.robots.entry(host.clone()).or_insert_with(|| rules.clone());
                     }
                 }
+                state.memo = Some(m);
+            }
+            self.emit_place(i, place, stale, confidence, complete, out);
+            if complete {
                 return;
             }
         } else if supplied {
@@ -516,6 +699,9 @@ impl Session {
     }
 
     fn update_passages(&mut self, out: &mut Vec<Effect>) {
+        let Some(query) = self.query.as_ref() else {
+            return;
+        };
         let mut ordered: BTreeMap<_, _> =
             self.articles.iter().map(|(pos, doc)| (*pos, doc)).collect();
         for site in self.sites.iter().flatten() {
@@ -525,7 +711,7 @@ impl Session {
         }
         let pages: Vec<_> = ordered.into_values().collect();
         let mut passages: Vec<_> = self.first_passage.clone().into_iter().collect();
-        for p in passage::read_passages(&self.query, &pages) {
+        for p in passage::read_passages(query, &pages) {
             if !passages
                 .iter()
                 .any(|f| f.source.page_match() == p.source.page_match())
@@ -599,12 +785,23 @@ impl Session {
                 return;
             }
         }
-        let candidates: BTreeSet<_> = place
-            .fetch_sections()
-            .into_iter()
-            .map(|e| e.id.clone())
-            .collect();
+        let candidates: BTreeSet<_> = match self.cfg.sections {
+            Sections::All => place
+                .fetch_sections()
+                .into_iter()
+                .map(|e| e.id.clone())
+                .collect(),
+            Sections::Asked => {
+                state
+                    .asked
+                    .extend(place.asked_sections(doc.page()).map(|e| e.id.clone()));
+                state.asked.clone()
+            }
+        };
         for entry in &mut place.sections {
+            if self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id) {
+                continue;
+            }
             let discovered = state
                 .discovered
                 .entry(entry.id.clone())
@@ -634,8 +831,11 @@ impl Session {
         let Some(place) = state.place.as_ref() else {
             return;
         };
-        let keys: Vec<_> = place
-            .fetch_sections()
+        let entries: Vec<_> = match self.cfg.sections {
+            Sections::All => place.fetch_sections(),
+            Sections::Asked => place.sections.iter().collect(),
+        };
+        let keys: Vec<_> = entries
             .into_iter()
             .filter(|e| e.read == Some(ReadState::Queued))
             .map(|e| e.key.clone())
@@ -732,6 +932,10 @@ impl Session {
         match input {
             Input::Cancel => {
                 self.stats.cancelled = true;
+                if self.opening.is_some() {
+                    self.done(&mut out);
+                    return out;
+                }
                 for i in 0..self.sites.len() {
                     let Some(state) = self.sites[i].as_mut() else {
                         self.close_slot(i, Failure::Cancelled, &mut out);
@@ -939,6 +1143,48 @@ impl Session {
             self.emit_place(i, place, s.stale, s.seed.confidence, true, out);
         }
     }
+
+    fn finish_open(&mut self, out: &mut Vec<Effect>) {
+        let Some(open) = self.opening.as_ref() else {
+            return;
+        };
+        let robots = self.place_robots(open.held.place());
+        let Some(open) = self.opening.as_mut() else {
+            return;
+        };
+        let mut updated = open.held.clone();
+        updated.payload.robots = robots;
+        if let Some(updated) = updated.bounded() {
+            open.held = updated;
+        }
+        let remember = if open.clean && self.stats.budgets.is_empty() {
+            open.held.memo.clone().and_then(|mut memo| {
+                let mut updated = open.held.clone();
+                memo.payload.robots.clone_from(&open.held.payload.robots);
+                let bytes = memo.encode().ok()?;
+                let site = memo.payload.place.key.clone();
+                updated.memo = Some(memo);
+                let retained = updated.bounded()?;
+                retained.memo.as_ref()?;
+                open.held = retained;
+                Some((site, bytes))
+            })
+        } else {
+            None
+        };
+        let (slot, place, stale, confidence) = (
+            open.slot,
+            open.held.place().clone(),
+            open.stale,
+            open.confidence,
+        );
+        self.emit_place(usize::from(slot), place, stale, confidence, true, out);
+        if let Some((site, memo)) = remember {
+            let id = self.id();
+            out.push(Effect::RememberSite { id, site, memo });
+        }
+        self.done(out);
+    }
     fn finish(&mut self, out: &mut Vec<Effect>) {
         if self.elapsed >= self.cfg.elapsed {
             let jobs: Vec<_> = self
@@ -951,6 +1197,9 @@ impl Session {
                 .chain(self.queue.drain(..))
                 .collect();
             for job in jobs {
+                if self.opening.is_some() && matches!(job.work, Work::Section(..)) {
+                    self.refused(Phase::Section, Failure::Timeout);
+                }
                 self.set_read(
                     &job,
                     ReadState::Skipped {
@@ -960,12 +1209,16 @@ impl Session {
                 );
             }
         }
-        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
-            && self.sites.iter().any(Option::is_some)
+        if self.opening.is_some() {
+            self.finish_open(out);
+            return;
+        }
+        let kind = self.query.as_ref().map(|q| q.kind().clone());
+        if matches!(kind, Some(QueryKind::Passage { .. })) && self.sites.iter().any(Option::is_some)
         {
             self.update_passages(out);
         }
-        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
+        if matches!(kind, Some(QueryKind::Passage { .. }))
             && self.passages.is_empty()
             && self
                 .stats
@@ -982,7 +1235,9 @@ impl Session {
         }
         for i in 0..self.sites.len() {
             self.close_slot(i, Failure::Limit, out);
-            let Some(s) = &self.sites[i] else { continue };
+            let Some(s) = &mut self.sites[i] else {
+                continue;
+            };
             if s.clean
                 && self.stats.budgets.is_empty()
                 && s.place
@@ -1012,13 +1267,18 @@ impl Session {
                     read_at: self.cfg.now,
                     payload: SitePayload { place, robots },
                 };
-                if let Ok(memo) = memo.encode() {
+                if let Ok(bytes) = memo.encode() {
+                    s.memo = Some(memo);
                     let id = self.id();
-                    out.push(Effect::RememberSite { id, site, memo });
+                    out.push(Effect::RememberSite {
+                        id,
+                        site,
+                        memo: bytes,
+                    });
                 }
             }
         }
-        if let QueryKind::Compare { shared, .. } = self.query.kind() {
+        if let Some(QueryKind::Compare { shared, .. }) = kind {
             let place = |i: usize| self.sites[i].as_ref()?.place.as_ref();
             if let Some((l, r)) = place(0).zip(place(1)) {
                 self.emit(
@@ -1032,7 +1292,7 @@ impl Session {
         self.done(out);
     }
 }
-fn origin(url: &Url) -> String {
+pub(crate) fn origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 mod scheduler;

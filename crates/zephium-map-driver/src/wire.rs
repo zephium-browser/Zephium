@@ -6,8 +6,9 @@ use zephium_map::{
     compare,
     query::{self, SectionRole},
     results::{self, FirstLayer, Profile},
+    robots::Robots,
     session::{self, ReadState},
-    site,
+    site, PageKey, PlaceKey, SiteKey,
 };
 
 pub const MAX_TEXT_BYTES: usize = 300;
@@ -15,6 +16,8 @@ pub const MAX_PATH_CHARS: usize = 128;
 pub const MAX_SECTIONS: usize = 32;
 pub const MAX_CHILDREN: usize = 12;
 pub const MAX_SOCIAL: usize = 10;
+pub const MAX_ALSO: usize = 8;
+pub const MAX_HOST_BYTES: usize = 253;
 pub const MAX_ROWS: usize = 64;
 pub const ID_BYTES: usize = 16;
 
@@ -55,6 +58,26 @@ pub enum StartRefusal {
     NotAMap,
     UnsupportedEngine,
     Invalid,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum OpenRefusal {
+    NoPlace,
+    UnknownEntry,
+    NotOpenable,
+    TooManyWaiting,
+    Cancelled,
+}
+
+impl From<session::OpenRefusal> for OpenRefusal {
+    fn from(refusal: session::OpenRefusal) -> Self {
+        match refusal {
+            session::OpenRefusal::UnknownEntry => Self::UnknownEntry,
+            session::OpenRefusal::NotOpenable => Self::NotOpenable,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +142,23 @@ pub struct Official {
     pub site: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum AlsoKind {
+    Page,
+    Discussion,
+    Video,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+pub struct Also {
+    pub title: String,
+    pub host: String,
+    pub kind: AlsoKind,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 pub struct Entry {
@@ -130,6 +170,9 @@ pub struct Entry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     pub off_site: bool,
+    pub open: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read: Option<Read>,
@@ -191,6 +234,14 @@ impl From<session::EndOutcome> for Outcome {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "ipc-types", derive(specta::Type))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpenResult {
+    Read,
+    Refused { failure: Failure },
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "ipc-types", derive(specta::Type))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -200,6 +251,7 @@ pub enum Change {
         official: Option<Official>,
         social: Vec<Network>,
         organic: u8,
+        also: Vec<Also>,
     },
     Place {
         seq: u32,
@@ -223,6 +275,12 @@ pub enum Change {
         outcome: Outcome,
         elapsed_ms: u32,
     },
+    Opened {
+        seq: u32,
+        slot: u8,
+        id: String,
+        result: OpenResult,
+    },
 }
 
 impl Change {
@@ -232,7 +290,8 @@ impl Change {
             | Self::Place { seq, .. }
             | Self::PlaceFailed { seq, .. }
             | Self::Compare { seq, .. }
-            | Self::End { seq, .. } => *seq,
+            | Self::End { seq, .. }
+            | Self::Opened { seq, .. } => *seq,
         }
     }
 }
@@ -244,6 +303,7 @@ pub enum Target {
     Entry { id: String },
     Site,
     Social { network: Network },
+    Also { index: u8 },
 }
 
 #[derive(Default)]
@@ -259,6 +319,7 @@ impl Targets {
             Target::Entry { id } => self.entries.get(id),
             Target::Site => self.site.as_ref(),
             Target::Social { network } => self.social.get(network),
+            Target::Also { .. } => None,
         }?;
         (url.scheme() == "https").then(|| url.clone())
     }
@@ -343,6 +404,16 @@ fn address(entry: &site::Entry) -> Url {
     url
 }
 
+fn hostname(url: &Url) -> Option<String> {
+    let host = url.domain()?.trim_end_matches('.');
+    (!host.is_empty()
+        && host.len() <= MAX_HOST_BYTES
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')))
+    .then(|| host.to_ascii_lowercase())
+}
+
 fn networks(profiles: &[Profile], social: &mut BTreeMap<Network, Url>) -> Vec<Network> {
     let mut out = Vec::new();
     for profile in profiles {
@@ -361,6 +432,8 @@ fn networks(profiles: &[Profile], social: &mut BTreeMap<Network, Url>) -> Vec<Ne
 fn entry(
     source: &site::Entry,
     child: bool,
+    place_host: Option<&str>,
+    open: bool,
     seen: &mut BTreeSet<String>,
     targets: &mut BTreeMap<String, Url>,
 ) -> Option<Entry> {
@@ -388,7 +461,7 @@ fn entry(
     } else {
         let mut rest = source.children.iter();
         for next in rest.by_ref() {
-            if let Some(projected) = entry(next, true, seen, targets) {
+            if let Some(projected) = entry(next, true, place_host, false, seen, targets) {
                 children.push(projected);
                 if children.len() == MAX_CHILDREN {
                     break;
@@ -404,6 +477,8 @@ fn entry(
         role: source.role.map(Role::from),
         group: source.group.as_deref().and_then(shown),
         off_site: source.off_site,
+        open,
+        host: hostname(source.key.as_url()).filter(|host| Some(host.as_str()) != place_host),
         path,
         read: source.read.map(Read::from),
         children,
@@ -411,7 +486,10 @@ fn entry(
     })
 }
 
-pub(crate) fn place(source: &site::Place) -> (Place, Targets) {
+pub(crate) fn place(
+    source: &site::Place,
+    robots: Option<&BTreeMap<String, Robots>>,
+) -> (Place, Targets) {
     let mut targets = Targets {
         site: Some(source.entry.as_url().clone()),
         ..Targets::default()
@@ -420,11 +498,20 @@ pub(crate) fn place(source: &site::Place) -> (Place, Targets) {
     let mut ordered: Vec<_> = source.sections.iter().collect();
     ordered.sort_by_key(|e| e.tier != site::Tier::Primary);
     let mut sections = Vec::new();
+    let host = hostname(source.entry.as_url());
     for section in ordered {
         if sections.len() == MAX_SECTIONS {
             break;
         }
-        if let Some(projected) = entry(section, false, &mut seen, &mut targets.entries) {
+        let open = robots.is_some_and(|rules| source.entry_openable(&section.id, rules));
+        if let Some(projected) = entry(
+            section,
+            false,
+            host.as_deref(),
+            open,
+            &mut seen,
+            &mut targets.entries,
+        ) {
             sections.push(projected);
         }
     }
@@ -451,7 +538,15 @@ pub(crate) fn place(source: &site::Place) -> (Place, Targets) {
     (place, targets)
 }
 
-pub(crate) fn first_layer(layer: &FirstLayer) -> (Option<Official>, Vec<Network>, u8) {
+pub(crate) struct Layer {
+    pub official: Option<Official>,
+    pub social: Vec<Network>,
+    pub organic: u8,
+    pub also: Vec<Also>,
+    pub targets: Vec<Url>,
+}
+
+pub(crate) fn first_layer(layer: &FirstLayer, places: &[(&PlaceKey, SiteKey)]) -> Layer {
     let official = layer.organic.iter().find_map(|hit| {
         let site = text(hit.official.as_ref()?.site.as_str());
         Some(Official {
@@ -459,9 +554,73 @@ pub(crate) fn first_layer(layer: &FirstLayer) -> (Option<Official>, Vec<Network>
             site,
         })
     });
-    let social = networks(&layer.social, &mut BTreeMap::new());
+    let mut social_targets = BTreeMap::new();
+    let social = networks(&layer.social, &mut social_targets);
     let organic = u8::try_from(layer.organic.len()).unwrap_or(u8::MAX);
-    (official, social, organic)
+    let mut seen: BTreeSet<_> = social_targets
+        .values()
+        .filter_map(|url| Some(PageKey::from_url(url).ok()?.page_match()))
+        .collect();
+    let (also, targets) = layer
+        .organic
+        .iter()
+        .filter(|hit| hit.official.is_none())
+        .map(|hit| {
+            (
+                &hit.url,
+                &hit.title,
+                if hit.discussion {
+                    AlsoKind::Discussion
+                } else {
+                    AlsoKind::Page
+                },
+            )
+        })
+        .chain(
+            layer
+                .video
+                .iter()
+                .map(|hit| (&hit.url, &hit.title, AlsoKind::Video)),
+        )
+        .filter_map(|(url, title, kind)| {
+            let host = hostname(url)?;
+            let key = PageKey::from_url(url).ok()?.page_match();
+            if places.iter().any(|(place, site)| {
+                if place.tenant.is_some() {
+                    PlaceKey::from_url(url).as_ref() == Some(*place)
+                } else {
+                    SiteKey::from_url(url).as_ref() == Some(site)
+                }
+            }) || !seen.insert(key)
+            {
+                return None;
+            }
+            let title = shown(title)
+                .filter(|text| {
+                    !text.split_whitespace().any(|word| {
+                        word.starts_with('/')
+                            || word
+                                .split_once('/')
+                                .is_some_and(|(head, _)| head.contains('.'))
+                    })
+                })
+                .unwrap_or_else(|| host.clone());
+            Some((Also { title, host, kind }, url.clone()))
+        })
+        .take(MAX_ALSO)
+        .unzip();
+    Layer {
+        official,
+        social,
+        organic,
+        also,
+        targets,
+    }
+}
+
+pub(crate) fn also_target(urls: &[Url], index: u8) -> Option<Url> {
+    let url = urls.get(usize::from(index))?;
+    (url.scheme() == "https").then(|| url.clone())
 }
 
 pub(crate) fn rows(source: &[compare::Row], left: &Targets, right: &Targets) -> Vec<Row> {
