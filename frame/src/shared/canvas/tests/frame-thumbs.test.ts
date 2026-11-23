@@ -64,7 +64,7 @@ afterEach(() => {
 });
 
 test("only ordinary media pictures request a width; native frames retain their PNG address", async () => {
-  const { thumbSrc } = await import("../lib/frame-thumbs");
+  const { thumbSrc } = await import("../frame-thumbs");
   const media = "zephium-media://localhost/01M3CTWDG20GFZPACD7905RSRJ/" + "b".repeat(64);
   expect(thumbSrc(media, 224)).toBe(`${media}?w=224`);
   expect(thumbSrc(`${media}?v=2`, 224)).toBe(`${media}?v=2&w=224`);
@@ -77,7 +77,7 @@ test("only ordinary media pictures request a width; native frames retain their P
 });
 
 test("a native generation decodes once across display widths, without scratch or JPEG resize", async () => {
-  const { thumbnail, thumbSrc } = await import("../lib/frame-thumbs");
+  const { thumbnail, thumbSrc } = await import("../frame-thumbs");
   const small = canvas();
   const large = canvas();
   thumbnail(small as unknown as HTMLCanvasElement, { url: frame(1), width: 288 });
@@ -103,7 +103,7 @@ test("a native generation decodes once across display widths, without scratch or
 test("a late older generation cannot draw over the newest page pixels", async () => {
   let release!: () => void;
   pending.set(frame(1), new Promise<void>((resolve) => (release = resolve)));
-  const { thumbnail } = await import("../lib/frame-thumbs");
+  const { thumbnail } = await import("../frame-thumbs");
   const shown = canvas();
   const action = thumbnail(shown as unknown as HTMLCanvasElement, { url: frame(1), width: 360 });
   action.update({ url: frame(2), width: 288 });
@@ -118,7 +118,7 @@ test("a late older generation cannot draw over the newest page pixels", async ()
 });
 
 test("bitmap eviction closes the least recently used generation within 16 MiB", async () => {
-  const { thumbnail } = await import("../lib/frame-thumbs");
+  const { thumbnail } = await import("../frame-thumbs");
   for (let generation = 0; generation < 13; generation += 1) {
     thumbnail(canvas() as unknown as HTMLCanvasElement, { url: frame(generation), width: 360 });
     await settle();
@@ -139,7 +139,7 @@ test("bitmap eviction closes the least recently used generation within 16 MiB", 
 test("an updated width wins while the same generation is still decoding", async () => {
   let release!: () => void;
   pending.set(frame(1), new Promise<void>((resolve) => (release = resolve)));
-  const { thumbnail } = await import("../lib/frame-thumbs");
+  const { thumbnail } = await import("../frame-thumbs");
   const shown = canvas();
   const action = thumbnail(shown as unknown as HTMLCanvasElement, { url: frame(1), width: 360 });
   action.update({ url: frame(1), width: 288 });

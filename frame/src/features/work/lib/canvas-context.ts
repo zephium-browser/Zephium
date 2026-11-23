@@ -1,6 +1,9 @@
 import type { DraftView, OwnedData } from "./board/types";
 import type { EvidenceReference } from "$shared/ui/data/Artifact";
 
+/** Kept by the canvas host: whether a node came near, is seen from far, and how it arrives. */
+export { canvasArrival, canvasFar, canvasSeen } from "$shared/canvas";
+
 /** Instance-local UI callbacks; never part of a saved canvas node or runtime projection. */
 export const canvasInspection = Symbol("canvas-inspection");
 export const canvasResize = Symbol("canvas-resize");
@@ -16,19 +19,10 @@ export const canvasAreas = Symbol("canvas-areas");
 export const canvasPictures = Symbol("canvas-pictures");
 /** An area's own actions: fit to members, rename in place, remove. */
 export const canvasAreaActions = Symbol("canvas-area-actions");
-/** How a node that just appeared arrives: with a group (`page`), into one (`base`), or not. */
-export const canvasArrival = Symbol("canvas-arrival");
 /** Asks native once for the icon of an origin no tab has shown. */
 export const canvasProbe = Symbol("canvas-probe");
 /** The runs behind the canvas, for a helper's own view of a part: `(objective) => projection`. */
 export const canvasWork = Symbol("canvas-work");
-/**
- * Whether a node has come near the view: until it has, it stands as an empty
- * box of its size, so opening a large work draws only what can be seen.
- */
-export const canvasSeen = Symbol("canvas-seen");
-/** Whether the canvas is seen from far (under half size): page frames draw as small copies. */
-export const canvasFar = Symbol("canvas-far");
 /** What a board's blocks ask of their canvas: see `BoardActions`. */
 export const canvasBoard = Symbol("canvas-board");
 /** A board's blocks report their size, open in place, and act through the canvas's owner. */

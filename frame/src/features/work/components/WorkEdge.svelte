@@ -1,52 +1,11 @@
-<script lang="ts" module>
-  import type { CanvasPosition } from "../lib/canvas-model";
-  type Side = "top" | "right" | "bottom" | "left";
-  const OUT: Record<Side, readonly [number, number]> = {
-    top: [0, -1],
-    right: [1, 0],
-    bottom: [0, 1],
-    left: [-1, 0],
-  };
-  /** A tie the person drew between their own things: a cubic along its handles. */
-  function curve(sx: number, sy: number, from: Side, tx: number, ty: number, to: Side) {
-    const upright = from === "top" || from === "bottom";
-    const along = Math.max(24, (upright ? Math.abs(ty - sy) : Math.abs(tx - sx)) / 2);
-    const [ax, ay] = OUT[from];
-    const [bx, by] = OUT[to];
-    return `M ${sx},${sy} C ${sx + ax * along},${sy + ay * along} ${tx + bx * along},${ty + by * along} ${tx},${ty}`;
-  }
-  /** Between two ends that no longer stand where the run put them: across, down, across. */
-  function elbow(from: CanvasPosition, to: CanvasPosition): CanvasPosition[] {
-    if (Math.abs(from.y - to.y) < 1) return [from, to];
-    if (Math.abs(from.x - to.x) < 1) return [from, to];
-    const x = to.x > from.x + 24 ? Math.round((from.x + to.x) / 2) : from.x + 24;
-    return to.x > from.x + 24
-      ? [from, { x, y: from.y }, { x, y: to.y }, to]
-      : [
-          from,
-          { x, y: from.y },
-          { x, y: (from.y + to.y) / 2 },
-          { x: to.x - 24, y: (from.y + to.y) / 2 },
-          { x: to.x - 24, y: to.y },
-          to,
-        ];
-  }
-</script>
-
 <script lang="ts">
   import { getContext, onMount } from "svelte";
   import { useStore, ViewportPortal, type EdgeProps } from "@xyflow/svelte";
   import { watchStill } from "$shared/lib/still";
   import { canvasArrival } from "../lib/canvas-context";
   import { duration, easing, reducedMotion, type Duration } from "$shared/lib/motion";
-  import { roundedPath } from "../lib/run/lines";
+  import { roundedPath, routedPoints, tiePath, type Route, type Side } from "$shared/canvas";
   type Tone = "rest" | "thread" | "flow" | "relation";
-  type Route = {
-    points: readonly CanvasPosition[];
-    from: CanvasPosition;
-    to: CanvasPosition;
-    laid: { source: CanvasPosition; target: CanvasPosition };
-  };
   let {
     source,
     target,
@@ -72,26 +31,18 @@
    * put them, and moves with them when they move together; once the person
    * moves one alone, it takes an elbow between where they stand now.
    */
-  const points = $derived.by(() => {
-    if (!route) return null;
-    const a = corner(source);
-    const b = corner(target);
-    if (!a || !b) return route.points;
-    const da = { x: a.x - route.laid.source.x, y: a.y - route.laid.source.y };
-    const db = { x: b.x - route.laid.target.x, y: b.y - route.laid.target.y };
-    const still = (d: CanvasPosition) => Math.abs(d.x) < 0.5 && Math.abs(d.y) < 0.5;
-    if (still(da) && still(db)) return route.points;
-    if (Math.abs(da.x - db.x) < 0.5 && Math.abs(da.y - db.y) < 0.5)
-      return route.points.map((point) => ({ x: point.x + da.x, y: point.y + da.y }));
-    return elbow(
-      { x: a.x + route.from.x, y: a.y + route.from.y },
-      { x: b.x + route.to.x, y: b.y + route.to.y },
-    );
-  });
+  const points = $derived(route ? routedPoints(route, corner(source), corner(target)) : null);
   const path = $derived(
     points
       ? roundedPath(points)
-      : curve(sourceX, sourceY, `${sourcePosition}`, targetX, targetY, `${targetPosition}`),
+      : tiePath(
+          sourceX,
+          sourceY,
+          `${sourcePosition}` as Side,
+          targetX,
+          targetY,
+          `${targetPosition}` as Side,
+        ),
   );
   let line = $state<SVGPathElement>();
   /** The stretches: the wrapper has no box, so visibility is read from the first. */

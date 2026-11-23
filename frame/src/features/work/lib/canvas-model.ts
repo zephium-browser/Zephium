@@ -3,11 +3,14 @@ import type { MediaAssetV1 } from "$domain/resources";
 import type { IconRef } from "$shared/ipc/bindings";
 import type { ArtifactView, EvidenceReference, SubjectView } from "$shared/ui/data/Artifact";
 import type { Node } from "@xyflow/svelte";
+import { absolutePosition } from "$shared/canvas";
 import type { HumanPage } from "./work-human";
 import { defaultSize as cardSize } from "./card-size";
 import type { Block, ObjectView } from "./board/types";
 import type { TrailLine } from "./board/trail";
 import type { RunSources } from "./run/sources";
+
+export { absolutePosition };
 
 /** The Sources card's line for pages that could not be read. */
 const UNREAD_FOOTER = 24;
@@ -426,15 +429,6 @@ export function validScene(items: readonly CanvasItem[], links: readonly CanvasL
         link.source !== link.target,
     )
   );
-}
-
-/** Absolute canvas position of a node, resolving one level of area parenting. */
-export function absolutePosition(node: WorkNode, nodes: readonly WorkNode[]): CanvasPosition {
-  if (!node.parentId) return { ...node.position };
-  const parent = nodes.find((candidate) => candidate.id === node.parentId);
-  return parent
-    ? { x: node.position.x + parent.position.x, y: node.position.y + parent.position.y }
-    : { ...node.position };
 }
 
 /** Position once. Subsequent projection changes preserve user arrangement and node identity. */

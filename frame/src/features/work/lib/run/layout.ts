@@ -1,5 +1,5 @@
 import type { BoardLayout, Rect } from "../board/layout";
-import { branch, merge, type Point } from "./lines";
+import { branch, digest, merge, snap, type Point } from "$shared/canvas";
 
 /**
  * A run on the 8 px grid, left to right: the inputs hang left of the request
@@ -40,19 +40,6 @@ export const RUN = {
   air: 6,
   head: 16,
 } as const;
-
-const snap = (value: number) => Math.ceil(value / 8) * 8;
-
-/**
- * A short digest of an id. A line between two cards is named by both, and two
- * full part ids run past the canvas's id limit, which drops the line.
- */
-function digest(id: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < id.length; index++)
-    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193);
-  return (hash >>> 0).toString(36);
-}
 
 type Sized = { id: string; width: number; height: number };
 type RunRow = {

@@ -3,7 +3,7 @@ import { expect, test, vi } from "vitest";
 const release = vi.hoisted(() => vi.fn(async () => true));
 vi.mock("$shared/ipc/bindings", () => ({ commands: { workReleaseMemory: release } }));
 
-import { thumbnail } from "../lib/frame-thumbs";
+import { thumbnail } from "../frame-thumbs";
 
 const PIXEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFklEQVR4nGP8z8Dwn4EIwESMolGFuBQBAHHqAg1SF5vzAAAAAElFTkSuQmCC";

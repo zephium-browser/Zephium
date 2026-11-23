@@ -19,7 +19,7 @@
     canvasArrival,
     canvasSeen,
   } from "../lib/canvas-context";
-  import { arrive } from "../lib/arrival";
+  import { arrive } from "$shared/canvas";
   import type { Duration } from "$shared/lib/motion";
   import { ArrowUpRight01Icon, MinusSignIcon, Target01Icon, Tick02Icon } from "../lib/icons";
   import TabCard from "./cards/TabCard.svelte";

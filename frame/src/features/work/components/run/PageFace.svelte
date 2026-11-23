@@ -1,6 +1,6 @@
 <script lang="ts">
   import HostGlyph from "../cards/HostGlyph.svelte";
-  import { thumbnail } from "../../lib/frame-thumbs";
+  import { thumbnail } from "$shared/canvas";
 
   /**
    * A page as a small browser window: a slim bar with the site's mark, its

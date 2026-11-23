@@ -2,13 +2,19 @@
   import { onMount } from "svelte";
   import { useSvelteFlow, useViewport, Panel } from "@xyflow/svelte";
   import { duration, reducedMotion } from "$shared/lib/motion";
-  import * as m from "$shared/i18n/messages";
   let {
+    label,
+    fitLabel,
+    dock,
     bottomInset = 0,
     onfit,
   }: {
+    label: string;
+    fitLabel: string;
+    /** A selector for an edge slot its owner keeps for the level; without one it stands in the flow's corner. */
+    dock?: string;
     bottomInset?: number;
-    /** The person asked for the whole picture: a run in progress may follow again. */
+    /** The person asked for the whole picture. */
     onfit?: () => void;
   } = $props();
   const flow = useSvelteFlow();
@@ -16,20 +22,22 @@
   const percent = $derived(Math.round(viewport.current.zoom * 100));
   /** A mark inside the flow: the level itself is drawn in the canvas's edge slot. */
   let anchor = $state<HTMLElement>();
-  /** The edge slot the workspace keeps for the level, when there is one. */
-  let slot = $state<HTMLElement | null>(null);
+  /** The edge slot its owner keeps for the level, when there is one. */
+  let docked = $state<HTMLElement | null>(null);
   onMount(() => {
+    const selector = dock;
+    if (!selector) return;
     const find = () => {
       for (let at = anchor?.parentElement; at; at = at.parentElement) {
-        const found = at.querySelector<HTMLElement>("[data-work-zoom-slot]");
+        const found = at.querySelector<HTMLElement>(selector);
         if (found) return found;
       }
       return null;
     };
-    slot = find();
-    if (slot) return;
+    docked = find();
+    if (docked) return;
     // The slot can arrive a frame after the canvas.
-    const frame = requestAnimationFrame(() => (slot = find()));
+    const frame = requestAnimationFrame(() => (docked = find()));
     return () => cancelAnimationFrame(frame);
   });
   /** Draws the level in the edge slot. */
@@ -75,17 +83,17 @@
 
 <span class="anchor" hidden bind:this={anchor}></span>
 {#snippet capsule()}
-  <div class="zoom" role="group" aria-label={m.work_canvas_controls()}>
+  <div class="zoom" role="group" aria-label={label}>
     <button
       type="button"
       class="level"
-      aria-label={m.work_fit()}
-      title={`${m.work_fit()} (0)`}
+      aria-label={fitLabel}
+      title={`${fitLabel} (0)`}
       onclick={fit}>{percent}%</button
     >
   </div>
 {/snippet}
-{#if slot}<div class="docked-host" use:into={slot}>{@render capsule()}</div>
+{#if docked}<div class="docked-host" use:into={docked}>{@render capsule()}</div>
 {:else}<Panel position="bottom-right">{@render capsule()}</Panel>{/if}
 
 <style>

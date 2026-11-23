@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { layerRelease } from "../lib/workspace/layers";
+import { layerRelease } from "../host/layers";
 
 const wait = (ms: number) => new Promise((done) => setTimeout(done, ms));
 

@@ -7,7 +7,7 @@
   import type { CanvasItem } from "../../lib/canvas-model";
   import { canvasBoard, type BoardActions } from "../../lib/canvas-context";
   import { SOURCE_ROWS } from "../../lib/project-environment-board";
-  import { thumbnail } from "../../lib/frame-thumbs";
+  import { thumbnail } from "$shared/canvas";
   import type { RunSource } from "../../lib/run/sources";
   import { pageLabel, sharedSite } from "../../lib/run/result-label";
   import * as m from "$shared/i18n/messages";
