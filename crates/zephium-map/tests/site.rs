@@ -697,7 +697,11 @@ fn footer_navigation_does_not_hide_primary_link_clusters() {
 fn nested_menu_links_keep_distinct_anchors_on_the_parent_page() {
     let home = doc("/", "<nav><ul><li><a href='/pricing'>Pricing</a><ul><li><a href='/pricing#students'>Students</a></li><li><a href='/pricing'>Same page</a></li></ul></li></ul></nav>");
     let place = read_site(&home, &SiteInputs::default()).unwrap();
-    assert_eq!(labels(&place.sections[0].children), ["Students"]);
+    assert!(place.sections[0].menu_only);
+    assert_eq!(
+        labels(&place.sections[0].children),
+        ["Students", "Same page"]
+    );
     assert_eq!(
         place.sections[0].children[0].locator.fragment().as_deref(),
         Some("#students")

@@ -223,7 +223,7 @@ fn a_shared_clipped_path_does_not_create_indistinguishable_children() {
 }
 
 #[test]
-fn version_badges_release_items_and_breadcrumbs_do_not_displace_sections() {
+fn direct_release_links_stay_primary_with_a_named_version_index_and_no_breadcrumbs() {
     let p = card("<nav><a href='/versions'>v3.4</a><a href='/changelog'>Changelog</a><a href='/changelog/cedar'>Cedar</a><a href='/changelog/feeds'>Feeds</a><a href='/topics#breadcrumbs'>Trail</a><a href='/topics#formats'>Formats</a></nav><footer><a href='/changelog/feeds'>Feeds</a></footer>");
     let primary: Vec<_> = p
         .sections
@@ -231,11 +231,14 @@ fn version_badges_release_items_and_breadcrumbs_do_not_displace_sections() {
         .filter(|e| e.tier == Tier::Primary)
         .map(|e| e.label.as_str())
         .collect();
-    assert_eq!(primary, ["Versions", "Changelog", "Feeds", "Formats"]);
+    assert_eq!(
+        primary,
+        ["Versions", "Changelog", "Cedar", "Feeds", "Formats"]
+    );
     assert!(p
         .sections
         .iter()
-        .any(|e| e.label == "Cedar" && e.tier == Tier::Secondary));
+        .any(|e| e.label == "Trail" && e.tier == Tier::Secondary));
 }
 
 #[test]

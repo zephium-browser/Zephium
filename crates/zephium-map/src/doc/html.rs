@@ -139,9 +139,20 @@ impl DocBuilder {
                         .attr("property")
                         .is_some_and(|v| v.eq_ignore_ascii_case("og:site_name")) =>
             {
-                if let Some(value) = node.attr("content") {
+                if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
                     let text = self.words(value);
                     self.doc.head.site_name = self.head_text(&text, limit);
+                }
+            }
+            "meta"
+                if self.doc.head.application_name.is_empty()
+                    && node
+                        .attr("name")
+                        .is_some_and(|s| s.eq_ignore_ascii_case("application-name")) =>
+            {
+                if let Some(value) = node.attr("content").filter(|_| !node.clipped("content")) {
+                    let text = self.words(value);
+                    self.doc.head.application_name = self.head_text(&text, limit);
                 }
             }
             "link" => {
@@ -198,6 +209,7 @@ impl DocBuilder {
         let node = &self.doc.nodes[at];
         let room = self.limits.node_text_bytes as usize
             - node.language.as_deref().map_or(0, str::len)
+            - node.link_language.as_deref().map_or(0, str::len)
             - node.text.len()
             - node.name.len()
             - node.element_id.as_deref().map_or(0, str::len);
@@ -417,10 +429,18 @@ impl DocBuilder {
                         self.limits.node_text_bytes as usize,
                     );
                     anchor = Some(links.len());
-                    links.push((url, label));
+                    let language = link_language(&n)
+                        .filter(|s| s.len() <= self.limits.text_bytes as usize - self.text_bytes)
+                        .map(str::to_ascii_lowercase);
+                    self.text_bytes += language.as_deref().map_or(0, str::len);
+                    links.push(MenuLink {
+                        url,
+                        label,
+                        language,
+                    });
                 }
             } else if let Some(i) = anchor {
-                let label = &mut links[i].1;
+                let label = &mut links[i].label;
                 if label.is_empty() && n.is_text() && !n.text().trim().is_empty() {
                     *label = self.head_text(n.text().trim(), self.limits.node_text_bytes as usize);
                 }
@@ -616,8 +636,17 @@ impl DocBuilder {
                         - node.element_id.as_deref().map_or(0, str::len);
                     node.language = language.filter(|s| s.len() <= room).map(str::to_owned);
                 }
+                if role == Role::Link {
+                    let room = (self.limits.node_text_bytes as usize)
+                        .min(self.limits.text_bytes as usize - self.text_bytes)
+                        - node.name.len()
+                        - node.element_id.as_deref().map_or(0, str::len);
+                    node.link_language = link_language(&n)
+                        .filter(|s| s.len() <= room)
+                        .map(str::to_ascii_lowercase);
+                }
                 let index = self.push(node)? as usize;
-                if role == Role::Button {
+                if matches!(role, Role::Button | Role::Link) {
                     self.disclosure_links(n, base, index);
                 }
                 (Some(index), level + 1)
@@ -679,6 +708,17 @@ fn marks(n: &NodeRef) -> Marks {
     marks
 }
 
+fn link_language<'a>(n: &NodeRef<'a>) -> Option<&'a str> {
+    ["hreflang", "lang"].into_iter().find_map(|attr| {
+        n.attr(attr).filter(|s| {
+            !n.clipped(attr)
+                && s.len() <= MAX_LANGUAGE_BYTES
+                && s.split('-')
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric()))
+        })
+    })
+}
+
 fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
     use super::Landmark as L;
     use Role::*;
@@ -724,6 +764,7 @@ fn classify(n: &NodeRef, tag: &str, in_sink: bool) -> Option<Role> {
                 },
                 "paragraph" => Paragraph,
                 "link" => Link,
+                "button" if tag == "a" && n.has_attr("href") => Link,
                 "button" => Button,
                 "dialog" | "alertdialog" => Dialog,
                 "list" | "feed" => List,

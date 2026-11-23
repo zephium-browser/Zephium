@@ -605,6 +605,11 @@ Places with at least 3 sections — 1 of 1 place and compare sites.
 | action | 0 | 0 |
 | detail | 0 | 0 |
 | duplicate | 0 | 0 |
+| duplicate_children | 0 | 0 |
+| invalid_group_pages | 0 | 0 |
+| language_groups | 0 | 0 |
+| long_compound_titles | 0 | 0 |
+| missing_header_links | 0 | 0 |
 | nameless | 0 | 0 |
 | off_host_root_children | 0 | 0 |
 | off_host_without_display | 0 | 0 |
@@ -613,6 +618,7 @@ Places with at least 3 sections — 1 of 1 place and compare sites.
 | same_role_pairs | 0 | 0 |
 | self | 0 | 0 |
 | sentence | 0 | 0 |
+| skip_links | 0 | 0 |
 | supplemental_only | 2 | 1 |
 | thin_cards | 0 | 0 |
 | top_level_menu_items | 0 | 0 |

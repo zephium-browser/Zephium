@@ -7,19 +7,48 @@ pub const MAX_PATH_CHARS: usize = 128;
 const SENTENCE_WORDS: usize = 7;
 const MIN_DIRECTORY_ITEMS: usize = 3;
 
-fn locale(segment: &str) -> bool {
-    let (language, region) = segment
-        .split_once('-')
-        .map_or((segment, None), |(l, r)| (l, Some(r)));
-    language.len() == 2
-        && language.bytes().all(|c| c.is_ascii_alphabetic())
-        && region.is_none_or(|r| r.len() == 2 && r.bytes().all(|c| c.is_ascii_alphabetic()))
+pub(super) fn locale(segment: &str) -> bool {
+    let mut parts = segment.split('-');
+    let language = parts.next().unwrap_or_default();
+    let alpha = |s: &str| s.bytes().all(|b| b.is_ascii_alphabetic());
+    if !(language.len() == 2 || language.len() == 3 && segment.contains('-')) || !alpha(language) {
+        return false;
+    }
+    let mut region = parts.next();
+    if region.is_some_and(|s| s.len() == 4 && alpha(s)) {
+        region = parts.next();
+    }
+    parts.next().is_none()
+        && region.is_none_or(|s| {
+            s.len() == 2 && alpha(s) || s.len() == 3 && s.bytes().all(|b| b.is_ascii_digit())
+        })
 }
 
 impl Entry {
     pub fn card_page(&self) -> PageMatch {
         localized_key(&self.key)
     }
+    pub(super) fn card_route(&self) -> (PageMatch, Option<String>) {
+        (self.card_page(), self.locator.fragment())
+    }
+}
+
+pub(super) fn skip_link(url: &Url, label: &str, landing: &Url) -> bool {
+    url.fragment().is_some_and(|s| !s.is_empty())
+        && crate::key::same_page(url, landing)
+        && skip_label(label)
+}
+
+pub fn skip_label(label: &str) -> bool {
+    let label = normal(label);
+    label.starts_with("skip to ")
+        || matches!(
+            label.as_str(),
+            "skip navigation"
+                | "skip navigation links"
+                | "jump to content"
+                | "jump to main content"
+        )
 }
 
 fn localized_key(key: &PageKey) -> PageMatch {
@@ -176,6 +205,9 @@ pub(super) fn self_link(entry: &Entry, root: &PageKey, landing: Option<&Url>) ->
 }
 
 impl Build<'_> {
+    pub(super) fn link_is_edition(&self, entry: &Entry) -> bool {
+        self.link_name(entry).is_some_and(|n| n.language_host)
+    }
     fn link_name(&self, entry: &Entry) -> Option<&LinkName> {
         self.names.get(&entry.id).or_else(|| {
             self.names
@@ -224,6 +256,10 @@ impl Build<'_> {
             .collect();
         let home = |e: &Entry| {
             self_link(e, &self.entry, landing)
+                || e.locator.element.is_some()
+                    && skip_label(&e.label)
+                    && (e.key.page_match() == self.entry.page_match()
+                        || landing.is_some_and(|u| crate::key::same_page(u, e.key.as_url())))
                 || (locale_paths.len() > 1
                     && e.locator == Locator::default()
                     && e.key.as_url().query().is_none()
@@ -533,7 +569,6 @@ impl Build<'_> {
             < MIN_NAV_ROWS;
         let mut roles = BTreeMap::new();
         let mut names = BTreeMap::new();
-        let mut docs = None;
         let mut merged = BTreeMap::new();
         for (i, e) in self
             .sections
@@ -542,15 +577,6 @@ impl Build<'_> {
             .filter(|(_, e)| e.tier == Tier::Primary && e.navigation_row() && !e.utility())
         {
             let label = normal(&e.label);
-            if matches!(label.as_str(), "docs" | "documentation") {
-                if let Some(parent) = docs {
-                    names.entry(label).or_insert(parent);
-                    merged.insert(i, parent);
-                    continue;
-                } else {
-                    docs = Some(i);
-                }
-            }
             names.entry(label).or_insert(i);
             if let Some(role) = e.role {
                 roles.entry(role).or_insert(i);

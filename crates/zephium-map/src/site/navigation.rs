@@ -188,6 +188,7 @@ impl Build<'_> {
             }
             if let Some(url) = &n.destination {
                 if n.accessible_name().is_empty()
+                    || card::skip_link(url, menus::link_label(n), doc.page())
                     || n.accessible_name().chars().count() > MAX_CLUSTER_LABEL_CHARS
                     || SiteKey::from_url(url).as_ref() != Some(&self.site)
                 {

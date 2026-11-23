@@ -18,12 +18,15 @@ use url::Url;
 pub const MIN_NAV_ROWS: usize = 3;
 mod card;
 pub use card::{
-    display_hostname, display_path, MAX_HOST_BYTES, MAX_PATH_CHARS, MAX_PRIMARY_LABEL_CHARS,
+    display_hostname, display_path, skip_label, MAX_HOST_BYTES, MAX_PATH_CHARS,
+    MAX_PRIMARY_LABEL_CHARS,
 };
 mod menus;
 mod navigation;
 mod sitemap;
+mod title;
 pub use sitemap::{Sitemap, XmlError, MAX_SITEMAP_URLS, MAX_XML_BYTES, MAX_XML_DEPTH};
+pub use title::{title_segments, MAX_SITE_NAME_BYTES};
 
 pub const ENTRY_ID_BYTES: usize = 16;
 pub const MAX_PRIMARY_SECTIONS: usize = 12;
@@ -150,6 +153,9 @@ pub struct PlaceNotes {
 }
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct PlaceStats {
+    pub missing_header_links: usize,
+    pub invalid_group_pages: usize,
+    pub language_groups: usize,
     pub robots_truncated: bool,
     pub entry_truncated: bool,
     pub sections_truncated: bool,
@@ -477,7 +483,7 @@ impl Build<'_> {
         let globals: BTreeSet<_> = self
             .sections
             .iter()
-            .map(|e| (e.key.page_match(), e.locator.fragment()))
+            .map(Entry::card_route)
             .chain(std::iter::once((self.entry.page_match(), None)))
             .collect();
         let demoted = Entry::utility;
@@ -488,8 +494,7 @@ impl Build<'_> {
             let mut children = std::mem::take(&mut e.children);
             children.retain(|c| {
                 !card::child_self(c, e) && {
-                    c.sources.contains(&Source::Heading)
-                        || !globals.contains(&(c.key.page_match(), c.locator.fragment()))
+                    c.sources.contains(&Source::Heading) || !globals.contains(&c.card_route())
                 }
             });
             let mut distinct = Vec::new();
@@ -1004,6 +1009,21 @@ pub(crate) fn quote(text: &str) -> Option<Locator> {
     })
 }
 impl Entry {
+    fn footer_utility(&self) -> bool {
+        self.utility()
+            || normal(&self.label).split_whitespace().any(|w| {
+                matches!(
+                    w,
+                    "policy"
+                        | "policies"
+                        | "restricted"
+                        | "prohibited"
+                        | "licences"
+                        | "licenses"
+                        | "sitemap"
+                )
+            })
+    }
     fn utility(&self) -> bool {
         let label = self.label.to_lowercase();
         self.role == Some(SectionRole::Legal)
@@ -1022,7 +1042,14 @@ impl Entry {
                     | "account"
                     | "ask ai"
                     | "search"
+                    | "shopping bag"
+                    | "shopping cart"
             )
+            || label.strip_prefix("search ").is_some_and(|target| {
+                self.key.as_url().domain().is_some_and(|host| {
+                    host.trim_start_matches("www.").eq_ignore_ascii_case(target)
+                })
+            })
             || self
                 .key
                 .as_url()
@@ -1032,7 +1059,7 @@ impl Entry {
                 .is_some_and(|s| {
                     (s.starts_with("llms") && s.ends_with(".txt")) || s.ends_with(".xml")
                 })
-            || ["skip to", "language", "cookie", "select region"]
+            || ["skip to", "cookie", "select region"]
                 .iter()
                 .any(|s| label.contains(s))
     }
@@ -1096,10 +1123,12 @@ impl Entry {
         if let Some(existing) = self
             .children
             .iter_mut()
-            .find(|e| e.key.page_match() == entry.key.page_match() && e.locator == entry.locator)
+            .find(|e| e.card_page() == entry.card_page() && e.locator == entry.locator)
         {
             existing.add_sources(entry.sources);
-            if let Some(id) = discovered {
+            if let Some(id) =
+                discovered.filter(|_| existing.key.page_match() == entry.key.page_match())
+            {
                 existing.id = id;
             }
             return;
@@ -1170,7 +1199,7 @@ pub(crate) fn enrich_held(
     let siblings: BTreeSet<_> = build
         .sections
         .iter()
-        .map(|entry| (entry.key.page_match(), entry.locator.fragment()))
+        .map(Entry::card_route)
         .chain(std::iter::once((build.entry.page_match(), None)))
         .collect();
     let section = &mut build.sections[index];
@@ -1179,7 +1208,7 @@ pub(crate) fn enrich_held(
         !card::child_self(child, section) && {
             focus.as_ref() == Some(&child.id)
                 || child.sources.contains(&Source::Heading)
-                || !siblings.contains(&(child.key.page_match(), child.locator.fragment()))
+                || !siblings.contains(&child.card_route())
         }
     });
     section.children = opened_children;
@@ -1230,13 +1259,15 @@ pub(crate) fn with_results(
         .chain(hint.map(|link| (link, Source::EngineResult)))
     {
         if let Some(entry) = build.entry_for(&link.url, &link.title, source) {
-            if let Some(existing) = build.sections.iter_mut().find(|e| e.id == entry.id) {
+            if let Some(existing) = build.sections.iter_mut().find(|e| {
+                !e.menu_only && (e.id == entry.id || e.card_route() == entry.card_route())
+            }) {
                 existing.add_sources(entry.sources);
             } else if let Some(child) = build
                 .sections
                 .iter_mut()
                 .flat_map(|e| &mut e.children)
-                .find(|e| e.id == entry.id || (e.key == entry.key && e.locator == entry.locator))
+                .find(|e| e.id == entry.id || e.card_route() == entry.card_route())
             {
                 child.add_sources(entry.sources);
             } else {
@@ -1266,14 +1297,7 @@ pub(crate) fn read_site_for(
 ) -> Result<(Place, PlaceStats, Vec<SectionRead>), KeyError> {
     let key = PlaceKey::from_url(doc.page()).ok_or(KeyError::Url)?;
     let site = SiteKey::from_url(doc.page()).ok_or(KeyError::Url)?;
-    let title = [
-        doc.head().site_name.as_str(),
-        doc.head().title.as_str(),
-        site.as_str(),
-    ]
-    .into_iter()
-    .find(|s| !s.trim().is_empty())
-    .unwrap_or_default();
+    let title = title::site_title(doc.head(), &site);
     let mut place = Build {
         names: Default::default(),
         llms_headings: Default::default(),
@@ -1281,7 +1305,7 @@ pub(crate) fn read_site_for(
         requested,
         stats: PlaceStats::default(),
         place: Place {
-            title: clip(title, TITLE_BYTES),
+            title,
             site,
             entry: key.root(doc.page())?,
             key,
@@ -1380,8 +1404,12 @@ pub(crate) fn read_site_for(
         })
         .count();
     let eager = place.eager_reads();
-    let menus = (!place.notes.wall).then(|| menus::Menus::read(&place, doc));
+    let mut menus = (!place.notes.wall).then(|| menus::Menus::read(&place, doc));
+    let evidence = menus.as_mut().map(menus::Menus::take_evidence);
     place.finish_sections(Some(doc.page()), menus);
+    if let Some(evidence) = evidence {
+        evidence.measure(&place.place, &mut place.stats);
+    }
     place.check_ids()?;
     place.notes.truncated = place.stats.truncated() || place.sections.iter().any(|e| e.more > 0);
     Ok((place.place, place.stats, eager))
