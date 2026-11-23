@@ -111,20 +111,6 @@
         >{m.ntp_choose_image()}</Button
       >
     </SettingsRow>
-
-    <SettingsRow
-      settingId="ntp.image-original"
-      title={m.ntp_image_original()}
-      description={m.ntp_image_original_help()}
-    >
-      <Switch
-        label={m.ntp_image_original()}
-        labelHidden
-        checked={preferences.value("ui.newtab-image-original") === "true"}
-        disabled={busy}
-        onchange={(v) => set("ui.newtab-image-original", String(v))}
-      />
-    </SettingsRow>
     <SettingsRow settingId="ntp.dim" title={m.ntp_dim()} description={m.ntp_dim_help()}>
       <Switch
         label={m.ntp_dim()}

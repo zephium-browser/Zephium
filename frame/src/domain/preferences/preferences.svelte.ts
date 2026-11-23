@@ -22,7 +22,6 @@ const defaults = {
   "ui.newtab-tasks": "true",
   "ui.newtab-background": "sky",
   "ui.newtab-image": "",
-  "ui.newtab-image-original": "false",
   "ui.newtab-dim": "false",
   "ui.newtab-wordmark": "true",
   "ui.newtab-trackers": "true",

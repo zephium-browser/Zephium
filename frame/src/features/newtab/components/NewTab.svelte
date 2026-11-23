@@ -364,7 +364,6 @@
                 digest={picture.digest}
                 {width}
                 {height}
-                original={preferences.value("ui.newtab-image-original") === "true"}
                 dim={preferences.value("ui.newtab-dim") === "true"}
                 onfailure={() => {
                   imageFailed(selected.key);

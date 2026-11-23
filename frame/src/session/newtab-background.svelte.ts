@@ -8,8 +8,7 @@ export function newTabImage() {
   const digest = preferences.value("ui.newtab-image");
   const profile = tabs.profile()?.id;
   if (!profile || !/^[0-9a-f]{64}$/u.test(digest)) return null;
-  const original = preferences.value("ui.newtab-image-original") === "true";
-  const key = `${profile}/${digest}/${original}`;
+  const key = `${profile}/${digest}`;
   return failed === key ? null : { profile, digest, key };
 }
 export function imageFailed(key: string) {
