@@ -435,6 +435,7 @@ export function createSearchSurface(options: {
   let fulfilled = false;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let expiresAt = 0;
+  let profileId: string | null = null;
   /** The last answer to an empty field, shown again when the launcher resets
    *  so its home list is complete on the frame it appears. */
   let home: SearchResult[] = [];
@@ -442,13 +443,18 @@ export function createSearchSurface(options: {
   /** Binds the launcher to one presentation, resuming whatever it was left
    *  showing unless that has since expired. */
   function begin(next: PanelState) {
-    if (expiresAt && Date.now() >= expiresAt) toHome();
+    if (profileId !== null && next.profile_id !== profileId) {
+      home = [];
+      toHome();
+    } else if (expiresAt && Date.now() >= expiresAt) toHome();
+    profileId = next.profile_id;
     expiresAt = 0;
     clearTimeout(expiry);
     context = next;
     // Before the controller exists, so its first request is for the address
     // and not for an empty field that the seed immediately replaces.
     if (next.seed) seed(next.seed);
+    else seededQuery = "";
     if (listening) void initialize();
   }
 
@@ -467,7 +473,7 @@ export function createSearchSurface(options: {
     clearTimeout(noticeTimer);
     notice = null;
     clearTimeout(expiry);
-    if (fulfilled || !query) toHome();
+    if (fulfilled || !query || query === seededQuery) toHome();
     else {
       expiresAt = Date.now() + RESUME_MS;
       expiry = setTimeout(toHome, RESUME_MS);
