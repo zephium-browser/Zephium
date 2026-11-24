@@ -1614,3 +1614,46 @@ fn a_split_made_before_the_page_presents_cancels_its_glance() {
         .glance_layout(zephium_core::geometry::Rect::new(0.0, 0.0, 1000.0, 800.0))
         .is_none());
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_glance_split_is_refused_when_its_opener_cannot_be_shown_again() {
+    use zephium_ipc::{GlanceAction, OperationOutcome, OperationReason};
+    let (mut shell, engine, screen) = setup();
+    let (source, child) = glance_over_source(&mut shell, &screen);
+    let effects = shell.items.hibernate(source);
+    let _ = shell.apply(effects);
+    assert!(!shell.items.tab(source).unwrap().has_view());
+    engine
+        .reject_create_dispatch
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let split = shell.handle_operation(Command::Glance(GlanceAction::Split));
+
+    assert_eq!(split.outcome, OperationOutcome::NativeAdmissionFailed);
+    assert_eq!(split.reason, OperationReason::NativeDispatchRejected);
+    let focused = shell.windows.focused().unwrap();
+    assert!(focused.splits.is_none());
+    assert!(focused.glance.is_none());
+    assert!(shell.items.tab(child).is_some());
+    assert!(!shell.items.tab(source).unwrap().has_view());
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn a_glance_split_waits_on_its_opener_being_shown_again() {
+    use zephium_ipc::{GlanceAction, OperationOutcome, OperationReason};
+    let (mut shell, _, screen) = setup();
+    let (source, child) = glance_over_source(&mut shell, &screen);
+    let effects = shell.items.hibernate(source);
+    let _ = shell.apply(effects);
+
+    let split = shell.handle_operation(Command::Glance(GlanceAction::Split));
+
+    assert_eq!(split.outcome, OperationOutcome::Deferred);
+    assert_eq!(split.reason, OperationReason::NativeWorkPending);
+    let focused = shell.windows.focused().unwrap();
+    let tabs = focused.splits.as_ref().unwrap().tabs();
+    assert!(tabs.contains(&source) && tabs.contains(&child));
+    assert!(shell.items.tab(source).unwrap().has_view());
+}
