@@ -102,6 +102,7 @@ test("restarting while a previous start is still subscribing releases the stale 
   expect(native.status).toHaveBeenCalledOnce();
 
   staleModelsListener?.();
+  await Promise.resolve();
   expect(native.status).toHaveBeenCalledOnce();
 
   settings.dispose();
