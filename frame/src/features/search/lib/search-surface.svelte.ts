@@ -435,7 +435,7 @@ export function createSearchSurface(options: {
   let fulfilled = false;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let expiresAt = 0;
-  let profileId: string | null = null;
+  let profileId: string | null | undefined;
   /** The last answer to an empty field, shown again when the launcher resets
    *  so its home list is complete on the frame it appears. */
   let home: SearchResult[] = [];
@@ -443,7 +443,7 @@ export function createSearchSurface(options: {
   /** Binds the launcher to one presentation, resuming whatever it was left
    *  showing unless that has since expired. */
   function begin(next: PanelState) {
-    if (profileId !== null && next.profile_id !== profileId) {
+    if (profileId !== undefined && next.profile_id !== profileId) {
       home = [];
       toHome();
     } else if (expiresAt && Date.now() >= expiresAt) toHome();

@@ -609,14 +609,36 @@ test("switching profiles clears any resumed query and home list from the previou
   await screen.getByRole("combobox").fill("private query");
   await reply("private query", [search("private query")]);
   await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000003",
+      session_id: "0000000000000003",
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+
+  await screen.getByRole("combobox").fill("unowned query");
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000004",
+      visible: false,
+    },
+  });
   const calls = native.search.mock.calls.length;
   await screen.rerender({
     context: {
       ...context,
       profile_id: "work",
       profile_name: "Work",
-      revision: "0000000000000003",
-      session_id: "0000000000000003",
+      revision: "0000000000000005",
+      session_id: "0000000000000005",
     },
   });
   await expect.element(screen.getByRole("combobox")).toHaveValue("");
