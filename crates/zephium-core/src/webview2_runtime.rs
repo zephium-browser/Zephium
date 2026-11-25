@@ -68,8 +68,6 @@ pub struct RuntimeGeneration {
     generation: String,
     kind: RuntimeGenerationKind,
     report: GenerationReport,
-    // Deny all sharing modes so concurrent prepares cannot classify or remove
-    // the same runtime root.
     _lease: File,
 }
 

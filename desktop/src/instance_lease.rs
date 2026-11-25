@@ -54,7 +54,7 @@ impl FileLease {
 
 #[cfg(unix)]
 fn is_contended(error: &io::Error) -> bool {
-    error.raw_os_error() == Some(libc::EWOULDBLOCK)
+    error.kind() == io::ErrorKind::WouldBlock
 }
 
 #[cfg(windows)]
@@ -84,35 +84,23 @@ fn open(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-#[cfg(unix)]
 fn lock(file: &File) -> io::Result<bool> {
-    use std::os::fd::AsRawFd;
-    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if result == 0 {
-        Ok(true)
-    } else {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(false)
-        } else {
-            Err(error)
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            let error = io::Error::from(error);
+            if error.kind() == io::ErrorKind::WouldBlock {
+                Ok(false)
+            } else {
+                Err(error)
+            }
         }
     }
 }
 
-#[cfg(windows)]
-fn lock(_file: &File) -> io::Result<bool> {
-    Ok(true)
-}
-
-#[cfg(unix)]
 fn unlock(file: &File) {
-    use std::os::fd::AsRawFd;
-    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    let _ = file.unlock();
 }
-
-#[cfg(windows)]
-fn unlock(_file: &File) {}
 
 #[cfg(test)]
 mod tests {

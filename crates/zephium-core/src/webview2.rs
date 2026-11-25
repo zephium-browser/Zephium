@@ -464,8 +464,6 @@ fn acquire_lifecycle_lock<T>(
             Err(error) => error,
         };
         let remaining = timeout.saturating_sub(elapsed());
-        // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process may
-        // still hold the same runtime root during shutdown.
         if !matches!(error.raw_os_error(), Some(32 | 33)) || remaining.is_zero() {
             return Err(io::Error::new(
                 error.kind(),
