@@ -2,10 +2,10 @@
 
 ## What changes for the user
 
-`open -na` can launch up to 16 Zephium processes. Overlapping starts no longer trigger false recovery prompts. If the instance holding the global launcher shortcut exits, another open instance can take ownership. Windows cleanup reclaims stale per-process WebView2 data after an unclean exit when browser processes are proven gone.
+`open -na` can keep up to 16 Zephium processes running against the default profile and data directory. Concurrent starts no longer trigger false recovery prompts. On macOS and Windows, a surviving instance takes over the global launcher shortcut when its owner exits. Windows cleanup reclaims stale WebView2 data after recorded browser processes exit, terminating orphans when possible.
 
 ## How I checked it
 
-- Startup recovery tests and 5 shortcut ownership tests. The desktop suite passed 439 tests with 2 ignored.
-- Mac development build and 16 distinct `open -na` process launches.
+- `cargo test -p zephium-desktop --lib`: 439 passed, 2 ignored, including recovery and lease tests.
+- Mac development build and 16 `open -na` processes running concurrently.
 - Windows runtime tests compile but still need a native Windows run.
