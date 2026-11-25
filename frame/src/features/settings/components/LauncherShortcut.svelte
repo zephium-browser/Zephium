@@ -140,7 +140,7 @@
   // Permission is granted in System Settings, which tells nobody; look
   // again while this page is waiting for it, and only then.
   $effect(() => {
-    if (!waiting && trigger?.ownership_available !== false) return;
+    if (!waiting && trigger?.ownership_available !== false && trigger?.registered) return;
     const poll = setInterval(() => {
       if (document.visibilityState === "visible") void refresh();
     }, 1500);

@@ -82,6 +82,18 @@ test("refreshes the recorder when this instance takes shortcut ownership", async
   expect(native.state).toHaveBeenCalledTimes(2);
 });
 
+test("keeps refreshing until the owned shortcut is registered", async () => {
+  native.state
+    .mockResolvedValueOnce({ ...trigger("CmdOrCtrl+Shift+Space"), registered: false })
+    .mockResolvedValue({ ...trigger("CmdOrCtrl+Shift+Space"), registered: true });
+  const screen = await render(LauncherShortcut);
+  await expect
+    .element(screen.getByText("Not active: another app may be using it. Record a different one."))
+    .toBeVisible();
+  await vi.waitFor(() => expect(native.state).toHaveBeenCalledTimes(2), { timeout: 2500 });
+  await expect.element(screen.getByText("Works from any app.")).toBeVisible();
+});
+
 test("closing settings during a save releases the launcher even if the shortcut is refused", async () => {
   const original = trigger("CmdOrCtrl+Shift+Space");
   native.state.mockResolvedValue(original);

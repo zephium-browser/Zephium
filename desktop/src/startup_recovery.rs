@@ -472,6 +472,13 @@ pub(crate) fn marker_recovery_available(data_dir: &Path, error: &io::Error) -> b
 /// Call only after the person explicitly chose preserved-session recovery.
 /// Keeps exact bounded damaged bytes without replacing any earlier evidence.
 pub(crate) fn recover_marker_after_choice(data_dir: &Path) -> io::Result<StartupAttempt> {
+    recover_marker_after_choice_with(data_dir, Root::replace_record)
+}
+
+fn recover_marker_after_choice_with(
+    data_dir: &Path,
+    publish_record: impl FnOnce(&Root, Record) -> io::Result<()>,
+) -> io::Result<StartupAttempt> {
     let root = Arc::new(Root::open(data_dir)?);
     let _lock = root.lock()?;
     let bytes = root
@@ -485,8 +492,8 @@ pub(crate) fn recover_marker_after_choice(data_dir: &Path) -> io::Result<Startup
     let wave = fresh_wave()?;
     root.retire_active_waves()?;
     let current = fresh_record(1, wave, 1)?;
-    root.replace_record(current)?;
     let active = Arc::new(root.create_active(wave, current.nonce)?);
+    publish_record(&root, current)?;
     Ok(StartupAttempt {
         root,
         generation: current.generation,
@@ -706,10 +713,10 @@ fn publish(staged: &tempfile::NamedTempFile, destination: &Path, replace: bool) 
 #[cfg(windows)]
 fn publish(staged: &tempfile::NamedTempFile, destination: &Path, replace: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
     use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
     let source: Vec<_> = staged.path().as_os_str().encode_wide().chain([0]).collect();
     let destination: Vec<_> = destination.as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: both buffers are owned, NUL-terminated paths for this call.
@@ -1008,6 +1015,34 @@ mod tests {
     }
 
     #[test]
+    fn failed_marker_repair_keeps_recovery_available() {
+        let root = tempdir();
+        let _previous = begin(root.path()).unwrap();
+        let damaged_bytes = b"damaged startup marker";
+        fs::write(root.path().join(MARKER), damaged_bytes).unwrap();
+        let error = begin(root.path()).err().unwrap();
+        let result = recover_marker_after_choice_with(root.path(), |_, _| {
+            Err(io::Error::other("injected marker publication failure"))
+        });
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "injected marker publication failure"
+        );
+        assert_eq!(fs::read(root.path().join(MARKER)).unwrap(), damaged_bytes);
+        assert!(
+            fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".startup-recovery-preserved-")
+                    && fs::read(entry.path()).is_ok_and(|bytes| bytes == damaged_bytes))
+        );
+        assert!(marker_recovery_available(root.path(), &error));
+    }
+
+    #[test]
     fn damage_recovery_has_an_exact_byte_bound_and_preserves_existing_evidence() {
         let root = tempdir();
         let attempt = begin(root.path()).unwrap();
@@ -1084,7 +1119,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn linked_marker_lock_and_root_are_refused_without_touching_targets() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::fs::{symlink, PermissionsExt};
         let root = tempdir();
         let target = root.path().join("target");
         fs::write(&target, []).unwrap();

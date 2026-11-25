@@ -61,19 +61,30 @@ impl FileLease {
     }
 
     pub(crate) fn acquire(path: &Path) -> io::Result<Self> {
+        Self::acquire_with_timeout(path, std::time::Duration::from_secs(10))
+    }
+
+    fn acquire_with_timeout(path: &Path, timeout: std::time::Duration) -> io::Result<Self> {
+        let started = std::time::Instant::now();
         loop {
             let file = match open(path) {
-                Ok(file) => file,
-                Err(error) if is_contended(&error) => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                }
+                Ok(file) => Some(file),
+                Err(error) if is_contended(&error) => None,
                 Err(error) => return Err(error),
             };
-            if lock(&file)? {
-                return Ok(Self { file });
+            if let Some(file) = file {
+                if lock(&file)? {
+                    return Ok(Self { file });
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "timed out waiting for the startup admission lock",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20).min(timeout - elapsed));
         }
     }
 }
@@ -130,8 +141,9 @@ fn unlock(file: &File) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileLease, GlobalShortcutOwner, shortcut_coordination_dir};
+    use super::{shortcut_coordination_dir, FileLease, GlobalShortcutOwner};
     use std::io::BufRead;
+    use std::time::Duration;
 
     #[test]
     fn exclusive_owner_is_unique_and_released_on_drop() {
@@ -142,6 +154,17 @@ mod tests {
         assert!(FileLease::try_acquire(&path).unwrap().is_none());
         drop(owner);
         assert!(FileLease::try_acquire(&path).unwrap().is_some());
+    }
+
+    #[test]
+    fn startup_admission_wait_has_a_deadline() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("startup.lock");
+        let owner = FileLease::try_acquire(&path).unwrap().unwrap();
+        let result = FileLease::acquire_with_timeout(&path, Duration::from_millis(40));
+        assert!(matches!(result, Err(error) if error.kind() == std::io::ErrorKind::TimedOut));
+        drop(owner);
+        assert!(FileLease::acquire_with_timeout(&path, Duration::from_millis(40)).is_ok());
     }
 
     #[test]
