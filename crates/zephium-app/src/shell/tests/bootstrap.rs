@@ -150,6 +150,143 @@ fn startup_profile_reports_store_flush_failure() {
 }
 
 #[test]
+fn startup_profile_creation_rolls_back_when_blocker_profile_initialization_fails() {
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (mut shell, _, _, _) = setup_with_operation_log_and_failure(
+        Arc::new(FakeStore::default()),
+        Box::new({
+            let failures = failures.clone();
+            move |failure| failures.lock().unwrap().push(failure)
+        }),
+    );
+    for index in 0..zephium_core::session::MAX_SESSION_PROFILES - 1 {
+        assert!(shell
+            .blocker
+            .initialize_new_profile(ProfileId::from(index as u128 + 10_000)));
+    }
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+
+    shell.handle(Command::Bootstrap);
+
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert_eq!(shell.profiles.iter().count(), 1);
+    assert!(!shell.profiles.iter().any(|profile| profile.name == "Work"));
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+    shell.handle(Command::Bootstrap);
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+}
+
+#[test]
+fn startup_profile_creation_rolls_back_when_no_space_id_can_be_inserted() {
+    let store = Arc::new(FakeStore::default());
+    let profile = ProfileId::from(10_000);
+    let spaces: Vec<_> = (0..zephium_core::session::MAX_SESSION_SPACES)
+        .map(|index| PersistedSpace {
+            id: SpaceId::from(index as u128 + 20_000),
+            profile,
+            name: "Space".into(),
+            look: Default::default(),
+        })
+        .collect();
+    *store.saved.lock().unwrap() = Some(zephium_core::session::SessionState {
+        active_space: Some(spaces[0].id),
+        profiles: vec![PersistedProfile {
+            id: profile,
+            name: "Personal".into(),
+            kind: ProfileKind::Default,
+        }],
+        spaces,
+        ..Default::default()
+    });
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (mut shell, _, _, _) = setup_with_operation_log_and_failure(
+        store,
+        Box::new({
+            let failures = failures.clone();
+            move |failure| failures.lock().unwrap().push(failure)
+        }),
+    );
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+
+    shell.handle(Command::Bootstrap);
+
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert_eq!(shell.profiles.iter().count(), 1);
+    assert!(!shell
+        .profiles
+        .iter()
+        .any(|candidate| candidate.name == "Work"));
+    assert_eq!(shell.blocker.profiles.len(), 1);
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+}
+
+#[test]
+fn startup_profile_fails_if_default_space_cannot_be_created_first() {
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (mut shell, _, _, _) = setup_with_operation_log_and_failure(
+        Arc::new(FakeStore::default()),
+        Box::new({
+            let failures = failures.clone();
+            move |failure| failures.lock().unwrap().push(failure)
+        }),
+    );
+    let owner = ProfileId::from(10_000);
+    for index in 0..zephium_core::session::MAX_SESSION_SPACES {
+        assert!(shell.spaces.insert(Space {
+            id: SpaceId::from(index as u128 + 30_000),
+            profile: owner,
+            name: "Full".into(),
+            look: Default::default(),
+        }));
+    }
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+
+    shell.handle(Command::Bootstrap);
+
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert_eq!(shell.profiles.iter().count(), 0);
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+}
+
+#[test]
+fn startup_profile_selection_command_is_ignored_after_bootstrap() {
+    let (mut shell, _, _) = setup();
+    shell.handle(Command::Bootstrap);
+    let focused_profile = shell.windows.focused().unwrap().profile;
+
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+
+    assert_eq!(shell.windows.focused().unwrap().profile, focused_profile);
+    assert_eq!(shell.startup_profile, None);
+    assert_eq!(shell.profiles.iter().count(), 1);
+}
+
+#[test]
+fn open_profile_by_name_before_bootstrap_becomes_startup_selection() {
+    let (mut shell, _, _) = setup();
+
+    let result = shell.operation_open_profile_by_name("Work");
+
+    assert_eq!(result.outcome, OperationOutcome::Applied);
+    assert_eq!(shell.startup_profile.as_deref(), Some("Work"));
+}
+
+#[test]
 fn startup_profile_creation_failure_stops_instead_of_opening_a_fallback_profile() {
     let store = Arc::new(FakeStore::default());
     let profiles: Vec<_> = (0..zephium_core::session::MAX_SESSION_PROFILES)

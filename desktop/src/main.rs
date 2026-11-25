@@ -200,4 +200,19 @@ mod profile_argument_tests {
             "--profile must be valid UTF-8"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_argument_rejects_non_utf8_separate_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let arguments = [
+            std::ffi::OsString::from("--profile"),
+            std::ffi::OsString::from_vec(b"Work\xff".to_vec()),
+        ];
+        assert_eq!(
+            profile_argument(arguments).unwrap_err(),
+            "--profile must be valid UTF-8"
+        );
+    }
 }

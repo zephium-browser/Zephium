@@ -8023,14 +8023,11 @@ fn finish_browser_setup(
         );
         return Err(error.into());
     }
-    if let Some(profile) = app
-        .try_state::<LaunchProfile>()
-        .and_then(|profile| profile.0.clone())
-    {
-        if !shell.dispatch(Command::SelectStartupProfile(profile)) {
-            return Err(std::io::Error::other("shell refused startup profile selection").into());
-        }
-    }
+    select_startup_profile(
+        app.try_state::<LaunchProfile>()
+            .and_then(|profile| profile.0.clone()),
+        |profile| shell.dispatch(Command::SelectStartupProfile(profile)),
+    )?;
     #[cfg(feature = "work-product")]
     let public_routes = {
         let routes =
@@ -8546,6 +8543,20 @@ fn finish_browser_setup(
     Ok(())
 }
 
+fn select_startup_profile(
+    profile: Option<String>,
+    dispatch: impl FnOnce(String) -> bool,
+) -> Result<(), std::io::Error> {
+    if let Some(profile) = profile {
+        if !dispatch(profile) {
+            return Err(std::io::Error::other(
+                "shell refused startup profile selection",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     run_with_profile(None);
@@ -8960,6 +8971,36 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_profile_selection_dispatches_and_reports_refusal() {
+        use super::select_startup_profile;
+
+        let mut dispatched = None;
+        select_startup_profile(Some("Work".into()), |command| {
+            dispatched = Some(command);
+            true
+        })
+        .unwrap();
+        assert_eq!(dispatched.as_deref(), Some("Work"));
+
+        let error = select_startup_profile(Some("Work".into()), |_| false).unwrap_err();
+        assert_eq!(error.to_string(), "shell refused startup profile selection");
+    }
+
+    #[test]
+    fn startup_profile_selection_without_a_flag_does_not_dispatch() {
+        use super::select_startup_profile;
+        use std::cell::Cell;
+
+        let dispatched = Cell::new(false);
+        select_startup_profile(None, |_| {
+            dispatched.set(true);
+            false
+        })
+        .unwrap();
+        assert!(!dispatched.get());
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")
