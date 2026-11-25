@@ -1,6 +1,6 @@
-//! Profile-scoped bookmark reads and writes for the Bookmarks panel, and
-//! bookmarking the page in front. Every call runs on the store-read worker;
-//! the shell only admits, routes and decorates with icons.
+//! Bookmark reads and writes for the Bookmarks panel, authorized against the
+//! focused profile. Every call runs on the store-read worker; the shell only
+//! admits, routes and decorates with icons.
 
 use super::*;
 

@@ -1853,6 +1853,27 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 30,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE bookmarks (
+                     id INTEGER PRIMARY KEY,
+                     parent_id INTEGER REFERENCES bookmarks(id) ON DELETE CASCADE,
+                     position INTEGER NOT NULL,
+                     title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 512),
+                     url TEXT CHECK (url IS NULL OR length(CAST(url AS BLOB)) <= 8192),
+                     added_at INTEGER NOT NULL
+                 ) STRICT;
+                 CREATE INDEX idx_bookmarks_parent ON bookmarks(parent_id, position);
+                 CREATE INDEX idx_bookmarks_url ON bookmarks(url) WHERE url IS NOT NULL;
+                 CREATE TABLE bookmark_profile_migrations (
+                     profile_id TEXT PRIMARY KEY
+                         CHECK (length(CAST(profile_id AS BLOB)) = 26)
+                 ) STRICT, WITHOUT ROWID;",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {

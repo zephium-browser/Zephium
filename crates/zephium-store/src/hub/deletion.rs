@@ -59,6 +59,7 @@ impl Hub {
                 ));
             }
             self.validate_session_transition(&prepared.registry)?;
+            self.prepare_shared_bookmarks()?;
             // Only the live, validated deletion request may establish this
             // protected cleanup intent. Imported AppData tombstones alone
             // cannot authorize deleting bodies from the private Work journal.

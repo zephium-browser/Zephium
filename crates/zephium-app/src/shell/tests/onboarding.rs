@@ -476,7 +476,7 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
         matches!(store.bookmarks(destination.profile, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if !nodes.is_empty())
     );
     assert!(
-        matches!(store.bookmarks(other, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if nodes.is_empty())
+        matches!(store.bookmarks(other, BookmarkRequest::All), BookmarkReply::Nodes(nodes) if !nodes.is_empty())
     );
     assert_eq!(
         store

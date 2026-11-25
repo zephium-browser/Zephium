@@ -2445,7 +2445,7 @@ impl Hub {
     /// losing what it held. The preserved bytes go to a file beside the
     /// databases, and the session restarts from the profile registry with no
     /// tabs, each profile named as the old snapshot still names it, so every
-    /// profile keeps its history, bookmarks and settings. A store left in
+    /// profile keeps its history and settings. A store left in
     /// recovery could otherwise never open again.
     pub(crate) fn set_aside_recovery(&mut self) -> rusqlite::Result<Option<PathBuf>> {
         let Some(reason) = self.recovery_required.clone() else {
