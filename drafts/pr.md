@@ -1,4 +1,4 @@
-# Allow multiple browser instances
+# Feat: Run multiple Zephium instances
 
 ## What changes for the user
 
