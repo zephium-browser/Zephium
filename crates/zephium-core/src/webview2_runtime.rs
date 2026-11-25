@@ -37,6 +37,7 @@ const MAX_RECORD_BYTES: u64 = 512;
 // restarting Windows, after which valid marked generations become reclaimable.
 const MAX_SAME_BOOT_GENERATIONS: usize = 32;
 const MAX_TOTAL_GENERATIONS: usize = 128;
+const MAX_SCANNED_PID_ROOTS: usize = 4096;
 const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SCANNED_ENTRIES: usize = 250_000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -980,7 +981,14 @@ fn maintain_sibling_roots(
         Ok(entries) => entries,
         Err(_) => return Some("other per-process runtime roots could not be inspected".into()),
     };
-    for entry in entries {
+    let mut candidates = Vec::new();
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_SCANNED_PID_ROOTS {
+            overdue.get_or_insert_with(|| {
+                "more per-process runtime directories exist than one launch inspects".into()
+            });
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => {
@@ -990,21 +998,18 @@ fn maintain_sibling_roots(
                 continue;
             }
         };
+        candidates.push(entry);
+    }
+    candidates.sort_by_key(|entry| entry.file_name());
+    for entry in candidates {
         let name = entry.file_name();
         if name == current_name
             || !name
                 .to_string_lossy()
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
+                .parse::<u32>()
+                .is_ok_and(|pid| pid != 0)
         {
             continue;
-        }
-        inspected += 1;
-        if inspected > MAX_TOTAL_GENERATIONS {
-            overdue.get_or_insert_with(|| {
-                "more per-process runtime roots exist than one launch inspects".into()
-            });
-            break;
         }
         let root = match direct_directory(&entry.path()) {
             Ok(root) if root.parent() == Some(parent.as_path()) => root,
@@ -1012,6 +1017,13 @@ fn maintain_sibling_roots(
         };
         if !has_owned_generation(&root, kind) {
             continue;
+        }
+        inspected += 1;
+        if inspected > MAX_TOTAL_GENERATIONS {
+            overdue.get_or_insert_with(|| {
+                "more owned per-process runtime roots exist than one launch inspects".into()
+            });
+            break;
         }
         let lease_path = root.join(LEASE_FILE);
         let before = match fs::symlink_metadata(&lease_path) {
@@ -1724,6 +1736,40 @@ mod tests {
             fs::read(unrelated_generation.join("owned-data")).unwrap(),
             b"preserve"
         );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn empty_pid_roots_do_not_hide_later_orphans_or_raise_overdue() {
+        let temp = tempfile::tempdir().unwrap();
+        for pid in 1000..(1000 + MAX_TOTAL_GENERATIONS as u32 + 1) {
+            let root = temp.path().join(pid.to_string());
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join(LEASE_FILE), b"").unwrap();
+        }
+        let stale = RuntimeGeneration::prepare(
+            &temp.path().join("999999"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("2000000"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        assert!(current.report().overdue.is_none());
         current
             .cleanup_ticket()
             .cleanup_after_proven_exit()
