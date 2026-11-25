@@ -2,9 +2,9 @@
 
 ## What changes for the user
 
-`--profile <name>` starts Zephium with that profile, creating it on first use. The override applies only to this launch and does not change the saved default. If the requested profile cannot be created or opened, startup reports the failure and exits instead of opening another profile.
+Pass `--profile <name>` to open an existing profile or create it on first use without changing the saved default. Without the flag, Zephium restores the active profile or falls back to the saved default. Unlike [Orion, which keeps each profile in a separate browser with its own Dock icon](https://orionbrowser.com/platforms/macos), Zephium keeps profiles in one app. If it can't create or open the requested profile, Zephium reports the error and exits.
 
-## How I checked it
+## How it was checked
 
-- Existing and first-use selection, invalid arguments, and saved-default preservation tests.
-- `cargo test -p zephium-desktop startup_alert::tests --locked` (10 passed).
+- `cargo test -p zephium-desktop profile_argument_tests --locked`: 2 tests passed for `--profile NAME`, `--profile=NAME`, and invalid or duplicate arguments.
+- `cargo test -p zephium-desktop startup_alert::tests --locked`: 10 startup alert tests passed, including the unavailable-profile message.
