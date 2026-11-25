@@ -32,6 +32,21 @@ beforeEach(() => {
 });
 
 describe("bookmarks session", () => {
+  it("keeps a queued refresh after a failed read", async () => {
+    const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
+    const session = new BookmarksSession("profile");
+    let finish!: (value: BookmarkResponse) => void;
+    native.call
+      .mockReturnValueOnce(new Promise((resolve) => (finish = resolve)))
+      .mockResolvedValueOnce(listing(null, [view("new", "New bookmark")]));
+    const read = session.open(null);
+    session.storeChanged();
+    finish({ kind: "error", error: "unavailable" });
+    await read;
+    expect(native.call).toHaveBeenCalledTimes(2);
+    expect(session.items.map((item) => item.id)).toEqual(["new"]);
+  });
+
   it("preserves a navigation error instead of refreshing the previous folder", async () => {
     const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
     const session = new BookmarksSession("profile");
@@ -42,10 +57,12 @@ describe("bookmarks session", () => {
     const navigation = session.open("B");
     native.call.mockResolvedValueOnce({ kind: "saved", id: "1" });
     await session.rename("1", "Renamed");
+    native.call.mockResolvedValueOnce({ kind: "error", error: "unavailable" });
     destination({ kind: "error", error: "unavailable" });
     await navigation;
     expect(session.error).toBe("unavailable");
-    expect(native.call).toHaveBeenCalledTimes(3);
+    expect(native.call).toHaveBeenCalledTimes(4);
+    expect(native.call).toHaveBeenLastCalledWith("profile", { kind: "list", folder: "B" });
   });
 
   it("refreshes the destination after a write settles during folder navigation", async () => {

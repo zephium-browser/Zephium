@@ -1038,6 +1038,7 @@ mod tests {
             active_item: Some(ItemId::from(10)),
             splits: Some(Pane::leaf(ItemId::from(10))),
             recently_closed: Vec::new(),
+            shared_bookmark_folders: Vec::new(),
         };
         let restored = restore(state);
         assert!(restored.spaces.is_empty());
@@ -1126,6 +1127,7 @@ mod tests {
                 b: Box::new(Pane::Leaf(kept)),
             }),
             recently_closed: Vec::new(),
+            shared_bookmark_folders: Vec::new(),
         };
 
         let clean = canonicalize(state);

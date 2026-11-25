@@ -152,7 +152,11 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
         if let Some(folder) = bookmark_folder {
-            let Some(current) = self.windows.focused().map(|window| window.profile) else {
+            let Some(current) = self
+                .profiles_view()
+                .and_then(|view| view.current)
+                .and_then(|profile| ProfileId::parse(&profile))
+            else {
                 return operation_result(
                     OperationOutcome::Rejected,
                     OperationReason::NoFocusedWindow,
