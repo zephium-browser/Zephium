@@ -1,3 +1,3 @@
 # Feat: Bookmarks are not shared between profiles in the same data directory
 
-Heyyy, thanks for the amazing project! Could bookmarks be shared between profiles using the same data directory, while history, cookies, and other website data remain profile-specific?
+Heyyy, thanks for the amazing project! Bookmarks saved in one profile are not available in another profile using the same data directory. Could they be shared while history, cookies, and other website data remain profile-specific?
