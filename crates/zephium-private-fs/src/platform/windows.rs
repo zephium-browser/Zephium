@@ -11,7 +11,7 @@ mod tests;
 
 use std::fs::{File, Metadata};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Component, Path, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 use windows::Win32::Foundation::{GetLastError, ERROR_LOCK_VIOLATION};
 use windows::Win32::Storage::FileSystem::{
     FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, LockFileEx,
@@ -482,6 +482,45 @@ pub(crate) fn create_private_root(path: &Path) -> Result<bool, PrivateFsError> {
         .and_then(|name| name.to_str())
         .ok_or(PrivateFsError::Unsafe)?;
     create_directory(&directory, parent, name)
+}
+
+#[allow(missing_docs)]
+pub fn prepare_user_data_root(path: &Path) -> Result<PathBuf, PrivateFsError> {
+    if !path.is_absolute() {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => return Err(PrivateFsError::Unsafe),
+        },
+        _ => return Err(PrivateFsError::Unsafe),
+    };
+    if components.next() != Some(Component::RootDir) {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let names = components
+        .map(|component| match component {
+            Component::Normal(name) => name.to_str().ok_or(PrivateFsError::Unsafe),
+            _ => Err(PrivateFsError::Unsafe),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if names.is_empty() {
+        return Err(PrivateFsError::Unsafe);
+    }
+    let mut current = PathBuf::from(format!("{}:\\", char::from(drive)));
+    for (index, name) in names.iter().enumerate() {
+        let parent = absolute_directory(&current, false)?;
+        create_directory(&parent, &current, name)?;
+        current.push(name);
+        if index + 1 == names.len() {
+            open_directory_with_mode(&current, DirectoryMode::Writable)?;
+        } else {
+            absolute_directory(&current, false)?;
+        }
+    }
+    current.canonicalize().map_err(|_| PrivateFsError::Unsafe)
 }
 pub(crate) fn same_open_identity(file: &File, expected: RawIdentity) -> bool {
     // Deletion settlement can inspect the original held, now unlinked regular

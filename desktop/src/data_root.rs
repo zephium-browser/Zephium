@@ -85,15 +85,17 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
             "user data directory contains relative traversal components",
         ));
     }
-    #[cfg(unix)]
-    let existing = std::fs::symlink_metadata(&path).ok();
-    std::fs::create_dir_all(&path)?;
     #[cfg(target_os = "windows")]
     {
+        let path =
+            zephium_private_fs::prepare_user_data_root(&path).map_err(std::io::Error::other)?;
         zephium_core::webview2::resolve_data_root(&path)
     }
     #[cfg(not(target_os = "windows"))]
     {
+        #[cfg(unix)]
+        let existing = std::fs::symlink_metadata(&path).ok();
+        std::fs::create_dir_all(&path)?;
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(std::io::Error::new(

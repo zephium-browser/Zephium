@@ -27,6 +27,8 @@ pub use windows::native_storage::{
     NativeWorkStorageAnchor, NativeWorkStorageFile,
 };
 #[cfg(target_os = "windows")]
+pub use windows::prepare_user_data_root;
+#[cfg(target_os = "windows")]
 pub(crate) use windows::*;
 
 #[cfg(not(any(unix, target_os = "windows")))]

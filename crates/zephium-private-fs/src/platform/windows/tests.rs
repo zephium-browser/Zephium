@@ -680,4 +680,16 @@ mod validation {
         std::fs::remove_dir(&alias).unwrap();
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"outside unchanged");
     }
+
+    #[test]
+    fn custom_data_root_creation_is_private_and_existing_root_is_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("outer").join("inner");
+        let resolved = prepare_user_data_root(&root).unwrap();
+        assert_eq!(resolved, root.canonicalize().unwrap());
+        let (directory, _) = open_directory(&resolved).unwrap();
+        let before = security::snapshot(&directory).unwrap();
+        assert_eq!(prepare_user_data_root(&resolved).unwrap(), resolved);
+        assert_eq!(security::snapshot(&directory).unwrap(), before);
+    }
 }

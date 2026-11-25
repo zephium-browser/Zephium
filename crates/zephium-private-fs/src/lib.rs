@@ -51,8 +51,8 @@ pub use namespace::{
 pub use platform::NativeWorkStorageTestSession;
 #[cfg(target_os = "windows")]
 pub use platform::{
-    NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
-    NativeWorkStorageAnchor, NativeWorkStorageFile,
+    prepare_user_data_root, NativeApplication, NativeSession, NativeStorageAnchor,
+    NativeStorageFile, NativeWorkStorageAnchor, NativeWorkStorageFile,
 };
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
 pub use transition::PrivateFsTransitionError;
