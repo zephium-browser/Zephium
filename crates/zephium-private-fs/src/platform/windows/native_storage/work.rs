@@ -36,24 +36,6 @@ impl NativeWorkStorageAnchor {
         })
     }
 
-    #[allow(missing_docs)]
-    pub fn prepare_in_data_root(
-        root: &Path,
-        application: NativeApplication,
-        session: Option<&NativeSession>,
-    ) -> Result<Self, PrivateFsError> {
-        validate_routing(application, session)?;
-        admit_namespace_support()?;
-        let metadata = std::fs::symlink_metadata(root).map_err(|_| PrivateFsError::Unsafe)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(PrivateFsError::Unsafe);
-        }
-        let root = root.canonicalize().map_err(|_| PrivateFsError::Unsafe)?;
-        Ok(Self {
-            inner: NativeStorageAnchor::prepare_under_impl(&root, application, session)?,
-        })
-    }
-
     /// Disposable validation root; absent from shipping and optimized graphs.
     #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
     #[doc(hidden)]

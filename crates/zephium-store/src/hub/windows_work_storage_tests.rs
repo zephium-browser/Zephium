@@ -27,14 +27,6 @@ fn application_selection_is_closed_and_sessions_do_not_alias_product() {
 }
 
 #[test]
-fn custom_data_root_is_selected_for_protected_work_storage() {
-    let root = tempfile::tempdir().unwrap();
-    let selector =
-        WindowsWorkStorage::for_application_in_data_root("app.zephium", None, root.path()).unwrap();
-    assert_eq!(selector.data_root.as_deref(), Some(root.path()));
-}
-
-#[test]
 fn installation_is_lazy_and_legacy_purge_has_no_protected_side_effect() {
     let ordinary = tempfile::tempdir().unwrap();
     let selector = WindowsWorkStorage::for_application("app.zephium", None).unwrap();

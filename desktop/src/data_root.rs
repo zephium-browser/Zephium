@@ -103,17 +103,7 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    if path.components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::CurDir | std::path::Component::ParentDir
-        )
-    }) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "user data directory contains relative traversal components",
-        ));
-    }
+    let path = normalize_absolute_path(&path);
     #[cfg(target_os = "windows")]
     {
         let path =
@@ -123,12 +113,7 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
         #[cfg(unix)]
-        validate_unix_ancestors(&path)?;
-        #[cfg(unix)]
-        {
-            prepare_unix_root(&path)?;
-            validate_unix_ancestors(&path)?;
-        }
+        let canonical = prepare_unix_root(&path)?;
         #[cfg(not(unix))]
         {
             std::fs::create_dir_all(&path)?;
@@ -140,55 +125,130 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
                 ));
             }
         }
+        #[cfg(not(unix))]
         let canonical = path.canonicalize()?;
-        #[cfg(unix)]
-        validate_unix_ancestors(&canonical)?;
         zephium_core::webview2::resolve_data_root(&canonical)
     }
 }
 
-#[cfg(unix)]
-fn prepare_unix_root(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => validate_unix_root(&metadata),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut missing = Vec::new();
-            for ancestor in path.ancestors() {
-                match std::fs::symlink_metadata(ancestor) {
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        missing.push(ancestor.to_owned());
-                    }
-                    Err(error) => return Err(error),
-                }
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
             }
-            for directory in missing.into_iter().rev() {
-                let mut builder = std::fs::DirBuilder::new();
-                builder.mode(0o700);
-                match builder.create(&directory) {
-                    Ok(()) => std::fs::set_permissions(
-                        &directory,
-                        std::fs::Permissions::from_mode(0o700),
-                    )?,
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        let metadata = std::fs::symlink_metadata(&directory)?;
-                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "user data directory must be a real directory",
-                            ));
-                        }
-                        validate_unix_directory_ancestor(&metadata)?;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            let metadata = std::fs::symlink_metadata(path)?;
-            validate_unix_root(&metadata)
+            component => normalized.push(component.as_os_str()),
         }
-        Err(error) => Err(error),
+    }
+    normalized
+}
+
+#[cfg(unix)]
+fn prepare_unix_root(path: &Path) -> std::io::Result<PathBuf> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "user data directory must be a real directory",
+        ));
+    }
+    let canonical = canonicalize_with_missing_suffix(path)?;
+    let mut directory = std::fs::File::from(
+        rustix::fs::open(
+            "/",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let components = canonical
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, name) in components.iter().enumerate() {
+        let child = match rustix::fs::openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Ok(child) => std::fs::File::from(child),
+            Err(error) if error == rustix::io::Errno::NOENT => {
+                let created =
+                    match rustix::fs::mkdirat(&directory, name, Mode::from_raw_mode(0o700)) {
+                        Ok(()) => true,
+                        Err(rustix::io::Errno::EXIST) => false,
+                        Err(error) => return Err(std::io::Error::from(error)),
+                    };
+                let child = rustix::fs::openat(
+                    &directory,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                    Mode::empty(),
+                )
+                .map_err(std::io::Error::from)?;
+                let child = std::fs::File::from(child);
+                if created {
+                    rustix::fs::fchmod(&child, Mode::from_raw_mode(0o700))
+                        .map_err(std::io::Error::from)?;
+                }
+                child
+            }
+            Err(error) => return Err(std::io::Error::from(error)),
+        };
+        let metadata = child.metadata()?;
+        if index + 1 == components.len() {
+            validate_unix_root(&metadata)?;
+        } else {
+            validate_unix_directory_ancestor(&metadata)?;
+        }
+        directory = child;
+    }
+    let metadata = directory.metadata()?;
+    if metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o700 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing user data directory must be owned by this user and private",
+        ));
+    }
+    Ok(canonical)
+}
+
+#[cfg(unix)]
+fn canonicalize_with_missing_suffix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut existing = path;
+    let mut suffix = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(mut canonical) => {
+                for component in suffix.into_iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let missing_component = || {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "user data directory has no existing ancestor",
+                    )
+                };
+                let name = existing.file_name().ok_or_else(missing_component)?;
+                suffix.push(name.to_owned());
+                existing = existing.parent().ok_or_else(missing_component)?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -409,6 +469,22 @@ mod tests {
         assert!(!second.join("settings.json").exists());
     }
 
+    #[test]
+    fn parent_relative_components_resolve_inside_the_selected_directory() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let relative = PathBuf::from(".")
+            .join(temp.path().file_name().unwrap())
+            .join("unused")
+            .join("..")
+            .join("browser-state");
+
+        let resolved = resolve(&relative).unwrap();
+        assert_eq!(
+            resolved,
+            temp.path().join("browser-state").canonicalize().unwrap()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn creates_new_root_and_missing_parents_with_private_permissions() {
@@ -470,6 +546,26 @@ mod tests {
         assert_eq!(after.uid(), rustix::process::geteuid().as_raw());
         assert!(result.is_ok(), "{result:?}");
         std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(original)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_ancestor_into_shared_writable_directory_before_creating_root() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&shared, &alias).unwrap();
+        let requested = alias.join("new-root");
+
+        assert_eq!(
+            resolve(&requested).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!shared.join("new-root").exists());
     }
 
     #[cfg(unix)]

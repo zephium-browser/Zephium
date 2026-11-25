@@ -18,7 +18,6 @@ use crate::migrations;
 pub struct WindowsWorkStorage {
     application: NativeApplication,
     session: Option<NativeSession>,
-    data_root: Option<std::path::PathBuf>,
     #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
     fixture: Option<std::path::PathBuf>,
 }
@@ -49,20 +48,9 @@ impl WindowsWorkStorage {
         Ok(Self {
             application,
             session: qa_session.map(NativeSession::new).transpose()?,
-            data_root: None,
             #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
             fixture: None,
         })
-    }
-
-    pub fn for_application_in_data_root(
-        identifier: &str,
-        qa_session: Option<&str>,
-        data_root: &std::path::Path,
-    ) -> Result<Self, PrivateFsError> {
-        let mut storage = Self::for_application(identifier, qa_session)?;
-        storage.data_root = Some(data_root.to_path_buf());
-        Ok(storage)
     }
 
     /// Disposable protected-fixture routing, absent from shipping builds.
@@ -87,14 +75,7 @@ impl WindowsWorkStorage {
                 self.session.as_ref(),
             );
         }
-        match self.data_root.as_deref() {
-            Some(root) => NativeWorkStorageAnchor::prepare_in_data_root(
-                root,
-                self.application,
-                self.session.as_ref(),
-            ),
-            None => NativeWorkStorageAnchor::prepare(self.application, self.session.as_ref()),
-        }
+        NativeWorkStorageAnchor::prepare(self.application, self.session.as_ref())
     }
 }
 
