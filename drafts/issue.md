@@ -1,3 +1,3 @@
-# Feat: Multiple Zephium instances cannot run reliably
+# Feat: Multiple Zephium instances interfere with startup and shortcuts
 
-Allow up to 16 independent Zephium launches using the default profile and data directory, with coordinated startup recovery and one global shortcut owner.
+Starting multiple Zephium instances with the default profile can trigger conflicting recovery prompts and leave the global shortcut unavailable when its owner closes. Support up to 16 concurrent instances while coordinating startup state and shortcut ownership.
