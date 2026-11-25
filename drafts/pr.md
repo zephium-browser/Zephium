@@ -2,7 +2,7 @@
 
 ## What changes for the user
 
-`--profile <name>` selects or creates the profile for that launch. Startup failures show an error and do not open a different profile.
+`--profile <name>` starts Zephium with that profile, creating it on first use. The override applies only to this launch and does not change the saved default. If the requested profile cannot be created or opened, startup reports the failure and exits instead of opening another profile.
 
 ## How I checked it
 

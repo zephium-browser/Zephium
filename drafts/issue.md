@@ -1,3 +1,3 @@
-# Feat: There is no way to select a profile at launch
+# Feat: I cannot choose a profile when launching Zephium
 
-Add `--profile <name>` to open an existing profile or create it on first use without changing the saved default.
+Please add `--profile <name>` to open the named profile or create it on first use without changing the saved default.
