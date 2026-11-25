@@ -1,4 +1,4 @@
-# Select a profile at launch
+# Feat: Select a profile at launch
 
 ## What changes for the user
 
