@@ -133,6 +133,9 @@ impl Shell {
         profile: ProfileId,
         change: ExtensionDataChange,
     ) {
+        if matches!(&change, ExtensionDataChange::Bookmark(_)) {
+            (self.emit)(Projection::UiCommand("bookmark.changed".into()));
+        }
         let interest = self.extension_data_interest(profile);
         let heard = match change {
             ExtensionDataChange::Visited(_) | ExtensionDataChange::VisitsRemoved { .. } => {

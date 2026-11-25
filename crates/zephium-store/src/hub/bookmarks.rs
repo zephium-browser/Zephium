@@ -1085,21 +1085,33 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(
-            titles(hub.bookmarks(first, BookmarkRequest::Children { parent: None })),
-            vec!["Personal", "Work"]
-        );
+        let BookmarkReply::Nodes(first_nodes) =
+            hub.bookmarks(first, BookmarkRequest::Children { parent: None })
+        else {
+            panic!("expected the migrated bookmarks");
+        };
+        let personal = first_nodes
+            .iter()
+            .find(|node| node.title == "Personal")
+            .unwrap()
+            .id;
         assert_eq!(
             titles(hub.bookmarks(second, BookmarkRequest::Children { parent: None })),
             vec!["Personal", "Work"]
         );
-        added(hub.bookmarks(
-            second,
-            link(None, "Shared write", "https://shared.example/"),
-        ));
+        assert_eq!(
+            hub.bookmarks(
+                second,
+                BookmarkRequest::Rename {
+                    id: personal,
+                    title: "Renamed in Work".into(),
+                },
+            ),
+            BookmarkReply::Done
+        );
         assert_eq!(
             titles(hub.bookmarks(first, BookmarkRequest::Children { parent: None })),
-            vec!["Personal", "Work", "Shared write"]
+            vec!["Renamed in Work", "Work"]
         );
 
         let first_history: i64 = hub

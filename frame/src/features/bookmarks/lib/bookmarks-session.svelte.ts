@@ -113,6 +113,11 @@ export class BookmarksSession {
       : this.read({ kind: "list", folder: this.folder });
   }
 
+  storeChanged() {
+    if (this.loading) this.refreshPending = true;
+    else return this.refresh();
+  }
+
   /** A write either applies and the view is read again, or reports why not. */
   private async write(call: BookmarkCall): Promise<string | null | false> {
     const response = await this.call(call);

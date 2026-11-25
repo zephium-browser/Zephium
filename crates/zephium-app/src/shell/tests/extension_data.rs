@@ -134,6 +134,27 @@ fn visits_are_described_only_while_an_extension_listens() {
 }
 
 #[test]
+fn a_shared_bookmark_change_refreshes_the_panel_without_extension_interest() {
+    let (mut shell, engine, _, _, _) = browsed();
+    let profile = shell.windows.focused().unwrap().profile;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    shell.emit = Box::new(move |projection| {
+        if let Projection::UiCommand(id) = projection {
+            sink.lock().unwrap().push(id);
+        }
+    });
+
+    shell.on_extension_data_changed(
+        profile,
+        ExtensionDataChange::Bookmark(zephium_core::bookmarks::BookmarkChange::Imported),
+    );
+
+    assert_eq!(*seen.lock().unwrap(), ["bookmark.changed"]);
+    assert!(engine.extension_data_changes.lock().unwrap().is_empty());
+}
+
+#[test]
 fn closed_tabs_list_newest_first_and_reopen_in_the_focused_window() {
     let (mut shell, engine, screen, _, _) = browsed();
     let profile = shell.windows.focused().unwrap().profile;
