@@ -68,9 +68,8 @@ pub struct RuntimeGeneration {
     generation: String,
     kind: RuntimeGenerationKind,
     report: GenerationReport,
-    // Deny all sharing modes. This independently prevents two Zephium parent
-    // processes from classifying/removing one root concurrently while the
-    // outer single-instance plugin is still settling.
+    // Deny all sharing modes so concurrent prepares cannot classify or remove
+    // the same runtime root.
     _lease: File,
 }
 

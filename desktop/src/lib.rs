@@ -86,6 +86,7 @@ mod focus_alerts;
 mod haptics;
 mod help;
 mod history_menu;
+mod instance_lease;
 mod intro_sound;
 mod keymap;
 mod launcher_trigger;
@@ -8613,14 +8614,7 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(tab_previews::SCHEME, tab_previews::serve)
         .register_asynchronous_uri_scheme_protocol(media::SCHEME, media::serve)
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        // Must register first: a second launch (file association, dock, a
-        // stale instance holding the global hotkey and the profile dbs)
-        // focuses the running window and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
-        }));
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
     // fail startup when Xwayland is absent). Linux selects an actual GDK
@@ -8736,6 +8730,13 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                #[cfg(not(target_os = "linux"))]
+                if !app.manage(instance_lease::GlobalShortcutOwner::acquire(&data_dir)?) {
+                    return Err(std::io::Error::other(
+                        "global shortcut ownership state is already installed",
+                    )
+                    .into());
+                }
                 #[cfg(target_os = "windows")]
                 updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
@@ -8773,6 +8774,8 @@ pub fn run() {
                 // private data root is secured. A corrupt/newer database must
                 // fail before either privileged chrome or raw content creates
                 // native renderer state.
+                let startup_gate =
+                    instance_lease::FileLease::acquire(&data_dir.join(".startup-admission.lock"))?;
                 #[cfg(all(target_os = "windows", feature = "work-product"))]
                 let store = {
                     #[cfg(feature = "webext-qa")]
@@ -8829,6 +8832,7 @@ pub fn run() {
                         .into())
                     }
                 };
+                drop(startup_gate);
                 let continuation = StartupContinuation::new(shutdown.inner().clone());
                 if recovery_needed {
                     offer_startup_recovery(

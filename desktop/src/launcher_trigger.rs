@@ -216,12 +216,19 @@ fn persist(key: &str, value: &str) {
 /// Registers what was chosen last time, or the default. The keymap override
 /// is honoured for a profile that set one before there was a recorder.
 pub fn install(app: &AppHandle, keymap_override: Option<String>) {
+    let owns_global_shortcut = app
+        .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+        .is_some_and(|owner| owner.owns());
     let shortcut = setting(SHORTCUT_KEY)
         .or(keymap_override)
         .unwrap_or_else(|| DEFAULT.into());
-    let parsed = Shortcut::from_str(&shortcut)
-        .ok()
-        .or_else(|| Shortcut::from_str(DEFAULT).ok());
+    let parsed = if owns_global_shortcut {
+        Shortcut::from_str(&shortcut)
+            .ok()
+            .or_else(|| Shortcut::from_str(DEFAULT).ok())
+    } else {
+        None
+    };
     let registered = parsed.filter(|parsed| register(app, parsed));
     let double_tap = match setting(DOUBLE_TAP_KEY).as_deref() {
         Some("command") => DoubleTap::Command,
@@ -235,7 +242,9 @@ pub fn install(app: &AppHandle, keymap_override: Option<String>) {
         state.double_tap = double_tap;
     }
     #[cfg(target_os = "macos")]
-    double_tap::apply(app, double_tap);
+    if owns_global_shortcut {
+        double_tap::apply(app, double_tap);
+    }
 }
 
 pub fn snapshot(app: &AppHandle) -> LauncherTrigger {
@@ -255,7 +264,12 @@ pub fn snapshot(app: &AppHandle) -> LauncherTrigger {
         // Permission can be granted in System Settings at any time; the
         // settings page asks again when it is shown, which is when the
         // observers are brought in line with it.
-        double_tap::apply(app, double_tap);
+        if app
+            .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+            .is_some_and(|owner| owner.owns())
+        {
+            double_tap::apply(app, double_tap);
+        }
         double_tap::trusted()
     };
     #[cfg(not(target_os = "macos"))]
@@ -278,6 +292,12 @@ pub fn set_shortcut(app: &AppHandle, accelerator: &str) -> TriggerChange {
     };
     if cfg!(target_os = "linux") {
         return rejected(Rejection::Unsupported);
+    }
+    if !app
+        .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+        .is_some_and(|owner| owner.owns())
+    {
+        return rejected(Rejection::Unavailable);
     }
     let shortcut = match validate(accelerator) {
         Ok(shortcut) => shortcut,

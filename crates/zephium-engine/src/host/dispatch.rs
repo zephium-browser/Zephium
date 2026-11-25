@@ -369,7 +369,9 @@ pub(crate) fn install(
             .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
-        &data_root.join("private-runtime"),
+        &data_root
+            .join("private-runtime")
+            .join(std::process::id().to_string()),
         zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
         &crate::platform::imp::WindowsLeftoverProcesses,
     )

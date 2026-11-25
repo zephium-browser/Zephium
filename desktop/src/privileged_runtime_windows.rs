@@ -31,7 +31,9 @@ pub fn prepare(
         ));
     }
     let runtime = RuntimeGeneration::prepare(
-        &data_dir.join("privileged-runtime"),
+        &data_dir
+            .join("privileged-runtime")
+            .join(std::process::id().to_string()),
         RuntimeGenerationKind::Privileged,
         &zephium_engine::WindowsLeftoverProcesses,
     )?;
