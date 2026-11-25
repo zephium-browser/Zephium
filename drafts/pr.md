@@ -2,7 +2,7 @@
 
 ## What changes for the user
 
-`open -na` can launch up to 16 Zephium processes. Startup recovery is coordinated across overlapping launches, global shortcuts transfer to a surviving instance, and Windows runtime cleanup is scoped by process generation.
+`open -na` can launch up to 16 Zephium processes. Startup recovery is coordinated across overlapping launches, global shortcut ownership transfers to a surviving instance, and Windows runtime cleanup reclaims stale per-process generations.
 
 ## How I checked it
 
