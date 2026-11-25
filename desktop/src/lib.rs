@@ -74,6 +74,7 @@ mod browser_credentials;
 mod browser_import;
 mod content_fullscreen;
 mod data_export;
+mod data_root;
 mod default_browser;
 mod diagnostic_report;
 mod diagnostics;
@@ -8540,6 +8541,23 @@ pub fn run() {
         );
         std::process::exit(1);
     }
+    let user_data_dir = match data_root::parse_argument(std::env::args_os().skip(1)) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("Zephium: {error}");
+            std::process::exit(2);
+        }
+    };
+    let user_data_dir = match user_data_dir.as_deref() {
+        Some(path) => match data_root::initialize_override(path) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                eprintln!("Zephium: invalid user data directory: {error}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
     #[cfg(feature = "adblock-qa")]
     blocker_bench::refuse_bad_arguments();
     install_async_runtime();
@@ -8556,7 +8574,7 @@ pub fn run() {
     );
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
-    platform::imp::open_startup_log(&context.config().identifier);
+    platform::imp::open_startup_log(&context.config().identifier, user_data_dir.as_deref());
     #[cfg(target_os = "windows")]
     if zephium_credentials::set_windows_identity(&context.config().identifier).is_err() {
         diagnostic!("security: could not initialize the Windows credential namespace");
@@ -8619,7 +8637,11 @@ pub fn run() {
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
+            external_links::hand_off(
+                app,
+                data_root::external_arguments(argv.into_iter().skip(1)),
+                true,
+            );
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -8717,7 +8739,10 @@ pub fn run() {
                     },
                 );
                 specta.mount_events(app);
-                let data_dir = app.path().app_data_dir()?;
+                let data_dir = match user_data_dir.as_deref() {
+                    Some(path) => path.to_owned(),
+                    None => app.path().app_data_dir()?,
+                };
                 // A profile behind a junction (#447): build everything on the
                 // directory it really is, so nothing below it may redirect.
                 #[cfg(target_os = "windows")]
@@ -8736,6 +8761,9 @@ pub fn run() {
                 #[cfg(all(feature = "macos-work-navigation-probe", target_os = "macos"))]
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
+                if !data_root::is_installed() {
+                    data_root::install(data_dir.clone())?;
+                }
                 #[cfg(target_os = "windows")]
                 updates::restore(app.handle(), &data_dir);
                 #[cfg(feature = "work-product")]
@@ -8763,7 +8791,8 @@ pub fn run() {
                 {
                     // Finder-launched apps write stderr nowhere; keep it in
                     // a private, bounded log the person can choose to share.
-                    let logs = app.path().app_log_dir()?;
+                    let logs = data_root::logs(app.handle())?;
+                    std::fs::create_dir_all(&logs)?;
                     platform::imp::redirect_stderr(&logs);
                     diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));

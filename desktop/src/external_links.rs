@@ -69,7 +69,11 @@ pub(crate) fn adopt(app: &tauri::AppHandle) {
     );
     hand_off(
         app,
-        waiting.into_iter().chain(std::env::args().skip(1)),
+        waiting
+            .into_iter()
+            .chain(super::data_root::external_arguments(
+                std::env::args_os().skip(1),
+            )),
         false,
     );
 }

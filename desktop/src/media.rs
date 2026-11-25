@@ -458,7 +458,7 @@ pub(crate) fn retire_profile_thumbnails(
 }
 
 mod thumb {
-    use super::{AppHandle, Manager};
+    use super::AppHandle;
     use std::path::PathBuf;
 
     static LIFECYCLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -467,10 +467,7 @@ mod thumb {
     pub(super) fn retire(app: &AppHandle, profile: &str) -> std::io::Result<()> {
         let mut retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
         retired.insert(profile.into());
-        let dir = app
-            .path()
-            .app_cache_dir()
-            .map_err(std::io::Error::other)?
+        let dir = super::super::data_root::cache(app)?
             .join("media-thumbs")
             .join(profile);
         let root = dir
@@ -513,7 +510,9 @@ mod thumb {
         if !plain {
             return None;
         }
-        let dir = app.path().app_cache_dir().ok()?.join("media-thumbs");
+        let dir = super::super::data_root::cache(app)
+            .ok()?
+            .join("media-thumbs");
         Some(dir.join(profile).join(format!("{digest}-{width}")))
     }
 

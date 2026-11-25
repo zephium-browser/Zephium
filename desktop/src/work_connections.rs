@@ -44,10 +44,7 @@ mod live {
         if let Some(store) = store::shared() {
             return Ok(store);
         }
-        let data = app
-            .path()
-            .app_data_dir()
-            .map_err(|_| WorkError::Unavailable)?;
+        let data = data_root::root(app).map_err(|_| WorkError::Unavailable)?;
         store::install(&data);
         store::shared().ok_or(WorkError::Unavailable)
     }
