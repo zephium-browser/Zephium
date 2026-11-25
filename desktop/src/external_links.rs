@@ -54,10 +54,8 @@ fn requested_profile(arguments: &[String]) -> Option<String> {
     requested
 }
 
-pub(crate) fn select_profile(app: &tauri::AppHandle, arguments: &[String]) {
-    if let (Some(name), Some(shell)) = (requested_profile(arguments), app.try_state::<Handle>()) {
-        let _ = shell.dispatch(Command::OpenProfileByName(name));
-    }
+pub(crate) fn cancel_forward() {
+    FORWARD.store(false, Ordering::Release);
 }
 
 /// Admits `arguments` and opens them. `forward` brings the window to the
@@ -68,15 +66,30 @@ pub(crate) fn hand_off(
     arguments: impl IntoIterator<Item = String>,
     forward: bool,
 ) {
+    let arguments: Vec<String> = arguments.into_iter().collect();
+    let has_profile_option = arguments
+        .iter()
+        .any(|argument| argument == "--profile" || argument.starts_with("--profile="));
+    let profile = requested_profile(&arguments);
+    if has_profile_option && profile.is_none() {
+        cancel_forward();
+        crate::emit_ui_command(app, "profile.open-failed");
+        return;
+    }
     let urls: Vec<String> = without_startup_options(arguments)
         .filter_map(|argument| external_target(&argument))
         .map(|url| url.to_string())
         .take(MAX_EXTERNAL_TARGETS)
         .collect();
-    if urls.is_empty() || shutdown_started(app) {
+    if shutdown_started(app) || (urls.is_empty() && profile.is_none()) {
         return;
     }
     let Some(shell) = app.try_state::<Handle>() else {
+        if profile.is_some() {
+            cancel_forward();
+            crate::emit_ui_command(app, "profile.open-failed");
+            return;
+        }
         let mut waiting = WAITING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -86,9 +99,24 @@ pub(crate) fn hand_off(
     };
     // Each batch says afresh whether it wants the main window forward, so a
     // batch that opened only mini windows leaves nothing behind for the next.
-    FORWARD.store(forward, Ordering::Release);
-    if !shell.dispatch(Command::OpenExternal(urls)) {
-        FORWARD.store(false, Ordering::Release);
+    if let Some(name) = profile {
+        let has_urls = !urls.is_empty();
+        let command = if !has_urls {
+            Command::OpenProfileByName(name)
+        } else {
+            Command::OpenProfileAndExternal { name, urls }
+        };
+        FORWARD.store(forward && has_urls, Ordering::Release);
+        let admission = crate::dispatch_operation(app, &shell, command);
+        if !admission.accepted {
+            cancel_forward();
+            crate::emit_ui_command(app, "profile.open-failed");
+        }
+    } else {
+        FORWARD.store(forward, Ordering::Release);
+        if !shell.dispatch(Command::OpenExternal(urls)) {
+            cancel_forward();
+        }
     }
 }
 

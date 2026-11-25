@@ -463,6 +463,10 @@ pub enum Command {
     /// Shows a persistent profile in the window.
     SwitchProfile(ProfileId),
     OpenProfileByName(String),
+    OpenProfileAndExternal {
+        name: String,
+        urls: Vec<String>,
+    },
     RenameProfile {
         profile: ProfileId,
         name: String,

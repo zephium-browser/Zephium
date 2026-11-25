@@ -357,6 +357,7 @@ impl Shell {
                 "browser: return to Browse refused (chrome applied={applied}, snapshot exact={exact})"
             );
             self.browser_after_return = None;
+            self.browser_after_return_followups.clear();
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
             return;
@@ -376,12 +377,16 @@ impl Shell {
         self.browser_return_hidden = false;
         if !scheduled {
             self.browser_page = previous;
+            self.browser_after_return_followups.clear();
             let _ = self.relayout();
             self.project_browser_page();
             (self.emit)(Projection::UiCommand("browser.return-failed".into()));
         } else if let Some(next) = next {
             self.browser_return_ready = true;
             self.handle(*next);
+            while let Some(followup) = self.browser_after_return_followups.pop_front() {
+                self.handle(followup);
+            }
             self.browser_return_ready = false;
             let _ = self.relayout();
             self.project_browser_page_if_changed();

@@ -356,6 +356,45 @@ fn profile_steps_accumulate_while_browser_return_is_pending() {
 }
 
 #[test]
+fn second_launch_profile_and_url_survive_browser_page_return() {
+    let (mut shell, engine, chrome, screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+
+    shell.handle(Command::Operation {
+        operation_id: "second-launch".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+
+    assert_eq!(window_profile(&shell), personal);
+    assert!(matches!(
+        shell.browser_after_return.as_deref(),
+        Some(Command::SwitchProfile(profile)) if *profile == work
+    ));
+    assert!(matches!(
+        shell.browser_after_return_followups.front(),
+        Some(Command::OpenExternal(urls)) if urls == &["https://example.com/"]
+    ));
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_eq!(window_profile(&shell), work);
+    assert!(shell.browser_after_return.is_none());
+    assert!(shell.browser_after_return_followups.is_empty());
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
+    assert_eq!(shell.profile_of_item(active_id(&screen)), Some(work));
+}
+
+#[test]
 fn profile_steps_require_a_focused_window() {
     let (mut shell, _engine, _screen) = setup();
     for forward in [true, false] {

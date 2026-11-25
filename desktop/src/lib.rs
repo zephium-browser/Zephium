@@ -7749,6 +7749,9 @@ fn finish_browser_setup(
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_FIND, &result)
         }
         Projection::UiCommand(id) => {
+            if id == "profile.open-failed" {
+                external_links::cancel_forward();
+            }
             if id.starts_with("preference.search.") {
                 search_providers::cancel_all();
             }
@@ -8653,7 +8656,6 @@ pub fn run_with_profile(profile: Option<String>) {
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             external_links::bring_forward(app);
             let arguments: Vec<_> = argv.into_iter().skip(1).collect();
-            external_links::select_profile(app, &arguments);
             external_links::hand_off(app, arguments, true);
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a

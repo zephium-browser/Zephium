@@ -1283,6 +1283,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::CreateProfile { .. }
             | Command::SwitchProfile(_)
             | Command::OpenProfileByName(_)
+            | Command::OpenProfileAndExternal { .. }
             | Command::RenameProfile { .. }
             | Command::SetProfileAvatar { .. }
             | Command::Activate(_)

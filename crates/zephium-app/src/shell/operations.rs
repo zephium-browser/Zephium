@@ -476,7 +476,15 @@ impl Shell {
         }
         // A browser page in front hands the whole batch to Browse at once.
         if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::OpenExternal(urls)));
+            if matches!(
+                self.browser_after_return.as_deref(),
+                Some(Command::SwitchProfile(_))
+            ) {
+                self.browser_after_return_followups
+                    .push_back(Command::OpenExternal(urls));
+            } else {
+                self.browser_after_return = Some(Box::new(Command::OpenExternal(urls)));
+            }
             let _ = self.operation_show_browser_page(None);
             return;
         }
