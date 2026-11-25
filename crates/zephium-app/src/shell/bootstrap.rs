@@ -242,6 +242,7 @@ impl Shell {
         if let Some(name) = self.startup_profile.take() {
             if self.profiles.default_profile().is_none() && self.create_default_space().is_none() {
                 crate::diagnostic!("bootstrap: default profile could not be initialized");
+                self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
                 return;
             }
             let existing = self
@@ -256,12 +257,19 @@ impl Shell {
                     .map(|profile| (profile, true)),
             };
             if let Some((profile, created)) = profile {
-                active_space = self.spaces.first_for(profile);
+                let Some(space) = self.spaces.first_for(profile) else {
+                    crate::diagnostic!("bootstrap: requested profile has no startup space");
+                    self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
+                    return;
+                };
+                active_space = Some(space);
                 active_item = None;
                 splits = None;
                 startup_profile_created = created;
             } else {
                 crate::diagnostic!("bootstrap: requested profile could not be created");
+                self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
+                return;
             }
         }
 

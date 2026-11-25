@@ -107,6 +107,58 @@ fn startup_profile_selects_existing_profile_without_changing_default_registry_en
 }
 
 #[test]
+fn startup_profile_creation_failure_stops_instead_of_opening_a_fallback_profile() {
+    let store = Arc::new(FakeStore::default());
+    let profiles: Vec<_> = (0..zephium_core::session::MAX_SESSION_PROFILES)
+        .map(|index| PersistedProfile {
+            id: ProfileId::from(index as u128 + 1),
+            name: format!("Profile {index}"),
+            kind: if index == 0 {
+                ProfileKind::Default
+            } else {
+                ProfileKind::Named
+            },
+        })
+        .collect();
+    let spaces: Vec<_> = profiles
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| PersistedSpace {
+            id: SpaceId::from(index as u128 + 10_000),
+            profile: profile.id,
+            name: "Space".into(),
+            look: Default::default(),
+        })
+        .collect();
+    let state = zephium_core::session::SessionState {
+        active_space: Some(spaces[0].id),
+        profiles,
+        spaces,
+        ..Default::default()
+    };
+    *store.saved.lock().unwrap() = Some(state.clone());
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (mut shell, _, _, _) = setup_with_operation_log_and_failure(
+        store.clone(),
+        Box::new({
+            let failures = failures.clone();
+            move |failure| failures.lock().unwrap().push(failure)
+        }),
+    );
+
+    shell.handle(Command::SelectStartupProfile("Overflow".into()));
+    shell.handle(Command::Bootstrap);
+
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+    assert_eq!(store.saved.lock().unwrap().as_ref(), Some(&state));
+}
+
+#[test]
 fn default_startup_opens_a_new_tab_without_losing_or_loading_restored_pages() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _, screen) = setup_with(store.clone());

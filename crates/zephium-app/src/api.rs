@@ -42,6 +42,7 @@ pub type AgentLifecycle = Box<dyn AgentBrowserLifecycle>;
 pub enum ShellTerminalFailure {
     ProfileDeletionInvariant,
     ActorExitedUnexpectedly,
+    StartupProfileUnavailable,
     /// The saved session or its deletion journal could not be opened. The
     /// store kept it untouched; the person is told so instead of facing an
     /// empty window that cannot do anything.
@@ -57,6 +58,7 @@ impl std::fmt::Display for ShellTerminalFailure {
                 "profile deletion violated a post-retirement invariant"
             }
             Self::ActorExitedUnexpectedly => "application shell actor exited unexpectedly",
+            Self::StartupProfileUnavailable => "the requested startup profile could not be opened",
             Self::SessionUnavailable => "the saved session could not be opened",
             Self::SessionFromNewerVersion => "the saved session belongs to a newer Zephium",
         })
