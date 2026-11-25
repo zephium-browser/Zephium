@@ -251,6 +251,7 @@ pub struct Shell {
     #[cfg(feature = "work-execution")]
     retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
+    startup_profile: Option<String>,
     spaces: Spaces,
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
@@ -529,6 +530,7 @@ impl Shell {
         } = ports;
         Self {
             profiles: Profiles::default(),
+            startup_profile: None,
             spaces: Spaces::default(),
             items: Items::default(),
             recently_closed: Vec::new(),
@@ -877,6 +879,11 @@ impl Shell {
                 (self.emit)(Projection::OperationProcessed(completion));
             }
             Command::Bootstrap => self.bootstrap(),
+            Command::SelectStartupProfile(name) => {
+                if !self.bootstrapped {
+                    self.startup_profile = zephium_core::profiles::profile_name(&name);
+                }
+            }
             Command::SetWebExtensions {
                 profile,
                 extensions,

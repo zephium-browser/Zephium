@@ -8017,6 +8017,14 @@ fn finish_browser_setup(
         );
         return Err(error.into());
     }
+    if let Some(profile) = app
+        .try_state::<LaunchProfile>()
+        .and_then(|profile| profile.0.clone())
+    {
+        if !shell.dispatch(Command::SelectStartupProfile(profile)) {
+            return Err(std::io::Error::other("shell refused startup profile selection").into());
+        }
+    }
     #[cfg(feature = "work-product")]
     let public_routes = {
         let routes =
@@ -8534,6 +8542,13 @@ fn finish_browser_setup(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_with_profile(None);
+}
+
+#[derive(Clone, Default)]
+struct LaunchProfile(Option<String>);
+
+pub fn run_with_profile(profile: Option<String>) {
     if cfg!(all(unix, not(target_os = "macos"))) {
         diagnostic!(
             "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
@@ -8606,6 +8621,7 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let setup_privileged_environments = attempted_privileged_environments.clone();
     let builder = tauri::Builder::default()
+        .manage(LaunchProfile(profile))
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())

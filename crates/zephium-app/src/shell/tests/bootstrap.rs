@@ -21,6 +21,64 @@ fn first_run_profile_is_persisted_before_profile_scoped_management_is_exposed() 
 }
 
 #[test]
+fn startup_profile_creates_a_named_profile_without_replacing_the_default() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+    shell.handle(Command::Bootstrap);
+
+    let focused = shell.windows.focused().unwrap();
+    let default = shell.profiles.default_profile().unwrap();
+    assert_ne!(focused.profile, default);
+    assert_eq!(shell.profiles.get(focused.profile).unwrap().name, "Work");
+    assert_eq!(
+        shell.profiles.get(focused.profile).unwrap().kind,
+        ProfileKind::Named
+    );
+    assert_eq!(
+        shell.profiles.get(default).unwrap().kind,
+        ProfileKind::Default
+    );
+    let saved = store.saved.lock().unwrap().clone().unwrap();
+    assert!(saved
+        .profiles
+        .iter()
+        .any(|profile| profile.id == focused.profile));
+    assert!(saved.profiles.iter().any(|profile| profile.id == default));
+}
+
+#[test]
+fn startup_profile_selects_existing_profile_without_changing_default_registry_entry() {
+    let store = Arc::new(FakeStore::default());
+    let (mut first, _, _) = setup_with(store.clone());
+    first.handle(Command::Bootstrap);
+    let default = first.profiles.default_profile().unwrap();
+    assert_eq!(
+        first
+            .operation_create_profile(
+                "Work",
+                zephium_core::profiles::ProfileAvatar::initial(ProfileId::from(800)),
+                None,
+                false,
+            )
+            .outcome,
+        OperationOutcome::Applied
+    );
+    first.persist();
+
+    let (mut restarted, _, _) = setup_with(store);
+    restarted.handle(Command::SelectStartupProfile("Work".into()));
+    restarted.handle(Command::Bootstrap);
+
+    let focused = restarted.windows.focused().unwrap();
+    assert_eq!(
+        restarted.profiles.get(focused.profile).unwrap().name,
+        "Work"
+    );
+    assert_eq!(restarted.profiles.default_profile(), Some(default));
+}
+
+#[test]
 fn default_startup_opens_a_new_tab_without_losing_or_loading_restored_pages() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _, screen) = setup_with(store.clone());

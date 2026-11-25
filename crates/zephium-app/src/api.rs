@@ -436,6 +436,7 @@ pub enum Command {
         command: Box<Command>,
     },
     Bootstrap,
+    SelectStartupProfile(String),
     Open,
     Activate(ItemId),
     Close(ItemId),

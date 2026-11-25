@@ -238,6 +238,22 @@ impl Shell {
             splits = None;
         }
 
+        let mut startup_profile_to_create = None;
+        if let Some(name) = self.startup_profile.take() {
+            let profile = self
+                .profiles
+                .iter()
+                .find(|profile| profile.name == name && profile.kind != ProfileKind::Incognito)
+                .map(|profile| profile.id);
+            if let Some(profile) = profile {
+                active_space = self.spaces.first_for(profile);
+                active_item = None;
+                splits = None;
+            } else {
+                startup_profile_to_create = Some(name);
+            }
+        }
+
         let Some(space) = active_space
             .or_else(|| {
                 self.profiles
@@ -370,6 +386,17 @@ impl Shell {
             // management and other profile-scoped actors must never observe a
             // chrome-visible profile that exists only in volatile Shell state.
             self.persist();
+        }
+        if let Some(name) = startup_profile_to_create {
+            let created = self.operation_create_profile(
+                &name,
+                zephium_core::profiles::ProfileAvatar::initial(ProfileId::generate()),
+                None,
+                true,
+            );
+            if created.outcome != OperationOutcome::Applied {
+                crate::diagnostic!("bootstrap: requested profile could not be created");
+            }
         }
     }
 

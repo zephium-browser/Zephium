@@ -15,6 +15,23 @@ static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// in front. The shell says which window that is once it has opened them.
 static FORWARD: AtomicBool = AtomicBool::new(false);
 
+fn without_startup_options(
+    arguments: impl IntoIterator<Item = String>,
+) -> impl Iterator<Item = String> {
+    let mut skip_value = false;
+    arguments.into_iter().filter(move |argument| {
+        if skip_value {
+            skip_value = false;
+            return false;
+        }
+        if argument == "--profile" || argument == "--user-data-dir" {
+            skip_value = true;
+            return false;
+        }
+        !argument.starts_with("--profile=") && !argument.starts_with("--user-data-dir=")
+    })
+}
+
 /// Admits `arguments` and opens them. `forward` brings the window to the
 /// front, which a running instance wants and a launch leaves to its own
 /// startup reveal.
@@ -23,8 +40,7 @@ pub(crate) fn hand_off(
     arguments: impl IntoIterator<Item = String>,
     forward: bool,
 ) {
-    let urls: Vec<String> = arguments
-        .into_iter()
+    let urls: Vec<String> = without_startup_options(arguments)
         .filter_map(|argument| external_target(&argument))
         .map(|url| url.to_string())
         .take(MAX_EXTERNAL_TARGETS)
@@ -45,6 +61,26 @@ pub(crate) fn hand_off(
     FORWARD.store(forward, Ordering::Release);
     if !shell.dispatch(Command::OpenExternal(urls)) {
         FORWARD.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_startup_options;
+
+    #[test]
+    fn profile_options_and_values_are_not_forwarded_as_urls() {
+        let arguments = [
+            "https://example.com".into(),
+            "--profile".into(),
+            "Work".into(),
+            "--user-data-dir=/tmp/profile".into(),
+            "https://example.org".into(),
+        ];
+        assert_eq!(
+            without_startup_options(arguments).collect::<Vec<_>>(),
+            ["https://example.com", "https://example.org"]
+        );
     }
 }
 
