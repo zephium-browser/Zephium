@@ -4,7 +4,7 @@ Hi, thanks for building Zephium. This adds shared bookmarks for profiles in one 
 
 ## What changes for the user
 
-Bookmarks are shared across profiles in one data directory; profile authorization and website-data isolation remain.
+Bookmarks are shared across profiles in one data directory. Profile authorization and website-data isolation remain.
 
 ## How I checked it
 
