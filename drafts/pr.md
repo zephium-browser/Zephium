@@ -6,6 +6,6 @@
 
 ## How I checked it
 
-- Startup recovery and lease tests; full desktop suite.
+- Startup recovery and lease tests, plus the full desktop suite.
 - Mac development build and 16 distinct launch processes.
-- Windows runtime tests compile; native Windows execution remains needed.
+- Windows runtime tests compile, though native Windows execution remains needed.
