@@ -6,5 +6,5 @@
 
 ## How I checked it
 
-- Existing and first-use profile selection, invalid arguments, and unchanged default profile.
-- Startup alert tests.
+- Existing and first-use selection, invalid arguments, and saved-default preservation tests.
+- `cargo test -p zephium-desktop startup_alert::tests --locked` (10 passed).
