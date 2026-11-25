@@ -1,5 +1,6 @@
 //! Lazy, separately protected Windows Work persistence; never a WebView2 UDF.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -18,6 +19,7 @@ use crate::migrations;
 pub struct WindowsWorkStorage {
     application: NativeApplication,
     session: Option<NativeSession>,
+    data_root: Option<PathBuf>,
     #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
     fixture: Option<std::path::PathBuf>,
 }
@@ -48,9 +50,21 @@ impl WindowsWorkStorage {
         Ok(Self {
             application,
             session: qa_session.map(NativeSession::new).transpose()?,
+            data_root: None,
             #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
             fixture: None,
         })
+    }
+
+    #[allow(missing_docs)]
+    pub fn for_application_in_data_root(
+        identifier: &str,
+        qa_session: Option<&str>,
+        data_root: PathBuf,
+    ) -> Result<Self, PrivateFsError> {
+        let mut selector = Self::for_application(identifier, qa_session)?;
+        selector.data_root = Some(data_root);
+        Ok(selector)
     }
 
     /// Disposable protected-fixture routing, absent from shipping builds.
@@ -71,6 +85,13 @@ impl WindowsWorkStorage {
         if let Some(profile) = &self.fixture {
             return NativeWorkStorageAnchor::prepare_validation_fixture(
                 profile,
+                self.application,
+                self.session.as_ref(),
+            );
+        }
+        if let Some(data_root) = &self.data_root {
+            return NativeWorkStorageAnchor::prepare_in_data_root(
+                data_root,
                 self.application,
                 self.session.as_ref(),
             );

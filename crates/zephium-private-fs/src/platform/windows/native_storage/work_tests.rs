@@ -7,6 +7,20 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+#[test]
+#[cfg(feature = "windows-namespace-validation")]
+fn work_storage_uses_the_selected_data_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("zephium-data");
+    crate::platform::windows::prepare_user_data_root(&root).unwrap();
+    let anchor =
+        NativeWorkStorageAnchor::prepare_in_data_root(&root, NativeApplication::Product, None)
+            .unwrap();
+    assert!(anchor
+        .database_path()
+        .starts_with(root.canonicalize().unwrap()));
+}
+
 // All live tests own a random session below the fixed QA application. Neither
 // Product nor an existing user's QA session is opened or removed.
 pub(super) struct OwnedSession {

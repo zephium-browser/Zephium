@@ -8563,8 +8563,9 @@ pub fn run() {
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
     let mut context = tauri::generate_context!();
+    let application_identifier = context.config().identifier.clone();
     context.config_mut().identifier =
-        data_root::instance_identifier(&context.config().identifier, user_data_dir.as_deref());
+        data_root::instance_identifier(&application_identifier, user_data_dir.as_deref());
     focus_alerts::claim_identity(&context.config().identifier);
     #[cfg(target_os = "windows")]
     default_browser::windows::claim(
@@ -8831,10 +8832,20 @@ pub fn run() {
                     let session = qa_session.as_deref();
                     #[cfg(not(feature = "webext-qa"))]
                     let session = None;
-                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
-                        &app.config().identifier,
-                        session,
-                    )?;
+                    let work_storage =
+                        match data_root::work_storage_root(&application_identifier, &data_dir) {
+                            Some(root) => {
+                                zephium_store::WindowsWorkStorage::for_application_in_data_root(
+                                    &application_identifier,
+                                    session,
+                                    root,
+                                )?
+                            }
+                            None => zephium_store::WindowsWorkStorage::for_application(
+                                &application_identifier,
+                                session,
+                            )?,
+                        };
                     Arc::new(SqliteStore::open_with_windows_work_storage(
                         &data_dir,
                         work_storage,

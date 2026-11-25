@@ -97,6 +97,21 @@ fn is_default_data_root(identifier: &str, root: &Path, data_dir: Option<PathBuf>
         == Some(root)
 }
 
+pub(crate) fn work_storage_root(identifier: &str, root: &Path) -> Option<PathBuf> {
+    if !CUSTOM_ROOT.load(Ordering::Acquire) {
+        return None;
+    }
+    work_storage_root_for_data_dir(identifier, root, dirs::data_dir())
+}
+
+fn work_storage_root_for_data_dir(
+    identifier: &str,
+    root: &Path,
+    data_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    (!is_default_data_root(identifier, root, data_dir)).then(|| root.to_owned())
+}
+
 pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -133,7 +148,8 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 
 fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
-    for component in path.components() {
+    let components = path.components().collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
@@ -141,6 +157,12 @@ fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
             }
             component => {
                 normalized.push(component.as_os_str());
+                if index + 1 == components.len()
+                    && std::fs::symlink_metadata(&normalized)
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    continue;
+                }
                 match normalized.canonicalize() {
                     Ok(canonical) => normalized = canonical,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -485,12 +507,25 @@ mod tests {
             Some(temp.path().to_owned())
         ));
         assert_eq!(
+            work_storage_root_for_data_dir("app.zephium", &root, Some(temp.path().to_owned())),
+            None
+        );
+        assert_eq!(
             instance_identifier_for_data_dir(
                 "app.zephium",
                 Some(&root),
                 Some(temp.path().to_owned())
             ),
             "app.zephium"
+        );
+    }
+
+    #[test]
+    fn custom_work_storage_uses_the_selected_data_root() {
+        let custom = PathBuf::from("/tmp/zephium-custom-root");
+        assert_eq!(
+            work_storage_root_for_data_dir("app.zephium", &custom, Some(PathBuf::from("/tmp"))),
+            Some(custom)
         );
     }
 
@@ -672,6 +707,29 @@ mod tests {
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(resolve(&file).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_symlink_as_custom_root() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("private-root");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+
+        assert_eq!(
+            resolve(&alias).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[cfg(unix)]

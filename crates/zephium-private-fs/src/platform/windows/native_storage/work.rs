@@ -36,6 +36,20 @@ impl NativeWorkStorageAnchor {
         })
     }
 
+    #[allow(missing_docs)]
+    pub fn prepare_in_data_root(
+        data_root: &Path,
+        application: NativeApplication,
+        session: Option<&NativeSession>,
+    ) -> Result<Self, PrivateFsError> {
+        admit_namespace_support()?;
+        validate_routing(application, session)?;
+        let data_root = super::super::prepare_user_data_root(data_root)?;
+        Ok(Self {
+            inner: NativeStorageAnchor::prepare_under_impl(&data_root, application, session)?,
+        })
+    }
+
     /// Disposable validation root; absent from shipping and optimized graphs.
     #[cfg(all(debug_assertions, feature = "windows-namespace-validation"))]
     #[doc(hidden)]
