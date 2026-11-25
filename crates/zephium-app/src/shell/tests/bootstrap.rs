@@ -23,12 +23,18 @@ fn first_run_profile_is_persisted_before_profile_scoped_management_is_exposed() 
 #[test]
 fn startup_profile_creates_a_named_profile_without_replacing_the_default() {
     let store = Arc::new(FakeStore::default());
+    let (mut initial, _, screen) = setup_with(store.clone());
+    initial.handle(Command::Bootstrap);
+    let default = initial.profiles.default_profile().unwrap();
+    navigate_and_commit(&mut initial, active_id(&screen), "example.com");
+    initial.persist();
+    let default_before = store.saved.lock().unwrap().clone().unwrap();
+
     let (mut shell, _, _) = setup_with(store.clone());
     shell.handle(Command::SelectStartupProfile("Work".into()));
     shell.handle(Command::Bootstrap);
 
     let focused = shell.windows.focused().unwrap();
-    let default = shell.profiles.default_profile().unwrap();
     assert_ne!(focused.profile, default);
     assert_eq!(shell.profiles.get(focused.profile).unwrap().name, "Work");
     assert_eq!(
@@ -45,6 +51,28 @@ fn startup_profile_creates_a_named_profile_without_replacing_the_default() {
         .iter()
         .any(|profile| profile.id == focused.profile));
     assert!(saved.profiles.iter().any(|profile| profile.id == default));
+    let default_scope = |state: &zephium_core::session::SessionState| {
+        let spaces: Vec<_> = state
+            .spaces
+            .iter()
+            .filter(|space| space.profile == default)
+            .cloned()
+            .collect();
+        let ids: std::collections::HashSet<_> = spaces.iter().map(|space| space.id).collect();
+        let items: Vec<_> = state
+            .items
+            .iter()
+            .filter(|item| match item.placement {
+                Placement::Favorites { space } | Placement::Space { space, .. } => {
+                    ids.contains(&space)
+                }
+                Placement::Mini { .. } => false,
+            })
+            .cloned()
+            .collect();
+        (spaces, items)
+    };
+    assert_eq!(default_scope(&saved), default_scope(&default_before));
 }
 
 #[test]

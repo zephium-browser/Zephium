@@ -238,19 +238,30 @@ impl Shell {
             splits = None;
         }
 
-        let mut startup_profile_to_create = None;
+        let mut startup_profile_created = false;
         if let Some(name) = self.startup_profile.take() {
-            let profile = self
+            if self.profiles.default_profile().is_none() && self.create_default_space().is_none() {
+                crate::diagnostic!("bootstrap: default profile could not be initialized");
+                return;
+            }
+            let existing = self
                 .profiles
                 .iter()
                 .find(|profile| profile.name == name && profile.kind != ProfileKind::Incognito)
                 .map(|profile| profile.id);
-            if let Some(profile) = profile {
+            let profile = match existing {
+                Some(profile) => Some((profile, false)),
+                None => self
+                    .create_startup_profile(&name)
+                    .map(|profile| (profile, true)),
+            };
+            if let Some((profile, created)) = profile {
                 active_space = self.spaces.first_for(profile);
                 active_item = None;
                 splits = None;
+                startup_profile_created = created;
             } else {
-                startup_profile_to_create = Some(name);
+                crate::diagnostic!("bootstrap: requested profile could not be created");
             }
         }
 
@@ -381,23 +392,41 @@ impl Shell {
             "bootstrap: native session ready at {}ms",
             started.elapsed().as_millis()
         );
-        if session_absent {
-            // Register the first-run profile with Store immediately. Extension
-            // management and other profile-scoped actors must never observe a
-            // chrome-visible profile that exists only in volatile Shell state.
+        if session_absent || startup_profile_created {
+            // Register startup-created profiles before profile-scoped management is exposed.
             self.persist();
         }
-        if let Some(name) = startup_profile_to_create {
-            let created = self.operation_create_profile(
-                &name,
-                zephium_core::profiles::ProfileAvatar::initial(ProfileId::generate()),
-                None,
-                true,
-            );
-            if created.outcome != OperationOutcome::Applied {
-                crate::diagnostic!("bootstrap: requested profile could not be created");
-            }
+    }
+
+    fn create_startup_profile(&mut self, name: &str) -> Option<ProfileId> {
+        let name = zephium_core::profiles::profile_name(name)?;
+        let profile = (0..8).map(|_| ProfileId::generate()).find(|id| {
+            !self.profile_deletion.states.contains_key(id)
+                && self.profiles.insert(Profile {
+                    id: *id,
+                    name: name.clone(),
+                    kind: ProfileKind::Named,
+                })
+        })?;
+        if !self.initialize_new_blocker_profile(profile) {
+            self.profiles.remove(profile);
+            return None;
         }
+        let space = (0..8).map(|_| SpaceId::generate()).find(|id| {
+            self.spaces.insert(Space {
+                id: *id,
+                profile,
+                name: "Space".into(),
+                look: Default::default(),
+            })
+        });
+        if space.is_none() {
+            self.blocker.discard_uncommitted_profile(profile);
+            self.finish_terminalized_blocker_native_operations();
+            self.profiles.remove(profile);
+            return None;
+        }
+        Some(profile)
     }
 
     pub(super) fn create_default_space(&mut self) -> Option<SpaceId> {
