@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 const MARKER: &str = ".startup-recovery";
 const LOCK: &str = ".startup-recovery-lock";
 const ACTIVE_PREFIX: &str = ".startup-recovery-active-";
+const RETIRED_PREFIX: &str = ".startup-recovery-retired-";
+const PENDING_RECOVERY: &str = ".startup-recovery-pending";
 const MAGIC_V1: &[u8; 4] = b"ZST\x01";
 const MAGIC_V2: &[u8; 4] = b"ZST\x02";
 const MAGIC: &[u8; 4] = b"ZST\x03";
@@ -101,6 +103,66 @@ struct ActiveStart {
     file: Mutex<Option<File>>,
     path: PathBuf,
     wave: u64,
+}
+
+pub(crate) struct RecoveryGate(File);
+
+impl Drop for RecoveryGate {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+pub(crate) fn acquire_recovery_gate(data_dir: &Path) -> io::Result<RecoveryGate> {
+    let root = Root::open(data_dir)?;
+    let path = root.path.join(PENDING_RECOVERY);
+    let file = match create_recovery_gate(&path) {
+        Ok(file) => {
+            file.sync_all()?;
+            sync_directory(&root.directory)?;
+            file
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => open(&path, false, true)?,
+        Err(error) => return Err(error),
+    };
+    let expected = identity(&file, false)?;
+    file.try_lock().map_err(io::Error::from)?;
+    if identity(&open(&path, false, true)?, false)? != expected {
+        return Err(invalid());
+    }
+    root.verify()?;
+    Ok(RecoveryGate(file))
+}
+
+pub(crate) fn wait_for_recovery(data_dir: &Path) -> io::Result<()> {
+    let root = Root::open(data_dir)?;
+    let path = root.path.join(PENDING_RECOVERY);
+    let file = match open(&path, false, true) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let expected = identity(&file, false)?;
+    loop {
+        match file.try_lock() {
+            Ok(()) => {
+                if identity(&open(&path, false, true)?, false)? != expected {
+                    return Err(invalid());
+                }
+                file.unlock()?;
+                root.verify()?;
+                return Ok(());
+            }
+            Err(error) => {
+                let error = io::Error::from(error);
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(error);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                root.verify()?;
+            }
+        }
+    }
 }
 
 impl Root {
@@ -326,7 +388,22 @@ impl Root {
                 continue;
             };
             if active_wave(&name)? == Some(wave) {
-                fs::remove_file(entry.path())?;
+                let metadata = fs::symlink_metadata(entry.path())?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(invalid());
+                }
+                let retired_name = format!(
+                    "{RETIRED_PREFIX}{}",
+                    name.strip_prefix(ACTIVE_PREFIX).ok_or_else(invalid)?
+                );
+                let retired_path = self.path.join(retired_name);
+                fs::rename(entry.path(), &retired_path)?;
+                match fs::remove_file(retired_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
         sync_directory(&self.directory)
@@ -628,6 +705,22 @@ fn create_active(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+fn create_recovery_gate(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(7);
+    }
+    options.open(path)
+}
+
 fn open(path: &Path, directory: bool, writable: bool) -> io::Result<File> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() != directory
@@ -681,7 +774,7 @@ fn identity(file: &File, directory: bool) -> io::Result<Identity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     };
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: file owns a live handle and information is writable for the call.
@@ -818,6 +911,26 @@ mod tests {
                 .incomplete,
             2
         );
+    }
+
+    #[test]
+    fn joining_startup_waits_until_recovery_gate_is_released() {
+        let root = tempdir();
+        let gate = acquire_recovery_gate(root.path()).unwrap();
+        let path = root.path().to_path_buf();
+        let (sent, received) = std::sync::mpsc::channel();
+        let joiner = std::thread::spawn(move || {
+            wait_for_recovery(&path).unwrap();
+            sent.send(()).unwrap();
+        });
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(gate);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        joiner.join().unwrap();
     }
 
     #[test]
@@ -1009,6 +1122,8 @@ mod tests {
             bytes
         );
         assert!(!old.mark_clean().unwrap());
+        let joined = begin(root.path()).unwrap();
+        assert!(!joined.requires_recovery());
         assert_eq!(recovered.root.read().unwrap().unwrap().incomplete, 1);
         assert!(!marker_recovery_available(root.path(), &error));
         assert!(recover_marker_after_choice(root.path()).is_err());
@@ -1017,7 +1132,7 @@ mod tests {
     #[test]
     fn failed_marker_repair_keeps_recovery_available() {
         let root = tempdir();
-        let _previous = begin(root.path()).unwrap();
+        let previous = begin(root.path()).unwrap();
         let damaged_bytes = b"damaged startup marker";
         fs::write(root.path().join(MARKER), damaged_bytes).unwrap();
         let error = begin(root.path()).err().unwrap();
@@ -1029,17 +1144,20 @@ mod tests {
             "injected marker publication failure"
         );
         assert_eq!(fs::read(root.path().join(MARKER)).unwrap(), damaged_bytes);
-        assert!(
-            fs::read_dir(root.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".startup-recovery-preserved-")
-                    && fs::read(entry.path()).is_ok_and(|bytes| bytes == damaged_bytes))
-        );
+        assert!(fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".startup-recovery-preserved-")
+                && fs::read(entry.path()).is_ok_and(|bytes| bytes == damaged_bytes)));
         assert!(marker_recovery_available(root.path(), &error));
+        let recovered = recover_marker_after_choice(root.path()).unwrap();
+        assert!(!recovered.requires_recovery());
+        let joined = begin(root.path()).unwrap();
+        assert!(!joined.requires_recovery());
+        assert!(!previous.mark_clean().unwrap());
     }
 
     #[test]

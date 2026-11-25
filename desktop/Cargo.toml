@@ -137,7 +137,6 @@ zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }
 tauri-plugin-single-instance.workspace = true
-libc.workspace = true
 window-vibrancy = "=0.8.1"
 serde.workspace = true
 serde_json.workspace = true
@@ -195,6 +194,7 @@ zephium-webext-macos = { path = "../crates/zephium-webext-macos", version = "=0.
 zephium-blocker = { workspace = true, features = ["webkit", "runtime", "runtime-exact"] }
 block2 = "0.6"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["block2", "std"] }
+libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"

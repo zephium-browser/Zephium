@@ -1413,6 +1413,8 @@ struct StartupHealth {
     admitted: AtomicBool,
 }
 
+struct StartupRecoveryBarrier(std::path::PathBuf);
+
 impl StartupHealth {
     fn new(attempt: startup_recovery::StartupAttempt) -> Self {
         Self {
@@ -1459,11 +1461,13 @@ fn offer_startup_recovery(
     store: Arc<SqliteStore>,
     data_dir: std::path::PathBuf,
     attempt: Option<startup_recovery::StartupAttempt>,
+    recovery_gate: startup_recovery::RecoveryGate,
     continuation: StartupContinuation,
     advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
     #[cfg(target_os = "windows")] environments: Arc<AtomicU8>,
 ) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let recovery_gate = Arc::new(Mutex::new(Some(recovery_gate)));
     app.dialog().message("Zephium did not finish starting on recent attempts. You can open it without restoring tabs. Your saved session will be preserved in a recovery file, and unsent Work drafts will remain available.")
         .title("Recover Zephium startup")
         .kind(MessageDialogKind::Warning)
@@ -1471,7 +1475,9 @@ fn offer_startup_recovery(
         .show(move |accepted| {
             let answer = continuation.clone();
             let close_app = app.clone();
+            let close_gate = recovery_gate.clone();
             answer.answer(accepted, move || {
+            let worker_gate = recovery_gate.clone();
             tauri::async_runtime::spawn(async move {
                 let worker_guard = continuation.clone();
                 let recovered = tauri::async_runtime::spawn_blocking(move || -> Result<_, std::io::Error> {
@@ -1483,6 +1489,7 @@ fn offer_startup_recovery(
                         return Err(std::io::Error::other("startup session recovery remained unavailable"));
                     }
                     let attempt = match attempt { Some(attempt) => attempt, None => startup_recovery::recover_marker_after_choice(&data_dir)? };
+                    drop(worker_gate.lock().map_err(|_| std::io::Error::other("startup recovery gate is unavailable"))?.take());
                     Ok(Some((store, data_dir, attempt)))
                 }).await;
                 if !continuation.available() { return; }
@@ -1505,7 +1512,10 @@ fn offer_startup_recovery(
                     request_orderly_terminal_failure(&app);
                 }
             });
-            }, move || request_orderly_terminal_failure(&close_app));
+            }, move || {
+                drop(close_gate.lock().ok().and_then(|mut gate| gate.take()));
+                request_orderly_terminal_failure(&close_app)
+            });
         });
 }
 
@@ -2976,11 +2986,41 @@ fn dispatch_with_id(
 
 #[tauri::command]
 #[specta::specta]
-fn tabs_bootstrap(caller: WebviewWindow, shell: State<'_, Handle>) {
+async fn tabs_bootstrap(caller: WebviewWindow, app: tauri::AppHandle) {
     if !authorize(&caller, CallerPolicy::Main, "tabs_bootstrap") {
         return;
     }
-    shell.dispatch(Command::Bootstrap);
+    let Some(barrier) = app.try_state::<StartupRecoveryBarrier>() else {
+        request_startup_failure(
+            &app,
+            std::io::Error::other("startup recovery barrier is unavailable"),
+        );
+        return;
+    };
+    let data_dir = barrier.0.clone();
+    let Some(shell) = app.try_state::<Handle>() else {
+        request_startup_failure(&app, std::io::Error::other("shell is unavailable"));
+        return;
+    };
+    let shell = shell.inner().clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        startup_recovery::wait_for_recovery(&data_dir)
+    })
+    .await
+    {
+        Ok(Ok(())) => {
+            shell.dispatch(Command::Bootstrap);
+        }
+        Ok(Err(error)) => {
+            request_startup_failure(&app, error);
+        }
+        Err(_) => {
+            request_startup_failure(
+                &app,
+                std::io::Error::other("startup recovery barrier did not complete"),
+            );
+        }
+    }
 }
 
 static BLOCKER_STATS_QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -8741,16 +8781,18 @@ pub fn run() {
                 std::fs::create_dir_all(&data_dir)?;
                 #[cfg(not(target_os = "linux"))]
                 {
-                    match app.path().config_dir().map_err(std::io::Error::other).and_then(
-                        |config_dir| {
+                    match app
+                        .path()
+                        .config_dir()
+                        .map_err(std::io::Error::other)
+                        .and_then(|config_dir| {
                             let coordination_dir = instance_lease::shortcut_coordination_dir(
                                 &config_dir,
                                 &app.config().identifier,
                             );
                             std::fs::create_dir_all(&coordination_dir)?;
                             instance_lease::GlobalShortcutOwner::acquire(&coordination_dir)
-                        },
-                    ) {
+                        }) {
                         Ok(owner) => {
                             if !app.manage(owner) {
                                 return Err(std::io::Error::other(
@@ -8854,17 +8896,32 @@ pub fn run() {
                             error.kind(),
                             "startup recovery marker is unavailable",
                         )
-                        .into())
+                        .into());
                     }
                 };
+                let recovery_gate = if recovery_needed {
+                    Some(startup_recovery::acquire_recovery_gate(&data_dir)?)
+                } else {
+                    None
+                };
+                if !app.manage(StartupRecoveryBarrier(data_dir.clone())) {
+                    return Err(std::io::Error::other(
+                        "startup recovery barrier is already installed",
+                    )
+                    .into());
+                }
                 drop(startup_gate);
                 let continuation = StartupContinuation::new(shutdown.inner().clone());
                 if recovery_needed {
+                    let recovery_gate = recovery_gate.ok_or_else(|| {
+                        std::io::Error::other("startup recovery gate is unavailable")
+                    })?;
                     offer_startup_recovery(
                         app.handle().clone(),
                         store,
                         data_dir,
                         startup.ok(),
+                        recovery_gate,
                         continuation,
                         runtime_security_advisories,
                         #[cfg(target_os = "windows")]

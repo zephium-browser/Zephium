@@ -231,7 +231,8 @@ pub fn install(app: &AppHandle, keymap_override: Option<String>) {
     } else {
         None
     };
-    let registered = parsed.filter(|parsed| register(app, parsed));
+    let registered =
+        register_owned_shortcut(owns_global_shortcut, parsed, |parsed| register(app, parsed));
     let double_tap = match setting(DOUBLE_TAP_KEY).as_deref() {
         Some("command") => DoubleTap::Command,
         Some("option") => DoubleTap::Option,
@@ -281,7 +282,7 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                 let app = app.clone();
                 let handle = app.clone();
                 let keymap_override = keymap_override.clone();
-                if app
+                let scheduled = app
                     .run_on_main_thread(move || {
                         let still_owns = handle
                             .try_state::<crate::instance_lease::GlobalShortcutOwner>()
@@ -300,11 +301,9 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                             release_install_reservation(&trigger);
                         }
                     })
-                    .is_err()
-                {
-                    if let Some(trigger) = app.try_state::<Trigger>() {
-                        release_install_reservation(&trigger);
-                    }
+                    .is_ok();
+                if let Some(trigger) = app.try_state::<Trigger>() {
+                    release_reservation_after_schedule(&trigger, scheduled);
                 }
             }
         }
@@ -463,6 +462,12 @@ fn release_install_reservation(trigger: &Trigger) {
         .install_pending = false;
 }
 
+fn release_reservation_after_schedule(trigger: &Trigger, scheduled: bool) {
+    if !scheduled {
+        release_install_reservation(trigger);
+    }
+}
+
 fn clear_recording_without_ownership(state: &mut State, owns: bool) -> bool {
     if owns {
         return false;
@@ -509,6 +514,18 @@ fn should_attempt_install(owns: bool, shutting_down: bool) -> bool {
 
 fn should_install_after_reservation(owns: bool, shutting_down: bool, can_record: bool) -> bool {
     should_attempt_install(owns, shutting_down) && can_record
+}
+
+fn register_owned_shortcut(
+    owns: bool,
+    shortcut: Option<Shortcut>,
+    register: impl FnOnce(&Shortcut) -> bool,
+) -> Option<Shortcut> {
+    if owns {
+        shortcut.filter(register)
+    } else {
+        None
+    }
 }
 
 pub fn set_double_tap(app: &AppHandle, mode: DoubleTap) -> LauncherTrigger {
@@ -591,8 +608,26 @@ mod tests {
         trigger.0.lock().unwrap().install_pending = false;
         assert!(!reserve_install(&trigger));
         trigger.0.lock().unwrap().install_pending = true;
-        release_install_reservation(&trigger);
+        release_reservation_after_schedule(&trigger, false);
         assert!(!trigger.0.lock().unwrap().install_pending);
+        trigger.0.lock().unwrap().install_pending = true;
+        release_reservation_after_schedule(&trigger, true);
+        assert!(trigger.0.lock().unwrap().install_pending);
+    }
+
+    #[test]
+    fn failed_owner_registration_leaves_no_registered_shortcut() {
+        let shortcut = Shortcut::from_str(DEFAULT).unwrap();
+        let registered = register_owned_shortcut(true, Some(shortcut), |_| false);
+        assert!(registered.is_none());
+        let attempted = std::cell::Cell::new(false);
+        let registered =
+            register_owned_shortcut(false, Some(Shortcut::from_str(DEFAULT).unwrap()), |_| {
+                attempted.set(true);
+                true
+            });
+        assert!(registered.is_none());
+        assert!(!attempted.get());
     }
 
     #[test]

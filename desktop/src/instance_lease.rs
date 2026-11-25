@@ -168,6 +168,24 @@ mod tests {
     }
 
     #[test]
+    fn startup_admission_lease_is_released_after_success_and_error_results() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("startup.lock");
+        for fail in [false, true] {
+            let lease = FileLease::acquire(&path).unwrap();
+            assert!(FileLease::try_acquire(&path).unwrap().is_none());
+            let result: std::io::Result<()> = if fail {
+                Err(std::io::Error::other("injected startup failure"))
+            } else {
+                Ok(())
+            };
+            drop(lease);
+            assert_eq!(result.is_err(), fail);
+            assert!(FileLease::try_acquire(&path).unwrap().is_some());
+        }
+    }
+
+    #[test]
     fn distinct_data_roots_share_shortcut_ownership_and_promote_after_release() {
         let temp = tempfile::tempdir().unwrap();
         let first_data_root = temp.path().join("first-data-root");

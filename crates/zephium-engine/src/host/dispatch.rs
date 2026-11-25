@@ -369,9 +369,7 @@ pub(crate) fn install(
             .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = crate::RuntimeGeneration::prepare(
-        &data_root
-            .join("private-runtime")
-            .join(std::process::id().to_string()),
+        &private_runtime_root(&data_root),
         crate::RuntimeGenerationKind::RawPrivate,
         &crate::platform::imp::WindowsLeftoverProcesses,
     )
@@ -603,6 +601,13 @@ pub(crate) fn install(
         Ok::<(), String>(())
     })?;
     Ok(cleanup_advisory)
+}
+
+#[cfg(target_os = "windows")]
+fn private_runtime_root(data_root: &std::path::Path) -> PathBuf {
+    data_root
+        .join("private-runtime")
+        .join(std::process::id().to_string())
 }
 
 // WebView2 construction pumps the Windows message loop. A nested main-thread
@@ -1837,6 +1842,18 @@ mod tests {
             key: Some(key),
             task: Box::new(|_: &mut EngineHost| {}),
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn private_runtime_root_is_scoped_to_the_process_id() {
+        let root = private_runtime_root(std::path::Path::new("data"));
+        assert_eq!(
+            root,
+            std::path::Path::new("data")
+                .join("private-runtime")
+                .join(std::process::id().to_string())
+        );
     }
 
     #[test]

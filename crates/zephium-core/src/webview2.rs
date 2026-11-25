@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::runtime_security::{
-    RuntimeSecurityAdvisories, RuntimeSecurityAdvisory, RuntimeSecurityUpdateTarget,
-    overdue_review_advisory,
+    overdue_review_advisory, RuntimeSecurityAdvisories, RuntimeSecurityAdvisory,
+    RuntimeSecurityUpdateTarget,
 };
 
 /// Windows Stable security release published by Microsoft on 2026-10-29.
@@ -31,7 +31,8 @@ pub const SECURITY_FLOOR_SOURCE_URL: &str =
 /// Runtime build is available for x86, x64, and ARM64. Edge security notes
 /// establish the security release; this independent source establishes that
 /// the corresponding supported WebView2 artifacts actually exist.
-pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str = "https://www.catalog.update.microsoft.com/Search.aspx?q=Microsoft+WebView2+Runtime+156.0.4314.56";
+pub const RUNTIME_AVAILABILITY_SOURCE_URL: &str =
+    "https://www.catalog.update.microsoft.com/Search.aspx?q=Microsoft+WebView2+Runtime+156.0.4314.56";
 
 /// Newest Stable security release included in this review. It is intentionally
 /// separate from the hard floor: falling behind by one serviced patch produces

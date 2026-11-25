@@ -30,10 +30,9 @@ pub fn prepare(
             "privileged WebView labels must be distinct and nonempty",
         ));
     }
+    let runtime_root = privileged_runtime_root(data_dir)?;
     let runtime = RuntimeGeneration::prepare(
-        &data_dir
-            .join("privileged-runtime")
-            .join(std::process::id().to_string()),
+        &runtime_root,
         RuntimeGenerationKind::Privileged,
         &zephium_engine::WindowsLeftoverProcesses,
     )?;
@@ -67,6 +66,13 @@ pub fn prepare(
     Ok(PreparedDirectories { main, panel })
 }
 
+fn privileged_runtime_root(data_dir: &Path) -> io::Result<PathBuf> {
+    let parent = data_dir.join("privileged-runtime");
+    fs::create_dir_all(&parent)?;
+    let parent = zephium_core::webview2::canonical_user_data_directory(&parent)?;
+    Ok(parent.join(std::process::id().to_string()))
+}
+
 /// Records a privileged browser process in this run's generation, so the
 /// next launch can clear it even if this run never proves the process gone.
 pub fn record_browser_process(process_id: u32) {
@@ -97,11 +103,15 @@ pub fn record_browser_process(process_id: u32) {
 fn unexpected_browser(error: &UnexpectedBrowser) -> (String, bool) {
     match error {
         UnexpectedBrowser::Invalidated(_) => (
-            format!("privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"),
+            format!(
+                "privacy: a privileged WebView2 browser starts unexpected, so its data waits for a reboot after an unclean quit: {error}"
+            ),
             false,
         ),
         UnexpectedBrowser::Refused { .. } => (
-            format!("privacy: a privileged WebView2 browser starts uncovered by its record, so its data may be cleared at the next launch this boot: {error}"),
+            format!(
+                "privacy: a privileged WebView2 browser starts uncovered by its record, so its data may be cleared at the next launch this boot: {error}"
+            ),
             true,
         ),
     }
@@ -137,6 +147,20 @@ pub fn cleanup_current_after_proven_exit() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_privileged_parent_before_returning_the_pid_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir(&data_dir).unwrap();
+        let root = privileged_runtime_root(&data_dir).unwrap();
+        assert!(root.parent().unwrap().is_dir());
+        assert_eq!(
+            root.file_name().unwrap().to_string_lossy(),
+            std::process::id().to_string()
+        );
+        assert!(!root.exists());
+    }
 
     #[test]
     fn an_uncovered_privileged_browser_still_starts_and_is_flagged() {
