@@ -36,6 +36,7 @@ impl NativeWorkStorageAnchor {
         })
     }
 
+    #[allow(missing_docs)]
     pub fn prepare_in_data_root(
         root: &Path,
         application: NativeApplication,
