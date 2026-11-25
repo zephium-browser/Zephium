@@ -202,6 +202,13 @@ fn prepare_unix_root(path: &Path) -> std::io::Result<PathBuf> {
         })
         .collect::<Vec<_>>();
     for (index, name) in components.iter().enumerate() {
+        #[cfg(target_os = "macos")]
+        if !zephium_private_fs::macos_directory_acl_is_restrictive(&directory) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "user data directory path has an ACL that grants or may grant access",
+            ));
+        }
         let child = match rustix::fs::openat(
             &directory,
             name,
@@ -233,6 +240,13 @@ fn prepare_unix_root(path: &Path) -> std::io::Result<PathBuf> {
             Err(error) => return Err(std::io::Error::from(error)),
         };
         let metadata = child.metadata()?;
+        #[cfg(target_os = "macos")]
+        if !zephium_private_fs::macos_directory_acl_is_restrictive(&child) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "user data directory path has an ACL that grants or may grant access",
+            ));
+        }
         if index + 1 == components.len() {
             validate_unix_root(&metadata)?;
         } else {
@@ -730,6 +744,32 @@ mod tests {
             std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rejects_inheritable_acl_before_creating_custom_root() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("acl-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let status = Command::new("/bin/chmod")
+            .args([
+                "+a",
+                "everyone allow read,search,file_inherit,directory_inherit",
+            ])
+            .arg(&parent)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let root = parent.join("browser-state");
+        assert_eq!(
+            prepare_unix_root(&root).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(!root.exists());
     }
 
     #[cfg(unix)]

@@ -1,7 +1,6 @@
 //! Fixed-purpose Work storage. Arbitrary private namespaces remain gated.
 use super::{
-    admit_namespace_support, known_profile, NativeApplication, NativeSession, NativeStorageAnchor,
-    NativeStorageFile,
+    known_profile, NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
 };
 use crate::{PrivateEntryName, PrivateFsError};
 use std::path::Path;
@@ -42,7 +41,6 @@ impl NativeWorkStorageAnchor {
         application: NativeApplication,
         session: Option<&NativeSession>,
     ) -> Result<Self, PrivateFsError> {
-        admit_namespace_support()?;
         validate_routing(application, session)?;
         let data_root = super::super::prepare_user_data_root(data_root)?;
         Ok(Self {

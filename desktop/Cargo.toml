@@ -134,6 +134,7 @@ zephium-agent-runtime = { workspace = true, optional = true }
 zephium-agent-provider-transport = { workspace = true, optional = true }
 zephium-engine.workspace = true
 zephium-store.workspace = true
+zephium-private-fs.workspace = true
 zephium-notes.workspace = true
 zephium-import.workspace = true
 zephium-blocker-service = { workspace = true, features = ["official-https"] }

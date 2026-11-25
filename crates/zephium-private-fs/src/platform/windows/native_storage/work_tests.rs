@@ -8,8 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 #[test]
-#[cfg(feature = "windows-namespace-validation")]
-fn work_storage_uses_the_selected_data_root() {
+fn work_storage_uses_the_selected_data_root_without_namespace_validation() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("zephium-data");
     crate::platform::windows::prepare_user_data_root(&root).unwrap();

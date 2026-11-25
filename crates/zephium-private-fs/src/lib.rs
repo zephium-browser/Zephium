@@ -57,6 +57,20 @@ pub use platform::{
 pub use streaming::{StreamingFileLength, StreamingWriteError, MAX_STREAMING_FILE_BYTES};
 pub use transition::PrivateFsTransitionError;
 
+#[cfg(target_os = "macos")]
+#[allow(missing_docs)]
+pub fn macos_directory_acl_is_restrictive(directory: &std::fs::File) -> bool {
+    use std::os::fd::AsFd;
+
+    calcifer_macos_acl::read_acl(directory.as_fd()).is_ok_and(|acl| {
+        acl.flags == 0
+            && acl
+                .entries
+                .into_iter()
+                .all(|entry| entry.tag == calcifer_macos_acl::TAG_DENY && entry.flags & !0x1f == 0)
+    })
+}
+
 /// Hard ceiling for any allocation or write accepted by the in-memory API.
 ///
 /// Larger artifacts must use a separately reviewed streaming interface. This
