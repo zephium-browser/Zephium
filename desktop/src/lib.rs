@@ -8772,8 +8772,13 @@ pub fn run() {
                 zephium_app::work_files::trash::install_root(data_dir.clone());
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700))?;
+                    if user_data_dir.is_none() {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            &data_dir,
+                            std::fs::Permissions::from_mode(0o700),
+                        )?;
+                    }
                 }
                 #[cfg(all(feature = "macos-work-profile-enrollment", target_os = "macos"))]
                 navigation_probe::mark_profile_enrollment(&data_dir)?;

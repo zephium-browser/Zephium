@@ -7720,6 +7720,7 @@ dependencies = [
  "raw-window-handle",
  "reqwest",
  "rfd",
+ "rustix",
  "serde",
  "serde_json",
  "specta",

@@ -85,6 +85,8 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
             "user data directory contains relative traversal components",
         ));
     }
+    #[cfg(unix)]
+    let existing = std::fs::symlink_metadata(&path).ok();
     std::fs::create_dir_all(&path)?;
     #[cfg(target_os = "windows")]
     {
@@ -98,6 +100,21 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
                 std::io::ErrorKind::InvalidData,
                 "user data directory must be a real directory",
             ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            if existing.is_none() {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o077 != 0
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "existing user data directory must be owned by this user and private",
+                ));
+            }
         }
         let canonical = path.canonicalize()?;
         zephium_core::webview2::resolve_data_root(&canonical)
@@ -207,5 +224,25 @@ mod tests {
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(resolve(&file).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_shared_existing_root_without_changing_its_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("shared");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = std::fs::symlink_metadata(&root).unwrap().mode() & 0o7777;
+        assert!(resolve(&root).is_err());
+        let after = std::fs::symlink_metadata(root).unwrap().mode() & 0o7777;
+        assert_eq!(before, 0o755);
+        assert_eq!(after, before);
+        assert_eq!(
+            rustix::process::geteuid().as_raw(),
+            temp.path().metadata().unwrap().uid()
+        );
     }
 }
