@@ -310,7 +310,41 @@
   }
 
   .bookmark-choice select {
+    box-sizing: border-box;
+    inline-size: calc(100% - 34px);
     min-inline-size: 0;
+    min-block-size: var(--search-height);
+    padding-inline: var(--control-inset);
     margin-inline-start: 34px;
+    border: 0;
+    border-radius: var(--radius-field);
+    background: var(--color-field);
+    color: var(--color-text);
+    font: inherit;
+    font-size: var(--text-label);
+    transition:
+      background-color var(--motion-instant) var(--ease-smooth),
+      box-shadow var(--motion-instant) var(--ease-smooth);
+  }
+
+  .bookmark-choice select:focus-visible {
+    background: var(--color-field-hover);
+    outline: none;
+    box-shadow: var(--shadow-field-focus);
+  }
+
+  .bookmark-choice select:disabled {
+    color: var(--color-muted);
+  }
+
+  .bookmark-choice select:hover:not(:disabled) {
+    background: var(--color-field-hover);
+  }
+
+  @media (forced-colors: active) {
+    .bookmark-choice select:focus-visible {
+      outline: 1px solid Highlight;
+      box-shadow: none;
+    }
   }
 </style>
