@@ -1,3 +1,3 @@
-# Feat: App data cannot be stored in a custom directory
+# Feat: App data cannot be kept outside the default directory
 
-Add `--user-data-dir <path>` to keep settings, stores, bookmarks, sessions, and browser data under a chosen directory.
+Users who need Zephium's data outside its default location have no way to choose where it is stored. Could `--user-data-dir <path>` put all app data, including settings, databases, bookmarks, sessions, logs, cache, and browser data, under the chosen directory? Without the flag, the existing default should remain.

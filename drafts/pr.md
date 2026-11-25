@@ -2,9 +2,9 @@
 
 ## What changes for the user
 
-`--user-data-dir <path>` routes app data into a private custom directory and keeps separate roots isolated.
+`zephium --user-data-dir <path>` stores all app data under the selected private directory and reuses that root across launches. Separate paths keep their app data isolated. Without the flag, Zephium uses its existing default directory.
 
 ## How I checked it
 
-- Custom-root persistence, isolation, invalid paths, and permissions.
-- Windows ACL coverage still needs a Windows run.
+- Custom-root persistence, isolation, invalid paths, Unix ancestor checks, and root permissions.
+- Windows private-fs tests compile for Windows but still need a native Windows run.
