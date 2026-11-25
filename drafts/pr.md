@@ -2,7 +2,7 @@
 
 ## What changes for the user
 
-`open -na` can launch up to 16 Zephium processes. Overlapping starts no longer trigger false recovery prompts. If the instance holding the global launcher shortcut exits, another open instance can take ownership. Windows cleanup reclaims stale per-process WebView2 data after an unclean exit when its browser processes can be proven gone.
+`open -na` can launch up to 16 Zephium processes. Overlapping starts no longer trigger false recovery prompts. If the instance holding the global launcher shortcut exits, another open instance can take ownership. Windows cleanup reclaims stale per-process WebView2 data after an unclean exit when browser processes are proven gone.
 
 ## How I checked it
 
