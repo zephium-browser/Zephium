@@ -8608,6 +8608,14 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let setup_privileged_environments = attempted_privileged_environments.clone();
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            external_links::bring_forward(app);
+            external_links::hand_off(
+                app,
+                external_links::external_arguments(argv.into_iter().skip(1)),
+                true,
+            );
+        }))
         // Every Tauri-managed webview is zone 2. It may load only the bundled
         // application origin (or the exact Vite origin in debug builds).
         .plugin(navigation_lock())
@@ -8732,11 +8740,20 @@ pub fn run() {
                 navigation_probe::validate_data_root(&data_dir)?;
                 std::fs::create_dir_all(&data_dir)?;
                 #[cfg(not(target_os = "linux"))]
-                if !app.manage(instance_lease::GlobalShortcutOwner::acquire(&data_dir)?) {
-                    return Err(std::io::Error::other(
-                        "global shortcut ownership state is already installed",
-                    )
-                    .into());
+                {
+                    let coordination_dir = instance_lease::shortcut_coordination_dir(
+                        &app.path().config_dir()?,
+                        &app.config().identifier,
+                    );
+                    std::fs::create_dir_all(&coordination_dir)?;
+                    if !app.manage(instance_lease::GlobalShortcutOwner::acquire(
+                        &coordination_dir,
+                    )?) {
+                        return Err(std::io::Error::other(
+                            "global shortcut ownership state is already installed",
+                        )
+                        .into());
+                    }
                 }
                 #[cfg(target_os = "windows")]
                 updates::restore(app.handle(), &data_dir);

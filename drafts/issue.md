@@ -1,7 +1,7 @@
-# Bug: Concurrent starts show false recovery prompts and lose the launcher shortcut
+# Bug: Zephium can't run separate data directories at once
 
-Recovery: On macOS, start A with `open -na Zephium` using the default profile and data directory. When A appears in Activity Monitor but its first browser window has not opened, run the same command for B. B can show a recovery prompt while A is still starting. Expected: both instances open without a false recovery prompt.
+Once `--user-data-dir` is available, could separate Zephium data directories run at the same time?
 
-Shortcut: On macOS, confirm A opens the launcher with `Cmd+Shift+Space`. On Windows, use `Ctrl+Shift+Space`. Start B with the same profile, close A, then press the shortcut. It no longer opens the launcher. Expected: B opens its launcher.
+**Observed:** Both instances start with distinct `--user-data-dir` paths, but the remaining one does not reliably reclaim the global launcher shortcut after its owner exits.
 
-Acceptance: On macOS, launch 16 instances using the same default profile and data directory. All should remain open without false recovery prompts. Closing the shortcut-owning instance should leave the shortcut working in a remaining instance.
+**Expected:** The remaining instance claims the shortcut after its owner exits.

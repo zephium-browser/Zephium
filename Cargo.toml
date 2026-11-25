@@ -45,6 +45,7 @@ zephium-page-assist = { path = "crates/zephium-page-assist", version = "=0.1.0" 
 tauri = { version = "=2.11.3", features = ["macos-private-api"] }
 tauri-build = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
 wry = "=0.55.1"
 libc = "0.2"
 raw-window-handle = "0.6"

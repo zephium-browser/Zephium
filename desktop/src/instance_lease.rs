@@ -3,6 +3,13 @@ use std::io;
 use std::path::Path;
 use std::sync::Mutex;
 
+pub(crate) fn shortcut_coordination_dir(config_dir: &Path, identifier: &str) -> std::path::PathBuf {
+    let base_identifier = identifier
+        .split_once(".userdata.")
+        .map_or(identifier, |(base, _)| base);
+    config_dir.join(base_identifier)
+}
+
 pub(crate) struct FileLease {
     file: File,
 }
@@ -13,8 +20,8 @@ pub(crate) struct GlobalShortcutOwner {
 }
 
 impl GlobalShortcutOwner {
-    pub(crate) fn acquire(data_dir: &Path) -> io::Result<Self> {
-        let path = data_dir.join(".global-shortcut-owner.lock");
+    pub(crate) fn acquire(coordination_dir: &Path) -> io::Result<Self> {
+        let path = coordination_dir.join(".global-shortcut-owner.lock");
         let lease = FileLease::try_acquire(&path)?;
         Ok(Self {
             path,
@@ -123,7 +130,7 @@ fn unlock(file: &File) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileLease, GlobalShortcutOwner};
+    use super::{shortcut_coordination_dir, FileLease, GlobalShortcutOwner};
     use std::io::BufRead;
 
     #[test]
@@ -138,16 +145,48 @@ mod tests {
     }
 
     #[test]
-    fn independent_roots_do_not_share_ownership() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let first = FileLease::try_acquire(&first.path().join("owner.lock"))
-            .unwrap()
-            .expect("first root owner");
-        let second = FileLease::try_acquire(&second.path().join("owner.lock"))
-            .unwrap()
-            .expect("second root owner");
-        drop((first, second));
+    fn distinct_data_roots_share_shortcut_ownership_and_promote_after_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_data_root = temp.path().join("first-data-root");
+        let second_data_root = temp.path().join("second-data-root");
+        let coordination_dir = temp.path().join("app-config");
+        std::fs::create_dir_all(&first_data_root).unwrap();
+        std::fs::create_dir_all(&second_data_root).unwrap();
+        std::fs::create_dir_all(&coordination_dir).unwrap();
+        assert_ne!(first_data_root, second_data_root);
+
+        let first_shortcut_dir =
+            shortcut_coordination_dir(&coordination_dir, "app.zephium.userdata.first");
+        let second_shortcut_dir =
+            shortcut_coordination_dir(&coordination_dir, "app.zephium.userdata.second");
+        assert_eq!(first_shortcut_dir, second_shortcut_dir);
+        std::fs::create_dir_all(&first_shortcut_dir).unwrap();
+
+        let first = GlobalShortcutOwner::acquire(&first_shortcut_dir).unwrap();
+        let second = GlobalShortcutOwner::acquire(&second_shortcut_dir).unwrap();
+        assert!(first.owns());
+        assert!(!second.owns());
+
+        drop(first);
+        assert!(second.try_claim().unwrap());
+        assert!(second.owns());
+    }
+
+    #[test]
+    fn custom_roots_keep_one_shortcut_coordination_directory() {
+        let config_dir = std::path::Path::new("/config");
+        assert_eq!(
+            shortcut_coordination_dir(config_dir, "app.zephium.userdata.first"),
+            config_dir.join("app.zephium")
+        );
+        assert_eq!(
+            shortcut_coordination_dir(config_dir, "app.zephium.userdata.second"),
+            config_dir.join("app.zephium")
+        );
+        assert_eq!(
+            shortcut_coordination_dir(config_dir, "app.zephium"),
+            config_dir.join("app.zephium")
+        );
     }
 
     #[test]

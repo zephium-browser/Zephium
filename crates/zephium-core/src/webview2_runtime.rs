@@ -975,6 +975,7 @@ fn maintain_sibling_roots(
     let parent = current_root.parent()?;
     let parent = direct_directory(parent).ok()?;
     let current_name = current_root.file_name()?;
+    let legacy_lease = legacy_parent_lease(&parent);
     let mut inspected = 0_usize;
     let mut overdue = None;
     let entries = match fs::read_dir(&parent) {
@@ -1003,20 +1004,33 @@ fn maintain_sibling_roots(
     candidates.sort_by_key(|entry| entry.file_name());
     for entry in candidates {
         let name = entry.file_name();
-        if name == current_name
-            || !name
-                .to_string_lossy()
-                .parse::<u32>()
-                .is_ok_and(|pid| pid != 0)
-        {
+        if name == current_name {
+            continue;
+        }
+        let name_text = name.to_string_lossy().into_owned();
+        let process_root = name_text.parse::<u32>().is_ok_and(|pid| pid != 0);
+        let legacy_generation =
+            ProfileId::parse(&name_text).filter(|generation| generation.to_string() == name_text);
+        if !process_root && legacy_generation.is_none() {
             continue;
         }
         let root = match direct_directory(&entry.path()) {
             Ok(root) if root.parent() == Some(parent.as_path()) => root,
             _ => continue,
         };
-        if !has_owned_generation(&root, kind) {
-            continue;
+        if process_root {
+            if !has_owned_generation(&root, kind) {
+                continue;
+            }
+        } else {
+            if legacy_lease.is_none()
+                || !matches!(
+                    marker_status(&root, kind, &name_text),
+                    Ok(MarkerStatus::Matches)
+                )
+            {
+                continue;
+            }
         }
         inspected += 1;
         if inspected > MAX_TOTAL_GENERATIONS {
@@ -1060,9 +1074,23 @@ fn maintain_sibling_roots(
             Err(_) => continue,
         }
         let mut report = GenerationReport::default();
-        match open_boot_registry(kind)
-            .and_then(|boot| maintain_generations(&root, &boot, kind, leftovers, &mut report))
-        {
+        let maintained = if process_root {
+            open_boot_registry(kind)
+                .and_then(|boot| maintain_generations(&root, &boot, kind, leftovers, &mut report))
+        } else {
+            open_boot_registry(kind).and_then(|boot| {
+                maintain_generation(
+                    &root,
+                    &name,
+                    &boot,
+                    kind,
+                    leftovers,
+                    &mut QuarantineUsage::default(),
+                    &mut report,
+                )
+            })
+        };
+        match maintained {
             Ok(()) => {
                 if let Some(reason) = report.overdue {
                     overdue.get_or_insert_with(|| {
@@ -1079,6 +1107,31 @@ fn maintain_sibling_roots(
         drop(lease);
     }
     overdue
+}
+
+fn legacy_parent_lease(parent: &Path) -> Option<File> {
+    let path = parent.join(LEASE_FILE);
+    let before = fs::symlink_metadata(&path).ok()?;
+    if !before.is_file() || before.file_type().is_symlink() || is_reparse(&before) {
+        return None;
+    }
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let after = lease.metadata().ok()?;
+    if !after.is_file()
+        || is_reparse(&after)
+        || before.creation_time() != after.creation_time()
+        || before.file_size() != after.file_size()
+        || lease.try_lock().is_err()
+    {
+        return None;
+    }
+    Some(lease)
 }
 
 fn has_owned_generation(root: &Path, kind: RuntimeGenerationKind) -> bool {
@@ -1678,6 +1731,106 @@ mod tests {
         )
         .unwrap();
         assert!(!stale_generation.exists());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_process_root_reclaims_marked_generations_from_the_legacy_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let stale = RuntimeGeneration::prepare(
+            &runtime_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_process_root_preserves_active_generations_from_the_legacy_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        let active = RuntimeGeneration::prepare(
+            &runtime_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        active.expect_browser().unwrap();
+        active.record_browser_process(BROWSER).unwrap();
+        fs::write(active.root().join("owned-data"), b"private").unwrap();
+        let active_generation = active.root().to_owned();
+        let cleanup = active.cleanup_ticket();
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(active_generation.exists());
+        assert_eq!(
+            fs::read(active_generation.join("owned-data")).unwrap(),
+            b"private"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+
+        drop(active);
+        cleanup.cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn legacy_generation_scan_stops_at_its_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("private-runtime");
+        fs::create_dir(&runtime_root).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(runtime_root.join(LEASE_FILE))
+            .unwrap();
+        let mut generations = Vec::new();
+        for _ in 0..=MAX_TOTAL_GENERATIONS {
+            let generation = ProfileId::generate().to_string();
+            let path = runtime_root.join(&generation);
+            fs::create_dir(&path).unwrap();
+            write_generation_marker(&path, RuntimeGenerationKind::RawPrivate, &generation).unwrap();
+            generations.push(path);
+        }
+
+        let current = RuntimeGeneration::prepare(
+            &runtime_root.join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(current.report().overdue.is_some());
+        assert!(generations.iter().any(|generation| generation.exists()));
         current
             .cleanup_ticket()
             .cleanup_after_proven_exit()

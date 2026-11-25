@@ -15,6 +15,24 @@ static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// in front. The shell says which window that is once it has opened them.
 static FORWARD: AtomicBool = AtomicBool::new(false);
 
+pub(crate) fn external_arguments<I>(arguments: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut arguments = arguments.into_iter();
+    let mut external = Vec::new();
+    while let Some(argument) = arguments.next() {
+        if matches!(argument.as_str(), "--user-data-dir" | "--profile") {
+            let _ = arguments.next();
+        } else if argument.starts_with("--user-data-dir=") || argument.starts_with("--profile=") {
+            continue;
+        } else {
+            external.push(argument);
+        }
+    }
+    external
+}
+
 /// Admits `arguments` and opens them. `forward` brings the window to the
 /// front, which a running instance wants and a launch leaves to its own
 /// startup reveal.
@@ -78,5 +96,29 @@ pub(crate) fn bring_forward(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::external_arguments;
+
+    #[test]
+    fn startup_options_and_values_are_not_treated_as_links() {
+        assert_eq!(
+            external_arguments([
+                "--profile".to_owned(),
+                "work".to_owned(),
+                "https://one.example/".to_owned(),
+                "--user-data-dir=/tmp/zephium".to_owned(),
+                "https://two.example/".to_owned(),
+                "--user-data-dir".to_owned(),
+                "/tmp/other".to_owned(),
+            ]),
+            vec![
+                "https://one.example/".to_owned(),
+                "https://two.example/".to_owned()
+            ]
+        );
     }
 }
