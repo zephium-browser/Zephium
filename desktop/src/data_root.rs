@@ -331,7 +331,11 @@ fn validate_unix_directory_ancestor(metadata: &std::fs::Metadata) -> std::io::Re
 }
 
 pub(crate) fn install(path: PathBuf) -> std::io::Result<()> {
-    DATA_ROOT.set(path).map_err(|_| {
+    install_into(&DATA_ROOT, path)
+}
+
+fn install_into(root: &std::sync::OnceLock<PathBuf>, path: PathBuf) -> std::io::Result<()> {
+    root.set(path).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "data root already resolved",
@@ -351,39 +355,75 @@ pub(crate) fn is_installed() -> bool {
 }
 
 pub(crate) fn root(app: &AppHandle) -> std::io::Result<PathBuf> {
-    DATA_ROOT
-        .get()
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(|| app.path().app_data_dir().map_err(std::io::Error::other))
+    selected_root(DATA_ROOT.get(), || {
+        app.path().app_data_dir().map_err(std::io::Error::other)
+    })
 }
 
 pub(crate) fn cache(app: &AppHandle) -> std::io::Result<PathBuf> {
-    if CUSTOM_ROOT.load(Ordering::Acquire) {
-        let root = DATA_ROOT
-            .get()
-            .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))?;
-        Ok(root.join("cache"))
-    } else {
-        app.path().app_cache_dir().map_err(std::io::Error::other)
-    }
+    selected_subdirectory(
+        CUSTOM_ROOT.load(Ordering::Acquire),
+        DATA_ROOT.get(),
+        "cache",
+        || app.path().app_cache_dir().map_err(std::io::Error::other),
+    )
 }
 
 pub(crate) fn logs(app: &AppHandle) -> std::io::Result<PathBuf> {
-    if CUSTOM_ROOT.load(Ordering::Acquire) {
-        let root = DATA_ROOT
-            .get()
-            .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))?;
-        Ok(root.join("logs"))
-    } else {
-        app.path().app_log_dir().map_err(std::io::Error::other)
+    selected_subdirectory(
+        CUSTOM_ROOT.load(Ordering::Acquire),
+        DATA_ROOT.get(),
+        "logs",
+        || app.path().app_log_dir().map_err(std::io::Error::other),
+    )
+}
+
+fn selected_root<F>(custom_root: Option<&PathBuf>, default_root: F) -> std::io::Result<PathBuf>
+where
+    F: FnOnce() -> std::io::Result<PathBuf>,
+{
+    match custom_root {
+        Some(root) => Ok(root.clone()),
+        None => default_root(),
     }
+}
+
+fn selected_subdirectory<F>(
+    use_custom_root: bool,
+    custom_root: Option<&PathBuf>,
+    child: &str,
+    default_path: F,
+) -> std::io::Result<PathBuf>
+where
+    F: FnOnce() -> std::io::Result<PathBuf>,
+{
+    if !use_custom_root {
+        return default_path();
+    }
+    custom_root
+        .map(|root| root.join(child))
+        .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))
 }
 
 pub(crate) fn prepare_logs(root: &Path) -> std::io::Result<PathBuf> {
     let logs = root.join("logs");
     std::fs::create_dir_all(&logs)?;
     Ok(logs)
+}
+
+pub(crate) fn startup_log_directory(
+    custom_root: Option<&Path>,
+    identifier: &str,
+    default_root: std::io::Result<PathBuf>,
+) -> std::io::Result<PathBuf> {
+    if let Some(root) = custom_root {
+        return prepare_logs(root);
+    }
+    let directory = default_root
+        .map_err(std::io::Error::other)?
+        .join(identifier);
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
 }
 
 #[cfg(test)]
@@ -464,6 +504,101 @@ mod tests {
             prepare_logs(temp.path()).unwrap_err().kind(),
             std::io::ErrorKind::AlreadyExists
         );
+    }
+
+    #[test]
+    fn startup_log_directory_uses_custom_root_and_propagates_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let custom = temp.path().join("custom");
+        let logs = startup_log_directory(Some(&custom), "zephium", Ok(PathBuf::new())).unwrap();
+        assert_eq!(logs, custom.join("logs"));
+        assert!(logs.is_dir());
+
+        let blocked = temp.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        assert!(startup_log_directory(Some(&blocked), "zephium", Ok(PathBuf::new())).is_err());
+
+        let fallback = temp.path().join("default");
+        let default_logs =
+            startup_log_directory(None, "app.zephium", Ok(fallback.clone())).unwrap();
+        assert_eq!(default_logs, fallback.join("app.zephium"));
+        assert!(default_logs.is_dir());
+        assert!(startup_log_directory(
+            None,
+            "app.zephium",
+            Err(std::io::Error::other("roaming unavailable"))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn data_paths_use_the_selected_root_and_keep_default_locations() {
+        let custom = PathBuf::from("/tmp/zephium-data");
+        let default_root = PathBuf::from("/tmp/default-data");
+        let default_cache = PathBuf::from("/tmp/default-cache");
+        let default_logs = PathBuf::from("/tmp/default-logs");
+
+        assert_eq!(
+            selected_root(Some(&custom), || Ok(default_root.clone())).unwrap(),
+            custom
+        );
+        assert_eq!(
+            selected_root(Some(&custom), || Err(std::io::Error::other("unused"))).unwrap(),
+            custom
+        );
+        assert_eq!(
+            selected_root(None, || Ok(default_root.clone())).unwrap(),
+            default_root
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "cache", || Ok(default_cache.clone()))
+                .unwrap(),
+            custom.join("cache")
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "cache", || {
+                Err(std::io::Error::other("unused"))
+            })
+            .unwrap(),
+            custom.join("cache")
+        );
+        assert_eq!(
+            selected_subdirectory(true, Some(&custom), "logs", || Ok(default_logs.clone()))
+                .unwrap(),
+            custom.join("logs")
+        );
+        assert_eq!(
+            selected_subdirectory(false, None, "cache", || Ok(default_cache.clone())).unwrap(),
+            default_cache
+        );
+        assert_eq!(
+            selected_subdirectory(false, None, "logs", || Ok(default_logs.clone())).unwrap(),
+            default_logs
+        );
+        assert!(selected_subdirectory(true, None, "cache", || Ok(default_cache)).is_err());
+    }
+
+    #[test]
+    fn data_root_install_rejects_a_second_selection() {
+        let root = std::sync::OnceLock::new();
+        install_into(&root, PathBuf::from("/tmp/first")).unwrap();
+        assert_eq!(root.get().unwrap(), Path::new("/tmp/first"));
+        assert_eq!(
+            install_into(&root, PathBuf::from("/tmp/second"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(root.get().unwrap(), Path::new("/tmp/first"));
+    }
+
+    #[test]
+    fn invalid_override_fails_before_installing_a_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(initialize_override(&file).is_err());
+        assert!(!is_installed());
     }
 
     #[test]

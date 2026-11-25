@@ -506,14 +506,26 @@ mod thumb {
     }
 
     fn path(app: &AppHandle, profile: &str, digest: &str, width: u32) -> Option<PathBuf> {
+        let cache = super::super::data_root::cache(app).ok()?;
+        cache_path(&cache, profile, digest, width)
+    }
+
+    fn cache_path(
+        cache: &std::path::Path,
+        profile: &str,
+        digest: &str,
+        width: u32,
+    ) -> Option<PathBuf> {
         let plain = digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit());
         if !plain {
             return None;
         }
-        let dir = super::super::data_root::cache(app)
-            .ok()?
-            .join("media-thumbs");
-        Some(dir.join(profile).join(format!("{digest}-{width}")))
+        Some(
+            cache
+                .join("media-thumbs")
+                .join(profile)
+                .join(format!("{digest}-{width}")),
+        )
     }
 
     pub(super) fn cached(
@@ -668,6 +680,20 @@ mod thumb {
             assert_eq!(width(Some("w=2561")), None);
             assert_eq!(width(Some("w=abc")), None);
             assert_eq!(width(None), None);
+        }
+
+        #[test]
+        fn thumbnails_follow_the_selected_cache_root() {
+            let cache = std::path::Path::new("/tmp/zephium-data/cache");
+            let digest = "a".repeat(64);
+            assert_eq!(
+                cache_path(cache, "profile-1", &digest, 360).unwrap(),
+                cache
+                    .join("media-thumbs")
+                    .join("profile-1")
+                    .join(format!("{digest}-360"))
+            );
+            assert!(cache_path(cache, "profile-1", "invalid", 360).is_none());
         }
 
         #[cfg(feature = "work-product")]

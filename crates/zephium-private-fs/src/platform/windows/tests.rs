@@ -16,6 +16,31 @@ fn namespace_activation_matches_the_explicit_validation_gate() {
     ));
 }
 
+#[test]
+fn custom_data_root_rejects_invalid_windows_paths_and_file_ancestors() {
+    for path in [
+        std::path::Path::new(""),
+        std::path::Path::new("relative\\state"),
+        std::path::Path::new("\\rooted-without-drive\\state"),
+        std::path::Path::new("C:\\"),
+        std::path::Path::new("C:\\..\\outside"),
+        std::path::Path::new("\\\\server\\share\\state"),
+    ] {
+        assert!(
+            matches!(prepare_user_data_root(path), Err(PrivateFsError::Unsafe)),
+            "accepted {path:?}"
+        );
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    assert!(matches!(
+        prepare_user_data_root(&file.join("child")),
+        Err(PrivateFsError::Unsafe)
+    ));
+}
+
 #[cfg(feature = "windows-namespace-validation")]
 mod validation {
     use super::*;

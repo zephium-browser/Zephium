@@ -101,14 +101,8 @@ pub fn open_startup_log(
             path
         })
     };
-    let directory = if let Some(root) = custom_data_dir {
-        crate::data_root::prepare_logs(root)?
-    } else {
-        let roaming = roaming.map_err(|error| std::io::Error::other(error.to_string()))?;
-        let directory = roaming.join(identifier);
-        std::fs::create_dir_all(&directory)?;
-        directory
-    };
+    let roaming = roaming.map_err(|error| std::io::Error::other(error.to_string()));
+    let directory = crate::data_root::startup_log_directory(custom_data_dir, identifier, roaming)?;
     redirect_stderr(&directory);
     crate::diagnostics::install(directory);
     Ok(())
