@@ -8,5 +8,5 @@ Bookmarks appear in every profile using the same data directory. Bookmark action
 
 ## How I checked it
 
-- Store bookmark tests: 17 passed, covering one-time migration, cross-profile visibility, and isolated history.
-- BookmarksPanel WebKit component suite: 16 passed.
+- Store: `cargo test -p zephium-store hub::bookmarks::tests --locked` (17 passed).
+- Panel: `frame/src/features/bookmarks/tests/BookmarksPanel.component.test.ts` (16 passed).
