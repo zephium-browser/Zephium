@@ -40,6 +40,7 @@ const MAX_TOTAL_GENERATIONS: usize = 128;
 const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SCANNED_ENTRIES: usize = 250_000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeGenerationKind {
@@ -819,6 +820,9 @@ impl RuntimeGeneration {
         // Only an exact cleanup ticket or this run's own process proof removes
         // a marker; otherwise Windows retires the volatile registry at reboot.
         let mut report = GenerationReport::default();
+        if let Some(reason) = maintain_sibling_roots(configured_root, kind, leftovers) {
+            note_overdue(&mut report, &reason);
+        }
         maintain_generations(&generations, &boot, kind, leftovers, &mut report)?;
 
         let generation = ProfileId::generate().to_string();
@@ -960,6 +964,142 @@ impl RuntimeGeneration {
             kind: self.kind,
         }
     }
+}
+
+fn maintain_sibling_roots(
+    current_root: &Path,
+    kind: RuntimeGenerationKind,
+    leftovers: &dyn LeftoverProcesses,
+) -> Option<String> {
+    let parent = current_root.parent()?;
+    let parent = direct_directory(parent).ok()?;
+    let current_name = current_root.file_name()?;
+    let mut inspected = 0_usize;
+    let mut overdue = None;
+    let entries = match fs::read_dir(&parent) {
+        Ok(entries) => entries,
+        Err(_) => return Some("other per-process runtime roots could not be inspected".into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                overdue.get_or_insert_with(|| {
+                    "a per-process runtime root could not be inspected".into()
+                });
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if name == current_name
+            || !name
+                .to_string_lossy()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        inspected += 1;
+        if inspected > MAX_TOTAL_GENERATIONS {
+            overdue.get_or_insert_with(|| {
+                "more per-process runtime roots exist than one launch inspects".into()
+            });
+            break;
+        }
+        let root = match direct_directory(&entry.path()) {
+            Ok(root) if root.parent() == Some(parent.as_path()) => root,
+            _ => continue,
+        };
+        if !has_owned_generation(&root, kind) {
+            continue;
+        }
+        let lease_path = root.join(LEASE_FILE);
+        let before = match fs::symlink_metadata(&lease_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && !is_reparse(&metadata) =>
+            {
+                metadata
+            }
+            _ => continue,
+        };
+        let lease = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&lease_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(32) => continue,
+            Err(_) => continue,
+        };
+        match lease.metadata() {
+            Ok(metadata)
+                if metadata.is_file()
+                    && !is_reparse(&metadata)
+                    && before.creation_time() == metadata.creation_time()
+                    && before.file_size() == metadata.file_size() => {}
+            _ => continue,
+        }
+        match lease.try_lock() {
+            Ok(()) => {}
+            Err(_) => continue,
+        }
+        let mut report = GenerationReport::default();
+        match open_boot_registry(kind)
+            .and_then(|boot| maintain_generations(&root, &boot, kind, leftovers, &mut report))
+        {
+            Ok(()) => {
+                if let Some(reason) = report.overdue {
+                    overdue.get_or_insert_with(|| {
+                        format!("an earlier per-process runtime root remains: {reason}")
+                    });
+                }
+            }
+            Err(_) => {
+                overdue.get_or_insert_with(|| {
+                    "an earlier per-process runtime root could not be maintained".into()
+                });
+            }
+        }
+        drop(lease);
+    }
+    overdue
+}
+
+fn has_owned_generation(root: &Path, kind: RuntimeGenerationKind) -> bool {
+    let Ok(entries) = fs::read_dir(root) else {
+        return false;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_TOTAL_GENERATIONS {
+            return false;
+        }
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Some(generation) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if ProfileId::parse(&generation).is_none_or(|id| id.to_string() != generation) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse(&metadata) {
+            continue;
+        }
+        if matches!(
+            marker_status(&entry.path(), kind, &generation),
+            Ok(MarkerStatus::Matches)
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 impl RuntimeCleanupTicket {
@@ -1501,6 +1641,93 @@ mod tests {
                 .unwrap();
             second.cleanup_ticket().cleanup_after_proven_exit().unwrap();
         }
+    }
+
+    #[test]
+    fn a_new_process_root_reclaims_proven_orphaned_sibling_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let stale_root = temp.path().join("101");
+        let stale = RuntimeGeneration::prepare(
+            &stale_root,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        stale.expect_browser().unwrap();
+        stale.record_browser_process(BROWSER).unwrap();
+        fs::write(stale.root().join("owned-data"), b"private").unwrap();
+        let stale_generation = stale.root().to_owned();
+        drop(stale);
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(!stale_generation.exists());
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+    }
+
+    #[test]
+    fn sibling_root_scan_leaves_active_process_generations_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let active = RuntimeGeneration::prepare(
+            &temp.path().join("101"),
+            RuntimeGenerationKind::Privileged,
+            &NoLeftovers,
+        )
+        .unwrap();
+        active.expect_browser().unwrap();
+        active.record_browser_process(BROWSER).unwrap();
+        fs::write(active.root().join("owned-data"), b"private").unwrap();
+        let active_generation = active.root().to_owned();
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::Privileged,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert!(active_generation.exists());
+        assert_eq!(
+            fs::read(active_generation.join("owned-data")).unwrap(),
+            b"private"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
+        active.cleanup_ticket().cleanup_after_proven_exit().unwrap();
+    }
+
+    #[test]
+    fn sibling_root_scan_ignores_unmarked_numeric_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let unrelated_root = temp.path().join("101");
+        fs::create_dir(&unrelated_root).unwrap();
+        fs::write(unrelated_root.join(LEASE_FILE), b"").unwrap();
+        let unrelated_generation = unrelated_root.join(ProfileId::generate().to_string());
+        fs::create_dir(&unrelated_generation).unwrap();
+        fs::write(unrelated_generation.join("owned-data"), b"preserve").unwrap();
+
+        let current = RuntimeGeneration::prepare(
+            &temp.path().join("202"),
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(unrelated_generation.join("owned-data")).unwrap(),
+            b"preserve"
+        );
+        current
+            .cleanup_ticket()
+            .cleanup_after_proven_exit()
+            .unwrap();
     }
 
     #[test]

@@ -8469,7 +8469,8 @@ fn finish_browser_setup(
                 !accelerator.is_empty() && *accelerator != launcher_trigger::DEFAULT
             })
             .cloned();
-        launcher_trigger::install(&handle, keymap_override);
+        launcher_trigger::install(&handle, keymap_override.clone());
+        launcher_trigger::monitor_global_shortcut_owner(&handle, keymap_override);
     }
     #[cfg(target_os = "linux")]
     {

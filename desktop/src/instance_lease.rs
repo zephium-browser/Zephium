@@ -1,22 +1,41 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
+use std::sync::Mutex;
 
 pub(crate) struct FileLease {
     file: File,
 }
 
-pub(crate) struct GlobalShortcutOwner(Option<FileLease>);
+pub(crate) struct GlobalShortcutOwner {
+    path: std::path::PathBuf,
+    lease: Mutex<Option<FileLease>>,
+}
 
 impl GlobalShortcutOwner {
     pub(crate) fn acquire(data_dir: &Path) -> io::Result<Self> {
-        Ok(Self(FileLease::try_acquire(
-            &data_dir.join(".global-shortcut-owner.lock"),
-        )?))
+        let path = data_dir.join(".global-shortcut-owner.lock");
+        let lease = FileLease::try_acquire(&path)?;
+        Ok(Self {
+            path,
+            lease: Mutex::new(lease),
+        })
     }
 
     pub(crate) fn owns(&self) -> bool {
-        self.0.is_some()
+        self.lease
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    pub(crate) fn try_claim(&self) -> io::Result<bool> {
+        let mut lease = self.lease.lock().unwrap_or_else(|e| e.into_inner());
+        if lease.is_some() {
+            return Ok(false);
+        }
+        *lease = FileLease::try_acquire(&self.path)?;
+        Ok(lease.is_some())
     }
 }
 
@@ -104,7 +123,7 @@ fn unlock(file: &File) {
 
 #[cfg(test)]
 mod tests {
-    use super::FileLease;
+    use super::{FileLease, GlobalShortcutOwner};
     use std::io::BufRead;
 
     #[test]
@@ -129,6 +148,18 @@ mod tests {
             .unwrap()
             .expect("second root owner");
         drop((first, second));
+    }
+
+    #[test]
+    fn surviving_monitor_promotes_after_owner_exits() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = GlobalShortcutOwner::acquire(root.path()).unwrap();
+        let survivor = GlobalShortcutOwner::acquire(root.path()).unwrap();
+        assert!(owner.owns());
+        assert!(!survivor.owns());
+        drop(owner);
+        assert!(survivor.try_claim().unwrap());
+        assert!(survivor.owns());
     }
 
     #[test]

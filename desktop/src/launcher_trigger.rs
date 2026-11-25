@@ -247,6 +247,37 @@ pub fn install(app: &AppHandle, keymap_override: Option<String>) {
     }
 }
 
+pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<String>) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if app
+                .try_state::<crate::ShutdownCoordinator>()
+                .is_some_and(|shutdown| shutdown.terminal_started())
+            {
+                return;
+            }
+            let claimed = app
+                .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+                .is_some_and(|owner| owner.try_claim().unwrap_or(false));
+            if claimed {
+                let app = app.clone();
+                let handle = app.clone();
+                let keymap_override = keymap_override.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if !handle
+                        .try_state::<crate::ShutdownCoordinator>()
+                        .is_some_and(|shutdown| shutdown.terminal_started())
+                    {
+                        install(&handle, keymap_override);
+                    }
+                });
+            }
+        }
+    });
+}
+
 pub fn snapshot(app: &AppHandle) -> LauncherTrigger {
     let (shortcut, registered, double_tap) = app.try_state::<Trigger>().map_or_else(
         || (DEFAULT.to_owned(), false, DoubleTap::Off),
