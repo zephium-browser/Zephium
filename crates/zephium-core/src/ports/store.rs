@@ -371,8 +371,11 @@ pub trait Store {
     ) {
         done(None);
     }
-    fn bookmark_folders(&self, _profile: ProfileId) -> Vec<crate::bookmarks::BookmarkFolder> {
-        Vec::new()
+    fn bookmark_folders(
+        &self,
+        _profile: ProfileId,
+    ) -> Option<Vec<crate::bookmarks::BookmarkFolder>> {
+        None
     }
     fn bookmark_folders_async(
         &self,
@@ -397,6 +400,10 @@ pub trait Store {
         done(false);
     }
     fn save_session(&self, session: SessionState);
+    fn save_session_checked(&self, session: SessionState) -> bool {
+        self.save_session(session);
+        true
+    }
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued
     /// before this call has committed (`true`) or the adapter reports failure.

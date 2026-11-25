@@ -209,6 +209,88 @@ fn profile_creation_rechecks_its_source_after_async_bookmark_folder_read() {
 }
 
 #[test]
+fn unavailable_folder_lookup_is_not_reported_as_an_invalid_folder_id() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store);
+    shell.handle(Command::Bootstrap);
+    let queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
+    let before = shell.profiles.iter().count();
+    shell.handle(Command::Operation {
+        operation_id: "unavailable-folder-list".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Shared".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: Some(41),
+            switch: false,
+        }),
+    });
+    shell.handle(queue.try_recv().expect("async folder validation"));
+    let completions = operations.lock().unwrap();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(
+        completions[0].reason,
+        OperationReason::StoreAdmissionRejected
+    );
+    assert_eq!(shell.profiles.iter().count(), before);
+}
+
+#[test]
+fn profile_creation_rejects_when_checked_session_commit_fails() {
+    let (mut shell, _engine, _screen, store) = browsed();
+    *store.checked_save_result.lock().unwrap() = Some(false);
+    let before = shell.profiles.iter().count();
+    let result = shell.handle_operation(Command::CreateProfile {
+        name: "Uncommitted".into(),
+        avatar: symbol(2, 5),
+        photo: None,
+        bookmark_folder: None,
+        switch: false,
+    });
+    assert_eq!(result.outcome, OperationOutcome::Rejected);
+    assert_eq!(result.reason, OperationReason::StoreAdmissionRejected);
+    assert_eq!(shell.profiles.iter().count(), before);
+}
+
+#[test]
+fn shutdown_completes_pending_folder_profile_creation_and_ignores_late_result() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store.clone());
+    shell.handle(Command::Bootstrap);
+    let queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
+    let before = shell.profiles.iter().count();
+    shell.handle(Command::Operation {
+        operation_id: "pending-profile-create".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Pending".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: Some(41),
+            switch: false,
+        }),
+    });
+    assert_eq!(shell.pending_profile_creations.len(), 1);
+    let (ack, result) = std::sync::mpsc::sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ack,
+    });
+    assert!(result.recv().is_ok());
+    let completions = operations.lock().unwrap();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].operation_id, "pending-profile-create");
+    assert_eq!(completions[0].outcome, OperationOutcome::Rejected);
+    drop(completions);
+
+    let late = queue.try_recv().expect("store validation result");
+    shell.handle(late);
+    assert_eq!(shell.profiles.iter().count(), before);
+    assert_eq!(operations.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn switching_shows_the_other_profile_and_returns_to_where_it_left() {
     let (mut shell, engine, screen, store) = browsed();
     let personal = window_profile(&shell);

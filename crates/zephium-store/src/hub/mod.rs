@@ -115,6 +115,10 @@ pub struct Hub {
     /// files are preserved and never retried, opened read-write, or recreated
     /// during this process.
     degraded_profiles: HashSet<ProfileId>,
+    /// Profiles whose legacy bookmark data could not be migrated. Keep this
+    /// independent from ancillary database degradation so bookmarks cannot
+    /// disable history, favicons, or other profile data.
+    degraded_bookmark_profiles: HashSet<ProfileId>,
     /// Visits recorded per profile since history was last held to its row
     /// cap; the cap's ordered walk runs once per batch of visits, not each.
     visits_since_prune: HashMap<ProfileId, u32>,
@@ -215,6 +219,7 @@ impl Hub {
             registry: HashSet::new(),
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            degraded_bookmark_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
@@ -338,6 +343,7 @@ impl Hub {
             registry: HashSet::new(),
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
+            degraded_bookmark_profiles: HashSet::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,

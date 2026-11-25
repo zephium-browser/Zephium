@@ -155,6 +155,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bookmark_folder_selection_requires_a_profile_and_positive_id_and_clears_on_remove() {
+        let mut profiles = Profiles::default();
+        let first = ProfileId::from(1);
+        assert!(!profiles.set_bookmark_folder(first, Some(1)));
+        assert!(profiles.insert(Profile {
+            id: first,
+            name: "Personal".into(),
+            kind: ProfileKind::Default,
+        }));
+        assert!(!profiles.set_bookmark_folder(first, Some(0)));
+        assert!(!profiles.set_bookmark_folder(first, Some(-1)));
+        assert!(profiles.set_bookmark_folder(first, Some(42)));
+        assert_eq!(profiles.bookmark_folder(first), Some(42));
+        assert!(profiles.remove(first).is_some());
+        assert_eq!(profiles.bookmark_folder(first), None);
+    }
+
+    #[test]
     fn profile_count_is_bounded_at_the_aggregate_boundary() {
         let mut profiles = Profiles::default();
         for value in 0..crate::session::MAX_SESSION_PROFILES {

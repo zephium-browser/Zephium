@@ -1207,6 +1207,7 @@ pub(crate) struct FakeStore {
         Mutex<std::collections::HashMap<ProfileId, zephium_core::blocker::BlockerStatistics>>,
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
     saved: Mutex<Option<SessionState>>,
+    checked_save_result: Mutex<Option<bool>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
     shutdown_outcome: Mutex<Option<StoreShutdownOutcome>>,
@@ -1341,13 +1342,11 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
-    fn bookmark_folders(&self, profile: ProfileId) -> Vec<zephium_core::bookmarks::BookmarkFolder> {
-        self.bookmark_folders
-            .lock()
-            .unwrap()
-            .get(&profile)
-            .cloned()
-            .unwrap_or_default()
+    fn bookmark_folders(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<zephium_core::bookmarks::BookmarkFolder>> {
+        self.bookmark_folders.lock().unwrap().get(&profile).cloned()
     }
 
     fn bookmark_folders_async(
@@ -1355,7 +1354,7 @@ impl Store for FakeStore {
         profile: ProfileId,
         done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
     ) {
-        done(Some(self.bookmark_folders(profile)));
+        done(self.bookmark_folders(profile));
     }
 
     fn popup_sites(
@@ -1571,6 +1570,13 @@ impl Store for FakeStore {
         );
         *self.saved.lock().unwrap() = Some(session);
         self.events.lock().unwrap().push("save");
+    }
+    fn save_session_checked(&self, session: SessionState) -> bool {
+        if self.checked_save_result.lock().unwrap().take() == Some(false) {
+            return false;
+        }
+        self.save_session(session);
+        true
     }
     fn flush(&self) -> bool {
         if let Some(order) = self.barrier_order.lock().unwrap().as_ref() {

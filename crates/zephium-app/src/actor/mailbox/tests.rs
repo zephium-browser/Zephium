@@ -646,6 +646,35 @@ fn overloaded_queue_never_blocks_and_reserves_lifecycle_capacity() {
 }
 
 #[test]
+fn profile_folder_validation_uses_reserved_completion_capacity() {
+    let queue = CommandQueue::new();
+    for _ in 0..NORMAL_COMMAND_CAPACITY {
+        queue
+            .try_push(Command::Reload(ItemId::from(7)))
+            .ok()
+            .unwrap();
+    }
+    assert!(queue
+        .try_push(Command::ProfileBookmarkFolderValidated {
+            generation: 1,
+            operation_id: Some("create-profile".into()),
+            source: ProfileId::from(1),
+            name: "Work".into(),
+            avatar: zephium_core::profiles::ProfileAvatar {
+                style: zephium_core::profiles::ProfileAvatarStyle::Symbol,
+                color: 2,
+                symbol: 5,
+                revision: 0,
+            },
+            photo: None,
+            folder: 42,
+            switch: false,
+            exists: Some(true),
+        })
+        .is_ok());
+}
+
+#[test]
 fn blocker_completion_wake_has_profile_bounded_lifecycle_admission() {
     let queue = CommandQueue::new();
     let id = ItemId::from(7);

@@ -92,4 +92,21 @@ impl Shell {
         );
         self.store.save_session(state);
     }
+
+    pub(super) fn publish_current_session_checked(&self) -> bool {
+        if !self.bootstrapped {
+            return false;
+        }
+        let (space, active, splits) = self.persisted_scope();
+        let state = session::snapshot_with_recently_closed(
+            &self.profiles,
+            &self.spaces,
+            &self.items,
+            space,
+            active,
+            splits,
+            &self.recently_closed,
+        );
+        self.store.save_session_checked(state)
+    }
 }

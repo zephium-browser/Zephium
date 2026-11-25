@@ -423,7 +423,7 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
     let destination = shell.import_destination().unwrap();
     shell.persist();
     assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
-    let shared_folder = store.bookmark_folders(destination.profile)[0].id;
+    let shared_folder = store.bookmark_folders(destination.profile).unwrap()[0].id;
     let before: Vec<_> = shell.profiles.iter().map(|profile| profile.id).collect();
     let created = shell.handle_operation(Command::CreateProfile {
         name: "Shared".into(),

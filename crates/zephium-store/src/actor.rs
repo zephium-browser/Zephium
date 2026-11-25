@@ -311,6 +311,7 @@ enum Cmd {
         zephium_agentic::AgentWorkArtifactCompletion,
     ),
     SaveWake,
+    SaveSessionChecked(SessionState, Sender<bool>),
     VisitWake,
     SettingWake,
     Load(Sender<SessionLoad>),
@@ -411,7 +412,7 @@ enum Cmd {
     ),
     BookmarkFolders(
         ProfileId,
-        Sender<Vec<zephium_core::bookmarks::BookmarkFolder>>,
+        Sender<Option<Vec<zephium_core::bookmarks::BookmarkFolder>>>,
     ),
     BookmarkFoldersAsync(
         ProfileId,
@@ -916,6 +917,26 @@ impl Store for SqliteStore {
         if needs_wake {
             let _ = self.tx.try_send(Cmd::SaveWake);
         }
+    }
+
+    fn save_session_checked(&self, session: SessionState) -> bool {
+        if !admissible_session(&session) {
+            return false;
+        }
+        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
+            return false;
+        }
+        let (tx, rx) = mpsc::channel();
+        if self
+            .tx
+            .try_send(Cmd::SaveSessionChecked(session, tx))
+            .is_err()
+        {
+            return false;
+        }
+        drop(lifecycle);
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or(false)
     }
 
     fn flush(&self) -> bool {
@@ -1524,12 +1545,15 @@ impl Store for SqliteStore {
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
-    fn bookmark_folders(&self, profile: ProfileId) -> Vec<zephium_core::bookmarks::BookmarkFolder> {
+    fn bookmark_folders(
+        &self,
+        profile: ProfileId,
+    ) -> Option<Vec<zephium_core::bookmarks::BookmarkFolder>> {
         let (tx, rx) = mpsc::channel();
         if self.tx.try_send(Cmd::BookmarkFolders(profile, tx)).is_err() {
-            return Vec::new();
+            return None;
         }
-        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+        rx.recv_timeout(STORE_RPC_TIMEOUT).ok().flatten()
     }
 
     fn bookmark_folders_async(
@@ -1537,11 +1561,22 @@ impl Store for SqliteStore {
         profile: ProfileId,
         done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
     ) {
-        if let Err(
-            mpsc::TrySendError::Full(Cmd::BookmarkFoldersAsync(_, done))
-            | mpsc::TrySendError::Disconnected(Cmd::BookmarkFoldersAsync(_, done)),
-        ) = self.tx.try_send(Cmd::BookmarkFoldersAsync(profile, done))
+        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        let rejected = if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire)
         {
+            Some(done)
+        } else {
+            match self.tx.try_send(Cmd::BookmarkFoldersAsync(profile, done)) {
+                Ok(()) => None,
+                Err(mpsc::TrySendError::Full(Cmd::BookmarkFoldersAsync(_, done)))
+                | Err(mpsc::TrySendError::Disconnected(Cmd::BookmarkFoldersAsync(_, done))) => {
+                    Some(done)
+                }
+                Err(mpsc::TrySendError::Full(_) | mpsc::TrySendError::Disconnected(_)) => None,
+            }
+        };
+        drop(lifecycle);
+        if let Some(done) = rejected {
             done(None);
         }
     }
@@ -1990,6 +2025,10 @@ fn actor(
                 let _ = activity.flush(&mut hub, &mut pending, false);
             }
             Some(Cmd::SaveWake) => {}
+            Some(Cmd::SaveSessionChecked(session, reply)) => {
+                let durable = flush(&mut hub, &mut pending) && hub.save(&session).is_ok();
+                let _ = reply.send(durable);
+            }
             Some(Cmd::VisitWake) => {}
             Some(Cmd::SettingWake) => {}
             Some(Cmd::Load(reply)) => {
@@ -2256,7 +2295,7 @@ fn actor(
                 let _ = reply.send(hub.bookmark_folders(profile));
             }
             Some(Cmd::BookmarkFoldersAsync(profile, done)) => {
-                done(Some(hub.bookmark_folders(profile)));
+                done(hub.bookmark_folders(profile));
             }
             Some(Cmd::BookmarksObserved(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks_observed(profile, request));

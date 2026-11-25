@@ -114,6 +114,49 @@ fn non_session_history_admission_keeps_the_eight_kib_queue_bound() {
     );
 }
 
+#[test]
+fn bookmark_folder_lookups_preserve_success_and_report_admission_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    store.save_session(sample());
+    assert!(store.flush());
+    let profile = ProfileId::from(1);
+    assert!(store.bookmark_folders(profile).is_some());
+    let (reply, receive) = mpsc::channel();
+    store.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert!(receive.recv_timeout(REPLY_TIMEOUT).unwrap().is_some());
+    assert_eq!(
+        store.shutdown_until(Instant::now() + REPLY_TIMEOUT),
+        StoreShutdownOutcome::Clean
+    );
+    let (reply, receive) = mpsc::channel();
+    store.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert_eq!(receive.recv_timeout(REPLY_TIMEOUT).unwrap(), None);
+
+    let (sender, _receiver) = mpsc::sync_channel(1);
+    sender.try_send(Cmd::SaveWake).unwrap();
+    let saturated = test_store_with_sender(sender);
+    assert_eq!(saturated.bookmark_folders(profile), None);
+    let (reply, receive) = mpsc::channel();
+    saturated.bookmark_folders_async(
+        profile,
+        Box::new(move |folders| {
+            let _ = reply.send(folders);
+        }),
+    );
+    assert_eq!(receive.recv_timeout(REPLY_TIMEOUT).unwrap(), None);
+}
+
 #[cfg(feature = "work-execution")]
 #[test]
 fn work_journal_mailbox_is_lazy_bounded_and_refusal_never_calls_completion() {

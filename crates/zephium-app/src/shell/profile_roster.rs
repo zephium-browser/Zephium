@@ -175,6 +175,18 @@ impl Shell {
                 OperationReason::InvalidInput,
             ));
         };
+        if self
+            .profiles
+            .iter()
+            .count()
+            .saturating_add(self.pending_profile_creations.len())
+            >= zephium_core::session::MAX_SESSION_PROFILES
+        {
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::ItemLimitReached,
+            ));
+        }
         if let Some(folder) = bookmark_folder {
             let Some(source) = self
                 .profiles_view()
@@ -201,12 +213,29 @@ impl Shell {
                 ));
             };
             let name = name.to_owned();
+            self.next_profile_creation_generation =
+                self.next_profile_creation_generation.wrapping_add(1);
+            let generation = self.next_profile_creation_generation;
+            self.pending_profile_creations
+                .insert(generation, operation_id.clone());
             self.store.bookmark_folders_async(
                 source,
                 Box::new(move |folders| {
                     let exists = folders
                         .map(|folders| folders.iter().any(|candidate| candidate.id == folder));
-                    let _ = callback.dispatch(Command::ProfileBookmarkFolderValidated {
+                    let rejected = Command::ProfileBookmarkFolderValidated {
+                        generation,
+                        operation_id: operation_id.clone(),
+                        source,
+                        name: name.clone(),
+                        avatar,
+                        photo: photo.clone(),
+                        folder,
+                        switch,
+                        exists: None,
+                    };
+                    if !callback.dispatch(Command::ProfileBookmarkFolderValidated {
+                        generation,
                         operation_id,
                         source,
                         name,
@@ -215,7 +244,9 @@ impl Shell {
                         folder,
                         switch,
                         exists,
-                    });
+                    }) {
+                        callback.dispatch(rejected);
+                    }
                 }),
             );
             return None;
@@ -290,7 +321,7 @@ impl Shell {
                 look: Default::default(),
             })
         });
-        if space.is_none() {
+        let Some(space) = space else {
             self.blocker.discard_uncommitted_profile(profile);
             self.finish_terminalized_blocker_native_operations();
             self.profiles.remove(profile);
@@ -298,10 +329,17 @@ impl Shell {
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
             );
+        };
+        if !self.publish_current_session_checked() {
+            self.blocker.discard_uncommitted_profile(profile);
+            self.finish_terminalized_blocker_native_operations();
+            self.spaces.remove(space);
+            self.profiles.remove(profile);
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreAdmissionRejected,
+            );
         }
-        // Register the profile with the Store before anything is written
-        // under it, as first run does for the default profile.
-        self.persist();
         self.save_avatar(profile, avatar, photo);
         self.project_profiles();
         if switch {

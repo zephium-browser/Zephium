@@ -2526,6 +2526,12 @@ impl Hub {
         Ok(())
     }
 
+    /// Starts again from a session the store could not restore, without
+    /// losing what it held. The preserved bytes go to a file beside the
+    /// databases, and the session restarts from the profile registry with no
+    /// tabs, each profile named as the old snapshot still names it, so every
+    /// profile keeps its history, bookmarks and settings. A store left in
+    /// recovery could otherwise never open again.
     pub(crate) fn set_aside_recovery(&mut self) -> rusqlite::Result<Option<PathBuf>> {
         let Some(reason) = self.recovery_required.clone() else {
             return Err(invalid_data("no session recovery is pending"));
@@ -2738,6 +2744,163 @@ fn kind_from_str(s: &str) -> Option<ProfileKind> {
         "default" => Some(ProfileKind::Default),
         "named" => Some(ProfileKind::Named),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod profile_bookmark_mapping_tests {
+    use super::*;
+    use zephium_core::session::{PersistedBookmarkFolder, PersistedProfile};
+
+    fn profile(id: u128, name: &str, kind: ProfileKind) -> PersistedProfile {
+        PersistedProfile {
+            id: ProfileId::from(id),
+            name: name.into(),
+            kind,
+        }
+    }
+
+    fn session(
+        profiles: Vec<PersistedProfile>,
+        shared_bookmark_folders: Vec<PersistedBookmarkFolder>,
+    ) -> SessionState {
+        SessionState {
+            profiles,
+            shared_bookmark_folders,
+            ..SessionState::default()
+        }
+    }
+
+    fn mapped_root(hub: &Hub, profile: ProfileId) -> i64 {
+        hub.meta
+            .query_row(
+                "SELECT folder_id FROM profile_bookmark_folders WHERE profile_id=?1",
+                [profile.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn bookmark_exists(hub: &Hub, folder: i64) -> bool {
+        hub.meta
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmarks WHERE id=?1)",
+                [folder],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn session_commit_rejects_missing_and_nested_shared_folders() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let root = mapped_root(&hub, first);
+        hub.meta
+            .execute(
+                "INSERT INTO bookmarks(parent_id,position,title,url,added_at) VALUES (?1,0,'Nested',NULL,1)",
+                [root],
+            )
+            .unwrap();
+        let nested = hub.meta.last_insert_rowid();
+        let profiles = vec![
+            profile(1, "Personal", ProfileKind::Default),
+            profile(2, "Work", ProfileKind::Named),
+        ];
+        for folder in [999_999, nested] {
+            assert!(hub
+                .save(&session(
+                    profiles.clone(),
+                    vec![PersistedBookmarkFolder {
+                        profile: second,
+                        folder,
+                    }],
+                ))
+                .is_err());
+            assert_eq!(hub.load().unwrap().unwrap().profiles.len(), 1);
+        }
+    }
+
+    #[test]
+    fn an_unmapped_profile_gets_a_new_top_level_bookmark_folder() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let first_root = mapped_root(&hub, first);
+        hub.save(&session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Work", ProfileKind::Named),
+            ],
+            Vec::new(),
+        ))
+        .unwrap();
+        let second_root = mapped_root(&hub, second);
+        let parent: Option<i64> = hub
+            .meta
+            .query_row(
+                "SELECT parent_id FROM bookmarks WHERE id=?1 AND url IS NULL",
+                [second_root],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None);
+        assert_ne!(first_root, second_root);
+    }
+
+    #[test]
+    fn removing_profiles_deletes_only_unshared_bookmark_roots() {
+        let mut hub = Hub::in_memory().unwrap();
+        let first = ProfileId::from(1);
+        let second = ProfileId::from(2);
+        let third = ProfileId::from(3);
+        hub.save(&session(
+            vec![profile(1, "Personal", ProfileKind::Default)],
+            Vec::new(),
+        ))
+        .unwrap();
+        let shared_root = mapped_root(&hub, first);
+        hub.save(&session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Shared", ProfileKind::Named),
+                profile(3, "Work", ProfileKind::Named),
+            ],
+            vec![PersistedBookmarkFolder {
+                profile: second,
+                folder: shared_root,
+            }],
+        ))
+        .unwrap();
+        let work_root = mapped_root(&hub, third);
+        assert_eq!(mapped_root(&hub, second), shared_root);
+        let remaining = session(
+            vec![
+                profile(1, "Personal", ProfileKind::Default),
+                profile(2, "Shared", ProfileKind::Named),
+            ],
+            vec![PersistedBookmarkFolder {
+                profile: second,
+                folder: shared_root,
+            }],
+        );
+        assert_eq!(
+            hub.authorize_profile_deletion(third, &remaining).unwrap(),
+            zephium_core::ports::store::ProfileDeletionAuthorizeOutcome::Authorized
+        );
+        assert!(bookmark_exists(&hub, shared_root));
+        assert!(!bookmark_exists(&hub, work_root));
     }
 }
 

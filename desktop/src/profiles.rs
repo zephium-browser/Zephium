@@ -16,6 +16,31 @@ use zephium_ipc::{OperationAdmission, ProfileAvatarStyleView, ProfilesView};
 
 const MAX_PICKED_BYTES: u64 = 32 * 1024 * 1024;
 
+fn parse_bookmark_folder(value: Option<&str>) -> Option<Option<i64>> {
+    match value {
+        None => Some(None),
+        Some(value) if value.len() <= 19 => value
+            .parse::<i64>()
+            .ok()
+            .filter(|folder| *folder > 0)
+            .map(Some),
+        Some(_) => None,
+    }
+}
+
+fn bookmark_folder_views(
+    folders: Option<Vec<zephium_core::bookmarks::BookmarkFolder>>,
+) -> Vec<BookmarkFolderView> {
+    folders
+        .unwrap_or_default()
+        .into_iter()
+        .map(|folder| BookmarkFolderView {
+            id: folder.id.to_string(),
+            title: folder.title,
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, serde::Deserialize, specta::Type)]
 pub(crate) struct ProfileAvatarInputV1 {
     style: ProfileAvatarStyleView,
@@ -115,18 +140,9 @@ pub(crate) async fn profiles_bookmark_folders(
     let Some(store) = crate::APP_STORE.get().cloned() else {
         return Vec::new();
     };
-    tokio::task::spawn_blocking(move || {
-        store
-            .bookmark_folders(profile)
-            .into_iter()
-            .map(|folder| BookmarkFolderView {
-                id: folder.id.to_string(),
-                title: folder.title,
-            })
-            .collect()
-    })
-    .await
-    .unwrap_or_default()
+    tokio::task::spawn_blocking(move || bookmark_folder_views(store.bookmark_folders(profile)))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -147,13 +163,8 @@ pub(crate) fn profiles_create(
     let Some((avatar, photo)) = avatar_of(&avatar) else {
         return super::rejected_operation();
     };
-    let bookmark_folder = match bookmark_folder {
-        Some(value) if value.len() <= 19 => match value.parse::<i64>() {
-            Ok(folder) if folder > 0 => Some(folder),
-            _ => return super::rejected_operation(),
-        },
-        Some(_) => return super::rejected_operation(),
-        None => None,
+    let Some(bookmark_folder) = parse_bookmark_folder(bookmark_folder.as_deref()) else {
+        return super::rejected_operation();
     };
     super::dispatch_operation(
         caller.app_handle(),
@@ -225,6 +236,26 @@ pub(crate) fn profiles_set_avatar(
             photo,
         },
     )
+}
+
+#[cfg(test)]
+mod bookmark_folder_tests {
+    use super::*;
+
+    #[test]
+    fn bookmark_folder_ids_require_bounded_positive_integers() {
+        assert_eq!(parse_bookmark_folder(None), Some(None));
+        assert_eq!(parse_bookmark_folder(Some("42")), Some(Some(42)));
+        assert_eq!(parse_bookmark_folder(Some("not-a-number")), None);
+        assert_eq!(parse_bookmark_folder(Some("0")), None);
+        assert_eq!(parse_bookmark_folder(Some("-1")), None);
+        assert_eq!(parse_bookmark_folder(Some("9".repeat(20).as_str())), None);
+    }
+
+    #[test]
+    fn unavailable_folder_lookup_projects_as_an_empty_list() {
+        assert!(bookmark_folder_views(None).is_empty());
+    }
 }
 
 /// Picks a picture natively and stages its 256px square copy.

@@ -281,6 +281,8 @@ pub struct Shell {
     /// The Recently Closed entries the menus were last told of.
     closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
     roster: profile_roster::RosterState,
+    next_profile_creation_generation: u64,
+    pending_profile_creations: std::collections::HashMap<u64, Option<String>>,
     space_memory: spaces::SpaceMemory,
     /// Kinds of application link each profile's sites may open without
     /// asking, as (site, scheme). Saved profiles read theirs from the store;
@@ -571,6 +573,8 @@ impl Shell {
             private_projected: (false, None),
             closed_projected: Vec::new(),
             roster: profile_roster::RosterState::default(),
+            next_profile_creation_generation: 0,
+            pending_profile_creations: std::collections::HashMap::new(),
             space_memory: spaces::SpaceMemory::default(),
             app_link_sites: std::collections::HashMap::new(),
             popup_sites: std::collections::HashMap::new(),
@@ -1569,6 +1573,7 @@ impl Shell {
                 }
             }
             Command::ProfileBookmarkFolderValidated {
+                generation,
                 operation_id,
                 source,
                 name,
@@ -1578,6 +1583,9 @@ impl Shell {
                 switch,
                 exists,
             } => {
+                if self.pending_profile_creations.remove(&generation).is_none() {
+                    return;
+                }
                 let mut completion = self
                     .finish_profile_creation(source, &name, avatar, photo, folder, switch, exists);
                 if let Some(operation_id) = operation_id {
@@ -1957,6 +1965,16 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        for (_, operation_id) in self.pending_profile_creations.drain() {
+            if let Some(operation_id) = operation_id {
+                let mut completion = operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                );
+                completion.operation_id = operation_id;
+                (self.emit)(Projection::OperationProcessed(completion));
+            }
+        }
         for window in self.windows.iter_mut() {
             window.sidebar_peek = false;
         }

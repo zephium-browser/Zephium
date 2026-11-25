@@ -60,6 +60,10 @@ impl Shell {
         let mut blocker_configs = None;
         let mut load = self.store.load_session();
         if let SessionLoad::RecoveryRequired { reason } = &load {
+            // A session that cannot be restored must not keep the browser
+            // from opening at every launch. The store keeps its bytes in a
+            // file and restarts it from the profile registry, so each
+            // profile keeps its history, bookmarks and settings.
             crate::diagnostic!(
                 "bootstrap: session cannot be restored ({reason}); setting it aside"
             );
