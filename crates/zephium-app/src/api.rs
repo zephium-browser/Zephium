@@ -453,6 +453,7 @@ pub enum Command {
         name: String,
         avatar: zephium_core::profiles::ProfileAvatar,
         photo: Option<Arc<Vec<u8>>>,
+        bookmark_folder: Option<i64>,
         /// Shows the new profile in the window once it exists.
         switch: bool,
     },

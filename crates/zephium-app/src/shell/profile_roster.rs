@@ -139,6 +139,7 @@ impl Shell {
         name: &str,
         avatar: ProfileAvatar,
         photo: Option<Arc<Vec<u8>>>,
+        bookmark_folder: Option<i64>,
         switch: bool,
     ) -> OperationDisposition {
         if !self.bootstrapped {
@@ -150,6 +151,22 @@ impl Shell {
         ) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
         };
+        if let Some(folder) = bookmark_folder {
+            let Some(current) = self.windows.focused().map(|window| window.profile) else {
+                return operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::NoFocusedWindow,
+                );
+            };
+            if !self
+                .store
+                .bookmark_folders(current)
+                .iter()
+                .any(|candidate| candidate.id == folder)
+            {
+                return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            }
+        }
         let Some(profile) = (0..8).map(|_| ProfileId::generate()).find(|id| {
             !self.profile_deletion.states.contains_key(id)
                 && self.profiles.insert(Profile {
@@ -163,6 +180,10 @@ impl Shell {
                 OperationReason::ItemLimitReached,
             );
         };
+        if !self.profiles.set_bookmark_folder(profile, bookmark_folder) {
+            self.profiles.remove(profile);
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        }
         if !self.initialize_new_blocker_profile(profile) {
             self.profiles.remove(profile);
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);

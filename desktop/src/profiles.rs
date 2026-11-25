@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use zephium_app::{Command, Handle};
 use zephium_core::ids::ProfileId;
+use zephium_core::ports::store::Store as _;
 use zephium_core::profiles::{ProfileAvatar, ProfileAvatarStyle};
 use zephium_ipc::{OperationAdmission, ProfileAvatarStyleView, ProfilesView};
 
@@ -31,6 +32,12 @@ pub(crate) enum ProfileAvatarPickV1 {
     Cancelled,
     Unsupported,
     Unavailable,
+}
+
+#[derive(Clone, Debug, serde::Serialize, specta::Type)]
+pub(crate) struct BookmarkFolderView {
+    pub id: String,
+    pub title: String,
 }
 
 /// One staged photo at a time: a newer pick replaces an unsaved one.
@@ -95,12 +102,42 @@ pub(crate) async fn profiles_get(
 
 #[tauri::command]
 #[specta::specta]
+pub(crate) async fn profiles_bookmark_folders(
+    caller: WebviewWindow,
+    profile: String,
+) -> Vec<BookmarkFolderView> {
+    if !admitted(&caller, "profiles_bookmark_folders") {
+        return Vec::new();
+    }
+    let Some(profile) = profile_of(&profile) else {
+        return Vec::new();
+    };
+    let Some(store) = crate::APP_STORE.get().cloned() else {
+        return Vec::new();
+    };
+    tokio::task::spawn_blocking(move || {
+        store
+            .bookmark_folders(profile)
+            .into_iter()
+            .map(|folder| BookmarkFolderView {
+                id: folder.id.to_string(),
+                title: folder.title,
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+#[specta::specta]
 pub(crate) fn profiles_create(
     caller: WebviewWindow,
     shell: State<'_, Handle>,
     name: String,
     avatar: ProfileAvatarInputV1,
     and_switch: bool,
+    bookmark_folder: Option<String>,
 ) -> OperationAdmission {
     if !admitted(&caller, "profiles_create")
         || !super::bounded(&name, super::MAX_PROFILE_NAME_BYTES)
@@ -110,6 +147,14 @@ pub(crate) fn profiles_create(
     let Some((avatar, photo)) = avatar_of(&avatar) else {
         return super::rejected_operation();
     };
+    let bookmark_folder = match bookmark_folder {
+        Some(value) if value.len() <= 19 => match value.parse::<i64>() {
+            Ok(folder) if folder > 0 => Some(folder),
+            _ => return super::rejected_operation(),
+        },
+        Some(_) => return super::rejected_operation(),
+        None => None,
+    };
     super::dispatch_operation(
         caller.app_handle(),
         &shell,
@@ -118,6 +163,7 @@ pub(crate) fn profiles_create(
             avatar,
             photo,
             switch: and_switch,
+            bookmark_folder,
         },
     )
 }

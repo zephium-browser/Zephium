@@ -27,6 +27,7 @@ fn create(shell: &mut Shell, name: &str) -> ProfileId {
         name: name.into(),
         avatar: symbol(2, 5),
         photo: None,
+        bookmark_folder: None,
         switch: false,
     });
     assert_eq!(created.outcome, OperationOutcome::Applied);
@@ -97,11 +98,63 @@ fn a_created_profile_is_named_registered_and_drawn() {
             name: name.into(),
             avatar,
             photo,
+            bookmark_folder: None,
             switch: true,
         });
         assert_eq!(refused.outcome, OperationOutcome::Rejected, "{name}");
     }
     assert_eq!(shell.profiles.iter().count(), 2);
+}
+
+#[test]
+fn profile_creation_validates_and_persists_the_shared_bookmark_folder() {
+    let (mut shell, _engine, _screen, store) = browsed();
+    let current = window_profile(&shell);
+    store.bookmark_folders.lock().unwrap().insert(
+        current,
+        vec![zephium_core::bookmarks::BookmarkFolder {
+            id: 41,
+            title: "Shared favorites".into(),
+        }],
+    );
+    let before = shell.profiles.iter().count();
+    let refused = shell.handle_operation(Command::CreateProfile {
+        name: "Unknown folder".into(),
+        avatar: symbol(2, 5),
+        photo: None,
+        bookmark_folder: Some(42),
+        switch: false,
+    });
+    assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.profiles.iter().count(), before);
+
+    let created = shell.handle_operation(Command::CreateProfile {
+        name: "Shared".into(),
+        avatar: symbol(2, 5),
+        photo: None,
+        bookmark_folder: Some(41),
+        switch: false,
+    });
+    assert_eq!(created.outcome, OperationOutcome::Applied);
+    let profile = shell
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "Shared")
+        .unwrap();
+    assert_eq!(shell.profiles.bookmark_folder(profile.id), Some(41));
+    assert_eq!(
+        store
+            .saved
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .shared_bookmark_folders,
+        vec![zephium_core::session::PersistedBookmarkFolder {
+            profile: profile.id,
+            folder: 41,
+        }]
+    );
 }
 
 #[test]
@@ -268,6 +321,7 @@ fn creating_from_the_sidebar_also_switches_to_the_new_profile() {
         name: "School".into(),
         avatar: symbol(3, 9),
         photo: None,
+        bookmark_folder: None,
         switch: true,
     });
     assert_ne!(created.outcome, OperationOutcome::Rejected);

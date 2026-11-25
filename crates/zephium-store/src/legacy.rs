@@ -302,6 +302,7 @@ fn decode_v2(stored: StoredSession) -> Option<SessionState> {
     };
     Some(SessionState {
         profiles,
+        shared_bookmark_folders: Vec::new(),
         spaces,
         items,
         active_space,
@@ -393,6 +394,7 @@ fn decode_v1(v1: V1Session) -> Option<SessionState> {
             name: "Personal".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: space,
             profile,

@@ -401,6 +401,7 @@ fn private_browsing_keeps_one_space_and_profiles_return_to_theirs() {
         name: "Work".into(),
         avatar: zephium_core::profiles::ProfileAvatar::initial(ProfileId::from(9)),
         photo: None,
+        bookmark_folder: None,
         switch: true,
     });
     assert_ne!(created.outcome, OperationOutcome::Rejected);

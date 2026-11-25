@@ -20,6 +20,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     accountGet: async () => ({ account: native.account!, fault: null, retry_after: null }),
     accountRefresh: async () => ({ account: native.account!, fault: null, retry_after: null }),
     profilesGet: async () => ({ status: "ok", data: native.profiles }),
+    profilesBookmarkFolders: async () => [],
     settingGet: async (key: never) => native.settings[key] ?? null,
     keymapEntries: async () => [],
     runCommand: async () => ({ accepted: true, operation_id: null }),

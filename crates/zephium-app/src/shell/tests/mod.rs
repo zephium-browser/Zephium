@@ -1271,6 +1271,8 @@ pub(crate) struct FakeStore {
     pub(crate) app_link_sites: Mutex<
         std::collections::HashMap<ProfileId, Vec<(zephium_core::permissions::PageOrigin, String)>>,
     >,
+    pub(crate) bookmark_folders:
+        Mutex<std::collections::HashMap<ProfileId, Vec<zephium_core::bookmarks::BookmarkFolder>>>,
     /// Every durable read of a pop-up, download or app-link list, by list.
     pub(crate) site_list_reads: Mutex<Vec<(&'static str, ProfileId)>>,
     /// Application link writes report failure, as a store that timed out.
@@ -1339,6 +1341,15 @@ impl FakeStore {
 }
 
 impl Store for FakeStore {
+    fn bookmark_folders(&self, profile: ProfileId) -> Vec<zephium_core::bookmarks::BookmarkFolder> {
+        self.bookmark_folders
+            .lock()
+            .unwrap()
+            .get(&profile)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn popup_sites(
         &self,
         profile: ProfileId,

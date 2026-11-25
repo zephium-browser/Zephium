@@ -19,6 +19,8 @@ pub(super) struct PreparedSession {
 struct BoundedSessionState {
     #[serde(deserialize_with = "deserialize_bounded_profiles")]
     profiles: Vec<BoundedProfile>,
+    #[serde(default, deserialize_with = "deserialize_bounded_bookmark_folders")]
+    shared_bookmark_folders: Vec<zephium_core::session::PersistedBookmarkFolder>,
     #[serde(deserialize_with = "deserialize_bounded_spaces")]
     spaces: Vec<BoundedSpace>,
     #[serde(deserialize_with = "deserialize_bounded_items")]
@@ -28,6 +30,17 @@ struct BoundedSessionState {
     splits: Option<bounded_json::BoundedPane>,
     #[serde(default, deserialize_with = "deserialize_bounded_recently_closed")]
     recently_closed: Vec<BoundedClosedTab>,
+}
+
+fn deserialize_bounded_bookmark_folders<'de, D>(
+    deserializer: D,
+) -> Result<Vec<zephium_core::session::PersistedBookmarkFolder>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded_json::deserialize_bounded_vec(deserializer, MAX_SESSION_PROFILES, |choice| {
+        choice.folder > 0
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -254,6 +267,7 @@ impl BoundedSessionState {
                     kind: profile.kind,
                 })
                 .collect(),
+            shared_bookmark_folders: self.shared_bookmark_folders,
             spaces,
             items,
             active_space: self.active_space,
@@ -516,6 +530,7 @@ mod qa_settings_recovery_tests {
                 name: "QA".into(),
                 kind: ProfileKind::Default,
             }],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![PersistedSpace {
                 id: space,
                 profile,
@@ -1999,6 +2014,21 @@ impl Hub {
                 ));
             }
         }
+        let removed_bookmark_roots: Vec<i64> = self
+            .registry
+            .difference(&registry)
+            .map(|profile| {
+                tx.query_row(
+                    "SELECT folder_id FROM profile_bookmark_folders WHERE profile_id=?1",
+                    [profile.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+            })
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
         {
             let mut ins = tx.prepare_cached(
                 "INSERT INTO profiles(id, name, kind, position) VALUES (?1, ?2, ?3, ?4)
@@ -2018,6 +2048,51 @@ impl Hub {
                 ])?;
             }
         }
+        for profile in &state.profiles {
+            let requested = state
+                .shared_bookmark_folders
+                .iter()
+                .find(|choice| choice.profile == profile.id)
+                .map(|choice| choice.folder);
+            if let Some(folder) = requested {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM bookmarks b JOIN profile_bookmark_folders pbf ON pbf.folder_id=b.id
+                         WHERE b.id=?1 AND b.parent_id IS NULL AND b.url IS NULL
+                     )",
+                    [folder],
+                    |row| row.get(0),
+                )?;
+                if !valid {
+                    return Err(invalid_data(
+                        "shared bookmark folder is missing or not top-level",
+                    ));
+                }
+                tx.execute(
+                    "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)
+                     ON CONFLICT(profile_id) DO UPDATE SET folder_id=excluded.folder_id",
+                    params![profile.id.to_string(), folder],
+                )?;
+            } else {
+                let mapped: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM profile_bookmark_folders WHERE profile_id=?1)",
+                    [profile.id.to_string()],
+                    |row| row.get(0),
+                )?;
+                if !mapped {
+                    tx.execute(
+                        "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                         VALUES (NULL, coalesce((SELECT max(position)+1 FROM bookmarks WHERE parent_id IS NULL),0), ?1, NULL, ?2)",
+                        params![profile.name, now_secs()],
+                    )?;
+                    let folder = tx.last_insert_rowid();
+                    tx.execute(
+                        "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)",
+                        params![profile.id.to_string(), folder],
+                    )?;
+                }
+            }
+        }
         for removed in self.registry.difference(&registry) {
             let deleted =
                 tx.execute("DELETE FROM profiles WHERE id = ?1", [removed.to_string()])?;
@@ -2025,6 +2100,16 @@ impl Hub {
                 return Err(invalid_data(
                     "profile registry changed during authoritative session commit",
                 ));
+            }
+        }
+        for root in removed_bookmark_roots {
+            let shared: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM profile_bookmark_folders WHERE folder_id=?1)",
+                [root],
+                |row| row.get(0),
+            )?;
+            if !shared {
+                tx.execute("DELETE FROM bookmarks WHERE id=?1", [root])?;
             }
         }
         Self::reconcile_blocker_cohort_for_session_commit(&tx, &registry)?;
@@ -2748,6 +2833,7 @@ mod essentials_per_space_tests {
                 profile(PERSONAL, "Personal", ProfileKind::Default),
                 profile(WORK_PROFILE, "Work", ProfileKind::Named),
             ],
+            shared_bookmark_folders: Vec::new(),
             spaces: vec![
                 space(HOME, PERSONAL),
                 space(SECOND, PERSONAL),

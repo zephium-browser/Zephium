@@ -28,8 +28,9 @@ impl Shell {
                 name,
                 avatar,
                 photo,
+                bookmark_folder,
                 switch,
-            } => self.operation_create_profile(&name, avatar, photo, switch),
+            } => self.operation_create_profile(&name, avatar, photo, bookmark_folder, switch),
             Command::SwitchProfile(profile) => self.operation_switch_profile(profile),
             Command::RenameProfile { profile, name } => {
                 self.operation_rename_profile(profile, &name)

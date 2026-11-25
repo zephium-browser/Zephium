@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import { Dialog } from "bits-ui";
-  import type { ProfileEntryView } from "$shared/ipc/bindings";
+  import type { BookmarkFolderView, ProfileEntryView } from "$shared/ipc/bindings";
   import { drawn, profiles, type AvatarDraft } from "$domain/profiles";
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
@@ -32,6 +32,10 @@
   let busy = $state(false);
   let failed = $state(false);
   let pendingDeletion = $state<string | undefined>();
+  let bookmarkMode = $state<"new" | "existing">("new");
+  let bookmarkFolders = $state<BookmarkFolderView[]>([]);
+  let selectedBookmarkFolder = $state<string | null>(null);
+  let loadingBookmarkFolders = $state(false);
   let opening = 0;
   let opener: HTMLElement | null = null;
   const saved = $derived(profile ? drawn(profile).src : null);
@@ -48,6 +52,10 @@
       failed = false;
       pendingDeletion = undefined;
       name = profile?.name ?? "";
+      bookmarkMode = "new";
+      bookmarkFolders = [];
+      selectedBookmarkFolder = null;
+      loadingBookmarkFolders = !profile;
       choice = profile
         ? {
             style: profile.avatar.style,
@@ -56,6 +64,20 @@
             photo: null,
           }
         : { style: "initials", color, symbol: 0, photo: null };
+      if (!profile) {
+        const currentProfile = profiles.current();
+        if (currentProfile) {
+          const started = opening;
+          void profiles.bookmarkFolders(currentProfile.id).then((folders) => {
+            if (!open || started !== opening) return;
+            bookmarkFolders = folders;
+            selectedBookmarkFolder = folders[0]?.id ?? null;
+            loadingBookmarkFolders = false;
+          });
+        } else {
+          loadingBookmarkFolders = false;
+        }
+      }
     });
     return () => {
       opening += 1;
@@ -89,7 +111,13 @@
     busy = true;
     failed = false;
     let ok: boolean;
-    if (!editing) ok = await profiles.create(submittedName, avatar, andSwitch);
+    if (!editing)
+      ok = await profiles.create(
+        submittedName,
+        avatar,
+        andSwitch,
+        bookmarkMode === "existing" ? selectedBookmarkFolder : null,
+      );
     else {
       ok = submittedName === editing.name || (await profiles.rename(editing.id, submittedName));
       if (ok && updateAvatar) ok = await profiles.setAvatar(editing.id, avatar);
@@ -173,6 +201,36 @@
             bind:value={name}
           />
           <AvatarPicker bind:value={choice} name={name || (profile?.name ?? "")} {saved} />
+          {#if !profile}
+            <fieldset class="bookmark-choice" disabled={busy}>
+              <legend>{m.profiles_bookmarks()}</legend>
+              <label>
+                <input type="radio" name="bookmark-folder" value="new" bind:group={bookmarkMode} />
+                <span>{m.profiles_bookmark_new()}</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="bookmark-folder"
+                  value="existing"
+                  bind:group={bookmarkMode}
+                  disabled={!bookmarkFolders.length || loadingBookmarkFolders}
+                />
+                <span>{m.profiles_bookmark_existing()}</span>
+              </label>
+              <select
+                aria-label={m.profiles_bookmark_existing()}
+                bind:value={selectedBookmarkFolder}
+                disabled={bookmarkMode !== "existing" ||
+                  !bookmarkFolders.length ||
+                  loadingBookmarkFolders}
+              >
+                {#each bookmarkFolders as folder (folder.id)}
+                  <option value={folder.id}>{folder.title}</option>
+                {/each}
+              </select>
+            </fieldset>
+          {/if}
           {#if failed}<p class="failed" role="alert">{m.profiles_failed()}</p>{/if}
           <footer>
             {#if profile?.kind === "named"}<div class="start">
@@ -187,7 +245,12 @@
                 >
               </div>{/if}
             <Button onclick={() => (open = false)} disabled={busy}>{m.action_cancel()}</Button>
-            <Button type="submit" variant="primary" pending={busy} disabled={!valid}
+            <Button
+              type="submit"
+              variant="primary"
+              pending={busy}
+              disabled={!valid ||
+                (!profile && bookmarkMode === "existing" && selectedBookmarkFolder === null)}
               >{profile
                 ? m.profiles_save()
                 : andSwitch
@@ -225,5 +288,29 @@
     color: var(--color-danger);
     font-size: var(--text-label);
     line-height: 1.5;
+  }
+
+  .bookmark-choice {
+    display: grid;
+    gap: 10px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .bookmark-choice legend {
+    margin-block-end: 6px;
+    padding: 0;
+  }
+
+  .bookmark-choice label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .bookmark-choice select {
+    min-inline-size: 0;
+    margin-inline-start: 34px;
   }
 </style>

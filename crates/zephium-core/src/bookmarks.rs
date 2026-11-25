@@ -142,6 +142,12 @@ pub enum BookmarkRequest {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookmarkFolder {
+    pub id: i64,
+    pub title: String,
+}
+
 /// A bookmark with its place among its siblings and when it was added.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookmarkEntry {

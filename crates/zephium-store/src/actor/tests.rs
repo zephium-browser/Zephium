@@ -287,6 +287,7 @@ fn sample() -> SessionState {
             name: "Personal".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: space,
             profile,
@@ -3274,6 +3275,7 @@ fn maximum_valid_session_fits_snapshot_budget() {
             name: "Personal".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: space,
             profile,
@@ -3732,6 +3734,7 @@ fn profile_deletion_rejects_a_hard_link_to_another_profile_database() {
             name: "Work".into(),
             kind: ProfileKind::Named,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: SpaceId::from(4),
             profile: survivor,

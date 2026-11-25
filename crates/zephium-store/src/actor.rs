@@ -409,6 +409,10 @@ enum Cmd {
         zephium_core::bookmarks::BookmarkRequest,
         Sender<zephium_core::bookmarks::BookmarkReply>,
     ),
+    BookmarkFolders(
+        ProfileId,
+        Sender<Vec<zephium_core::bookmarks::BookmarkFolder>>,
+    ),
     BookmarksObserved(
         ProfileId,
         zephium_core::bookmarks::BookmarkRequest,
@@ -1516,6 +1520,14 @@ impl Store for SqliteStore {
             .unwrap_or(BookmarkReply::Failed(BookmarkFailure::Unavailable))
     }
 
+    fn bookmark_folders(&self, profile: ProfileId) -> Vec<zephium_core::bookmarks::BookmarkFolder> {
+        let (tx, rx) = mpsc::channel();
+        if self.tx.try_send(Cmd::BookmarkFolders(profile, tx)).is_err() {
+            return Vec::new();
+        }
+        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
+    }
+
     fn bookmarks_observed(
         &self,
         profile: ProfileId,
@@ -2221,6 +2233,9 @@ fn actor(
             }
             Some(Cmd::Bookmarks(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks(profile, request));
+            }
+            Some(Cmd::BookmarkFolders(profile, reply)) => {
+                let _ = reply.send(hub.bookmark_folders(profile));
             }
             Some(Cmd::BookmarksObserved(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks_observed(profile, request));

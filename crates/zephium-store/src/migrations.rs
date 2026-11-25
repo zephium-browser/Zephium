@@ -1874,6 +1874,18 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 31,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE profile_bookmark_folders (
+                     profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+                     folder_id INTEGER NOT NULL REFERENCES bookmarks(id) ON DELETE CASCADE
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX idx_profile_bookmark_folders_folder ON profile_bookmark_folders(folder_id);",
+            )
+        },
+    },
 ];
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
@@ -2893,6 +2905,8 @@ mod tests {
         (27, 0x6c555aa33142ef81),
         (28, 0xdce79131820ba8c9),
         (29, 0xe7926065f4d26c22),
+        (30, 0xf595_7729_f391_8f11),
+        (31, 0x0da9_5c7c_9116_2f16),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),

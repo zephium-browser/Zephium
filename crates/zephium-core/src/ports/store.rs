@@ -371,6 +371,9 @@ pub trait Store {
     ) {
         done(None);
     }
+    fn bookmark_folders(&self, _profile: ProfileId) -> Vec<crate::bookmarks::BookmarkFolder> {
+        Vec::new()
+    }
     /// Notes kept in the profile database before notes became Markdown
     /// files, for their one-time move into the notes folder. `None` when they
     /// cannot be read now.

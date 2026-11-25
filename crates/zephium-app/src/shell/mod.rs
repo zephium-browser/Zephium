@@ -938,9 +938,11 @@ impl Shell {
                 name,
                 avatar,
                 photo,
+                bookmark_folder,
                 switch,
             } => {
-                let _ = self.operation_create_profile(&name, avatar, photo, switch);
+                let _ =
+                    self.operation_create_profile(&name, avatar, photo, bookmark_folder, switch);
             }
             Command::SwitchProfile(profile) => {
                 let _ = self.operation_switch_profile(profile);
