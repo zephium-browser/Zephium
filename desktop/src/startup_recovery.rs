@@ -8,7 +8,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const MARKER: &str = ".startup-recovery";
 const LOCK: &str = ".startup-recovery-lock";
@@ -98,7 +98,7 @@ struct Root {
 }
 
 struct ActiveStart {
-    _file: File,
+    file: Mutex<Option<File>>,
     path: PathBuf,
     wave: u64,
 }
@@ -131,6 +131,14 @@ impl Root {
     }
 
     fn lock(&self) -> io::Result<File> {
+        self.lock_with_wait(false)
+    }
+
+    fn lock_for_report(&self) -> io::Result<File> {
+        self.lock_with_wait(true)
+    }
+
+    fn lock_with_wait(&self, wait: bool) -> io::Result<File> {
         self.verify()?;
         let path = self.path.join(LOCK);
         let file = match create_new(&path) {
@@ -146,7 +154,18 @@ impl Root {
         if file.metadata()?.len() != 0 {
             return Err(invalid());
         }
-        file.try_lock().map_err(io::Error::from)?;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(error) => {
+                    let error = io::Error::from(error);
+                    if error.kind() != io::ErrorKind::WouldBlock || !wait {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
         // A replaced lock must never split cooperating owners into two locks.
         if identity(&open(&path, false, true)?, false)? != expected {
             return Err(invalid());
@@ -228,7 +247,7 @@ impl Root {
         file.sync_all()?;
         sync_directory(&self.directory)?;
         Ok(ActiveStart {
-            _file: file,
+            file: Mutex::new(Some(file)),
             path,
             wave,
         })
@@ -246,12 +265,16 @@ impl Root {
         {
             return Err(invalid());
         }
+        let mut active_file = active.file.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(lease_file) = active_file.as_ref() else {
+            return Ok(());
+        };
         let path_file = match open(&active.path, false, true) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        if identity(&path_file, false)? != identity(&active._file, false)? {
+        if identity(&path_file, false)? != identity(lease_file, false)? {
             return Err(invalid());
         }
         drop(path_file);
@@ -260,13 +283,19 @@ impl Root {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        sync_directory(&self.directory)
+        sync_directory(&self.directory)?;
+        active_file.take();
+        Ok(())
     }
 
     fn has_active_start(&self, active: &ActiveStart) -> io::Result<bool> {
         self.verify()?;
         if active.path.parent() != Some(self.path.as_path()) {
             return Err(invalid());
+        }
+        let active_file = active.file.lock().unwrap_or_else(|e| e.into_inner());
+        if active_file.is_none() {
+            return Ok(false);
         }
         let file = match open(&active.path, false, true) {
             Ok(file) => file,
@@ -401,10 +430,12 @@ pub(crate) fn begin(data_dir: &Path) -> io::Result<StartupAttempt> {
         .find(|wave| *wave == previous.wave)
         .or_else(|| live_waves.first().copied())
         .unwrap_or(generation);
-    let incomplete = if live_waves.is_empty() && !previous.successful {
-        previous.incomplete.saturating_add(1).min(INCOMPLETE_LIMIT)
-    } else {
+    let incomplete = if !live_waves.is_empty() {
         previous.incomplete
+    } else if previous.successful {
+        1
+    } else {
+        previous.incomplete.saturating_add(1).min(INCOMPLETE_LIMIT)
     };
     let mut current = fresh_record(generation, wave, incomplete)?;
     current.successful = !live_waves.is_empty() && previous.successful;
@@ -513,7 +544,7 @@ impl StartupAttempt {
     }
 
     fn clear(&self) -> io::Result<bool> {
-        let _lock = self.root.lock()?;
+        let _lock = self.root.lock_for_report()?;
         let Some(mut current) = self.root.read()? else {
             return Ok(false);
         };
@@ -643,7 +674,7 @@ fn identity(file: &File, directory: bool) -> io::Result<Identity> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: file owns a live handle and information is writable for the call.
@@ -675,10 +706,10 @@ fn publish(staged: &tempfile::NamedTempFile, destination: &Path, replace: bool) 
 #[cfg(windows)]
 fn publish(staged: &tempfile::NamedTempFile, destination: &Path, replace: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
+    use windows::core::PCWSTR;
     let source: Vec<_> = staged.path().as_os_str().encode_wide().chain([0]).collect();
     let destination: Vec<_> = destination.as_os_str().encode_wide().chain([0]).collect();
     // SAFETY: both buffers are owned, NUL-terminated paths for this call.
@@ -792,11 +823,12 @@ mod tests {
         assert!(healthy.generation > early.generation);
         assert!(healthy.mark_healthy().unwrap());
         assert!(healthy.mark_healthy().unwrap());
-        assert!(!begin(root.path()).unwrap().requires_recovery());
-        drop(begin(root.path()).unwrap());
-        let third_incomplete = begin(root.path()).unwrap();
-        assert!(!third_incomplete.requires_recovery());
-        drop(third_incomplete);
+        let first_incomplete = begin(root.path()).unwrap();
+        assert!(!first_incomplete.requires_recovery());
+        drop(first_incomplete);
+        let second_incomplete = begin(root.path()).unwrap();
+        assert!(!second_incomplete.requires_recovery());
+        drop(second_incomplete);
         let recovery = begin(root.path()).unwrap();
         assert!(recovery.requires_recovery());
         assert!(recovery.mark_healthy().unwrap());
@@ -866,8 +898,27 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .incomplete,
-            0
+            1
         );
+    }
+
+    #[test]
+    fn health_report_waits_for_a_marker_transaction() {
+        let root = tempdir();
+        let attempt = begin(root.path()).unwrap();
+        let blocker = Root::open(root.path()).unwrap();
+        let lock = blocker.lock().unwrap();
+        let report = attempt.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            report.mark_healthy()
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        assert!(!thread.is_finished());
+        drop(lock);
+        assert!(thread.join().unwrap().unwrap());
     }
 
     #[test]
@@ -914,14 +965,13 @@ mod tests {
     }
 
     #[test]
-    fn an_occupied_lock_refuses_instead_of_racing_generation_updates() {
+    fn an_occupied_lock_refuses_admission_and_recovery_marker_updates() {
         let root = tempdir();
         let attempt = begin(root.path()).unwrap();
         let _held = attempt.root.lock().unwrap();
         let error = begin(root.path()).err().unwrap();
         assert!(!marker_recovery_available(root.path(), &error));
         assert!(recover_marker_after_choice(root.path()).is_err());
-        assert!(attempt.mark_healthy().is_err());
         assert_eq!(attempt.root.read().unwrap().unwrap().incomplete, 1);
     }
 
@@ -1034,7 +1084,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn linked_marker_lock_and_root_are_refused_without_touching_targets() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
+        use std::os::unix::fs::{PermissionsExt, symlink};
         let root = tempdir();
         let target = root.path().join("target");
         fs::write(&target, []).unwrap();

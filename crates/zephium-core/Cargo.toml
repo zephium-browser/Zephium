@@ -18,9 +18,6 @@ base64.workspace = true
 sha2 = "=0.10.9"
 zeroize = "=1.9.1"
 
-[target.'cfg(target_os = "windows")'.dependencies]
-winreg = "0.56"
-
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true

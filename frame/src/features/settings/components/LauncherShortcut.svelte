@@ -38,6 +38,7 @@
     if (rejection) return reasons[rejection]();
     if (recording) return m.launcher_shortcut_recording();
     if (failed) return m.panel_action_failed();
+    if (trigger && !trigger.ownership_available) return m.launcher_shortcut_owner_unavailable();
     if (trigger && !trigger.registered) return m.launcher_shortcut_unregistered();
     return m.launcher_shortcut_ready();
   });
@@ -139,7 +140,7 @@
   // Permission is granted in System Settings, which tells nobody; look
   // again while this page is waiting for it, and only then.
   $effect(() => {
-    if (!waiting) return;
+    if (!waiting && trigger?.ownership_available !== false) return;
     const poll = setInterval(() => {
       if (document.visibilityState === "visible") void refresh();
     }, 1500);

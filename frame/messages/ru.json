@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Нажмите клавиши…",
   "launcher_shortcut_reset": "Сбросить",
   "launcher_shortcut_ready": "Работает из любого приложения.",
+  "launcher_shortcut_owner_unavailable": "Только один экземпляр Zephium может одновременно менять сочетание клавиш запуска.",
   "launcher_shortcut_unregistered": "Не работает: возможно, его использует другое приложение. Запишите другое сочетание.",
   "launcher_shortcut_invalid": "Эту клавишу нельзя использовать в сочетании.",
   "launcher_shortcut_needs_modifier": "Удерживайте ⌘, ⌃ или ⌥ вместе с клавишей, чтобы она не печаталась.",

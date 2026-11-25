@@ -50,6 +50,7 @@ pub struct LauncherTrigger {
     /// The shortcut is registered and will open the launcher.
     pub registered: bool,
     pub editable: bool,
+    pub ownership_available: bool,
     pub double_tap: DoubleTap,
     pub double_tap_supported: bool,
     /// Double tap needs Accessibility permission to observe modifier keys
@@ -78,6 +79,7 @@ struct State {
     registered: Option<Shortcut>,
     recording: bool,
     double_tap: DoubleTap,
+    install_pending: bool,
 }
 
 /// Checks a recorded accelerator before anything is unregistered, so a bad
@@ -240,6 +242,7 @@ pub fn install(app: &AppHandle, keymap_override: Option<String>) {
         state.shortcut = shortcut;
         state.registered = registered;
         state.double_tap = double_tap;
+        state.install_pending = false;
     }
     #[cfg(target_os = "macos")]
     if owns_global_shortcut {
@@ -258,21 +261,49 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
             {
                 return;
             }
-            let claimed = app
+            let owns = app
                 .try_state::<crate::instance_lease::GlobalShortcutOwner>()
-                .is_some_and(|owner| owner.try_claim().unwrap_or(false));
-            if claimed {
+                .is_some_and(|owner| {
+                    owner.owns()
+                        || owner.try_claim().unwrap_or_else(|error| {
+                            crate::write_diagnostic(format_args!(
+                                "launcher: shortcut ownership unavailable: {error}"
+                            ));
+                            false
+                        })
+                });
+            let retry = should_attempt_install(owns, false)
+                && app
+                    .try_state::<Trigger>()
+                    .as_deref()
+                    .is_some_and(reserve_install);
+            if retry {
                 let app = app.clone();
                 let handle = app.clone();
                 let keymap_override = keymap_override.clone();
-                let _ = app.run_on_main_thread(move || {
-                    if !handle
-                        .try_state::<crate::ShutdownCoordinator>()
-                        .is_some_and(|shutdown| shutdown.terminal_started())
-                    {
-                        install(&handle, keymap_override);
+                if app
+                    .run_on_main_thread(move || {
+                        let still_owns = handle
+                            .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+                            .is_some_and(|owner| owner.owns());
+                        if still_owns
+                            && !handle
+                                .try_state::<crate::ShutdownCoordinator>()
+                                .is_some_and(|shutdown| shutdown.terminal_started())
+                        {
+                            install(&handle, keymap_override);
+                        }
+                    })
+                    .is_err()
+                {
+                    if let Some(trigger) = app.try_state::<Trigger>() {
+                        trigger
+                            .0
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .install_pending = false;
                     }
-                });
+                }
             }
         }
     });
@@ -305,11 +336,16 @@ pub fn snapshot(app: &AppHandle) -> LauncherTrigger {
     };
     #[cfg(not(target_os = "macos"))]
     let accessibility = false;
+    let ownership_available = cfg!(target_os = "linux")
+        || app
+            .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+            .is_some_and(|owner| owner.owns());
     LauncherTrigger {
         shortcut,
         default_shortcut: DEFAULT.into(),
         registered,
-        editable: cfg!(not(target_os = "linux")),
+        editable: cfg!(not(target_os = "linux")) && ownership_available,
+        ownership_available,
         double_tap,
         double_tap_supported: cfg!(target_os = "macos"),
         accessibility,
@@ -369,6 +405,17 @@ pub fn set_shortcut(app: &AppHandle, accelerator: &str) -> TriggerChange {
 /// While a new shortcut is being recorded the current one must not fire, or
 /// pressing it to re-record would open the launcher instead.
 pub fn recording(app: &AppHandle, active: bool) {
+    if !app
+        .try_state::<crate::instance_lease::GlobalShortcutOwner>()
+        .is_some_and(|owner| owner.owns())
+    {
+        if let Some(trigger) = app.try_state::<Trigger>() {
+            let mut state = trigger.0.lock().unwrap_or_else(|e| e.into_inner());
+            state.recording = false;
+            state.registered = None;
+        }
+        return;
+    }
     let Some(trigger) = app.try_state::<Trigger>() else {
         return;
     };
@@ -399,6 +446,19 @@ pub fn recording(app: &AppHandle, active: bool) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .registered = restored;
+}
+
+fn reserve_install(trigger: &Trigger) -> bool {
+    let mut state = trigger.0.lock().unwrap_or_else(|e| e.into_inner());
+    if state.registered.is_some() || state.install_pending {
+        return false;
+    }
+    state.install_pending = true;
+    true
+}
+
+fn should_attempt_install(owns: bool, shutting_down: bool) -> bool {
+    owns && !shutting_down
 }
 
 pub fn set_double_tap(app: &AppHandle, mode: DoubleTap) -> LauncherTrigger {
@@ -458,6 +518,21 @@ mod tests {
             assert_eq!(validate(taken), Err(Rejection::AppCommand), "{taken}");
         }
         assert!(validate("CmdOrCtrl+Shift+F5").is_ok());
+    }
+
+    #[test]
+    fn shortcut_registration_retries_only_for_the_owner() {
+        let trigger = Trigger::default();
+        assert!(should_attempt_install(true, false));
+        assert!(!should_attempt_install(false, false));
+        assert!(!should_attempt_install(true, true));
+        assert!(reserve_install(&trigger));
+        assert!(!reserve_install(&trigger));
+        trigger.0.lock().unwrap().install_pending = false;
+        assert!(reserve_install(&trigger));
+        trigger.0.lock().unwrap().registered = Some(Shortcut::from_str(DEFAULT).unwrap());
+        trigger.0.lock().unwrap().install_pending = false;
+        assert!(!reserve_install(&trigger));
     }
 
     #[cfg(target_os = "macos")]

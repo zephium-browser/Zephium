@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "키를 누르세요…",
   "launcher_shortcut_reset": "재설정",
   "launcher_shortcut_ready": "어떤 앱에서든 작동해요.",
+  "launcher_shortcut_owner_unavailable": "한 번에 하나의 Zephium 인스턴스만 런처 단축키를 변경할 수 있어요.",
   "launcher_shortcut_unregistered": "작동하지 않아요. 다른 앱이 사용하고 있을 수 있어요. 다른 단축키를 기록하세요.",
   "launcher_shortcut_invalid": "이 키는 단축키로 사용할 수 없어요.",
   "launcher_shortcut_needs_modifier": "글자가 입력되지 않도록 키와 함께 ⌘, ⌃, ⌥ 중 하나를 누르세요.",

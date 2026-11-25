@@ -11,11 +11,11 @@ use std::io::{self, Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use winreg::RegKey;
 use winreg::enums::{
     HKEY_CURRENT_USER, KEY_CREATE_SUB_KEY, KEY_READ, KEY_SET_VALUE, REG_CREATED_NEW_KEY,
     REG_OPTION_VOLATILE,
 };
-use winreg::RegKey;
 
 use crate::ids::ProfileId;
 
@@ -42,6 +42,32 @@ const MAX_QUARANTINE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_SCANNED_ENTRIES: usize = 250_000;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x00200000;
+
+fn acquire_lifecycle_lock<T>(
+    operation: &str,
+    mut open: impl FnMut() -> io::Result<T>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> io::Result<T> {
+    use std::time::Duration;
+
+    let timeout = Duration::from_secs(10);
+    let backoff = Duration::from_millis(100);
+    loop {
+        let error = match open() {
+            Ok(lease) => return Ok(lease),
+            Err(error) => error,
+        };
+        let remaining = timeout.saturating_sub(elapsed());
+        if !matches!(error.raw_os_error(), Some(32 | 33)) || remaining.is_zero() {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("{operation}: {error}"),
+            ));
+        }
+        sleep(backoff.min(remaining));
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeGenerationKind {
@@ -801,7 +827,7 @@ impl RuntimeGeneration {
             RuntimeGenerationKind::Privileged => "privileged runtime lifecycle lock",
         };
         let started = std::time::Instant::now();
-        let lease = super::acquire_lifecycle_lock(
+        let lease = acquire_lifecycle_lock(
             operation,
             || {
                 OpenOptions::new()
@@ -1190,7 +1216,117 @@ impl RuntimeCleanupTicket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
+    use std::time::Duration;
+
+    #[test]
+    fn lifecycle_lock_retries_contention_until_open_succeeds() {
+        for code in [32, 33] {
+            let elapsed = Cell::new(Duration::ZERO);
+            let mut attempts = 0;
+            let lease = acquire_lifecycle_lock(
+                "privileged runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    if attempts <= 3 {
+                        Err(io::Error::from_raw_os_error(code))
+                    } else {
+                        Ok("lease")
+                    }
+                },
+                || elapsed.get(),
+                |delay| {
+                    assert_eq!(delay, Duration::from_millis(100));
+                    elapsed.set(elapsed.get() + delay);
+                },
+            )
+            .unwrap();
+            assert_eq!(lease, "lease");
+            assert_eq!(attempts, 4);
+            assert_eq!(elapsed.get(), Duration::from_millis(300));
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_stops_after_ten_seconds_with_operation_and_os_error() {
+        for operation in [
+            "privileged runtime lifecycle lock",
+            "private runtime lifecycle lock",
+        ] {
+            for code in [32, 33] {
+                let elapsed = Cell::new(Duration::ZERO);
+                let mut attempts = 0;
+                let error = acquire_lifecycle_lock::<()>(
+                    operation,
+                    || {
+                        attempts += 1;
+                        Err(io::Error::from_raw_os_error(code))
+                    },
+                    || elapsed.get(),
+                    |delay| elapsed.set(elapsed.get() + delay),
+                )
+                .unwrap_err();
+                assert_eq!(attempts, 101);
+                assert_eq!(elapsed.get(), Duration::from_secs(10));
+                assert_eq!(error.kind(), io::Error::from_raw_os_error(code).kind());
+                assert_eq!(
+                    error.to_string(),
+                    format!("{operation}: {}", io::Error::from_raw_os_error(code))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_does_not_retry_other_errors() {
+        for code in [2, 5, 112] {
+            let mut attempts = 0;
+            let error = acquire_lifecycle_lock::<()>(
+                "private runtime lifecycle lock",
+                || {
+                    attempts += 1;
+                    Err(io::Error::from_raw_os_error(code))
+                },
+                || Duration::ZERO,
+                |_| panic!("unrelated errors must not wait"),
+            )
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "private runtime lifecycle lock: {}",
+                    io::Error::from_raw_os_error(code)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_lock_bounds_backoff_by_remaining_time() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut attempts = 0;
+        let error = acquire_lifecycle_lock::<()>(
+            "privileged runtime lifecycle lock",
+            || {
+                attempts += 1;
+                elapsed.set(elapsed.get() + Duration::from_millis(9990));
+                Err(io::Error::from_raw_os_error(32))
+            },
+            || elapsed.get(),
+            |delay| {
+                assert_eq!(delay, Duration::from_millis(10));
+                elapsed.set(elapsed.get() + delay);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(attempts, 2);
+        assert!(
+            error
+                .to_string()
+                .starts_with("privileged runtime lifecycle lock:")
+        );
+    }
 
     struct NoLeftovers;
 
@@ -1331,11 +1467,12 @@ mod tests {
             next.report().kept_running,
             std::slice::from_ref(&left.generation)
         );
-        assert!(next
-            .report()
-            .overdue
-            .as_deref()
-            .is_some_and(|reason| reason.contains("could not be ended")));
+        assert!(
+            next.report()
+                .overdue
+                .as_deref()
+                .is_some_and(|reason| reason.contains("could not be ended"))
+        );
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
@@ -1351,11 +1488,12 @@ mod tests {
         assert!(left.root().join("private-data").exists());
         assert!(boot_knows(kind, &left.generation));
         assert!(next.report().reclaimed_after_exit.is_empty());
-        assert!(next
-            .report()
-            .overdue
-            .as_deref()
-            .is_some_and(|reason| reason.contains("no complete process record")));
+        assert!(
+            next.report()
+                .overdue
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no complete process record"))
+        );
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }
@@ -1439,11 +1577,12 @@ mod tests {
             next.report().kept_unchecked,
             std::slice::from_ref(&left.generation)
         );
-        assert!(next
-            .report()
-            .overdue
-            .as_deref()
-            .is_some_and(|reason| reason.contains("could not be checked")));
+        assert!(
+            next.report()
+                .overdue
+                .as_deref()
+                .is_some_and(|reason| reason.contains("could not be checked"))
+        );
         left.cleanup_after_proven_exit().unwrap();
         next.cleanup_ticket().cleanup_after_proven_exit().unwrap();
     }

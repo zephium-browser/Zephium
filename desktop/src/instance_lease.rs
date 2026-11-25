@@ -130,7 +130,7 @@ fn unlock(file: &File) {
 
 #[cfg(test)]
 mod tests {
-    use super::{shortcut_coordination_dir, FileLease, GlobalShortcutOwner};
+    use super::{FileLease, GlobalShortcutOwner, shortcut_coordination_dir};
     use std::io::BufRead;
 
     #[test]
@@ -213,6 +213,7 @@ mod tests {
             ])
             .env("ZEPHIUM_TEST_INSTANCE_LOCK", &path)
             .stdout(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
         let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
@@ -224,6 +225,7 @@ mod tests {
             }
         }
         assert!(FileLease::try_acquire(&path).unwrap().is_none());
+        drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
         assert!(FileLease::try_acquire(&path).unwrap().is_some());
     }
@@ -238,6 +240,10 @@ mod tests {
             .expect("child owns lease");
         println!("lease-ready");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut acknowledgment = String::new();
+        let _ = std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(std::io::stdin()),
+            &mut acknowledgment,
+        );
     }
 }

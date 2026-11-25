@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use zephium_core::runtime_security::RuntimeSecurityAdvisory;
-use zephium_core::webview2::{RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser};
+use zephium_engine::{RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser};
 
 static RUNTIME_STATE: OnceLock<RuntimeGeneration> = OnceLock::new();
 /// A privileged browser started that this run's record does not cover.

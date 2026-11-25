@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "キーを押してください…",
   "launcher_shortcut_reset": "リセット",
   "launcher_shortcut_ready": "どのアプリからでも動作します。",
+  "launcher_shortcut_owner_unavailable": "ランチャーのショートカットを変更できる Zephium は一度に 1 つだけです。",
   "launcher_shortcut_unregistered": "有効になっていません。別のアプリが使用している可能性があります。別のショートカットを記録してください。",
   "launcher_shortcut_invalid": "そのキーはショートカットに使用できません。",
   "launcher_shortcut_needs_modifier": "文字が入力されないよう、キーと一緒に⌘、⌃、⌥のいずれかを押したままにしてください。",

@@ -8741,18 +8741,25 @@ pub fn run() {
                 std::fs::create_dir_all(&data_dir)?;
                 #[cfg(not(target_os = "linux"))]
                 {
-                    let coordination_dir = instance_lease::shortcut_coordination_dir(
-                        &app.path().config_dir()?,
-                        &app.config().identifier,
-                    );
-                    std::fs::create_dir_all(&coordination_dir)?;
-                    if !app.manage(instance_lease::GlobalShortcutOwner::acquire(
-                        &coordination_dir,
-                    )?) {
-                        return Err(std::io::Error::other(
-                            "global shortcut ownership state is already installed",
-                        )
-                        .into());
+                    match app.path().config_dir().map_err(std::io::Error::other).and_then(
+                        |config_dir| {
+                            let coordination_dir = instance_lease::shortcut_coordination_dir(
+                                &config_dir,
+                                &app.config().identifier,
+                            );
+                            std::fs::create_dir_all(&coordination_dir)?;
+                            instance_lease::GlobalShortcutOwner::acquire(&coordination_dir)
+                        },
+                    ) {
+                        Ok(owner) => {
+                            if !app.manage(owner) {
+                                return Err(std::io::Error::other(
+                                    "global shortcut ownership state is already installed",
+                                )
+                                .into());
+                            }
+                        }
+                        Err(error) => diagnostic!("shortcut coordination unavailable: {error}"),
                     }
                 }
                 #[cfg(target_os = "windows")]

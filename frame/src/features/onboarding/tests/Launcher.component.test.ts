@@ -14,6 +14,7 @@ vi.mock("$shared/ipc/bindings", async () => {
       default_shortcut: "CmdOrCtrl+Shift+Space",
       registered: native.registered,
       editable: true,
+      ownership_available: true,
       double_tap: "off",
       double_tap_supported: true,
       accessibility: false,

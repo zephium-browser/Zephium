@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::{
     WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_BASIC_INFORMATION, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
 };
-use zephium_core::webview2::{
+use super::runtime_generation::{
     BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
 };
 

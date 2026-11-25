@@ -1467,6 +1467,7 @@
   "launcher_shortcut_press": "Tuşlara basın…",
   "launcher_shortcut_reset": "Sıfırla",
   "launcher_shortcut_ready": "Her uygulamada çalışır.",
+  "launcher_shortcut_owner_unavailable": "Başlatıcı kısayolunu aynı anda yalnızca bir Zephium örneği değiştirebilir.",
   "launcher_shortcut_unregistered": "Etkin değil: başka bir uygulama kullanıyor olabilir. Farklı bir kısayol kaydedin.",
   "launcher_shortcut_invalid": "Bu tuş kısayol olarak kullanılamaz.",
   "launcher_shortcut_needs_modifier": "Tuşla birlikte ⌘, ⌃ veya ⌥ basılı tutun; böylece metin yazılmaz.",

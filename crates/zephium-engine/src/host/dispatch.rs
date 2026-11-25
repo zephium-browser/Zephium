@@ -368,11 +368,11 @@ pub(crate) fn install(
         crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
             .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
-    let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
+    let private_runtime = crate::RuntimeGeneration::prepare(
         &data_root
             .join("private-runtime")
             .join(std::process::id().to_string()),
-        zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
+        crate::RuntimeGenerationKind::RawPrivate,
         &crate::platform::imp::WindowsLeftoverProcesses,
     )
     .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;

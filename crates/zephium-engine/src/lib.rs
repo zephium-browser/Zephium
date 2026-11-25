@@ -560,6 +560,8 @@ pub use platform::windows::{
     browser_process_record, detach_privileged_environment_update,
     finalize_privileged_environment_registrations, generation_report_lines,
     install_privileged_environment_registration, privileged_environment_process,
+    BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
+    RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser,
     WindowsLeftoverProcesses,
 };
 

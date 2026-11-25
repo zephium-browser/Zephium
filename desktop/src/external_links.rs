@@ -3,9 +3,9 @@
 //! admits every address before the shell sees it.
 
 use super::*;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
-use zephium_core::navigation::{external_target, MAX_EXTERNAL_TARGETS};
+use std::sync::atomic::AtomicBool;
+use zephium_core::navigation::{MAX_EXTERNAL_TARGETS, external_target};
 
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.
@@ -87,7 +87,9 @@ pub(crate) fn adopt(app: &tauri::AppHandle) {
     );
     hand_off(
         app,
-        waiting.into_iter().chain(std::env::args().skip(1)),
+        waiting
+            .into_iter()
+            .chain(external_arguments(std::env::args().skip(1))),
         false,
     );
 }
@@ -113,7 +115,8 @@ mod tests {
                 "--user-data-dir=/tmp/zephium".to_owned(),
                 "https://two.example/".to_owned(),
                 "--user-data-dir".to_owned(),
-                "/tmp/other".to_owned(),
+                "https://not-a-link.example/".to_owned(),
+                "--profile=https://also-not-a-link.example/".to_owned(),
             ]),
             vec![
                 "https://one.example/".to_owned(),
