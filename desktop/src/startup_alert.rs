@@ -48,6 +48,7 @@ pub(crate) enum StartupProblem {
     DataFolderUnavailable,
     /// Another Zephium process still holds the profile.
     ProfileInUse,
+    StartupProfileUnavailable,
     StillClosing,
     Other,
 }
@@ -151,6 +152,9 @@ impl StartupProblem {
             Self::ProfileInUse => "Zephium's data is still in use by another copy of Zephium that \
                  hasn't finished closing. Wait a few seconds and open it again; if it keeps \
                  happening, end Zephium in Task Manager or restart your computer."
+                .to_owned(),
+            Self::StartupProfileUnavailable => "Zephium couldn't create or open the requested \
+                profile. Check your data folder and try again."
                 .to_owned(),
             Self::Other => format!(
                 "Something went wrong while starting Zephium. Try opening it again.\n\n\
@@ -398,6 +402,14 @@ mod tests {
         assert_eq!(
             StartupProblem::classify("unrelated error (os error 350)"),
             StartupProblem::Other
+        );
+    }
+
+    #[test]
+    fn unavailable_startup_profile_has_a_visible_actionable_message() {
+        assert_eq!(
+            StartupProblem::StartupProfileUnavailable.message_with_log("details", None),
+            "Zephium couldn't create or open the requested profile. Check your data folder and try again."
         );
     }
 

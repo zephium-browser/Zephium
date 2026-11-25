@@ -401,7 +401,6 @@ impl Shell {
             started.elapsed().as_millis()
         );
         if session_absent || startup_profile_created {
-            // Register startup-created profiles before profile-scoped management is exposed.
             self.persist();
         }
     }

@@ -7917,21 +7917,27 @@ fn finish_browser_setup(
             failure,
             zephium_app::ShellTerminalFailure::SessionUnavailable
                 | zephium_app::ShellTerminalFailure::SessionFromNewerVersion
+                | zephium_app::ShellTerminalFailure::StartupProfileUnavailable
         ) {
             let app = terminal_failure_app.clone();
             let shutdown = terminal_failure_shutdown.clone();
             let explained = terminal_failure_app.run_on_main_thread(move || {
                 #[cfg(not(target_os = "linux"))]
                 startup_alert::show_blocking(
-                    if matches!(
-                        failure,
-                        zephium_app::ShellTerminalFailure::SessionFromNewerVersion
-                    ) {
-                        startup_alert::StartupProblem::NewerProfile
-                    } else {
-                        startup_alert::StartupProblem::DamagedProfile
+                    match failure {
+                        zephium_app::ShellTerminalFailure::SessionFromNewerVersion => {
+                            startup_alert::StartupProblem::NewerProfile
+                        }
+                        zephium_app::ShellTerminalFailure::StartupProfileUnavailable => {
+                            startup_alert::StartupProblem::StartupProfileUnavailable
+                        }
+                        _ => startup_alert::StartupProblem::DamagedProfile,
                     },
-                    "the saved tabs and settings could not be opened",
+                    if failure == zephium_app::ShellTerminalFailure::StartupProfileUnavailable {
+                        "the requested profile could not be created or opened"
+                    } else {
+                        "the saved tabs and settings could not be opened"
+                    },
                 );
                 request_shell_terminal_failure(&app, &shutdown, failure);
             });
