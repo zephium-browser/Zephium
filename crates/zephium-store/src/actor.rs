@@ -212,6 +212,7 @@ impl PendingSettings {
 }
 
 struct PendingSession {
+    sequence: u64,
     state: SessionState,
     first: Instant,
     latest: Instant,
@@ -220,8 +221,9 @@ struct PendingSession {
 }
 
 impl PendingSession {
-    fn new(state: SessionState, now: Instant) -> Self {
+    fn new(sequence: u64, state: SessionState, now: Instant) -> Self {
         Self {
+            sequence,
             state,
             first: now,
             latest: now,
@@ -244,6 +246,12 @@ impl PendingSession {
         self.failures = self.failures.saturating_add(1);
         self.retry_at = Some(now + delay);
     }
+}
+
+#[derive(Default)]
+struct SessionMailbox {
+    next_sequence: u64,
+    latest: Option<(u64, SessionState)>,
 }
 
 #[derive(Default)]
@@ -311,7 +319,7 @@ enum Cmd {
         zephium_agentic::AgentWorkArtifactCompletion,
     ),
     SaveWake,
-    SaveSessionChecked(SessionState, Sender<bool>),
+    SaveSessionChecked(u64, SessionState, Sender<bool>),
     VisitWake,
     SettingWake,
     Load(Sender<SessionLoad>),
@@ -515,7 +523,7 @@ pub struct SqliteStore {
     #[cfg(feature = "work-execution")]
     work_admission: OnceLock<Arc<AtomicUsize>>,
     tx: SyncSender<Cmd>,
-    latest_session: Arc<Mutex<Option<SessionState>>>,
+    latest_session: Arc<Mutex<SessionMailbox>>,
     pending_visits: Arc<Mutex<PendingVisits>>,
     pending_settings: Arc<Mutex<PendingSettings>>,
     userscript_mutation_admission: Arc<Mutex<UserscriptMutationAdmission>>,
@@ -615,7 +623,7 @@ impl SqliteStore {
         // remaining request too, so a compromised privileged UI cannot retain
         // unlimited settings/search/favicon commands in this actor.
         let (tx, rx) = mpsc::sync_channel::<Cmd>(256);
-        let latest_session = Arc::new(Mutex::new(None));
+        let latest_session = Arc::new(Mutex::new(SessionMailbox::default()));
         let pending_visits = Arc::new(Mutex::new(PendingVisits::new()));
         let pending_settings = Arc::new(Mutex::new(PendingSettings::with_known_keys(setting_keys)));
         let actor_latest_session = latest_session.clone();
@@ -909,8 +917,10 @@ impl Store for SqliteStore {
             .latest_session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let needs_wake = latest.is_none();
-        *latest = Some(session);
+        latest.next_sequence = latest.next_sequence.wrapping_add(1);
+        let sequence = latest.next_sequence;
+        let needs_wake = latest.latest.is_none();
+        latest.latest = Some((sequence, session));
         drop(latest);
         // A full queue already guarantees the actor is awake. It checks this
         // mailbox before every queued command, so no blocking or lost wakeup.
@@ -927,16 +937,27 @@ impl Store for SqliteStore {
         if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire) {
             return false;
         }
+        let mut mailbox = self
+            .latest_session
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        mailbox.next_sequence = mailbox.next_sequence.wrapping_add(1);
+        let sequence = mailbox.next_sequence;
         let (tx, rx) = mpsc::channel();
         if self
             .tx
-            .try_send(Cmd::SaveSessionChecked(session, tx))
+            .try_send(Cmd::SaveSessionChecked(sequence, session, tx))
             .is_err()
         {
             return false;
         }
+        drop(mailbox);
         drop(lifecycle);
-        rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or(false)
+        match rx.recv_timeout(STORE_RPC_TIMEOUT) {
+            Ok(durable) => durable,
+            Err(mpsc::RecvTimeoutError::Timeout) => rx.recv().unwrap_or(false),
+            Err(mpsc::RecvTimeoutError::Disconnected) => false,
+        }
     }
 
     fn flush(&self) -> bool {
@@ -1561,7 +1582,14 @@ impl Store for SqliteStore {
         profile: ProfileId,
         done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
     ) {
-        let lifecycle = self.lifecycle.read().unwrap_or_else(|p| p.into_inner());
+        let lifecycle = match self.lifecycle.try_read() {
+            Ok(lifecycle) => lifecycle,
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                done(None);
+                return;
+            }
+        };
         let rejected = if lifecycle.terminal_admitted || self.shutdown_clean.load(Ordering::Acquire)
         {
             Some(done)
@@ -1955,7 +1983,7 @@ fn admissible_split(root: &Pane) -> bool {
 fn actor(
     mut hub: Hub,
     rx: Receiver<Cmd>,
-    latest_session: Arc<Mutex<Option<SessionState>>>,
+    latest_session: Arc<Mutex<SessionMailbox>>,
     pending_visits: Arc<Mutex<PendingVisits>>,
     pending_settings: Arc<Mutex<PendingSettings>>,
 ) {
@@ -2025,8 +2053,8 @@ fn actor(
                 let _ = activity.flush(&mut hub, &mut pending, false);
             }
             Some(Cmd::SaveWake) => {}
-            Some(Cmd::SaveSessionChecked(session, reply)) => {
-                let durable = flush(&mut hub, &mut pending) && hub.save(&session).is_ok();
+            Some(Cmd::SaveSessionChecked(sequence, session, reply)) => {
+                let durable = save_checked_session(&mut hub, &mut pending, sequence, &session);
                 let _ = reply.send(durable);
             }
             Some(Cmd::VisitWake) => {}
@@ -2843,24 +2871,24 @@ fn requeue_visits(mailbox: &Mutex<PendingVisits>, visits: PendingVisits) {
     }
 }
 
-fn absorb_latest_session(
-    latest: &Mutex<Option<SessionState>>,
-    pending: &mut Option<PendingSession>,
-) {
-    let Some(state) = latest
+fn absorb_latest_session(latest: &Mutex<SessionMailbox>, pending: &mut Option<PendingSession>) {
+    let Some((sequence, state)) = latest
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .latest
         .take()
     else {
         return;
     };
     let now = Instant::now();
     match pending {
-        Some(pending) => {
+        Some(pending) if sequence > pending.sequence => {
+            pending.sequence = sequence;
             pending.state = state;
             pending.latest = now;
         }
-        None => *pending = Some(PendingSession::new(state, now)),
+        Some(_) => {}
+        None => *pending = Some(PendingSession::new(sequence, state, now)),
     }
 }
 
@@ -2882,6 +2910,21 @@ fn flush(hub: &mut Hub, pending: &mut Option<PendingSession>) -> bool {
             false
         }
     }
+}
+
+fn save_checked_session(
+    hub: &mut Hub,
+    pending: &mut Option<PendingSession>,
+    sequence: u64,
+    session: &SessionState,
+) -> bool {
+    let prior = pending.take();
+    let has_later = prior.as_ref().is_some_and(|save| save.sequence > sequence);
+    let durable = hub.save(session).is_ok();
+    if has_later || !durable {
+        *pending = prior;
+    }
+    durable
 }
 
 /// The session the hub holds, as the shell receives it.

@@ -54,7 +54,7 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         #[cfg(feature = "work-execution")]
         work_admission: OnceLock::new(),
         tx,
-        latest_session: Arc::new(Mutex::new(None)),
+        latest_session: Arc::new(Mutex::new(SessionMailbox::default())),
         pending_visits: Arc::new(Mutex::new(PendingVisits::new())),
         pending_settings: Arc::new(Mutex::new(PendingSettings::default())),
         userscript_mutation_admission: Arc::new(Mutex::new(UserscriptMutationAdmission::default())),
@@ -1613,7 +1613,7 @@ fn first_visit_lands_even_inside_the_save_debounce() {
 #[test]
 fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
     let started = Instant::now();
-    let mut pending = PendingSession::new(sample(), started);
+    let mut pending = PendingSession::new(1, sample(), started);
     assert_eq!(pending.deadline(), started + DEBOUNCE);
 
     for delay in [1, 2, 4, 8, 16, 30, 30] {
@@ -1623,13 +1623,31 @@ fn failed_save_uses_capped_exponential_backoff_and_keeps_latest() {
 
     let mut latest = sample();
     latest.active_item = None;
-    let mailbox = Mutex::new(Some(latest.clone()));
+    let mailbox = Mutex::new(SessionMailbox {
+        next_sequence: 2,
+        latest: Some((2, latest.clone())),
+    });
     let retry_at = pending.retry_at;
     let mut slot = Some(pending);
     absorb_latest_session(&mailbox, &mut slot);
     let pending = slot.unwrap();
     assert_eq!(pending.state, latest);
     assert_eq!(pending.retry_at, retry_at, "new snapshots retain backoff");
+}
+
+#[test]
+fn a_later_ordinary_session_is_saved_after_an_earlier_checked_barrier() {
+    let mut hub = Hub::in_memory().unwrap();
+    let checked = sample();
+    let mut later = sample();
+    later.active_item = None;
+    let started = Instant::now();
+    let mut pending = Some(PendingSession::new(3, later.clone(), started));
+
+    assert!(save_checked_session(&mut hub, &mut pending, 2, &checked));
+    assert_eq!(pending.as_ref().map(|save| save.sequence), Some(3));
+    assert!(flush(&mut hub, &mut pending));
+    assert_eq!(hub.load().unwrap().unwrap(), later);
 }
 
 #[test]

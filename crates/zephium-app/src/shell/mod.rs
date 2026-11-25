@@ -1965,6 +1965,8 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        let now = std::time::Instant::now();
+        let mut rejection_emission_clean = true;
         for (_, operation_id) in self.pending_profile_creations.drain() {
             if let Some(operation_id) = operation_id {
                 let mut completion = operation_result(
@@ -1972,16 +1974,22 @@ impl Shell {
                     OperationReason::StoreAdmissionRejected,
                 );
                 completion.operation_id = operation_id;
-                (self.emit)(Projection::OperationProcessed(completion));
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (self.emit)(Projection::OperationProcessed(completion));
+                }))
+                .is_err()
+                {
+                    crate::diagnostic!("shutdown: profile-creation rejection projection panicked");
+                    rejection_emission_clean = false;
+                }
             }
         }
         for window in self.windows.iter_mut() {
             window.sidebar_peek = false;
         }
         // Reserve the last quarter of the remaining budget for native teardown.
-        let now = std::time::Instant::now();
         let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
-        let mut terminal_clean = now < deadline;
+        let mut terminal_clean = now < deadline && rejection_emission_clean;
         self.flush_visit_titles();
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();

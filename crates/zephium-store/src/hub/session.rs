@@ -1782,6 +1782,35 @@ mod unchanged_session_tests {
         assert!(hub.meta.total_changes() > written);
         assert_eq!(hub.load().unwrap().unwrap().profiles[0].name, "Home");
     }
+
+    #[test]
+    fn multibyte_profile_name_is_safely_bounded_for_bookmark_folder_title() {
+        let mut hub = Hub::in_memory().unwrap();
+        let session = SessionState {
+            profiles: vec![PersistedProfile {
+                id: 1.into(),
+                name: "界".repeat(200),
+                kind: ProfileKind::Default,
+            }],
+            ..SessionState::default()
+        };
+
+        hub.save(&session).unwrap();
+
+        let (title, bytes): (String, i64) = hub
+            .meta
+            .query_row(
+                "SELECT b.title, length(CAST(b.title AS BLOB)) FROM bookmarks b
+                 JOIN profile_bookmark_folders pbf ON pbf.folder_id=b.id
+                 WHERE pbf.profile_id=?1",
+                [session.profiles[0].id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 510);
+        assert_eq!(title, "界".repeat(170));
+        assert!(hub.load().unwrap().is_some());
+    }
 }
 
 #[cfg(test)]
@@ -2083,7 +2112,7 @@ impl Hub {
                     tx.execute(
                         "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
                          VALUES (NULL, coalesce((SELECT max(position)+1 FROM bookmarks WHERE parent_id IS NULL),0), ?1, NULL, ?2)",
-                        params![profile.name, now_secs()],
+                        params![bookmark_profile_title(&profile.name), now_secs()],
                     )?;
                     let folder = tx.last_insert_rowid();
                     tx.execute(
@@ -2610,6 +2639,16 @@ impl Hub {
         Ok(())
     }
 }
+
+fn bookmark_profile_title(name: &str) -> &str {
+    let mut end = name.len().min(MAX_BOOKMARK_TITLE_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+const MAX_BOOKMARK_TITLE_BYTES: usize = 512;
 
 /// The largest unreadable snapshot copied out when no recovery bytes exist.
 const MAX_SET_ASIDE_BYTES: usize = 64 * 1024 * 1024;

@@ -400,9 +400,9 @@ pub trait Store {
         done(false);
     }
     fn save_session(&self, session: SessionState);
-    fn save_session_checked(&self, session: SessionState) -> bool {
-        self.save_session(session);
-        true
+    #[must_use = "true confirms the session snapshot is durable"]
+    fn save_session_checked(&self, _session: SessionState) -> bool {
+        false
     }
     /// Ordered session-durability barrier for shutdown and other process
     /// boundaries. Returns only after the latest session snapshot queued
