@@ -2,9 +2,10 @@
 
 ## What changes for the user
 
-`zephium --user-data-dir <path>` stores all app data under the selected private directory and reuses that root across launches. Separate paths keep their app data isolated. Without the flag, Zephium uses its existing default directory.
+`zephium --user-data-dir <path>` stores settings, databases, bookmarks, sessions, logs, cache, and browser data under the selected private root across launches. Separate paths keep their data isolated. Without the flag, Zephium uses its existing default directory.
 
 ## How I checked it
 
-- Custom-root persistence, isolation, invalid paths, Unix ancestor checks, and root permissions.
-- Windows private-fs tests compile for Windows but still need a native Windows run.
+- `cargo test -p zephium-desktop --lib data_root::tests` (6 passed).
+- `cargo test -p zephium-private-fs` (125 passed).
+- Windows private-fs tests compile for Windows. Native Windows execution is still needed.
