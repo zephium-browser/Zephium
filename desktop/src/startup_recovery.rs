@@ -14,7 +14,8 @@ const MARKER: &str = ".startup-recovery";
 const LOCK: &str = ".startup-recovery-lock";
 const ACTIVE_PREFIX: &str = ".startup-recovery-active-";
 const MAGIC_V1: &[u8; 4] = b"ZST\x01";
-const MAGIC: &[u8; 4] = b"ZST\x02";
+const MAGIC_V2: &[u8; 4] = b"ZST\x02";
+const MAGIC: &[u8; 4] = b"ZST\x03";
 const V1_RECORD_BYTES: usize = 29;
 const RECORD_BYTES: usize = 37;
 const INCOMPLETE_LIMIT: u8 = 2;
@@ -28,17 +29,26 @@ struct Record {
     nonce: [u8; 16],
     wave: u64,
     incomplete: u8,
+    successful: bool,
 }
 
 impl Record {
     fn decode(bytes: &[u8]) -> io::Result<Self> {
-        let (wave, incomplete) = match bytes.len() {
-            V1_RECORD_BYTES if bytes.get(..4) == Some(MAGIC_V1.as_slice()) => (None, 28),
+        let (wave, incomplete, successful) = match bytes.len() {
+            V1_RECORD_BYTES if bytes.get(..4) == Some(MAGIC_V1.as_slice()) => (None, 28, false),
+            RECORD_BYTES if bytes.get(..4) == Some(MAGIC_V2.as_slice()) => (
+                Some(u64::from_le_bytes(
+                    bytes[28..36].try_into().map_err(|_| invalid())?,
+                )),
+                36,
+                false,
+            ),
             RECORD_BYTES if bytes.get(..4) == Some(MAGIC.as_slice()) => (
                 Some(u64::from_le_bytes(
                     bytes[28..36].try_into().map_err(|_| invalid())?,
                 )),
                 36,
+                bytes[36] & 0x80 != 0,
             ),
             _ => return Err(invalid()),
         };
@@ -48,7 +58,16 @@ impl Record {
         let mut nonce = [0; 16];
         nonce.copy_from_slice(&bytes[12..28]);
         let wave = wave.unwrap_or(generation);
-        if generation == 0 || nonce == [0; 16] || wave == 0 || bytes[incomplete] > INCOMPLETE_LIMIT
+        let incomplete = if successful {
+            bytes[incomplete] & 0x7f
+        } else {
+            bytes[incomplete]
+        };
+        if generation == 0
+            || nonce == [0; 16]
+            || wave == 0
+            || incomplete > INCOMPLETE_LIMIT
+            || (successful && incomplete != 0)
         {
             return Err(invalid());
         }
@@ -56,7 +75,8 @@ impl Record {
             generation,
             nonce,
             wave,
-            incomplete: bytes[incomplete],
+            incomplete,
+            successful,
         })
     }
 
@@ -66,7 +86,7 @@ impl Record {
         bytes[4..12].copy_from_slice(&self.generation.to_le_bytes());
         bytes[12..28].copy_from_slice(&self.nonce);
         bytes[28..36].copy_from_slice(&self.wave.to_le_bytes());
-        bytes[36] = self.incomplete;
+        bytes[36] = self.incomplete | if self.successful { 0x80 } else { 0 };
         bytes
     }
 }
@@ -79,6 +99,7 @@ struct Root {
 
 struct ActiveStart {
     _file: File,
+    path: PathBuf,
     wave: u64,
 }
 
@@ -206,7 +227,66 @@ impl Root {
         file.try_lock().map_err(io::Error::from)?;
         file.sync_all()?;
         sync_directory(&self.directory)?;
-        Ok(ActiveStart { _file: file, wave })
+        Ok(ActiveStart {
+            _file: file,
+            path,
+            wave,
+        })
+    }
+
+    fn clear_active_start(&self, active: &ActiveStart) -> io::Result<()> {
+        self.verify()?;
+        if active.path.parent() != Some(self.path.as_path())
+            || active
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| active_wave(name).ok())
+                != Some(Some(active.wave))
+        {
+            return Err(invalid());
+        }
+        let path_file = match open(&active.path, false, true) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if identity(&path_file, false)? != identity(&active._file, false)? {
+            return Err(invalid());
+        }
+        drop(path_file);
+        match fs::remove_file(&active.path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        sync_directory(&self.directory)
+    }
+
+    fn has_active_start(&self, active: &ActiveStart) -> io::Result<bool> {
+        self.verify()?;
+        if active.path.parent() != Some(self.path.as_path()) {
+            return Err(invalid());
+        }
+        let file = match open(&active.path, false, true) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                file.unlock()?;
+                Ok(false)
+            }
+            Err(error) => {
+                let error = io::Error::from(error);
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    Ok(true)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     fn clear_active_wave(&self, wave: u64) -> io::Result<()> {
@@ -311,6 +391,7 @@ pub(crate) fn begin(data_dir: &Path) -> io::Result<StartupAttempt> {
         nonce: [0; 16],
         wave: 0,
         incomplete: 0,
+        successful: false,
     });
     let live_waves = root.active_waves()?;
     let generation = previous.generation.checked_add(1).ok_or_else(invalid)?;
@@ -320,12 +401,13 @@ pub(crate) fn begin(data_dir: &Path) -> io::Result<StartupAttempt> {
         .find(|wave| *wave == previous.wave)
         .or_else(|| live_waves.first().copied())
         .unwrap_or(generation);
-    let incomplete = if live_waves.is_empty() {
+    let incomplete = if live_waves.is_empty() && !previous.successful {
         previous.incomplete.saturating_add(1).min(INCOMPLETE_LIMIT)
     } else {
         previous.incomplete
     };
-    let current = fresh_record(generation, wave, incomplete)?;
+    let mut current = fresh_record(generation, wave, incomplete)?;
+    current.successful = !live_waves.is_empty() && previous.successful;
     let active = Arc::new(root.create_active(wave, current.nonce)?);
     root.write(current)?;
     Ok(StartupAttempt {
@@ -333,7 +415,9 @@ pub(crate) fn begin(data_dir: &Path) -> io::Result<StartupAttempt> {
         generation,
         nonce: current.nonce,
         active,
-        recovery: live_waves.is_empty() && previous.incomplete >= INCOMPLETE_LIMIT,
+        recovery: live_waves.is_empty()
+            && !previous.successful
+            && previous.incomplete >= INCOMPLETE_LIMIT,
     })
 }
 
@@ -397,6 +481,7 @@ fn fresh_record(generation: u64, wave: u64, incomplete: u8) -> io::Result<Record
         nonce,
         wave,
         incomplete,
+        successful: false,
     })
 }
 
@@ -436,8 +521,9 @@ impl StartupAttempt {
             return Ok(false);
         }
         current.incomplete = 0;
+        current.successful = true;
         if (current.generation != self.generation || current.nonce != self.nonce)
-            && !self.root.active_waves()?.contains(&self.active.wave)
+            && !self.root.has_active_start(&self.active)?
         {
             return Ok(false);
         }
@@ -445,7 +531,7 @@ impl StartupAttempt {
             return Ok(false);
         }
         self.root.write(current)?;
-        self.root.clear_active_wave(self.active.wave)?;
+        self.root.clear_active_start(&self.active)?;
         Ok(true)
     }
 }
@@ -641,11 +727,12 @@ mod tests {
             nonce: [1; 16],
             wave: generation,
             incomplete,
+            successful: false,
         }
     }
 
     #[test]
-    fn version_one_records_migrate_with_their_generation_as_the_wave() {
+    fn older_records_migrate_with_their_generation_as_the_wave() {
         let mut bytes = [0; V1_RECORD_BYTES];
         bytes[..4].copy_from_slice(MAGIC_V1);
         bytes[4..12].copy_from_slice(&9u64.to_le_bytes());
@@ -654,7 +741,16 @@ mod tests {
         let decoded = Record::decode(&bytes).unwrap();
         assert_eq!(decoded.wave, 9);
         assert_eq!(decoded.incomplete, 1);
+        assert!(!decoded.successful);
         assert_eq!(&decoded.encode()[..4], MAGIC);
+
+        let mut version_two = record(9, 1).encode();
+        version_two[..4].copy_from_slice(MAGIC_V2);
+        version_two[36] = 1;
+        let decoded = Record::decode(&version_two).unwrap();
+        assert_eq!(decoded.wave, 9);
+        assert_eq!(decoded.incomplete, 1);
+        assert!(!decoded.successful);
     }
 
     #[test]
@@ -698,6 +794,9 @@ mod tests {
         assert!(healthy.mark_healthy().unwrap());
         assert!(!begin(root.path()).unwrap().requires_recovery());
         drop(begin(root.path()).unwrap());
+        let third_incomplete = begin(root.path()).unwrap();
+        assert!(!third_incomplete.requires_recovery());
+        drop(third_incomplete);
         let recovery = begin(root.path()).unwrap();
         assert!(recovery.requires_recovery());
         assert!(recovery.mark_healthy().unwrap());
@@ -742,6 +841,33 @@ mod tests {
         assert!(recovery_owner.requires_recovery());
         let recovery_joiner = begin(root.path()).unwrap();
         assert!(!recovery_joiner.requires_recovery());
+    }
+
+    #[test]
+    fn healthy_start_keeps_overlapping_start_leases_visible() {
+        let root = tempdir();
+        let first = begin(root.path()).unwrap();
+        let second = begin(root.path()).unwrap();
+        let second_path = second.active.path.clone();
+        assert!(first.mark_healthy().unwrap());
+        assert!(second_path.exists());
+        let later = begin(root.path()).unwrap();
+        assert!(!later.requires_recovery());
+        assert_eq!(later.active.wave, second.active.wave);
+        assert_eq!(later.root.read().unwrap().unwrap().incomplete, 0);
+        drop(second);
+        drop(later);
+        let after_successful_wave = begin(root.path()).unwrap();
+        assert!(!after_successful_wave.requires_recovery());
+        assert_eq!(
+            after_successful_wave
+                .root
+                .read()
+                .unwrap()
+                .unwrap()
+                .incomplete,
+            0
+        );
     }
 
     #[test]
