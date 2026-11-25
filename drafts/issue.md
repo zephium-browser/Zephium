@@ -1,3 +1,3 @@
 # Feat: No command-line option to store app data outside the default directory
 
-There is no command-line option to choose a custom data root. Add `--user-data-dir <path>` to route settings, databases, bookmarks, sessions, logs, cache, and WebView profiles under that directory. When omitted, Zephium should keep using its existing default.
+People who need Zephium's data on a separate volume cannot choose its location from the command line. Add `--user-data-dir <path>` to route all persistent app data there, including settings, databases, bookmarks, sessions, logs, cache, and WebView profiles. When omitted, Zephium should keep using its existing default.
