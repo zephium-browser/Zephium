@@ -8,4 +8,4 @@
 
 - `cargo test -p zephium-desktop --lib`: 439 passed, 2 ignored, including recovery and lease tests.
 - Mac development build and 16 `open -na` processes running concurrently.
-- Windows runtime tests compile but still need a native Windows run.
+- `cargo check -p zephium-core --tests --target x86_64-pc-windows-msvc` passed. Native Windows execution is still needed.
