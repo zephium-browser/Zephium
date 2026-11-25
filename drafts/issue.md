@@ -1,3 +1,3 @@
-# Feat: App data cannot be kept outside the default directory
+# Feat: No command-line option to store app data outside the default directory
 
-Users who need Zephium's data outside its default location have no way to choose where it is stored. Could `--user-data-dir <path>` put all app data, including settings, databases, bookmarks, sessions, logs, cache, and browser data, under the chosen directory? Without the flag, the existing default should remain.
+There is no command-line option to choose a custom data root. Add `--user-data-dir <path>` to route settings, databases, bookmarks, sessions, logs, cache, and WebView profiles under that directory. When omitted, Zephium should keep using its existing default.
