@@ -27,6 +27,30 @@ fn avatar_view(avatar: ProfileAvatar) -> ProfileAvatarView {
 }
 
 impl Shell {
+    pub(super) fn operation_open_profile_by_name(&mut self, name: &str) -> OperationDisposition {
+        let Some(name) = profile_name(name) else {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+        };
+        if !self.bootstrapped {
+            self.startup_profile = Some(name);
+            return operation_result(OperationOutcome::Applied, OperationReason::MutationApplied);
+        }
+        let existing = self
+            .profiles
+            .iter()
+            .find(|profile| profile.name == name && profile.kind != ProfileKind::Incognito)
+            .map(|profile| profile.id);
+        if let Some(profile) = existing {
+            return self.operation_switch_profile(profile);
+        }
+        self.operation_create_profile(
+            &name,
+            ProfileAvatar::initial(ProfileId::generate()),
+            None,
+            true,
+        )
+    }
+
     pub(super) fn load_profile_avatars(&mut self) {
         self.roster.avatars = self
             .store

@@ -8641,7 +8641,9 @@ pub fn run_with_profile(profile: Option<String>) {
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
+            let arguments: Vec<_> = argv.into_iter().skip(1).collect();
+            external_links::select_profile(app, &arguments);
+            external_links::hand_off(app, arguments, true);
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or

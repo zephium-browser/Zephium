@@ -142,6 +142,22 @@ fn switching_shows_the_other_profile_and_returns_to_where_it_left() {
 }
 
 #[test]
+fn a_second_launch_selects_or_creates_the_requested_profile() {
+    let (mut shell, _, _, _) = browsed();
+    let default = window_profile(&shell);
+
+    let created = shell.handle_operation(Command::OpenProfileByName("Work".into()));
+    assert_ne!(created.outcome, OperationOutcome::Rejected);
+    let work = window_profile(&shell);
+    assert_ne!(work, default);
+    assert_eq!(shell.profiles.get(work).unwrap().name, "Work");
+
+    let selected = shell.handle_operation(Command::OpenProfileByName("Personal".into()));
+    assert_ne!(selected.outcome, OperationOutcome::Rejected);
+    assert_eq!(window_profile(&shell), default);
+}
+
+#[test]
 fn a_profile_tombstone_clears_only_that_profiles_destination_entries() {
     let destination = "https://start.example/";
     let (mut shell, _, screen, _) = browsed();

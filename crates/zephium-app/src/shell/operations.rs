@@ -31,6 +31,7 @@ impl Shell {
                 switch,
             } => self.operation_create_profile(&name, avatar, photo, switch),
             Command::SwitchProfile(profile) => self.operation_switch_profile(profile),
+            Command::OpenProfileByName(name) => self.operation_open_profile_by_name(&name),
             Command::RenameProfile { profile, name } => {
                 self.operation_rename_profile(profile, &name)
             }

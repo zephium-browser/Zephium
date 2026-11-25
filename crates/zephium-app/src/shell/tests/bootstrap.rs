@@ -107,6 +107,49 @@ fn startup_profile_selects_existing_profile_without_changing_default_registry_en
 }
 
 #[test]
+fn invalid_startup_profile_name_does_not_select_a_malformed_profile() {
+    let (mut shell, _, _) = setup_with(Arc::new(FakeStore::default()));
+    shell.handle(Command::SelectStartupProfile("  ".into()));
+    shell.handle(Command::Bootstrap);
+
+    let focused = shell.windows.focused().unwrap();
+    assert_eq!(
+        shell.profiles.get(focused.profile).unwrap().kind,
+        ProfileKind::Default
+    );
+    assert_eq!(shell.profiles.iter().count(), 1);
+}
+
+#[test]
+fn startup_profile_reports_store_flush_failure() {
+    let store = Arc::new(FakeStore::default());
+    *store.flush_result.lock().unwrap() = Some(false);
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let (mut shell, _, _, _) = setup_with_operation_log_and_failure(
+        store,
+        Box::new({
+            let failures = failures.clone();
+            move |failure| failures.lock().unwrap().push(failure)
+        }),
+    );
+
+    shell.handle(Command::SelectStartupProfile("Work".into()));
+    shell.handle(Command::Bootstrap);
+
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    shell.handle(Command::Bootstrap);
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
+}
+
+#[test]
 fn startup_profile_creation_failure_stops_instead_of_opening_a_fallback_profile() {
     let store = Arc::new(FakeStore::default());
     let profiles: Vec<_> = (0..zephium_core::session::MAX_SESSION_PROFILES)
@@ -156,6 +199,14 @@ fn startup_profile_creation_failure_stops_instead_of_opening_a_fallback_profile(
         &[ShellTerminalFailure::StartupProfileUnavailable]
     );
     assert_eq!(store.saved.lock().unwrap().as_ref(), Some(&state));
+
+    shell.handle(Command::Bootstrap);
+    assert!(!shell.bootstrapped);
+    assert!(shell.windows.focused().is_none());
+    assert_eq!(
+        failures.lock().unwrap().as_slice(),
+        &[ShellTerminalFailure::StartupProfileUnavailable]
+    );
 }
 
 #[test]

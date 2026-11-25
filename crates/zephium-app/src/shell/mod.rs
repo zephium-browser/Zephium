@@ -252,6 +252,7 @@ pub struct Shell {
     retained_graveyard: Vec<crate::work_resources::product::ProductWork>,
     profiles: Profiles,
     startup_profile: Option<String>,
+    startup_profile_failed: bool,
     spaces: Spaces,
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
@@ -531,6 +532,7 @@ impl Shell {
         Self {
             profiles: Profiles::default(),
             startup_profile: None,
+            startup_profile_failed: false,
             spaces: Spaces::default(),
             items: Items::default(),
             recently_closed: Vec::new(),
@@ -951,6 +953,9 @@ impl Shell {
             }
             Command::SwitchProfile(profile) => {
                 let _ = self.operation_switch_profile(profile);
+            }
+            Command::OpenProfileByName(name) => {
+                let _ = self.operation_open_profile_by_name(&name);
             }
             Command::RenameProfile { profile, name } => {
                 let _ = self.operation_rename_profile(profile, &name);

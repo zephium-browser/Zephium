@@ -1282,6 +1282,7 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RenameFocusedProfile(_)
             | Command::CreateProfile { .. }
             | Command::SwitchProfile(_)
+            | Command::OpenProfileByName(_)
             | Command::RenameProfile { .. }
             | Command::SetProfileAvatar { .. }
             | Command::Activate(_)

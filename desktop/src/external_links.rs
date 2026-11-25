@@ -32,6 +32,34 @@ fn without_startup_options(
     })
 }
 
+fn requested_profile(arguments: &[String]) -> Option<String> {
+    let mut requested = None;
+    let mut args = arguments.iter();
+    while let Some(argument) = args.next() {
+        let value = if argument == "--profile" {
+            args.next().map(String::as_str)
+        } else {
+            argument.strip_prefix("--profile=")
+        };
+        let Some(value) = value else { continue };
+        if requested.is_some() {
+            return None;
+        }
+        let Some(name) = zephium_core::profiles::profile_name(value).filter(|name| name == value)
+        else {
+            return None;
+        };
+        requested = Some(name);
+    }
+    requested
+}
+
+pub(crate) fn select_profile(app: &tauri::AppHandle, arguments: &[String]) {
+    if let (Some(name), Some(shell)) = (requested_profile(arguments), app.try_state::<Handle>()) {
+        let _ = shell.dispatch(Command::OpenProfileByName(name));
+    }
+}
+
 /// Admits `arguments` and opens them. `forward` brings the window to the
 /// front, which a running instance wants and a launch leaves to its own
 /// startup reveal.
@@ -66,7 +94,7 @@ pub(crate) fn hand_off(
 
 #[cfg(test)]
 mod tests {
-    use super::without_startup_options;
+    use super::{requested_profile, without_startup_options};
 
     #[test]
     fn profile_options_and_values_are_not_forwarded_as_urls() {
@@ -81,6 +109,23 @@ mod tests {
             without_startup_options(arguments).collect::<Vec<_>>(),
             ["https://example.com", "https://example.org"]
         );
+    }
+
+    #[test]
+    fn second_launch_profile_arguments_are_validated() {
+        assert_eq!(
+            requested_profile(&["--profile".into(), "Work".into()]).as_deref(),
+            Some("Work")
+        );
+        assert_eq!(
+            requested_profile(&["--profile=Work".into()]).as_deref(),
+            Some("Work")
+        );
+        assert!(
+            requested_profile(&["--profile=Work".into(), "--profile".into(), "Home".into()])
+                .is_none()
+        );
+        assert!(requested_profile(&["--profile=".into()]).is_none());
     }
 }
 

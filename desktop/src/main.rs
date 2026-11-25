@@ -133,13 +133,16 @@ fn profile_argument(
                 .filter(|name| name == &value)
                 .ok_or_else(|| "--profile requires a valid, non-empty profile name".to_owned())?;
             profile = Some(canonical);
-        } else if let Some(value) = argument
-            .to_str()
-            .and_then(|value| value.strip_prefix("--profile="))
-        {
+        } else if argument.to_string_lossy().starts_with("--profile=") {
             if profile.is_some() {
                 return Err("--profile may be provided only once".into());
             }
+            let argument = argument
+                .into_string()
+                .map_err(|_| "--profile must be valid UTF-8".to_owned())?;
+            let value = argument
+                .strip_prefix("--profile=")
+                .ok_or_else(|| "--profile requires a name".to_owned())?;
             let canonical = zephium_core::profiles::profile_name(value)
                 .filter(|name| name == value)
                 .ok_or_else(|| "--profile requires a valid, non-empty profile name".to_owned())?;
@@ -184,5 +187,17 @@ mod profile_argument_tests {
         ] {
             assert!(profile_argument(args(&values)).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_argument_rejects_non_utf8_equals_value() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let argument = std::ffi::OsString::from_vec(b"--profile=Work\xff".to_vec());
+        assert_eq!(
+            profile_argument([argument]).unwrap_err(),
+            "--profile must be valid UTF-8"
+        );
     }
 }

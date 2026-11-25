@@ -1,5 +1,7 @@
 //! Authoritative session bootstrap and recovery admission.
 
+const STARTUP_PROFILE_STORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 use super::*;
 
 impl Shell {
@@ -8,7 +10,7 @@ impl Shell {
         let started = *self
             .bootstrap_started
             .get_or_insert_with(std::time::Instant::now);
-        if self.profile_deletion.failed_closed {
+        if self.profile_deletion.failed_closed || self.startup_profile_failed {
             return;
         }
         // Before any view exists: none may start out on the wrong route.
@@ -242,7 +244,7 @@ impl Shell {
         if let Some(name) = self.startup_profile.take() {
             if self.profiles.default_profile().is_none() && self.create_default_space().is_none() {
                 crate::diagnostic!("bootstrap: default profile could not be initialized");
-                self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
+                self.fail_startup_profile();
                 return;
             }
             let existing = self
@@ -259,7 +261,7 @@ impl Shell {
             if let Some((profile, created)) = profile {
                 let Some(space) = self.spaces.first_for(profile) else {
                     crate::diagnostic!("bootstrap: requested profile has no startup space");
-                    self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
+                    self.fail_startup_profile();
                     return;
                 };
                 active_space = Some(space);
@@ -268,7 +270,7 @@ impl Shell {
                 startup_profile_created = created;
             } else {
                 crate::diagnostic!("bootstrap: requested profile could not be created");
-                self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
+                self.fail_startup_profile();
                 return;
             }
         }
@@ -290,6 +292,28 @@ impl Shell {
             crate::diagnostic!("bootstrap: selected space has no authoritative profile ownership");
             return;
         };
+        if startup_profile_created {
+            let state = session::snapshot_with_recently_closed(
+                &self.profiles,
+                &self.spaces,
+                &self.items,
+                active_space,
+                active_item,
+                splits.as_ref(),
+                &self.recently_closed,
+            );
+            self.store.save_session(state);
+            if !self
+                .store
+                .flush_until(std::time::Instant::now() + STARTUP_PROFILE_STORE_TIMEOUT)
+            {
+                crate::diagnostic!(
+                    "bootstrap: requested profile session was not confirmed durable"
+                );
+                self.fail_startup_profile();
+                return;
+            }
+        }
         if !self.start_blocker_profile(profile) {
             crate::diagnostic!(
                 "bootstrap: active profile policy compilation was not admitted; content views remain unavailable"
@@ -403,6 +427,11 @@ impl Shell {
         if session_absent || startup_profile_created {
             self.persist();
         }
+    }
+
+    fn fail_startup_profile(&mut self) {
+        self.startup_profile_failed = true;
+        self.report_terminal_failure(ShellTerminalFailure::StartupProfileUnavailable);
     }
 
     fn create_startup_profile(&mut self, name: &str) -> Option<ProfileId> {
