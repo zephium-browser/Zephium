@@ -1,4 +1,4 @@
-# Choose a user data directory
+# Feat: Choose a custom user data directory
 
 ## What changes for the user
 
