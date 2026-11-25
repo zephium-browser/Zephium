@@ -94,6 +94,8 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     {
         #[cfg(unix)]
+        validate_unix_ancestors(&path)?;
+        #[cfg(unix)]
         let existing = std::fs::symlink_metadata(&path).ok();
         std::fs::create_dir_all(&path)?;
         let metadata = std::fs::symlink_metadata(&path)?;
@@ -117,10 +119,60 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
                     "existing user data directory must be owned by this user and private",
                 ));
             }
+            validate_unix_ancestors(&path)?;
         }
         let canonical = path.canonicalize()?;
+        #[cfg(unix)]
+        validate_unix_ancestors(&canonical)?;
         zephium_core::webview2::resolve_data_root(&canonical)
     }
+}
+
+#[cfg(unix)]
+fn validate_unix_ancestors(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = rustix::process::geteuid().as_raw();
+    for ancestor in path
+        .ancestors()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        let metadata = match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        let mode = metadata.mode();
+        let uid = metadata.uid();
+        if metadata.file_type().is_symlink() {
+            if uid != euid && uid != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "user data directory has an unsafe ancestor: {}",
+                        ancestor.display()
+                    ),
+                ));
+            }
+            continue;
+        }
+        if !metadata.is_dir()
+            || (uid != euid && uid != 0)
+            || (mode & 0o022 != 0 && (mode & 0o1000 == 0 || (uid != euid && uid != 0)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "user data directory has an unsafe ancestor: {}",
+                    ancestor.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn install(path: PathBuf) -> std::io::Result<()> {
@@ -226,6 +278,43 @@ mod tests {
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(resolve(&file).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_group_writable_non_sticky_ancestor_without_changing_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path();
+        let original = std::fs::metadata(ancestor).unwrap().mode() & 0o7777;
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let result = resolve(&ancestor.join("custom-root"));
+        let after = std::fs::symlink_metadata(ancestor).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o770);
+        assert_eq!(after.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(original)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allows_sticky_shared_ancestor_without_changing_its_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let ancestor = temp.path();
+        let original = std::fs::metadata(ancestor).unwrap().mode() & 0o7777;
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let result = resolve(&ancestor.join("custom-root"));
+        let after = std::fs::symlink_metadata(ancestor).unwrap();
+        assert_eq!(after.mode() & 0o7777, 0o1777);
+        assert_eq!(after.uid(), rustix::process::geteuid().as_raw());
+        assert!(result.is_ok(), "{result:?}");
+        std::fs::set_permissions(ancestor, std::fs::Permissions::from_mode(original)).unwrap();
     }
 
     #[cfg(unix)]
