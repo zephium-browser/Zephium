@@ -1,7 +1,3 @@
-//! Shared-app bookmarks: one ordered tree of folders and links, bounded in
-//! size and depth. Every write runs in one transaction and re-checks the tree
-//! it changes, so a stale view in chrome can never corrupt it.
-
 use super::*;
 
 use zephium_core::bookmarks::{

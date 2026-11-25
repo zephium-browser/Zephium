@@ -1,7 +1,3 @@
-//! Bookmark reads and writes for the Bookmarks panel, authorized against the
-//! focused profile. Every call runs on the store-read worker; the shell only
-//! admits, routes and decorates with icons.
-
 use super::*;
 
 use crate::api::{BookmarkCompletion, ExportCompletion, ImportCompletion};

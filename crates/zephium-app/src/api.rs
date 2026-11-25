@@ -368,7 +368,6 @@ pub enum Command {
         offset: i32,
         url: String,
     },
-    /// App bookmarks or the focused profile's history as the text of a file.
     Export {
         kind: zephium_core::export::ExportKind,
         done: ExportCompletion,
