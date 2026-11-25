@@ -103,7 +103,7 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     } else {
         std::env::current_dir()?.join(path)
     };
-    let path = normalize_absolute_path(&path);
+    let path = normalize_absolute_path(&path)?;
     #[cfg(target_os = "windows")]
     {
         let path =
@@ -131,7 +131,7 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-fn normalize_absolute_path(path: &Path) -> PathBuf {
+fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
@@ -139,10 +139,17 @@ fn normalize_absolute_path(path: &Path) -> PathBuf {
             std::path::Component::ParentDir => {
                 normalized.pop();
             }
-            component => normalized.push(component.as_os_str()),
+            component => {
+                normalized.push(component.as_os_str());
+                match normalized.canonicalize() {
+                    Ok(canonical) => normalized = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
         }
     }
-    normalized
+    Ok(normalized)
 }
 
 #[cfg(unix)]
@@ -483,6 +490,27 @@ mod tests {
             resolved,
             temp.path().join("browser-state").canonicalize().unwrap()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_symlink_prefix_before_parent_components() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target_parent = temp.path().join("actual");
+        let target = target_parent.join("nested");
+        std::fs::create_dir_all(&target).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&target, &alias).unwrap();
+
+        let resolved = resolve(&alias.join("..").join("browser-state")).unwrap();
+
+        assert_eq!(
+            resolved,
+            target_parent.join("browser-state").canonicalize().unwrap()
+        );
+        assert!(!temp.path().join("browser-state").exists());
     }
 
     #[cfg(unix)]
