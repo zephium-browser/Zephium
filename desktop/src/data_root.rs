@@ -68,6 +68,35 @@ where
     external
 }
 
+pub(crate) fn instance_identifier(identifier: &str, root: Option<&Path>) -> String {
+    instance_identifier_for_data_dir(identifier, root, dirs::data_dir())
+}
+
+fn instance_identifier_for_data_dir(
+    identifier: &str,
+    root: Option<&Path>,
+    data_dir: Option<PathBuf>,
+) -> String {
+    let Some(root) = root else {
+        return identifier.to_owned();
+    };
+    if is_default_data_root(identifier, root, data_dir) {
+        return identifier.to_owned();
+    }
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(root.as_os_str().as_encoded_bytes());
+    format!("{identifier}.userdata.{digest:x}")
+}
+
+fn is_default_data_root(identifier: &str, root: &Path, data_dir: Option<PathBuf>) -> bool {
+    data_dir
+        .map(|path| path.join(identifier))
+        .and_then(|path| path.canonicalize().ok())
+        .and_then(|path| zephium_core::webview2::resolve_data_root(&path).ok())
+        .as_deref()
+        == Some(root)
+}
+
 pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_owned()
@@ -96,30 +125,20 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
         #[cfg(unix)]
         validate_unix_ancestors(&path)?;
         #[cfg(unix)]
-        let existing = std::fs::symlink_metadata(&path).ok();
-        std::fs::create_dir_all(&path)?;
-        let metadata = std::fs::symlink_metadata(&path)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "user data directory must be a real directory",
-            ));
-        }
-        #[cfg(unix)]
         {
-            use std::os::unix::fs::{MetadataExt, PermissionsExt};
-            if existing.is_none() {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
-            }
+            prepare_unix_root(&path)?;
+            validate_unix_ancestors(&path)?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::create_dir_all(&path)?;
             let metadata = std::fs::symlink_metadata(&path)?;
-            if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o077 != 0
-            {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "existing user data directory must be owned by this user and private",
+                    std::io::ErrorKind::InvalidData,
+                    "user data directory must be a real directory",
                 ));
             }
-            validate_unix_ancestors(&path)?;
         }
         let canonical = path.canonicalize()?;
         #[cfg(unix)]
@@ -129,10 +148,74 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 #[cfg(unix)]
-fn validate_unix_ancestors(path: &Path) -> std::io::Result<()> {
+fn prepare_unix_root(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => validate_unix_root(&metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut missing = Vec::new();
+            for ancestor in path.ancestors() {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing.push(ancestor.to_owned());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            for directory in missing.into_iter().rev() {
+                let mut builder = std::fs::DirBuilder::new();
+                builder.mode(0o700);
+                match builder.create(&directory) {
+                    Ok(()) => std::fs::set_permissions(
+                        &directory,
+                        std::fs::Permissions::from_mode(0o700),
+                    )?,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata = std::fs::symlink_metadata(&directory)?;
+                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "user data directory must be a real directory",
+                            ));
+                        }
+                        validate_unix_directory_ancestor(&metadata)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            let metadata = std::fs::symlink_metadata(path)?;
+            validate_unix_root(&metadata)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn validate_unix_root(metadata: &std::fs::Metadata) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let euid = rustix::process::geteuid().as_raw();
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "user data directory must be a real directory",
+        ));
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.mode() & 0o700 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "existing user data directory must be owned by this user and private",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_ancestors(path: &Path) -> std::io::Result<()> {
     for ancestor in path
         .ancestors()
         .skip(1)
@@ -145,34 +228,39 @@ fn validate_unix_ancestors(path: &Path) -> std::io::Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        let mode = metadata.mode();
-        let uid = metadata.uid();
-        if metadata.file_type().is_symlink() {
-            if uid != euid && uid != 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "user data directory has an unsafe ancestor: {}",
-                        ancestor.display()
-                    ),
-                ));
-            }
-            continue;
-        }
-        if !metadata.is_dir()
-            || (uid != euid && uid != 0)
-            || (mode & 0o022 != 0 && (mode & 0o1000 == 0 || (uid != euid && uid != 0)))
-        {
-            return Err(std::io::Error::new(
+        validate_unix_directory_ancestor(&metadata).map_err(|_| {
+            std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 format!(
                     "user data directory has an unsafe ancestor: {}",
                     ancestor.display()
                 ),
-            ));
-        }
+            )
+        })?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn validate_unix_directory_ancestor(metadata: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let euid = rustix::process::geteuid().as_raw();
+    let uid = metadata.uid();
+    if metadata.file_type().is_symlink() {
+        if uid == euid || uid == 0 {
+            return Ok(());
+        }
+    } else if metadata.is_dir()
+        && (uid == euid || uid == 0)
+        && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0)
+    {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "user data directory has an unsafe ancestor",
+    ))
 }
 
 pub(crate) fn install(path: PathBuf) -> std::io::Result<()> {
@@ -225,6 +313,12 @@ pub(crate) fn logs(app: &AppHandle) -> std::io::Result<PathBuf> {
     }
 }
 
+pub(crate) fn prepare_logs(root: &Path) -> std::io::Result<PathBuf> {
+    let logs = root.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    Ok(logs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +354,49 @@ mod tests {
             ]),
             vec!["https://example.com".to_owned()]
         );
+        assert_eq!(instance_identifier("app.zephium", None), "app.zephium");
+        let first = instance_identifier("app.zephium", Some(Path::new("/tmp/one")));
+        assert_eq!(
+            first,
+            instance_identifier("app.zephium", Some(Path::new("/tmp/one")))
+        );
+        assert_ne!(
+            first,
+            instance_identifier("app.zephium", Some(Path::new("/tmp/two")))
+        );
+    }
+
+    #[test]
+    fn explicit_default_data_root_keeps_the_default_instance_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app.zephium");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = zephium_core::webview2::resolve_data_root(&root).unwrap();
+        assert!(is_default_data_root(
+            "app.zephium",
+            &root,
+            Some(temp.path().to_owned())
+        ));
+        assert_eq!(
+            instance_identifier_for_data_dir(
+                "app.zephium",
+                Some(&root),
+                Some(temp.path().to_owned())
+            ),
+            "app.zephium"
+        );
+    }
+
+    #[test]
+    fn log_directory_creation_failure_is_returned() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        std::fs::write(&logs, b"file where logs directory belongs").unwrap();
+
+        assert_eq!(
+            prepare_logs(temp.path()).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]
@@ -270,6 +407,24 @@ mod tests {
         std::fs::write(first.join("settings.json"), b"one").unwrap();
         assert_eq!(std::fs::read(first.join("settings.json")).unwrap(), b"one");
         assert!(!second.join("settings.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creates_new_root_and_missing_parents_with_private_permissions() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = resolve(&temp.path().join("nested/parent/private-root")).unwrap();
+        for path in [
+            root.as_path(),
+            root.parent().unwrap(),
+            root.parent().unwrap().parent().unwrap(),
+        ] {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+            assert_eq!(metadata.mode() & 0o777, 0o700);
+        }
     }
 
     #[test]

@@ -8562,7 +8562,9 @@ pub fn run() {
     blocker_bench::refuse_bad_arguments();
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    context.config_mut().identifier =
+        data_root::instance_identifier(&context.config().identifier, user_data_dir.as_deref());
     focus_alerts::claim_identity(&context.config().identifier);
     #[cfg(target_os = "windows")]
     default_browser::windows::claim(
@@ -8574,7 +8576,15 @@ pub fn run() {
     );
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
-    platform::imp::open_startup_log(&context.config().identifier, user_data_dir.as_deref());
+    if let Err(error) =
+        platform::imp::open_startup_log(&context.config().identifier, user_data_dir.as_deref())
+    {
+        startup_alert::show_blocking(
+            startup_alert::StartupProblem::DataFolderUnavailable,
+            &format!("could not prepare the startup log directory: {error}"),
+        );
+        std::process::exit(1);
+    }
     #[cfg(target_os = "windows")]
     if zephium_credentials::set_windows_identity(&context.config().identifier).is_err() {
         diagnostic!("security: could not initialize the Windows credential namespace");
@@ -8788,8 +8798,16 @@ pub fn run() {
                     // private diagnostic sink before storage admission so a
                     // schema/corruption failure is still actionable without
                     // constructing WebView2 state merely to initialize logs.
-                    platform::imp::redirect_stderr(&data_dir);
-                    diagnostics::install(data_dir.clone());
+                    let logs = if user_data_dir.is_some() {
+                        data_root::prepare_logs(&data_dir)?
+                    } else {
+                        data_dir.clone()
+                    };
+                    if user_data_dir.is_none() {
+                        std::fs::create_dir_all(&logs)?;
+                    }
+                    platform::imp::redirect_stderr(&logs);
+                    diagnostics::install(logs);
                     diagnostic!("zephium {} starting", env!("CARGO_PKG_VERSION"));
                 }
                 #[cfg(target_os = "macos")]

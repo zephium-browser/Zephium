@@ -1,3 +1,5 @@
-# Feat: No command-line option to store app data outside the default directory
+# Feat: Zephium can't use a custom data directory
 
-People with limited space on their system drive or a portable setup need Zephium's data elsewhere. There is no command-line option to choose a root. Add `--user-data-dir <path>` so all app data and WebView profiles live under that path, including settings, databases, bookmarks, saved app sessions, logs, and cache. Without the flag, keep the existing default.
+The default data location can be impractical on portable setups or machines with limited disk space. Could Zephium support Chromium's [`--user-data-dir`](https://github.com/chromium/chromium/blob/main/docs/user_data_dir.md) flag on macOS and Windows?
+
+It should keep all browser data, including settings, databases, bookmarks, and sessions, under the chosen path. Relative paths should resolve from the current directory, new roots should use private permissions, and invalid paths or repeated flags should fail. Without the flag, Zephium should keep its current default. Distinct roots should run concurrently, while launches using one root should share an instance.
