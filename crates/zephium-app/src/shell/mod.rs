@@ -790,6 +790,27 @@ impl Shell {
                     return;
                 }
                 let command = *command;
+                if let Command::CreateProfile {
+                    name,
+                    avatar,
+                    photo,
+                    bookmark_folder: Some(folder),
+                    switch,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_profile_creation(
+                        Some(operation_id.clone()),
+                        name,
+                        *avatar,
+                        photo.clone(),
+                        Some(*folder),
+                        *switch,
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if let Command::RespondToPagePermissionPrompt {
                     profile,
                     item,
@@ -1545,6 +1566,23 @@ impl Shell {
                     .is_some_and(|state| state.retry_generation == generation)
                 {
                     self.drive_profile_deletion(profile);
+                }
+            }
+            Command::ProfileBookmarkFolderValidated {
+                operation_id,
+                source,
+                name,
+                avatar,
+                photo,
+                folder,
+                switch,
+                exists,
+            } => {
+                let mut completion = self
+                    .finish_profile_creation(source, &name, avatar, photo, folder, switch, exists);
+                if let Some(operation_id) = operation_id {
+                    completion.operation_id = operation_id;
+                    (self.emit)(Projection::OperationProcessed(completion));
                 }
             }
             Command::StoreRead(result) => self.on_store_read(result),

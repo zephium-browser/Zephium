@@ -418,6 +418,8 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
     );
     shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
     shell.handle(Command::Bootstrap);
+    let callback_queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(callback_queue.clone());
     let destination = shell.import_destination().unwrap();
     shell.persist();
     assert!(store.flush_until(std::time::Instant::now() + std::time::Duration::from_secs(30)));
@@ -435,7 +437,19 @@ fn all_queued_import_kinds_and_icons_keep_one_destination_after_focus_moves() {
         bookmark_folder: Some(shared_folder),
         switch: false,
     });
-    assert_eq!(created.outcome, OperationOutcome::Applied);
+    assert_eq!(created.outcome, OperationOutcome::Deferred);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let completion = loop {
+        if let Some(command) = callback_queue.try_recv() {
+            break command;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "bookmark folder read timed out"
+        );
+        std::thread::yield_now();
+    };
+    shell.handle(completion);
     let other = shell
         .profiles
         .iter()

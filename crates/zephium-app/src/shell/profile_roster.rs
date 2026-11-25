@@ -142,35 +142,125 @@ impl Shell {
         bookmark_folder: Option<i64>,
         switch: bool,
     ) -> OperationDisposition {
+        self.begin_profile_creation(None, name, avatar, photo, bookmark_folder, switch)
+            .unwrap_or_else(|| {
+                operation_result(
+                    OperationOutcome::Deferred,
+                    OperationReason::StoreWorkPending,
+                )
+            })
+    }
+
+    pub(super) fn begin_profile_creation(
+        &mut self,
+        operation_id: Option<String>,
+        name: &str,
+        avatar: ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        bookmark_folder: Option<i64>,
+        switch: bool,
+    ) -> Option<OperationDisposition> {
         if !self.bootstrapped {
-            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::NoFocusedWindow,
+            ));
         }
         let (Some(name), Some(avatar)) = (
             profile_name(name),
             Self::admitted_avatar(avatar, photo.as_ref()),
         ) else {
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::InvalidInput,
+            ));
         };
         if let Some(folder) = bookmark_folder {
-            let Some(current) = self
+            let Some(source) = self
                 .profiles_view()
                 .and_then(|view| view.current)
                 .and_then(|profile| ProfileId::parse(&profile))
             else {
-                return operation_result(
+                return Some(operation_result(
                     OperationOutcome::Rejected,
                     OperationReason::NoFocusedWindow,
-                );
+                ));
             };
-            if !self
-                .store
-                .bookmark_folders(current)
-                .iter()
-                .any(|candidate| candidate.id == folder)
-            {
-                return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            if !self.rostered(source) {
+                return Some(operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::InvalidScope,
+                ));
             }
+            let Some(callback) = self.self_queue.as_ref().map(|queue| CallbackHandle {
+                queue: std::sync::Arc::downgrade(&queue.inner),
+            }) else {
+                return Some(operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                ));
+            };
+            let name = name.to_owned();
+            self.store.bookmark_folders_async(
+                source,
+                Box::new(move |folders| {
+                    let exists = folders
+                        .map(|folders| folders.iter().any(|candidate| candidate.id == folder));
+                    let _ = callback.dispatch(Command::ProfileBookmarkFolderValidated {
+                        operation_id,
+                        source,
+                        name,
+                        avatar,
+                        photo,
+                        folder,
+                        switch,
+                        exists,
+                    });
+                }),
+            );
+            return None;
         }
+        Some(self.create_profile_validated(name, avatar, photo, bookmark_folder, switch))
+    }
+
+    pub(super) fn finish_profile_creation(
+        &mut self,
+        source: ProfileId,
+        name: &str,
+        avatar: ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        folder: i64,
+        switch: bool,
+        exists: Option<bool>,
+    ) -> OperationDisposition {
+        if exists != Some(true) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                if exists == Some(false) {
+                    OperationReason::InvalidInput
+                } else {
+                    OperationReason::StoreAdmissionRejected
+                },
+            );
+        }
+        let current = self
+            .profiles_view()
+            .and_then(|view| view.current)
+            .and_then(|profile| ProfileId::parse(&profile));
+        if !self.bootstrapped || current != Some(source) || !self.rostered(source) {
+            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        self.create_profile_validated(name.to_owned(), avatar, photo, Some(folder), switch)
+    }
+
+    fn create_profile_validated(
+        &mut self,
+        name: String,
+        avatar: ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        bookmark_folder: Option<i64>,
+        switch: bool,
+    ) -> OperationDisposition {
         let Some(profile) = (0..8).map(|_| ProfileId::generate()).find(|id| {
             !self.profile_deletion.states.contains_key(id)
                 && self.profiles.insert(Profile {

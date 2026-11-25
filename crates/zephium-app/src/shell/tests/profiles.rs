@@ -109,6 +109,8 @@ fn a_created_profile_is_named_registered_and_drawn() {
 #[test]
 fn profile_creation_validates_and_persists_the_shared_bookmark_folder() {
     let (mut shell, _engine, _screen, store) = browsed();
+    let queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
     let current = window_profile(&shell);
     store.bookmark_folders.lock().unwrap().insert(
         current,
@@ -118,24 +120,37 @@ fn profile_creation_validates_and_persists_the_shared_bookmark_folder() {
         }],
     );
     let before = shell.profiles.iter().count();
-    let refused = shell.handle_operation(Command::CreateProfile {
-        name: "Unknown folder".into(),
-        avatar: symbol(2, 5),
-        photo: None,
-        bookmark_folder: Some(42),
-        switch: false,
+    shell.handle(Command::Operation {
+        operation_id: "unknown-bookmark-folder".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Unknown folder".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: Some(42),
+            switch: false,
+        }),
     });
-    assert_eq!(refused.outcome, OperationOutcome::Rejected);
+    assert_eq!(shell.profiles.iter().count(), before);
+    let completion = queue.try_recv().expect("async folder validation");
+    assert!(matches!(
+        completion,
+        Command::ProfileBookmarkFolderValidated { .. }
+    ));
+    shell.handle(completion);
     assert_eq!(shell.profiles.iter().count(), before);
 
-    let created = shell.handle_operation(Command::CreateProfile {
-        name: "Shared".into(),
-        avatar: symbol(2, 5),
-        photo: None,
-        bookmark_folder: Some(41),
-        switch: false,
+    shell.handle(Command::Operation {
+        operation_id: "known-bookmark-folder".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Shared".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: Some(41),
+            switch: false,
+        }),
     });
-    assert_eq!(created.outcome, OperationOutcome::Applied);
+    assert_eq!(shell.profiles.iter().count(), before);
+    shell.handle(queue.try_recv().expect("async folder validation"));
     let profile = shell
         .profiles
         .iter()
@@ -155,6 +170,42 @@ fn profile_creation_validates_and_persists_the_shared_bookmark_folder() {
             folder: 41,
         }]
     );
+}
+
+#[test]
+fn profile_creation_rechecks_its_source_after_async_bookmark_folder_read() {
+    let (mut shell, _engine, _screen, store) = browsed();
+    let queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
+    let source = window_profile(&shell);
+    store.bookmark_folders.lock().unwrap().insert(
+        source,
+        vec![zephium_core::bookmarks::BookmarkFolder {
+            id: 41,
+            title: "Shared favorites".into(),
+        }],
+    );
+
+    shell.handle(Command::Operation {
+        operation_id: "stale-bookmark-folder-scope".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Stale".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: Some(41),
+            switch: false,
+        }),
+    });
+    let completion = queue.try_recv().expect("async folder validation");
+    let other = create(&mut shell, "Other");
+    assert_ne!(other, source);
+    assert_ne!(
+        shell.operation_switch_profile(other).outcome,
+        OperationOutcome::Rejected
+    );
+
+    shell.handle(completion);
+    assert!(!shell.profiles.iter().any(|profile| profile.name == "Stale"));
 }
 
 #[test]

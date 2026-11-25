@@ -1350,6 +1350,14 @@ impl Store for FakeStore {
             .unwrap_or_default()
     }
 
+    fn bookmark_folders_async(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
+    ) {
+        done(Some(self.bookmark_folders(profile)));
+    }
+
     fn popup_sites(
         &self,
         profile: ProfileId,

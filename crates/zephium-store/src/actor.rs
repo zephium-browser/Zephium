@@ -413,6 +413,10 @@ enum Cmd {
         ProfileId,
         Sender<Vec<zephium_core::bookmarks::BookmarkFolder>>,
     ),
+    BookmarkFoldersAsync(
+        ProfileId,
+        Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
+    ),
     BookmarksObserved(
         ProfileId,
         zephium_core::bookmarks::BookmarkRequest,
@@ -1528,6 +1532,20 @@ impl Store for SqliteStore {
         rx.recv_timeout(STORE_RPC_TIMEOUT).unwrap_or_default()
     }
 
+    fn bookmark_folders_async(
+        &self,
+        profile: ProfileId,
+        done: Box<dyn FnOnce(Option<Vec<zephium_core::bookmarks::BookmarkFolder>>) + Send>,
+    ) {
+        if let Err(
+            mpsc::TrySendError::Full(Cmd::BookmarkFoldersAsync(_, done))
+            | mpsc::TrySendError::Disconnected(Cmd::BookmarkFoldersAsync(_, done)),
+        ) = self.tx.try_send(Cmd::BookmarkFoldersAsync(profile, done))
+        {
+            done(None);
+        }
+    }
+
     fn bookmarks_observed(
         &self,
         profile: ProfileId,
@@ -2236,6 +2254,9 @@ fn actor(
             }
             Some(Cmd::BookmarkFolders(profile, reply)) => {
                 let _ = reply.send(hub.bookmark_folders(profile));
+            }
+            Some(Cmd::BookmarkFoldersAsync(profile, done)) => {
+                done(Some(hub.bookmark_folders(profile)));
             }
             Some(Cmd::BookmarksObserved(profile, request, reply)) => {
                 let _ = reply.send(hub.bookmarks_observed(profile, request));

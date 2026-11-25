@@ -463,6 +463,16 @@ pub enum Command {
         profile: ProfileId,
         name: String,
     },
+    ProfileBookmarkFolderValidated {
+        operation_id: Option<String>,
+        source: ProfileId,
+        name: String,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        folder: i64,
+        switch: bool,
+        exists: Option<bool>,
+    },
     /// A photo style carries its already downscaled bytes.
     SetProfileAvatar {
         profile: ProfileId,
