@@ -1,4 +1,6 @@
-# Share bookmarks across profiles
+# Feat: Share bookmarks across profiles
+
+Hi, thanks for building Zephium. This adds shared bookmarks for profiles in one data directory while preserving profile authorization.
 
 ## What changes for the user
 
