@@ -4,9 +4,9 @@ Hi, thanks for building Zephium! I appreciate the work on it. This PR shares boo
 
 ## What changes for the user
 
-Bookmarks appear in every profile using the same data directory. History, cookies, and other website data remain profile-specific.
+Bookmarks appear in every profile using the same data directory. Bookmark actions still require authorization for the active profile. History, cookies, and other website data remain profile-specific.
 
 ## How I checked it
 
-- Store tests cover one-time bookmark migration, cross-profile visibility, and isolated history.
-- Bookmarks panel tests (16 passed).
+- Store bookmark tests: 17 passed, covering one-time migration, cross-profile visibility, and isolated history.
+- BookmarksPanel WebKit component suite: 16 passed.
