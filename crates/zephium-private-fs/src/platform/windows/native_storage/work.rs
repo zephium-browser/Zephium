@@ -1,8 +1,10 @@
 //! Fixed-purpose Work storage. Arbitrary private namespaces remain gated.
 use super::{
-    known_profile, NativeApplication, NativeSession, NativeStorageAnchor, NativeStorageFile,
+    admit_namespace_support, known_profile, NativeApplication, NativeSession, NativeStorageAnchor,
+    NativeStorageFile,
 };
 use crate::{PrivateEntryName, PrivateFsError};
+use std::path::Path;
 use std::path::PathBuf;
 
 const DATABASE: &str = "work.sqlite";
@@ -31,6 +33,23 @@ impl NativeWorkStorageAnchor {
         let profile = known_profile()?;
         Ok(Self {
             inner: NativeStorageAnchor::prepare_under_impl(&profile, application, session)?,
+        })
+    }
+
+    pub fn prepare_in_data_root(
+        root: &Path,
+        application: NativeApplication,
+        session: Option<&NativeSession>,
+    ) -> Result<Self, PrivateFsError> {
+        validate_routing(application, session)?;
+        admit_namespace_support()?;
+        let metadata = std::fs::symlink_metadata(root).map_err(|_| PrivateFsError::Unsafe)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(PrivateFsError::Unsafe);
+        }
+        let root = root.canonicalize().map_err(|_| PrivateFsError::Unsafe)?;
+        Ok(Self {
+            inner: NativeStorageAnchor::prepare_under_impl(&root, application, session)?,
         })
     }
 

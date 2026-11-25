@@ -8808,10 +8808,18 @@ pub fn run() {
                     let session = qa_session.as_deref();
                     #[cfg(not(feature = "webext-qa"))]
                     let session = None;
-                    let work_storage = zephium_store::WindowsWorkStorage::for_application(
-                        &app.config().identifier,
-                        session,
-                    )?;
+                    let work_storage = if user_data_dir.is_some() {
+                        zephium_store::WindowsWorkStorage::for_application_in_data_root(
+                            &app.config().identifier,
+                            session,
+                            &data_dir,
+                        )?
+                    } else {
+                        zephium_store::WindowsWorkStorage::for_application(
+                            &app.config().identifier,
+                            session,
+                        )?
+                    };
                     Arc::new(SqliteStore::open_with_windows_work_storage(
                         &data_dir,
                         work_storage,
