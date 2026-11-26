@@ -1,4 +1,5 @@
 import { preferences } from "$domain/preferences";
+import { tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -644,6 +645,48 @@ test("switching profiles clears any resumed query and home list from the previou
   await expect.element(screen.getByRole("combobox")).toHaveValue("");
   await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
   expect(native.search.mock.calls.at(-1)?.[0]).toBe("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+});
+
+test("switching profiles drops a pending capture and search reply from the old presentation", async () => {
+  let finishCapture!: (title: string) => void;
+  const capture = new Promise<string>((resolve) => {
+    finishCapture = resolve;
+  });
+  const onCapture = vi.fn((_text: string) => capture);
+  const screen = await render(LauncherPanel, { props: { context, destinations, onCapture } });
+  const input = screen.getByRole("combobox");
+  await input.fill("private query");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe("private query"));
+  const oldRequest = native.search.mock.calls.at(-1)![1];
+  await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
+  expect(onCapture).toHaveBeenCalledExactlyOnceWith("private query");
+  await expect.element(screen.getByText("Opening…")).toBeVisible();
+
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: "work",
+      profile_name: "Work",
+      revision: "0000000000000002",
+      session_id: "0000000000000002",
+    },
+  });
+  await expect.element(input).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe(""));
+  await expect.element(screen.getByText("Opening…")).not.toBeInTheDocument();
+
+  finishCapture("Private task");
+  emitNativeEvent("searchChanged", {
+    context: { ...native.context, request_id: oldRequest },
+    query: "private query",
+    results: [visit("Private result", "https://private.example/")],
+    completion: null,
+    pending: false,
+  });
+  await capture;
+  await tick();
+  await expect.element(screen.getByText("Added “Private task” to Tasks")).not.toBeInTheDocument();
   expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
 });
 
