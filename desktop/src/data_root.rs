@@ -4,6 +4,8 @@ use tauri::{AppHandle, Manager};
 
 static DATA_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static CUSTOM_ROOT: AtomicBool = AtomicBool::new(false);
+#[cfg(unix)]
+static CUSTOM_INSTANCE_LOCK: std::sync::OnceLock<std::fs::File> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ArgumentError {
@@ -113,6 +115,13 @@ fn work_storage_root_for_data_dir(
 }
 
 pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
+    resolve_for_application(path, None)
+}
+
+fn resolve_for_application(
+    path: &Path,
+    _application_identifier: Option<&str>,
+) -> std::io::Result<PathBuf> {
     let path = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -121,6 +130,13 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     let path = normalize_absolute_path(&path)?;
     #[cfg(target_os = "windows")]
     {
+        if let Some(identifier) = _application_identifier {
+            if is_default_root_request(&path, identifier, dirs::data_dir())? {
+                std::fs::create_dir_all(&path)?;
+                let canonical = path.canonicalize()?;
+                return zephium_core::webview2::resolve_data_root(&canonical);
+            }
+        }
         let path =
             zephium_private_fs::prepare_user_data_root(&path).map_err(std::io::Error::other)?;
         zephium_core::webview2::resolve_data_root(&path)
@@ -144,6 +160,17 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
         let canonical = path.canonicalize()?;
         zephium_core::webview2::resolve_data_root(&canonical)
     }
+}
+
+fn is_default_root_request(
+    path: &Path,
+    identifier: &str,
+    data_dir: Option<PathBuf>,
+) -> std::io::Result<bool> {
+    let Some(data_dir) = data_dir else {
+        return Ok(false);
+    };
+    Ok(normalize_absolute_path(&data_dir.join(identifier))? == path)
 }
 
 fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
@@ -390,8 +417,11 @@ fn install_into(root: &std::sync::OnceLock<PathBuf>, path: PathBuf) -> std::io::
     })
 }
 
-pub(crate) fn initialize_override(path: &Path) -> std::io::Result<PathBuf> {
-    let path = resolve(path)?;
+pub(crate) fn initialize_override(
+    path: &Path,
+    application_identifier: &str,
+) -> std::io::Result<PathBuf> {
+    let path = resolve_for_application(path, Some(application_identifier))?;
     install(path.clone())?;
     CUSTOM_ROOT.store(true, Ordering::Release);
     Ok(path)
@@ -399,6 +429,40 @@ pub(crate) fn initialize_override(path: &Path) -> std::io::Result<PathBuf> {
 
 pub(crate) fn is_installed() -> bool {
     DATA_ROOT.get().is_some()
+}
+
+#[cfg(unix)]
+pub(crate) fn claim_custom_instance() -> std::io::Result<bool> {
+    if !CUSTOM_ROOT.load(Ordering::Acquire) {
+        return Ok(true);
+    }
+    let root = DATA_ROOT
+        .get()
+        .ok_or_else(|| std::io::Error::other("custom data root is unavailable"))?;
+    let file = open_instance_lock(root)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => {
+            CUSTOM_INSTANCE_LOCK
+                .set(file)
+                .map_err(|_| std::io::Error::other("custom instance lock already claimed"))?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn open_instance_lock(root: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(flags.bits() as i32)
+        .open(root.join(".instance.lock"))
 }
 
 pub(crate) fn root(app: &AppHandle) -> std::io::Result<PathBuf> {
@@ -454,8 +518,42 @@ where
 
 pub(crate) fn prepare_logs(root: &Path) -> std::io::Result<PathBuf> {
     let logs = root.join("logs");
+    match std::fs::symlink_metadata(&logs) {
+        Ok(metadata) if redirected_metadata(&metadata) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "logs path must be a plain directory inside the data root",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     std::fs::create_dir_all(&logs)?;
+    let metadata = std::fs::symlink_metadata(&logs)?;
+    if !plain_directory_metadata(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "logs path must be a plain directory inside the data root",
+        ));
+    }
     Ok(logs)
+}
+
+pub(crate) fn plain_directory_metadata(metadata: &std::fs::Metadata) -> bool {
+    metadata.is_dir() && !redirected_metadata(metadata)
+}
+
+fn redirected_metadata(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 pub(crate) fn startup_log_directory(
@@ -521,6 +619,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_default_root_matches_the_application_data_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("Roaming");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let requested = normalize_absolute_path(&data_dir.join("app.zephium")).unwrap();
+        assert!(
+            is_default_root_request(&requested, "app.zephium", Some(data_dir.clone())).unwrap()
+        );
+        assert!(
+            !is_default_root_request(&data_dir.join("other"), "app.zephium", Some(data_dir))
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn explicit_default_data_root_keeps_the_default_instance_identity() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("app.zephium");
@@ -566,6 +679,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn startup_logs_reject_a_redirected_logs_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let target = temp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, root.join("logs")).unwrap();
+
+        assert_eq!(
+            prepare_logs(&root).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read_dir(target).unwrap().count(), 0);
+    }
+
     #[test]
     fn startup_log_directory_uses_custom_root_and_propagates_failures() {
         let temp = tempfile::tempdir().unwrap();
@@ -589,6 +719,32 @@ mod tests {
             Err(std::io::Error::other("roaming unavailable"))
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custom_instance_lock_admits_one_process_and_releases_with_its_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".instance.lock");
+        let first = open_instance_lock(temp.path()).unwrap();
+        rustix::fs::flock(&first, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        let second = open_instance_lock(temp.path()).unwrap();
+        assert_eq!(
+            rustix::fs::flock(
+                &second,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(first);
+        rustix::fs::flock(
+            &second,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        )
+        .unwrap();
+        assert!(path.is_file());
     }
 
     #[test]
@@ -657,7 +813,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
-        assert!(initialize_override(&file).is_err());
+        assert!(initialize_override(&file, "app.zephium").is_err());
         assert!(!is_installed());
     }
 

@@ -131,6 +131,7 @@ unsafe extern "system" {
 
 pub(super) const READ: u32 = 0x0012_0089; // FILE_GENERIC_READ
 pub(super) const WRITE_DAC: u32 = 0x0004_0000;
+pub(super) const DELETE: u32 = 0x0001_0000;
 pub(super) const METADATA: u32 = 0x0005_0000; // DELETE | WRITE_DAC
 pub(super) const WRITE: u32 = 0x0012_0116; // FILE_GENERIC_WRITE
 pub(super) const TRAVERSE: u32 = 0x20; // directory-only FILE_TRAVERSE
@@ -495,9 +496,17 @@ pub(super) fn flush(file: &File) -> Result<(), PrivateFsError> {
 }
 
 pub(super) fn reopen_writable(file: &File) -> Result<File, PrivateFsError> {
+    reopen_with_access(file, 0)
+}
+
+pub(super) fn reopen_deletable(file: &File) -> Result<File, PrivateFsError> {
+    reopen_with_access(file, DELETE)
+}
+
+fn reopen_with_access(file: &File, extra_access: u32) -> Result<File, PrivateFsError> {
     let expected = super::identity(file, None)?;
     let security = super::security::snapshot(file)?;
-    let access = READ | WRITE | WRITE_DAC | if expected.1 { TRAVERSE } else { 0 };
+    let access = READ | WRITE | WRITE_DAC | extra_access | if expected.1 { TRAVERSE } else { 0 };
     let flags = FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH;
     let raw = if expected.1 {
         let mut info = BY_HANDLE_FILE_INFORMATION::default();

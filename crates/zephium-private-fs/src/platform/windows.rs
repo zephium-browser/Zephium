@@ -135,7 +135,7 @@ pub(crate) fn open_regular(
         return Err(PrivateFsError::Unsafe);
     }
     if matches!(purpose, OpenPurpose::Mutation) && !sealed {
-        file = native::reopen_writable(&file)?;
+        file = native::reopen_deletable(&file)?;
         if identity(&file, Some(false))?.0 != id || security::mode(&file)? {
             return Err(PrivateFsError::IdentityAmbiguous);
         }

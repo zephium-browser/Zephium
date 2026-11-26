@@ -8548,8 +8548,10 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    let mut context = tauri::generate_context!();
+    let application_identifier = context.config().identifier.clone();
     let user_data_dir = match user_data_dir.as_deref() {
-        Some(path) => match data_root::initialize_override(path) {
+        Some(path) => match data_root::initialize_override(path, &application_identifier) {
             Ok(path) => Some(path),
             Err(error) => {
                 eprintln!("Zephium: invalid user data directory: {error}");
@@ -8558,12 +8560,19 @@ pub fn run() {
         },
         None => None,
     };
+    #[cfg(unix)]
+    match data_root::claim_custom_instance() {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("Zephium: could not claim the custom data directory: {error}");
+            std::process::exit(1);
+        }
+    }
     #[cfg(feature = "adblock-qa")]
     blocker_bench::refuse_bad_arguments();
     install_async_runtime();
     APP_STARTED.get_or_init(std::time::Instant::now);
-    let mut context = tauri::generate_context!();
-    let application_identifier = context.config().identifier.clone();
     context.config_mut().identifier =
         data_root::instance_identifier(&application_identifier, user_data_dir.as_deref());
     focus_alerts::claim_identity(&context.config().identifier);

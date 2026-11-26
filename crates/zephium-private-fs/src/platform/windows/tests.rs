@@ -282,6 +282,16 @@ mod validation {
     }
 
     #[test]
+    fn unsealed_regular_file_can_be_removed_with_its_mutation_handle() {
+        let (_temp, directory, root) = fixture();
+        let (file, _) = create_new_regular(&directory, &root, "payload").unwrap();
+        drop(file);
+
+        remove_regular(&directory, &root, "payload").unwrap();
+        assert!(!root.join("payload").exists());
+    }
+
+    #[test]
     fn lock_contention_is_nonblocking_and_reacquisition_works() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("namespace");
