@@ -34,9 +34,9 @@ impl Shell {
                     );
                     return;
                 }
-                self.browser_after_return = Some(Box::new(Command::Engine(
+                self.replace_browser_after_return(Some(Box::new(Command::Engine(
                     EngineEvent::ExtensionBrowserRequested { request },
-                )));
+                ))));
                 let _ = self.operation_show_browser_page(None);
                 return;
             }

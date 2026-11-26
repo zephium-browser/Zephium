@@ -395,6 +395,70 @@ fn second_launch_profile_and_url_survive_browser_page_return() {
 }
 
 #[test]
+fn rejected_profile_switch_drops_external_followups() {
+    let (mut shell, engine, chrome, _screen, ui_commands) =
+        setup_with_async_chrome_and_ui_commands();
+    shell.handle(Command::Bootstrap);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle(Command::Operation {
+        operation_id: "second-launch-rejected".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+    shell.profiles.remove(work).unwrap();
+
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert_eq!(window_profile(&shell), personal);
+    assert!(shell.browser_after_return_followups.is_empty());
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
+    assert!(ui_commands
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| command == "profile.open-failed"));
+}
+
+#[test]
+fn replacing_pending_profile_switch_drops_external_followups() {
+    let (mut shell, engine, chrome, _screen) = setup_with_async_chrome();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::CreateProfile {
+        name: "Work".into(),
+        avatar: symbol(2, 5),
+        photo: None,
+        switch: false,
+    });
+    shell.handle(Command::ShowBrowserPage(Some(crate::BrowserPage::Settings)));
+    shell.handle(Command::Operation {
+        operation_id: "second-launch-replaced".into(),
+        command: Box::new(Command::OpenProfileAndExternal {
+            name: "Work".into(),
+            urls: vec!["https://example.com/".into()],
+        }),
+    });
+    assert!(!shell.browser_after_return_followups.is_empty());
+
+    shell.handle_operation(Command::Open);
+    assert!(shell.browser_after_return_followups.is_empty());
+    let (revision, _) = chrome.complete_browser_return(true);
+    shell.browser_chrome_restored(revision, true);
+
+    assert!(!engine
+        .calls()
+        .iter()
+        .any(|call| call.contains("https://example.com/")));
+}
+
+#[test]
 fn profile_steps_require_a_focused_window() {
     let (mut shell, _engine, _screen) = setup();
     for forward in [true, false] {

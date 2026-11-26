@@ -7,9 +7,46 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use zephium_core::navigation::{external_target, MAX_EXTERNAL_TARGETS};
 
+#[derive(Debug, PartialEq, Eq)]
+struct WaitingRequest {
+    profile: Option<String>,
+    urls: Vec<String>,
+    forward: bool,
+}
+
+#[derive(Default)]
+struct WaitingRequests(Vec<WaitingRequest>);
+
+impl WaitingRequests {
+    fn push(&mut self, request: WaitingRequest) {
+        let waiting: usize = self
+            .0
+            .iter()
+            .map(|request| {
+                request
+                    .urls
+                    .len()
+                    .max(usize::from(request.profile.is_some()))
+            })
+            .sum();
+        let room = MAX_EXTERNAL_TARGETS.saturating_sub(waiting);
+        let cost = request
+            .urls
+            .len()
+            .max(usize::from(request.profile.is_some()));
+        if cost > 0 && cost <= room {
+            self.0.push(request);
+        }
+    }
+
+    fn take(&mut self) -> Vec<WaitingRequest> {
+        std::mem::take(&mut self.0)
+    }
+}
+
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.
-static WAITING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static WAITING: Mutex<WaitingRequests> = Mutex::new(WaitingRequests(Vec::new()));
 
 /// A running instance received links and wants the window that shows them
 /// in front. The shell says which window that is once it has opened them.
@@ -85,16 +122,14 @@ pub(crate) fn hand_off(
         return;
     }
     let Some(shell) = app.try_state::<Handle>() else {
-        if profile.is_some() {
-            cancel_forward();
-            crate::emit_ui_command(app, "profile.open-failed");
-            return;
-        }
-        let mut waiting = WAITING
+        WAITING
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let room = MAX_EXTERNAL_TARGETS.saturating_sub(waiting.len());
-        waiting.extend(urls.into_iter().take(room));
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(WaitingRequest {
+                profile,
+                urls,
+                forward,
+            });
         return;
     };
     // Each batch says afresh whether it wants the main window forward, so a
@@ -122,7 +157,7 @@ pub(crate) fn hand_off(
 
 #[cfg(test)]
 mod tests {
-    use super::{requested_profile, without_startup_options};
+    use super::{requested_profile, without_startup_options, WaitingRequest, WaitingRequests};
 
     #[test]
     fn profile_options_and_values_are_not_forwarded_as_urls() {
@@ -155,6 +190,26 @@ mod tests {
         );
         assert!(requested_profile(&["--profile=".into()]).is_none());
     }
+
+    #[test]
+    fn startup_profile_request_waits_for_shell_adoption() {
+        let request = WaitingRequest {
+            profile: Some("Work".into()),
+            urls: Vec::new(),
+            forward: false,
+        };
+        let mut waiting = WaitingRequests::default();
+        waiting.push(request);
+        assert_eq!(
+            waiting.take(),
+            [WaitingRequest {
+                profile: Some("Work".into()),
+                urls: Vec::new(),
+                forward: false,
+            }]
+        );
+        assert!(waiting.take().is_empty());
+    }
 }
 
 /// Links opened as tabs: the main window comes forward to show them. A
@@ -171,16 +226,19 @@ pub(crate) fn forward_pending(app: &tauri::AppHandle) {
 /// Runs once the shell is managed: what arrived early, then this launch's own
 /// command line (Windows and Linux pass a clicked link as an argument).
 pub(crate) fn adopt(app: &tauri::AppHandle) {
-    let waiting = std::mem::take(
-        &mut *WAITING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-    );
-    hand_off(
-        app,
-        waiting.into_iter().chain(std::env::args().skip(1)),
-        false,
-    );
+    let waiting = WAITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    for request in waiting {
+        let mut arguments = Vec::new();
+        if let Some(profile) = request.profile {
+            arguments.extend(["--profile".into(), profile]);
+        }
+        arguments.extend(request.urls);
+        hand_off(app, arguments, request.forward);
+    }
+    hand_off(app, std::env::args().skip(1), false);
 }
 
 pub(crate) fn bring_forward(app: &tauri::AppHandle) {

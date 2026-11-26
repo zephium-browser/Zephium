@@ -189,7 +189,7 @@ impl Shell {
             .keep(id, document, |held| held == id || items.tab(held).is_some());
         self.browser_page = None;
         self.browser_return = None;
-        self.browser_after_return = None;
+        self.replace_browser_after_return(None);
         let effects = self.focus_tab(id);
         let native = self.commit(effects);
         if native.rejected {

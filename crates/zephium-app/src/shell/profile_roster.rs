@@ -297,7 +297,7 @@ impl Shell {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
         if self.active_browser_page().is_some() && !self.browser_return_ready {
-            self.browser_after_return = Some(Box::new(Command::SwitchProfile(profile)));
+            self.replace_browser_after_return(Some(Box::new(Command::SwitchProfile(profile))));
             return self.operation_show_browser_page(None);
         }
         let mut effects = Vec::new();

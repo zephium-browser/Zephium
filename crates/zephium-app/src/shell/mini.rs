@@ -619,7 +619,7 @@ impl Shell {
                 crate::MiniAction::OpenInMain,
                 crate::MiniAction::OpenInSpace,
             );
-            self.browser_after_return = Some(Box::new(Command::Mini { window, action }));
+            self.replace_browser_after_return(Some(Box::new(Command::Mini { window, action })));
             return self.operation_show_browser_page(None);
         }
         if self.private_shown() {
