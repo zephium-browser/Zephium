@@ -437,7 +437,7 @@ fn absolute_directory(path: &Path, private_leaf: bool) -> Result<File, PrivateFs
         let last = index + 1 == names.len();
         let access = native::READ
             | if last && private_leaf {
-                native::METADATA
+                native::WRITE_DAC
             } else {
                 0
             };

@@ -153,6 +153,17 @@ fn normalize_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
         match component {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
+                match std::fs::metadata(&normalized) {
+                    Ok(metadata) if !metadata.is_dir() => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::NotADirectory,
+                            "path component before .. is not a directory",
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                    _ => {}
+                }
                 normalized.pop();
             }
             component => {
@@ -721,6 +732,17 @@ mod tests {
         let file = temp.path().join("file");
         std::fs::write(&file, b"not a directory").unwrap();
         assert!(resolve(&file).is_err());
+    }
+
+    #[test]
+    fn rejects_a_file_component_before_parent_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+
+        assert!(resolve(&file.join("..").join("browser-state")).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"not a directory");
+        assert!(!temp.path().join("browser-state").exists());
     }
 
     #[cfg(unix)]
