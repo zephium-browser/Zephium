@@ -44,7 +44,7 @@ export class DownloadSession {
   }
 
   get canLoadMore() {
-    return this.next !== null && this.entries.length < MAX_HISTORY_ENTRIES;
+    return Boolean(this.next) && this.entries.length < MAX_HISTORY_ENTRIES;
   }
 
   async start(initial = true) {
@@ -176,8 +176,7 @@ export class DownloadSession {
                   !this.removedDuringLoad.has(entry.id) &&
                   !entries.some((old) => old.id === entry.id),
               ),
-            ]
-              .sort((a, b) => b.id.localeCompare(a.id));
+            ].sort((a, b) => b.id.localeCompare(a.id));
         this.entries = merged.slice(0, MAX_HISTORY_ENTRIES);
         this.next = response.next;
         this.error = null;
