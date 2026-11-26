@@ -59,6 +59,7 @@ pub(crate) fn install(
     engine: std::sync::Arc<zephium_engine::WebviewEngine>,
     store: std::sync::Arc<zephium_store::SqliteStore>,
     frames: Option<std::sync::Arc<zephium_store::WorkFrameStore>>,
+    public_routes: zephium_agentic::public_asset::RouteSource,
 ) -> bool {
     use zephium_core::ports::store::Store;
     #[cfg(feature = "work-development-traces")]
@@ -71,6 +72,10 @@ pub(crate) fn install(
     let providers = std::sync::Arc::new(super::work_provider::WorkProviders::new(
         engine, store, frames,
     ));
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    providers.browser.set_public_routes(public_routes);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    drop(public_routes);
     {
         let app = app.clone();
         providers

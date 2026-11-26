@@ -750,6 +750,10 @@ impl Shell {
                     return;
                 }
                 let first_committed_url = self.items.tab(id).is_some_and(|tab| tab.url.is_none());
+                // The destination's first load may redirect. An explicit
+                // navigation elsewhere can supersede that load before it commits.
+                let adopt_new_tab_destination =
+                    first_committed_url && self.new_tab_destination_is_current(id);
                 let uncovered = self
                     .items
                     .tab(id)
@@ -763,6 +767,7 @@ impl Shell {
                     crate::diagnostic!("engine: rejected invalid or unknown committed URL event");
                     return;
                 }
+                self.update_new_tab_destination(id, &committed_url, adopt_new_tab_destination);
                 if uncovered {
                     // The view holds a real document again; lay it out before
                     // its presentation is acknowledged.

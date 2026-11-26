@@ -357,9 +357,13 @@ impl Items {
             .items
             .iter()
             .filter_map(|(id, item)| {
-                let (Placement::Favorites { space } | Placement::Space { space, .. }) =
-                    item.placement;
-                removed_spaces.contains(&space).then_some(*id)
+                let owned = match item.placement {
+                    Placement::Favorites { space } | Placement::Space { space, .. } => {
+                        removed_spaces.contains(&space)
+                    }
+                    Placement::Mini { profile } => profile == spaces.profile(),
+                };
+                owned.then_some(*id)
             })
             .collect();
         if owned.is_empty() {
@@ -489,6 +493,10 @@ impl Items {
         self.pending_navigations
             .get(&id)
             .map(|pending| pending.request)
+    }
+
+    pub fn pending_navigation_url(&self, id: ItemId) -> Option<&Url> {
+        self.pending_navigations.get(&id)?.url.as_ref()
     }
 
     fn mint_navigation_request(&mut self) -> NavigationRequestId {

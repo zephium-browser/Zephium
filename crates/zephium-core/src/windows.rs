@@ -12,7 +12,7 @@ use crate::split::Pane;
 pub enum WindowKind {
     Main,
     App { origin: String },
-    Little,
+    Mini,
 }
 
 #[derive(Debug)]
@@ -68,6 +68,30 @@ impl Windows {
         id
     }
 
+    /// A window that leaves focus where it was, as a mini window does: the
+    /// main window stays the one commands and layout follow.
+    pub fn create_unfocused(
+        &mut self,
+        kind: WindowKind,
+        profile: ProfileId,
+        space: SpaceId,
+        size: Size,
+    ) -> WindowId {
+        let focused = self.focused;
+        let id = self.create(kind, profile, space, size);
+        self.focused = focused;
+        id
+    }
+
+    /// Removes a window that is not focused. The focused window stays.
+    pub fn remove(&mut self, id: WindowId) -> Option<Window> {
+        if self.focused == Some(id) {
+            return None;
+        }
+        self.order.retain(|window| *window != id);
+        self.map.remove(&id)
+    }
+
     pub fn get(&self, id: WindowId) -> Option<&Window> {
         self.map.get(&id)
     }
@@ -91,5 +115,30 @@ impl Windows {
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Window> {
         self.map.values_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::{ProfileId, SpaceId};
+
+    #[test]
+    fn an_unfocused_window_leaves_focus_and_is_removed_alone() {
+        let mut windows = Windows::default();
+        let profile = ProfileId::generate();
+        let space = SpaceId::generate();
+        let main = windows.create(WindowKind::Main, profile, space, Size::new(800.0, 600.0));
+        let mini =
+            windows.create_unfocused(WindowKind::Mini, profile, space, Size::new(400.0, 300.0));
+        assert_ne!(main, mini);
+        assert_eq!(windows.focused().map(|window| window.id), Some(main));
+        assert!(windows.remove(main).is_none());
+        assert_eq!(
+            windows.remove(mini).map(|window| window.kind),
+            Some(WindowKind::Mini)
+        );
+        assert_eq!(windows.iter().count(), 1);
+        assert_eq!(windows.focused().map(|window| window.id), Some(main));
     }
 }
