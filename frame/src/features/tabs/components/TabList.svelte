@@ -89,7 +89,8 @@
       selectionEscapeBlocked ||
       event.defaultPrevented ||
       event.key !== "Escape" ||
-      event.isComposing
+      event.isComposing ||
+      event.keyCode === 229
     )
       return;
     const selected = selection.value.ids.length > 0;
@@ -116,7 +117,7 @@
       if (over?.closest("[data-essentials-drop]") && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && over?.closest("[data-essentials-drop], [data-tabs-drop]")) {
         const essential = !!over.closest("[data-essentials-drop]");
-        void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
+        void tabDrag.leaveSplit(id, { essential, before });
         return;
       }
       if (over?.closest("[data-essentials-drop]")) {
@@ -134,6 +135,7 @@
     },
   });
   const handlePointerDown = (event: PointerEvent, tab: TabView) => {
+    if (drag.isForeignPointer(event.pointerId)) return;
     if (event.button === 0 && modified(event)) {
       drag.abandon();
       drag.swallowClick();

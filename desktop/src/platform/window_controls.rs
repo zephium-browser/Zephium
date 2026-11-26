@@ -279,10 +279,13 @@ impl WindowControls {
         // AppKit can restore its default titlebar layout as a window gains
         // or loses focus. Reapply the configured inset before reading the
         // hover rect or fading the controls at their new position.
+        // These notifications can arrive while Tauri is still closing another
+        // window and holds its window table, so use the window at hand rather
+        // than asking Tauri for its handle.
         self.ivars().inset.refresh(
             self.ivars().suspended.get(),
             self.ivars().chrome.borrow().as_ref(),
-            set_in_card,
+            |_, in_card| place_in_card(&window, in_card),
         );
         let point = self.convertPoint_fromView(window.mouseLocationOutsideOfEventStream(), None);
         let inside = self.hot_rect().is_some_and(|hot| NSPointInRect(point, hot));
@@ -565,7 +568,10 @@ pub fn set_in_card(window: &WebviewWindow, in_card: bool) {
         return;
     };
     // SAFETY: Tao's live NSWindow, borrowed for this main-thread call only.
-    let ns_window = unsafe { &*(pointer as *const NSWindow) };
+    place_in_card(unsafe { &*(pointer as *const NSWindow) }, in_card);
+}
+
+fn place_in_card(ns_window: &NSWindow, in_card: bool) {
     let buttons: Vec<_> = [
         NSWindowButton::CloseButton,
         NSWindowButton::MiniaturizeButton,

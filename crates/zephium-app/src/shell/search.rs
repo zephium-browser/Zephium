@@ -29,6 +29,8 @@ pub(super) struct SearchState {
     /// history search still reads them.
     pub(super) include_history: bool,
     pub(super) context: Option<zephium_ipc::SearchContext>,
+    /// The bound launcher is choosing a page for a mini window.
+    pub(super) mini: bool,
     pub(super) results: Vec<SearchResult>,
     pub(super) pending: Option<PendingSearch>,
     pub(super) generation: u64,
@@ -45,6 +47,11 @@ impl Shell {
                     .map(str::to_owned)
             })
             .flatten();
+        if self.search.mini {
+            results
+                .results
+                .retain(|result| matches!(result.action, SearchAction::OpenUrl { .. }));
+        }
         let mut identities = std::collections::HashSet::new();
         results.results.retain(|result| {
             identities.insert(match &result.action {
@@ -166,7 +173,12 @@ impl Shell {
         });
     }
 
-    pub(super) fn search_scoped(&mut self, query: &str, context: zephium_ipc::SearchContext) {
+    pub(super) fn search_scoped(
+        &mut self,
+        query: &str,
+        context: zephium_ipc::SearchContext,
+        mini: bool,
+    ) {
         if !self.search_context_current(&context) {
             return;
         }
@@ -176,6 +188,9 @@ impl Shell {
         self.search.supplementary_pending = !query.trim().is_empty();
         self.search.query = query.to_owned();
         self.search.context = Some(context);
+        // A private session's tabs and history must not become a regular
+        // Mini page's address.
+        self.search.mini = mini && !self.private_shown();
         self.search(query);
     }
 
@@ -226,6 +241,7 @@ impl Shell {
             self.search.pending = None;
             self.search.supplementary_pending = false;
             self.search.context = None;
+            self.search.mini = false;
             self.search.results.clear();
         }
     }
@@ -236,6 +252,7 @@ impl Shell {
         action: SearchAction,
         background: bool,
         replace: Option<String>,
+        new_mini: bool,
     ) -> OperationDisposition {
         if !self.search_context_current(&context)
             || self.search.context.as_ref() != Some(&context)
@@ -310,6 +327,14 @@ impl Shell {
                 {
                     // The launcher stood in for the page's own address field.
                     self.operation_navigate(id, url)
+                } else if replace
+                    .as_deref()
+                    .and_then(ItemId::parse)
+                    .and_then(|id| self.mini_window_of(id))
+                    .is_some_and(|window| self.navigate_mini(window, &url))
+                    || (new_mini && !self.private_shown() && self.open_mini(url.clone()))
+                {
+                    operation_result(OperationOutcome::Applied, OperationReason::OpenedInMini)
                 } else {
                     self.operation_open_url(url, true)
                 }
@@ -375,6 +400,15 @@ impl Shell {
             }
             stack.extend(self.items.children(id).iter().rev().copied());
         }
+        // A blank tab is not a site, and it must not use up a row.
+        if self.search.mini {
+            tabs.retain(|id| {
+                self.items
+                    .tab(*id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .is_some_and(|url| navigation::is_allowed_str(url.as_str()))
+            });
+        }
         tabs.sort_by_key(|id| std::cmp::Reverse(self.residency.last_focus.get(id).copied()));
         let mut results = Vec::new();
         self.search.generation = self.search.generation.wrapping_add(1);
@@ -393,6 +427,7 @@ impl Shell {
                                 *id,
                                 t,
                                 self.icon_ref(self.search_surface(), t, Some(profile)),
+                                self.search.mini,
                             )
                         })
                     })
@@ -416,6 +451,7 @@ impl Shell {
                     *id,
                     t,
                     self.icon_ref(self.search_surface(), t, Some(profile)),
+                    self.search.mini,
                 )
             }));
 
@@ -680,7 +716,12 @@ impl Shell {
     }
 }
 
-fn tab_result(id: ItemId, tab: &TabState, icon: Option<zephium_ipc::IconRef>) -> SearchResult {
+fn tab_result(
+    id: ItemId,
+    tab: &TabState,
+    icon: Option<zephium_ipc::IconRef>,
+    mini: bool,
+) -> SearchResult {
     let detail = tab
         .url
         .as_ref()
@@ -691,6 +732,12 @@ fn tab_result(id: ItemId, tab: &TabState, icon: Option<zephium_ipc::IconRef>) ->
         title: tab.title.clone(),
         detail,
         icon,
-        action: SearchAction::ActivateTab { id: id.to_string() },
+        action: match tab.url.as_ref().filter(|_| mini) {
+            // The tab stays where it is; its site opens in the mini window.
+            Some(url) => SearchAction::OpenUrl {
+                url: url.to_string(),
+            },
+            None => SearchAction::ActivateTab { id: id.to_string() },
+        },
     }
 }

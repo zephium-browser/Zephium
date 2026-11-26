@@ -715,6 +715,7 @@ impl Shell {
     // rechecks URL, loading, visibility, idle age, and the current budget.
     pub(super) fn maintain_views(&mut self) -> bool {
         self.expire_tab_preview(std::time::Instant::now());
+        self.prune_mini_windows();
         self.crash
             .crashes
             .retain(|id, _| self.items.tab(*id).is_some());
@@ -735,7 +736,7 @@ impl Shell {
             .capacity_blocked
             .retain(|id, _| self.items.tab(*id).is_some_and(|tab| !tab.has_view()));
         self.retry_capacity_requests();
-        let shown: std::collections::HashSet<ItemId> = if self.window_visible {
+        let mut shown: std::collections::HashSet<ItemId> = if self.window_visible {
             let mut shown: std::collections::HashSet<ItemId> = self
                 .visible_tree()
                 .map(|t| t.tabs().into_iter().collect())
@@ -756,6 +757,9 @@ impl Shell {
         } else {
             std::collections::HashSet::new()
         };
+        // A mini window is its own window: the main one being minimized
+        // does not hide its page.
+        shown.extend(self.mini_pages());
         self.residency
             .recent
             .retain(|id| self.items.tab(*id).is_some());
@@ -994,7 +998,7 @@ impl Shell {
     }
 
     pub(super) fn discard_protected_leaves(&self) -> std::collections::HashSet<ItemId> {
-        let mut protected = std::collections::HashSet::new();
+        let mut protected: std::collections::HashSet<ItemId> = self.mini_pages().collect();
         let Some(window) = self.windows.focused() else {
             return protected;
         };
@@ -1444,7 +1448,9 @@ impl Shell {
         // id-only close here could be reordered behind recovery and destroy
         // the replacement generation.
         let active = self.windows.focused().and_then(|window| window.active);
-        let visible = active == Some(id) || self.work_pane_shows(id);
+        // A mini window shows its page whatever the main window shows.
+        let visible =
+            active == Some(id) || self.work_pane_shows(id) || self.mini_window_of(id).is_some();
         self.retire_crashed_view(id, visible);
         self.items.set_loading(id, false);
         let recent = self
@@ -1474,7 +1480,9 @@ impl Shell {
             .visible_tree()
             .map(|tree| tree.tabs())
             .unwrap_or_default();
-        let visible: std::collections::HashSet<ItemId> = visible_order.iter().copied().collect();
+        let mut visible: std::collections::HashSet<ItemId> =
+            visible_order.iter().copied().collect();
+        visible.extend(self.mini_pages());
         let mut suppressed_visible = std::collections::HashSet::new();
         let mut effects = Vec::new();
         for id in ids {

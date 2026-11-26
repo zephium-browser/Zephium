@@ -71,6 +71,7 @@ test("loads the launcher before startup IPC and preserves a live setting during 
       corner_radius: 20,
       seed: null,
       seed_tab: null,
+      mini: false,
     };
   });
   await expect.poll(() => native.loading.mock.calls.length).toBe(1);

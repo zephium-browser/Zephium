@@ -556,6 +556,14 @@ impl Stage {
         self.state.borrow().views.contains_key(&id)
     }
 
+    /// The pages this stage holds now.
+    pub fn attached_items(&self) -> Vec<ItemId> {
+        self.state
+            .try_borrow()
+            .map(|state| state.views.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     /// Marks the page shown fullscreen, which the shell lays over the whole
     /// window: it loses its rounded corners and is raised above siblings.
     pub fn set_fullscreen(&self, id: Option<ItemId>) {

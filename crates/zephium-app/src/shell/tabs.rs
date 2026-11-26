@@ -76,6 +76,9 @@ pub(super) struct TabPreferences {
     /// Where a link handed over by another application opens; none
     /// follows `new_position`.
     pub(super) external_position: Option<NewTabPosition>,
+    /// A link handed over by another application opens in a mini window,
+    /// the default; a link no mini window can take still opens as a tab.
+    pub(super) external_mini: bool,
     pub(super) archive_after: ArchiveAfter,
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
@@ -97,6 +100,7 @@ impl Default for TabPreferences {
         Self {
             new_position: NewTabPosition::default(),
             external_position: None,
+            external_mini: true,
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
@@ -161,10 +165,21 @@ impl TabPreferences {
                 self.new_page = zephium_core::preferences::new_tab_page(value)
                     .and_then(|page| url::Url::parse(&page).ok());
             }
-            ("tabs.external-position", "new-tab") => self.external_position = None,
-            ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
+            ("tabs.external-position", "new-tab") => {
+                self.external_position = None;
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "end") => {
+                self.external_position = Some(NewTabPosition::End);
+                self.external_mini = false;
+            }
             ("tabs.external-position", "after-current") => {
-                self.external_position = Some(NewTabPosition::AfterCurrent)
+                self.external_position = Some(NewTabPosition::AfterCurrent);
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "mini") => {
+                self.external_position = None;
+                self.external_mini = true;
             }
             ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
             ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,
@@ -880,6 +895,10 @@ impl Shell {
         foreground: bool,
         adoption: zephium_core::ports::engine::NativeTabAdoption,
     ) {
+        if self.mini_window_of(source).is_some() {
+            self.adopt_linked_mini(source, child, foreground, adoption);
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -992,6 +1011,12 @@ impl Shell {
     /// source, routed through the same navigation policy. The split group
     /// survives: the new tab shows alone, the group stays a tab away.
     pub(super) fn open_linked_tab(&mut self, source: ItemId, url: &str) {
+        if self.mini_window_of(source).is_some() {
+            if !self.open_linked_mini(source, url) {
+                self.open_mini_link_as_tab(source, url);
+            }
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
