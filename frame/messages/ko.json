@@ -3547,7 +3547,7 @@
   "native_account_more": "계정…",
   "native_split_view_more": "분할 보기…",
   "native_extensions_more": "확장 프로그램…",
-  "native_reload_tab": "탭 새로고침",
+  "native_refresh": "탭 새로고침",
   "native_duplicate_tab": "탭 복제",
   "native_copy_link": "링크 복사",
   "native_autofill_password_more": "암호 자동 완성…",
