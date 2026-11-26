@@ -206,7 +206,8 @@
       (!splitting && pendingSplit === null) ||
       event.key !== "Escape" ||
       event.defaultPrevented ||
-      event.isComposing
+      event.isComposing ||
+      event.keyCode === 229
     )
       return;
     event.preventDefault();

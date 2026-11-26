@@ -3547,7 +3547,7 @@
   "native_account_more": "Account…",
   "native_split_view_more": "Geteilte Ansicht…",
   "native_extensions_more": "Erweiterungen…",
-  "native_reload_tab": "Tab neu laden",
+  "native_refresh": "Tab neu laden",
   "native_duplicate_tab": "Tab duplizieren",
   "native_copy_link": "Link kopieren",
   "native_autofill_password_more": "Passwort automatisch ausfüllen…",

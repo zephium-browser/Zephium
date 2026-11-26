@@ -1,4 +1,5 @@
 import { preferences } from "$domain/preferences";
+import { tick } from "svelte";
 import { afterEach, expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
@@ -565,6 +566,128 @@ test("sleeping past the resume deadline clears a query even when its timer never
   } finally {
     now.mockRestore();
   }
+});
+
+test("dismissing an unedited address does not carry it into the next launcher session", async () => {
+  const screen = await render(LauncherPanel, {
+    props: {
+      context: {
+        ...context,
+        seed: "https://example.com/",
+        seed_tab: "tab-1",
+      },
+      destinations,
+    },
+  });
+  await reply("https://example.com/", [visit("Example", "https://example.com/")]);
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  const calls = native.search.mock.calls.length;
+  await screen.rerender({
+    context: {
+      ...context,
+      revision: "0000000000000003",
+      session_id: "0000000000000003",
+      seed: null,
+      seed_tab: null,
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
+  expect(native.search.mock.calls.at(-1)?.[0]).toBe("");
+});
+
+test("switching profiles clears any resumed query and home list from the previous profile", async () => {
+  const tab: SearchResult = {
+    kind: "tab",
+    title: "Private Tab",
+    detail: "private.example",
+    icon: null,
+    action: { type: "ActivateTab", id: "tab-1" },
+  };
+  const screen = await render(LauncherPanel, { props: { context, destinations } });
+  await reply("", [tab]);
+  await expect.element(screen.getByRole("option", { name: /Private Tab/u })).toBeVisible();
+  await screen.getByRole("combobox").fill("private query");
+  await reply("private query", [search("private query")]);
+  await screen.rerender({ context: { ...context, revision: "0000000000000002", visible: false } });
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000003",
+      session_id: "0000000000000003",
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+
+  await screen.getByRole("combobox").fill("unowned query");
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: null,
+      profile_name: null,
+      revision: "0000000000000004",
+      visible: false,
+    },
+  });
+  const calls = native.search.mock.calls.length;
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: "work",
+      profile_name: "Work",
+      revision: "0000000000000005",
+      session_id: "0000000000000005",
+    },
+  });
+  await expect.element(screen.getByRole("combobox")).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.length).toBeGreaterThan(calls));
+  expect(native.search.mock.calls.at(-1)?.[0]).toBe("");
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
+});
+
+test("switching profiles drops a pending capture and search reply from the old presentation", async () => {
+  let finishCapture!: (title: string) => void;
+  const capture = new Promise<string>((resolve) => {
+    finishCapture = resolve;
+  });
+  const onCapture = vi.fn((_text: string) => capture);
+  const screen = await render(LauncherPanel, { props: { context, destinations, onCapture } });
+  const input = screen.getByRole("combobox");
+  await input.fill("private query");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe("private query"));
+  const oldRequest = native.search.mock.calls.at(-1)![1];
+  await userEvent.keyboard("{Alt>}{Enter}{/Alt}");
+  expect(onCapture).toHaveBeenCalledExactlyOnceWith("private query");
+  await expect.element(screen.getByText("Opening…")).toBeVisible();
+
+  await screen.rerender({
+    context: {
+      ...context,
+      profile_id: "work",
+      profile_name: "Work",
+      revision: "0000000000000002",
+      session_id: "0000000000000002",
+    },
+  });
+  await expect.element(input).toHaveValue("");
+  await vi.waitFor(() => expect(native.search.mock.calls.at(-1)?.[0]).toBe(""));
+  await expect.element(screen.getByText("Opening…")).not.toBeInTheDocument();
+
+  finishCapture("Private task");
+  emitNativeEvent("searchChanged", {
+    context: { ...native.context, request_id: oldRequest },
+    query: "private query",
+    results: [visit("Private result", "https://private.example/")],
+    completion: null,
+    pending: false,
+  });
+  await capture;
+  await tick();
+  await expect.element(screen.getByText("Added “Private task” to Tasks")).not.toBeInTheDocument();
+  expect(screen.container.querySelectorAll('[role="option"]')).toHaveLength(0);
 });
 
 test("anything typed can be kept as a task, by its row or by Option+Enter", async () => {

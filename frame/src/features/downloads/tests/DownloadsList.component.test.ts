@@ -51,6 +51,11 @@ test("resuming after a pause starts a fresh time-left estimate", async () => {
   entry = { ...entry, revision: "00000005", received: "2000" };
   native.listener?.({ payload: { profile } });
   await expect.poll(() => screen.container.textContent).toContain("8 sec left");
+  time = 603_000;
+  entry = { ...entry, revision: "00000006", received: "10000" };
+  native.listener?.({ payload: { profile } });
+  await expect.element(screen.getByText("9.8 KB of 9.8 KB", { exact: true })).toBeVisible();
+  await expect.element(screen.getByRole("button", { name: "Cancel", exact: true })).toBeVisible();
   await screen.unmount();
 });
 vi.mock("$shared/ipc/bindings", async () => {
