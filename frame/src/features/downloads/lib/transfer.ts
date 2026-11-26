@@ -55,7 +55,7 @@ export function transferLine(entry: DownloadView, rate: number | null): string {
   const progress = downloadProgress(entry);
   if (entry.total === null || progress === undefined) return received;
   const sizes = m.download_of({ received, total: formatDownloadBytes(entry.total) });
-  if (rate === null || rate <= 0) return sizes;
+  if (progress === 1 || rate === null || rate <= 0) return sizes;
   const left = (Number(entry.total) - Number(entry.received)) / rate;
   return `${sizes} · ${m.download_time_left({ time: formatTimeLeft(left) })}`;
 }
