@@ -1761,6 +1761,7 @@ impl InitialUserContent {
 
 pub fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
+    #[cfg(target_os = "windows")] private_runtime: RuntimeGeneration,
     dispatch: MainThreadDispatch,
     data_root: PathBuf,
     runtime_security_advisories: RuntimeSecurityAdvisories,
@@ -1790,6 +1791,8 @@ pub fn install(
     let cleanup_advisory = host::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
+        #[cfg(target_os = "windows")]
+        private_runtime,
         data_root,
         dispatch.clone(),
         initial_user_content.generation,

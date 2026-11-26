@@ -2406,10 +2406,10 @@ fn resolve_privileged_target(
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Debug)]
 struct PrivilegedRuntimeDirectories {
     main: std::path::PathBuf,
     panel: std::path::PathBuf,
+    private_runtime: zephium_engine::RuntimeGeneration,
 }
 
 #[cfg(target_os = "windows")]
@@ -2417,9 +2417,18 @@ fn prepare_privileged_runtime_directories(
     data_dir: &std::path::Path,
 ) -> std::io::Result<PrivilegedRuntimeDirectories> {
     let prepared = privileged_runtime_windows::prepare(data_dir, MAIN_LABEL, overlay::PANEL_LABEL)?;
+    let private_runtime = zephium_engine::RuntimeGeneration::prepare(
+        &data_dir
+            .join("web-content")
+            .join("private-runtime")
+            .join(std::process::id().to_string()),
+        zephium_engine::RuntimeGenerationKind::RawPrivate,
+        &zephium_engine::WindowsLeftoverProcesses,
+    )?;
     Ok(PrivilegedRuntimeDirectories {
         main: prepared.main,
         panel: prepared.panel,
+        private_runtime,
     })
 }
 
@@ -7642,6 +7651,8 @@ fn finish_browser_setup(
     let engine = Arc::new(zephium_engine::install(
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         parent,
+        #[cfg(target_os = "windows")]
+        privileged_runtime.private_runtime,
         dispatch.clone(),
         data_dir.join("web-content"),
         runtime_security_advisories,

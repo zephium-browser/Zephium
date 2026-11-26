@@ -115,6 +115,7 @@ pub struct RuntimeGeneration {
     kind: RuntimeGenerationKind,
     report: GenerationReport,
     _lease: File,
+    _root_pin: File,
 }
 
 /// One browser process a generation started: its id and its creation time
@@ -1003,7 +1004,7 @@ impl RuntimeGeneration {
             RuntimeGenerationKind::Privileged => "privileged runtime lifecycle lock",
         };
         let started = std::time::Instant::now();
-        let (lease, _root_pin) = acquire_lifecycle_lock(
+        let (lease, root_pin) = acquire_lifecycle_lock(
             operation,
             || {
                 fs::create_dir_all(configured_root)?;
@@ -1034,12 +1035,23 @@ impl RuntimeGeneration {
                         match OpenOptions::new()
                             .write(true)
                             .create_new(true)
-                            .share_mode(FILE_SHARE_DELETE)
+                            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                             .open(&lease_path)
                         {
                             Ok(_) => return Err(io::Error::from_raw_os_error(32)),
                             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                                 return Err(io::Error::from_raw_os_error(32));
+                            }
+                            Err(error) if error.raw_os_error() == Some(5) => {
+                                let lease_is_absent = fs::symlink_metadata(&lease_path)
+                                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+                                let root_is_pinned = open_direct_directory(&checked_root)
+                                    .and_then(|root| directory_identity(&root))
+                                    .is_ok_and(|identity| identity == pinned_identity);
+                                if lease_is_absent && root_is_pinned {
+                                    return Err(io::Error::from_raw_os_error(32));
+                                }
+                                return Err(error);
                             }
                             Err(error) => return Err(error),
                         }
@@ -1056,7 +1068,7 @@ impl RuntimeGeneration {
                     .write(true)
                     .create(true)
                     .truncate(false)
-                    .share_mode(FILE_SHARE_DELETE)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
                     .open(&lease_path)
                 {
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -1065,6 +1077,13 @@ impl RuntimeGeneration {
                     Err(error) => return Err(error),
                     Ok(lease) => lease,
                 };
+                match lease.try_lock() {
+                    Ok(()) => {}
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        return Err(io::Error::from_raw_os_error(32));
+                    }
+                    Err(std::fs::TryLockError::Error(error)) => return Err(error),
+                }
                 let opened = lease.metadata()?;
                 let current = fs::symlink_metadata(&lease_path)?;
                 if !opened.is_file()
@@ -1121,6 +1140,7 @@ impl RuntimeGeneration {
             kind,
             report,
             _lease: lease,
+            _root_pin: root_pin,
         })
     }
 
@@ -1354,7 +1374,13 @@ fn maintain_sibling_roots(
                 {
                     metadata
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    note_overdue(
+                        report,
+                        "a per-process runtime root has no lifecycle lease and may need cleanup",
+                    );
+                    continue;
+                }
                 Err(error) => {
                     note_overdue(
                         report,
@@ -1806,13 +1832,39 @@ mod tests {
         let root = temp.path().join("runtime-root");
         fs::create_dir(&root).unwrap();
         let pin = open_direct_directory(&root).unwrap();
+        let second = open_direct_directory(&root).unwrap();
         assert_eq!(
-            directory_identity(&pin.metadata().unwrap()).unwrap(),
-            directory_identity(&fs::metadata(&root).unwrap()).unwrap()
+            directory_identity(&pin).unwrap(),
+            directory_identity(&second).unwrap()
         );
+        drop(second);
         assert!(fs::remove_dir(&root).is_err());
         drop(pin);
         fs::remove_dir(&root).unwrap();
+    }
+
+    #[test]
+    fn pid_root_without_lease_is_reported_for_later_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("private-runtime");
+        fs::create_dir(&parent).unwrap();
+        let current = parent.join("current");
+        fs::create_dir(&current).unwrap();
+        let abandoned = parent.join("12345");
+        fs::create_dir(&abandoned).unwrap();
+
+        let mut report = GenerationReport::default();
+        maintain_sibling_roots(
+            &current,
+            RuntimeGenerationKind::RawPrivate,
+            &NoLeftovers,
+            &mut report,
+        );
+
+        assert!(report
+            .overdue
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no lifecycle lease")));
     }
 
     struct NoLeftovers;

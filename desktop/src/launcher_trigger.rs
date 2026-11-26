@@ -293,8 +293,6 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                     .as_deref()
                     .is_some_and(reserve_install);
             if retry {
-                let shortcut_setting = setting(SHORTCUT_KEY);
-                let double_tap_setting = setting(DOUBLE_TAP_KEY);
                 let app = app.clone();
                 let handle = app.clone();
                 let keymap_override = keymap_override.clone();
@@ -311,6 +309,8 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                             .is_some_and(|trigger| install_is_available(&trigger))
                             && should_attempt_install(still_owns, shutting_down);
                         if can_install {
+                            let shortcut_setting = setting(SHORTCUT_KEY);
+                            let double_tap_setting = setting(DOUBLE_TAP_KEY);
                             install_with_settings(
                                 &handle,
                                 keymap_override,

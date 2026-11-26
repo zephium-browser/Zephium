@@ -335,6 +335,7 @@ static PENDING_OVERFLOW_LOGS_REMAINING: AtomicUsize = AtomicUsize::new(4);
 )]
 pub(crate) fn install(
     #[cfg(any(target_os = "macos", target_os = "windows"))] parent: RawWindowHandle,
+    #[cfg(target_os = "windows")] private_runtime: crate::RuntimeGeneration,
     data_root: PathBuf,
     main_dispatch: crate::MainThreadDispatch,
     initial_user_content_generation: UserContentGeneration,
@@ -367,13 +368,6 @@ pub(crate) fn install(
     let private_scriptlet_root =
         crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
             .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
-    #[cfg(target_os = "windows")]
-    let private_runtime = crate::RuntimeGeneration::prepare(
-        &private_runtime_root(&data_root),
-        crate::RuntimeGenerationKind::RawPrivate,
-        &crate::platform::imp::WindowsLeftoverProcesses,
-    )
-    .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
     #[cfg(target_os = "windows")]
     for line in crate::platform::imp::generation_report_lines("private", private_runtime.report()) {
         eprintln!("{line}");
@@ -603,7 +597,7 @@ pub(crate) fn install(
     Ok(cleanup_advisory)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", test))]
 fn private_runtime_root(data_root: &std::path::Path) -> PathBuf {
     data_root
         .join("private-runtime")
