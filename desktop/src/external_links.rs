@@ -18,7 +18,7 @@ struct WaitingRequest {
 struct WaitingRequests(Vec<WaitingRequest>);
 
 impl WaitingRequests {
-    fn push(&mut self, request: WaitingRequest) {
+    fn push(&mut self, request: WaitingRequest) -> bool {
         let waiting: usize = self
             .0
             .iter()
@@ -36,6 +36,9 @@ impl WaitingRequests {
             .max(usize::from(request.profile.is_some()));
         if cost > 0 && cost <= room {
             self.0.push(request);
+            true
+        } else {
+            false
         }
     }
 
@@ -47,6 +50,7 @@ impl WaitingRequests {
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.
 static WAITING: Mutex<WaitingRequests> = Mutex::new(WaitingRequests(Vec::new()));
+static PROFILE_ADMISSION_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// A running instance received links and wants the window that shows them
 /// in front. The shell says which window that is once it has opened them.
@@ -74,7 +78,13 @@ fn requested_profile(arguments: &[String]) -> Option<String> {
     let mut args = arguments.iter();
     while let Some(argument) = args.next() {
         let value = if argument == "--profile" {
-            args.next().map(String::as_str)
+            let Some(value) = args.next() else {
+                return None;
+            };
+            if value.starts_with("--") {
+                return None;
+            }
+            Some(value.as_str())
         } else {
             argument.strip_prefix("--profile=")
         };
@@ -122,7 +132,7 @@ pub(crate) fn hand_off(
         return;
     }
     let Some(shell) = app.try_state::<Handle>() else {
-        WAITING
+        let accepted = WAITING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(WaitingRequest {
@@ -130,6 +140,9 @@ pub(crate) fn hand_off(
                 urls,
                 forward,
             });
+        if !accepted && has_profile_option {
+            PROFILE_ADMISSION_FAILED.store(true, Ordering::Release);
+        }
         return;
     };
     // Each batch says afresh whether it wants the main window forward, so a
@@ -157,7 +170,10 @@ pub(crate) fn hand_off(
 
 #[cfg(test)]
 mod tests {
-    use super::{requested_profile, without_startup_options, WaitingRequest, WaitingRequests};
+    use super::{
+        requested_profile, without_startup_options, WaitingRequest, WaitingRequests,
+        MAX_EXTERNAL_TARGETS,
+    };
 
     #[test]
     fn profile_options_and_values_are_not_forwarded_as_urls() {
@@ -189,6 +205,7 @@ mod tests {
                 .is_none()
         );
         assert!(requested_profile(&["--profile=".into()]).is_none());
+        assert!(requested_profile(&["--profile=Work".into(), "--profile".into()]).is_none());
     }
 
     #[test]
@@ -199,7 +216,7 @@ mod tests {
             forward: false,
         };
         let mut waiting = WaitingRequests::default();
-        waiting.push(request);
+        assert!(waiting.push(request));
         assert_eq!(
             waiting.take(),
             [WaitingRequest {
@@ -209,6 +226,23 @@ mod tests {
             }]
         );
         assert!(waiting.take().is_empty());
+    }
+
+    #[test]
+    fn startup_profile_request_is_rejected_when_waiting_capacity_is_full() {
+        let mut waiting = WaitingRequests::default();
+        for index in 0..MAX_EXTERNAL_TARGETS {
+            assert!(waiting.push(WaitingRequest {
+                profile: None,
+                urls: vec![format!("https://{index}.example/")],
+                forward: false,
+            }));
+        }
+        assert!(!waiting.push(WaitingRequest {
+            profile: Some("Work".into()),
+            urls: Vec::new(),
+            forward: false,
+        }));
     }
 }
 
@@ -226,6 +260,7 @@ pub(crate) fn forward_pending(app: &tauri::AppHandle) {
 /// Runs once the shell is managed: what arrived early, then this launch's own
 /// command line (Windows and Linux pass a clicked link as an argument).
 pub(crate) fn adopt(app: &tauri::AppHandle) {
+    hand_off(app, std::env::args().skip(1), false);
     let waiting = WAITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -238,7 +273,9 @@ pub(crate) fn adopt(app: &tauri::AppHandle) {
         arguments.extend(request.urls);
         hand_off(app, arguments, request.forward);
     }
-    hand_off(app, std::env::args().skip(1), false);
+    if PROFILE_ADMISSION_FAILED.swap(false, Ordering::AcqRel) {
+        crate::emit_ui_command(app, "profile.open-failed");
+    }
 }
 
 pub(crate) fn bring_forward(app: &tauri::AppHandle) {
