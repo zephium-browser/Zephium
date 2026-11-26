@@ -167,6 +167,7 @@
     void shape;
     untrack(() => motion.play(list));
   });
+  $effect(() => () => drag.abandon());
 
   function toggleFolder(key: string) {
     if (folded.has(key)) folded.delete(key);
@@ -218,6 +219,7 @@
   aria-label={label}
   hidden={entries.length === 0}
   data-close-buttons={preferences.value("tabs.close-button")}
+  data-tab-list-background={variant === "list" || undefined}
 >
   <ul
     bind:this={list}
@@ -227,6 +229,7 @@
     style:--dock-columns={columns}
     class:flex-col={variant === "list"}
     class:tab-list-rows={variant === "list"}
+    data-tab-list-background={variant === "list" || undefined}
     role="list"
   >
     {#each displayUnits as unit, index (unit.key)}

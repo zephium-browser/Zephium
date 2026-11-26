@@ -20,7 +20,9 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT},
+  native_bounds::{
+    bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT,
+  },
   AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
   NavigationFailure, NavigationId, PageLoadEvent,
 };
@@ -111,6 +113,7 @@ pub(crate) struct AppleNavigationEventState {
   next_record_token: Option<u128>,
   programmatic_load_depth: usize,
   deferred_flush_scheduled: bool,
+  pending_policy_refusal: Option<String>,
 }
 
 impl Default for AppleNavigationEventState {
@@ -121,6 +124,7 @@ impl Default for AppleNavigationEventState {
       next_record_token: Some(1),
       programmatic_load_depth: 0,
       deferred_flush_scheduled: false,
+      pending_policy_refusal: None,
     }
   }
 }
@@ -132,6 +136,14 @@ impl AppleNavigationEventState {
     };
     if depth > ACTIVE_APPLE_NAVIGATION_LIMIT {
       return false;
+    }
+    if self.programmatic_load_depth == 0 {
+      // Only proven policy refusals are superseded. A merely delayed start
+      // can still belong to a valid overlapping load and must keep its URL.
+      self
+        .active
+        .retain(|_, record| !record.policy_refused || record.start_observed);
+      self.pending_policy_refusal = None;
     }
     self.programmatic_load_depth = depth;
     true
@@ -151,6 +163,10 @@ impl AppleNavigationEventState {
       registration_accepted: true,
       ..Default::default()
     };
+    let policy_refused = self.pending_policy_refusal.as_deref() == Some(url.as_str());
+    if policy_refused {
+      self.pending_policy_refusal = None;
+    }
     let Some(record) = self.record_or_insert(key) else {
       update.registration_accepted = false;
       self.settle_programmatic_boundary(&mut update);
@@ -161,6 +177,7 @@ impl AppleNavigationEventState {
         update.registration_accepted = false;
       } else {
         record.programmatic_url = Some(url);
+        record.policy_refused = policy_refused;
         update.events = drain_record(key, record);
         if record.terminal.is_some() {
           self.active.remove(&key);
@@ -169,6 +186,32 @@ impl AppleNavigationEventState {
     }
     self.settle_programmatic_boundary(&mut update);
     update
+  }
+
+  fn policy_refused(&mut self, url: &str) {
+    if self.programmatic_load_depth != 0 {
+      // The policy action may belong to loadRequest before it returns its
+      // identity. An older same-address registration makes correlation
+      // ambiguous; never retire that delayed attempt as the new refusal.
+      if self.programmatic_load_depth == 1
+        && !self
+          .active
+          .values()
+          .any(|record| record.programmatic_url.as_deref() == Some(url))
+      {
+        self.pending_policy_refusal = Some(url.to_owned());
+      }
+      return;
+    }
+    let mut candidates = self
+      .active
+      .values_mut()
+      .filter(|record| !record.start_observed && record.programmatic_url.as_deref() == Some(url));
+    if let Some(record) = candidates.next() {
+      if candidates.next().is_none() {
+        record.policy_refused = true;
+      }
+    }
   }
 
   fn settle_programmatic_boundary(&mut self, update: &mut AppleNavigationUpdate) {
@@ -392,10 +435,15 @@ impl AppleNavigationEventState {
     self.next_record_token = Some(1);
     self.programmatic_load_depth = 0;
     self.deferred_flush_scheduled = false;
+    self.pending_policy_refusal = None;
   }
 }
 
 struct AppleNavigationRecord {
+  // Prevent native pointer reuse while a registration can still receive a
+  // callback. The record, not an integer address, owns the native identity.
+  navigation: Option<Retained<WKNavigation>>,
+  policy_refused: bool,
   token: u128,
   programmatic_url: Option<String>,
   committed_url: Option<String>,
@@ -412,6 +460,8 @@ struct AppleNavigationRecord {
 impl AppleNavigationRecord {
   fn new(token: u128) -> Self {
     Self {
+      navigation: None,
+      policy_refused: false,
       token,
       programmatic_url: None,
       committed_url: None,
@@ -612,7 +662,13 @@ pub(crate) fn register_programmatic_navigation(
     return true;
   }
   let update = with_navigation_state(&this.ivars().navigation_event_state, |state| {
-    state.register_programmatic(navigation_key(navigation), url)
+    let key = navigation_key(navigation);
+    let update = state.register_programmatic(key, url);
+    if let Some(record) = state.active.get_mut(&key) {
+      // SAFETY: WebKit supplies a live navigation for this callback/load.
+      record.navigation = unsafe { Retained::retain(navigation as *const _ as *mut _) };
+    }
+    update
   });
   let accepted = update.registration_accepted;
   apply_navigation_update(this, None, update);
@@ -780,6 +836,10 @@ pub(crate) fn did_commit_navigation(
   webview: &WKWebView,
   navigation: &WKNavigation,
 ) {
+  #[cfg(target_os = "macos")]
+  if this.ivars().navigation_event_handler.is_none() {
+    this.ivars().script_dialogs.document_committed();
+  }
   if this.ivars().navigation_event_handler.is_some() {
     let committed_url = unsafe {
       webview
@@ -791,6 +851,8 @@ pub(crate) fn did_commit_navigation(
       state.committed(navigation_key(navigation), committed_url)
     });
     if update.guard_presentation {
+      #[cfg(target_os = "macos")]
+      this.ivars().script_dialogs.document_committed();
       // WKNavigationDelegate's didCommit boundary precedes presentation of
       // the newly committed main-frame document. Hide once per exact native
       // identity before calling the embedder; duplicate callbacks cannot
@@ -873,6 +935,12 @@ pub(crate) fn navigation_policy(
         .and_then(|url| url.absoluteString())
         .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
       else {
+        let target = match action.targetFrame().map(|frame| frame.isMainFrame()) {
+          Some(true) => crate::NativeUrlTarget::MainFrame,
+          Some(false) => crate::NativeUrlTarget::Subframe,
+          None => crate::NativeUrlTarget::NewWindow,
+        };
+        crate::report_native_url_refused(this.ivars().native_url_refused_handler.as_ref(), target);
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };
@@ -989,6 +1057,11 @@ pub(crate) fn navigation_policy(
         if let Some(observe) = &this.ivars().main_frame_navigation_attempt_handler {
           observe(url.clone());
         }
+      }
+      if !policy_allows && target_is_main_frame == Some(true) {
+        with_navigation_state(&this.ivars().navigation_event_state, |state| {
+          state.policy_refused(&url);
+        });
       }
       match policy_allows {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
@@ -1442,10 +1515,71 @@ mod navigation_event_state_tests {
   }
 
   #[test]
+  fn superseded_unstarted_programmatic_loads_release_identity_capacity() {
+    let mut state = AppleNavigationEventState::default();
+    for key in 0..(ACTIVE_APPLE_NAVIGATION_LIMIT * 3) {
+      assert!(register(&mut state, key, "https://policy-cancelled.example/").registration_accepted);
+      state.policy_refused("https://policy-cancelled.example/");
+      assert_eq!(state.active.len(), 1);
+    }
+    assert!(register(&mut state, 999, "https://allowed.example/").registration_accepted);
+    assert_eq!(
+      phases(&state.started(999)),
+      vec![NavigationEventPhase::Started]
+    );
+    assert_eq!(
+      phases(&state.committed(999, Some("https://allowed.example/".into()))),
+      vec![NavigationEventPhase::Committed]
+    );
+  }
+
+  #[test]
+  fn reentrant_policy_refusal_is_bound_when_load_request_returns() {
+    let mut state = AppleNavigationEventState::default();
+    assert!(state.begin_programmatic());
+    state.policy_refused("https://refused.example/");
+    assert!(
+      state
+        .register_programmatic(71, "https://refused.example/".into())
+        .registration_accepted
+    );
+    assert!(register(&mut state, 72, "https://allowed.example/").registration_accepted);
+    assert!(!state.active.contains_key(&71));
+    assert_eq!(state.started(72).events[0].url, "https://allowed.example/");
+  }
+
+  #[test]
+  fn same_address_reentrant_refusal_cannot_retire_an_older_delayed_load() {
+    let mut state = AppleNavigationEventState::default();
+    assert!(register(&mut state, 81, "https://same.example/").registration_accepted);
+    assert!(state.begin_programmatic());
+    state.policy_refused("https://same.example/");
+    assert!(
+      state
+        .register_programmatic(82, "https://same.example/".into())
+        .registration_accepted
+    );
+    assert!(register(&mut state, 83, "https://other.example/").registration_accepted);
+    assert_eq!(state.started(81).events[0].url, "https://same.example/");
+    assert!(state.active.contains_key(&82));
+  }
+
+  #[test]
+  fn unstarted_unproven_attempts_still_obey_the_identity_budget() {
+    let mut state = AppleNavigationEventState::default();
+    for key in 0..ACTIVE_APPLE_NAVIGATION_LIMIT {
+      assert!(register(&mut state, key, "https://delayed.example/").registration_accepted);
+    }
+    assert!(!register(&mut state, 999, "https://overflow.example/").registration_accepted);
+    assert_eq!(state.active.len(), ACTIVE_APPLE_NAVIGATION_LIMIT);
+  }
+
+  #[test]
   fn active_navigation_identity_budget_is_fail_closed() {
     let mut state = AppleNavigationEventState::default();
     for key in 0..ACTIVE_APPLE_NAVIGATION_LIMIT {
       assert!(register(&mut state, key, &format!("https://{key}.example/")).registration_accepted);
+      state.started(key);
     }
     assert!(state.begin_programmatic());
     let overflow = state.register_programmatic(

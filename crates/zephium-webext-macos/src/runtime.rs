@@ -13,9 +13,8 @@ use objc2_foundation::{NSArray, NSError, NSSet, NSString, NSURL, NSUUID};
 use objc2_web_kit::{
     WKWebExtension, WKWebExtensionContext, WKWebExtensionContextPermissionStatus,
     WKWebExtensionController, WKWebExtensionControllerConfiguration, WKWebExtensionDataRecord,
-    WKWebExtensionDataType, WKWebExtensionDataTypeLocal, WKWebExtensionDataTypeSession,
-    WKWebExtensionDataTypeSynchronized, WKWebExtensionMatchPattern, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKWebExtensionDataType, WKWebExtensionMatchPattern, WKWebView, WKWebViewConfiguration,
+    WKWebsiteDataStore,
 };
 
 use crate::delegate::Delegate;
@@ -50,6 +49,8 @@ pub struct ExtensionSpec {
     /// `nativeMessaging` optional.
     pub native_messaging_grantable: bool,
     pub inspectable: bool,
+    /// The prepared worker reports `worker.started` through our compatibility layer.
+    pub verify_background_start: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +67,7 @@ pub(crate) struct Loaded {
     pub(crate) native_messaging_grantable: bool,
     /// Granted permissions of the APIs the browser implements itself.
     pub(crate) browser_permissions: RefCell<std::collections::BTreeSet<String>>,
+    pub(crate) background: Rc<crate::background::State>,
 }
 
 /// One profile's state. WebKit gives an extension the same identifier in
@@ -304,12 +306,17 @@ impl Runtime {
             return done(Err(format!("{id} is not loaded")));
         };
         let done = RefCell::new(Some(done));
+        let owner = Rc::downgrade(&self.shared);
+        let target = context.clone();
         let completion = RcBlock::new(move |error: *mut NSError| {
             if let Some(done) = done.take() {
-                done(match unsafe { error.as_ref() } {
-                    None => Ok(()),
-                    Some(error) => Err(describe(Some(error))),
-                });
+                if let Some(error) = unsafe { error.as_ref() } {
+                    return done(Err(describe(Some(error))));
+                }
+                let Some(shared) = owner.upgrade() else {
+                    return done(Err("The extension runtime was closed.".into()));
+                };
+                crate::background::wait(&shared, &target, Box::new(done));
             }
         });
         unsafe { context.loadBackgroundContentWithCompletionHandler(&completion) };
@@ -712,6 +719,7 @@ fn activate(
             external_native_messaging: std::cell::Cell::new(spec.external_native_messaging),
             native_messaging_grantable: spec.native_messaging_grantable,
             browser_permissions,
+            background: Rc::new(crate::background::State::new(spec.verify_background_start)),
         },
     );
     Ok(loaded)
@@ -839,20 +847,21 @@ fn unload(shared: &Rc<Shared>, controller: &WKWebExtensionController, id: &str) 
     shared.popouts.borrow_mut().remove(id);
     crate::api::forget(id);
     crate::cookies::refresh(shared);
-    unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok()
+    let result = unsafe { controller.unloadExtensionContext_error(&loaded.context) }.is_ok();
+    // Unloading closes the native background view before settling its waiters.
+    loaded.background.cancel();
+    result
 }
 
 /// Deletes an unloaded extension's `chrome.storage` areas.
 fn erase_storage(controller: &Retained<WKWebExtensionController>, host: &Rc<dyn Host>, id: &str) {
-    let types: Vec<&WKWebExtensionDataType> = unsafe {
-        [
-            WKWebExtensionDataTypeLocal,
-            WKWebExtensionDataTypeSession,
-            WKWebExtensionDataTypeSynchronized,
-        ]
-    }
+    let types: Vec<&WKWebExtensionDataType> = [
+        c"WKWebExtensionDataTypeLocal",
+        c"WKWebExtensionDataTypeSession",
+        c"WKWebExtensionDataTypeSynchronized",
+    ]
     .into_iter()
-    .flatten()
+    .filter_map(crate::webkit_string)
     .collect();
     let types = NSSet::from_slice(&types);
     let removal_types = types.clone();

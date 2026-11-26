@@ -7,6 +7,7 @@
   import Icon from "$shared/ui/Icon";
   import ExtensionActionIcon from "./ExtensionActionIcon.svelte";
   import { holdWhilePopupOpen } from "../lib/popup-hold";
+  import { openButtonMenu } from "../lib/button-menu";
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let tabId = $derived(tabs.activeId());
@@ -38,7 +39,7 @@
     event.stopPropagation();
     const target = event.currentTarget;
     if (profileId === null || !(target instanceof HTMLElement)) return;
-    extensions.menu(profileId, action, target.getBoundingClientRect());
+    openButtonMenu(profileId, action, target.getBoundingClientRect());
   }
 
   $effect(() => {

@@ -532,6 +532,10 @@ fn handle(
         "open" => open(app, bench, &command),
         "navigate" => navigate(app, bench, &command),
         "eval" => eval(engine, &command),
+        "frame" => frame(app, &command),
+        "layers" => layers(app),
+        "glass" => glass(app, &command),
+        "window" => window_parts(app, &command),
         "preload" => preload(engine, &command),
         "blocked" => blocked(app, bench, &command),
         "close" => close(app, &command),
@@ -539,6 +543,7 @@ fn handle(
         "command" => run_command(app, &command),
         "setting" => setting(app, bench, &command),
         "capture" => capture(app, &command),
+        "input" => input(app),
         "quit" => Ok(json!({})),
         _ => Err(format!("unknown op {op:?}")),
     };
@@ -935,6 +940,317 @@ fn setting(app: &tauri::AppHandle, bench: &Bench, command: &Value) -> Result<Val
     }
 }
 
+/// Runs `js` in the main window's own interface document, for measuring
+/// what the interface holds (animations, nodes). macOS only.
+#[cfg(target_os = "macos")]
+fn frame(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2::runtime::AnyObject;
+    use objc2::{msg_send, ClassType};
+    use objc2_foundation::{MainThreadMarker, NSError, NSString};
+    use objc2_web_kit::{WKContentWorld, WKWebView};
+    let (body, timeout) = (text(command, "js")?.to_owned(), timeout(command));
+    let window = app
+        .get_webview_window(crate::MAIN_LABEL)
+        .ok_or("no main window")?;
+    let (done, answer) = std::sync::mpsc::channel::<Option<String>>();
+    window
+        .with_webview(move |webview| {
+            let Some(mtm) = MainThreadMarker::new() else {
+                let _ = done.send(None);
+                return;
+            };
+            let pending = std::cell::RefCell::new(Some(done));
+            let callback =
+                block2::RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+                    let Some(done) = pending.borrow_mut().take() else {
+                        return;
+                    };
+                    // SAFETY: WebKit owns the callback-scoped result; the class is
+                    // checked before the cast.
+                    let text = unsafe {
+                        (!value.is_null()
+                            && error.is_null()
+                            && msg_send![value, isKindOfClass: NSString::class()])
+                        .then(|| (*value.cast::<NSString>()).to_string())
+                    };
+                    let _ = done.send(text);
+                });
+            // SAFETY: Tauri supplies the live WKWebView for this main-thread call.
+            let webkit: &WKWebView = unsafe { &*webview.inner().cast() };
+            unsafe {
+                webkit.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+                    &NSString::from_str(&format!("return await ({});", script(&body))),
+                    None,
+                    None,
+                    &WKContentWorld::pageWorld(mtm),
+                    Some(&callback),
+                );
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    let result = answer
+        .recv_timeout(timeout)
+        .map_err(|_| "the interface gave no result in time".to_owned())?
+        .ok_or("the interface gave no result")?;
+    let envelope: Value = serde_json::from_str(&result).map_err(|_| "unreadable result")?;
+    if envelope.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(json!({ "value": envelope.get("value").cloned().unwrap_or(Value::Null) }))
+    } else {
+        Err(envelope
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the interface script failed")
+            .to_owned())
+    }
+}
+
+/// The main window's view and layer tree with any animations still attached,
+/// to find what keeps the window server drawing. macOS only.
+#[cfg(target_os = "macos")]
+fn layers(app: &tauri::AppHandle) -> Result<Value, String> {
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::NSView;
+    use objc2_quartz_core::CALayer;
+    fn layer_tree(layer: &CALayer, depth: usize, out: &mut Vec<Value>) {
+        if out.len() >= 2000 || depth > 40 {
+            return;
+        }
+        let keys: Vec<String> = layer
+            .animationKeys()
+            .map(|keys| keys.iter().map(|key| key.to_string()).collect())
+            .unwrap_or_default();
+        let frame = layer.frame();
+        let class: &AnyObject = layer.as_ref();
+        out.push(json!({
+            "depth": depth,
+            "class": class.class().name().to_string_lossy(),
+            "name": layer.name().map(|name| name.to_string()),
+            "frame": [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+            "hidden": layer.isHidden(),
+            "opacity": layer.opacity(),
+            "animations": keys,
+        }));
+        if let Some(sublayers) = unsafe { layer.sublayers() } {
+            for sublayer in sublayers.iter() {
+                layer_tree(&sublayer, depth + 1, out);
+            }
+        }
+    }
+    let out = on_main_window(app, "layer walk", |ns_window| {
+        let mut out = Vec::new();
+        // The frame view holds the content view and the titlebar's own views.
+        let root: Option<objc2::rc::Retained<NSView>> = ns_window
+            .contentView()
+            .and_then(|view| unsafe { view.superview() });
+        if let Some(layer) = root.and_then(|view| view.layer()) {
+            layer_tree(&layer, 0, &mut out);
+        }
+        out
+    })?;
+    Ok(json!({ "layers": out }))
+}
+
+/// Measurement only: sets the window material view's frame (AppKit points,
+/// bottom-left origin) to see what its size costs the window server.
+#[cfg(target_os = "macos")]
+fn glass(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2_app_kit::NSView;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+    const EFFECT_VIEW_TAGS: [isize; 2] = [91_376_254, 96_945_937];
+    let [x, y, w, h] = glass_rect(command)?;
+    let rect = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+    let found = on_main_window(app, "glass change", move |ns_window| {
+        let mut found = Vec::new();
+        if let Some(content) = ns_window.contentView() {
+            for tag in EFFECT_VIEW_TAGS {
+                let view: Option<objc2::rc::Retained<NSView>> = content.viewWithTag(tag);
+                if let Some(view) = view {
+                    view.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::empty());
+                    view.setFrame(rect);
+                    found.push(tag);
+                }
+            }
+        }
+        found
+    })?;
+    Ok(json!({ "tags": found }))
+}
+
+/// The largest frame, in points, AppKit is asked to lay out for the glass op.
+const GLASS_LIMIT: f64 = 16_384.0;
+
+/// The glass op's `x`, `y`, `w` and `h`: finite, not negative, and no larger
+/// than [`GLASS_LIMIT`] in either direction.
+fn glass_rect(command: &Value) -> Result<[f64; 4], String> {
+    let mut rect = [0.0; 4];
+    for (slot, key) in rect.iter_mut().zip(["x", "y", "w", "h"]) {
+        let value = command
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or(format!("{key} is required"))?;
+        if !value.is_finite() || !(0.0..=GLASS_LIMIT).contains(&value) {
+            return Err(format!("{key} must be between 0 and {GLASS_LIMIT}"));
+        }
+        *slot = value;
+    }
+    if rect[0] + rect[2] > GLASS_LIMIT || rect[1] + rect[3] > GLASS_LIMIT {
+        return Err(format!("the rect must end within {GLASS_LIMIT}"));
+    }
+    Ok(rect)
+}
+
+/// Runs `work` with the main NSWindow on the main thread. The window is
+/// looked up there too, so the timeout covers the whole call.
+#[cfg(target_os = "macos")]
+fn on_main_window<T: Send + 'static>(
+    app: &tauri::AppHandle,
+    what: &str,
+    work: impl FnOnce(&objc2_app_kit::NSWindow) -> T + Send + 'static,
+) -> Result<T, String> {
+    let (done, answer) = std::sync::mpsc::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = handle
+            .get_webview_window(crate::MAIN_LABEL)
+            .ok_or_else(|| "no main window".to_owned())
+            .and_then(|window| window.ns_window().map_err(|error| error.to_string()))
+            // SAFETY: Tao's live NSWindow, on the main thread for this call.
+            .map(|pointer| work(unsafe { &*(pointer as *const objc2_app_kit::NSWindow) }));
+        let _ = done.send(result);
+    })
+    .map_err(|error| error.to_string())?;
+    answer
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| format!("the {what} did not finish"))?
+}
+
+/// Measurement only: hides the window's backdrop layers (the material's and
+/// the titlebar's), paints the window opaque, or takes hidden content views
+/// out of the window, to see what each costs the window server.
+#[cfg(target_os = "macos")]
+fn window_parts(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    use objc2_app_kit::{NSColor, NSView};
+    use objc2_quartz_core::CALayer;
+    fn hide_backdrops(layer: &CALayer, hidden: bool, count: &mut usize) {
+        let class: &objc2::runtime::AnyObject = layer.as_ref();
+        if class.class().name().to_bytes() == b"CABackdropLayer" {
+            layer.setHidden(hidden);
+            *count += 1;
+        }
+        if let Some(sublayers) = unsafe { layer.sublayers() } {
+            for sublayer in sublayers.iter() {
+                hide_backdrops(&sublayer, hidden, count);
+            }
+        }
+    }
+    let flag = |key: &str| command.get(key).and_then(Value::as_bool);
+    let (backdrops, opaque, detach, leaves) = (
+        flag("backdrops"),
+        flag("opaque"),
+        flag("detachHidden"),
+        flag("detachHiddenLeaves"),
+    );
+    let count = on_main_window(app, "window change", move |ns_window| {
+        let mut count = 0;
+        if let Some(shown) = backdrops {
+            let frame: Option<objc2::rc::Retained<NSView>> = ns_window
+                .contentView()
+                .and_then(|view| unsafe { view.superview() });
+            if let Some(layer) = frame.and_then(|view| view.layer()) {
+                if let Some(sublayers) = unsafe { layer.sublayers() } {
+                    for sublayer in sublayers.iter().skip(1) {
+                        hide_backdrops(&sublayer, !shown, &mut count);
+                    }
+                }
+            }
+        }
+        if let Some(content) = ns_window.contentView() {
+            for view in content.subviews().iter() {
+                if view.isHidden() {
+                    if detach == Some(true) {
+                        view.removeFromSuperview();
+                        count += 1;
+                    }
+                } else if leaves == Some(true) {
+                    for leaf in view.subviews().iter() {
+                        if leaf.isHidden() {
+                            leaf.removeFromSuperview();
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(opaque) = opaque {
+            ns_window.setOpaque(opaque);
+            let color = if opaque {
+                NSColor::windowBackgroundColor()
+            } else {
+                NSColor::clearColor()
+            };
+            ns_window.setBackgroundColor(Some(&color));
+        }
+        count
+    })?;
+    Ok(json!({ "changed": count }))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_parts(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("window is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn glass(_: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
+    glass_rect(command)?;
+    Err("glass is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn layers(_: &tauri::AppHandle) -> Result<Value, String> {
+    Err("layers is macOS only".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn frame(_: &tauri::AppHandle, _: &Value) -> Result<Value, String> {
+    Err("frame is macOS only".into())
+}
+
+/// Measurement only: posts a key press pages ignore (F15) to the main window,
+/// to exercise what input in the window sets off.
+#[cfg(target_os = "macos")]
+fn input(app: &tauri::AppHandle) -> Result<Value, String> {
+    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType};
+    use objc2_foundation::{MainThreadMarker, NSPoint, NSString};
+    on_main_window(app, "input", |window| -> Result<(), String> {
+        let mtm = MainThreadMarker::new().ok_or_else(|| "not on the main thread".to_owned())?;
+        let key = NSString::from_str("\u{F712}");
+        for kind in [NSEventType::KeyDown, NSEventType::KeyUp] {
+            let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                kind,
+                NSPoint::new(0.0, 0.0),
+                NSEventModifierFlags::empty(),
+                0.0,
+                window.windowNumber(),
+                None,
+                &key,
+                &key,
+                false,
+                113,
+            )
+            .ok_or_else(|| "AppKit made no key event".to_owned())?;
+            NSApplication::sharedApplication(mtm).postEvent_atStart(&event, false);
+        }
+        Ok(())
+    })??;
+    Ok(json!({}))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn input(_: &tauri::AppHandle) -> Result<Value, String> {
+    Err("input is macOS only".into())
+}
+
 /// The main window as a PNG at `path`, for page screenshots.
 #[cfg(target_os = "macos")]
 fn capture(app: &tauri::AppHandle, command: &Value) -> Result<Value, String> {
@@ -1073,5 +1389,30 @@ mod tests {
         );
         bench.await_results(false);
         assert!(bench.lock().results.is_empty());
+    }
+
+    #[test]
+    fn the_glass_op_takes_a_finite_rect_inside_the_limit() {
+        assert_eq!(
+            glass_rect(&json!({ "x": 0, "y": 12.5, "w": 320, "h": 0 })),
+            Ok([0.0, 12.5, 320.0, 0.0])
+        );
+        assert!(glass_rect(&json!({ "x": 0, "y": 0, "w": GLASS_LIMIT, "h": GLASS_LIMIT })).is_ok());
+    }
+
+    #[test]
+    fn the_glass_op_refuses_malformed_rects_before_appkit_sees_them() {
+        for command in [
+            json!({ "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": "0", "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": -1, "y": 0, "w": 10, "h": 10 }),
+            json!({ "x": 0, "y": 0, "w": -10, "h": 10 }),
+            json!({ "x": 0, "y": 0, "w": 10, "h": 1e300 }),
+            json!({ "x": 0, "y": 0, "w": GLASS_LIMIT + 1.0, "h": 10 }),
+            json!({ "x": GLASS_LIMIT, "y": 0, "w": 1, "h": 10 }),
+            json!({ "x": 0, "y": 10, "w": 10, "h": GLASS_LIMIT }),
+        ] {
+            assert!(glass_rect(&command).is_err(), "{command}");
+        }
     }
 }

@@ -147,13 +147,14 @@
 
   function keydown(event: KeyboardEvent) {
     if (frozen || event.isComposing) return;
+    const choices = snapshot.keyboard ? snapshot.entries.length : count;
     let intent: TabSwitcherAction | undefined;
     if (event.key === "Tab") intent = { type: "step", reverse: event.shiftKey };
     else if (event.key === "ArrowLeft" || event.key === "ArrowRight")
       intent = { type: "step", reverse: event.key === "ArrowLeft" };
     else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const index = snapshot.selected + (event.key === "ArrowUp" ? -across : across);
-      if (index >= 0 && index < snapshot.entries.length) intent = { type: "select", index };
+      if (index >= 0 && index < choices) intent = { type: "select", index };
       else intent = { type: "step", reverse: event.key === "ArrowUp" };
     } else if (event.key === "Escape") intent = { type: "cancel" };
     else if (event.key === "Enter") intent = { type: "commit" };
@@ -246,7 +247,17 @@
       </div>
     {/each}
     <div class="slot">
-      <button type="button" class="card new" tabindex="-1" onclick={newTab}>
+      <button
+        id={`switcher-${snapshot.entries.length}`}
+        type="button"
+        class="card new"
+        role={snapshot.keyboard ? undefined : "option"}
+        aria-selected={snapshot.keyboard
+          ? undefined
+          : snapshot.selected === snapshot.entries.length}
+        tabindex="-1"
+        onclick={newTab}
+      >
         <span class="page"><span class="plus"><Icon icon={Add01Icon} size={22} /></span></span>
         <span class="caption"><span class="title">{m.new_tab()}</span></span>
       </button>

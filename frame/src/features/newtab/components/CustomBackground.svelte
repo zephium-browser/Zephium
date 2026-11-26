@@ -18,13 +18,14 @@
     onfailure: () => void;
   } = $props();
   // One image element and one bounded decode, with no resize observer or
-  // preloading image. Reopening reuses the protocol/browser cache. Never ask
-  // beyond the pipeline's largest thumbnail (larger asks serve the original).
+  // preloading image. Reopening reuses the protocol/browser cache. Ask for the
+  // physical pixels the picture covers, up to the pipeline's largest thumbnail
+  // (larger asks serve the original): 2560 px decodes to about 15 MB at 16:9.
   const src = untrack(() =>
     mediaUrl(
       profile,
       digest,
-      Math.min(1600, Math.max(1, Math.ceil(Math.max(width, height) * window.devicePixelRatio))),
+      Math.min(2560, Math.max(1, Math.ceil(Math.max(width, height) * window.devicePixelRatio))),
     ),
   );
 </script>

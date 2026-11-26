@@ -35,6 +35,7 @@ mod actor;
 mod api;
 mod lookup;
 mod onboarding;
+pub mod profile_cleanup;
 mod reply;
 mod shell;
 mod store_reads;
@@ -76,16 +77,18 @@ pub use work::{
 };
 
 pub use actor::{
-    spawn, spawn_suspended, CallbackHandle, ContentPolicyStatusRequest,
-    FocusedContentPolicyStatusRequest, Handle, ShutdownRequest, SpawnError, SpawnFailure,
+    spawn, spawn_suspended, spawn_suspended_with_profile_cleanup, CallbackHandle,
+    ContentPolicyStatusRequest, FocusedContentPolicyStatusRequest, Handle, ShutdownRequest,
+    SpawnError, SpawnFailure,
 };
 #[cfg(feature = "agentic-browser")]
 pub use actor::{spawn_agentic, spawn_agentic_suspended, AgenticSpawnFailure};
 #[cfg(feature = "agentic-browser")]
 pub use api::AgentLifecycle;
+pub use api::{AppProxyAttachment, AppProxyReport};
 pub use api::{
     BrowserPage, ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch,
-    Command, ContentPolicyStatusQueryOutcome, EmitFn, PagePermissionPromptDecision,
+    Command, ContentPolicyStatusQueryOutcome, EmitFn, MiniAction, PagePermissionPromptDecision,
     PageRequestDecision, PresentationChrome, SharedBlocker, SharedChrome, SharedEngine,
     SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome, TabMetadata,
     WorkPaneTarget,
@@ -94,7 +97,10 @@ pub use lookup::{NoteMatch, TaskMatch};
 pub use onboarding::{finish_onboarding, onboarding_due};
 #[cfg(feature = "work-planning")]
 pub mod work_context;
-pub use shell::{Shell, WebExtensionStatus, WebExtensionTarget};
+pub use shell::{
+    admitted_mini_size, Shell, WebExtensionStatus, WebExtensionTarget, MAX_MINI_WINDOWS,
+    MINI_PAGE_INSET, MINI_TOOLBAR_HEIGHT, MINI_WINDOW_MIN_SIZE, MINI_WINDOW_SIZE,
+};
 
 #[doc(hidden)]
 pub use store_reads::{ImportWork, ImportedSite, StoreReadResult};

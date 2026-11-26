@@ -9,6 +9,8 @@ pub use hub::profile_avatars::prepare_avatar_photo;
 mod legacy;
 mod migrations;
 mod pane;
+mod window_frame;
+pub use window_frame::{WindowFrame, WindowMonitor, WindowRect};
 #[cfg(target_os = "windows")]
 mod windows_file_identity;
 

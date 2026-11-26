@@ -161,7 +161,11 @@ pub fn init(
         // A visual enhancement must never remove access to window controls.
         let _ = window.set_decorations(true);
     }
-    let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
+    let hardened = harden_privileged(
+        window,
+        expected_user_data_folder,
+        PrivilegedEnvironment::Own(on_runtime_update),
+    );
     apply_material(window, true);
     hardened
 }
@@ -183,13 +187,23 @@ fn bridge_caption_keys(window: &WebviewWindow) {
     }
 }
 
+/// Whose browser process a privileged WebView runs in.
+pub enum PrivilegedEnvironment {
+    /// Its own: the WebView registers it, so teardown proves its exit.
+    Own(RuntimeUpdateCallback),
+    /// The one already registered under this label, which it shares through
+    /// the same user-data folder and arguments, as a mini window's toolbar
+    /// shares the launcher's. Teardown's proof for that label covers it.
+    Joined(&'static str),
+}
+
 /// Tauri does not expose Wry's permission callback. Install the WebView2
 /// policy directly for privileged chrome so an XSS cannot prompt for ambient
 /// capabilities or persist password/form suggestions in its shared UDF.
 pub fn harden_privileged(
     window: &WebviewWindow,
     expected_user_data_folder: &Path,
-    on_runtime_update: RuntimeUpdateCallback,
+    environment_owner: PrivilegedEnvironment,
 ) -> Result<(), StartupFailure> {
     let installed = Arc::new(AtomicBool::new(false));
     let completed = installed.clone();
@@ -434,15 +448,34 @@ pub fn harden_privileged(
                 })),
                 &mut external_token,
             )?;
-            zephium_engine::install_privileged_environment_registration(
-                label,
-                &environment,
-                on_runtime_update,
-            )?;
-            let mut browser = 0_u32;
-            // An id left unread records nothing, which invalidates the record.
-            let _ = core.BrowserProcessId(&mut browser);
-            crate::privileged_runtime_windows::record_browser_process(browser);
+            match environment_owner {
+                PrivilegedEnvironment::Own(on_runtime_update) => {
+                    zephium_engine::install_privileged_environment_registration(
+                        label,
+                        &environment,
+                        on_runtime_update,
+                    )?;
+                    let mut browser = 0_u32;
+                    // An id left unread records nothing, which invalidates the record.
+                    let _ = core.BrowserProcessId(&mut browser);
+                    crate::privileged_runtime_windows::record_browser_process(browser);
+                }
+                PrivilegedEnvironment::Joined(owner) => {
+                    // A browser this run's record and exit proof do not
+                    // cover must never host privileged chrome.
+                    let mut browser = 0_u32;
+                    core.BrowserProcessId(&mut browser)?;
+                    if browser == 0
+                        || zephium_engine::privileged_environment_process(owner) != Some(browser)
+                    {
+                        return Err(windows::core::Error::new(
+                            windows::Win32::Foundation::E_ACCESSDENIED,
+                            "privileged WebView2 did not join its registered browser process",
+                        )
+                        .into());
+                    }
+                }
+            }
             Ok(())
         })();
         if let Err(error) = result {
@@ -507,6 +540,58 @@ pub fn set_caption_suppressed(window: &WebviewWindow, suppressed: bool) {
 /// Keeps the caption out of a window the person made fullscreen themselves.
 pub fn set_caption_window_fullscreen(window: &WebviewWindow, fullscreen: bool) {
     caption::set_suppressed(window, caption::Suppression::Window, fullscreen);
+}
+
+pub(crate) fn set_window_fullscreen(window: &WebviewWindow, enter: bool) -> tauri::Result<()> {
+    with_fullscreen_border(
+        enter,
+        || window.set_fullscreen(enter),
+        |suppressed| set_fullscreen_border(window, suppressed),
+    )
+}
+
+fn with_fullscreen_border<E>(
+    enter: bool,
+    change_fullscreen: impl FnOnce() -> Result<(), E>,
+    mut suppress_border: impl FnMut(bool),
+) -> Result<(), E> {
+    if enter {
+        suppress_border(true);
+    }
+    let result = change_fullscreen();
+    // Restore the default on a successful exit or a failed entry.
+    if enter != result.is_ok() {
+        suppress_border(false);
+    }
+    result
+}
+
+fn set_fullscreen_border(window: &WebviewWindow, suppressed: bool) {
+    use windows::Win32::Foundation::COLORREF;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
+
+    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
+    const DWMWA_COLOR_DEFAULT: u32 = 0xffff_ffff;
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let color = COLORREF(if suppressed {
+        DWMWA_COLOR_NONE
+    } else {
+        DWMWA_COLOR_DEFAULT
+    });
+    // Windows 11 can draw an accent border over a borderless fullscreen window.
+    // Older Windows versions reject this attribute; fullscreen can still proceed.
+    // SAFETY: hwnd identifies the live window and DWM copies the COLORREF.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            (&color as *const COLORREF).cast(),
+            size_of::<COLORREF>() as u32,
+        )
+    };
 }
 
 // Undecorated windows lose DWM rounding unless asked for explicitly.
@@ -809,6 +894,15 @@ impl PresentationChrome for ChromeAdapter {
     ) -> ChromePresentationDispatch {
         crate::apply_chrome_presentation(&self.window, presentation, done)
     }
+
+    fn apply_mini_presentation(
+        &self,
+        window: u64,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::mini::apply_presentation(self.window.app_handle(), window, presentation, done)
+    }
 }
 
 pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
@@ -818,3 +912,49 @@ pub fn content_size(_window: &WebviewWindow) -> Option<Size> {
 #[cfg(test)]
 #[path = "windows_startup_tests.rs"]
 mod startup_tests;
+
+#[cfg(test)]
+mod fullscreen_border_tests {
+    use super::with_fullscreen_border;
+    use std::cell::RefCell;
+
+    #[test]
+    fn restores_default_border_when_the_window_is_windowed() {
+        #[derive(Debug, PartialEq, Eq)]
+        enum Step {
+            HideBorder,
+            ChangeFullscreen,
+            RestoreBorder,
+        }
+        use Step::*;
+
+        for (enter, result, expected) in [
+            (true, Ok(()), &[HideBorder, ChangeFullscreen][..]),
+            (
+                true,
+                Err(()),
+                &[HideBorder, ChangeFullscreen, RestoreBorder],
+            ),
+            (false, Ok(()), &[ChangeFullscreen, RestoreBorder]),
+            (false, Err(()), &[ChangeFullscreen]),
+        ] {
+            let steps = RefCell::new(Vec::new());
+            let returned = with_fullscreen_border(
+                enter,
+                || {
+                    steps.borrow_mut().push(ChangeFullscreen);
+                    result
+                },
+                |suppressed| {
+                    steps.borrow_mut().push(if suppressed {
+                        HideBorder
+                    } else {
+                        RestoreBorder
+                    });
+                },
+            );
+            assert_eq!(returned, result);
+            assert_eq!(steps.into_inner(), expected);
+        }
+    }
+}

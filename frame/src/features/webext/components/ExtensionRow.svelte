@@ -9,6 +9,7 @@
   import Switch from "$shared/ui/Switch";
   import * as m from "$shared/i18n/messages";
   import SiteAccessEditor from "./SiteAccessEditor.svelte";
+  import { untrack } from "svelte";
 
   let { extension }: { extension: WebExtensionView } = $props();
   let removing = $state(false);
@@ -58,6 +59,13 @@
       : []),
     { kind: "item", id: "remove", label: m.webext_remove(), danger: true },
   ]);
+
+  // Remove… chosen from the extension's toolbar button asks here.
+  $effect(() => {
+    if (!webext.isRemovalRequested(extension.id)) return;
+    untrack(() => webext.settleRemovalRequest());
+    removing = true;
+  });
 
   function select(id: string) {
     if (id === "options") void webext.openOptions(extension.id);

@@ -18,8 +18,8 @@ vi.mock("$domain/resources", async (original) => ({
     `data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7#${picture.digest}`,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     workCall: native.call,
     mediaAdmitRemote: native.admit,
     resourceCall: native.resource,

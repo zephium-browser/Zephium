@@ -1,5 +1,72 @@
 use super::*;
 
+struct VaultOnlyCleanup {
+    fails: std::sync::atomic::AtomicBool,
+    remnant: std::sync::atomic::AtomicBool,
+}
+impl crate::profile_cleanup::ProfileCleanup for VaultOnlyCleanup {
+    fn release(&self, _: ProfileId, done: crate::profile_cleanup::CleanupDone) -> bool {
+        let success = !self.fails.load(std::sync::atomic::Ordering::Acquire);
+        if success {
+            self.remnant
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        done(success);
+        true
+    }
+}
+
+#[test]
+fn recovered_vault_only_remnants_require_present_successful_cleanup_before_journal_completion() {
+    let store = Arc::new(FakeStore::default());
+    let (mut initial, _, _) = setup_with(store.clone());
+    initial.handle(Command::Bootstrap);
+    initial.persist();
+    drop(initial);
+    let profile = ProfileId::from(89_400);
+    store
+        .pending_deletions
+        .lock()
+        .unwrap()
+        .push(PendingProfileDeletion {
+            profile,
+            native_erasure_verified: true,
+        });
+    store
+        .finalize_outcomes
+        .lock()
+        .unwrap()
+        .push_back(ProfileDeletionFinalizeOutcome::Completed);
+    let cleanup = Arc::new(VaultOnlyCleanup {
+        fails: std::sync::atomic::AtomicBool::new(true),
+        remnant: std::sync::atomic::AtomicBool::new(true),
+    });
+    let (mut missing, engine, _) = setup_with(store.clone());
+    missing.profile_cleanup = None;
+    missing.handle(Command::Bootstrap);
+    assert_eq!(store.pending_deletions.lock().unwrap().len(), 1);
+    assert!(engine.erasure_requests().is_empty());
+    assert!(!store.events.lock().unwrap().contains(&"finalize-delete"));
+    drop(missing);
+    let (mut restarted, engine, _) = setup_with(store.clone());
+    restarted.profile_cleanup = Some(cleanup.clone());
+    restarted.handle(Command::Bootstrap);
+    assert_eq!(store.pending_deletions.lock().unwrap().len(), 1);
+    assert!(cleanup.remnant.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!store.events.lock().unwrap().contains(&"finalize-delete"));
+    cleanup
+        .fails
+        .store(false, std::sync::atomic::Ordering::Release);
+    let generation = restarted.profile_deletion.states[&profile].retry_generation;
+    restarted.handle(Command::ProfileDeletionRetry {
+        profile,
+        generation,
+    });
+    assert!(!cleanup.remnant.load(std::sync::atomic::Ordering::Acquire));
+    assert!(store.pending_deletions.lock().unwrap().is_empty());
+    assert!(engine.erasure_requests().is_empty());
+}
+
 fn insert_inactive_profile_tab(
     shell: &mut Shell,
     profile: ProfileId,
