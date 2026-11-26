@@ -104,8 +104,9 @@
     if (held?.pointerId === event.pointerId) held = null;
   }
 
-  function choose(id: string) {
-    if (moved) {
+  function choose(event: MouseEvent, id: string) {
+    if (held) return;
+    if (moved && event.detail > 0) {
       moved = false;
       return;
     }
@@ -161,7 +162,7 @@
         onpointerup={up}
         onlostpointercapture={cancel}
         onkeydown={(event) => keydown(event, index)}
-        onclick={() => choose(space.id)}
+        onclick={(event) => choose(event, space.id)}
       >
         <SpaceGlyph icon={space.icon} color={space.color} size={16} />
         <span class="switch-name">{space.name}</span>
