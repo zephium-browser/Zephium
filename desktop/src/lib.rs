@@ -1523,9 +1523,21 @@ fn offer_startup_recovery(
                     let result = match recovered {
                         Ok(Ok(Some((store, data_dir, attempt)))) => {
                             dispatch.manage(StartupHealth::new(attempt));
-                            finish_browser_setup(&dispatch, store, data_dir, advisories,
-                                #[cfg(target_os = "windows")] environments,
-                            )
+                            #[cfg(target_os = "windows")]
+                            {
+                                prepare_runtime_then_finish_browser_setup(
+                                    dispatch.clone(),
+                                    store,
+                                    data_dir,
+                                    advisories,
+                                    environments,
+                                );
+                                Ok(())
+                            }
+                            #[cfg(not(target_os = "windows"))]
+                            {
+                                finish_browser_setup(&dispatch, store, data_dir, advisories)
+                            }
                         }
                         Ok(Ok(None)) => return,
                         Ok(Err(error)) => Err(error.into()),
@@ -2409,6 +2421,47 @@ fn prepare_privileged_runtime_directories(
         main: prepared.main,
         panel: prepared.panel,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_runtime_then_finish_browser_setup(
+    app: tauri::AppHandle,
+    store: Arc<SqliteStore>,
+    data_dir: std::path::PathBuf,
+    runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    setup_privileged_environments: Arc<AtomicU8>,
+) {
+    tauri::async_runtime::spawn(async move {
+        let preparation_root = data_dir.clone();
+        let prepared = tauri::async_runtime::spawn_blocking(move || {
+            prepare_privileged_runtime_directories(&preparation_root)
+        })
+        .await;
+        let dispatch = app.clone();
+        let scheduled = app.run_on_main_thread(move || {
+            let result: SetupResult = match prepared {
+                Ok(Ok(privileged_runtime)) => finish_browser_setup(
+                    &dispatch,
+                    store,
+                    data_dir,
+                    runtime_security_advisories,
+                    privileged_runtime,
+                    setup_privileged_environments,
+                ),
+                Ok(Err(error)) => Err(error.into()),
+                Err(error) => Err(std::io::Error::other(format!(
+                    "privileged runtime preparation worker failed: {error}"
+                ))
+                .into()),
+            };
+            if let Err(error) = result {
+                request_setup_failure(&dispatch, error);
+            }
+        });
+        if scheduled.is_err() {
+            request_orderly_terminal_failure(&app);
+        }
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -7313,6 +7366,7 @@ fn finish_browser_setup(
     store: Arc<SqliteStore>,
     data_dir: std::path::PathBuf,
     runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
+    #[cfg(target_os = "windows")] privileged_runtime: PrivilegedRuntimeDirectories,
     #[cfg(target_os = "windows")] setup_privileged_environments: Arc<AtomicU8>,
 ) -> SetupResult {
     let shutdown = app
@@ -7341,8 +7395,6 @@ fn finish_browser_setup(
     #[cfg(not(feature = "adblock-qa"))]
     account::install(app);
 
-    #[cfg(target_os = "windows")]
-    let privileged_runtime = prepare_privileged_runtime_directories(&data_dir)?;
     #[cfg(target_os = "windows")]
     let runtime_security_advisories =
         runtime_security_advisories.with_optional(privileged_runtime_windows::cleanup_advisory());
@@ -8982,13 +9034,20 @@ pub fn run() {
                 }
                 app.manage(StartupHealth::new(startup?));
                 if continuation.admit() {
+                    #[cfg(target_os = "windows")]
+                    prepare_runtime_then_finish_browser_setup(
+                        app.handle().clone(),
+                        store,
+                        data_dir,
+                        runtime_security_advisories,
+                        setup_privileged_environments,
+                    );
+                    #[cfg(not(target_os = "windows"))]
                     finish_browser_setup(
                         app.handle(),
                         store,
                         data_dir,
                         runtime_security_advisories,
-                        #[cfg(target_os = "windows")]
-                        setup_privileged_environments,
                     )?;
                 }
                 Ok(())
@@ -9073,6 +9132,36 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_runtime_preparation_runs_off_thread_before_browser_setup() {
+        let production = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let worker = production
+            .split("fn prepare_runtime_then_finish_browser_setup(")
+            .nth(1)
+            .and_then(|body| {
+                body.split("fn cleanup_privileged_runtime_after_exit")
+                    .next()
+            })
+            .expect("privileged runtime worker");
+        let blocking = worker.find("spawn_blocking").expect("blocking worker");
+        let awaited = worker.find(".await").expect("worker completion");
+        let main_thread = worker
+            .find("run_on_main_thread")
+            .expect("main-thread browser setup");
+        let finish = worker
+            .find("finish_browser_setup(")
+            .expect("browser setup after preparation");
+        assert!(blocking < awaited && awaited < main_thread && main_thread < finish);
+
+        let setup = production
+            .split("fn finish_browser_setup(")
+            .nth(1)
+            .and_then(|body| body.split("fn navigation_lock(").next())
+            .expect("browser setup body");
+        assert!(!setup.contains("prepare_privileged_runtime_directories"));
+        assert!(setup.contains("privileged_runtime.main.clone()"));
+    }
+
     #[test]
     fn recovery_wait_suspends_an_elapsed_ui_startup_deadline() {
         assert!(!super::startup_watchdog_should_fail(true, false, true));
