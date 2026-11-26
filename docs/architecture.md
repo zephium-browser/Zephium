@@ -77,6 +77,17 @@ Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
 `platform/` and `host/` modules, with application policy expressed through ports.
 
+**Regular browser windows.** macOS can open another full browser window in the
+current profile with File → New Window (`⌘N`). These windows share the shell,
+profile, and tab collection while each keeps its own active tab, layout, and
+native content stage. The `main` window remains the launch window; additional
+trusted chrome windows use `browser-<id>` labels and each has its own startup
+gate. `tauri-plugin-single-instance` still forwards a second process launch to
+the running app; it does not handle ordinary in-process window creation.
+`desktop/src/browser_window.rs` owns native construction and lifetime, while
+`zephium-app` admits window lifecycle events and focuses the corresponding
+logical window.
+
 **Mini windows.** A mini window holds one page outside the sidebar. Links
 from other apps open in one by default (`tabs.external-position = mini`);
 `window.newMini` opens the launcher in mini mode, which offers only sites, and

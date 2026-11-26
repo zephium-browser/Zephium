@@ -3,7 +3,10 @@ import { mount, flushSync } from "svelte";
 import App from "$app/browser/BrowserApp.svelte";
 
 try {
-  if (getCurrentWindow().label !== "main") throw new Error("unexpected native surface");
+  const label = getCurrentWindow().label;
+  if (label !== "main" && !/^browser-[1-9]\d{0,19}$/.test(label)) {
+    throw new Error("unexpected native surface");
+  }
   const target = document.getElementById("root");
   if (!(target instanceof HTMLElement)) throw new Error("trusted UI root is unavailable");
   mount(App, { target });

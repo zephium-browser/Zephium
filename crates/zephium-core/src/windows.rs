@@ -24,6 +24,7 @@ pub struct Window {
     pub mode: Mode,
     pub size: Size,
     pub metrics: Metrics,
+    pub visible: bool,
     /// An admitted request to keep the hidden card raised, not native completion.
     pub sidebar_peek: bool,
     pub active: Option<ItemId>,
@@ -58,6 +59,7 @@ impl Windows {
                 mode: Mode::Sidebar,
                 size,
                 metrics: Metrics::default(),
+                visible: true,
                 sidebar_peek: false,
                 active: None,
                 splits: None,
@@ -100,6 +102,43 @@ impl Windows {
         self.map.get_mut(&id)
     }
 
+    pub fn focus(&mut self, id: WindowId) -> bool {
+        if !self.map.contains_key(&id) {
+            return false;
+        }
+        self.focused = Some(id);
+        true
+    }
+
+    /// Removes a native window, choosing the newest remaining window if it
+    /// owned focus. Unlike `remove`, this also supports closing the focused
+    /// browser window.
+    pub fn close(&mut self, id: WindowId) -> Option<Window> {
+        let removed = self.map.remove(&id)?;
+        self.order.retain(|window| *window != id);
+        if self.focused == Some(id) {
+            let browser = |window: &Window| window.kind != WindowKind::Mini;
+            self.focused = self
+                .order
+                .iter()
+                .rev()
+                .copied()
+                .find(|window| {
+                    self.map
+                        .get(window)
+                        .is_some_and(|candidate| browser(candidate) && candidate.visible)
+                })
+                .or_else(|| {
+                    self.order
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|window| self.map.get(window).is_some_and(browser))
+                });
+        }
+        Some(removed)
+    }
+
     pub fn focused(&self) -> Option<&Window> {
         self.focused.and_then(|id| self.map.get(&id))
     }
@@ -140,5 +179,31 @@ mod tests {
         );
         assert_eq!(windows.iter().count(), 1);
         assert_eq!(windows.focused().map(|window| window.id), Some(main));
+    }
+
+    #[test]
+    fn closing_the_focused_window_selects_the_newest_browser_window() {
+        let mut windows = Windows::default();
+        let profile = ProfileId::generate();
+        let space = SpaceId::generate();
+        let first = windows.create(WindowKind::Main, profile, space, Size::new(800.0, 600.0));
+        let second = windows.create(WindowKind::Main, profile, space, Size::new(900.0, 700.0));
+        assert_eq!(windows.close(second).map(|window| window.id), Some(second));
+        assert_eq!(windows.focused().map(|window| window.id), Some(first));
+    }
+
+    #[test]
+    fn closing_the_focused_window_skips_a_newer_minimized_window() {
+        let mut windows = Windows::default();
+        let profile = ProfileId::generate();
+        let space = SpaceId::generate();
+        let first = windows.create(WindowKind::Main, profile, space, Size::new(800.0, 600.0));
+        let minimized = windows.create(WindowKind::Main, profile, space, Size::new(900.0, 700.0));
+        windows.get_mut(minimized).unwrap().visible = false;
+        let focused = windows.create(WindowKind::Main, profile, space, Size::new(900.0, 700.0));
+
+        windows.close(focused);
+
+        assert_eq!(windows.focused().map(|window| window.id), Some(first));
     }
 }

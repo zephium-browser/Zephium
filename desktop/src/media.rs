@@ -292,8 +292,8 @@ fn respond(
         .unwrap_or_else(|_| tauri::http::Response::new(Cow::Borrowed(b"" as &[u8])))
 }
 
-/// `zephium-media://localhost/<profile>/<digest>[?w=<px>]` from privileged main
-/// chrome only. Serves admitted image blobs, scaled down to `w` when the
+/// `zephium-media://localhost/<profile>/<digest>[?w=<px>]` from privileged
+/// browser chrome only. Serves admitted image blobs, scaled down to `w` when the
 /// picture is wider and one is asked for; every other request is 404. Work
 /// happens off the main thread.
 pub(crate) fn serve(
@@ -301,7 +301,9 @@ pub(crate) fn serve(
     request: tauri::http::Request<Vec<u8>>,
     responder: tauri::UriSchemeResponder,
 ) {
-    if ctx.webview_label() != super::MAIN_LABEL {
+    if ctx.webview_label() != super::MAIN_LABEL
+        && super::browser_window::window_of(ctx.webview_label()).is_none()
+    {
         return responder.respond(respond(403, Vec::new(), "text/plain"));
     }
     let app = ctx.app_handle().clone();

@@ -36,6 +36,35 @@ fn run_commands_drive_tabs_zoom_and_engine() {
 }
 
 #[test]
+fn new_browser_window_gets_its_own_focus_and_closes_without_closing_the_shell() {
+    let (mut shell, _engine, _screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = shell.windows.focused().unwrap().id;
+
+    let opened = shell.handle_operation(Command::Run("window.new".into()));
+    assert_eq!(opened.outcome, OperationOutcome::Deferred);
+    assert_eq!(opened.reason, OperationReason::NativeWorkPending);
+    let second = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != first)
+        .expect("logical window was admitted");
+    assert_eq!(shell.windows.focused().unwrap().id, first);
+
+    shell.handle(Command::BrowserWindowAttached {
+        window: second,
+        size: Size::new(1100.0, 720.0),
+    });
+    assert_eq!(shell.windows.focused().unwrap().id, second);
+    assert!(shell.windows.get(second).unwrap().active.is_some());
+
+    shell.handle(Command::BrowserWindowClosed(second));
+    assert_eq!(shell.windows.iter().count(), 1);
+    assert_eq!(shell.windows.focused().unwrap().id, first);
+}
+
+#[test]
 fn setting_operation_reports_store_admission_without_claiming_durability() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, _screen) = setup_with(store.clone());

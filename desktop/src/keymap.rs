@@ -56,14 +56,16 @@ impl Keymap {
             .and_then(|store| store.app_setting(SETTING))
             .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
             .unwrap_or_default();
-        *write(&keymap.overrides) = stored
-            .into_iter()
-            .filter(|(id, value)| {
-                commands::get(id).is_some_and(|spec| spec.customizable())
-                    && value.len() <= MAX_ACCELERATOR_BYTES
-            })
-            .take(commands::MAX_OVERRIDES)
-            .collect();
+        *write(&keymap.overrides) = validated_overrides(
+            stored
+                .into_iter()
+                .filter(|(id, value)| {
+                    commands::get(id).is_some_and(|spec| spec.customizable())
+                        && value.len() <= MAX_ACCELERATOR_BYTES
+                })
+                .take(commands::MAX_OVERRIDES)
+                .collect(),
+        );
         keymap.refresh_tables();
         keymap
     }
@@ -141,7 +143,10 @@ impl Keymap {
                     // the key after the focused page has, and a page keystroke
                     // hides the pointer until the mouse moves.
                     command.group == Group::Keys
-                        || matches!(command.id, "tab.recent.next" | "tab.recent.previous")
+                        || matches!(
+                            command.id,
+                            "window.new" | "tab.recent.next" | "tab.recent.previous"
+                        )
                 })
                 .filter(|command| self.offers(command.id))
                 .filter_map(|command| {
@@ -256,6 +261,23 @@ impl Keymap {
             EVENT_KEYMAP_CHANGED,
             &KeymapChanged { version: 1 },
         );
+    }
+}
+
+fn validated_overrides(mut overrides: HashMap<String, String>) -> HashMap<String, String> {
+    loop {
+        let resolved = commands::resolve(&overrides);
+        let conflicts: Vec<_> = overrides
+            .iter()
+            .filter(|(id, value)| commands::validate_binding(&resolved, id, Some(value)).is_err())
+            .map(|(id, _)| id.clone())
+            .collect();
+        if conflicts.is_empty() {
+            return overrides;
+        }
+        for id in conflicts {
+            overrides.remove(&id);
+        }
     }
 }
 
@@ -596,6 +618,41 @@ mod tests {
             #[cfg(not(target_os = "macos"))]
             assert!(keymap.engine_table().iter().any(|s| s.id == id));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn new_window_is_taken_before_webkit_receives_command_n() {
+        let keymap = Keymap::default();
+        keymap.refresh_tables();
+        assert!(read(&keymap.key_table)
+            .iter()
+            .any(|(_, id)| *id == "window.new"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn legacy_new_tab_command_n_override_falls_back_to_default() {
+        let mut overrides = HashMap::new();
+        overrides.insert("tab.new".into(), "CmdOrCtrl+N".into());
+
+        let overrides = validated_overrides(overrides);
+        assert!(!overrides.contains_key("tab.new"));
+        let resolved = commands::resolve(&overrides);
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|command| command.id == "window.new")
+                .and_then(|command| command.accelerator.as_deref()),
+            Some("Cmd+N")
+        );
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|command| command.id == "tab.new")
+                .and_then(|command| command.accelerator.as_deref()),
+            Some("Cmd+T")
+        );
     }
 
     #[test]

@@ -1044,6 +1044,7 @@ impl Shell {
         };
         match id {
             "tab.new" => self.operation_open(),
+            "window.new" => self.open_browser_window(),
             "window.newPrivate" => self.operation_enter_private(),
             // The desktop opens the launcher for a mini window instead; this
             // runs only while the private window is in front, whose pages

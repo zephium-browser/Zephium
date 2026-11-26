@@ -219,12 +219,10 @@ fn toast_tag(identifier: &str) -> String {
 /// One of Zephium's windows is in front, so chrome's own notice is enough.
 pub(crate) fn in_front(app: &tauri::AppHandle) -> bool {
     use tauri::Manager;
-    [crate::MAIN_LABEL, crate::overlay::PANEL_LABEL]
-        .iter()
-        .any(|label| {
-            app.get_webview_window(label)
-                .is_some_and(|window| window.is_focused().unwrap_or(false))
-        })
+    crate::browser_window::focused(app).is_some()
+        || app
+            .get_webview_window(crate::overlay::PANEL_LABEL)
+            .is_some_and(|window| window.is_focused().unwrap_or(false))
 }
 
 /// `alert` is the shell's `focus.alert=` value.

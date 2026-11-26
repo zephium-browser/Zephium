@@ -131,6 +131,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         Group::App,
     ),
     command("tab.new", "New Tab", Keys::same("CmdOrCtrl+T"), Group::File),
+    command("window.new", "New window", mac_only("Cmd+N"), Group::File),
     command(
         "window.newPrivate",
         "New Private Window",
@@ -839,13 +840,13 @@ mod tests {
     #[test]
     fn overrides_replace_and_remove_shortcuts() {
         let mut overrides = HashMap::new();
-        overrides.insert("tab.new".into(), "CmdOrCtrl+N".into());
+        overrides.insert("tab.new".into(), "CmdOrCtrl+U".into());
         overrides.insert("tab.close".into(), "".into());
         overrides.insert("bogus.id".into(), "CmdOrCtrl+X".into());
 
         let resolved = resolve_on(&overrides, Platform::Mac);
         let find = |id: &str| resolved.iter().find(|c| c.id == id).unwrap();
-        assert_eq!(find("tab.new").accelerator.as_deref(), Some("Cmd+N"));
+        assert_eq!(find("tab.new").accelerator.as_deref(), Some("Cmd+U"));
         assert!(find("tab.new").customized);
         assert_eq!(find("tab.close").accelerator, None);
         assert!(find("tab.close").customized);
@@ -921,6 +922,9 @@ mod tests {
 
     #[test]
     fn the_private_window_keys_sit_beside_new_private_and_leave_the_system_cycle_alone() {
+        let new = get("window.new").expect("new regular window command");
+        assert_eq!(new.keys.on(Platform::Mac), Some("Cmd+N"));
+        assert_eq!(new.keys.on(Platform::Other), None);
         let new = get("window.newPrivate").expect("new private command");
         assert_eq!(new.keys, Keys::same("CmdOrCtrl+Shift+N"));
         let toggle = get("window.togglePrivate").expect("toggle command");

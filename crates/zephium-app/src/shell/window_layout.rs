@@ -113,7 +113,7 @@ impl Shell {
         // `relayout`, so the first visible layout remains correctly ordered
         // after native policy registration and view admission.
         let native_policy_available = self.blocker.native_policy_available(win.profile);
-        if !self.window_visible || !native_policy_available || privileged_overlay_active {
+        if !win.visible || !native_policy_available || privileged_overlay_active {
             l.content = None;
         }
         // The Work pane is the one content rect that coexists with full-window
@@ -121,7 +121,7 @@ impl Shell {
         // chrome draws around the applied rect. Modal prompts still win.
         let pane_admitted = browser_page_active
             && !self.page_permissions.is_visible()
-            && self.window_visible
+            && win.visible
             && native_policy_available;
         let work_pane = self.work_pane_layout(pane_admitted && present);
         if let Some(pane) = work_pane.as_ref().filter(|pane| pane.presented) {
@@ -137,7 +137,7 @@ impl Shell {
         // The content stage itself is transparent and presentation-gated, so
         // it can sit above this real UI without painting an artificial box.
         let chrome_present = !privileged_overlay_active
-            && self.window_visible
+            && win.visible
             && native_policy_available
             && tree.as_ref().is_some_and(|tree| {
                 tree.tabs().iter().any(|id| {
