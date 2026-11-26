@@ -3379,7 +3379,7 @@
   "profiles_save": "Enregistrer",
   "profiles_delete_open": "Supprimer le profil…",
   "profiles_delete_title": "Supprimer « {name} » ?",
-  "profiles_delete_body": "Son historique, ses cookies et données de sites, ses onglets, ses extensions et son Travail sont définitivement supprimés de cet appareil. Votre compte Zephium n’est pas affecté.",
+  "profiles_delete_body": "Ses marque-pages, son historique, ses cookies et données de sites, ses onglets, ses extensions et son Travail sont définitivement supprimés de cet appareil. Votre compte Zephium n’est pas affecté.",
   "profiles_delete_confirm": "Supprimer le profil",
   "profiles_delete_default": "Le profil par défaut ne peut pas être supprimé.",
   "profiles_delete_current": "Passez cette fenêtre sur un autre profil pour supprimer celui-ci.",

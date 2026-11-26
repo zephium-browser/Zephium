@@ -21,6 +21,41 @@ fn symbol(color: u8, symbol: u8) -> ProfileAvatar {
     }
 }
 
+#[test]
+fn allocated_profile_is_not_counted_again_as_pending_creation() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let limit = zephium_core::session::MAX_SESSION_PROFILES;
+    let pending = ProfileId::from(10_000);
+    assert!(shell.profiles.insert(zephium_core::profiles::Profile {
+        id: pending,
+        name: "Pending".into(),
+        kind: zephium_core::profiles::ProfileKind::Named,
+    }));
+    for index in 1..(limit - 2) {
+        assert!(shell.profiles.insert(zephium_core::profiles::Profile {
+            id: ProfileId::from(10_000 + index as u128),
+            name: format!("Profile {index}"),
+            kind: zephium_core::profiles::ProfileKind::Named,
+        }));
+    }
+    let generation = 11;
+    shell.pending_profile_creations.insert(generation, None);
+    shell.pending_profile_rollbacks.insert(
+        generation,
+        PendingProfileRollback {
+            profile: pending,
+            space: SpaceId::from(10_000),
+            avatar: ProfileAvatar::initial(pending),
+            photo: None,
+            publication_state: Arc::new(std::sync::atomic::AtomicU8::new(1)),
+            publication_result: Arc::new((Mutex::new(Some(true)), std::sync::Condvar::new())),
+        },
+    );
+
+    assert_eq!(shell.profiles.iter().count(), limit - 1);
+    assert_eq!(shell.profile_slots_used(), limit - 1);
+}
+
 fn create(shell: &mut Shell, name: &str) -> ProfileId {
     let before: Vec<_> = shell.profiles.iter().map(|profile| profile.id).collect();
     let created = shell.handle_operation(Command::CreateProfile {
@@ -297,6 +332,25 @@ fn pending_profile_publication_does_not_block_other_shell_commands() {
         .profiles
         .iter()
         .any(|profile| profile.name == "Still responsive"));
+    let pending_profile = shell
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "Async")
+        .expect("allocated profile is present in memory")
+        .id;
+    assert!(!shell
+        .profiles_view()
+        .unwrap()
+        .profiles
+        .iter()
+        .any(|profile| profile.id == pending_profile.to_string()));
+    shell.persist();
+    assert!(store.saved.lock().unwrap().as_ref().is_some_and(|session| {
+        !session
+            .profiles
+            .iter()
+            .any(|profile| profile.id == pending_profile)
+    }));
 
     release_tx.send(()).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
@@ -314,10 +368,18 @@ fn pending_profile_publication_does_not_block_other_shell_commands() {
         operations.lock().unwrap()[0].outcome,
         OperationOutcome::Applied
     );
+    assert!(shell.persistence.persist_first_dirty.is_some());
+    shell.persist();
+    assert!(store.saved.lock().unwrap().as_ref().is_some_and(|session| {
+        session
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "Still responsive")
+    }));
 }
 
 #[test]
-fn shutdown_does_not_reject_a_profile_whose_publication_is_already_in_flight() {
+fn shutdown_reports_success_for_a_profile_whose_publication_is_already_in_flight() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store.clone());
     shell.handle(Command::Bootstrap);
@@ -365,7 +427,55 @@ fn shutdown_does_not_reject_a_profile_whose_publication_is_already_in_flight() {
         ack,
     });
     assert!(result.recv().is_ok());
-    assert!(operations.lock().unwrap().is_empty());
+    let completions = operations.lock().unwrap();
+    assert_eq!(completions.len(), 1);
+    assert_eq!(completions[0].operation_id, "shutdown-profile-create");
+    assert_eq!(completions[0].outcome, OperationOutcome::Applied);
+}
+
+#[test]
+fn shutdown_timeout_keeps_an_uncertain_profile_out_of_the_ordinary_snapshot() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _engine, _screen, operations) = setup_with_operation_log(store.clone());
+    shell.handle(Command::Bootstrap);
+    let queue = crate::actor::CommandQueue::new();
+    shell.self_queue = Some(queue.clone());
+    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    *store.checked_save_started.lock().unwrap() = Some(started_tx);
+    *store.checked_save_release.lock().unwrap() = Some(release_rx);
+    shell.handle(Command::Operation {
+        operation_id: "uncertain-profile-create".into(),
+        command: Box::new(Command::CreateProfile {
+            name: "Uncertain".into(),
+            avatar: symbol(2, 5),
+            photo: None,
+            bookmark_folder: None,
+            switch: false,
+        }),
+    });
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("checked publication started");
+
+    let (ack, result) = std::sync::mpsc::sync_channel(1);
+    shell.handle(Command::Shutdown {
+        deadline: std::time::Instant::now() + std::time::Duration::from_millis(20),
+        ack,
+    });
+
+    assert!(result.recv().is_ok());
+    assert_eq!(
+        operations.lock().unwrap()[0].outcome,
+        OperationOutcome::Deferred
+    );
+    assert!(store.saved.lock().unwrap().as_ref().is_some_and(|session| {
+        !session
+            .profiles
+            .iter()
+            .any(|profile| profile.name == "Uncertain")
+    }));
+    release_tx.send(()).unwrap();
 }
 
 #[test]

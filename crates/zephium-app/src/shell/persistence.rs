@@ -80,17 +80,9 @@ impl Shell {
         if !self.bootstrapped {
             return;
         }
-        let (space, active, splits) = self.persisted_scope();
-        let state = session::snapshot_with_recently_closed(
-            &self.profiles,
-            &self.spaces,
-            &self.items,
-            space,
-            active,
-            splits,
-            &self.recently_closed,
-        );
-        self.store.save_session(state);
+        if let Some(state) = self.current_ordinary_session_snapshot() {
+            self.store.save_session(state);
+        }
     }
 
     pub(super) fn publish_current_session_checked(&self) -> bool {
@@ -114,5 +106,30 @@ impl Shell {
             splits,
             &self.recently_closed,
         ))
+    }
+
+    fn current_ordinary_session_snapshot(&self) -> Option<zephium_core::session::SessionState> {
+        let mut state = self.current_session_snapshot()?;
+        let pending: std::collections::HashSet<_> = self
+            .pending_profile_rollbacks
+            .values()
+            .map(|pending| pending.profile)
+            .collect();
+        if pending.is_empty() {
+            return Some(state);
+        }
+        state
+            .profiles
+            .retain(|profile| !pending.contains(&profile.id));
+        state
+            .spaces
+            .retain(|space| !pending.contains(&space.profile));
+        state
+            .shared_bookmark_folders
+            .retain(|folder| !pending.contains(&folder.profile));
+        state
+            .recently_closed
+            .retain(|entry| !pending.contains(&entry.profile));
+        Some(state)
     }
 }

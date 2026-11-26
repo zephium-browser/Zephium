@@ -1858,7 +1858,7 @@ pub static META: &[Migration] = &[
         up: |tx| {
             tx.execute_batch(
                 "CREATE TABLE bookmarks (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     id INTEGER PRIMARY KEY,
                      parent_id INTEGER REFERENCES bookmarks(id) ON DELETE CASCADE,
                      position INTEGER NOT NULL,
                      title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 512),
@@ -1886,7 +1886,76 @@ pub static META: &[Migration] = &[
             )
         },
     },
+    Migration {
+        version: 32,
+        up: migrate_bookmark_ids,
+    },
+    Migration {
+        version: 33,
+        up: |tx| {
+            tx.execute(
+                "UPDATE bookmarks SET title='Favorites'
+                 WHERE id IN (
+                     SELECT pbf.folder_id FROM profile_bookmark_folders pbf
+                     JOIN profiles p ON p.id=pbf.profile_id WHERE p.kind='default'
+                 ) AND parent_id IS NULL AND url IS NULL AND title='Personal'",
+                [],
+            )?;
+            Ok(())
+        },
+    },
+    Migration {
+        version: 34,
+        up: |tx| {
+            tx.execute_batch(
+                "CREATE TABLE bookmark_root_consolidation (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     pending INTEGER NOT NULL CHECK (pending IN (0, 1))
+                 ) STRICT;
+                 INSERT INTO bookmark_root_consolidation(id, pending)
+                 SELECT 1, CASE
+                     WHEN EXISTS(SELECT 1 FROM bookmark_profile_migrations)
+                          AND NOT EXISTS(SELECT 1 FROM profile_bookmark_folders)
+                     THEN 1 ELSE 0 END;",
+            )
+        },
+    },
 ];
+
+fn migrate_bookmark_ids(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute_batch(
+        "PRAGMA defer_foreign_keys=ON;
+         CREATE TEMP TABLE bookmark_folder_backup (
+             profile_id TEXT NOT NULL,
+             folder_id INTEGER NOT NULL,
+             PRIMARY KEY(profile_id, folder_id)
+         ) WITHOUT ROWID;
+         INSERT INTO bookmark_folder_backup(profile_id, folder_id)
+             SELECT profile_id, folder_id FROM profile_bookmark_folders;
+         CREATE TABLE bookmarks_replacement (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             parent_id INTEGER REFERENCES bookmarks_replacement(id) ON DELETE CASCADE,
+             position INTEGER NOT NULL,
+             title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 512),
+             url TEXT CHECK (url IS NULL OR length(CAST(url AS BLOB)) <= 8192),
+             added_at INTEGER NOT NULL
+         ) STRICT;
+         INSERT INTO bookmarks_replacement(id, parent_id, position, title, url, added_at)
+             SELECT id, parent_id, position, title, url, added_at FROM bookmarks ORDER BY id;
+         DROP TABLE bookmarks;
+         ALTER TABLE bookmarks_replacement RENAME TO bookmarks;
+         CREATE INDEX idx_bookmarks_parent ON bookmarks(parent_id, position);
+         CREATE INDEX idx_bookmarks_url ON bookmarks(url) WHERE url IS NOT NULL;
+         INSERT INTO profile_bookmark_folders(profile_id, folder_id)
+             SELECT profile_id, folder_id FROM bookmark_folder_backup;
+         UPDATE bookmarks SET title='Favorites'
+             WHERE id IN (
+                 SELECT pbf.folder_id FROM profile_bookmark_folders pbf
+                 JOIN profiles p ON p.id=pbf.profile_id WHERE p.kind='default'
+             ) AND parent_id IS NULL AND url IS NULL AND title='Personal';
+         DROP TABLE bookmark_folder_backup;",
+    )
+}
 
 fn record_media(tx: &Transaction) -> rusqlite::Result<()> {
     tx.execute_batch(
@@ -2907,6 +2976,9 @@ mod tests {
         (29, 0xe7926065f4d26c22),
         (30, 0xf595_7729_f391_8f11),
         (31, 0x0da9_5c7c_9116_2f16),
+        (32, 0x1484_fbcd_f2df_3a7b),
+        (33, 0x1484_fbcd_f2df_3a7b),
+        (34, 0xcd41_f508_e239_0ff1),
     ];
     const PROFILE_SCHEMA_FINGERPRINTS: &[(i64, u64)] = &[
         (1, 0x10b8_b7a3_094f_23d7),
@@ -2951,6 +3023,193 @@ mod tests {
         (40, 0x7ff9aa66128d00ab),
         (41, 0x98234ca2f9d7e6bb),
     ];
+
+    #[test]
+    fn meta_v32_preserves_bookmarks_and_never_reuses_deleted_folder_ids() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &META[..31]).unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Personal', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmarks(id, parent_id, position, title, url, added_at)
+             VALUES (12, NULL, 0, 'Favorites', NULL, 1),
+                    (13, 12, 0, 'Saved', 'https://saved.example/', 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profile_bookmark_folders(profile_id, folder_id)
+             VALUES ('01J00000000000000000000000', 12)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let saved: String = conn
+            .query_row("SELECT title FROM bookmarks WHERE id=13", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let folder: i64 = conn
+            .query_row(
+                "SELECT folder_id FROM profile_bookmark_folders",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let folder_title: String = conn
+            .query_row("SELECT title FROM bookmarks WHERE id=?1", [folder], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            (saved.as_str(), folder, folder_title.as_str()),
+            ("Saved", 12, "Favorites")
+        );
+
+        let first: i64 = conn
+            .query_row(
+                "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 VALUES (NULL, 1, 'New folder', NULL, 3) RETURNING id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute("DELETE FROM bookmarks WHERE id=?1", [first])
+            .unwrap();
+        let second: i64 = conn
+            .query_row(
+                "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 VALUES (NULL, 1, 'Another folder', NULL, 4) RETURNING id",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(second > first);
+    }
+
+    #[test]
+    fn meta_v33_renames_the_default_bookmark_folder_to_favorites() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &META[..32]).unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Personal', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmarks(id, parent_id, position, title, url, added_at)
+             VALUES (12, NULL, 0, 'Personal', NULL, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profile_bookmark_folders(profile_id, folder_id)
+             VALUES ('01J00000000000000000000000', 12)",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        let title: String = conn
+            .query_row("SELECT title FROM bookmarks WHERE id=12", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "Favorites");
+    }
+
+    #[test]
+    fn meta_v34_preserves_roots_that_already_have_profile_mappings() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &META[..33]).unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Personal', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000001', 'Work', 'named', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+             VALUES (NULL, 0, 'Personal', NULL, 1), (NULL, 1, 'Work', NULL, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO profile_bookmark_folders(profile_id, folder_id)
+             VALUES ('01J00000000000000000000000', 1),
+                    ('01J00000000000000000000001', 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmark_profile_migrations(profile_id)
+             VALUES ('01J00000000000000000000000'),
+                    ('01J00000000000000000000001')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT pending FROM bookmark_root_consolidation WHERE id=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "mapped roots can be intentional user choices"
+        );
+    }
+
+    #[test]
+    fn meta_v34_schedules_consolidation_for_partial_imports_without_mappings() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        apply(&mut conn, &META[..33]).unwrap();
+        conn.execute(
+            "INSERT INTO profiles(id, name, kind, position)
+             VALUES ('01J00000000000000000000000', 'Personal', 'default', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO bookmark_profile_migrations(profile_id)
+             VALUES ('01J00000000000000000000000')",
+            [],
+        )
+        .unwrap();
+
+        apply(&mut conn, META).unwrap();
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT pending FROM bookmark_root_consolidation WHERE id=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
 
     #[test]
     fn upgrades_drop_every_previous_extension_object_and_keep_user_data() {

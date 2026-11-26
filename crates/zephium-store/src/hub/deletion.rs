@@ -60,7 +60,9 @@ impl Hub {
             }
             self.validate_session_transition(&prepared.registry)?;
             self.prepare_shared_bookmarks()?;
-            if !self.bookmark_migration_complete(profile) {
+            if !self.bookmark_migration_complete(profile)
+                && !self.degraded_bookmark_profiles.contains(&profile)
+            {
                 return Ok(ProfileDeletionAuthorizeOutcome::Failed);
             }
             // Only the live, validated deletion request may establish this

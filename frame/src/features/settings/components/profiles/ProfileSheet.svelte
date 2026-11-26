@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { StarIcon } from "@hugeicons/core-free-icons";
   import { untrack } from "svelte";
   import { Dialog } from "bits-ui";
   import type { BookmarkFolderView, ProfileEntryView } from "$shared/ipc/bindings";
@@ -6,6 +7,7 @@
   import * as m from "$shared/i18n/messages";
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
+  import Icon from "$shared/ui/Icon";
   import AvatarPicker, { type AvatarChoice } from "./AvatarPicker.svelte";
 
   let {
@@ -218,17 +220,35 @@
                 />
                 <span>{m.profiles_bookmark_existing()}</span>
               </label>
-              <select
-                aria-label={m.profiles_bookmark_existing()}
-                bind:value={selectedBookmarkFolder}
-                disabled={bookmarkMode !== "existing" ||
-                  !bookmarkFolders.length ||
-                  loadingBookmarkFolders}
-              >
-                {#each bookmarkFolders as folder (folder.id)}
-                  <option value={folder.id}>{folder.title}</option>
-                {/each}
-              </select>
+              <div class="bookmark-folder-select">
+                <Icon icon={StarIcon} size={16} strokeWidth={1.8} />
+                <select
+                  aria-label={m.profiles_bookmark_existing()}
+                  bind:value={selectedBookmarkFolder}
+                  disabled={bookmarkMode !== "existing" ||
+                    !bookmarkFolders.length ||
+                    loadingBookmarkFolders}
+                >
+                  {#each bookmarkFolders as folder (folder.id)}
+                    <option value={folder.id}>{folder.title}</option>
+                  {/each}
+                </select>
+                <svg
+                  class="chevron"
+                  aria-hidden="true"
+                  viewBox="0 0 12 16"
+                  width="11"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                >
+                  <path d="M3 6.5L6 3.5l3 3" />
+                  <path d="M3 9.5l3 3 3-3" />
+                </svg>
+              </div>
             </fieldset>
           {/if}
           {#if failed}<p class="failed" role="alert">{m.profiles_failed()}</p>{/if}
@@ -309,40 +329,63 @@
     gap: 10px;
   }
 
-  .bookmark-choice select {
+  .bookmark-folder-select {
+    position: relative;
+    display: flex;
+    align-items: center;
+    inline-size: calc(100% - 16px);
+    min-inline-size: 0;
+    margin-inline-start: 16px;
+    color: var(--color-muted);
+  }
+
+  .bookmark-folder-select > :global(svg:first-child) {
+    position: absolute;
+    inset-inline-start: var(--control-inset);
+    pointer-events: none;
+  }
+
+  .bookmark-folder-select .chevron {
+    position: absolute;
+    inset-inline-end: 10px;
+    pointer-events: none;
+  }
+
+  .bookmark-folder-select select {
     box-sizing: border-box;
-    inline-size: calc(100% - 34px);
+    inline-size: 100%;
     min-inline-size: 0;
     min-block-size: var(--search-height);
-    padding-inline: var(--control-inset);
-    margin-inline-start: 34px;
+    padding-inline: 34px 32px;
     border: 0;
     border-radius: var(--radius-field);
+    appearance: none;
     background: var(--color-field);
     color: var(--color-text);
     font: inherit;
     font-size: var(--text-label);
+    opacity: 1;
     transition:
       background-color var(--motion-instant) var(--ease-smooth),
       box-shadow var(--motion-instant) var(--ease-smooth);
   }
 
-  .bookmark-choice select:focus-visible {
+  .bookmark-folder-select select:focus-visible {
     background: var(--color-field-hover);
     outline: none;
     box-shadow: var(--shadow-field-focus);
   }
 
-  .bookmark-choice select:disabled {
+  .bookmark-folder-select select:disabled {
     color: var(--color-muted);
   }
 
-  .bookmark-choice select:hover:not(:disabled) {
+  .bookmark-folder-select select:hover:not(:disabled) {
     background: var(--color-field-hover);
   }
 
   @media (forced-colors: active) {
-    .bookmark-choice select:focus-visible {
+    .bookmark-folder-select select:focus-visible {
       outline: 1px solid Highlight;
       box-shadow: none;
     }

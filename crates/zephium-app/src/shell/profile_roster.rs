@@ -66,7 +66,19 @@ impl Shell {
         self.profiles
             .get(profile)
             .is_some_and(|candidate| candidate.kind != ProfileKind::Incognito)
+            && !self
+                .pending_profile_rollbacks
+                .values()
+                .any(|pending| pending.profile == profile)
             && !self.profile_deletion_quarantines(profile)
+    }
+
+    pub(super) fn profile_slots_used(&self) -> usize {
+        self.profiles.iter().count().saturating_add(
+            self.pending_profile_creations
+                .len()
+                .saturating_sub(self.pending_profile_rollbacks.len()),
+        )
     }
 
     pub(super) fn profiles_view(&self) -> Option<ProfilesView> {
@@ -186,13 +198,7 @@ impl Shell {
                 OperationReason::InvalidInput,
             ));
         };
-        if self
-            .profiles
-            .iter()
-            .count()
-            .saturating_add(self.pending_profile_creations.len())
-            >= zephium_core::session::MAX_SESSION_PROFILES
-        {
+        if self.profile_slots_used() >= zephium_core::session::MAX_SESSION_PROFILES {
             return Some(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
@@ -410,8 +416,19 @@ impl Shell {
         };
         let store = self.store.clone();
         let publication_state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
-        self.pending_profile_rollbacks
-            .insert(generation, (profile, space, publication_state.clone()));
+        let publication_result =
+            std::sync::Arc::new((std::sync::Mutex::new(None), std::sync::Condvar::new()));
+        self.pending_profile_rollbacks.insert(
+            generation,
+            PendingProfileRollback {
+                profile,
+                space,
+                avatar,
+                photo: photo.clone(),
+                publication_state: publication_state.clone(),
+                publication_result: publication_result.clone(),
+            },
+        );
         std::thread::spawn(move || {
             let durable = if publication_state
                 .compare_exchange(
@@ -426,6 +443,13 @@ impl Shell {
             } else {
                 false
             };
+            {
+                let (settled, ready) = &*publication_result;
+                *settled
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(durable);
+                ready.notify_all();
+            }
             let mut command = Some(Command::ProfileCreationPublished {
                 generation,
                 profile,

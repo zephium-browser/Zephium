@@ -3379,7 +3379,7 @@
   "profiles_save": "Salva",
   "profiles_delete_open": "Elimina profilo…",
   "profiles_delete_title": "Eliminare «{name}»?",
-  "profiles_delete_body": "Cronologia, cookie e dati dei siti, schede, estensioni e Lavoro vengono rimossi in modo permanente da questo dispositivo. Il tuo account Zephium non viene modificato.",
+  "profiles_delete_body": "Preferiti, cronologia, cookie e dati dei siti, schede, estensioni e Lavoro vengono rimossi in modo permanente da questo dispositivo. Il tuo account Zephium non viene modificato.",
   "profiles_delete_confirm": "Elimina profilo",
   "profiles_delete_default": "Il profilo predefinito non può essere eliminato.",
   "profiles_delete_current": "Per eliminare questo profilo, passa la finestra a un altro profilo.",

@@ -119,6 +119,8 @@ pub struct Hub {
     /// independent from ancillary database degradation so bookmarks cannot
     /// disable history, favicons, or other profile data.
     degraded_bookmark_profiles: HashSet<ProfileId>,
+    #[cfg(test)]
+    bookmark_busy_reads: HashMap<ProfileId, usize>,
     /// Visits recorded per profile since history was last held to its row
     /// cap; the cap's ordered walk runs once per batch of visits, not each.
     visits_since_prune: HashMap<ProfileId, u32>,
@@ -220,6 +222,8 @@ impl Hub {
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
             degraded_bookmark_profiles: HashSet::new(),
+            #[cfg(test)]
+            bookmark_busy_reads: HashMap::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
@@ -344,6 +348,8 @@ impl Hub {
             session_scopes: HashSet::new(),
             degraded_profiles: HashSet::new(),
             degraded_bookmark_profiles: HashSet::new(),
+            #[cfg(test)]
+            bookmark_busy_reads: HashMap::new(),
             visits_since_prune: HashMap::new(),
             legacy_state_purged: false,
             committed_session: None,
