@@ -27,10 +27,11 @@
   let ownImage = $derived(preferences.value("ui.newtab-background") === "image");
 
   function confirmWallpaperPreference(key: preferences.PreferenceKey, expected: string) {
+    if (preferences.saveFailed()) return false;
     if (preferences.value(key) === expected) return true;
     // The settings shell already reports native refusals. A skipped write
     // while another preference is saving does not set that error.
-    if (!preferences.saveFailed()) failure = m.settings_save_error();
+    failure = m.settings_save_error();
     return false;
   }
 
