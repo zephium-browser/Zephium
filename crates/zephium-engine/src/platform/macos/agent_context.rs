@@ -620,6 +620,7 @@ pub(crate) struct AgentOwnedViewCallbacks<Navigation, Location, RendererLost, In
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
     failure_diagnostic: Option<Rc<dyn Fn(crate::WorkResourceFailureCause)>>,
     redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    unreachable: Option<Rc<dyn Fn()>>,
     credential_denied: Option<Rc<dyn Fn()>>,
     navigation: Navigation,
     location: Location,
@@ -642,6 +643,7 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
             #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
             failure_diagnostic: None,
             redirect: None,
+            unreachable: None,
             credential_denied: None,
             navigation,
             location,
@@ -662,6 +664,12 @@ impl<Navigation, Location, RendererLost, Invariant, Panic>
         redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
     ) -> Self {
         self.redirect = Some(Rc::new(redirect));
+        self
+    }
+    /// Told, before the document fails, that its main-frame load could not
+    /// reach the site (no connection, unknown host, refused or insecure).
+    pub(crate) fn with_unreachable(mut self, callback: impl Fn() + 'static) -> Self {
+        self.unreachable = Some(Rc::new(callback));
         self
     }
     #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
@@ -753,6 +761,7 @@ where
         #[cfg(feature = "native-agentic-work-lifetime-diagnostic")]
         failure_diagnostic,
         redirect: on_redirect,
+        unreachable: on_unreachable,
         credential_denied: on_credential_denied,
         navigation: on_navigation,
         location: on_location,
@@ -768,6 +777,7 @@ where
     let renderer_events = navigation.clone();
     let work_policy = work_navigation.clone();
     let work_events = work_navigation.clone();
+    let work_failures = work_navigation.clone();
     let work_renderer = work_navigation.clone();
     let navigation_callback = Rc::new(on_navigation);
     let location_callback = Rc::new(on_location);
@@ -801,6 +811,7 @@ where
     let location_callback_panicked = on_callback_panic.clone();
     let renderer_callback_panicked = on_callback_panic.clone();
     let credential_callback_panicked = on_callback_panic.clone();
+    let unreachable_callback_panicked = on_callback_panic.clone();
     let configuration = new_owned_agent_configuration(profile, storage_class, ephemeral_store)?;
     let semantic = AgentSemanticRuntimeRegistration::install(
         &configuration,
@@ -828,6 +839,21 @@ where
         })
         .with_visible(false)
         .with_focused(false)
+        .with_navigation_failure_handler(move |id, failure, _| {
+            // Only the construction load's own failure: a load it replaced or
+            // one after the document was ready leaves the slot unchanged.
+            let construction = work_failures
+                .as_ref()
+                .is_some_and(|gate| gate.construction_failure(id));
+            if let Some(unreachable) = on_unreachable.as_ref().filter(|_| {
+                construction && crate::platform::work_document_navigation::unreachable(&failure)
+            }) {
+                invoke_owned_unit_callback(
+                    unreachable.as_ref(),
+                    unreachable_callback_panicked.as_ref(),
+                );
+            }
+        })
         .with_devtools(owned_agent_view_inspectable())
         .with_autoplay(false)
         .with_fullscreen_enabled(false)

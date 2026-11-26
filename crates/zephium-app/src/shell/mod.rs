@@ -24,7 +24,12 @@ mod history;
 mod history_list;
 mod https_first;
 mod media;
+mod mini;
 mod network;
+pub use mini::{
+    admitted_mini_size, MAX_MINI_WINDOWS, MINI_PAGE_INSET, MINI_TOOLBAR_HEIGHT,
+    MINI_WINDOW_MIN_SIZE, MINI_WINDOW_SIZE,
+};
 mod operations;
 mod page_permissions;
 mod page_requests;
@@ -83,14 +88,14 @@ use crate::actor::{CallbackHandle, CommandQueue};
 #[cfg(feature = "agentic-browser")]
 use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
+#[cfg(test)]
+use crate::api::PresentationChrome;
 use crate::api::TabAction;
 use crate::api::{
-    ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure,
-    ShellTerminalFailureCallback, ShutdownOutcome,
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
+    ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
-#[cfg(test)]
-use crate::api::{ChromePresentationCallback, PresentationChrome};
 #[cfg(test)]
 use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
 use crate::store_reads::{StoreReadQueue, StoreReadResult};
@@ -252,6 +257,7 @@ pub struct Shell {
     windows: Windows,
     recent_tabs: recent_tabs::RecentTabs,
     tab_previews: tab_previews::TabPreviews,
+    mini: mini::MiniState,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
@@ -261,6 +267,7 @@ pub struct Shell {
     sources: page_source::SourceState,
     search: SearchState,
     tab_preferences: tabs::TabPreferences,
+    new_tab_destinations: std::collections::HashMap<ItemId, url::Url>,
     proxy: network::ProxyPreference,
     presentation: PresentationState,
     zoom: ZoomState,
@@ -526,6 +533,7 @@ impl Shell {
             items: Items::default(),
             recently_closed: Vec::new(),
             windows: Windows::default(),
+            mini: mini::MiniState::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
@@ -552,6 +560,7 @@ impl Shell {
                 ..SearchState::default()
             },
             tab_preferences: tabs::TabPreferences::load(&*store),
+            new_tab_destinations: Default::default(),
             proxy: network::ProxyPreference::load(&*store),
             presentation: PresentationState::default(),
             zoom: ZoomState::load(&*store),
@@ -1186,7 +1195,8 @@ impl Shell {
                 done,
             } => self.import_into_profile(destination, *work, done),
             Command::Export { kind, done } => self.export_from_focused(kind, done),
-            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
+            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment),
+            Command::AttachAppProxy(attachment) => self.proxy.attach(attachment.0),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
                 profile,
@@ -1382,6 +1392,7 @@ impl Shell {
             } => self.on_page_permission_timeout(profile, item, request),
             Command::Search(query) => {
                 self.search.context = None;
+                self.search.mini = false;
                 self.search(&query);
             }
             Command::SearchSupplementaryFinished { context, query } => {
@@ -1392,7 +1403,11 @@ impl Shell {
                 query,
                 results,
             } => self.search_additional(*context, query, results),
-            Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
+            Command::SearchScoped {
+                query,
+                context,
+                mini,
+            } => self.search_scoped(&query, *context, mini),
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
             Command::PanelLoaded => {
                 self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
@@ -1403,13 +1418,20 @@ impl Shell {
                 action,
                 background,
                 replace,
+                new_mini,
             } => {
-                let _ = self.operation_run_search_action(*context, action, background, replace);
+                let _ = self
+                    .operation_run_search_action(*context, action, background, replace, new_mini);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);
             }
             Command::OpenExternal(urls) => self.open_external(urls),
+            Command::MiniAttached { window, size } => self.mini_attached(window, size),
+            Command::MiniResized { window, size } => self.mini_resized(window, size),
+            Command::Mini { window, action } => {
+                let _ = self.mini_action(window, action);
+            }
             Command::Find(request) => self.find_in_page(request),
             Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
             Command::SetAppSetting { key, value } => {

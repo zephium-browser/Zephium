@@ -952,6 +952,21 @@ pub trait Engine {
         region: Option<Rect>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, preview: Option<DropPreview>) -> NativeDispatch;
+    /// Whether a window other than the main one can host a page in its own
+    /// native window, as a mini window does.
+    fn hosts_mini_windows(&self) -> bool {
+        false
+    }
+    /// Retires the stage of a window other than the main one before its
+    /// native window goes away. A later layout for it is refused.
+    fn release_window(&self, _window: WindowId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
+    /// Gives a page the keyboard inside its own window, as a mini window's
+    /// page takes it when the window opens.
+    fn focus_page(&self, _id: ItemId) -> NativeDispatch {
+        NativeDispatch::Unsupported
+    }
     /// A transient guide in window coordinates; never changes pane geometry.
     fn set_resize_guide(&self, _window: WindowId, _zone: Option<Rect>) -> NativeDispatch {
         NativeDispatch::Unsupported
@@ -1656,6 +1671,11 @@ pub enum EngineEvent {
         profile: ProfileId,
         request: crate::extensions::ExtensionActionRequestId,
         settlement: crate::extensions::ExtensionActionSettlement,
+    },
+    /// A browser-owned row was chosen from a native extension action menu.
+    ExtensionActionMenuSelected {
+        profile: ProfileId,
+        command: String,
     },
     /// Coalescible native notification that one or more effective actions for
     /// this profile changed. It carries no native or extension identity; the

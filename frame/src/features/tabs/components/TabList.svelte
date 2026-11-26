@@ -168,6 +168,7 @@
     void shape;
     untrack(() => motion.play(list));
   });
+  $effect(() => () => drag.abandon());
 
   function toggleFolder(key: string) {
     if (folded.has(key)) folded.delete(key);

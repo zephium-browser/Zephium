@@ -4391,6 +4391,9 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "url",
         "zeroize",
         "zephium-core",
+        // Optional provider-transport: the one public-address guard, owned by
+        // the anonymous public reader.
+        "zephium-public-fetch",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -4421,6 +4424,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "dep:zeroize",
         "dep:zephium-decision",
         "dep:zephium-credentials",
+        "dep:zephium-public-fetch",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -4472,6 +4476,7 @@ fn validate_manifest(source: &str) -> Result<(), String> {
         "rig-core",
         "httpdate",
         "zephium-decision",
+        "zephium-public-fetch",
     ] {
         if dependencies
             .get(runtime)
@@ -13005,7 +13010,7 @@ mod tests {
             publish = false
             [features]
             default = []
-            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate", "dep:zephium-credentials"]
+            provider-transport = ["dep:futures-util", "dep:reqwest", "dep:rig-core", "dep:tokio", "dep:zeroize", "dep:security-framework", "dep:security-framework-sys", "dep:dirs", "dep:zephium-decision", "dep:httpdate", "dep:zephium-credentials", "dep:zephium-public-fetch"]
             probe-harness = ["zephium-decision?/evals"]
             [[bin]]
             name = "windows-agentic-input-evidence-review"
@@ -13033,6 +13038,7 @@ mod tests {
             zephium-decision = { workspace = true, optional = true }
             httpdate = { version = "1", optional = true }
             zephium-core = "1"
+            zephium-public-fetch = { path = "../zephium-public-fetch", optional = true }
             [target.'cfg(target_os = "windows")'.dependencies]
             zephium-credentials = { workspace = true, optional = true }
             [target.'cfg(target_os = "macos")'.dependencies]
@@ -13059,6 +13065,10 @@ mod tests {
                 "dirs = \"1\"",
             ),
             ("psl = \"=2.1.220\"", "psl = \"2\""),
+            (
+                "zephium-public-fetch = { path = \"../zephium-public-fetch\", optional = true }",
+                "zephium-public-fetch = { path = \"../zephium-public-fetch\" }",
+            ),
         ] {
             assert!(validate_manifest(&manifest.replace(optional, eager)).is_err());
         }

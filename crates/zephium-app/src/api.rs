@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use zephium_core::blocker::{ContentPolicyGeneration, ProfileContentPolicyStatus};
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
@@ -115,6 +115,17 @@ pub trait PresentationChrome: GeometryChrome {
         presentation: ChromePresentation,
         done: ChromePresentationCallback,
     ) -> ChromePresentationDispatch;
+
+    /// The same barrier for the page of a mini window, whose own toolbar
+    /// must show the exact page before it may appear.
+    fn apply_mini_presentation(
+        &self,
+        _window: zephium_core::ids::WindowId,
+        _presentation: ChromePresentation,
+        _done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        ChromePresentationDispatch::Rejected
+    }
 }
 
 /// Terminal result of the ordered application shutdown protocol.
@@ -249,6 +260,24 @@ pub enum SpaceCommand {
     },
     /// Moves the tab in front, for the menu bar.
     MoveActive(zephium_core::ids::SpaceId),
+}
+
+/// Something the toolbar of a mini window asks of its page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiniAction {
+    Back,
+    Forward,
+    Reload,
+    /// Moves the page into the main window as a tab and closes the window.
+    OpenInMain,
+    /// The same, into the space the person picked.
+    OpenInSpace(zephium_core::ids::SpaceId),
+    Close,
+    /// Keeps the window above other applications' windows, or stops; `None`
+    /// turns it the other way.
+    KeepOnTop(Option<bool>),
+    /// The native window could not be built, so the page opens as a tab.
+    Unbuilt,
 }
 
 /// What the person chose for a page's request to open another application
@@ -584,8 +613,8 @@ pub enum Command {
         runtime: ExtensionRuntimeInstance,
         revision: ExtensionActionRevision,
         anchor: ExtensionPopupAnchor,
-        /// Opens the action's context menu rather than clicking it.
-        menu: bool,
+        /// Browser rows included when opening the action's context menu.
+        menu: Option<Arc<[ExtensionButtonMenuRow]>>,
     },
     /// Browser-owned response to the exact currently projected foreground
     /// page request. Public composition wraps this in `Operation`.
@@ -671,6 +700,9 @@ pub enum Command {
     SearchScoped {
         query: String,
         context: Box<zephium_ipc::SearchContext>,
+        /// The launcher is choosing a page for a mini window, so it offers
+        /// only sites, and an open tab's site rather than the tab.
+        mini: bool,
     },
     CancelSearch {
         session_id: String,
@@ -687,6 +719,9 @@ pub enum Command {
         /// The tab whose address the launcher was opened to edit: an address
         /// chosen there replaces that tab's page while it is still in front.
         replace: Option<String>,
+        /// The launcher was opened for a new mini window: an address chosen
+        /// there opens in one, unless the main window shows a private session.
+        new_mini: bool,
     },
     OpenUrl {
         input: String,
@@ -698,6 +733,21 @@ pub enum Command {
     /// `navigation::external_target`. Each opens in a new tab; any that
     /// arrive before the session is restored wait for it.
     OpenExternal(Vec<String>),
+    /// The desktop built the native window for a mini window the shell
+    /// opened, and the engine took its handle.
+    MiniAttached {
+        window: zephium_core::ids::WindowId,
+        size: Size,
+    },
+    MiniResized {
+        window: zephium_core::ids::WindowId,
+        size: Size,
+    },
+    /// Something a mini window's toolbar, keys or native window asked of it.
+    Mini {
+        window: zephium_core::ids::WindowId,
+        action: MiniAction,
+    },
     SetAppSetting {
         key: String,
         value: String,
@@ -813,6 +863,9 @@ pub enum Command {
     },
     /// Hands the shell the anonymous origin prober, once, after startup.
     AttachFaviconProber(FaviconProberAttachment),
+    /// Hands the shell the port anonymous readers learn the app's proxy
+    /// setting from, once, after startup.
+    AttachAppProxy(AppProxyAttachment),
     /// Icons for origins shown outside a tab: cached or stored rasters are
     /// delivered to chrome, the rest are queued for the origin probe.
     ProbeFavicons {
@@ -982,10 +1035,26 @@ pub enum FaviconProbe {
 pub type FaviconProber = Arc<dyn Fn(FaviconProbe) + Send + Sync>;
 
 #[derive(Clone)]
-pub struct FaviconProberAttachment(pub FaviconProber);
+pub struct FaviconProberAttachment {
+    pub probe: FaviconProber,
+    /// Cancels active network requests, which still send their ordinary replies.
+    pub cancel_network: Arc<dyn Fn() + Send + Sync>,
+}
 impl fmt::Debug for FaviconProberAttachment {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("FaviconProberAttachment")
+    }
+}
+
+/// Told the proxy chosen in Zephium, or `None` for the system's: when
+/// attached, then on every change.
+pub type AppProxyReport = Arc<dyn Fn(Option<zephium_core::proxy::ProxyServer>) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AppProxyAttachment(pub AppProxyReport);
+impl fmt::Debug for AppProxyAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AppProxyAttachment")
     }
 }
 

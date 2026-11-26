@@ -102,6 +102,7 @@ mod material;
 mod media;
 mod memory_pressure;
 mod menu_text;
+mod mini;
 mod notes;
 #[cfg(target_os = "windows")]
 mod onboarding_host;
@@ -141,6 +142,8 @@ mod webext;
     feature = "adblock-qa"
 ))]
 mod webext_qa;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod window_frame;
 mod windows_privacy;
 #[cfg(feature = "work-product")]
 mod work_activity;
@@ -179,8 +182,8 @@ use zephium_app::{
 };
 use zephium_blocker_service::ManagedBlocker;
 use zephium_core::extensions::{
-    ExtensionActionRevision, ExtensionPopupAnchor, ExtensionRuntimeGeneration,
-    ExtensionRuntimeInstance,
+    ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor,
+    ExtensionRuntimeGeneration, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
 #[cfg(not(target_os = "macos"))]
@@ -759,6 +762,16 @@ impl UiStartupGate {
         renderer_recovery::restart_settled(window.app_handle());
         let _ = window.set_resizable(true);
         let _ = window.set_maximizable(true);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        window_frame::activate(window, true);
+        #[cfg(target_os = "windows")]
+        if let Err(error) = window_frame::show(window) {
+            request_startup_failure(
+                window.app_handle(),
+                format_args!("could not show the browser after onboarding: {error}"),
+            );
+            return;
+        }
         if !platform::imp::set_chrome_hidden(window, false) {
             request_startup_failure(
                 window.app_handle(),
@@ -822,41 +835,14 @@ fn show_initialized_main_window(window: &WebviewWindow) -> Result<(), String> {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         #[cfg(target_os = "windows")]
-        fit_to_work_area(window);
-        window.show().map_err(|error| error.to_string())
+        {
+            window_frame::show(window)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            window.show().map_err(|error| error.to_string())
+        }
     }
-}
-
-/// The default size is taller than a scaled 1080p screen's work area, which
-/// would leave the window under the taskbar; it shrinks to fit and is centred.
-#[cfg(target_os = "windows")]
-fn fit_to_work_area(window: &WebviewWindow) {
-    let (Ok(Some(monitor)), Ok(outer), Ok(inner)) = (
-        window.current_monitor(),
-        window.outer_size(),
-        window.inner_size(),
-    ) else {
-        return;
-    };
-    let work = monitor.work_area();
-    if outer.width <= work.size.width && outer.height <= work.size.height {
-        return;
-    }
-    let width = outer.width.min(work.size.width);
-    let height = outer.height.min(work.size.height);
-    let frame = (
-        outer.width.saturating_sub(inner.width),
-        outer.height.saturating_sub(inner.height),
-    );
-    let _ = window.set_size(tauri::PhysicalSize::new(
-        width.saturating_sub(frame.0),
-        height.saturating_sub(frame.1),
-    ));
-    let offset = |room: u32, used: u32| i32::try_from(room.saturating_sub(used) / 2).unwrap_or(0);
-    let _ = window.set_position(tauri::PhysicalPosition::new(
-        work.position.x + offset(work.size.width, width),
-        work.position.y + offset(work.size.height, height),
-    ));
 }
 
 const NO_AUTHORIZED_EXIT_CODE: i32 = -1;
@@ -1372,6 +1358,8 @@ impl ShutdownCoordinator {
 /// A closed browser leaves the screen at once; the windows themselves stay
 /// alive until native teardown destroys them in order.
 fn hide_windows_for_shutdown(app: &tauri::AppHandle) {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    window_frame::closing(app);
     for window in app.webview_windows().into_values() {
         if let Err(error) = window.hide() {
             write_diagnostic(format_args!(
@@ -1784,6 +1772,9 @@ struct ItemsChanged(zephium_ipc::ItemsState);
 struct TabChanged(zephium_ipc::TabView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct MiniChanged(zephium_ipc::MiniView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct FaviconsChanged(zephium_ipc::FaviconsView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -2118,6 +2109,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             chrome_menu_popup,
             extension_action_invoke,
             extension_action_menu,
+            extension_button_menu_popup,
             webext::web_extension_prepare,
             webext::web_extension_store_button,
             webext::web_extension_confirm,
@@ -2250,7 +2242,10 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             divider_grab,
             divider_drag,
             divider_release,
-            swipe::swipe_region
+            swipe::swipe_region,
+            mini::mini_ready,
+            mini::mini_action,
+            mini::mini_space_menu
         ])
         .events(collect_events![
             keymap::KeymapChanged,
@@ -2272,6 +2267,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             DownloadsChanged,
             NoteOpenRequested,
             TabChanged,
+            MiniChanged,
             ExtensionActionsChanged,
             ExtensionActionFailed,
             ExtensionActionShortcut,
@@ -2666,6 +2662,9 @@ fn emit_ui_command(app: &tauri::AppHandle, id: &str) {
     // Only consumed settings wake the hidden launcher WebView.
     if launcher_follows_ui_command(id) {
         emit_to_privileged(app, overlay::PANEL_LABEL, EVENT_UI, &id);
+        for label in mini::labels(app) {
+            emit_to_privileged(app, &label, EVENT_UI, &id);
+        }
     }
 }
 
@@ -2775,6 +2774,10 @@ enum CallerPolicy {
     Main,
     Panel,
     Both,
+    /// A mini window's toolbar; the command acts on that window alone.
+    Mini,
+    /// Any privileged chrome, for read-only appearance and language state.
+    AnyChrome,
 }
 
 // `WebviewWindow` is injected from Tauri's invoke message (and omitted by
@@ -2784,6 +2787,10 @@ fn caller_allowed(policy: CallerPolicy, label: &str) -> bool {
         CallerPolicy::Main => label == MAIN_LABEL,
         CallerPolicy::Panel => label == overlay::PANEL_LABEL,
         CallerPolicy::Both => matches!(label, MAIN_LABEL | overlay::PANEL_LABEL),
+        CallerPolicy::Mini => mini::window_of(label).is_some(),
+        CallerPolicy::AnyChrome => {
+            matches!(label, MAIN_LABEL | overlay::PANEL_LABEL) || mini::window_of(label).is_some()
+        }
     }
 }
 
@@ -2930,7 +2937,7 @@ fn finish_operation_admission(
     }
 }
 
-fn dispatch_operation(
+pub(crate) fn dispatch_operation(
     app: &tauri::AppHandle,
     shell: &Handle,
     command: Command,
@@ -3667,8 +3674,16 @@ fn extension_action_invoke(
             &action_revision,
         ],
         [anchor_x, anchor_y, anchor_width, anchor_height],
-        false,
+        None,
     )
+}
+
+#[derive(Deserialize, specta::Type)]
+struct ExtensionActionMenuAnchor {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
 }
 
 /// The context menu of an extension's toolbar button, under the button.
@@ -3682,10 +3697,8 @@ fn extension_action_menu(
     install_id: String,
     runtime_generation: String,
     action_revision: String,
-    anchor_x: f64,
-    anchor_y: f64,
-    anchor_width: f64,
-    anchor_height: f64,
+    anchor: ExtensionActionMenuAnchor,
+    entries: Vec<ExtensionButtonMenuEntry>,
 ) -> zephium_ipc::OperationAdmission {
     extension_action(
         &caller,
@@ -3697,8 +3710,8 @@ fn extension_action_menu(
             &runtime_generation,
             &action_revision,
         ],
-        [anchor_x, anchor_y, anchor_width, anchor_height],
-        true,
+        [anchor.x, anchor.y, anchor.width, anchor.height],
+        Some(&entries),
     )
 }
 
@@ -3708,7 +3721,7 @@ fn extension_action(
     command: &'static str,
     [profile_id, install_id, runtime_generation, action_revision]: [&str; 4],
     [anchor_x, anchor_y, anchor_width, anchor_height]: [f64; 4],
-    menu: bool,
+    menu_entries: Option<&[ExtensionButtonMenuEntry]>,
 ) -> zephium_ipc::OperationAdmission {
     if !authorize(caller, CallerPolicy::Main, command)
         || shutdown_started(caller.app_handle())
@@ -3726,6 +3739,14 @@ fn extension_action(
         ExtensionInstallId::parse(install_id).filter(|install| install.to_string() == install_id)
     else {
         return rejected_extension_action("install-identity");
+    };
+    let menu = if let Some(entries) = menu_entries {
+        let Some(rows) = extension_button_menu_rows(install_id, entries, false) else {
+            return rejected_extension_action("invalid-menu-entries");
+        };
+        Some(Arc::from(rows))
+    } else {
+        None
     };
     let Some(generation) =
         fixed_nonzero_hex(runtime_generation).and_then(ExtensionRuntimeGeneration::new)
@@ -4143,6 +4164,15 @@ fn apply_native_theme(app: &tauri::AppHandle, mode: &str) {
     reinstall_native_materials(app);
 }
 
+/// A UI-only admission: no shell operation settles it.
+pub(crate) fn ui_admission(accepted: bool) -> zephium_ipc::OperationAdmission {
+    if accepted {
+        accepted_ui_operation()
+    } else {
+        rejected_operation()
+    }
+}
+
 fn accepted_ui_operation() -> zephium_ipc::OperationAdmission {
     zephium_ipc::OperationAdmission {
         operation_id: None,
@@ -4190,6 +4220,11 @@ fn execute_command_or(
     let id = zephium_core::commands::runs_as(id);
     if id == "tab.close" && tab_switcher::close_selected(app) {
         return accepted_ui_operation();
+    }
+    // A command a mini window answers never falls through to the main
+    // window, refused or not.
+    if let Some(admission) = mini::route(app, id) {
+        return admission;
     }
     if matches!(id, "tab.recent.next" | "tab.recent.previous") {
         return if tab_switcher::step(app, id == "tab.recent.previous", true) {
@@ -4304,6 +4339,7 @@ fn execute_command_or(
         id,
         PROTECTION_SITE_COMMAND | PROTECTION_HIDE_COMMAND | PAGE_CLEAR_SITE_DATA_COMMAND
     ) || id.starts_with(EXTENSION_ACTION_COMMAND)
+        || id.starts_with(EXTENSION_MENU_COMMAND)
     {
         return if try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI, &id) {
             accepted_ui_operation()
@@ -4359,6 +4395,13 @@ fn execute_command_or(
             .map_or_else(rejected_operation, |shell| {
                 dispatch_operation(app, &shell, Command::ShowBrowserPage(page))
             });
+    }
+    if id == "window.newMini" {
+        return if overlay::request(app, |panel| panel.toggle_mini()) {
+            accepted_ui_operation()
+        } else {
+            rejected_operation()
+        };
     }
     if id == "launcher.toggle" {
         return if overlay::request(app, |panel| panel.toggle()) {
@@ -4569,6 +4612,7 @@ fn newtab_search(
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        mini: false,
     });
     if accepted {
         search_providers::schedule(caller, app, shell.inner().clone(), query, context);
@@ -4634,6 +4678,7 @@ fn newtab_run(
             action,
             background: false,
             replace: None,
+            new_mini: false,
         },
     )
 }
@@ -4652,16 +4697,18 @@ fn launcher_search(
     {
         return false;
     }
-    let Some(context) = app
-        .try_state::<overlay::Overlay>()
-        .and_then(|overlay| overlay.search_context(&request_id))
-    else {
+    let Some((context, mini)) = app.try_state::<overlay::Overlay>().and_then(|overlay| {
+        overlay
+            .search_context(&request_id)
+            .map(|context| (context, overlay.mini()))
+    }) else {
         diagnostic!("launcher: search refused outside a presented session");
         return false;
     };
     let accepted = shell.dispatch(Command::SearchScoped {
         query: query.clone(),
         context: Box::new(context.clone()),
+        mini,
     });
     if !accepted {
         diagnostic!("launcher: search refused by a full actor queue");
@@ -4685,6 +4732,17 @@ fn launcher_run(
     {
         return rejected_operation();
     }
+    // Offered as a command, it turns this launcher into the one it opens,
+    // but only from the presentation it was offered in, with nothing pending.
+    if matches!(&action, zephium_ipc::SearchAction::RunCommand { id } if id == "window.newMini") {
+        if !app
+            .try_state::<overlay::Overlay>()
+            .is_some_and(|overlay| overlay.idle_for(&context))
+        {
+            return rejected_operation();
+        }
+        return execute_command(&app, "window.newMini");
+    }
     let (Some(shell), Some(overlay), Some(ledger)) = (
         app.try_state::<Handle>(),
         app.try_state::<overlay::Overlay>(),
@@ -4703,7 +4761,9 @@ fn launcher_run(
     }
     // Only an address can be sent behind the current tab; every other action
     // is about where the user is going next.
-    let background = background && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
+    let background = background
+        && !overlay.mini()
+        && matches!(action, zephium_ipc::SearchAction::OpenUrl { .. });
     // Armed before either path runs, so one action at a time reaches the
     // launcher's outcome, wherever it is carried out.
     if !overlay.arm_action(&operation_id, &context, background) {
@@ -4807,6 +4867,7 @@ fn run_in_shell(
             action,
             background,
             replace: overlay.editing_tab(),
+            new_mini: overlay.mini(),
         },
     );
     if !accepted {
@@ -4823,7 +4884,7 @@ struct UiInfo {
 #[tauri::command]
 #[specta::specta]
 fn ui_info(caller: WebviewWindow) -> UiInfo {
-    if !authorize(&caller, CallerPolicy::Both, "ui_info") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "ui_info") {
         return UiInfo {
             material: material::Material::None,
         };
@@ -5456,7 +5517,7 @@ fn setting_value_for_frame(key: &str, stored: Option<String>) -> Option<String> 
 #[tauri::command]
 #[specta::specta]
 async fn setting_get(caller: WebviewWindow, key: String) -> Option<String> {
-    if !authorize(&caller, CallerPolicy::Both, "setting_get") {
+    if !authorize(&caller, CallerPolicy::AnyChrome, "setting_get") {
         return None;
     }
     if !SETTING_KEYS.contains(&key.as_str()) {
@@ -5640,14 +5701,17 @@ fn extension_menu_id(id: &str) -> Option<String> {
 }
 
 fn extension_menu_label(label: &str) -> String {
+    // A bare `&` would become a Windows mnemonic.
+    plain_extension_menu_label(label).replace('&', "&&")
+}
+
+fn plain_extension_menu_label(label: &str) -> String {
     let label: String = label
         .trim()
         .chars()
         .filter(|c| !c.is_control())
         .take(64)
         .collect();
-    // A bare `&` would become a Windows mnemonic.
-    let label = label.replace('&', "&&");
     if label.is_empty() {
         "Extension".into()
     } else {
@@ -5661,6 +5725,161 @@ fn extension_menu_icon(icon: Option<&str>) -> Option<Vec<u8>> {
         .decode(icon?)
         .ok()?;
     (rgba.len() == 32 * 32 * 4).then_some(rgba)
+}
+
+/// A browser entry on an extension's toolbar button menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionButtonChoice {
+    Pin,
+    Unpin,
+    Options,
+    Manage,
+    Remove,
+}
+
+impl ExtensionButtonChoice {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Pin => "pin",
+            Self::Unpin => "unpin",
+            Self::Options => "options",
+            Self::Manage => "manage",
+            Self::Remove => "remove",
+        }
+    }
+}
+
+/// One row of an extension's toolbar button menu. The frame builds the list,
+/// the same on every platform; native only draws it and relays the choice.
+#[derive(Clone, Debug, serde::Deserialize, specta::Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExtensionButtonMenuEntry {
+    Item {
+        choice: ExtensionButtonChoice,
+        label: String,
+        enabled: bool,
+    },
+    Separator,
+}
+
+const EXTENSION_MENU_COMMAND: &str = "extension.menu=";
+const EXTENSION_BUTTON_MENU_ENTRIES: usize = 8;
+/// Far above any localized entry; refused before the label is normalized.
+const EXTENSION_MENU_LABEL_BYTES: usize = 256;
+
+/// The rows to draw, each choice named `extension.menu=<choice>:<install>`.
+/// None for a list the frame could not have built: a malformed install, no
+/// choice, too many rows, a choice offered twice, or an oversized label.
+fn extension_button_menu_rows(
+    install_id: &str,
+    entries: &[ExtensionButtonMenuEntry],
+    windows_mnemonics: bool,
+) -> Option<Vec<ExtensionButtonMenuRow>> {
+    let install = ExtensionInstallId::parse(install_id)
+        .filter(|install| install.to_string() == install_id)?;
+    if entries.len() > EXTENSION_BUTTON_MENU_ENTRIES {
+        return None;
+    }
+    let mut offered = Vec::new();
+    let mut rows = Vec::new();
+    for entry in entries {
+        match entry {
+            ExtensionButtonMenuEntry::Item {
+                choice,
+                label,
+                enabled,
+            } => {
+                if offered.contains(choice) || label.len() > EXTENSION_MENU_LABEL_BYTES {
+                    return None;
+                }
+                offered.push(*choice);
+                rows.push(ExtensionButtonMenuRow::Item {
+                    id: format!("{EXTENSION_MENU_COMMAND}{}:{install}", choice.name()),
+                    label: if windows_mnemonics {
+                        extension_menu_label(label)
+                    } else {
+                        plain_extension_menu_label(label)
+                    },
+                    enabled: *enabled,
+                });
+            }
+            // A rule only between rows.
+            ExtensionButtonMenuEntry::Separator => {
+                if matches!(rows.last(), Some(ExtensionButtonMenuRow::Item { .. })) {
+                    rows.push(ExtensionButtonMenuRow::Separator);
+                }
+            }
+        }
+    }
+    if rows.last() == Some(&ExtensionButtonMenuRow::Separator) {
+        rows.pop();
+    }
+    (!offered.is_empty()).then_some(rows)
+}
+
+fn build_extension_button_menu(
+    handle: &tauri::AppHandle,
+    rows: &[ExtensionButtonMenuRow],
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem};
+    let menu = Menu::new(handle)?;
+    for row in rows {
+        match row {
+            ExtensionButtonMenuRow::Item { id, label, enabled } => menu.append(
+                &MenuItemBuilder::with_id(id.as_str(), label)
+                    .enabled(*enabled)
+                    .build(handle)?,
+            )?,
+            ExtensionButtonMenuRow::Separator => {
+                menu.append(&PredefinedMenuItem::separator(handle)?)?;
+            }
+        }
+    }
+    Ok(menu)
+}
+
+/// The menu of an extension's toolbar button, pinned or in the tray, where
+/// the engine lists none of the extension's own items (Windows).
+#[tauri::command]
+#[specta::specta]
+fn extension_button_menu_popup(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    install_id: String,
+    entries: Vec<ExtensionButtonMenuEntry>,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "extension_button_menu_popup")
+        || !bounded(&install_id, MAX_ITEM_ID_BYTES)
+    {
+        return false;
+    }
+    let Ok(inner_size) = caller.inner_size() else {
+        return false;
+    };
+    let Ok(scale_factor) = caller.scale_factor() else {
+        return false;
+    };
+    if !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+    let Some(anchor) = menu_popup_anchor(
+        x,
+        y,
+        f64::from(inner_size.width) / scale_factor,
+        f64::from(inner_size.height) / scale_factor,
+    ) else {
+        return false;
+    };
+    let Some(rows) = extension_button_menu_rows(&install_id, &entries, true) else {
+        return false;
+    };
+    let Ok(menu) = build_extension_button_menu(&app, &rows) else {
+        return false;
+    };
+    caller.popup_menu_at(&menu, anchor).is_ok()
 }
 
 #[tauri::command]
@@ -5938,7 +6157,7 @@ fn launcher_edit(
     {
         return false;
     }
-    overlay::request(&app, move |panel| panel.edit(tab_id, url))
+    overlay::request(&app, move |panel| panel.edit(tab_id, url, false))
 }
 
 #[tauri::command]
@@ -6293,6 +6512,7 @@ fn build_menu(
     let file = SubmenuBuilder::new(handle, menu_text::label("File"))
         .item(&item("tab.new")?)
         .item(&item("window.newPrivate")?)
+        .item(&item("window.newMini")?)
         .item(&item("note.new")?)
         .item(&item("split.choose")?)
         .separator()
@@ -7176,6 +7396,16 @@ fn finish_browser_setup(
             }
         })
         .build()?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    window_frame::install(
+        &window,
+        store.clone(),
+        (
+            main_config.min_width.unwrap_or(680.0),
+            main_config.min_height.unwrap_or(480.0),
+        ),
+        onboarding,
+    );
     // Onboarding composes for one size; the browser takes the window
     // back resizable once it has replaced onboarding.
     if onboarding {
@@ -7304,9 +7534,14 @@ fn finish_browser_setup(
             if zephium_engine::foreground_rendering_policy_event(&event) {
                 return;
             }
-            if let zephium_core::ports::engine::EngineEvent::ShortcutPressed { command, .. } =
-                &event
-            {
+            use zephium_core::ports::engine::EngineEvent;
+            if let EngineEvent::ShortcutPressed { item, command } = &event {
+                if mini::route_page_key(&sink_app, &item.to_string(), command).is_none() {
+                    let _ = execute_command(&sink_app, command);
+                }
+                return;
+            }
+            if let EngineEvent::ExtensionActionMenuSelected { command, .. } = &event {
                 let _ = execute_command(&sink_app, command);
                 return;
             }
@@ -7361,7 +7596,10 @@ fn finish_browser_setup(
     #[cfg(target_os = "macos")]
     install_menu_bar(&handle, &keymap, false)?;
     app.on_menu_event(|app, event| {
-        let _ = execute_command(app, event.id().0.as_str());
+        let id = event.id().0.as_str();
+        if !mini::on_menu(app, id) {
+            let _ = execute_command(app, id);
+        }
     });
     let keys_engine = engine.clone();
     app.state::<keymap::Keymap>()
@@ -7631,6 +7869,10 @@ fn finish_browser_setup(
         Projection::MediaPlayer(player) => {
             emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_MEDIA_PLAYER, &player)
         }
+        Projection::MiniOpened(opened) => mini::open(&emit_handle, opened),
+        Projection::Mini(view) => mini::project(&emit_handle, &view),
+        Projection::MiniClosed(closed) => mini::close(&emit_handle, closed),
+        Projection::ExternalTabsOpened => external_links::forward_pending(&emit_handle),
     });
 
     let chrome: SharedChrome = platform::imp::make_chrome(&window, dispatch.clone());
@@ -7776,12 +8018,28 @@ fn finish_browser_setup(
         return Err(error.into());
     }
     #[cfg(feature = "work-product")]
+    let public_routes = {
+        let routes =
+            zephium_agentic::public_asset::RouteSource::new(tauri::async_runtime::handle().inner());
+        let reported = routes.clone();
+        if !shell.dispatch(Command::AttachAppProxy(zephium_app::AppProxyAttachment(
+            Arc::new(move |proxy| reported.set_app_proxy(proxy)),
+        ))) {
+            write_diagnostic(format_args!(
+                "public route: the shell refused its proxy port"
+            ));
+        }
+        app.manage(routes.clone());
+        routes
+    };
+    #[cfg(feature = "work-product")]
     if !work_product::install(
         app,
         engine.clone(),
         store.clone(),
         app.try_state::<work_product::WorkFrames>()
             .map(|frames| frames.0.clone()),
+        public_routes.clone(),
     ) {
         let error = std::io::Error::other("Work product owner is already installed");
         shutdown.request_terminal_startup_failure(
@@ -7795,10 +8053,17 @@ fn finish_browser_setup(
     }
     #[cfg(feature = "work-product")]
     page_assist::install(app, engine.clone(), store.clone());
+    mini::install(
+        app,
+        engine.clone(),
+        privileged_app_url(app, &tauri::WebviewUrl::App("mini.html".into()))?,
+        #[cfg(target_os = "windows")]
+        privileged_runtime.panel.clone(),
+    );
     notes::install(app, &data_dir, store.clone(), &shell);
     external_links::adopt(app);
     #[cfg(feature = "work-product")]
-    favicon_probe::install(&shell);
+    favicon_probe::install(&shell, public_routes);
     let web_extensions = webext::WebExtensions::new(&data_dir);
     web_extensions.restore(&shell);
     app.manage(web_extensions);
@@ -8099,7 +8364,7 @@ fn finish_browser_setup(
             platform::imp::harden_privileged(
                 &panel_window,
                 &privileged_runtime.panel,
-                runtime_update_notifier.clone(),
+                platform::imp::PrivilegedEnvironment::Own(runtime_update_notifier.clone()),
             )?;
             platform::imp::apply_material(&panel_window, true);
         }
@@ -8292,6 +8557,10 @@ pub fn run() {
     // A launch that stops before setup has nowhere else to say why.
     #[cfg(all(target_os = "windows", not(feature = "webext-qa")))]
     platform::imp::open_startup_log(&context.config().identifier);
+    #[cfg(target_os = "windows")]
+    if zephium_credentials::set_windows_identity(&context.config().identifier).is_err() {
+        diagnostic!("security: could not initialize the Windows credential namespace");
+    }
     #[cfg(target_os = "macos")]
     let runtime_security_advisories = match platform::imp::enforce_runtime_security_floor() {
         Ok(advisory) => advisory,
@@ -8366,7 +8635,7 @@ pub fn run() {
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(|webview| {
         let label = webview.label().to_owned();
-        if !renderer_recovery::owns(&label) {
+        if !renderer_recovery::owns(&label) && mini::window_of(&label).is_none() {
             let _ = webview.reload();
             return;
         }
@@ -8449,6 +8718,13 @@ pub fn run() {
                 );
                 specta.mount_events(app);
                 let data_dir = app.path().app_data_dir()?;
+                // A profile behind a junction (#447): build everything on the
+                // directory it really is, so nothing below it may redirect.
+                #[cfg(target_os = "windows")]
+                let data_dir = {
+                    std::fs::create_dir_all(&data_dir)?;
+                    zephium_core::webview2::resolve_data_root(&data_dir)?
+                };
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
                 let qa_session = webext_qa::session_label("--webext-qa-session=")?;
                 #[cfg(all(target_os = "windows", feature = "webext-qa"))]
@@ -9121,6 +9397,181 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_button_menu_draws_the_frames_list_and_names_each_choice() {
+        use super::{
+            ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry,
+            ExtensionButtonMenuRow as Row,
+        };
+        let install = super::ExtensionInstallId::generate().to_string();
+        let item = |choice, label: &str, enabled| Entry::Item {
+            choice,
+            label: label.into(),
+            enabled,
+        };
+        let rows = super::extension_button_menu_rows(
+            &install,
+            &[
+                Entry::Separator,
+                item(Choice::Unpin, "Unpin from sidebar", true),
+                item(Choice::Options, "Options", true),
+                Entry::Separator,
+                Entry::Separator,
+                item(Choice::Manage, "Manage extensions", true),
+                item(Choice::Remove, "Remove & forget…", false),
+                Entry::Separator,
+            ],
+            true,
+        )
+        .unwrap();
+        let row = |choice: &str, label: &str, enabled| Row::Item {
+            id: format!("extension.menu={choice}:{install}"),
+            label: label.into(),
+            enabled,
+        };
+        assert_eq!(
+            rows,
+            [
+                row("unpin", "Unpin from sidebar", true),
+                row("options", "Options", true),
+                Row::Separator,
+                row("manage", "Manage extensions", true),
+                // A bare `&` would be a Windows mnemonic.
+                row("remove", "Remove && forget…", false),
+            ]
+        );
+        // Every id relays to the frame, which acts on the choice.
+        assert!(rows.iter().all(|row| match row {
+            Row::Item { id, .. } => id.starts_with(super::EXTENSION_MENU_COMMAND),
+            Row::Separator => true,
+        }));
+    }
+
+    #[test]
+    fn macos_extension_button_rows_follow_webkit_items_with_one_separator() {
+        use super::{
+            ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry,
+            ExtensionButtonMenuRow as Row,
+        };
+        let install = super::ExtensionInstallId::generate().to_string();
+        let entries = [
+            Entry::Separator,
+            Entry::Item {
+                choice: Choice::Options,
+                label: " Settings & privacy ".into(),
+                enabled: true,
+            },
+            Entry::Separator,
+            Entry::Separator,
+            Entry::Item {
+                choice: Choice::Pin,
+                label: "Unpin one to pin another".into(),
+                enabled: false,
+            },
+            Entry::Separator,
+        ];
+        let rows = super::extension_button_menu_rows(&install, &entries, false).unwrap();
+        assert_eq!(
+            rows,
+            [
+                Row::Item {
+                    id: format!("extension.menu=options:{install}"),
+                    label: "Settings & privacy".into(),
+                    enabled: true,
+                },
+                Row::Separator,
+                Row::Item {
+                    id: format!("extension.menu=pin:{install}"),
+                    label: "Unpin one to pin another".into(),
+                    enabled: false,
+                },
+            ]
+        );
+        assert!(
+            Row::after_extension_items(&rows, true).eq([&Row::Separator].into_iter().chain(&rows))
+        );
+        assert!(Row::after_extension_items(&rows, false).eq(&rows));
+    }
+
+    #[test]
+    fn an_extension_button_menu_the_frame_could_not_have_built_is_refused() {
+        use super::{ExtensionButtonChoice as Choice, ExtensionButtonMenuEntry as Entry};
+        let install = super::ExtensionInstallId::generate().to_string();
+        let item = |choice| Entry::Item {
+            choice,
+            label: "Entry".into(),
+            enabled: true,
+        };
+        let rows = |install: &str, entries: &[Entry]| {
+            let windows = super::extension_button_menu_rows(install, entries, true).is_some();
+            let macos = super::extension_button_menu_rows(install, entries, false).is_some();
+            assert_eq!(windows, macos);
+            windows
+        };
+        assert!(rows(&install, &[item(Choice::Pin)]));
+        // A malformed or differently spelled install never names a choice.
+        for malformed in [
+            "",
+            "not-an-install",
+            &install.to_lowercase(),
+            &format!("{install}:x"),
+        ] {
+            assert!(!rows(malformed, &[item(Choice::Pin)]), "{malformed:?}");
+        }
+        // Nothing to choose, a choice offered twice, or more than any list.
+        assert!(!rows(&install, &[]));
+        assert!(!rows(&install, &[Entry::Separator]));
+        assert!(!rows(
+            &install,
+            &[item(Choice::Remove), item(Choice::Remove)]
+        ));
+        let long: Vec<_> = std::iter::repeat_with(|| Entry::Separator)
+            .take(super::EXTENSION_BUTTON_MENU_ENTRIES)
+            .chain([item(Choice::Manage)])
+            .collect();
+        assert!(!rows(&install, &long));
+        // A label is bounded before it is normalized; a localized one fits.
+        let labelled = |label: String| Entry::Item {
+            choice: Choice::Options,
+            label,
+            enabled: true,
+        };
+        assert!(rows(
+            &install,
+            &[labelled("Erweiterungsoptionen öffnen".into())]
+        ));
+        assert!(rows(
+            &install,
+            &[labelled("é".repeat(super::EXTENSION_MENU_LABEL_BYTES / 2))]
+        ));
+        assert!(!rows(
+            &install,
+            &[labelled(" ".repeat(super::EXTENSION_MENU_LABEL_BYTES + 1))]
+        ));
+    }
+
+    #[test]
+    fn extension_button_menu_pops_up_at_its_anchor_and_relays_choices_to_the_frame() {
+        let source = include_str!("lib.rs");
+        let command = source
+            .split("fn extension_button_menu_popup(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("extension_button_menu_popup");
+        assert!(command.contains("authorize(&caller, CallerPolicy::Main"));
+        assert!(command.contains("caller.popup_menu_at(&menu, anchor)"));
+        assert!(!command.contains("popup_menu(&menu)"));
+        let relay = source
+            .split("|| id.starts_with(EXTENSION_ACTION_COMMAND)")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split("try_emit_to_privileged(app, MAIN_LABEL, EVENT_UI")
+                    .next()
+            })
+            .expect("extension menu relay");
+        assert!(relay.contains("id.starts_with(EXTENSION_MENU_COMMAND)"));
+    }
+
+    #[test]
     fn export_typescript_bindings() {
         super::specta_builder()
             .export(
@@ -9369,6 +9820,7 @@ mod tests {
         for html in [
             crate::frame_sources::INDEX_HTML,
             crate::frame_sources::PANEL_HTML,
+            crate::frame_sources::MINI_HTML,
             crate::frame_sources::ONBOARDING_HTML,
         ] {
             assert!(
@@ -9379,6 +9831,7 @@ mod tests {
         for css in [
             include_str!("../../frame/src/styles/global.css"),
             include_str!("../../frame/src/styles/panel.css"),
+            include_str!("../../frame/src/styles/mini.css"),
         ] {
             assert!(css.starts_with("@import \"./axes/bootstrap.css\";"));
         }
@@ -10002,6 +10455,27 @@ mod tests {
             .find("set_chrome_hidden(window, false)")
             .expect("recovered chrome reveal");
         assert!(facts < recovery_reveal);
+
+        let setup = production.split("fn finish_browser_setup(").nth(1).unwrap();
+        let install = setup
+            .split("window_frame::install(")
+            .nth(1)
+            .and_then(|body| body.split("// Onboarding composes").next())
+            .expect("main frame owner installation");
+        assert!(install.contains("onboarding,"));
+        assert!(!install.contains("map_err"));
+        let reveal = production
+            .split("fn reveal_browser(&self, window: &WebviewWindow)")
+            .nth(1)
+            .and_then(|body| body.split("fn is_visible").next())
+            .unwrap();
+        let resizable = reveal.find("set_resizable(true)").unwrap();
+        let maximizable = reveal.find("set_maximizable(true)").unwrap();
+        let placement = reveal.find("window_frame::activate(window, true)").unwrap();
+        let show = reveal.find("window_frame::show(window)").unwrap();
+        let chrome = reveal.find("set_chrome_hidden(window, false)").unwrap();
+        assert!(resizable < placement && maximizable < placement);
+        assert!(placement < show && show < chrome);
 
         for command in [
             "onboarding_play_intro",

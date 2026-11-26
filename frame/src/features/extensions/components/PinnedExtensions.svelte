@@ -5,6 +5,7 @@
   import * as m from "$shared/i18n/messages";
   import ExtensionActionIcon from "./ExtensionActionIcon.svelte";
   import { holdWhilePopupOpen } from "../lib/popup-hold";
+  import { openButtonMenu } from "../lib/button-menu";
 
   let profileId = $derived(tabs.profile()?.id ?? null);
   let tabId = $derived(tabs.activeId());
@@ -26,7 +27,7 @@
     event.preventDefault();
     const target = event.currentTarget;
     if (profileId === null || !(target instanceof HTMLElement)) return;
-    extensions.menu(profileId, action, target.getBoundingClientRect());
+    openButtonMenu(profileId, action, target.getBoundingClientRect());
   }
 </script>
 

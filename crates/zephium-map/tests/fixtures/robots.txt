@@ -1,0 +1,16 @@
+User-agent: *
+Disallow: /
+
+User-agent: Other
+User-agent: Zephium
+Disallow: /draft
+Allow: /draft/public
+Disallow: /*.pdf$
+Allow: /draft/same
+Disallow: /draft/same
+Disallow: /admin/*/edit$
+Disallow:
+
+User-agent: Zephium
+Disallow: /more
+Sitemap: https://workshop.example/index.xml # primary
