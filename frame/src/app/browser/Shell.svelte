@@ -70,6 +70,7 @@
   } from "$features/sidebar";
   import { IS_WINDOWS } from "$shared/platform";
   import { installChromeMenu } from "$shared/lib/chrome-menu";
+  import { isComposing } from "$shared/lib/keyboard";
   import { tabs } from "$domain/tabs";
   import { preferences } from "$domain/preferences";
   /** The new tab field's menu, kept out of the graph the launcher shares. */
@@ -206,8 +207,7 @@
       (!splitting && pendingSplit === null) ||
       event.key !== "Escape" ||
       event.defaultPrevented ||
-      event.isComposing ||
-      event.keyCode === 229
+      isComposing(event)
     )
       return;
     event.preventDefault();
