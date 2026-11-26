@@ -9,6 +9,7 @@ import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import TabList from "../components/TabList.svelte";
 import { sidebarTree } from "../lib/sidebar-model";
+import { TabSelection } from "../lib/tab-selection.svelte";
 
 const native = vi.hoisted(() => ({
   leaveSplit: vi.fn(async () => ({ accepted: true, operation_id: null })),
@@ -46,6 +47,7 @@ async function list(
   section: "today" | "pinned" = "today",
   onSelect: (id: string) => void = () => {},
   split: string[] = [],
+  selection?: TabSelection,
 ) {
   await page.viewport(400, 400);
   await tabs.init();
@@ -73,6 +75,7 @@ async function list(
     label: "Open tabs",
     splitting: false,
     onSelect,
+    selection,
   });
   const row = (id: string) =>
     screen.container.querySelector<HTMLElement>(`.browse-tab[data-zephium-tab-id="${id}"]`)!;
@@ -317,6 +320,33 @@ test("movement from another pointer does not hijack or cancel an active drag", a
     }),
   );
 });
+
+test.each([
+  { type: "pointerdown", shiftKey: false },
+  { type: "pointerdown", shiftKey: true },
+  { type: "pointerup", shiftKey: false },
+  { type: "pointercancel", shiftKey: false },
+])(
+  "$type from another pointer leaves the original drag in control (Shift: $shiftKey)",
+  async ({ type, shiftKey }) => {
+    const { row } = await list("today", undefined, [], new TabSelection());
+    const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+    const target = row("c").getBoundingClientRect();
+    const point = { clientX: target.left + 20, clientY: target.bottom - 4 };
+    const { init } = drag(handle, { x: point.clientX, y: point.clientY });
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+
+    handle.dispatchEvent(new PointerEvent(type, { ...init, ...point, pointerId: 2, shiftKey }));
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+    expect(native.setEssential).not.toHaveBeenCalled();
+
+    handle.dispatchEvent(new PointerEvent("pointerup", { ...init, ...point }));
+    await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+    expect(native.setEssential).toHaveBeenCalledExactlyOnceWith("a", false, "d");
+  },
+);
 
 test("unmounting an idle list does not clear another list's active drag", async () => {
   const active = await list();
