@@ -74,7 +74,8 @@ export class BookmarksSession {
     }
     if (this.refreshPending) {
       this.refreshPending = false;
-      await this.read(call);
+      if (response.kind === "error") await this.read(call);
+      else await this.refresh();
     }
   }
 

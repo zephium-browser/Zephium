@@ -1858,7 +1858,7 @@ pub static META: &[Migration] = &[
         up: |tx| {
             tx.execute_batch(
                 "CREATE TABLE bookmarks (
-                     id INTEGER PRIMARY KEY,
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                      parent_id INTEGER REFERENCES bookmarks(id) ON DELETE CASCADE,
                      position INTEGER NOT NULL,
                      title TEXT NOT NULL CHECK (length(CAST(title AS BLOB)) <= 512),

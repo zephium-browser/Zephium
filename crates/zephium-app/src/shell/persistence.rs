@@ -94,11 +94,18 @@ impl Shell {
     }
 
     pub(super) fn publish_current_session_checked(&self) -> bool {
-        if !self.bootstrapped {
+        let Some(state) = self.current_session_snapshot() else {
             return false;
+        };
+        self.store.save_session_checked(state)
+    }
+
+    pub(super) fn current_session_snapshot(&self) -> Option<zephium_core::session::SessionState> {
+        if !self.bootstrapped {
+            return None;
         }
         let (space, active, splits) = self.persisted_scope();
-        let state = session::snapshot_with_recently_closed(
+        Some(session::snapshot_with_recently_closed(
             &self.profiles,
             &self.spaces,
             &self.items,
@@ -106,7 +113,6 @@ impl Shell {
             active,
             splits,
             &self.recently_closed,
-        );
-        self.store.save_session_checked(state)
+        ))
     }
 }

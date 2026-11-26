@@ -283,6 +283,8 @@ pub struct Shell {
     roster: profile_roster::RosterState,
     next_profile_creation_generation: u64,
     pending_profile_creations: std::collections::HashMap<u64, Option<String>>,
+    pending_profile_rollbacks:
+        std::collections::HashMap<u64, (ProfileId, SpaceId, Arc<std::sync::atomic::AtomicU8>)>,
     space_memory: spaces::SpaceMemory,
     /// Kinds of application link each profile's sites may open without
     /// asking, as (site, scheme). Saved profiles read theirs from the store;
@@ -575,6 +577,7 @@ impl Shell {
             roster: profile_roster::RosterState::default(),
             next_profile_creation_generation: 0,
             pending_profile_creations: std::collections::HashMap::new(),
+            pending_profile_rollbacks: std::collections::HashMap::new(),
             space_memory: spaces::SpaceMemory::default(),
             app_link_sites: std::collections::HashMap::new(),
             popup_sites: std::collections::HashMap::new(),
@@ -798,7 +801,7 @@ impl Shell {
                     name,
                     avatar,
                     photo,
-                    bookmark_folder: Some(folder),
+                    bookmark_folder,
                     switch,
                 } = &command
                 {
@@ -807,11 +810,13 @@ impl Shell {
                         name,
                         *avatar,
                         photo.clone(),
-                        Some(*folder),
+                        *bookmark_folder,
                         *switch,
                     ) {
-                        completion.operation_id = operation_id;
-                        (self.emit)(Projection::OperationProcessed(completion));
+                        if completion.outcome != OperationOutcome::Deferred {
+                            completion.operation_id = operation_id;
+                            (self.emit)(Projection::OperationProcessed(completion));
+                        }
                     }
                     return;
                 }
@@ -1583,11 +1588,59 @@ impl Shell {
                 switch,
                 exists,
             } => {
-                if self.pending_profile_creations.remove(&generation).is_none() {
+                if !self.pending_profile_creations.contains_key(&generation) {
                     return;
                 }
-                let mut completion = self
-                    .finish_profile_creation(source, &name, avatar, photo, folder, switch, exists);
+                let mut completion =
+                    self.finish_profile_creation(profile_roster::ProfileCreationValidation {
+                        source,
+                        name,
+                        avatar,
+                        photo,
+                        folder,
+                        switch,
+                        exists,
+                        generation,
+                    });
+                if completion.outcome != OperationOutcome::Deferred {
+                    self.pending_profile_creations.remove(&generation);
+                    if let Some(operation_id) = operation_id {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                }
+            }
+            Command::ProfileCreationPublished {
+                generation,
+                profile,
+                space,
+                avatar,
+                photo,
+                switch,
+                durable,
+            } => {
+                let Some(operation_id) = self.pending_profile_creations.remove(&generation) else {
+                    return;
+                };
+                self.pending_profile_rollbacks.remove(&generation);
+                let mut completion = if durable {
+                    self.save_avatar(profile, avatar, photo);
+                    self.project_profiles();
+                    if switch {
+                        self.operation_switch_profile(profile)
+                    } else {
+                        operation_result(
+                            OperationOutcome::Applied,
+                            OperationReason::MutationApplied,
+                        )
+                    }
+                } else {
+                    self.rollback_profile_creation(profile, space, generation);
+                    operation_result(
+                        OperationOutcome::Rejected,
+                        OperationReason::StoreAdmissionRejected,
+                    )
+                };
                 if let Some(operation_id) = operation_id {
                     completion.operation_id = operation_id;
                     (self.emit)(Projection::OperationProcessed(completion));
@@ -1967,7 +2020,27 @@ impl Shell {
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
         let now = std::time::Instant::now();
         let mut rejection_emission_clean = true;
-        for (_, operation_id) in self.pending_profile_creations.drain() {
+        let pending_profile_creations = std::mem::take(&mut self.pending_profile_creations);
+        for (generation, operation_id) in pending_profile_creations {
+            if let Some((profile, space, publication_state)) =
+                self.pending_profile_rollbacks.remove(&generation)
+            {
+                if publication_state
+                    .compare_exchange(
+                        0,
+                        2,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_err()
+                {
+                    continue;
+                }
+                self.blocker.discard_uncommitted_profile(profile);
+                self.finish_terminalized_blocker_native_operations();
+                self.spaces.remove(space);
+                self.profiles.remove(profile);
+            }
             if let Some(operation_id) = operation_id {
                 let mut completion = operation_result(
                     OperationOutcome::Rejected,
@@ -1984,6 +2057,7 @@ impl Shell {
                 }
             }
         }
+        self.publish_current_session();
         for window in self.windows.iter_mut() {
             window.sidebar_peek = false;
         }

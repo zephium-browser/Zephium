@@ -1988,6 +1988,7 @@ fn actor(
     pending_settings: Arc<Mutex<PendingSettings>>,
 ) {
     let mut pending: Option<PendingSession> = None;
+    let mut committed_sequence = 0;
     let mut visit_retry = WriteRetry::default();
     let mut setting_retry = WriteRetry::default();
     let mut activity = PendingActivityWrites::default();
@@ -2028,10 +2029,11 @@ fn actor(
                     &mut hub,
                     &pending_visits,
                     &mut pending,
+                    &mut committed_sequence,
                     &mut visit_retry,
                     false,
                 );
-                let _ = activity.flush(&mut hub, &mut pending, false);
+                let _ = activity.flush(&mut hub, &mut pending, &mut committed_sequence, false);
             }
         }
         match cmd {
@@ -2040,31 +2042,39 @@ fn actor(
                     .as_ref()
                     .is_some_and(|pending| pending.due(Instant::now()))
                 {
-                    let _ = flush(&mut hub, &mut pending);
+                    let _ = flush(&mut hub, &mut pending, &mut committed_sequence);
                 }
                 let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
                 let _ = flush_visits(
                     &mut hub,
                     &pending_visits,
                     &mut pending,
+                    &mut committed_sequence,
                     &mut visit_retry,
                     false,
                 );
-                let _ = activity.flush(&mut hub, &mut pending, false);
+                let _ = activity.flush(&mut hub, &mut pending, &mut committed_sequence, false);
             }
             Some(Cmd::SaveWake) => {}
             Some(Cmd::SaveSessionChecked(sequence, session, reply)) => {
-                let durable = save_checked_session(&mut hub, &mut pending, sequence, &session);
+                let durable = save_checked_session(
+                    &mut hub,
+                    &mut pending,
+                    &mut committed_sequence,
+                    sequence,
+                    &session,
+                );
                 let _ = reply.send(durable);
             }
             Some(Cmd::VisitWake) => {}
             Some(Cmd::SettingWake) => {}
             Some(Cmd::Load(reply)) => {
-                if flush(&mut hub, &mut pending) {
+                if flush(&mut hub, &mut pending, &mut committed_sequence) {
                     let _ = flush_visits(
                         &mut hub,
                         &pending_visits,
                         &mut pending,
+                        &mut committed_sequence,
                         &mut visit_retry,
                         false,
                     );
@@ -2083,7 +2093,7 @@ fn actor(
                 let _ = reply.send(restarted);
             }
             Some(Cmd::SetAsideStartupSession(reply)) => {
-                let restarted = if flush(&mut hub, &mut pending) {
+                let restarted = if flush(&mut hub, &mut pending, &mut committed_sequence) {
                     match hub.set_aside_startup_session() {
                         Ok(file) => Some((session_load(&mut hub), file)),
                         Err(error) => {
@@ -2110,14 +2120,20 @@ fn actor(
             }
             Some(Cmd::Activity(write, permit)) => {
                 activity.push(write, permit);
-                let _ = activity.flush(&mut hub, &mut pending, false);
+                let _ = activity.flush(&mut hub, &mut pending, &mut committed_sequence, false);
             }
             Some(Cmd::TimeReport(profile, query, done)) => {
-                if !activity.flush_profile(profile, &mut hub, &mut pending, false) {
+                if !activity.flush_profile(
+                    profile,
+                    &mut hub,
+                    &mut pending,
+                    &mut committed_sequence,
+                    false,
+                ) {
                     done(None);
                     continue;
                 }
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(None);
                     continue;
                 }
@@ -2127,7 +2143,7 @@ fn actor(
                 let _ = reply.send(hub.profile_avatars().unwrap_or_default());
             }
             Some(Cmd::SaveProfileAvatar(profile, avatar, photo, done)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(false);
                     continue;
                 }
@@ -2137,28 +2153,28 @@ fn actor(
                 done(hub.profile_avatar_photo(profile));
             }
             Some(Cmd::FocusDays(from_day, days, done)) => {
-                if !activity.flush_focus(&mut hub, &mut pending) {
+                if !activity.flush_focus(&mut hub, &mut pending, &mut committed_sequence) {
                     done(None);
                     continue;
                 }
                 done(hub.focus_days(from_day, days).ok());
             }
             Some(Cmd::LoadBlockerStatistics(profile, done)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(None);
                     continue;
                 }
                 done(hub.load_blocker_statistics(profile).ok());
             }
             Some(Cmd::SaveBlockerStatistics(profile, statistics, done)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(false);
                     continue;
                 }
                 done(hub.save_blocker_statistics(profile, &statistics).is_ok());
             }
             Some(Cmd::LoadProfileBlockerSites(profile, done)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(BlockerSiteLoadOutcome::Failed);
                     continue;
                 }
@@ -2168,7 +2184,7 @@ fn actor(
                 );
             }
             Some(Cmd::UpdateProfileBlockerSites(profile, expected, next, done)) => {
-                if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                if !hub.knows(profile) && !flush(&mut hub, &mut pending, &mut committed_sequence) {
                     done(BlockerSiteUpdateOutcome::Failed);
                     continue;
                 }
@@ -2244,7 +2260,9 @@ fn actor(
                 let _ = reply.send(hub.app_setting_readback(&key));
             }
             Some(Cmd::ResourceCall(profile, call, done, admission)) => {
-                let response = if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                let response = if !hub.knows(profile)
+                    && !flush(&mut hub, &mut pending, &mut committed_sequence)
+                {
                     zephium_core::resources::ResourceResponse::Error {
                         error: zephium_core::resources::ResourceError::Unavailable,
                     }
@@ -2255,7 +2273,9 @@ fn actor(
                 done(response);
             }
             Some(Cmd::ImportMedia(profile, import, done, admission)) => {
-                let response = if !hub.knows(profile) && !flush(&mut hub, &mut pending) {
+                let response = if !hub.knows(profile)
+                    && !flush(&mut hub, &mut pending, &mut committed_sequence)
+                {
                     zephium_core::resources::ResourceResponse::Error {
                         error: zephium_core::resources::ResourceError::Unavailable,
                     }
@@ -2266,7 +2286,8 @@ fn actor(
                 done(response);
             }
             Some(Cmd::LegacyNotes(profile, done)) => {
-                let known = hub.knows(profile) || flush(&mut hub, &mut pending);
+                let known =
+                    hub.knows(profile) || flush(&mut hub, &mut pending, &mut committed_sequence);
                 done(known.then(|| hub.legacy_notes(profile)).flatten());
             }
             Some(Cmd::RetireLegacyNotes(profile, ids, done)) => {
@@ -2300,7 +2321,8 @@ fn actor(
                 let _ = reply.send(hub.history_page_checked(profile, &query, since, before, limit));
             }
             Some(Cmd::ForgetHistoryUrls(profile, urls, reply)) => {
-                let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);
+                let session_durable =
+                    hub.knows(profile) || flush(&mut hub, &mut pending, &mut committed_sequence);
                 let visits_durable = session_durable
                     && flush_profile_visits(&mut hub, &pending_visits, &mut visit_retry, profile);
                 let result = if visits_durable {
@@ -2338,7 +2360,8 @@ fn actor(
                         | HistoryRequest::RemoveAll
                 );
                 let durable = !removes
-                    || ((hub.knows(profile) || flush(&mut hub, &mut pending))
+                    || ((hub.knows(profile)
+                        || flush(&mut hub, &mut pending, &mut committed_sequence))
                         && flush_profile_visits(
                             &mut hub,
                             &pending_visits,
@@ -2352,11 +2375,17 @@ fn actor(
                 });
             }
             Some(Cmd::ClearHistory(profile, since, reply)) => {
-                let session_durable = hub.knows(profile) || flush(&mut hub, &mut pending);
+                let session_durable =
+                    hub.knows(profile) || flush(&mut hub, &mut pending, &mut committed_sequence);
                 let visits_durable = session_durable
                     && flush_profile_visits(&mut hub, &pending_visits, &mut visit_retry, profile);
-                let activity_durable =
-                    activity.flush_profile(profile, &mut hub, &mut pending, true);
+                let activity_durable = activity.flush_profile(
+                    profile,
+                    &mut hub,
+                    &mut pending,
+                    &mut committed_sequence,
+                    true,
+                );
                 let result = if session_durable && visits_durable && activity_durable {
                     hub.clear_history_checked(profile, since)
                 } else {
@@ -2365,7 +2394,9 @@ fn actor(
                 let _ = reply.send(result);
             }
             Some(Cmd::DiscardSessionBackup(profile, done)) => {
-                let result = if hub.knows(profile) || flush(&mut hub, &mut pending) {
+                let result = if hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence)
+                {
                     hub.discard_session_backup(profile)
                 } else {
                     Err(rusqlite::Error::InvalidQuery)
@@ -2398,7 +2429,8 @@ fn actor(
                 body,
                 reply,
             }) => {
-                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                let stored = (hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence))
                     && hub.save_chat(profile, &id, &space, &title, updated_ms, &body);
                 let _ = reply.send(stored);
             }
@@ -2412,7 +2444,8 @@ fn actor(
                 let _ = reply.send(hub.zoom_levels(profile));
             }
             Some(Cmd::SaveZoomLevel(profile, site, percent, set_at, reply)) => {
-                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                let stored = (hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence))
                     && hub.save_zoom_level(profile, &site, percent, set_at);
                 let _ = reply.send(stored);
             }
@@ -2423,7 +2456,8 @@ fn actor(
                 let _ = reply.send(hub.app_link_sites(profile));
             }
             Some(Cmd::SetAppLinkSite(profile, origin, scheme, allowed, reply)) => {
-                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                let stored = (hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence))
                     && hub.set_app_link_site(profile, &origin, &scheme, allowed);
                 let _ = reply.send(stored);
             }
@@ -2431,12 +2465,14 @@ fn actor(
                 let _ = reply.send(hub.download_sites(profile));
             }
             Some(Cmd::SetDownloadSite(profile, origin, allowed, reply)) => {
-                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                let stored = (hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence))
                     && hub.set_download_site(profile, &origin, allowed);
                 let _ = reply.send(stored);
             }
             Some(Cmd::SetPopupSite(profile, origin, allowed, reply)) => {
-                let stored = (hub.knows(profile) || flush(&mut hub, &mut pending))
+                let stored = (hub.knows(profile)
+                    || flush(&mut hub, &mut pending, &mut committed_sequence))
                     && hub.set_popup_site(profile, &origin, allowed);
                 let _ = reply.send(stored);
             }
@@ -2476,7 +2512,7 @@ fn actor(
                             activity.forget_profile(deletion.profile);
                         }
                         if deletions.is_empty() {
-                            if flush(&mut hub, &mut pending) {
+                            if flush(&mut hub, &mut pending, &mut committed_sequence) {
                                 ProfileDeletionLoad::Loaded(deletions)
                             } else {
                                 ProfileDeletionLoad::Failed
@@ -2547,7 +2583,7 @@ fn actor(
                 let _ = reply.send(result);
             }
             Some(Cmd::FinalizeProfileDeletion(profile, reply)) => {
-                let result = if flush(&mut hub, &mut pending) {
+                let result = if flush(&mut hub, &mut pending, &mut committed_sequence) {
                     match hub.finalize_profile_deletion(profile) {
                         Ok(true) => ProfileDeletionFinalizeOutcome::Completed,
                         Ok(false) => ProfileDeletionFinalizeOutcome::NotAuthorized,
@@ -2570,7 +2606,8 @@ fn actor(
                         ..
                     }
                 );
-                let result = if composer && !flush(&mut hub, &mut pending) {
+                let result = if composer && !flush(&mut hub, &mut pending, &mut committed_sequence)
+                {
                     Err(zephium_core::work::WorkError::Unavailable)
                 } else {
                     hub.work_document(profile, *request)
@@ -2598,13 +2635,15 @@ fn actor(
             Some(Cmd::Flush(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
-                let session_durable = flush(&mut hub, &mut pending);
-                let activity_durable = activity.flush(&mut hub, &mut pending, true);
+                let session_durable = flush(&mut hub, &mut pending, &mut committed_sequence);
+                let activity_durable =
+                    activity.flush(&mut hub, &mut pending, &mut committed_sequence, true);
                 let visits_durable = session_durable
                     && flush_visits(
                         &mut hub,
                         &pending_visits,
                         &mut pending,
+                        &mut committed_sequence,
                         &mut visit_retry,
                         true,
                     );
@@ -2615,21 +2654,23 @@ fn actor(
             Some(Cmd::Shutdown(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
-                let session_durable = flush(&mut hub, &mut pending);
-                let activity_durable = activity.flush(&mut hub, &mut pending, true) || {
-                    let lost = activity.only_unrecoverable_records();
-                    if lost {
-                        eprintln!(
-                            "store: shutting down with time or focus records that keep failing"
-                        );
-                    }
-                    lost
-                };
+                let session_durable = flush(&mut hub, &mut pending, &mut committed_sequence);
+                let activity_durable =
+                    activity.flush(&mut hub, &mut pending, &mut committed_sequence, true) || {
+                        let lost = activity.only_unrecoverable_records();
+                        if lost {
+                            eprintln!(
+                                "store: shutting down with time or focus records that keep failing"
+                            );
+                        }
+                        lost
+                    };
                 let visits_durable = session_durable
                     && flush_visits(
                         &mut hub,
                         &pending_visits,
                         &mut pending,
+                        &mut committed_sequence,
                         &mut visit_retry,
                         true,
                     );
@@ -2648,12 +2689,13 @@ fn actor(
         if pending
             .as_ref()
             .is_some_and(|pending| pending.due(Instant::now()))
-            && flush(&mut hub, &mut pending)
+            && flush(&mut hub, &mut pending, &mut committed_sequence)
         {
             let _ = flush_visits(
                 &mut hub,
                 &pending_visits,
                 &mut pending,
+                &mut committed_sequence,
                 &mut visit_retry,
                 false,
             );
@@ -2664,12 +2706,13 @@ fn actor(
     // used its caller-owned deadline barrier. On an unexpected sender drop,
     // this detached actor gets one best-effort terminal durability attempt.
     let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
-    let _ = activity.flush(&mut hub, &mut pending, true);
-    if flush(&mut hub, &mut pending) {
+    let _ = activity.flush(&mut hub, &mut pending, &mut committed_sequence, true);
+    if flush(&mut hub, &mut pending, &mut committed_sequence) {
         let _ = flush_visits(
             &mut hub,
             &pending_visits,
             &mut pending,
+            &mut committed_sequence,
             &mut visit_retry,
             true,
         );
@@ -2787,6 +2830,7 @@ fn flush_visits(
     hub: &mut Hub,
     mailbox: &Mutex<PendingVisits>,
     pending_session: &mut Option<PendingSession>,
+    committed_sequence: &mut u64,
     retry: &mut WriteRetry,
     force: bool,
 ) -> bool {
@@ -2831,7 +2875,9 @@ fn flush_visits(
     };
     // A first-run profile registry may still be in the session debounce
     // window. Publish it before attributing any visit to that profile.
-    if visits.keys().any(|(profile, _)| !hub.knows(*profile)) && !flush(hub, pending_session) {
+    if visits.keys().any(|(profile, _)| !hub.knows(*profile))
+        && !flush(hub, pending_session, committed_sequence)
+    {
         requeue_visits(mailbox, visits);
         return false;
     }
@@ -2892,12 +2938,19 @@ fn absorb_latest_session(latest: &Mutex<SessionMailbox>, pending: &mut Option<Pe
     }
 }
 
-fn flush(hub: &mut Hub, pending: &mut Option<PendingSession>) -> bool {
+fn flush(
+    hub: &mut Hub,
+    pending: &mut Option<PendingSession>,
+    committed_sequence: &mut u64,
+) -> bool {
     let Some(mut save) = pending.take() else {
         return true;
     };
     match hub.save(&save.state) {
-        Ok(()) => true,
+        Ok(()) => {
+            *committed_sequence = (*committed_sequence).max(save.sequence);
+            true
+        }
         Err(e) => {
             eprintln!("store: save failed: {e}");
             // Keep the latest snapshot retryable instead of acknowledging a
@@ -2915,12 +2968,20 @@ fn flush(hub: &mut Hub, pending: &mut Option<PendingSession>) -> bool {
 fn save_checked_session(
     hub: &mut Hub,
     pending: &mut Option<PendingSession>,
+    committed_sequence: &mut u64,
     sequence: u64,
     session: &SessionState,
 ) -> bool {
     let prior = pending.take();
+    if sequence <= *committed_sequence {
+        *pending = prior;
+        return true;
+    }
     let has_later = prior.as_ref().is_some_and(|save| save.sequence > sequence);
     let durable = hub.save(session).is_ok();
+    if durable {
+        *committed_sequence = (*committed_sequence).max(sequence);
+    }
     if has_later || !durable {
         *pending = prior;
     }

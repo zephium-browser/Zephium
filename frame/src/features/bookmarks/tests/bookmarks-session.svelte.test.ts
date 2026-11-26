@@ -47,6 +47,27 @@ describe("bookmarks session", () => {
     expect(session.items.map((item) => item.id)).toEqual(["new"]);
   });
 
+  it("refreshes the resolved folder after a reveal when a refresh is pending", async () => {
+    const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
+    const session = new BookmarksSession("profile");
+    let finishReveal!: (value: BookmarkResponse) => void;
+    native.call
+      .mockReturnValueOnce(new Promise((resolve) => (finishReveal = resolve)))
+      .mockResolvedValueOnce(listing("folder", []));
+
+    const reveal = session.reveal("deleted-after-snapshot");
+    session.storeChanged();
+    finishReveal(listing("folder", [view("deleted-after-snapshot", "Stale")], "Current"));
+    await reveal;
+
+    expect(native.call).toHaveBeenNthCalledWith(1, "profile", {
+      kind: "reveal",
+      id: "deleted-after-snapshot",
+    });
+    expect(native.call).toHaveBeenLastCalledWith("profile", { kind: "list", folder: "folder" });
+    expect(session.items).toEqual([]);
+  });
+
   it("preserves a navigation error instead of refreshing the previous folder", async () => {
     const { BookmarksSession } = await import("../lib/bookmarks-session.svelte");
     const session = new BookmarksSession("profile");

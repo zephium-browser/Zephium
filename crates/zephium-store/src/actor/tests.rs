@@ -1643,11 +1643,40 @@ fn a_later_ordinary_session_is_saved_after_an_earlier_checked_barrier() {
     later.active_item = None;
     let started = Instant::now();
     let mut pending = Some(PendingSession::new(3, later.clone(), started));
+    let mut committed_sequence = 0;
 
-    assert!(save_checked_session(&mut hub, &mut pending, 2, &checked));
+    assert!(save_checked_session(
+        &mut hub,
+        &mut pending,
+        &mut committed_sequence,
+        2,
+        &checked
+    ));
     assert_eq!(pending.as_ref().map(|save| save.sequence), Some(3));
-    assert!(flush(&mut hub, &mut pending));
+    assert!(flush(&mut hub, &mut pending, &mut committed_sequence));
     assert_eq!(hub.load().unwrap().unwrap(), later);
+}
+
+#[test]
+fn checked_session_does_not_overwrite_a_newer_flushed_snapshot() {
+    let mut hub = Hub::in_memory().unwrap();
+    let mut newer = sample();
+    newer.active_item = None;
+    let older = sample();
+    let mut pending = Some(PendingSession::new(7, newer.clone(), Instant::now()));
+    let mut committed_sequence = 0;
+
+    assert!(flush(&mut hub, &mut pending, &mut committed_sequence));
+    assert_eq!(committed_sequence, 7);
+    assert!(save_checked_session(
+        &mut hub,
+        &mut pending,
+        &mut committed_sequence,
+        6,
+        &older
+    ));
+
+    assert_eq!(hub.load().unwrap().unwrap(), newer);
 }
 
 #[test]

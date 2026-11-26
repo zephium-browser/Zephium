@@ -1208,6 +1208,8 @@ pub(crate) struct FakeStore {
     pub(crate) statistics_writes: std::sync::atomic::AtomicUsize,
     saved: Mutex<Option<SessionState>>,
     checked_save_result: Mutex<Option<bool>>,
+    checked_save_started: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+    checked_save_release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     events: Mutex<Vec<&'static str>>,
     flush_result: Mutex<Option<bool>>,
     shutdown_outcome: Mutex<Option<StoreShutdownOutcome>>,
@@ -1572,6 +1574,12 @@ impl Store for FakeStore {
         self.events.lock().unwrap().push("save");
     }
     fn save_session_checked(&self, session: SessionState) -> bool {
+        if let Some(started) = self.checked_save_started.lock().unwrap().take() {
+            let _ = started.send(());
+        }
+        if let Some(release) = self.checked_save_release.lock().unwrap().take() {
+            let _ = release.recv();
+        }
         if self.checked_save_result.lock().unwrap().take() == Some(false) {
             return false;
         }

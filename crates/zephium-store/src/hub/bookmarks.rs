@@ -143,7 +143,7 @@ fn insert_legacy_children(
     let Some(siblings) = children.get(&legacy_parent) else {
         return Ok(());
     };
-    if depth > MAX_DEPTH as usize {
+    if depth > MAX_DEPTH {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mut position: i64 = tx.query_row(
@@ -332,7 +332,7 @@ impl Hub {
                 }
                 let legacy = retry_transient_sqlite(|| {
                     self.profile_conn(*profile)
-                        .and_then(|conn| read_legacy_bookmarks(&conn))
+                        .and_then(|conn| read_legacy_bookmarks(conn))
                 });
                 match legacy {
                     Ok(rows) => unimported.push((*profile, rows)),
@@ -401,17 +401,16 @@ impl Hub {
                         .collect::<rusqlite::Result<_>>()?;
                     children
                 };
-                let mut position: i64 = tx.query_row(
+                let position: i64 = tx.query_row(
                     "SELECT coalesce(max(position) + 1, 0) FROM bookmarks WHERE parent_id=?1",
                     [root],
                     |row| row.get(0),
                 )?;
-                for child in children {
+                for (offset, child) in children.into_iter().enumerate() {
                     tx.execute(
                         "UPDATE bookmarks SET parent_id=?1, position=?2 WHERE id=?3",
-                        params![root, position, child],
+                        params![root, position + offset as i64, child],
                     )?;
-                    position += 1;
                 }
                 tx.execute("DELETE FROM bookmarks WHERE id=?1", [old_root])?;
             }
@@ -476,7 +475,7 @@ impl Hub {
 
             let legacy = match retry_transient_sqlite(|| {
                 self.profile_conn(profile)
-                    .and_then(|conn| read_legacy_bookmarks(&conn))
+                    .and_then(|conn| read_legacy_bookmarks(conn))
             }) {
                 Ok(legacy) => legacy,
                 Err(error) => {
@@ -567,6 +566,9 @@ impl Hub {
             eprintln!("store: bookmarks failed for profile {profile}: {error}");
             return BookmarkReply::Failed(BookmarkFailure::Unavailable);
         }
+        if !self.bookmark_migration_complete(profile) {
+            return BookmarkReply::Failed(BookmarkFailure::Unavailable);
+        }
         if self.degraded_bookmark_profiles.contains(&profile) {
             return BookmarkReply::Failed(BookmarkFailure::Unavailable);
         }
@@ -591,6 +593,34 @@ impl Hub {
         request: BookmarkRequest,
         known_existing_link: Option<Option<i64>>,
     ) -> BookmarkReply {
+        if let (
+            BookmarkRequest::AddLink {
+                parent,
+                if_absent: true,
+                ..
+            },
+            Some(Some(_)),
+        ) = (&request, known_existing_link)
+        {
+            if let Some(parent) = parent.filter(|id| *id != root) {
+                match in_folder(&self.meta, root, parent) {
+                    Ok(true) => {}
+                    Ok(false) => return BookmarkReply::Failed(BookmarkFailure::Missing),
+                    Err(error) => {
+                        eprintln!("store: bookmark parent scope check failed: {error}");
+                        return BookmarkReply::Failed(BookmarkFailure::Unavailable);
+                    }
+                }
+                match folder(&self.meta, parent) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(Refused(failure))) => return BookmarkReply::Failed(failure),
+                    Err(error) => {
+                        eprintln!("store: bookmark parent validation failed: {error}");
+                        return BookmarkReply::Failed(BookmarkFailure::Unavailable);
+                    }
+                }
+            }
+        }
         let request = match (request, known_existing_link) {
             (
                 BookmarkRequest::AddLink {
@@ -638,6 +668,9 @@ impl Hub {
             || self.recovery_required.is_some()
             || self.prepare_shared_bookmarks().is_err()
         {
+            return (BookmarkReply::Failed(BookmarkFailure::Unavailable), None);
+        }
+        if !self.bookmark_migration_complete(profile) {
             return (BookmarkReply::Failed(BookmarkFailure::Unavailable), None);
         }
         let target = match &request {
@@ -729,6 +762,16 @@ impl Hub {
             _ => None,
         };
         (reply, change)
+    }
+
+    pub(super) fn bookmark_migration_complete(&self, profile: ProfileId) -> bool {
+        self.meta
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM bookmark_profile_migrations WHERE profile_id=?1)",
+                [profile.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
     }
 }
 
@@ -918,6 +961,10 @@ fn apply_at(
              ) SELECT id FROM tree WHERE id!={root})"
         )
     });
+    let order = scope_root.map_or_else(
+        || "b.parent_id".to_owned(),
+        |root| format!("CASE WHEN b.parent_id={root} THEN -1 ELSE b.parent_id END"),
+    );
     match request {
         BookmarkRequest::Children { parent } => {
             if let Some(parent) = parent {
@@ -994,7 +1041,7 @@ fn apply_at(
         BookmarkRequest::All => {
             let mut rows = conn.prepare_cached(&format!(
                 "SELECT b.id, b.parent_id, b.url, b.title, 0 FROM bookmarks b
-                 WHERE 1=1{scoped} ORDER BY b.parent_id, b.position, b.id LIMIT ?1"
+                 WHERE 1=1{scoped} ORDER BY {order}, b.position, b.id LIMIT ?1"
             ))?;
             let nodes: Vec<_> = rows
                 .query_map(params![i64::from(MAX_BOOKMARKS) + 1], node)?
@@ -1110,19 +1157,7 @@ fn apply_at(
                     .map_or(0, |elapsed| elapsed.as_secs() as i64),
             };
             let Some(root) = import.folder(scope_root, &title)? else {
-                let mut remaining: Vec<&ImportNode> = nodes.iter().collect();
-                let mut partial = false;
-                while let Some(node) = remaining.pop() {
-                    match node {
-                        ImportNode::Link { url, .. } => {
-                            if navigation::is_allowed_str(url) {
-                                partial = true;
-                                break;
-                            }
-                        }
-                        ImportNode::Folder { children, .. } => remaining.extend(children),
-                    }
-                }
+                let partial = nodes_have_eligible_links(&nodes, &import.existing_urls);
                 return Ok(Ok(BookmarkReply::Imported { added: 0, partial }));
             };
             import.merge(root, 1, &nodes)?;
@@ -1175,10 +1210,10 @@ fn apply_at(
             let hidden_root = root.is_some_and(|id| Some(id) == scope_root);
             let mut entries = match root {
                 None => conn
-                    .prepare_cached(
+                    .prepare_cached(&format!(
                         "SELECT b.id, b.parent_id, 0, b.url, b.title, b.added_at FROM bookmarks b
-                         ORDER BY b.parent_id, b.position, b.id LIMIT ?1",
-                    )?
+                         ORDER BY {order}, b.position, b.id LIMIT ?1"
+                    ))?
                     .query_map([MAX_SUBTREE + 1], entry_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?,
                 Some(root) => {
@@ -1437,14 +1472,14 @@ impl Import<'_> {
     /// would nest past the limit are opened into the deepest allowed one.
     fn merge(&mut self, parent: i64, depth: usize, nodes: &[ImportNode]) -> rusqlite::Result<()> {
         for node in nodes {
-            if self.budget == 0 {
-                self.partial = true;
-                break;
-            }
             match node {
                 ImportNode::Link { title, url } => {
                     if !navigation::is_allowed_str(url) || self.existing_urls.contains(url) {
                         continue;
+                    }
+                    if self.budget == 0 {
+                        self.partial = true;
+                        break;
                     }
                     let title = match clean_title(title) {
                         empty if empty.is_empty() => clean_title(url),
@@ -1455,6 +1490,13 @@ impl Import<'_> {
                     }
                 }
                 ImportNode::Folder { title, children } => {
+                    if !nodes_have_eligible_links(children, &self.existing_urls) {
+                        continue;
+                    }
+                    if self.budget == 0 {
+                        self.partial = true;
+                        break;
+                    }
                     // The folder sits a level down and its contents one more.
                     if depth + 2 > MAX_DEPTH {
                         self.merge(parent, depth, children)?;
@@ -1472,6 +1514,15 @@ impl Import<'_> {
         }
         Ok(())
     }
+}
+
+fn nodes_have_eligible_links(nodes: &[ImportNode], existing_urls: &HashSet<String>) -> bool {
+    nodes.iter().any(|node| match node {
+        ImportNode::Link { url, .. } => {
+            navigation::is_allowed_str(url) && !existing_urls.contains(url)
+        }
+        ImportNode::Folder { children, .. } => nodes_have_eligible_links(children, existing_urls),
+    })
 }
 
 /// Refuses unless `id` is an existing folder.
@@ -1819,6 +1870,236 @@ mod tests {
             vec!["Shared", "Duplicate one", "Duplicate two"]
         );
         assert_eq!(bookmark_root(&hub, second), root);
+    }
+
+    #[test]
+    fn duplicate_add_link_still_rejects_a_parent_from_another_profile() {
+        let (mut hub, first) = hub();
+        let first_root = bookmark_root(&hub, first);
+        let link_id = added(hub.bookmarks(first, link(None, "Saved", "https://saved.example/")));
+        let second = ProfileId::from(3);
+        hub.meta
+            .execute(
+                "INSERT INTO profiles(id, name, kind, position) VALUES (?1, 'Work', 'named', 1)",
+                [second.to_string()],
+            )
+            .unwrap();
+        hub.registry.insert(second);
+        hub.meta
+            .execute(
+                "INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 VALUES (NULL, 1, 'Work', NULL, 1)",
+                [],
+            )
+            .unwrap();
+        let foreign_root = hub.meta.last_insert_rowid();
+        hub.meta
+            .execute(
+                "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)",
+                params![second.to_string(), foreign_root],
+            )
+            .unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO bookmark_profile_migrations(profile_id) VALUES (?1)",
+                [second.to_string()],
+            )
+            .unwrap();
+        assert_ne!(first_root, foreign_root);
+
+        let (reply, change) = hub.bookmarks_observed(
+            first,
+            BookmarkRequest::AddLink {
+                parent: Some(foreign_root),
+                title: "Saved".into(),
+                url: "https://saved.example/".into(),
+                if_absent: true,
+            },
+        );
+        assert_eq!(reply, BookmarkReply::Failed(BookmarkFailure::Missing));
+        assert_eq!(change, None);
+        assert_eq!(
+            hub.bookmarks_observed(
+                first,
+                BookmarkRequest::AddLink {
+                    parent: Some(link_id),
+                    title: "Nested".into(),
+                    url: "https://saved.example/".into(),
+                    if_absent: true,
+                }
+            )
+            .0,
+            BookmarkReply::Failed(BookmarkFailure::Invalid)
+        );
+        assert_eq!(
+            entries(hub.bookmarks(first, BookmarkRequest::Entries { ids: vec![link_id] })),
+            vec![(link_id, None, 0, "Saved".into())]
+        );
+    }
+
+    #[test]
+    fn profile_deletion_is_not_authorized_without_its_bookmark_migration_marker() {
+        let (mut hub, profile) = hub();
+        hub.meta
+            .execute(
+                "DELETE FROM bookmark_profile_migrations WHERE profile_id=?1",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.degraded_bookmark_profiles.insert(profile);
+        let mut filtered = hub.load_authoritative().unwrap().unwrap().state;
+        filtered
+            .profiles
+            .retain(|candidate| candidate.id != profile);
+        filtered.spaces.retain(|space| space.profile != profile);
+        filtered
+            .shared_bookmark_folders
+            .retain(|folder| folder.profile != profile);
+        filtered.active_space = None;
+        filtered.active_item = None;
+
+        assert_eq!(
+            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
+            zephium_core::ports::store::ProfileDeletionAuthorizeOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn all_lists_a_migrated_profile_root_before_its_children() {
+        let (mut hub, profile) = hub();
+        let old_root = bookmark_root(&hub, profile);
+        hub.meta
+            .execute("DELETE FROM bookmark_profile_migrations", [])
+            .unwrap();
+        hub.meta
+            .execute("DELETE FROM profile_bookmark_folders", [])
+            .unwrap();
+        hub.meta.execute("DELETE FROM bookmarks", []).unwrap();
+        let root = hub
+            .meta
+            .query_row(
+                "INSERT INTO bookmarks(id, parent_id, position, title, url, added_at)
+                 VALUES (3, NULL, 0, 'Personal', NULL, 1) RETURNING id",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let folder = hub
+            .meta
+            .query_row(
+                "INSERT INTO bookmarks(id, parent_id, position, title, url, added_at)
+                 VALUES (1, ?1, 0, 'Folder', NULL, 1) RETURNING id",
+                [root],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO profile_bookmark_folders(profile_id, folder_id) VALUES (?1, ?2)",
+                params![profile.to_string(), root],
+            )
+            .unwrap();
+        hub.meta
+            .execute(
+                "INSERT INTO bookmark_profile_migrations(profile_id) VALUES (?1)",
+                [profile.to_string()],
+            )
+            .unwrap();
+        assert_ne!(old_root, root);
+        hub.meta
+            .execute(
+                "INSERT INTO bookmarks(id, parent_id, position, title, url, added_at)
+                 VALUES (2, ?1, 0, 'Child', 'https://child.example/', 1)",
+                [folder],
+            )
+            .unwrap();
+        assert_eq!(
+            titles(hub.bookmarks(profile, BookmarkRequest::All)),
+            vec!["Folder", "Child"]
+        );
+    }
+
+    #[test]
+    fn duplicate_only_import_at_capacity_is_not_partial() {
+        let (mut hub, profile) = hub();
+        let root = bookmark_root(&hub, profile);
+        added(hub.bookmarks(profile, link(None, "Saved", "https://saved.example/")));
+        hub.meta
+            .execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, x, 'Fill ' || x, 'https://fill.example/' || x, 0 FROM n",
+                params![root, i64::from(MAX_BOOKMARKS) - 1],
+            )
+            .unwrap();
+
+        assert_eq!(
+            hub.bookmarks(
+                profile,
+                BookmarkRequest::Import {
+                    folder: "Imported".into(),
+                    nodes: vec![ImportNode::Link {
+                        title: "Saved again".into(),
+                        url: "https://saved.example/".into(),
+                    }],
+                }
+            ),
+            BookmarkReply::Imported {
+                added: 0,
+                partial: false,
+            }
+        );
+    }
+
+    #[test]
+    fn duplicate_only_subfolder_does_not_consume_the_last_import_slot() {
+        let (mut hub, profile) = hub();
+        let root = bookmark_root(&hub, profile);
+        let import_folder = added(hub.bookmarks(
+            profile,
+            BookmarkRequest::AddFolder {
+                parent: None,
+                title: "Imported".into(),
+            },
+        ));
+        added(hub.bookmarks(
+            profile,
+            link(Some(import_folder), "Saved", "https://saved.example/"),
+        ));
+        hub.meta
+            .execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
+                 INSERT INTO bookmarks(parent_id, position, title, url, added_at)
+                 SELECT ?1, x, 'Fill ' || x, 'https://fill.example/' || x, 0 FROM n",
+                params![root, i64::from(MAX_BOOKMARKS) - 3],
+            )
+            .unwrap();
+
+        assert_eq!(
+            hub.bookmarks(
+                profile,
+                BookmarkRequest::Import {
+                    folder: "Imported".into(),
+                    nodes: vec![
+                        ImportNode::Folder {
+                            title: "Duplicates".into(),
+                            children: vec![ImportNode::Link {
+                                title: "Saved again".into(),
+                                url: "https://saved.example/".into(),
+                            }],
+                        },
+                        ImportNode::Link {
+                            title: "New".into(),
+                            url: "https://new.example/".into(),
+                        },
+                    ],
+                }
+            ),
+            BookmarkReply::Imported {
+                added: 1,
+                partial: false,
+            }
+        );
     }
 
     fn link(parent: Option<i64>, title: &str, url: &str) -> BookmarkRequest {
@@ -2458,17 +2739,17 @@ mod tests {
         for nested in [false, true] {
             let (mut hub, profile) = hub();
             let root = bookmark_root(&hub, profile);
-            let parent = nested
-                .then(|| {
-                    added(hub.bookmarks(
-                        profile,
-                        BookmarkRequest::AddFolder {
-                            parent: Some(root),
-                            title: "Parent".into(),
-                        },
-                    ))
-                })
-                .unwrap_or(root);
+            let parent = if nested {
+                added(hub.bookmarks(
+                    profile,
+                    BookmarkRequest::AddFolder {
+                        parent: Some(root),
+                        title: "Parent".into(),
+                    },
+                ))
+            } else {
+                root
+            };
             let conn = &hub.meta;
             conn.execute(
                 "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < ?2)
@@ -3105,8 +3386,7 @@ mod tests {
                 if_absent: false,
             },
         ));
-        let ids = std::iter::repeat(id)
-            .take(MAX_ENTRIES as usize)
+        let ids = std::iter::repeat_n(id, MAX_ENTRIES as usize)
             .chain(std::iter::once(i64::MAX))
             .collect();
         let reply = apply_scoped(&mut hub.meta, root, BookmarkRequest::Entries { ids }).unwrap();

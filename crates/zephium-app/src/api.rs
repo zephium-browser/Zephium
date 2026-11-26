@@ -475,6 +475,15 @@ pub enum Command {
         switch: bool,
         exists: Option<bool>,
     },
+    ProfileCreationPublished {
+        generation: u64,
+        profile: ProfileId,
+        space: zephium_core::ids::SpaceId,
+        avatar: zephium_core::profiles::ProfileAvatar,
+        photo: Option<Arc<Vec<u8>>>,
+        switch: bool,
+        durable: bool,
+    },
     /// A photo style carries its already downscaled bytes.
     SetProfileAvatar {
         profile: ProfileId,

@@ -106,6 +106,7 @@ fn register(hub: &mut Hub) {
             name: "Fixture".into(),
             kind: ProfileKind::Default,
         }],
+        shared_bookmark_folders: Vec::new(),
         spaces: vec![PersistedSpace {
             id: 2_u128.into(),
             profile: 1_u128.into(),

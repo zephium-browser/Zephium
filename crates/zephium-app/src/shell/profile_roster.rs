@@ -13,6 +13,17 @@ pub(super) struct RosterState {
     left_at: std::collections::HashMap<ProfileId, ItemId>,
 }
 
+pub(super) struct ProfileCreationValidation {
+    pub(super) source: ProfileId,
+    pub(super) name: String,
+    pub(super) avatar: ProfileAvatar,
+    pub(super) photo: Option<Arc<Vec<u8>>>,
+    pub(super) folder: i64,
+    pub(super) switch: bool,
+    pub(super) exists: Option<bool>,
+    pub(super) generation: u64,
+}
+
 fn avatar_view(avatar: ProfileAvatar) -> ProfileAvatarView {
     ProfileAvatarView {
         style: match avatar.style {
@@ -113,7 +124,7 @@ impl Shell {
         .then_some(avatar)
     }
 
-    fn save_avatar(
+    pub(super) fn save_avatar(
         &mut self,
         profile: ProfileId,
         avatar: ProfileAvatar,
@@ -212,12 +223,12 @@ impl Shell {
                     OperationReason::StoreAdmissionRejected,
                 ));
             };
-            let name = name.to_owned();
             self.next_profile_creation_generation =
                 self.next_profile_creation_generation.wrapping_add(1);
             let generation = self.next_profile_creation_generation;
             self.pending_profile_creations
                 .insert(generation, operation_id.clone());
+            let name = name.to_owned();
             self.store.bookmark_folders_async(
                 source,
                 Box::new(move |folders| {
@@ -251,23 +262,22 @@ impl Shell {
             );
             return None;
         }
-        Some(self.create_profile_validated(name, avatar, photo, bookmark_folder, switch))
+        self.next_profile_creation_generation =
+            self.next_profile_creation_generation.wrapping_add(1);
+        let generation = self.next_profile_creation_generation;
+        self.pending_profile_creations
+            .insert(generation, operation_id.clone());
+        self.create_profile_validated(name, avatar, photo, bookmark_folder, switch, generation)
     }
 
     pub(super) fn finish_profile_creation(
         &mut self,
-        source: ProfileId,
-        name: &str,
-        avatar: ProfileAvatar,
-        photo: Option<Arc<Vec<u8>>>,
-        folder: i64,
-        switch: bool,
-        exists: Option<bool>,
+        validation: ProfileCreationValidation,
     ) -> OperationDisposition {
-        if exists != Some(true) {
+        if validation.exists != Some(true) {
             return operation_result(
                 OperationOutcome::Rejected,
-                if exists == Some(false) {
+                if validation.exists == Some(false) {
                     OperationReason::InvalidInput
                 } else {
                     OperationReason::StoreAdmissionRejected
@@ -278,10 +288,26 @@ impl Shell {
             .profiles_view()
             .and_then(|view| view.current)
             .and_then(|profile| ProfileId::parse(&profile));
-        if !self.bootstrapped || current != Some(source) || !self.rostered(source) {
+        if !self.bootstrapped
+            || current != Some(validation.source)
+            || !self.rostered(validation.source)
+        {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
-        self.create_profile_validated(name.to_owned(), avatar, photo, Some(folder), switch)
+        self.create_profile_validated(
+            validation.name,
+            validation.avatar,
+            validation.photo,
+            Some(validation.folder),
+            validation.switch,
+            validation.generation,
+        )
+        .unwrap_or_else(|| {
+            operation_result(
+                OperationOutcome::Deferred,
+                OperationReason::StoreWorkPending,
+            )
+        })
     }
 
     fn create_profile_validated(
@@ -291,7 +317,8 @@ impl Shell {
         photo: Option<Arc<Vec<u8>>>,
         bookmark_folder: Option<i64>,
         switch: bool,
-    ) -> OperationDisposition {
+        generation: u64,
+    ) -> Option<OperationDisposition> {
         let Some(profile) = (0..8).map(|_| ProfileId::generate()).find(|id| {
             !self.profile_deletion.states.contains_key(id)
                 && self.profiles.insert(Profile {
@@ -300,18 +327,27 @@ impl Shell {
                     kind: ProfileKind::Named,
                 })
         }) else {
-            return operation_result(
+            self.pending_profile_creations.remove(&generation);
+            return Some(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
-            );
+            ));
         };
         if !self.profiles.set_bookmark_folder(profile, bookmark_folder) {
             self.profiles.remove(profile);
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            self.pending_profile_creations.remove(&generation);
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::InvalidInput,
+            ));
         }
         if !self.initialize_new_blocker_profile(profile) {
             self.profiles.remove(profile);
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+            self.pending_profile_creations.remove(&generation);
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::InvalidScope,
+            ));
         }
         let space = (0..8).map(|_| SpaceId::generate()).find(|id| {
             self.spaces.insert(Space {
@@ -325,27 +361,107 @@ impl Shell {
             self.blocker.discard_uncommitted_profile(profile);
             self.finish_terminalized_blocker_native_operations();
             self.profiles.remove(profile);
-            return operation_result(
+            self.pending_profile_creations.remove(&generation);
+            return Some(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
-            );
+            ));
         };
-        if !self.publish_current_session_checked() {
+        if self.self_queue.is_none() {
+            if !self.publish_current_session_checked() {
+                self.blocker.discard_uncommitted_profile(profile);
+                self.finish_terminalized_blocker_native_operations();
+                self.spaces.remove(space);
+                self.profiles.remove(profile);
+                self.pending_profile_creations.remove(&generation);
+                return Some(operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                ));
+            }
+            self.pending_profile_creations.remove(&generation);
+            self.save_avatar(profile, avatar, photo);
+            self.project_profiles();
+            return Some(if switch {
+                self.operation_switch_profile(profile)
+            } else {
+                operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
+            });
+        }
+        let Some(session) = self.current_session_snapshot() else {
             self.blocker.discard_uncommitted_profile(profile);
             self.finish_terminalized_blocker_native_operations();
             self.spaces.remove(space);
             self.profiles.remove(profile);
-            return operation_result(
+            self.pending_profile_creations.remove(&generation);
+            return Some(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::StoreAdmissionRejected,
-            );
-        }
-        self.save_avatar(profile, avatar, photo);
+            ));
+        };
+        let Some(callback) = self.self_queue.as_ref().map(|queue| CallbackHandle {
+            queue: std::sync::Arc::downgrade(&queue.inner),
+        }) else {
+            self.rollback_profile_creation(profile, space, generation);
+            return Some(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::StoreAdmissionRejected,
+            ));
+        };
+        let store = self.store.clone();
+        let publication_state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
+        self.pending_profile_rollbacks
+            .insert(generation, (profile, space, publication_state.clone()));
+        std::thread::spawn(move || {
+            let durable = if publication_state
+                .compare_exchange(
+                    0,
+                    1,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                store.save_session_checked(session)
+            } else {
+                false
+            };
+            let mut command = Some(Command::ProfileCreationPublished {
+                generation,
+                profile,
+                space,
+                avatar,
+                photo,
+                switch,
+                durable,
+            });
+            while let Some(next) = command.take() {
+                if callback.dispatch(next.clone()) {
+                    break;
+                }
+                if !callback.is_accepting_commands() {
+                    break;
+                }
+                command = Some(next);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        None
+    }
+
+    pub(super) fn rollback_profile_creation(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        generation: u64,
+    ) {
+        self.pending_profile_rollbacks.remove(&generation);
+        self.blocker.discard_uncommitted_profile(profile);
+        self.finish_terminalized_blocker_native_operations();
+        self.spaces.remove(space);
+        self.profiles.remove(profile);
+        self.pending_profile_creations.remove(&generation);
         self.project_profiles();
-        if switch {
-            return self.operation_switch_profile(profile);
-        }
-        operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
     }
 
     pub(super) fn operation_rename_profile(
