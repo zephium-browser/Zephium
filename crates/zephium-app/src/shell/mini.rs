@@ -374,10 +374,11 @@ impl Shell {
         });
         let region = mini_page_region(win.size);
         let dispatch = match page {
-            Some(id) => self
-                .engine
-                .set_content(window, Some(Pane::Leaf(id)), Some(region)),
-            None => self.engine.set_content(window, None, None),
+            Some(id) => {
+                self.engine
+                    .set_content(window, Some(Pane::Leaf(id)), Some(region), Some(id))
+            }
+            None => self.engine.set_content(window, None, None, None),
         };
         if let Some(id) = page.filter(|_| mini.focus_pending.get()) {
             if self.engine.focus_page(id) == NativeDispatch::Scheduled {

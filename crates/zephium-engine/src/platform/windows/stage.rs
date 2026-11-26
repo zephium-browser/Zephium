@@ -192,6 +192,8 @@ struct State {
     /// The card on its way in or out, and the timer that steps the cut.
     card_motion: Option<CardMotion>,
     card_tick: Option<super::ContentPolicyTimeout>,
+    /// The active leaf in `tree` chosen by the shell for focus handoff.
+    active: Option<ItemId>,
     /// True after a deselected or closed foreground page yields focus so the
     /// next revealed active page receives keyboard focus.
     pending_page_focus: bool,
@@ -435,6 +437,7 @@ impl Stage {
             card_clip: None,
             card_motion: None,
             card_tick: None,
+            active: None,
             pending_page_focus: false,
         }));
         CAPTION_STAGES.with(|stages| {
@@ -454,7 +457,13 @@ impl Stage {
         }
     }
 
-    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) -> bool {
+    pub fn apply(
+        &self,
+        region: Option<Rect>,
+        tree: Option<Pane>,
+        visible: &[ItemId],
+        active: Option<ItemId>,
+    ) -> bool {
         let hide_now = {
             let Ok(mut s) = self.state.try_borrow_mut() else {
                 return false;
@@ -536,7 +545,12 @@ impl Stage {
             }
             s.tree = tree;
             s.visible = next_visible;
-            if s.hidden || s.visible.is_empty() {
+            s.active = if s.hidden {
+                None
+            } else {
+                active.filter(|id| s.visible.contains(id))
+            };
+            if s.hidden || s.visible.is_empty() || s.active.is_none() {
                 s.pending_page_focus = false;
             }
             s.revision = s.revision.wrapping_add(1);
@@ -669,7 +683,7 @@ impl Stage {
 
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the container window; dropping the webview destroys it.
-        let (container, has_visible_page, cover) = {
+        let (container, has_surviving_active, cover) = {
             let mut state = self.state.borrow_mut();
             if state.preview.is_some_and(|moving| moving.id == id) {
                 state.preview = None;
@@ -679,9 +693,15 @@ impl Stage {
             state.dirty.remove(&id);
             state.visibility_uncertain.remove(&id);
             state.visible.remove(&id);
-            let has_visible_page = !state.hidden && !state.visible.is_empty();
+            if state.active == Some(id) {
+                state.active = None;
+            }
+            let has_surviving_active = !state.hidden
+                && state
+                    .active
+                    .is_some_and(|active| state.visible.contains(&active));
             let cover = state.covers.remove(&id);
-            (container, has_visible_page, cover)
+            (container, has_surviving_active, cover)
         };
         if let Some(container) = container {
             // Destroying the focused child HWND drops Win32 focus to NULL
@@ -693,7 +713,7 @@ impl Stage {
                 if let Ok(mut state) = self.state.try_borrow_mut() {
                     state.pending_page_focus = true;
                 }
-                if has_visible_page {
+                if has_surviving_active {
                     schedule_sync(&self.state);
                 }
             }
@@ -1361,12 +1381,15 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
             current.dirty.insert(hide.id);
         }
         let selected = current.visible.contains(&hide.id);
-        let has_visible_page = !current.hidden && !current.visible.is_empty();
+        let has_active_page = !current.hidden
+            && current
+                .active
+                .is_some_and(|active| current.visible.contains(&active));
         drop(current);
         // Hiding WebView2 does not release its native keyboard focus. Give it
         // back to chrome only if focus still belongs to a deselected page.
         // A selected page hidden while navigating must keep its focus.
-        if return_hidden_focus(hide.container, selected) && has_visible_page {
+        if return_hidden_focus(hide.container, selected) && has_active_page {
             if let Ok(mut current) = state.try_borrow_mut() {
                 current.pending_page_focus = true;
             }
@@ -1446,28 +1469,16 @@ fn can_focus_revealed_page(
 }
 
 fn select_focus_target(state: &State) -> Option<ItemId> {
-    let ready_and_shown = |id: &ItemId| -> bool {
-        state.visible.contains(id)
-            && state.ready.contains(id)
-            && state.views.get(id).is_some_and(|view| {
-                let applied = view.applied.get();
-                view.presentation_permit.load(Ordering::Acquire)
-                    && applied.window_visible == Some(true)
-                    && applied.controller_visible == Some(true)
-            })
-    };
-    state
-        .tree
-        .as_ref()
-        .and_then(|tree| tree.tabs().into_iter().find(|id| ready_and_shown(id)))
-        .or_else(|| {
-            state
-                .visible
-                .iter()
-                .copied()
-                .filter(|id| ready_and_shown(id))
-                .min()
-        })
+    let target = state.active?;
+    (state.visible.contains(&target)
+        && state.ready.contains(&target)
+        && state.views.get(&target).is_some_and(|view| {
+            let applied = view.applied.get();
+            view.presentation_permit.load(Ordering::Acquire)
+                && applied.window_visible == Some(true)
+                && applied.controller_visible == Some(true)
+        }))
+    .then_some(target)
 }
 
 fn restore_page_focus(state: &Rc<RefCell<State>>, revision: u64) {
@@ -2075,14 +2086,17 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         // Finishing can schedule another pass or retire the view. Recheck its
         // identity and revision, then release State before transferring focus.
         if placement_is_current(state, placement) {
-            let (selected, has_visible_page) = {
+            let (selected, has_active_page) = {
                 let current = state.borrow();
                 (
                     current.visible.contains(&placement.id),
-                    !current.hidden && !current.visible.is_empty(),
+                    !current.hidden
+                        && current
+                            .active
+                            .is_some_and(|active| current.visible.contains(&active)),
                 )
             };
-            if return_hidden_focus(placement.container, selected) && has_visible_page {
+            if return_hidden_focus(placement.container, selected) && has_active_page {
                 if let Ok(mut current) = state.try_borrow_mut() {
                     current.pending_page_focus = true;
                 }

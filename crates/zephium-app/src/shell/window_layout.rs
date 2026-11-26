@@ -184,7 +184,18 @@ impl Shell {
             dividers,
             work_pane,
         }));
-        let applied = self.engine.set_content(win.id, tree, l.content);
+        let active = l.content.and_then(|_| {
+            tree.as_ref().and_then(|tree| {
+                filling
+                    .or(win.active)
+                    .filter(|id| tree.contains(*id))
+                    .or_else(|| {
+                        let tabs = tree.tabs();
+                        (tabs.len() == 1).then_some(tabs[0])
+                    })
+            })
+        });
+        let applied = self.engine.set_content(win.id, tree, l.content, active);
         self.reconcile_page_permission_placement();
         applied
     }

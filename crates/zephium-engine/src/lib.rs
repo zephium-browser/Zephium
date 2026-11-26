@@ -1394,7 +1394,13 @@ fn dispatch_layout_turn(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
                         .remove(&update.window);
-                    let applied = host.set_content(update.window, update.tree, update.region, hint);
+                    let applied = host.set_content(
+                        update.window,
+                        update.tree,
+                        update.region,
+                        update.active,
+                        hint,
+                    );
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     if let Some(id) = update.focus.filter(|_| applied) {
                         if !host.focus_page(id) {
@@ -1734,6 +1740,8 @@ struct PendingLayout {
     window: WindowId,
     tree: Option<Pane>,
     region: Option<Rect>,
+    /// The shell-selected active leaf in `tree` for focus handoff.
+    active: Option<ItemId>,
     item_tokens: Vec<(ItemId, Arc<AtomicBool>)>,
     tab_preview: TabPreviewSlot,
     /// A page that takes the keyboard once this layout has placed it.
@@ -3275,6 +3283,7 @@ impl Engine for WebviewEngine {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        active: Option<ItemId>,
     ) -> NativeDispatch {
         // Hiding content is cleanup and remains available. Any operation that
         // could show views must prove every leaf is a currently active item.
@@ -3283,6 +3292,7 @@ impl Engine for WebviewEngine {
         } else {
             Vec::new()
         };
+        let active = active.filter(|id| visible_ids.contains(id));
         let (item_tokens, already_terminal) = {
             let retirement = lock_retirement_gate(&self.retirement);
             (
@@ -3305,6 +3315,7 @@ impl Engine for WebviewEngine {
             window,
             tree,
             region,
+            active,
             item_tokens,
             tab_preview: self.tab_preview.clone(),
             focus: None,
@@ -4134,6 +4145,7 @@ mod tests {
             window: 1,
             tree,
             region,
+            active: None,
             item_tokens: Vec::new(),
             tab_preview: preview.clone(),
             focus: None,
@@ -4181,6 +4193,7 @@ mod tests {
             window: 1,
             tree: Some(Pane::leaf(id)),
             region: Some(Rect::new(0., 0., 800., 600.)),
+            active: Some(id),
             item_tokens: Vec::new(),
             tab_preview: preview.clone(),
             focus: None,
@@ -4246,7 +4259,12 @@ mod tests {
             Some(profile)
         );
         assert_eq!(
-            engine.set_content(1, Some(Pane::leaf(id)), Some(Rect::new(0., 0., 800., 600.))),
+            engine.set_content(
+                1,
+                Some(Pane::leaf(id)),
+                Some(Rect::new(0., 0., 800., 600.)),
+                Some(id),
+            ),
             NativeDispatch::Scheduled
         );
         assert_eq!(
@@ -4708,7 +4726,7 @@ mod tests {
         );
         assert_eq!(engine.print(id), NativeDispatch::Rejected);
         assert_eq!(
-            engine.set_content(1, None, None),
+            engine.set_content(1, None, None, None),
             NativeDispatch::Rejected,
             "an empty layout cannot bypass a terminal retirement gate"
         );
@@ -4717,6 +4735,7 @@ mod tests {
                 1,
                 Some(Pane::leaf(id)),
                 Some(Rect::new(0.0, 0.0, 100.0, 100.0)),
+                Some(id),
             ),
             NativeDispatch::Rejected
         );
@@ -5414,6 +5433,7 @@ mod tests {
                 1,
                 Some(Pane::leaf(id)),
                 Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+                Some(id),
             ),
             NativeDispatch::Rejected
         );
@@ -5484,6 +5504,7 @@ mod tests {
                 1,
                 Some(Pane::leaf(ItemId::from(99))),
                 Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+                Some(ItemId::from(99)),
             ),
             NativeDispatch::Rejected
         );
@@ -5536,6 +5557,7 @@ mod tests {
                     window,
                     Some(Pane::leaf(id)),
                     Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+                    Some(id),
                 ),
                 NativeDispatch::Scheduled
             );
@@ -5545,6 +5567,7 @@ mod tests {
                 MAX_PENDING_LAYOUT_WINDOWS as u64,
                 Some(Pane::leaf(id)),
                 Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+                Some(id),
             ),
             NativeDispatch::Rejected
         );

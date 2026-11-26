@@ -416,6 +416,7 @@ fn closing_a_focused_tab_returns_focus_before_teardown_and_focuses_the_successor
         Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
         Some(Pane::Leaf(tab_b)),
         &[tab_b],
+        Some(tab_b),
     ));
     sync(&stage.state);
 
@@ -514,6 +515,7 @@ fn switching_tabs_transfers_focus_to_the_revealed_page_unless_chrome_held_focus(
             Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
             Some(Pane::Leaf(tab_b)),
             &[tab_b],
+            Some(tab_b),
         ));
         sync(&stage.state);
 
@@ -605,7 +607,7 @@ fn empty_stage_clears_pending_focus_handoff_so_chrome_keeps_focus() {
     assert!(stage.state.borrow().pending_page_focus);
 
     // Switching onto an empty stage (e.g. built-in New Tab) clears the handoff.
-    assert!(stage.apply(None, None, &[]));
+    assert!(stage.apply(None, None, &[], None));
     assert!(!stage.state.borrow().pending_page_focus);
     sync(&stage.state);
 
@@ -614,6 +616,7 @@ fn empty_stage_clears_pending_focus_handoff_so_chrome_keeps_focus() {
         Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
         Some(Pane::Leaf(tab_b)),
         &[tab_b],
+        Some(tab_b),
     ));
     sync(&stage.state);
     FOCUS.with(|record| {
@@ -679,6 +682,7 @@ fn removing_focused_split_pane_schedules_sync_when_surviving_pane_is_clean() {
         s.ready.insert(tab_b);
         s.visible.insert(tab_a);
         s.visible.insert(tab_b);
+        s.active = Some(tab_b);
         s.hidden = false;
     }
     FOCUS.with(|record| {
@@ -782,5 +786,197 @@ fn focus_transfer_refuses_background_minimized_or_already_focused_windows() {
         });
     });
     restore_page_focus(&stage.state, 0);
+    assert!(!stage.state.borrow().pending_page_focus);
+}
+
+#[test]
+fn closing_focused_split_pane_focuses_the_intended_successor_not_first_tree_leaf() {
+    use zephium_core::split::Axis;
+
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let page_a = windows.create(Some(owner));
+    let page_b = windows.create(Some(owner));
+    let renderer_b = windows.create(Some(page_b));
+    let page_c = windows.create(Some(owner));
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_a = ItemId::generate();
+    let tab_b = ItemId::generate();
+    let tab_c = ItemId::generate();
+    {
+        let mut s = stage.state.borrow_mut();
+        for (id, container, label, serial) in [
+            (tab_a, page_a, "a", 1),
+            (tab_b, page_b, "b", 2),
+            (tab_c, page_c, "c", 3),
+        ] {
+            s.views.insert(
+                id,
+                HostView {
+                    container,
+                    controller: Controller {
+                        label,
+                        on_hide: Box::new(|| {}),
+                    }
+                    .into(),
+                    serial,
+                    applied: Cell::new(AppliedPlacement {
+                        window_visible: Some(true),
+                        controller_visible: Some(true),
+                        ..AppliedPlacement::default()
+                    }),
+                    consecutive_failures: Cell::new(0),
+                    terminal_failure_reported: Cell::new(false),
+                    generation: Arc::new(AtomicBool::new(true)),
+                    presentation_permit: Arc::new(AtomicBool::new(true)),
+                },
+            );
+            s.ready.insert(id);
+            s.visible.insert(id);
+        }
+        s.tree = Some(Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.33,
+            a: Box::new(Pane::Leaf(tab_a)),
+            b: Box::new(Pane::Branch {
+                axis: Axis::Row,
+                ratio: 0.5,
+                a: Box::new(Pane::Leaf(tab_b)),
+                b: Box::new(Pane::Leaf(tab_c)),
+            }),
+        });
+        s.active = Some(tab_b);
+        s.hidden = false;
+    }
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: renderer_b,
+            foreground: owner,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+
+    // Closing the active pane must wait for the replacement layout's successor
+    // instead of prematurely focusing the first surviving tree leaf.
+    stage.remove_view(tab_b);
+    assert!(stage.state.borrow().pending_page_focus);
+    sync(&stage.state);
+    FOCUS.with(|record| {
+        assert!(record.borrow().as_ref().unwrap().moved.is_empty());
+    });
+    assert!(stage.state.borrow().pending_page_focus);
+
+    // Apply the surviving split [tab_a, tab_c] with tab_c as the shell's successor.
+    assert!(stage.apply(
+        Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+        Some(Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::Leaf(tab_a)),
+            b: Box::new(Pane::Leaf(tab_c)),
+        }),
+        &[tab_a, tab_c],
+        Some(tab_c),
+    ));
+    sync(&stage.state);
+
+    FOCUS.with(|record| {
+        assert_eq!(
+            record.borrow().as_ref().unwrap().moved,
+            vec![("c", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
+        );
+    });
+    assert!(!stage.state.borrow().pending_page_focus);
+}
+
+#[test]
+fn pending_focus_waits_for_unready_successor_instead_of_falling_back_to_earlier_leaf() {
+    use zephium_core::split::Axis;
+
+    let mut windows = Windows(Vec::new());
+    let owner = windows.create(None);
+    let page_a = windows.create(Some(owner));
+    let page_b = windows.create(Some(owner));
+    let renderer_b = windows.create(Some(page_b));
+    let page_c = windows.create(Some(owner));
+    let _ = unsafe { ShowWindow(page_c, windows::Win32::UI::WindowsAndMessaging::SW_HIDE) };
+    let stage = Stage::new(owner, 8.0, |_, _| {});
+    let tab_a = ItemId::generate();
+    let tab_b = ItemId::generate();
+    let tab_c = ItemId::generate();
+    {
+        let mut s = stage.state.borrow_mut();
+        for (id, container, label, serial, shown) in [
+            (tab_a, page_a, "a", 1, true),
+            (tab_b, page_b, "b", 2, true),
+            (tab_c, page_c, "c", 3, false),
+        ] {
+            s.views.insert(
+                id,
+                HostView {
+                    container,
+                    controller: Controller {
+                        label,
+                        on_hide: Box::new(|| {}),
+                    }
+                    .into(),
+                    serial,
+                    applied: Cell::new(AppliedPlacement {
+                        window_visible: Some(shown),
+                        controller_visible: Some(shown),
+                        ..AppliedPlacement::default()
+                    }),
+                    consecutive_failures: Cell::new(0),
+                    terminal_failure_reported: Cell::new(false),
+                    generation: Arc::new(AtomicBool::new(true)),
+                    presentation_permit: Arc::new(AtomicBool::new(true)),
+                },
+            );
+            if shown {
+                s.ready.insert(id);
+                s.visible.insert(id);
+            }
+        }
+        s.active = Some(tab_b);
+        s.hidden = false;
+    }
+    FOCUS.with(|record| {
+        *record.borrow_mut() = Some(FocusRecord {
+            focus: renderer_b,
+            foreground: owner,
+            targets: Vec::new(),
+            moved: Vec::new(),
+        });
+    });
+
+    stage.remove_view(tab_b);
+    assert!(stage.apply(
+        Some(Rect::new(0.0, 0.0, 800.0, 600.0)),
+        Some(Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::Leaf(tab_a)),
+            b: Box::new(Pane::Leaf(tab_c)),
+        }),
+        &[tab_a, tab_c],
+        Some(tab_c),
+    ));
+    sync(&stage.state);
+
+    // tab_a is already ready and visible, but focus must wait for tab_c.
+    FOCUS.with(|record| {
+        assert!(record.borrow().as_ref().unwrap().moved.is_empty());
+    });
+    assert!(stage.state.borrow().pending_page_focus);
+
+    assert!(stage.set_ready(tab_c));
+    sync(&stage.state);
+    FOCUS.with(|record| {
+        assert_eq!(
+            record.borrow().as_ref().unwrap().moved,
+            vec![("c", COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)]
+        );
+    });
     assert!(!stage.state.borrow().pending_page_focus);
 }
