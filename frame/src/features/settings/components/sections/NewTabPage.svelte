@@ -85,7 +85,7 @@
 </script>
 
 <SettingsGroup title={m.ntp_destination()}>
-  {#key destinationReset}<NewTabPageRow />{/key}
+  {#key destinationReset}<NewTabPageRow {resetting} />{/key}
 </SettingsGroup>
 
 <SettingsGroup title={m.ntp_background()}>
