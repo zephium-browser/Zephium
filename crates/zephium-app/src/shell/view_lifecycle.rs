@@ -645,7 +645,19 @@ impl Shell {
         }
     }
 
-    pub(super) fn on_view_capacity_retry(&mut self, _id: ItemId) {
+    pub(super) fn on_view_capacity_retry(&mut self, id: ItemId) {
+        if let Some((container, url)) = self.container_recreates.remove(&id) {
+            let still_assigned = self.items.tab(id).is_some_and(|tab| {
+                tab.container == container && tab.content == zephium_core::item::TabContent::Web
+            });
+            if still_assigned {
+                let effects = self.items.navigate(id, url.as_str());
+                self.apply(effects);
+                let _ = self.relayout();
+                self.project_tab(id);
+                return;
+            }
+        }
         self.maintain_views();
     }
 

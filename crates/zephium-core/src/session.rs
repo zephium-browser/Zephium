@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use url::Url;
 
-use crate::ids::{ClosedSessionId, ItemId, ProfileId, SpaceId};
+use crate::ids::{ClosedSessionId, ContainerId, ItemId, ProfileId, SpaceId};
 use crate::item::{
     sanitize_page_title, BrowserOwnedTab, Item, ItemKind, Placement, TabContent, TabState,
 };
@@ -76,6 +76,14 @@ pub enum PersistedKind {
         /// Absent on legacy snapshots and for tabs never in front.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         last_active_ms: Option<u64>,
+    },
+    ContainerTab {
+        url: String,
+        title: String,
+        zoom: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_active_ms: Option<u64>,
+        container: ContainerId,
     },
     /// Browser-owned pages have no navigable URL or native content view.
     BrowserTab {
@@ -216,11 +224,20 @@ fn collect(items: &Items, placement: Placement, out: &mut Vec<PersistedItem>) {
                 TabContent::Web => match &tab.url {
                     // A tab without a url (empty New Tab) is not worth persisting.
                     None => return,
-                    Some(url) => PersistedKind::Tab {
-                        url: url.to_string(),
-                        title: tab.title.clone(),
-                        zoom: tab.zoom,
-                        last_active_ms: tab.last_active_ms,
+                    Some(url) => match tab.container {
+                        Some(container) => PersistedKind::ContainerTab {
+                            url: url.to_string(),
+                            title: tab.title.clone(),
+                            zoom: tab.zoom,
+                            last_active_ms: tab.last_active_ms,
+                            container,
+                        },
+                        None => PersistedKind::Tab {
+                            url: url.to_string(),
+                            title: tab.title.clone(),
+                            zoom: tab.zoom,
+                            last_active_ms: tab.last_active_ms,
+                        },
                     },
                 },
             },
@@ -331,6 +348,32 @@ pub fn restore(state: SessionState) -> Restored {
                 };
                 tab.last_active_ms =
                     last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
+                ItemKind::Tab(tab)
+            }
+            PersistedKind::ContainerTab {
+                url,
+                title,
+                zoom,
+                last_active_ms,
+                container,
+            } => {
+                let Ok(url) = Url::parse(&url) else {
+                    continue;
+                };
+                if !navigation::is_browser_target(&url) {
+                    continue;
+                }
+                let mut tab = TabState::new();
+                tab.url = Some(url);
+                tab.title = sanitize_page_title(&title);
+                tab.zoom = if zoom.is_finite() {
+                    zoom.clamp(0.3, 3.0)
+                } else {
+                    1.0
+                };
+                tab.last_active_ms =
+                    last_active_ms.filter(|ms| (1_000..=MAX_EXACT_MS).contains(ms));
+                tab.container = Some(container);
                 ItemKind::Tab(tab)
             }
             PersistedKind::BrowserTab { page } => {

@@ -340,7 +340,9 @@ fn validate_data_store_postcondition(
                 return Err("ephemeral WKWebView exposed a durable data-store identifier".into());
             }
         }
-        Partition::Default(profile) | Partition::Persistent(profile) => {
+        Partition::Default(_profile)
+        | Partition::Persistent(_profile)
+        | Partition::Container(_profile, _) => {
             if has_expected_ephemeral_store {
                 return Err("durable WKWebView received an ephemeral data-store proof".into());
             }
@@ -349,7 +351,7 @@ fn validate_data_store_postcondition(
                     "durable WKWebView received a non-persistent website data store".into(),
                 );
             }
-            if identifier != Some(profile.bytes()) {
+            if identifier != Some(partition.data_store_identifier()) {
                 return Err(
                     "durable WKWebView data-store identifier does not match its profile".into(),
                 );

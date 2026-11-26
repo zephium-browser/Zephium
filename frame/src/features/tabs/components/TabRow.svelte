@@ -65,11 +65,14 @@
   // supplies no icon, and the row should say which.
   let fallback = $derived(tabFallbackIcon(tab.content));
   let indent = $derived(grouped ? 8 : 8 + Math.min(depth, 8) * 13);
+  let container = $derived(tabs.containersList().find((entry) => entry.id === tab.container_id));
 </script>
 
 <li
   data-motion-key={`tab:${tab.id}`}
   data-plate
+  data-space-hue={container?.color ?? 0}
+  data-container={container ? "" : undefined}
   data-zephium-tab-id={tab.id}
   data-zephium-tab-url={tab.url ?? ""}
   data-zephium-projection-revision={tab.projection_revision}
@@ -87,7 +90,7 @@
     style:padding-inline-start={`${indent}px`}
     aria-current={active ? "page" : undefined}
     aria-pressed={multiSelecting ? selected : undefined}
-    aria-label={tab.title || m.untitled_tab()}
+    aria-label={container ? `${tab.title || m.untitled_tab()}, ${container.name} container` : tab.title || m.untitled_tab()}
     oncontextmenu={(event) => onContextMenu(event, tab)}
     onpointerdown={(event) => onPointerDown(event, tab)}
     onpointermove={onPointerMove}
@@ -138,6 +141,7 @@
 </li>
 
 <style>
+  @import "./space-hue.css";
   /*
     The close control is absolutely positioned rather than reserved in the
     layout. Reserving it cost 28px of every row permanently to a button that
@@ -158,6 +162,19 @@
       background-color var(--motion-fast) var(--ease-out),
       box-shadow var(--motion-fast) var(--ease-out),
       color var(--motion-base) var(--ease-out);
+  }
+
+  .browse-tab[data-container]::after {
+    position: absolute;
+    inset-inline-end: 8px;
+    top: 50%;
+    width: 2px;
+    height: 18px;
+    transform: translateY(-50%);
+    border-radius: 3px;
+    background: var(--space-hue);
+    content: "";
+    pointer-events: none;
   }
 
   .browse-tab-grouped {
@@ -270,6 +287,15 @@
       opacity var(--motion-fast) var(--ease-out),
       background-color var(--motion-fast) var(--ease-out),
       color var(--motion-fast) var(--ease-out);
+  }
+
+  .browse-tab[data-container]:has(.tab-close) .tab-close {
+    inset-inline-end: 18px;
+  }
+
+  .browse-tab[data-container]:is(:hover, :focus-within) .tab-label,
+  :global([data-close-buttons="always"]) .browse-tab[data-container]:has(.tab-close) .tab-label {
+    margin-inline-end: 40px;
   }
 
   .tab-close:hover {

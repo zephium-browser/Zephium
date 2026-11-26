@@ -9,7 +9,7 @@ use zephium_core::extensions::{
     ExtensionActionRevision, ExtensionButtonMenuRow, ExtensionPopupAnchor, ExtensionRuntimeInstance,
 };
 use zephium_core::geometry::{Rect, Size};
-use zephium_core::ids::{ItemId, ProfileId, SpaceId, WindowId};
+use zephium_core::ids::{ContainerId, ItemId, ProfileId, SpaceId, WindowId};
 use zephium_core::ports::blocker::ContentBlocker;
 use zephium_core::ports::chrome::Chrome as GeometryChrome;
 use zephium_core::ports::engine::{DiscardProbeId, Engine, EngineEvent, NavigationPresentationId};
@@ -260,6 +260,29 @@ pub enum SpaceCommand {
     },
     /// Moves the tab in front, for the menu bar.
     MoveActive(zephium_core::ids::SpaceId),
+}
+
+/// Mutations for website-data containers. Native shell validation owns profile
+/// and Space authorization; callers supply only a durable container identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContainerCommand {
+    Create {
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+        spaces: zephium_core::containers::SpaceAccess,
+    },
+    Update {
+        id: ContainerId,
+        name: String,
+        look: zephium_core::spaces::SpaceLook,
+        spaces: zephium_core::containers::SpaceAccess,
+    },
+    RemoveFromSpace(ContainerId),
+    Delete(ContainerId),
+    AssignTab {
+        tab: ItemId,
+        container: Option<ContainerId>,
+    },
 }
 
 /// Something the toolbar of a mini window asks of its page.
@@ -522,6 +545,7 @@ pub enum Command {
     },
     /// Something done to the focused profile's spaces.
     Space(Box<SpaceCommand>),
+    Container(Box<ContainerCommand>),
     SetWindowSize(Size),
     /// Whether the OS can currently present the main window. Minimized
     /// windows hide native content views so the engine can lower their memory

@@ -77,6 +77,18 @@ Engine callbacks and native object access must respect their platform thread
 and lifetime requirements. Keep platform-specific operations in the appropriate
 `platform/` and `host/` modules, with application policy expressed through ports.
 
+**Browse containers.** A persistent browsing container is a data partition
+owned by one profile, not a profile of its own. A tab's optional container ID
+is stored with the tab in the session snapshot. The shell admits the assignment
+only when the container belongs to the tab's profile and its Space access
+includes the tab's current Space; moving a tab beyond that access clears the
+assignment and rebuilds the page on the ordinary profile store. Unassigned
+tabs continue to use that profile's ordinary store. macOS binds a container to
+a persistent `WKWebsiteDataStore` keyed by the container ID, and Windows binds
+it to a WebView2 profile name derived from that ID. Incognito windows cannot
+use persistent browsing containers. This partitions page cookies and site
+storage; extension runtime state remains profile-scoped.
+
 **Mini windows.** A mini window holds one page outside the sidebar. Links
 from other apps open in one by default (`tabs.external-position = mini`);
 `window.newMini` opens the launcher in mini mode, which offers only sites, and

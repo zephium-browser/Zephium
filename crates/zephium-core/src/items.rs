@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use url::Url;
 
-use crate::ids::ItemId;
+use crate::ids::{ContainerId, ItemId};
 use crate::item::{
     sanitize_page_title, BrowserOwnedTab, Item, ItemKind, Lifecycle, Placement, TabContent,
     TabState,
@@ -60,6 +60,74 @@ impl Items {
 
     pub fn tab(&self, id: ItemId) -> Option<&TabState> {
         self.items.get(&id).and_then(Item::tab)
+    }
+
+    pub fn container_is_in_use(&self, container: ContainerId) -> bool {
+        self.items.values().any(|item| {
+            item.tab()
+                .is_some_and(|tab| tab.container == Some(container))
+        })
+    }
+
+    /// Durable container references, paired with their owning placement so
+    /// session restore can revalidate cross-profile and deleted-space access.
+    pub fn container_assignments(&self) -> Vec<(ItemId, ContainerId, crate::item::Placement)> {
+        let mut assignments = self
+            .items
+            .values()
+            .filter_map(|item| {
+                item.tab()?
+                    .container
+                    .map(|container| (item.id, container, item.placement))
+            })
+            .collect::<Vec<_>>();
+        assignments.sort_unstable_by_key(|(id, _, _)| *id);
+        assignments
+    }
+
+    pub fn tabs_using_container_in_space(
+        &self,
+        container: ContainerId,
+        space: crate::ids::SpaceId,
+    ) -> Vec<ItemId> {
+        let mut ids = self
+            .items
+            .values()
+            .filter(|item| {
+                matches!(item.placement, Placement::Favorites { space: owner } | Placement::Space { space: owner, .. } if owner == space)
+                    && item.tab().is_some_and(|tab| tab.container == Some(container))
+            })
+            .map(|item| item.id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Changes the storage identity and closes a live page so the shell can
+    /// recreate it only after the engine releases its old native partition.
+    /// The caller must authorize the container first.
+    pub fn set_container(&mut self, id: ItemId, container: Option<ContainerId>) -> Vec<Effect> {
+        let Some(tab) = self.tab_mut(id) else {
+            return Vec::new();
+        };
+        if tab.container == container {
+            return Vec::new();
+        }
+        let rebuild = tab.view && tab.content == TabContent::Web;
+        if rebuild {
+            tab.view = false;
+            tab.lifecycle = Lifecycle::Inactive;
+            tab.loading = false;
+            tab.page_request = None;
+        }
+        tab.container = container;
+        if !rebuild {
+            return Vec::new();
+        }
+        // The shell recreates this view after the engine has completed
+        // closing its old partition. The engine intentionally blocks
+        // same-id reuse until that asynchronous close finishes.
+        vec![Effect::Close { id }]
     }
 
     /// Legacy QA Settings tabs are decoded so durable snapshots remain

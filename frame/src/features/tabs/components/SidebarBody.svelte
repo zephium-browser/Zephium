@@ -9,6 +9,7 @@
   import TabSelectionBar from "./TabSelectionBar.svelte";
   import { TabSelection } from "../lib/tab-selection.svelte";
   import SpaceBar from "./SpaceBar.svelte";
+  import ContainerMenu from "./ContainerMenu.svelte";
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
@@ -99,6 +100,7 @@
     </button>
     {@render extras?.()}
   </div>{/if}
+<ContainerMenu />
 
 <div
   bind:this={stage}

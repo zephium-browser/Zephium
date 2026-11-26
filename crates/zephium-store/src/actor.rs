@@ -1843,6 +1843,9 @@ fn admissible_session(session: &SessionState) -> bool {
             PersistedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
             PersistedKind::Tab {
                 url, title, zoom, ..
+            }
+            | PersistedKind::ContainerTab {
+                url, title, zoom, ..
             } => {
                 url.len() <= MAX_URL_BYTES
                     && title.len() <= MAX_TITLE_BYTES

@@ -73,6 +73,7 @@ ulid_id!(DownloadId);
 ulid_id!(ClosedSessionId);
 ulid_id!(ItemId);
 ulid_id!(SpaceId);
+ulid_id!(ContainerId);
 ulid_id!(ProfileId);
 ulid_id!(ExtensionInstallId);
 ulid_id!(PagePermissionGrantId);

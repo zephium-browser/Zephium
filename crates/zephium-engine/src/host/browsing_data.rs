@@ -23,7 +23,9 @@ pub(super) fn admitted_profile(
     erasing: &HashSet<ProfileId>,
 ) -> Result<ProfileId, EngineDataFailure> {
     let profile = match partition {
-        Partition::Default(profile) | Partition::Persistent(profile) => profile,
+        Partition::Default(profile)
+        | Partition::Persistent(profile)
+        | Partition::Container(profile, _) => profile,
         Partition::Ephemeral(_) => return Err(EngineDataFailure::Unsupported),
     };
     if erasing.contains(&profile) {
@@ -43,7 +45,7 @@ impl EngineHost {
         call: EngineDataCall,
         done: EngineDataCompletion,
     ) {
-        let profile = match admitted_profile(
+        let _profile = match admitted_profile(
             partition,
             &mut self.profile_persistence_classes,
             &self.erasure_tombstones,
@@ -59,10 +61,12 @@ impl EngineHost {
             use crate::platform::imp::browsing_data as native;
             match call {
                 EngineDataCall::Clear { kinds, since } => {
-                    native::clear(profile, kinds, since, done)
+                    native::clear(partition.data_store_identifier(), kinds, since, done)
                 }
-                EngineDataCall::Sites => native::sites(profile, done),
-                EngineDataCall::ForgetSite { site, .. } => native::forget_site(profile, site, done),
+                EngineDataCall::Sites => native::sites(partition.data_store_identifier(), done),
+                EngineDataCall::ForgetSite { site, .. } => {
+                    native::forget_site(partition.data_store_identifier(), site, done)
+                }
             }
         }
         #[cfg(target_os = "windows")]

@@ -8,6 +8,7 @@ pub mod bookmarks;
 pub mod browsing_data;
 pub mod certificates;
 pub mod commands;
+pub mod containers;
 pub mod downloads;
 pub mod export;
 pub mod extension_data;

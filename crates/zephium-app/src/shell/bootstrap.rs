@@ -255,6 +255,29 @@ impl Shell {
             crate::diagnostic!("bootstrap: selected space has no authoritative profile ownership");
             return;
         };
+        for (tab, id, placement) in self.items.container_assignments() {
+            let owning_space = match placement {
+                Placement::Favorites { space } | Placement::Space { space, .. } => Some(space),
+                Placement::Mini { .. } => None,
+            };
+            let valid = owning_space
+                .and_then(|space| {
+                    self.spaces
+                        .get(space)
+                        .map(|space_state| (space, space_state.profile))
+                })
+                .is_some_and(|(space, profile)| {
+                    self.containers.get(id).is_some_and(|container| {
+                        container.profile == profile && container.available_in(space)
+                    })
+                });
+            if !valid && !self.items.set_container(tab, None).is_empty() {
+                crate::diagnostic!(
+                    "bootstrap: invalid container assignment unexpectedly owned a native view"
+                );
+                return;
+            }
+        }
         if !self.start_blocker_profile(profile) {
             crate::diagnostic!(
                 "bootstrap: active profile policy compilation was not admitted; content views remain unavailable"

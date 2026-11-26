@@ -97,6 +97,11 @@ impl Hub {
                             "legacy session writer cannot encode browser-owned tabs",
                         ));
                     }
+                    PersistedKind::ContainerTab { .. } => {
+                        return Err(invalid_data(
+                            "legacy session writer cannot encode container tab assignments",
+                        ));
+                    }
                 };
                 ins.execute(params![
                     item.id.to_string(),

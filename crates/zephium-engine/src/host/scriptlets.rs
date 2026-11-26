@@ -222,7 +222,7 @@ impl EngineHost {
             Partition::Ephemeral(_) => {
                 self.scriptlets.prepare_private(profile);
             }
-            Partition::Default(_) | Partition::Persistent(_) => {
+            Partition::Default(_) | Partition::Persistent(_) | Partition::Container(_, _) => {
                 self.webext.prepare(profile, &self.sink);
             }
         }

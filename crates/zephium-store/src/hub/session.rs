@@ -114,6 +114,14 @@ enum BoundedKind {
         #[serde(default)]
         last_active_ms: Option<u64>,
     },
+    ContainerTab {
+        url: String,
+        title: String,
+        zoom: f64,
+        #[serde(default)]
+        last_active_ms: Option<u64>,
+        container: zephium_core::ids::ContainerId,
+    },
     BrowserTab {
         page: zephium_core::item::BrowserOwnedTab,
     },
@@ -145,6 +153,9 @@ where
         match &item.kind {
             BoundedKind::Folder { name } => name.len() <= MAX_NAME_BYTES,
             BoundedKind::Tab {
+                url, title, zoom, ..
+            }
+            | BoundedKind::ContainerTab {
                 url, title, zoom, ..
             } => {
                 url.len() <= MAX_SESSION_URL_BYTES
@@ -236,6 +247,19 @@ impl BoundedSessionState {
                         title,
                         zoom,
                         last_active_ms,
+                    },
+                    BoundedKind::ContainerTab {
+                        url,
+                        title,
+                        zoom,
+                        last_active_ms,
+                        container,
+                    } => PersistedKind::ContainerTab {
+                        url,
+                        title,
+                        zoom,
+                        last_active_ms,
+                        container,
                     },
                     BoundedKind::BrowserTab { page } => PersistedKind::BrowserTab { page },
                 },

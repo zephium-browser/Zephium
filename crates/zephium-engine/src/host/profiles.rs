@@ -217,7 +217,9 @@ pub(super) const MAX_PROFILE_PERSISTENCE_BINDINGS: usize =
 
 fn profile_persistence_class(partition: Partition) -> ProfilePersistenceClass {
     match partition {
-        Partition::Default(_) | Partition::Persistent(_) => ProfilePersistenceClass::Durable,
+        Partition::Default(_) | Partition::Persistent(_) | Partition::Container(_, _) => {
+            ProfilePersistenceClass::Durable
+        }
         Partition::Ephemeral(_) => ProfilePersistenceClass::Ephemeral,
     }
 }
