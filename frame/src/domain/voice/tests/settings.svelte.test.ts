@@ -57,6 +57,32 @@ test("a refused subscription releases the sibling listener and marks settings un
   expect(stopModels).toHaveBeenCalledOnce();
 });
 
+test("ignores an event during setup when the sibling subscription is refused", async () => {
+  let modelsChanged!: () => void;
+  let refuseAccount!: (error: Error) => void;
+  native.listenModels.mockImplementationOnce((listener) => {
+    modelsChanged = listener;
+    return Promise.resolve(vi.fn());
+  });
+  native.listenAccount.mockImplementationOnce(
+    () =>
+      new Promise((_, reject) => {
+        refuseAccount = reject;
+      }),
+  );
+
+  const settings = new VoiceSettings();
+  const starting = settings.start();
+  await Promise.resolve();
+  modelsChanged();
+  refuseAccount(new Error("subscription refused"));
+  await starting;
+
+  expect(native.status).not.toHaveBeenCalled();
+  expect(settings.unavailable).toBe(true);
+  settings.dispose();
+});
+
 test("restarting while a previous start is still subscribing releases the stale listeners", async () => {
   const stopFirstModels = vi.fn();
   const stopFirstAccount = vi.fn();

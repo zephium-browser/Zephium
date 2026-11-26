@@ -50,15 +50,15 @@ export class VoiceSettings {
     this.active = true;
     const generation = ++this.generation;
     this.lifetime = new AbortController();
+    let ready = false;
+    const refresh = () => {
+      if (ready && this.active && generation === this.generation) void this.read();
+    };
     let stops: (() => void)[];
     try {
       stops = await listenAll([
-        events.workModelsChanged.listen(() => {
-          if (this.active && generation === this.generation) void this.read();
-        }),
-        events.accountChanged.listen(() => {
-          if (this.active && generation === this.generation) void this.read();
-        }),
+        events.workModelsChanged.listen(refresh),
+        events.accountChanged.listen(refresh),
       ]);
     } catch {
       if (generation === this.generation) {
@@ -72,6 +72,7 @@ export class VoiceSettings {
       return;
     }
     this.stops = stops;
+    ready = true;
     await this.read();
   }
 
