@@ -85,8 +85,12 @@ export class RowDrag {
     this.#options = options;
   }
 
+  isForeignPointer(pointerId: number): boolean {
+    return this.#pointerId !== null && pointerId !== this.#pointerId;
+  }
+
   #onLostCapture = (event: PointerEvent) => {
-    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    if (this.isForeignPointer(event.pointerId)) return;
     this.abandon();
   };
 
@@ -95,7 +99,7 @@ export class RowDrag {
   };
 
   #onWindowPointerEnd = (event: PointerEvent) => {
-    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    if (this.isForeignPointer(event.pointerId)) return;
     this.abandon();
   };
 
@@ -133,7 +137,7 @@ export class RowDrag {
 
   down(event: PointerEvent, id: string) {
     if (event.button !== 0) return;
-    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    if (this.isForeignPointer(event.pointerId)) return;
     this.#swallow = false;
     if (this.#dragging || this.#down !== null) this.abandon();
     this.#down = { x: event.clientX, y: event.clientY };
@@ -146,7 +150,7 @@ export class RowDrag {
   move(event: PointerEvent) {
     const start = this.#down;
     if (start === null) return;
-    if (this.#pointerId !== null && event.pointerId !== this.#pointerId) return;
+    if (this.isForeignPointer(event.pointerId)) return;
     if (event.isTrusted && event.pointerType === "mouse" && (event.buttons & 1) === 0) {
       this.abandon();
       return;

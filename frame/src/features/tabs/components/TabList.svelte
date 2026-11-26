@@ -134,6 +134,7 @@
     },
   });
   const handlePointerDown = (event: PointerEvent, tab: TabView) => {
+    if (drag.isForeignPointer(event.pointerId)) return;
     if (event.button === 0 && modified(event)) {
       drag.abandon();
       drag.swallowClick();
