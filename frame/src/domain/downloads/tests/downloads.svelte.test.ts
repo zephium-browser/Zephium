@@ -110,6 +110,27 @@ test.each([false, true])(
   },
 );
 
+test("loading an older page cannot exceed the history limit", async () => {
+  const { DownloadSession } = await import("../downloads.svelte");
+  const session = new DownloadSession(profile);
+  const item = (id: number) => ({ ...entry, id: String(id).padStart(26, "0") });
+  session.entries = Array.from({ length: 1999 }, (_, at) => item(2002 - at));
+  session.next = item(4).id;
+  host.call.mockResolvedValueOnce({
+    kind: "page",
+    entries: [item(3), item(2)],
+    next: item(2).id,
+    supported: true,
+    cleanup: { running: false, error: null },
+  });
+
+  await session.reload(true);
+  expect(session.entries).toHaveLength(2000);
+  expect(session.entries.at(-1)?.id).toBe(item(3).id);
+  await session.reload(true);
+  expect(host.call).toHaveBeenCalledOnce();
+});
+
 test("the status indicator reads a bounded snapshot on subscribe and ignores another profile", async () => {
   host.call.mockResolvedValue({
     kind: "updates",
