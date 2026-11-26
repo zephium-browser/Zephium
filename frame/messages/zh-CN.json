@@ -3547,7 +3547,7 @@
   "native_account_more": "账户…",
   "native_split_view_more": "分屏视图…",
   "native_extensions_more": "扩展程序…",
-  "native_reload_tab": "重新载入标签页",
+  "native_refresh": "重新载入标签页",
   "native_duplicate_tab": "创建标签页副本",
   "native_copy_link": "拷贝链接",
   "native_autofill_password_more": "自动填充密码…",

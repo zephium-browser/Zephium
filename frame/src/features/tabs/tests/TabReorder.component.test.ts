@@ -9,8 +9,10 @@ import { revision, tabFixture } from "$shared/testing/fixtures";
 import { tabs } from "$domain/tabs";
 import TabList from "../components/TabList.svelte";
 import { sidebarTree } from "../lib/sidebar-model";
+import { TabSelection } from "../lib/tab-selection.svelte";
 
 const native = vi.hoisted(() => ({
+  leaveSplit: vi.fn(async () => ({ accepted: true, operation_id: null })),
   setEssential: vi.fn(async () => ({ accepted: true, operation_id: null })),
   split: vi.fn(async () => ({ accepted: true, operation_id: null })),
   dragOver: vi.fn(async () => undefined),
@@ -20,6 +22,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     tabsBootstrap: async () => {},
+    tabsLeaveSplit: native.leaveSplit,
     tabsSetEssential: native.setEssential,
     tabsSplit: native.split,
     tabDragOver: native.dragOver,
@@ -33,6 +36,7 @@ vi.mock("$domain/operations", () => ({
 
 afterEach(() => {
   tabs.dispose();
+  native.leaveSplit.mockClear();
   native.setEssential.mockClear();
   native.dragOver.mockClear();
 });
@@ -42,6 +46,8 @@ const open = ["a", "b", "c", "d"].map((id) => tabFixture({ id, title: `Tab ${id}
 async function list(
   section: "today" | "pinned" = "today",
   onSelect: (id: string) => void = () => {},
+  split: string[] = [],
+  selection?: TabSelection,
 ) {
   await page.viewport(400, 400);
   await tabs.init();
@@ -59,7 +65,7 @@ async function list(
     nodes,
     tabs: open,
     active: "a",
-    split_group: null,
+    split_group: split.length > 0 ? { members: split } : null,
   });
   flushSync();
   const tree = sidebarTree(nodes, open);
@@ -69,6 +75,7 @@ async function list(
     label: "Open tabs",
     splitting: false,
     onSelect,
+    selection,
   });
   const row = (id: string) =>
     screen.container.querySelector<HTMLElement>(`.browse-tab[data-zephium-tab-id="${id}"]`)!;
@@ -147,6 +154,20 @@ test("letting go in the room below the last row drops the tab at the end", async
   expect(row("d").style.transform).toContain("translateY(-");
 
   handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
+  expect(native.setEssential).toHaveBeenCalledWith("a", false, null);
+});
+
+test("dropping a split member below the list detaches it and moves it to the end", async () => {
+  const { row, screen } = await list("today", undefined, ["a", "b"]);
+  const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+  const room = screen.container.getBoundingClientRect();
+  const to = { x: room.left + 40, y: room.bottom - 8 };
+  const { init } = drag(handle, to);
+  await frame();
+
+  handle.dispatchEvent(new PointerEvent("pointerup", { ...init, clientX: to.x, clientY: to.y }));
+  expect(native.leaveSplit).toHaveBeenCalledExactlyOnceWith("a");
   await expect.poll(() => native.setEssential.mock.calls.length).toBe(1);
   expect(native.setEssential).toHaveBeenCalledWith("a", false, null);
 });
@@ -299,6 +320,33 @@ test("movement from another pointer does not hijack or cancel an active drag", a
     }),
   );
 });
+
+test.each([
+  { type: "pointerdown", shiftKey: false },
+  { type: "pointerdown", shiftKey: true },
+  { type: "pointerup", shiftKey: false },
+  { type: "pointercancel", shiftKey: false },
+])(
+  "$type from another pointer leaves the original drag in control (Shift: $shiftKey)",
+  async ({ type, shiftKey }) => {
+    const { row } = await list("today", undefined, [], new TabSelection());
+    const handle = row("a").querySelector<HTMLElement>(".tab-open")!;
+    const target = row("c").getBoundingClientRect();
+    const point = { clientX: target.left + 20, clientY: target.bottom - 4 };
+    const { init } = drag(handle, { x: point.clientX, y: point.clientY });
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+
+    handle.dispatchEvent(new PointerEvent(type, { ...init, ...point, pointerId: 2, shiftKey }));
+    await frame();
+    expect(document.querySelector(".drag-card")).not.toBeNull();
+    expect(native.setEssential).not.toHaveBeenCalled();
+
+    handle.dispatchEvent(new PointerEvent("pointerup", { ...init, ...point }));
+    await expect.poll(() => document.querySelector(".drag-card")).toBeNull();
+    expect(native.setEssential).toHaveBeenCalledExactlyOnceWith("a", false, "d");
+  },
+);
 
 test("unmounting an idle list does not clear another list's active drag", async () => {
   const active = await list();

@@ -3595,7 +3595,7 @@
   "native_account_more": "Account…",
   "native_split_view_more": "Split View…",
   "native_extensions_more": "Extensions…",
-  "native_reload_tab": "Reload Tab",
+  "native_refresh": "Refresh",
   "native_duplicate_tab": "Duplicate Tab",
   "native_copy_link": "Copy Link",
   "native_autofill_password_more": "AutoFill Password…",
