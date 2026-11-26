@@ -3,9 +3,9 @@
 //! admits every address before the shell sees it.
 
 use super::*;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
-use zephium_core::navigation::{MAX_EXTERNAL_TARGETS, external_target};
+use std::sync::Mutex;
+use zephium_core::navigation::{external_target, MAX_EXTERNAL_TARGETS};
 
 /// Hand-offs that arrive before the shell exists. macOS delivers a link that
 /// launched the app through the run loop, which can precede setup.

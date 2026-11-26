@@ -31,12 +31,12 @@ mod content_filter;
 mod find;
 mod leftover_processes;
 mod runtime_generation;
+pub use leftover_processes::{
+    browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
+};
 pub use runtime_generation::{
     BrowserProcessRecord, GenerationReport, LeftoverProcesses, RecordedProcessState,
     RuntimeCleanupTicket, RuntimeGeneration, RuntimeGenerationKind, UnexpectedBrowser,
-};
-pub use leftover_processes::{
-    browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
 };
 mod http_auth;
 pub(crate) use certificates::clear_certificate_decisions;
