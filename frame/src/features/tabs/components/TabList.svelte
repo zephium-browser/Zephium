@@ -15,7 +15,6 @@
   import SplitGroupRow from "./SplitGroupRow.svelte";
   import TabRow from "./TabRow.svelte";
   import { untrack } from "svelte";
-  import { isComposing } from "$shared/lib/keyboard";
   import { ListMotion } from "$shared/lib/list-motion";
   import { RowDrag } from "$session/row-drag.svelte";
   import { favicons } from "$domain/favicons";
@@ -90,7 +89,8 @@
       selectionEscapeBlocked ||
       event.defaultPrevented ||
       event.key !== "Escape" ||
-      isComposing(event)
+      event.isComposing ||
+      event.keyCode === 229
     )
       return;
     const selected = selection.value.ids.length > 0;

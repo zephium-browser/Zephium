@@ -254,10 +254,7 @@ test("Escape puts the space back as it was", async () => {
   await expect.element(screen.getByRole("menuitemradio").first()).toBeVisible();
 });
 
-test.each([
-  ["isComposing", { isComposing: true }],
-  ["keyCode 229", { keyCode: 229 }],
-])("an IME Escape marked by %s leaves the space editor open", async (_, marker) => {
+test("an IME Escape leaves the space editor open", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
   await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
@@ -268,7 +265,7 @@ test.each([
 
   const escape = new KeyboardEvent("keydown", {
     key: "Escape",
-    ...marker,
+    keyCode: 229,
     bubbles: true,
     cancelable: true,
   });

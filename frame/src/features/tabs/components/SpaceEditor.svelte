@@ -1,6 +1,5 @@
 <script lang="ts">
   import * as m from "$shared/i18n/messages";
-  import { isComposing } from "$shared/lib/keyboard";
   import { Tick02Icon, UnavailableIcon } from "@hugeicons/core-free-icons";
   import type { SpaceIconView, SpaceThemeView, SpaceView } from "$shared/ipc/bindings";
   import { tabs } from "$domain/tabs";
@@ -151,7 +150,7 @@
   // Heard window-wide and first, since WebKit does not focus a pressed button.
   $effect(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || isComposing(event)) return;
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       if (confirming) confirming = false;
