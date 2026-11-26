@@ -137,6 +137,27 @@ pub const REGISTRY: &[CommandSpec] = &[
         Keys::same("CmdOrCtrl+Shift+N"),
         Group::File,
     ),
+    // Opens the launcher for a page of its own in a mini window.
+    command(
+        "window.newMini",
+        "New Mini Window",
+        Keys::same("CmdOrCtrl+Shift+M"),
+        Group::File,
+    ),
+    // Keys a mini window answers while it is in front. Elsewhere they do
+    // nothing, so they stay out of the menus.
+    command(
+        "mini.openInMain",
+        "Open Mini Window in Zephium",
+        Keys::same("CmdOrCtrl+O"),
+        Group::Keys,
+    ),
+    command(
+        "mini.keepOnTop",
+        "Keep Mini Window on Top",
+        Keys::NONE,
+        Group::Keys,
+    ),
     command(
         "window.closePrivate",
         "Close Private Window",

@@ -271,3 +271,53 @@ it("persists shortcut settings and preserves equals signs in live URL templates"
   expect(preferences.searchShortcuts()[0]?.id).toBe("custom:example");
   preferences.dispose();
 });
+
+describe("new-tab section reset", () => {
+  it("clears the destination and appearance settings through confirmed persistence", async () => {
+    const stored: Record<string, string> = {
+      "tabs.new-page": "https://example.com/start",
+      "ui.newtab-clock": "false",
+      "tabs.home": "https://home.example/",
+    };
+    native.get.mockImplementation(async (key: string) => stored[key] ?? null);
+    native.set.mockImplementation(async (key: string, value: string) => {
+      stored[key] = value;
+      return { accepted: true, operation_id: "0000000000000001" };
+    });
+    const preferences = await import("../preferences.svelte");
+    await preferences.init();
+    expect(await preferences.resetNewTab()).toBe(true);
+    expect(preferences.value("tabs.new-page")).toBe("");
+    expect(preferences.value("ui.newtab-clock")).toBe("true");
+    expect(stored["tabs.new-page"]).toBe("");
+    expect(stored["ui.newtab-clock"]).toBe("true");
+    expect(stored["tabs.home"]).toBe("https://home.example/");
+    preferences.dispose();
+  });
+
+  it("does not write when all new-tab settings are already at defaults", async () => {
+    const preferences = await import("../preferences.svelte");
+    await preferences.init();
+    expect(await preferences.resetNewTab()).toBe(true);
+    expect(native.set).not.toHaveBeenCalled();
+    preferences.dispose();
+  });
+
+  it.each(["rejected", "unconfirmed"])(
+    "reports a %s reset without claiming success",
+    async (failure) => {
+      native.get.mockImplementation(async (key: string) =>
+        key === "tabs.new-page" ? "https://example.com/start" : null,
+      );
+      if (failure === "rejected")
+        native.settle.mockResolvedValue({ outcome: "rejected", disposition: null });
+      const preferences = await import("../preferences.svelte");
+      await preferences.init();
+      const reset = preferences.resetNewTab();
+      await vi.advanceTimersByTimeAsync(1600);
+      expect(await reset).toBe(false);
+      expect(preferences.value("tabs.new-page")).toBe("https://example.com/start");
+      preferences.dispose();
+    },
+  );
+});

@@ -13,6 +13,7 @@ mod blocker_seed;
 mod foreground_rendering_boundary;
 mod macos_imports;
 mod macos_process_family;
+mod map_bench;
 mod page_assist_boundary;
 mod page_reader_boundary;
 mod password_manager_qa;
@@ -94,6 +95,12 @@ fn main() {
                 exit(1);
             }
         }
+        Some("map-bench") => {
+            if let Err(error) = map_bench::run(&arguments[1..]) {
+                eprintln!("map bench: {error}");
+                exit(1);
+            }
+        }
         Some("webext-suite") => {
             if let Err(error) = webext_suite::run(&arguments[1..]) {
                 eprintln!("extension suite: {error}");
@@ -146,7 +153,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|check-frame-styles|check-macos-imports <binary>|check-engine-floors [--strict]|check-release-engine-security|check-release-assets <directory> <tag> <owner/repo>|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
+                "usage: cargo xtask <ci|webext-suite [--only NAME,...] [--soak]|blocker-bench --zephium PATH [--browsers LIST] [--runs N] [--only SITES] [--settle-ms N] [--youtube|--startup N] [--label NAME] [--compare RESULTS]|map-bench <record|replay|report> ...|check-frame-styles|check-macos-imports <binary>|check-engine-floors [--strict]|check-release-engine-security|check-release-assets <directory> <tag> <owner/repo>|check-agentic-probe-boundary|check-advisory-exceptions [--strict]|check-security-fork-locks|check-native-adapter-locks|check-blocker-security-fork|measure-macos-process-family --bundle-id ID --duration-seconds N [--interval-millis N] [--label LABEL]|serve-password-manager-webauthn-qa [--port PORT]|check-blocker-seed|materialize-blocker-seed-webkit --output PATH|{UPDATE_BLOCKER_SEED_USAGE}|blocker-prune <materialize|notify|hosts|build> ...|check-webview2-floor [--strict]>"
             );
             exit(2);
         }

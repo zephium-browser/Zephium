@@ -497,7 +497,7 @@ mod thumb {
     }
 
     /// The widths a copy is made at, so a few variants exist per picture.
-    const WIDTHS: [u32; 7] = [160, 240, 360, 540, 800, 1200, 1600];
+    const WIDTHS: [u32; 8] = [160, 240, 360, 540, 800, 1200, 1600, 2560];
     /// What the copies may hold on disk before the oldest go.
     const CACHE_BYTES: u64 = 96 * 1024 * 1024;
 
@@ -664,7 +664,9 @@ mod thumb {
             assert_eq!(width(Some("w=100")), Some(160));
             assert_eq!(width(Some("x=1&w=300")), Some(360));
             assert_eq!(width(Some("w=1600")), Some(1600));
-            assert_eq!(width(Some("w=2000")), None);
+            assert_eq!(width(Some("w=2000")), Some(2560));
+            assert_eq!(width(Some("w=2560")), Some(2560));
+            assert_eq!(width(Some("w=2561")), None);
             assert_eq!(width(Some("w=abc")), None);
             assert_eq!(width(None), None);
         }
@@ -1084,7 +1086,10 @@ pub(crate) async fn link_describe(
         if title.trim_start_matches("www.") != host.trim_start_matches("www.") {
             return Ok(false);
         }
-        let Some(details) = zephium_agentic::youtube_oembed::fetch(url).await else {
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return Ok(false);
+        };
+        let Ok(details) = zephium_agentic::youtube_oembed::fetch(&routes, url).await else {
             return Ok(false);
         };
         let title = format!("{}\n{}", details.title, details.channel);
@@ -1179,9 +1184,14 @@ async fn admit_remote(
             profile,
             environment,
         };
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return refused(ResourceError::Unavailable);
+        };
         let resource = {
             let bytes =
-                match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
+                match zephium_agentic::public_asset::fetch_public_image(&routes, parsed.as_str())
+                    .await
+                {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         trace.fetch = Some(error);

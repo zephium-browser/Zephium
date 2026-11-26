@@ -2,10 +2,13 @@
 
 use zephium_core::proxy::{self, ProxyServer};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+use crate::AppProxyReport;
+
+#[derive(Clone, Default)]
 pub(super) struct ProxyPreference {
     mode: String,
     address: String,
+    port: Option<AppProxyReport>,
 }
 
 impl ProxyPreference {
@@ -33,5 +36,17 @@ impl ProxyPreference {
     /// The manual proxy, or none for the system's.
     pub(super) fn server(&self) -> Option<ProxyServer> {
         proxy::from_settings(&self.mode, &self.address)
+    }
+
+    /// Keeps the first port and tells it the setting in force.
+    pub(super) fn attach(&mut self, port: AppProxyReport) {
+        self.port.get_or_insert(port);
+        self.report();
+    }
+
+    pub(super) fn report(&self) {
+        if let Some(port) = &self.port {
+            port(self.server());
+        }
     }
 }
