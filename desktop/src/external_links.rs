@@ -132,14 +132,14 @@ pub(crate) fn hand_off(
         return;
     }
     let Some(shell) = app.try_state::<Handle>() else {
-        let accepted = WAITING
+        let mut waiting = WAITING
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(WaitingRequest {
-                profile,
-                urls,
-                forward,
-            });
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let accepted = waiting.push(WaitingRequest {
+            profile,
+            urls,
+            forward,
+        });
         if !accepted && has_profile_option {
             PROFILE_ADMISSION_FAILED.store(true, Ordering::Release);
         }
