@@ -3379,7 +3379,7 @@
   "profiles_save": "Kaydet",
   "profiles_delete_open": "Profili sil…",
   "profiles_delete_title": "“{name}” silinsin mi?",
-  "profiles_delete_body": "Yer işaretleri, geçmişi, çerezleri ve site verileri, sekmeleri, uzantıları ve Çalışma'sı bu aygıttan kalıcı olarak kaldırılır. Zephium hesabınız etkilenmez.",
+  "profiles_delete_body": "Yer işaretleri, geçmişi, çerezleri ve site verileri, sekmeleri, uzantıları ve Çalışma'sı bu aygıttan kalıcı olarak kaldırılır. Zephium hesabınız etkilenmez. Başka bir profille paylaşılan klasörlerdeki yer işaretleri bu aygıtta kalır.",
   "profiles_delete_confirm": "Profili sil",
   "profiles_delete_default": "Varsayılan profil silinemez.",
   "profiles_delete_current": "Bunu silmek için bu pencereyi başka bir profile geçirin.",

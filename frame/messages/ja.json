@@ -3379,7 +3379,7 @@
   "profiles_save": "保存",
   "profiles_delete_open": "プロファイルを削除…",
   "profiles_delete_title": "「{name}」を削除しますか？",
-  "profiles_delete_body": "そのブックマーク、履歴、Cookie とサイトのデータ、タブ、機能拡張、ワークは、このデバイスから完全に削除されます。Zephium アカウントには影響しません。",
+  "profiles_delete_body": "そのブックマーク、履歴、Cookie とサイトのデータ、タブ、機能拡張、ワークは、このデバイスから完全に削除されます。Zephium アカウントには影響しません。 別のプロフィールと共有しているフォルダのブックマークは、このデバイスに残ります。",
   "profiles_delete_confirm": "プロファイルを削除",
   "profiles_delete_default": "デフォルトのプロファイルは削除できません。",
   "profiles_delete_current": "このプロファイルを削除するには、このウインドウを別のプロファイルに切り替えてください。",

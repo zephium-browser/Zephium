@@ -3425,7 +3425,7 @@
   "profiles_save": "Save",
   "profiles_delete_open": "Delete Profile…",
   "profiles_delete_title": "Delete “{name}”?",
-  "profiles_delete_body": "Its bookmarks, history, cookies and site data, tabs, extensions and Work are permanently removed from this device. Your Zephium account is not affected.",
+  "profiles_delete_body": "Its bookmarks, history, cookies and site data, tabs, extensions and Work are permanently removed from this device. Your Zephium account is not affected. Bookmarks in folders shared with another profile remain on this device.",
   "profiles_delete_confirm": "Delete Profile",
   "profiles_delete_default": "The default profile can’t be deleted.",
   "profiles_delete_current": "Switch this window to another profile to delete this one.",

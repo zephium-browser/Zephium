@@ -3379,7 +3379,7 @@
   "profiles_save": "Salvar",
   "profiles_delete_open": "Excluir perfil…",
   "profiles_delete_title": "Excluir “{name}”?",
-  "profiles_delete_body": "Os favoritos, o histórico, os cookies e os dados de sites, as abas, as extensões e o Trabalho dele serão removidos deste dispositivo de forma permanente. Sua conta Zephium não é afetada.",
+  "profiles_delete_body": "Os favoritos, o histórico, os cookies e os dados de sites, as abas, as extensões e o Trabalho dele serão removidos deste dispositivo de forma permanente. Sua conta Zephium não é afetada. Os favoritos em pastas compartilhadas com outro perfil permanecem neste dispositivo.",
   "profiles_delete_confirm": "Excluir perfil",
   "profiles_delete_default": "O perfil padrão não pode ser excluído.",
   "profiles_delete_current": "Troque esta janela para outro perfil para excluir este.",

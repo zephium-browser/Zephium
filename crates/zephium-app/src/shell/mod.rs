@@ -2028,6 +2028,9 @@ impl Shell {
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
         let now = std::time::Instant::now();
+        let budget = deadline.saturating_duration_since(now);
+        let publication_deadline = now + budget / 4;
+        let storage_deadline = deadline - budget / 4;
         let mut rejection_emission_clean = true;
         let pending_profile_creations = std::mem::take(&mut self.pending_profile_creations);
         for (generation, operation_id) in pending_profile_creations {
@@ -2053,9 +2056,12 @@ impl Shell {
                         let mut settled = settled
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        while settled.is_none() && std::time::Instant::now() < deadline {
+                        while settled.is_none()
+                            && std::time::Instant::now() < publication_deadline
+                        {
                             let remaining =
-                                deadline.saturating_duration_since(std::time::Instant::now());
+                                publication_deadline
+                                    .saturating_duration_since(std::time::Instant::now());
                             let (next, timeout) = ready
                                 .wait_timeout(settled, remaining)
                                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2115,12 +2121,11 @@ impl Shell {
                 }
             }
         }
-        self.publish_current_session();
+        self.publish_current_session_including_pending();
         for window in self.windows.iter_mut() {
             window.sidebar_peek = false;
         }
         // Reserve the last quarter of the remaining budget for native teardown.
-        let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
         let mut terminal_clean = now < deadline && rejection_emission_clean;
         self.flush_visit_titles();
         #[cfg(feature = "work-runtime")]

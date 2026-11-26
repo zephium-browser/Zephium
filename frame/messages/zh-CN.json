@@ -3379,7 +3379,7 @@
   "profiles_save": "保存",
   "profiles_delete_open": "删除个人资料…",
   "profiles_delete_title": "删除“{name}”？",
-  "profiles_delete_body": "其书签、历史记录、Cookie 和网站数据、标签页、扩展程序以及工作将从此设备上永久删除。你的 Zephium 账户不受影响。",
+  "profiles_delete_body": "其书签、历史记录、Cookie 和网站数据、标签页、扩展程序以及工作将从此设备上永久删除。你的 Zephium 账户不受影响。 与其他配置文件共享的文件夹中的书签会保留在此设备上。",
   "profiles_delete_confirm": "删除个人资料",
   "profiles_delete_default": "无法删除默认个人资料。",
   "profiles_delete_current": "请先将此窗口切换到其他个人资料，然后再删除此个人资料。",

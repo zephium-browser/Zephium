@@ -62,6 +62,7 @@ impl Hub {
             self.prepare_shared_bookmarks()?;
             if !self.bookmark_migration_complete(profile)
                 && !self.degraded_bookmark_profiles.contains(&profile)
+                && !self.degraded_profiles.contains(&profile)
             {
                 return Ok(ProfileDeletionAuthorizeOutcome::Failed);
             }

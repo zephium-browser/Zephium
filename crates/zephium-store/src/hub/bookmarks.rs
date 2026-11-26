@@ -2073,6 +2073,33 @@ mod tests {
     }
 
     #[test]
+    fn confirmed_profile_deletion_can_discard_ancillary_degraded_bookmarks() {
+        let (mut hub, profile) = hub();
+        hub.meta
+            .execute(
+                "DELETE FROM bookmark_profile_migrations WHERE profile_id=?1",
+                [profile.to_string()],
+            )
+            .unwrap();
+        hub.degraded_profiles.insert(profile);
+        let mut filtered = hub.load_authoritative().unwrap().unwrap().state;
+        filtered
+            .profiles
+            .retain(|candidate| candidate.id != profile);
+        filtered.spaces.retain(|space| space.profile != profile);
+        filtered
+            .shared_bookmark_folders
+            .retain(|folder| folder.profile != profile);
+        filtered.active_space = None;
+        filtered.active_item = None;
+
+        assert_eq!(
+            hub.authorize_profile_deletion(profile, &filtered).unwrap(),
+            zephium_core::ports::store::ProfileDeletionAuthorizeOutcome::Authorized
+        );
+    }
+
+    #[test]
     fn profile_deletion_stays_blocked_while_bookmark_reads_are_retryable() {
         let (mut hub, profile) = hub();
         hub.bookmark_busy_reads.insert(profile, 3);

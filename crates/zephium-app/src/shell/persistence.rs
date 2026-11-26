@@ -85,6 +85,15 @@ impl Shell {
         }
     }
 
+    pub(super) fn publish_current_session_including_pending(&self) {
+        if !self.bootstrapped {
+            return;
+        }
+        if let Some(state) = self.current_session_snapshot() {
+            self.store.save_session(state);
+        }
+    }
+
     pub(super) fn publish_current_session_checked(&self) -> bool {
         let Some(state) = self.current_session_snapshot() else {
             return false;
