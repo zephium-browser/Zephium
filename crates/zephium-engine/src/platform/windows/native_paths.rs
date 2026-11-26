@@ -108,6 +108,11 @@ fn invalid() -> io::Error {
     )
 }
 
+pub(crate) fn directory_identity(file: &std::fs::File) -> io::Result<(u64, [u8; 16])> {
+    let identity = verified_short_path::identity(file)?;
+    Ok((identity.VolumeSerialNumber, identity.FileId.Identifier))
+}
+
 mod verified_short_path {
     use super::*;
     use std::fs::{File, OpenOptions};
@@ -211,7 +216,7 @@ mod verified_short_path {
         Ok(file)
     }
 
-    fn identity(file: &File) -> io::Result<FILE_ID_INFO> {
+    pub(super) fn identity(file: &File) -> io::Result<FILE_ID_INFO> {
         let mut information = FILE_ID_INFO::default();
         // SAFETY: file owns this live handle, information has the exact native
         // layout and size for FileIdInfo, and the synchronous call cannot retain it.

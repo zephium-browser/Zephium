@@ -218,10 +218,24 @@ fn persist(key: &str, value: &str) {
 /// Registers what was chosen last time, or the default. The keymap override
 /// is honoured for a profile that set one before there was a recorder.
 pub fn install(app: &AppHandle, keymap_override: Option<String>) {
+    install_with_settings(
+        app,
+        keymap_override,
+        setting(SHORTCUT_KEY),
+        setting(DOUBLE_TAP_KEY),
+    );
+}
+
+fn install_with_settings(
+    app: &AppHandle,
+    keymap_override: Option<String>,
+    shortcut_setting: Option<String>,
+    double_tap_setting: Option<String>,
+) {
     let owns_global_shortcut = app
         .try_state::<crate::instance_lease::GlobalShortcutOwner>()
         .is_some_and(|owner| owner.owns());
-    let shortcut = setting(SHORTCUT_KEY)
+    let shortcut = shortcut_setting
         .or(keymap_override)
         .unwrap_or_else(|| DEFAULT.into());
     let parsed = if owns_global_shortcut {
@@ -233,7 +247,7 @@ pub fn install(app: &AppHandle, keymap_override: Option<String>) {
     };
     let registered =
         register_owned_shortcut(owns_global_shortcut, parsed, |parsed| register(app, parsed));
-    let double_tap = match setting(DOUBLE_TAP_KEY).as_deref() {
+    let double_tap = match double_tap_setting.as_deref() {
         Some("command") => DoubleTap::Command,
         Some("option") => DoubleTap::Option,
         _ => DoubleTap::Off,
@@ -279,6 +293,8 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                     .as_deref()
                     .is_some_and(reserve_install);
             if retry {
+                let shortcut_setting = setting(SHORTCUT_KEY);
+                let double_tap_setting = setting(DOUBLE_TAP_KEY);
                 let app = app.clone();
                 let handle = app.clone();
                 let keymap_override = keymap_override.clone();
@@ -290,13 +306,17 @@ pub fn monitor_global_shortcut_owner(app: &AppHandle, keymap_override: Option<St
                         let shutting_down = handle
                             .try_state::<crate::ShutdownCoordinator>()
                             .is_some_and(|shutdown| shutdown.terminal_started());
-                        let can_record = handle
+                        let can_install = handle
                             .try_state::<Trigger>()
-                            .is_some_and(|trigger| install_is_not_recording(&trigger));
-                        let can_install =
-                            should_install_after_reservation(still_owns, shutting_down, can_record);
+                            .is_some_and(|trigger| install_is_available(&trigger))
+                            && should_attempt_install(still_owns, shutting_down);
                         if can_install {
-                            install(&handle, keymap_override);
+                            install_with_settings(
+                                &handle,
+                                keymap_override,
+                                shortcut_setting,
+                                double_tap_setting,
+                            );
                         } else if let Some(trigger) = handle.try_state::<Trigger>() {
                             release_install_reservation(&trigger);
                         }
@@ -500,12 +520,9 @@ fn should_apply_double_tap(owns: bool) -> bool {
     owns
 }
 
-fn install_is_not_recording(trigger: &Trigger) -> bool {
-    !trigger
-        .0
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .recording
+fn install_is_available(trigger: &Trigger) -> bool {
+    let state = trigger.0.lock().unwrap_or_else(|e| e.into_inner());
+    state.registered.is_none() && !state.recording
 }
 
 fn should_attempt_install(owns: bool, shutting_down: bool) -> bool {
@@ -597,6 +614,7 @@ mod tests {
         assert!(!should_install_after_reservation(false, false, true));
         assert!(!should_install_after_reservation(true, true, true));
         assert!(!should_install_after_reservation(true, false, false));
+        assert!(install_is_available(&trigger));
         assert!(reserve_install(&trigger));
         assert!(!reserve_install(&trigger));
         trigger.0.lock().unwrap().install_pending = false;
@@ -606,6 +624,7 @@ mod tests {
         assert!(reserve_install(&trigger));
         trigger.0.lock().unwrap().registered = Some(Shortcut::from_str(DEFAULT).unwrap());
         trigger.0.lock().unwrap().install_pending = false;
+        assert!(!install_is_available(&trigger));
         assert!(!reserve_install(&trigger));
         trigger.0.lock().unwrap().install_pending = true;
         release_reservation_after_schedule(&trigger, false);

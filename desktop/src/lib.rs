@@ -449,8 +449,17 @@ struct UiStartupGate {
     visible: Arc<AtomicBool>,
     handed_over: Arc<AtomicBool>,
     browser_revealed: Arc<AtomicBool>,
+    recovery_pending: Arc<AtomicBool>,
     health_generation: Arc<std::sync::atomic::AtomicU64>,
     health_task: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+}
+
+fn startup_watchdog_should_fail(
+    deadline_elapsed: bool,
+    visible: bool,
+    recovery_pending: bool,
+) -> bool {
+    deadline_elapsed && !visible && !recovery_pending
 }
 
 // WebView2 cold starts compete with runtime servicing and antivirus scanning.
@@ -476,9 +485,18 @@ impl UiStartupGate {
             visible: Arc::new(AtomicBool::new(false)),
             handed_over: Arc::new(AtomicBool::new(false)),
             browser_revealed: Arc::new(AtomicBool::new(false)),
+            recovery_pending: Arc::new(AtomicBool::new(false)),
             health_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             health_task: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn set_recovery_pending(&self, pending: bool) {
+        self.recovery_pending.store(pending, Ordering::Release);
+    }
+
+    fn recovery_pending(&self) -> bool {
+        self.recovery_pending.load(Ordering::Acquire)
     }
 
     /// Onboarding first, then the browser in the same window.
@@ -1482,7 +1500,13 @@ fn offer_startup_recovery(
                 let worker_guard = continuation.clone();
                 let recovered = tauri::async_runtime::spawn_blocking(move || -> Result<_, std::io::Error> {
                     if !worker_guard.available() { return Ok(None); }
-                    let Some((load, _artifact)) = store.set_aside_startup_session() else {
+                    let Some(recovery_result) = store.queue_set_aside_startup_session() else {
+                        return Err(std::io::Error::other("startup session recovery could not be queued"));
+                    };
+                    let Some((load, _artifact)) = recovery_result
+                        .recv()
+                        .map_err(|_| std::io::Error::other("startup session recovery worker stopped"))?
+                    else {
                         return Err(std::io::Error::other("startup session could not be preserved"));
                     };
                     if matches!(load, zephium_core::ports::store::SessionLoad::RecoveryRequired { .. } | zephium_core::ports::store::SessionLoad::Failed) {
@@ -2998,16 +3022,26 @@ async fn tabs_bootstrap(caller: WebviewWindow, app: tauri::AppHandle) {
         return;
     };
     let data_dir = barrier.0.clone();
+    let Some(startup_gate) = app.try_state::<UiStartupGate>() else {
+        request_startup_failure(
+            &app,
+            std::io::Error::other("UI startup gate is unavailable"),
+        );
+        return;
+    };
+    startup_gate.set_recovery_pending(true);
     let Some(shell) = app.try_state::<Handle>() else {
+        startup_gate.set_recovery_pending(false);
         request_startup_failure(&app, std::io::Error::other("shell is unavailable"));
         return;
     };
     let shell = shell.inner().clone();
-    match tauri::async_runtime::spawn_blocking(move || {
+    let recovery_result = tauri::async_runtime::spawn_blocking(move || {
         startup_recovery::wait_for_recovery(&data_dir)
     })
-    .await
-    {
+    .await;
+    startup_gate.set_recovery_pending(false);
+    match recovery_result {
         Ok(Ok(())) => {
             shell.dispatch(Command::Bootstrap);
         }
@@ -7458,9 +7492,26 @@ fn finish_browser_setup(
     std::thread::Builder::new()
                 .name("zephium-ui-startup-watchdog".into())
                 .spawn(move || {
-                    std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
-                    if startup_watchdog_gate.is_visible() {
-                        return;
+                    loop {
+                        std::thread::sleep(UI_INITIALIZATION_TIMEOUT);
+                        if startup_watchdog_gate.is_visible() {
+                            return;
+                        }
+                        if startup_watchdog_should_fail(
+                            true,
+                            startup_watchdog_gate.is_visible(),
+                            startup_watchdog_gate.recovery_pending(),
+                        ) {
+                            break;
+                        }
+                        while startup_watchdog_gate.recovery_pending()
+                            && !startup_watchdog_gate.is_visible()
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        if startup_watchdog_gate.is_visible() {
+                            return;
+                        }
                     }
                     let exit_app = startup_watchdog_app.clone();
                     let exit_gate = startup_watchdog_gate.clone();
@@ -9022,6 +9073,13 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recovery_wait_suspends_an_elapsed_ui_startup_deadline() {
+        assert!(!super::startup_watchdog_should_fail(true, false, true));
+        assert!(super::startup_watchdog_should_fail(true, false, false));
+        assert!(!super::startup_watchdog_should_fail(true, true, false));
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")

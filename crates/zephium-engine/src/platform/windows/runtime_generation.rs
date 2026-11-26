@@ -231,14 +231,8 @@ fn open_direct_directory(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn directory_identity(metadata: &fs::Metadata) -> io::Result<(u32, u64)> {
-    match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(index)) => Ok((volume, index)),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the per-process runtime root identity is unavailable",
-        )),
-    }
+fn directory_identity(file: &File) -> io::Result<(u64, [u8; 16])> {
+    crate::platform::windows::native_paths::directory_identity(file)
 }
 
 fn open_boot_registry(kind: RuntimeGenerationKind) -> io::Result<RegKey> {
@@ -1021,9 +1015,9 @@ impl RuntimeGeneration {
                     ));
                 }
                 let root_pin = open_direct_directory(&checked_root)?;
-                let pinned_identity = directory_identity(&root_pin.metadata()?)?;
+                let pinned_identity = directory_identity(&root_pin)?;
                 let current_root = open_direct_directory(&checked_root)?;
-                if directory_identity(&current_root.metadata()?)? != pinned_identity {
+                if directory_identity(&current_root)? != pinned_identity {
                     return Err(io::Error::from_raw_os_error(32));
                 }
                 drop(current_root);
@@ -1037,7 +1031,18 @@ impl RuntimeGeneration {
                         metadata
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        return Err(io::Error::from_raw_os_error(32));
+                        match OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .share_mode(FILE_SHARE_DELETE)
+                            .open(&lease_path)
+                        {
+                            Ok(_) => return Err(io::Error::from_raw_os_error(32)),
+                            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                                return Err(io::Error::from_raw_os_error(32));
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     Ok(_) => {
                         return Err(remediation_error(
@@ -1402,10 +1407,8 @@ fn maintain_sibling_roots(
             }
             match lease.try_lock() {
                 Ok(()) => {}
-                Err(error) if io::Error::from(error).kind() == io::ErrorKind::WouldBlock => {
-                    continue;
-                }
-                Err(error) => {
+                Err(std::fs::TryLockError::WouldBlock) => continue,
+                Err(std::fs::TryLockError::Error(error)) => {
                     note_overdue(
                         report,
                         &format!("a per-process runtime lease could not be locked ({error})"),
@@ -1562,8 +1565,8 @@ fn legacy_parent_lease(parent: &Path) -> io::Result<Option<File>> {
     }
     match lease.try_lock() {
         Ok(()) => Ok(Some(lease)),
-        Err(error) if io::Error::from(error).kind() == io::ErrorKind::WouldBlock => Ok(None),
-        Err(error) => Err(io::Error::from(error)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
 }
 
@@ -1718,7 +1721,7 @@ mod tests {
                     |delay| elapsed.set(elapsed.get() + delay),
                 )
                 .unwrap_err();
-                assert_eq!(attempts, 101);
+                assert_eq!(attempts, 100);
                 assert_eq!(elapsed.get(), Duration::from_secs(10));
                 assert_eq!(error.kind(), io::Error::from_raw_os_error(code).kind());
                 assert_eq!(

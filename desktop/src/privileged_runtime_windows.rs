@@ -163,6 +163,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_junction_at_the_privileged_runtime_parent() {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let target = temp.path().join("target");
+        fs::create_dir(&data_dir).unwrap();
+        fs::create_dir(&target).unwrap();
+        let parent = data_dir.join("privileged-runtime");
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&parent)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "could not create junction: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert!(privileged_runtime_root(&data_dir).is_err());
+        assert!(!target.join(std::process::id().to_string()).exists());
+    }
+
+    #[test]
     fn an_uncovered_privileged_browser_still_starts_and_is_flagged() {
         let (line, uncovered) =
             unexpected_browser(&UnexpectedBrowser::Invalidated(io::Error::other("full")));
