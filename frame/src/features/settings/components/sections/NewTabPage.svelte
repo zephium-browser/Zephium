@@ -26,6 +26,14 @@
   let busy = $derived(importing || resetting || preferences.saving());
   let ownImage = $derived(preferences.value("ui.newtab-background") === "image");
 
+  function confirmWallpaperPreference(key: preferences.PreferenceKey, expected: string) {
+    if (preferences.value(key) === expected) return true;
+    // The settings shell already reports native refusals. A skipped write
+    // while another preference is saving does not set that error.
+    if (!preferences.saveFailed()) failure = m.settings_save_error();
+    return false;
+  }
+
   async function importImage() {
     const owner = tabs.profile()?.id;
     if (!owner || busy) return;
@@ -49,9 +57,12 @@
         return;
       }
       await preferences.set("ui.newtab-image", content.asset.digest);
-      if (preferences.saveFailed() || !live || tabs.profile()?.id !== owner) return;
+      if (!live || tabs.profile()?.id !== owner) return;
+      if (!confirmWallpaperPreference("ui.newtab-image", content.asset.digest)) return;
       retryImage();
       await preferences.set("ui.newtab-background", "image");
+      if (!live || tabs.profile()?.id !== owner) return;
+      confirmWallpaperPreference("ui.newtab-background", "image");
     } catch {
       if (live) failure = m.ntp_image_failed();
     } finally {
