@@ -33,7 +33,7 @@
   });
 </script>
 
-{#if !session.unavailable()}
+{#if !session.unavailable() && (signedIn || preferences.showSignInPrompts())}
   <!-- Holds its height while the first answer is read, so the list below
        never jumps. -->
   <div class="identity-slot">

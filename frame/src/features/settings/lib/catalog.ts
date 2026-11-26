@@ -62,6 +62,18 @@ export const fields = {
     description: m.settings_color_scheme_desc,
     initial: "system",
   },
+  "appearance.sign-in-prompts": {
+    section: "appearance",
+    label: m.look_sign_in_prompts,
+    description: m.look_sign_in_prompts_help,
+    initial: true,
+  },
+  "appearance.mode-switch": {
+    section: "appearance",
+    label: m.look_mode_switch,
+    description: m.look_mode_switch_help,
+    initial: true,
+  },
   "appearance.sidebar": {
     section: "appearance",
     label: m.settings_sidebar,

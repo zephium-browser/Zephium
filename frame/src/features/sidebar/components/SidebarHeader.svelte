@@ -8,6 +8,7 @@
     SidebarLeftIcon,
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
+  import { preferences } from "$domain/preferences";
   import { blocker, siteMenuState } from "$domain/blocker";
   import { pageSite } from "$domain/site-data";
   import { extensions } from "$domain/extensions";
@@ -150,8 +151,8 @@
     <!-- Beside a tool panel the panel's own close button already gives the
          column back, so a second way to the same shape would only crowd the
          lights; search stands there instead. -->
-    {#if launcher && IS_WINDOWS}<span class="flex w-14 shrink-0 justify-center"
-        ><ModeTabs compact /></span
+    {#if launcher && IS_WINDOWS && preferences.showModeSwitch()}<span
+        class="flex w-14 shrink-0 justify-center"><ModeTabs compact /></span
       >{:else if launcher}<span class="ms-1.5 flex"><SidebarSearch /></span>{:else}<IconButton
         icon={SidebarLeftIcon}
         label={m.ui_compact_mode()}

@@ -1,8 +1,10 @@
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import type { AccountV1, ProfileEntryView, ProfilesView } from "$shared/ipc/bindings";
 import { accountFixture, usageFixture } from "$shared/testing/account";
+import { preferences } from "$domain/preferences";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import AccountMenuStage from "./AccountMenuStage.svelte";
 
 const native = vi.hoisted(() => ({
@@ -188,3 +190,25 @@ test(
     }
   },
 );
+
+afterEach(() => preferences.dispose());
+
+test("hidden sign-in prompts preserve profile, model and settings actions", async () => {
+  await preferences.init();
+  await page.viewport(520, 420);
+  document.documentElement.dataset.theme = "dark";
+  await open(accountFixture(), solo);
+  await expect
+    .element(page.getByRole("menuitem", { name: "Sign in to Zephium", exact: true }))
+    .toBeVisible();
+  await settle();
+  await page.screenshot({ path: "../../../../../target/look/visibility/profile-menu-before.png" });
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  await expect
+    .element(page.getByRole("menuitem", { name: "Sign in to Zephium", exact: true }))
+    .not.toBeInTheDocument();
+  await settle();
+  await page.screenshot({ path: "../../../../../target/look/visibility/profile-menu-after.png" });
+  await expect.element(page.getByRole("menuitem", { name: /Profile Settings/u })).toBeVisible();
+  await expect.element(page.getByRole("menuitem", { name: "Models", exact: true })).toBeVisible();
+});

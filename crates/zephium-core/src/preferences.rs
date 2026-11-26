@@ -10,6 +10,8 @@ pub const KEYS: &[&str] = &[
     "ui.accent",
     "ui.material",
     "ui.reduce-motion",
+    "ui.sign-in-prompts",
+    "ui.mode-switch",
     "ui.newtab-greeting",
     "ui.newtab-name",
     "ui.newtab-clock",
@@ -323,6 +325,8 @@ pub fn value_allowed(key: &str, value: &str) -> bool {
         }
         "search.suggestions"
         | "ui.reduce-motion"
+        | "ui.sign-in-prompts"
+        | "ui.mode-switch"
         | "ui.newtab-greeting"
         | "ui.newtab-name"
         | "ui.newtab-clock"
@@ -387,6 +391,18 @@ mod tests {
             &"a".repeat(65),
         ] {
             assert!(!value_allowed("ui.newtab-image", value));
+        }
+    }
+
+    #[test]
+    fn browser_visibility_preferences_accept_only_booleans() {
+        for key in ["ui.sign-in-prompts", "ui.mode-switch"] {
+            assert!(KEYS.contains(&key));
+            assert!(value_allowed(key, "true"));
+            assert!(value_allowed(key, "false"));
+            for invalid in ["", "0", "off", "TRUE", "false "] {
+                assert!(!value_allowed(key, invalid));
+            }
         }
     }
 

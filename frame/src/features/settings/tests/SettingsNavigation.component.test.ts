@@ -1,9 +1,12 @@
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { page } from "vitest/browser";
 import { render } from "vitest-browser-svelte";
 import { flushSync } from "svelte";
+import { preferences } from "$domain/preferences";
+import { emitNativeEvent } from "$shared/testing/native-events";
 import * as settings from "../lib/settings-state.svelte";
 import "$styles/global.css";
+import AiZephiumRow from "../components/AiZephiumRow.svelte";
 import SettingsNavigation from "../components/SettingsNavigation.svelte";
 
 const native = vi.hoisted(() => ({ available: true }));
@@ -63,4 +66,39 @@ test("the identity card is gone where accounts are unavailable", async () => {
   await expect.poll(() => screen.container.querySelector(".identity-slot")).toBeNull();
   native.available = true;
   await screen.unmount();
+});
+
+afterEach(() => preferences.dispose());
+
+test("hiding sign-in prompts removes the identity slot and can be reversed", async () => {
+  native.available = true;
+  await preferences.init();
+  await page.viewport(300, 820);
+  document.documentElement.dataset.theme = "dark";
+  settings.select("general");
+  const screen = await render(SettingsNavigation);
+  screen.container.style.cssText =
+    "inline-size:260px;block-size:800px;background:var(--color-chrome)";
+  await expect.element(screen.getByRole("button", { name: /^Sign in/u })).toBeVisible();
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/look/visibility/settings-before.png" });
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  await expect.poll(() => screen.container.querySelector(".identity-slot")).toBeNull();
+  await page
+    .elementLocator(screen.container)
+    .screenshot({ path: "../../../../../target/look/visibility/settings-after.png" });
+  expect(settings.section()).not.toBe("account");
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=true");
+  await expect.element(screen.getByRole("button", { name: /^Sign in/u })).toBeVisible();
+});
+
+test("hiding sign-in invitations also removes the hosted-model promotion", async () => {
+  await preferences.init();
+  native.available = true;
+  const screen = await render(AiZephiumRow);
+  await expect.element(screen.getByRole("button", { name: "Sign in…" })).toBeVisible();
+  emitNativeEvent("uiCommand", "preference.ui.sign-in-prompts=false");
+  await expect.element(screen.getByRole("button", { name: "Sign in…" })).not.toBeInTheDocument();
+  expect(screen.container.textContent?.trim()).toBe("");
 });

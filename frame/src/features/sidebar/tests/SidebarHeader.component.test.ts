@@ -13,6 +13,12 @@ const native = vi.hoisted(() => ({
   kind: "default" as "default" | "incognito",
 }));
 
+vi.mock("$shared/platform", async (original) => ({
+  ...(await original<object>()),
+  IS_MAC: false,
+  IS_WINDOWS: true,
+}));
+
 vi.mock("$domain/blocker", async (original) => ({
   ...(await original<typeof import("$domain/blocker")>()),
   blocker: { status: () => ({ protection: "unavailable", applied_enabled: null, site: null }) },
@@ -25,6 +31,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsBootstrap: async () => {},
     runCommand: async () => ({ accepted: true, operation_id: null }),
     settingGet: async () => null,
+    searchShortcutDefaults: async () => [],
     sidebarMenuPopup: native.menu,
     tabSwitcherOpen: native.switcher,
   });
@@ -89,4 +96,29 @@ test("the header leaves switching tabs to its keys", async () => {
     await screen.unmount();
   }
   expect(native.switcher).not.toHaveBeenCalled();
+});
+
+test("the Windows launcher header swaps the mode switch for search when hidden", async () => {
+  await preferences.init();
+  const screen = await render(SidebarHeader, {
+    compact: false,
+    launcher: true,
+    pageControls: false,
+    ontoggle: () => {},
+  });
+  for (const shown of [true, false, true]) {
+    emitNativeEvent("uiCommand", `preference.ui.mode-switch=${shown}`);
+    const browse = screen.getByRole("button", { name: "Browse", exact: true });
+    const work = screen.getByRole("button", { name: "Work", exact: true });
+    const search = screen.getByRole("button", { name: "Search or enter an address" });
+    if (shown) {
+      await expect.element(browse).toBeVisible();
+      await expect.element(work).toBeVisible();
+      await expect.element(search).not.toBeInTheDocument();
+    } else {
+      await expect.element(browse).not.toBeInTheDocument();
+      await expect.element(work).not.toBeInTheDocument();
+      await expect.element(search).toBeVisible();
+    }
+  }
 });
