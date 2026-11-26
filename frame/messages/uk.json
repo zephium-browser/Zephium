@@ -3548,7 +3548,7 @@
   "native_account_more": "Обліковий запис…",
   "native_split_view_more": "Розділений перегляд…",
   "native_extensions_more": "Розширення…",
-  "native_reload_tab": "Перезавантажити вкладку",
+  "native_refresh": "Перезавантажити вкладку",
   "native_duplicate_tab": "Дублювати вкладку",
   "native_copy_link": "Копіювати посилання",
   "native_autofill_password_more": "Автозаповнення пароля…",

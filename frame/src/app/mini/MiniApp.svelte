@@ -48,9 +48,19 @@
 
   onMount(() => {
     let disposed = false;
-    let stopView: (() => void) | undefined;
-    let stopPresentation: (() => void) | undefined;
-    let stopCommands: (() => void) | undefined;
+    const listeners: (() => void)[] = [];
+    async function track(registration: Promise<() => void>) {
+      const stop = await registration;
+      if (disposed) stop();
+      else listeners.push(stop);
+    }
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const stop of listeners) stop();
+      listeners.length = 0;
+      theme.dispose();
+    }
     let liveMotion = false;
     let liveLanguage = false;
     const liveLook: string[] = [];
@@ -85,9 +95,8 @@
 
     void (async () => {
       try {
-        stopView = await viewListener;
-        stopPresentation = await presentationListener;
-        stopCommands = await uiListener;
+        await Promise.all([viewListener, presentationListener, uiListener].map(track));
+        if (disposed) return;
         await theme.init();
         if (disposed) return;
         const [motion, language, ...look] = await Promise.all([
@@ -109,15 +118,10 @@
         await commands.miniReady();
       } catch {
         // The window stays hidden; closing the app removes it.
+        dispose();
       }
     })();
-    return () => {
-      disposed = true;
-      stopView?.();
-      stopPresentation?.();
-      stopCommands?.();
-      theme.dispose();
-    };
+    return dispose;
   });
 </script>
 

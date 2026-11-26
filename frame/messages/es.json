@@ -3548,7 +3548,7 @@
   "native_account_more": "Cuenta…",
   "native_split_view_more": "Vista dividida…",
   "native_extensions_more": "Extensiones…",
-  "native_reload_tab": "Recargar pestaña",
+  "native_refresh": "Recargar pestaña",
   "native_duplicate_tab": "Duplicar pestaña",
   "native_copy_link": "Copiar enlace",
   "native_autofill_password_more": "Autorrellenar contraseña…",

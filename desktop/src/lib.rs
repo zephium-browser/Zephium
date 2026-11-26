@@ -6970,7 +6970,7 @@ fn build_tab_menu(
             .enabled(enabled)
             .build(handle)
     };
-    let reload = item(0, "Reload Tab", true)?;
+    let reload = item(0, "Refresh", true)?;
     let duplicate = item(1, "Duplicate Tab", context.page)?;
     let copy_link = item(2, "Copy Link", context.page)?;
     let bookmark = item(3, "Bookmark Tab", context.page)?;

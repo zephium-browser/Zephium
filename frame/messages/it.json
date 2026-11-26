@@ -3548,7 +3548,7 @@
   "native_account_more": "Account…",
   "native_split_view_more": "Vista divisa…",
   "native_extensions_more": "Estensioni…",
-  "native_reload_tab": "Ricarica scheda",
+  "native_refresh": "Ricarica scheda",
   "native_duplicate_tab": "Duplica scheda",
   "native_copy_link": "Copia link",
   "native_autofill_password_more": "Compila automaticamente la password…",

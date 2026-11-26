@@ -53,7 +53,13 @@
     const away = () => flow.dismiss();
     // WebKit does not focus a pressed button, so Escape is heard window-wide.
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
+      if (
+        event.key !== "Escape" ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        event.defaultPrevented
+      )
+        return;
       // The panel owns Escape ahead of the selection beneath it, regardless
       // of the order in which the window listeners were installed.
       event.preventDefault();
