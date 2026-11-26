@@ -46,6 +46,13 @@ test("the line says how far along and how long is left once it knows", () => {
   expect(formatTimeLeft(7200)).toMatch(/^2 hr/u);
 });
 
+test.each([
+  [1024, "1 KB of 1 KB"],
+  [2048, "2 KB of 1 KB"],
+])("does not estimate time with %i bytes received out of 1024", (received, summary) => {
+  expect(transferLine(entry(received, 1024), 1024)).toBe(summary);
+});
+
 test("a file's kind comes from its name", () => {
   expect(downloadKind("Photo.HEIC")).toBe("image");
   expect(downloadKind("setup.dmg")).toBe("app");

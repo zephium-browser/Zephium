@@ -5,6 +5,8 @@
   import Button from "$shared/ui/Button";
   import Field from "$shared/ui/Field";
 
+  let { resetting = false }: { resetting?: boolean } = $props();
+
   let draft = $state(untrack(() => preferences.value("tabs.new-page")));
   let editing = $state(false);
   let invalid = $state(false);
@@ -16,6 +18,7 @@
 
   async function save(event: SubmitEvent) {
     event.preventDefault();
+    if (resetting || preferences.saving()) return;
     const submitted = draft;
     await preferences.set("tabs.new-page", submitted.trim());
     if (draft !== submitted) return;
@@ -34,6 +37,7 @@
       label={m.ntp_page()}
       labelHidden
       value={draft}
+      disabled={resetting}
       autocomplete="off"
       inputmode="url"
       spellcheck={false}
@@ -46,7 +50,7 @@
         draft = event.currentTarget.value;
       }}
     />
-    <Button type="submit" disabled={preferences.saving() || draft.trim() === saved}>
+    <Button type="submit" disabled={resetting || preferences.saving() || draft.trim() === saved}>
       {m.search_save()}
     </Button>
   </form>
