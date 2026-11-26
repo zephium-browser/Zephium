@@ -90,6 +90,12 @@ pub(super) fn run_loopback_site() -> Result<(), ProbeFailure> {
                     let result = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "loopback_runtime")
                         .and_then(|runtime| runtime.block_on(async {
                             tokio::time::timeout(timeout, async {
+                                // The product root gives the composition its public route; the
+                                // fixture profile has no proxy of its own, so the system's is used.
+                                let routes = zephium_agentic::public_asset::RouteSource::new(&tokio::runtime::Handle::current());
+                                routes.set_app_proxy(None);
+                                composition.set_public_routes(routes.clone());
+                                routes.settled().await;
                                 let binding = loop {
                                     let selected = worker_handle.work_profile_binding();
                                     let answer = loop {

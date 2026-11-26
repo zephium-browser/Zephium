@@ -134,6 +134,9 @@ impl std::fmt::Debug for TrustedWorkRequest {
 pub struct NativeWorkComposition {
     #[cfg(feature = "durable-runtime")]
     pub(crate) human_pages: crate::human::HumanPages,
+    /// Public record pictures are refused until the composition root sets it.
+    #[cfg(feature = "durable-runtime")]
+    pub(crate) public_routes: std::sync::OnceLock<zephium_agentic::public_asset::RouteSource>,
     engine: Arc<WebviewEngine>,
     store: Arc<SqliteStore>,
     native: Arc<Mutex<NativeLifetimeOwner>>,
@@ -212,7 +215,15 @@ impl NativeWorkComposition {
             native: Arc::new(Mutex::new(NativeLifetimeOwner::Dormant)),
             #[cfg(feature = "durable-runtime")]
             human_pages: crate::human::HumanPages::default(),
+            #[cfg(feature = "durable-runtime")]
+            public_routes: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The route anonymous public fetches take; the first one set is kept.
+    #[cfg(feature = "durable-runtime")]
+    pub fn set_public_routes(&self, routes: zephium_agentic::public_asset::RouteSource) {
+        let _ = self.public_routes.set(routes);
     }
 
     /// Claims content-free recovery inventory only. No runtime/native page starts.

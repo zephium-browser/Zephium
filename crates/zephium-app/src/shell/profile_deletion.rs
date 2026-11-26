@@ -224,9 +224,13 @@ impl Shell {
             .recently_closed
             .retain(|entry| entry.profile != profile);
         filtered.spaces.retain(|space| space.profile != profile);
-        filtered.items.retain(|item| {
-            let (Placement::Favorites { space } | Placement::Space { space, .. }) = item.placement;
-            !removed_spaces.contains(&space)
+        filtered.items.retain(|item| match item.placement {
+            Placement::Favorites { space } | Placement::Space { space, .. } => {
+                !removed_spaces.contains(&space)
+            }
+            Placement::Mini {
+                profile: item_profile,
+            } => item_profile != profile,
         });
 
         (session::canonicalize(filtered.clone()) == filtered).then_some(filtered)
@@ -293,6 +297,8 @@ impl Shell {
         let removed_spaces = self.spaces.remove_for_profile(profile);
         let _native_erasure_owns_close = self.items.remove_for_profile(&removed_spaces);
         self.sources.retain(|id| self.items.tab(id).is_some());
+        self.new_tab_destinations
+            .retain(|id, _| self.items.tab(*id).is_some());
         self.profiles.remove(profile);
         self.forget_profile_roster(profile);
 

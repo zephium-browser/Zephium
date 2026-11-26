@@ -142,6 +142,43 @@ fn switching_shows_the_other_profile_and_returns_to_where_it_left() {
 }
 
 #[test]
+fn a_profile_tombstone_clears_only_that_profiles_destination_entries() {
+    let destination = "https://start.example/";
+    let (mut shell, _, screen, _) = browsed();
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: destination.into(),
+    });
+    shell.handle(Command::Open);
+    let personal_tab = active_id(&screen);
+    commit_url(&mut shell, personal_tab, destination);
+    present_committed(&mut shell, personal_tab, destination);
+    let personal = window_profile(&shell);
+    let work = create(&mut shell, "Work");
+    shell.handle_operation(Command::SwitchProfile(work));
+    let work_tab = active_id(&screen);
+    assert_eq!(shell.profile_of_item(work_tab), Some(work));
+    commit_url(&mut shell, work_tab, destination);
+    present_committed(&mut shell, work_tab, destination);
+    shell.handle_operation(Command::SwitchProfile(personal));
+    assert_eq!(window_profile(&shell), personal);
+    assert!(shell.new_tab_destinations.contains_key(&personal_tab));
+    assert!(shell.new_tab_destinations.contains_key(&work_tab));
+
+    shell.apply_profile_tombstone(work);
+
+    assert!(shell.items.tab(work_tab).is_none());
+    assert!(!shell.new_tab_destinations.contains_key(&work_tab));
+    assert_eq!(
+        shell
+            .new_tab_destinations
+            .get(&personal_tab)
+            .map(url::Url::as_str),
+        Some(destination)
+    );
+}
+
+#[test]
 fn switching_from_a_private_window_leaves_private_first() {
     let (mut shell, _engine, _screen, _store) = browsed();
     let personal = window_profile(&shell);

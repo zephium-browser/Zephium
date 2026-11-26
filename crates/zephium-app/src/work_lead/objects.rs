@@ -20,6 +20,47 @@ pub(crate) struct CanvasObject {
     pub part_title: Option<String>,
 }
 
+/// The pages behind this run's current objects: what a reply that names no
+/// sources of its own rests on. Empty when they are general knowledge too.
+pub(crate) fn run_evidence(objects: &[CanvasObject]) -> Vec<WorkEvidenceLink> {
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in objects
+        .iter()
+        .filter(|object| object.current && object.in_this_run)
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
+}
+
+/// What a revision that names no sources rests on: a reply without pages
+/// takes this run's, a plan whose pages came from its picks none (so its new
+/// picks give them), and anything else keeps its own.
+pub(crate) fn revised_evidence(
+    objects: &[CanvasObject],
+    target: &CanvasObject,
+) -> Vec<WorkEvidenceLink> {
+    let evidence = &target.artifact.evidence;
+    match &target.artifact.data {
+        WorkArtifactDataV1::Reply { .. } if evidence.is_empty() => run_evidence(objects),
+        data @ WorkArtifactDataV1::Plan { .. }
+            if !evidence.is_empty() && {
+                let picked = pick_evidence(objects, data);
+                evidence.iter().all(|link| picked.contains(link))
+            } =>
+        {
+            Vec::new()
+        }
+        _ => evidence.clone(),
+    }
+}
+
 /// Objects the runs of this work placed, oldest first; records a page gave
 /// a part are sources, not objects.
 pub(crate) fn canvas(
@@ -783,12 +824,41 @@ pub(crate) fn propose(
             ));
         }
     }
+    if evidence.is_empty() {
+        evidence = pick_evidence(objects, &data);
+    }
     Ok(Proposed {
         title: title.to_owned(),
         data,
         evidence,
         left_out,
     })
+}
+
+/// The pages behind the picks a plan's steps point to: what a plan that
+/// names no sources of its own rests on.
+pub(crate) fn pick_evidence(
+    objects: &[CanvasObject],
+    data: &WorkArtifactDataV1,
+) -> Vec<WorkEvidenceLink> {
+    let WorkArtifactDataV1::Plan { steps, .. } = data else {
+        return Vec::new();
+    };
+    let mut links: Vec<WorkEvidenceLink> = Vec::new();
+    for link in steps
+        .iter()
+        .filter_map(|step| step.pick.as_ref())
+        .filter_map(|pick| objects.iter().find(|o| o.artifact.id == pick.artifact))
+        .flat_map(|object| &object.artifact.evidence)
+    {
+        if links.len() == MAX_ARTIFACT_EVIDENCE {
+            break;
+        }
+        if !links.contains(link) {
+            links.push(link.clone());
+        }
+    }
+    links
 }
 
 /// What a second try left out, for the model: the place and why.
@@ -1597,6 +1667,147 @@ mod tests {
             items[0].image_candidates,
             ["https://img.example.com/loft.jpg"]
         );
+    }
+
+    #[test]
+    fn a_reply_without_its_own_sources_rests_on_this_runs_sourced_objects() {
+        let object = |id: &str, evidence: serde_json::Value, in_this_run: bool| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Sets", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "product", "items": [{"name": "Paris"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run,
+            part_title: None,
+        };
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let general = object("01M3RV9DBTWYS7770BES8YYKT3", serde_json::json!([]), true);
+        assert!(run_evidence(std::slice::from_ref(&general)).is_empty());
+        let earlier = object(
+            "01M3RV9DBTWYS7770BES8YYKT4",
+            serde_json::json!([link(7)]),
+            false,
+        );
+        let picks = object(
+            "01M3RV9DBTWYS7770BES8YYKT5",
+            serde_json::json!([link(1), link(2)]),
+            true,
+        );
+        let sheet = object(
+            "01M3RV9DBTWYS7770BES8YYKT6",
+            serde_json::json!([link(2), link(3)]),
+            true,
+        );
+        let links = run_evidence(&[earlier, general, picks, sheet]);
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        let many: Vec<_> = (0..MAX_ARTIFACT_EVIDENCE as u16 + 8)
+            .map(|i| {
+                object(
+                    "01M3RV9DBTWYS7770BES8YYKT7",
+                    serde_json::json!([link(i)]),
+                    true,
+                )
+            })
+            .collect();
+        assert_eq!(run_evidence(&many).len(), MAX_ARTIFACT_EVIDENCE);
+    }
+
+    #[test]
+    fn a_plan_without_its_own_sources_rests_on_the_picks_it_points_to() {
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let picks = |id: &str, evidence: serde_json::Value| CanvasObject {
+            artifact: serde_json::from_value(serde_json::json!({
+                "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                "output": "result", "title": "Flights", "evidence": evidence,
+                "review": "mechanical", "presentation": "automatic",
+                "data": {"kind": "picks", "facet": "flight", "items": [{"name": "LOT"}]}
+            }))
+            .unwrap(),
+            current: true,
+            in_this_run: true,
+            part_title: None,
+        };
+        let flights = picks(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            serde_json::json!([link(1), link(2)]),
+        );
+        let other = picks("01M3RV9DBTWYS7770BES8YYKT4", serde_json::json!([link(5)]));
+        let plan = |pick: Option<&str>| -> WorkArtifactDataV1 {
+            serde_json::from_value(serde_json::json!({"kind": "plan", "steps": [
+                {"kind": "travel", "title": "Fly to San Francisco", "pick": pick.map(|id| serde_json::json!({"artifact": id, "index": 0}))},
+                {"kind": "task", "title": "Apply for ESTA"}
+            ]}))
+            .unwrap()
+        };
+        let objects = [flights, other];
+        let links = pick_evidence(&objects, &plan(Some("01M3RV9DBTWYS7770BES8YYKT3")));
+        assert_eq!(
+            links.iter().map(|l| l.source_id).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        // A plan that points to no pick stays general knowledge.
+        assert!(pick_evidence(&objects, &plan(None)).is_empty());
+    }
+
+    #[test]
+    fn a_revision_without_sources_rests_on_what_its_object_rests_on_now() {
+        let link = |source: u16| serde_json::json!({"extraction_id": "01M3RV9DBTWYS7770BES8YYKT9", "source_id": source});
+        let object =
+            |id: &str, evidence: serde_json::Value, data: serde_json::Value| CanvasObject {
+                artifact: serde_json::from_value(serde_json::json!({
+                    "version": 1, "id": id, "execution": "01M3RV9DBTWYS7770BES8YYKT1",
+                    "node": "01M3RV9DBSG3ZRK3M2H2P2HZ0R", "attempt": "01M3RV9DBTWYS7770BES8YYKT2",
+                    "output": "result", "title": "Object", "evidence": evidence,
+                    "review": "mechanical", "presentation": "automatic", "data": data
+                }))
+                .unwrap(),
+                current: true,
+                in_this_run: true,
+                part_title: None,
+            };
+        let picks =
+            serde_json::json!({"kind": "picks", "facet": "flight", "items": [{"name": "LOT"}]});
+        let plan = serde_json::json!({"kind": "plan", "steps": [
+            {"kind": "travel", "title": "Fly", "pick": {"artifact": "01M3RV9DBTWYS7770BES8YYKT3", "index": 0}}
+        ]});
+        let flights = object(
+            "01M3RV9DBTWYS7770BES8YYKT3",
+            serde_json::json!([link(1)]),
+            picks,
+        );
+        let reply = object(
+            "01M3RV9DBTWYS7770BES8YYKT5",
+            serde_json::json!([]),
+            serde_json::json!({"kind": "reply", "headline": "Flights", "text": "Two flights fit."}),
+        );
+        let derived = object(
+            "01M3RV9DBTWYS7770BES8YYKT6",
+            serde_json::json!([link(1)]),
+            plan.clone(),
+        );
+        let own = object(
+            "01M3RV9DBTWYS7770BES8YYKT7",
+            serde_json::json!([link(1), link(4)]),
+            plan,
+        );
+        let objects = [flights, reply.clone(), derived.clone(), own.clone()];
+        let ids =
+            |links: Vec<WorkEvidenceLink>| links.iter().map(|l| l.source_id).collect::<Vec<_>>();
+
+        // A reply first placed without pages takes the ones placed since.
+        assert_eq!(ids(revised_evidence(&objects, &reply)), [1, 4]);
+        // A plan's pages from its picks come again from the picks it names now.
+        assert!(revised_evidence(&objects, &derived).is_empty());
+        // Pages a plan named itself stay.
+        assert_eq!(ids(revised_evidence(&objects, &own)), [1, 4]);
     }
 
     #[test]
