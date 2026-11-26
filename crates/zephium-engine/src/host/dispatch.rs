@@ -1971,11 +1971,23 @@ mod tests {
         let parent = RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(
             std::num::NonZeroIsize::new(1).unwrap(),
         ));
+        #[cfg(target_os = "windows")]
+        let private_runtime = crate::RuntimeGeneration::prepare(
+            &root
+                .path()
+                .join("private-runtime")
+                .join(std::process::id().to_string()),
+            crate::RuntimeGenerationKind::RawPrivate,
+            &crate::platform::imp::WindowsLeftoverProcesses,
+        )
+        .unwrap();
         let dispatch: crate::MainThreadDispatch = Arc::new(|_| panic!("no native dispatch"));
         let failure: Arc<dyn Fn(&'static str) + Send + Sync> =
             Arc::new(|reason| panic!("unexpected terminal failure: {reason}"));
         install(
             parent,
+            #[cfg(target_os = "windows")]
+            private_runtime,
             root.path().to_owned(),
             dispatch.clone(),
             UserContentGeneration::new(1).unwrap(),
