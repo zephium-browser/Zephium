@@ -91,6 +91,7 @@ export function createSearchSurface(options: {
   const CALCULATION_ID = "calculation";
   /** The launcher's current presentation; null while it is put away. */
   let context: PanelState | null = null;
+  let presentation = 0;
 
   /** Intent expressed before the answer arrived. Resolved against the settled
    *  result set so a click or Enter is never silently dropped, and never runs
@@ -206,18 +207,19 @@ export function createSearchSurface(options: {
   async function capture() {
     const text = query.trim();
     if (running || !text || !options.onCapture || options.sitesOnly?.()) return;
+    const startedIn = presentation;
     running = true;
     failed = false;
     try {
       const title = await options.onCapture(text);
-      if (disposed) return;
+      if (disposed || startedIn !== presentation) return;
       running = false;
       if (title) {
         captured = title;
         fulfilled = true;
       } else failed = true;
     } catch {
-      if (!disposed) {
+      if (!disposed && startedIn === presentation) {
         running = false;
         failed = true;
       }
@@ -255,13 +257,14 @@ export function createSearchSurface(options: {
     if (!row.result || !expected) return;
     // A mini window's launcher opens only in the foreground, as native does.
     background = background && !anchored && !options.sitesOnly?.() && !!addressOf(row);
+    const startedIn = presentation;
     running = true;
     failed = false;
     try {
       const admission = anchored
         ? await settle(commands.newtabRun(row.result.action, expected))
         : await commands.launcherRun(row.result.action, expected, background);
-      if (disposed) return;
+      if (disposed || startedIn !== presentation) return;
       const rejected =
         "accepted" in admission
           ? !admission.accepted
@@ -272,7 +275,7 @@ export function createSearchSurface(options: {
       else if (background) announce("opened");
       else fulfilled = true;
     } catch {
-      if (!disposed) {
+      if (!disposed && startedIn === presentation) {
         running = false;
         failed = true;
       }
@@ -373,11 +376,12 @@ export function createSearchSurface(options: {
   }
 
   async function copyText(text: string, notice: SurfaceNotice) {
+    const startedIn = presentation;
     try {
       await navigator.clipboard.writeText(text);
-      if (!disposed) announce(notice);
+      if (!disposed && startedIn === presentation) announce(notice);
     } catch {
-      if (!disposed) failed = true;
+      if (!disposed && startedIn === presentation) failed = true;
     }
   }
 
@@ -435,6 +439,7 @@ export function createSearchSurface(options: {
   let fulfilled = false;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let expiresAt = 0;
+  let profileId: string | null | undefined;
   /** The last answer to an empty field, shown again when the launcher resets
    *  so its home list is complete on the frame it appears. */
   let home: SearchResult[] = [];
@@ -442,13 +447,20 @@ export function createSearchSurface(options: {
   /** Binds the launcher to one presentation, resuming whatever it was left
    *  showing unless that has since expired. */
   function begin(next: PanelState) {
-    if (expiresAt && Date.now() >= expiresAt) toHome();
+    if (context) end();
+    if (profileId !== undefined && next.profile_id !== profileId) {
+      home = [];
+      toHome();
+    } else if (expiresAt && Date.now() >= expiresAt) toHome();
+    profileId = next.profile_id;
     expiresAt = 0;
     clearTimeout(expiry);
+    presentation += 1;
     context = next;
     // Before the controller exists, so its first request is for the address
     // and not for an empty field that the seed immediately replaces.
     if (next.seed) seed(next.seed);
+    else seededQuery = "";
     if (listening) void initialize();
   }
 
@@ -456,6 +468,7 @@ export function createSearchSurface(options: {
    *  for a short while, and the reset to home happens while still hidden so
    *  the window never changes size on the frame it is shown. */
   function end() {
+    presentation += 1;
     context = null;
     controller?.dispose();
     controller = undefined;
@@ -467,7 +480,7 @@ export function createSearchSurface(options: {
     clearTimeout(noticeTimer);
     notice = null;
     clearTimeout(expiry);
-    if (fulfilled || !query) toHome();
+    if (fulfilled || !query || query === seededQuery) toHome();
     else {
       expiresAt = Date.now() + RESUME_MS;
       expiry = setTimeout(toHome, RESUME_MS);

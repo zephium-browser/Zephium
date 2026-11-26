@@ -3547,7 +3547,7 @@
   "native_account_more": "Hesap…",
   "native_split_view_more": "Bölünmüş Görünüm…",
   "native_extensions_more": "Uzantılar…",
-  "native_reload_tab": "Sekmeyi Yeniden Yükle",
+  "native_refresh": "Sekmeyi Yeniden Yükle",
   "native_duplicate_tab": "Sekmeyi Çoğalt",
   "native_copy_link": "Bağlantıyı Kopyala",
   "native_autofill_password_more": "Parolayı Otomatik Doldur…",

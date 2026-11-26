@@ -192,7 +192,7 @@ zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] 
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tauri-plugin-global-shortcut.workspace = true
-rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
+rfd = { version = "=0.18.0", default-features = false, features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }

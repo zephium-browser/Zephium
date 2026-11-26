@@ -1136,6 +1136,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
 name = "dirs-sys"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3251,6 +3260,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation",
  "objc2-quartz-core",
+ "objc2-uniform-type-identifiers",
 ]
 
 [[package]]
@@ -3513,6 +3523,16 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "objc2-user-notifications",
+]
+
+[[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]
@@ -4362,9 +4382,9 @@ dependencies = [
 
 [[package]]
 name = "rfd"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a15ad77d9e70a92437d8f74c35d99b4e4691128df018833e99f90bcd36152672"
+checksum = "f4fe518b6db89699d59862e4d1e3a0226316090f4e4ec09f7dd686be25634c7c"
 dependencies = [
  "block2",
  "dispatch2",
@@ -4382,6 +4402,30 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "rfd"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4b9d4857b10297ffb0f64cae711e983a7aeaee561848d56d429d3858bd8ed93"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-foundation",
+ "objc2-uniform-type-identifiers",
+ "percent-encoding",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5476,7 +5520,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "cookie",
- "dirs",
+ "dirs 6.0.0",
  "dunce",
  "embed_plist",
  "getrandom 0.3.4",
@@ -5527,7 +5571,7 @@ checksum = "bc9ce40b16101cb6ea63d3e221567affd1c3a9205f95d7bc574941a10636b632"
 dependencies = [
  "anyhow",
  "cargo_toml",
- "dirs",
+ "dirs 6.0.0",
  "glob",
  "heck 0.5.0",
  "json-patch",
@@ -5605,7 +5649,7 @@ checksum = "61854a36651aa48381e5e209f69a01273b77f3f9f91f0c430b1b98d33bd47229"
 dependencies = [
  "log",
  "raw-window-handle",
- "rfd",
+ "rfd 0.16.1",
  "serde",
  "serde_json",
  "tauri",
@@ -5675,7 +5719,7 @@ name = "tauri-plugin-updater"
 version = "2.10.1"
 dependencies = [
  "base64 0.22.1",
- "dirs",
+ "dirs 6.0.0",
  "flate2",
  "futures-util",
  "http",
@@ -6259,7 +6303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65ba1e5f6b9ef9fd87e21b9c6f351554dbd717960089168fcfdef854686961dc"
 dependencies = [
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "libappindicator",
  "muda",
  "objc2",
@@ -7279,7 +7323,7 @@ dependencies = [
  "block2",
  "cookie",
  "crossbeam-channel",
- "dirs",
+ "dirs 6.0.0",
  "dispatch2",
  "dom_query 0.28.0",
  "dpi",
@@ -7538,7 +7582,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "crc32fast",
- "dirs",
+ "dirs 7.0.0",
  "dom_query 0.28.0",
  "futures-util",
  "httpdate",
@@ -7684,7 +7728,7 @@ name = "zephium-credentials"
 version = "0.1.0"
 dependencies = [
  "core-foundation 0.10.1",
- "dirs",
+ "dirs 7.0.0",
  "security-framework",
  "security-framework-sys",
  "windows-sys 0.61.2",
@@ -7708,7 +7752,7 @@ dependencies = [
  "async-io",
  "base64 0.22.1",
  "block2",
- "dirs",
+ "dirs 6.0.0",
  "dispatch2",
  "futures-lite",
  "getrandom 0.4.3",
@@ -7726,7 +7770,7 @@ dependencies = [
  "objc2-web-kit",
  "raw-window-handle",
  "reqwest",
- "rfd",
+ "rfd 0.18.0",
  "rustix",
  "serde",
  "serde_json",
@@ -7781,7 +7825,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "block2",
- "dirs",
+ "dirs 7.0.0",
  "dispatch2",
  "flate2",
  "gtk",

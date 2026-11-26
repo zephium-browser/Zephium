@@ -150,7 +150,7 @@
   // Heard window-wide and first, since WebKit does not focus a pressed button.
   $effect(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return;
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       if (confirming) confirming = false;
