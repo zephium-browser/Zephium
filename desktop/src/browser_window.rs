@@ -242,6 +242,10 @@ fn build(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) -> bool {
         };
         match event {
             tauri::WindowEvent::CloseRequested { api, .. } if !shutdown_started(app) => {
+                if crate::updates::blocks_exit(app) {
+                    api.prevent_close();
+                    return;
+                }
                 let admitted = allowed_closes()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

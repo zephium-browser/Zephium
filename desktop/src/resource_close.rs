@@ -102,10 +102,15 @@ impl Gate {
         true
     }
 
-    fn forget_window(&mut self, label: &str, cancel_survivors: bool) -> Vec<(String, String)> {
+    fn forget_window(
+        &mut self,
+        label: &str,
+        cancel_survivors: bool,
+        preserve_flush: bool,
+    ) -> Vec<(String, String)> {
         self.touched.remove(label);
         self.pending.remove(label);
-        if cancel_survivors && !self.system_closing {
+        if cancel_survivors && !preserve_flush && !self.system_closing {
             self.prepared = false;
             std::mem::take(&mut self.flushed)
                 .into_iter()
@@ -275,10 +280,12 @@ pub(super) fn complete(label: &str, token: &str, success: bool) -> bool {
 }
 
 pub(super) fn forget_window(app: &tauri::AppHandle, label: &str) {
+    let cancel_survivors = !super::shutdown_started(app);
+    let preserve_flush = super::updates::blocks_exit(app);
     let flushed = gate()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .forget_window(label, !super::shutdown_started(app));
+        .forget_window(label, cancel_survivors, preserve_flush);
     for (participant, token) in flushed {
         super::try_emit_to_privileged_only(
             app,
@@ -762,7 +769,7 @@ mod tests {
         gate.pending
             .insert("browser-1".into(), ("closing-token".into(), send));
 
-        let cancelled = gate.forget_window("browser-1", true);
+        let cancelled = gate.forget_window("browser-1", true, false);
 
         assert!(!gate.prepared);
         assert!(!gate.touched.contains("browser-1"));
@@ -790,7 +797,7 @@ mod tests {
             ("browser-2".into(), "survivor-token".into()),
         ];
 
-        let cancelled = gate.forget_window("browser-1", true);
+        let cancelled = gate.forget_window("browser-1", true, false);
 
         assert!(!gate.prepared);
         assert!(gate.flushed.is_empty());
@@ -810,7 +817,7 @@ mod tests {
             ("browser-2".into(), "survivor-token".into()),
         ];
 
-        let cancelled = gate.forget_window(super::super::MAIN_LABEL, true);
+        let cancelled = gate.forget_window(super::super::MAIN_LABEL, true, false);
 
         assert!(!gate.touched.contains(super::super::MAIN_LABEL));
         assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
@@ -823,11 +830,36 @@ mod tests {
             ..Gate::default()
         };
 
-        let cancelled = gate.forget_window("browser-1", true);
+        let cancelled = gate.forget_window("browser-1", true, false);
 
         assert!(cancelled.is_empty());
         assert!(!gate.prepared);
         assert!(gate.touch("browser-2", || false));
+    }
+
+    #[test]
+    fn update_keeps_flush_proof_when_a_window_closes() {
+        let mut gate = Gate {
+            prepared: true,
+            ..Gate::default()
+        };
+        gate.flushed = vec![
+            ("browser-1".into(), "closing-token".into()),
+            ("browser-2".into(), "survivor-token".into()),
+        ];
+
+        let cancelled = gate.forget_window("browser-1", true, true);
+
+        assert!(cancelled.is_empty());
+        assert!(gate.prepared);
+        assert_eq!(
+            gate.flushed,
+            [
+                ("browser-1".into(), "closing-token".into()),
+                ("browser-2".into(), "survivor-token".into()),
+            ]
+        );
+        assert!(!gate.touch("browser-2", || false));
     }
 
     #[test]
