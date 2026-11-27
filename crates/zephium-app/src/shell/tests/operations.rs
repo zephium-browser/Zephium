@@ -102,6 +102,44 @@ fn a_tab_active_in_another_browser_window_cannot_blank_its_content_stage() {
 }
 
 #[test]
+fn previous_tab_cycle_skips_tabs_active_in_another_window() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+
+    let first_window = shell.windows.focused().unwrap().id;
+    assert_eq!(
+        shell.handle_operation(Command::Run("window.new".into())).outcome,
+        OperationOutcome::Deferred
+    );
+    let other_window = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != first_window)
+        .unwrap();
+    shell.handle(Command::BrowserWindowAttached {
+        window: other_window,
+        size: Size::new(1100.0, 720.0),
+    });
+    shell.windows.get_mut(other_window).unwrap().active = Some(first);
+    shell.windows.get_mut(first_window).unwrap().active = Some(second);
+    shell.handle(Command::BrowserWindowFocused {
+        window: first_window,
+        focused: true,
+    });
+
+    shell.handle(Command::Run("tab.previous".into()));
+
+    assert_eq!(shell.windows.get(first_window).unwrap().active, Some(third));
+    assert_eq!(shell.windows.get(other_window).unwrap().active, Some(first));
+}
+
+#[test]
 fn private_scope_cannot_open_a_second_window_that_outlives_its_partition() {
     let (mut shell, _engine, _screen) = setup();
     shell.handle(Command::Bootstrap);
