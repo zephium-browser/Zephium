@@ -65,6 +65,21 @@
     busy = false;
   }
 
+  async function retryShortcuts(id: string) {
+    if (busy) return;
+    busy = true;
+    failure = null;
+    const repaired = await commands.miniAppsRetryShortcuts(id).catch(() => false);
+    if (repaired) {
+      apps = apps.map((app) =>
+        app.id === id ? { ...app, shortcuts_need_retry: false } : app,
+      );
+    } else {
+      failure = m.miniapps_shortcuts_retry_failed();
+    }
+    busy = false;
+  }
+
   function host(value: string): string {
     try {
       return new URL(value).host.replace(/^www\./u, "");
@@ -142,6 +157,11 @@
           <Button size="compact" onclick={() => void commands.miniAppsOpen(app.id).catch(() => {})}
             >{m.miniapps_open()}</Button
           >
+          {#if app.shortcuts_need_retry}
+            <Button size="compact" disabled={busy} onclick={() => void retryShortcuts(app.id)}
+              >{m.miniapps_retry_shortcuts()}</Button
+            >
+          {/if}
           <IconButton
             icon={Cancel01Icon}
             size={14}

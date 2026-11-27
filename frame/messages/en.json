@@ -4027,6 +4027,8 @@
   "miniapps_remove": "Remove",
   "miniapps_scope": "Scoped to {scope}",
   "miniapps_failed": "The app could not be installed. Check the address and try again.",
+  "miniapps_retry_shortcuts": "Retry shortcuts",
+  "miniapps_shortcuts_retry_failed": "Shortcuts could not be created. Try again later.",
   "miniapps_invalid": "Enter a full HTTPS address.",
   "section_miniapps": "Mini apps",
   "section_miniapps_description": "Install a site as its own focused app, using the browser you already trust."

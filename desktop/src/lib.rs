@@ -1993,6 +1993,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             miniapps::mini_apps_list,
             miniapps::mini_apps_open,
             miniapps::mini_apps_install,
+            miniapps::mini_apps_retry_shortcuts,
             miniapps::mini_apps_remove,
             media::media_import,
             media::media_open,

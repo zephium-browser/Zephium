@@ -76,6 +76,7 @@ pub struct MiniAppView {
     pub background_color: Option<String>,
     pub icon: Option<String>,
     pub registry_recovered: bool,
+    pub shortcuts_need_retry: bool,
 }
 
 impl From<&MiniApp> for MiniAppView {
@@ -90,6 +91,7 @@ impl From<&MiniApp> for MiniAppView {
             background_color: app.background_color.clone(),
             icon: app.icon.clone(),
             registry_recovered: false,
+            shortcuts_need_retry: false,
         }
     }
 }
@@ -177,20 +179,69 @@ pub(crate) async fn mini_apps_install(
             }
             failures
         })
-        .await
-        .map_err(|_| "Windows shortcut creation failed.".to_owned())?;
-        if !post_commit.is_empty() {
-            // The durable install remains authoritative and launchable; the
-            // UI can retry shortcut creation without misreporting rollback.
+        .await;
+        if let Ok(post_commit) = post_commit {
+            view.shortcuts_need_retry = !post_commit.is_empty();
+            if !post_commit.is_empty() {
+                // The durable install remains authoritative and launchable; the
+                // UI can retry shortcut creation without misreporting rollback.
+                crate::write_diagnostic(format_args!(
+                    "mini_apps: installed app but shortcut creation needs retry: {}",
+                    post_commit.join("; ")
+                ));
+            }
+        } else {
+            view.shortcuts_need_retry = true;
             crate::write_diagnostic(format_args!(
-                "mini_apps: installed app but shortcut creation needs retry: {}",
-                post_commit.join("; ")
+                "mini_apps: shortcut worker failed after the app was installed"
             ));
         }
     }
     #[cfg(not(target_os = "windows"))]
     let _ = (app_handle, discovered.native_icon);
     Ok(view)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn mini_apps_retry_shortcuts(
+    caller: WebviewWindow,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "mini_apps_retry_shortcuts") || !valid_id(&id) {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mini_app = {
+            let _guard = REGISTRY_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            load_registry()
+                .ok()
+                .and_then(|registry| registry.find(&id).cloned())
+        };
+        let Some(mini_app) = mini_app else {
+            return false;
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            let mut success = true;
+            for destination in ["start_menu", "desktop"] {
+                if create_windows_shortcut(&app_handle, &mini_app, destination).is_err() {
+                    success = false;
+                }
+            }
+            success
+        })
+        .await
+        .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app_handle;
+        false
+    }
 }
 
 #[tauri::command]

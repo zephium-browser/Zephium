@@ -25,6 +25,7 @@ const native = vi.hoisted(() => ({
       background_color: null,
       icon: null,
       registry_recovered: false,
+      shortcuts_need_retry: false,
     },
   })),
 }));
@@ -89,6 +90,7 @@ afterEach(() => {
       background_color: null,
       icon: null,
       registry_recovered: false,
+      shortcuts_need_retry: false,
     },
   });
 });
@@ -200,6 +202,7 @@ test("the HTTPS install action installs once and reports registry recovery", asy
       background_color: null,
       icon: null,
       registry_recovered: true,
+      shortcuts_need_retry: false,
     },
   });
   const { screen } = await field();
@@ -229,6 +232,7 @@ test("the install action is disabled while its command is pending", async () => 
       background_color: null,
       icon: null,
       registry_recovered: false,
+      shortcuts_need_retry: false,
     },
   });
   await expect.element(install).toBeDisabled();
