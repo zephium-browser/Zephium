@@ -2499,13 +2499,15 @@ fn setup_with_async_chrome() -> (Shell, Arc<FakeEngine>, Arc<AsyncChrome>, Scree
     (shell, engine, chrome, screen)
 }
 
-fn setup_with_async_chrome_and_ui_commands() -> (
+type AsyncChromeUiCommandsSetup = (
     Shell,
     Arc<FakeEngine>,
     Arc<AsyncChrome>,
     Screen,
     Arc<Mutex<Vec<String>>>,
-) {
+);
+
+fn setup_with_async_chrome_and_ui_commands() -> AsyncChromeUiCommandsSetup {
     let engine = Arc::new(FakeEngine::default());
     let chrome = Arc::new(AsyncChrome::default());
     let screen: Screen = Arc::new(Mutex::new(ItemsState {

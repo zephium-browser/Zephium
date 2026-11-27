@@ -78,9 +78,7 @@ fn requested_profile(arguments: &[String]) -> Option<String> {
     let mut args = arguments.iter();
     while let Some(argument) = args.next() {
         let value = if argument == "--profile" {
-            let Some(value) = args.next() else {
-                return None;
-            };
+            let value = args.next()?;
             if value.starts_with("--") {
                 return None;
             }
@@ -92,10 +90,7 @@ fn requested_profile(arguments: &[String]) -> Option<String> {
         if requested.is_some() {
             return None;
         }
-        let Some(name) = zephium_core::profiles::profile_name(value).filter(|name| name == value)
-        else {
-            return None;
-        };
+        let name = zephium_core::profiles::profile_name(value).filter(|name| name == value)?;
         requested = Some(name);
     }
     requested
@@ -165,6 +160,45 @@ pub(crate) fn hand_off(
         if !shell.dispatch(Command::OpenExternal(urls)) {
             cancel_forward();
         }
+    }
+}
+
+/// Links opened as tabs: the main window comes forward to show them. A
+/// link that opened a mini window leaves the request in place, since that
+/// window comes forward on its own and a later link of the same batch may
+/// still open as a tab; the shell reports tabs once per batch.
+pub(crate) fn forward_pending(app: &tauri::AppHandle) {
+    if FORWARD.swap(false, Ordering::AcqRel) {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || bring_forward(&handle));
+    }
+}
+
+/// Runs once the shell is managed: what arrived early, then this launch's own
+/// command line (Windows and Linux pass a clicked link as an argument).
+pub(crate) fn adopt(app: &tauri::AppHandle) {
+    hand_off(app, std::env::args().skip(1), false);
+    let waiting = WAITING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    for request in waiting {
+        let mut arguments = Vec::new();
+        if let Some(profile) = request.profile {
+            arguments.extend(["--profile".into(), profile]);
+        }
+        arguments.extend(request.urls);
+        hand_off(app, arguments, request.forward);
+    }
+    if PROFILE_ADMISSION_FAILED.swap(false, Ordering::AcqRel) {
+        crate::emit_ui_command(app, "profile.open-failed");
+    }
+}
+
+pub(crate) fn bring_forward(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
 }
 
@@ -243,44 +277,5 @@ mod tests {
             urls: Vec::new(),
             forward: false,
         }));
-    }
-}
-
-/// Links opened as tabs: the main window comes forward to show them. A
-/// link that opened a mini window leaves the request in place, since that
-/// window comes forward on its own and a later link of the same batch may
-/// still open as a tab; the shell reports tabs once per batch.
-pub(crate) fn forward_pending(app: &tauri::AppHandle) {
-    if FORWARD.swap(false, Ordering::AcqRel) {
-        let handle = app.clone();
-        let _ = app.run_on_main_thread(move || bring_forward(&handle));
-    }
-}
-
-/// Runs once the shell is managed: what arrived early, then this launch's own
-/// command line (Windows and Linux pass a clicked link as an argument).
-pub(crate) fn adopt(app: &tauri::AppHandle) {
-    hand_off(app, std::env::args().skip(1), false);
-    let waiting = WAITING
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
-    for request in waiting {
-        let mut arguments = Vec::new();
-        if let Some(profile) = request.profile {
-            arguments.extend(["--profile".into(), profile]);
-        }
-        arguments.extend(request.urls);
-        hand_off(app, arguments, request.forward);
-    }
-    if PROFILE_ADMISSION_FAILED.swap(false, Ordering::AcqRel) {
-        crate::emit_ui_command(app, "profile.open-failed");
-    }
-}
-
-pub(crate) fn bring_forward(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-        let _ = window.unminimize();
-        let _ = window.set_focus();
     }
 }
