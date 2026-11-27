@@ -110,6 +110,42 @@ fn cookies_and_cache_reach_the_engine_for_the_focused_profile_and_range() {
 }
 
 #[test]
+fn profile_wide_site_data_clear_includes_every_browsing_container() {
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, engine, _screen, _queue) = browsed(store);
+    let profile = focused_profile(&shell);
+    let space = shell.windows.focused().unwrap().space;
+    for name in ["Personal", "Work"] {
+        let created = shell.handle_operation(Command::Container(Box::new(
+            crate::ContainerCommand::Create {
+                name: name.into(),
+                look: zephium_core::spaces::SpaceLook::default(),
+                spaces: zephium_core::containers::SpaceAccess::Selected(vec![space]),
+            },
+        )));
+        assert_eq!(created.outcome, OperationOutcome::Applied);
+    }
+
+    let answer = dispatch(
+        &mut shell,
+        profile,
+        clear(Range::Everything, [false, true, false, false]),
+    );
+
+    assert_eq!(answered(&answer), BrowsingDataResponse::Cleared);
+    let calls = engine.data_calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    let partitions = calls
+        .iter()
+        .map(|(partition, _)| *partition)
+        .collect::<Vec<_>>();
+    assert!(partitions.contains(&Partition::Default(profile)));
+    for container in shell.containers.for_profile(profile) {
+        assert!(partitions.contains(&Partition::Container(profile, container.id)));
+    }
+}
+
+#[test]
 fn all_time_clears_without_a_date() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, _screen, _queue) = browsed(store);

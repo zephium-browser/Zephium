@@ -320,24 +320,36 @@ impl Shell {
             site_data: cookies,
             cache,
         };
-        let parts = usize::from(!kinds.is_empty())
-            + usize::from(downloads)
-            + usize::from(history)
-            + usize::from(cookies);
+        let data_partitions = if matches!(partition, Partition::Container(_, _)) {
+            vec![partition]
+        } else {
+            std::iter::once(partition)
+                .chain(
+                    self.containers
+                        .for_profile(profile)
+                        .map(|container| Partition::Container(profile, container.id)),
+                )
+                .collect::<Vec<_>>()
+        };
+        let engine_parts = usize::from(!kinds.is_empty()) * data_partitions.len();
+        let parts =
+            engine_parts + usize::from(downloads) + usize::from(history) + usize::from(cookies);
         let join = Join::new(parts, done);
         if cookies {
             self.discard_browsing_backup(profile, &join);
         }
 
         if !kinds.is_empty() {
-            let settled = join.clone();
-            self.engine.browsing_data_call(
-                partition,
-                EngineDataCall::Clear { kinds, since },
-                EngineDataCompletion::new(move |reply| {
-                    Join::settle(&settled, reply == EngineDataReply::Cleared)
-                }),
-            );
+            for data_partition in data_partitions {
+                let settled = join.clone();
+                self.engine.browsing_data_call(
+                    data_partition,
+                    EngineDataCall::Clear { kinds, since },
+                    EngineDataCompletion::new(move |reply| {
+                        Join::settle(&settled, reply == EngineDataReply::Cleared)
+                    }),
+                );
+            }
         }
         if downloads {
             let settled = join.clone();
