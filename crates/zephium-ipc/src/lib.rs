@@ -494,6 +494,12 @@ pub struct WebExtensionAccessRequestView {
     pub patterns: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct WebExtensionAccessDismissalView {
+    pub profile_id: String,
+    pub request: String,
+}
+
 /// A person clicked the install button the browser showed on the Web Store
 /// listing in `tab_id`, which is still the active tab of the focused window.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -1836,6 +1842,7 @@ pub enum Projection {
     ExtensionActionShortcut(ExtensionActionShortcutView),
     PagePermissionPrompt(PagePermissionPromptView),
     WebExtensionAccessRequest(WebExtensionAccessRequestView),
+    WebExtensionAccessDismissed(WebExtensionAccessDismissalView),
     WebExtensionAccessRemoved(WebExtensionAccessRemovalView),
     WebExtensionStoreClick(WebExtensionStoreClickView),
     UiCommand(String),

@@ -35,6 +35,7 @@ import type {
   VoiceChanged,
   VoiceLevels,
   SwipeScroll,
+  WebExtensionAccessDismissed,
   WebExtensionAccessRequested,
   WebExtensionStoreClicked,
 } from "./bindings";
@@ -84,6 +85,7 @@ export const nativeEventNames = {
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionAccessDismissed: "zephium:web-extension-access-dismissed",
   webExtensionStoreClicked: "zephium:web-extension-store-click",
   webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
@@ -145,6 +147,9 @@ export const events = {
   ),
   webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
     nativeEventNames.webExtensionAccessRequested,
+  ),
+  webExtensionAccessDismissed: scopedEvent<WebExtensionAccessDismissed>(
+    nativeEventNames.webExtensionAccessDismissed,
   ),
   webExtensionStoreClicked: scopedEvent<WebExtensionStoreClicked>(
     nativeEventNames.webExtensionStoreClicked,

@@ -246,6 +246,7 @@ const EVENT_FAVICONS: &str = "zephium:favicons";
 const EVENT_EXTENSION_ACTIONS: &str = "zephium:extension-actions";
 const EVENT_EXTENSION_ACTION_FAILED: &str = "zephium:extension-action-failed";
 const EVENT_WEB_EXTENSION_ACCESS: &str = "zephium:web-extension-access";
+const EVENT_WEB_EXTENSION_ACCESS_DISMISSED: &str = "zephium:web-extension-access-dismissed";
 const EVENT_WEB_EXTENSION_DROPPED: &str = "zephium:web-extension-dropped";
 const EVENT_EXTENSION_ACTION_SHORTCUT: &str = "zephium:extension-action-shortcut";
 const EVENT_WEB_EXTENSION_STORE_CLICK: &str = "zephium:web-extension-store-click";
@@ -1790,6 +1791,9 @@ struct ExtensionActionShortcut(zephium_ipc::ExtensionActionShortcutView);
 struct WebExtensionAccessRequested(zephium_ipc::WebExtensionAccessRequestView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
+struct WebExtensionAccessDismissed(zephium_ipc::WebExtensionAccessDismissalView);
+
+#[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
 struct WebExtensionStoreClicked(zephium_ipc::WebExtensionStoreClickView);
 
 #[derive(Clone, Debug, Serialize, Deserialize, specta::Type, Event)]
@@ -2272,6 +2276,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ExtensionActionFailed,
             ExtensionActionShortcut,
             WebExtensionAccessRequested,
+            WebExtensionAccessDismissed,
             WebExtensionStoreClicked,
             browser_credentials::BrowserCredentialCapabilityChanged,
             PagePermissionPromptChanged,
@@ -7725,6 +7730,12 @@ fn finish_browser_setup(
             &emit_handle,
             MAIN_LABEL,
             EVENT_WEB_EXTENSION_ACCESS,
+            &request,
+        ),
+        Projection::WebExtensionAccessDismissed(request) => emit_to_privileged(
+            &emit_handle,
+            MAIN_LABEL,
+            EVENT_WEB_EXTENSION_ACCESS_DISMISSED,
             &request,
         ),
         Projection::WebExtensionStoreClick(click) => emit_to_privileged(

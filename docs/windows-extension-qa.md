@@ -69,6 +69,30 @@ buttons without account data. It shares the storage fixture's public test key:
 use only one of those fixtures in a session. It must not be enabled in the
 three-extension memory comparison.
 
+## Optional permission prompt
+
+1. Build and run the QA browser with `-Build -Release -Session permission-279`.
+   Install Bitwarden in this session. Use a disposable account and open
+   **Settings > Autofill > Make Bitwarden your default password manager**.
+2. Turn the option on and choose **Deny** in Zephium's access prompt. Verify
+   the toggle stays off and the main window responds. Repeat with **Allow**.
+   Verify the toggle turns on and survives a QA restart. Install the extension
+   separately in a second profile and verify its toggle stays off. In the
+   first profile, open an ordinary tab after Allow and check that the browser
+   stops offering to save new passwords or fill general form data.
+3. To force Chromium's prompt, use a throwaway checkout and prefix
+   `permissions.request = function` with `if (false)` in
+   `crates/zephium-webext/src/windows/permissions.js`. Rebuild the QA browser
+   and use a fresh `-Session permission-279-native`. Install Bitwarden there.
+   Open Bitwarden in a browser tab using its pop-out control and dismiss any
+   toolbar popup before turning on the same toggle. If this WebView2 version
+   reproduces the hidden native modal, verify the main window recovers without
+   a restart and the log contains one `recovered hidden Windows WebView2 modal`
+   line.
+4. On the same build, leave a normal webpage's visible file picker open for
+   at least two seconds. Verify it stays open until dismissed and produces
+   no recovery line.
+
 ## Performance checks
 
 Use a release build and the same resident tabs, package versions, permissions
@@ -127,6 +151,6 @@ extension admission budget is a QA limit, not a WebView2 limit.
 
 Eight enabled extensions process-wide remains
 provisional. Dark Reader's per-site popup controls are not qualified. On-click
-access, runtime permission UI, native messaging/desktop companions and MV2 are
+access, native messaging/desktop companions and MV2 are
 unavailable or unqualified. Work remains separate. Fixture passes do not
 establish compatibility with every store extension.

@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use zephium_core::geometry::Rect;
 
 pub(super) const BACKGROUND: (u8, u8, u8, u8) = (26, 26, 29, 255);
-pub(super) struct PopupWindow(pub(super) HWND, HWND, RECT, Cell<bool>);
+pub(super) struct PopupWindow(pub(super) HWND, HWND, RECT, Cell<bool>, Cell<bool>);
 
 impl PopupWindow {
     pub(super) fn new(parent: HWND, anchor: Rect) -> Result<Self, String> {
@@ -66,7 +66,7 @@ impl PopupWindow {
                 None,
             )
             .map_err(|e| e.to_string())?;
-            let result = Self(hwnd, parent, anchor, Cell::new(false));
+            let result = Self(hwnd, parent, anchor, Cell::new(false), Cell::new(false));
             let corner = DWMWCP_ROUND;
             let dark = 1i32;
             let border = 0x003b_3838u32; // COLORREF, matching the dark neutral rim.
@@ -167,6 +167,34 @@ impl PopupWindow {
             let foreground = GetForegroundWindow();
             foreground == self.0 || foreground == self.1
         }
+    }
+
+    pub(super) fn permission_pending(&self) -> bool {
+        self.4.get()
+    }
+
+    pub(super) fn hide_for_permission(&self) {
+        if !self.3.get() {
+            return;
+        }
+        self.4.set(true);
+        // Hide the native popover so the prompt can take focus while its
+        // extension document remains alive to receive the decision.
+        unsafe {
+            self.restore_owner_focus();
+            let _ = ShowWindow(self.0, SW_HIDE);
+        }
+    }
+
+    pub(super) fn resume_after_permission(&self) -> bool {
+        if !self.4.replace(false) || !self.owner_active() {
+            return false;
+        }
+        unsafe {
+            let _ = ShowWindow(self.0, SW_SHOW);
+            let _ = SetForegroundWindow(self.0);
+        }
+        true
     }
 
     pub(super) fn cursor_on_anchor(&self) -> bool {
@@ -294,6 +322,9 @@ pub(super) fn close(hwnd: HWND, deactivated: bool) {
             .as_ref()
             .filter(|popup| popup.window.0 == hwnd)
         {
+            if deactivated && popup.window.permission_pending() {
+                return;
+            }
             if deactivated && popup.window.cursor_on_anchor() {
                 host.windows_extensions.dismissed_action =
                     Some((popup.runtime, popup.tab, std::time::Instant::now()));

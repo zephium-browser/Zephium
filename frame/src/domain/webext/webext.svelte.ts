@@ -77,11 +77,22 @@ export function listenForStoreClicks(): Promise<() => void> {
   });
 }
 
-export function listenForAccess(): Promise<() => void> {
-  return events.webExtensionAccessRequested.listen((event) => {
-    accessQueue = [...accessQueue, event.payload];
-    if (named(event.payload.extension_id) === null) void refresh();
-  });
+function dismissAccess(request: { profile_id: string; request: string }): void {
+  const sameRequest = (pending: WebExtensionAccessRequestView) =>
+    pending.profile_id === request.profile_id && pending.request === request.request;
+  if (accessQueue[0] && sameRequest(accessQueue[0])) accessFailure = null;
+  accessQueue = accessQueue.filter((pending) => !sameRequest(pending));
+}
+
+export async function listenForAccess(): Promise<() => void> {
+  const stop = await Promise.all([
+    events.webExtensionAccessRequested.listen(({ payload }) => {
+      accessQueue = [...accessQueue, payload];
+      if (named(payload.extension_id) === null) void refresh();
+    }),
+    events.webExtensionAccessDismissed.listen(({ payload }) => dismissAccess(payload)),
+  ]);
+  return () => stop.forEach((unlisten) => unlisten());
 }
 
 export async function answerAccess(allowed: boolean): Promise<void> {
@@ -91,10 +102,10 @@ export async function answerAccess(allowed: boolean): Promise<void> {
   accessFailure = null;
   try {
     const result = await commands.webExtensionAnswerAccess(current, allowed);
-    if (result.status === "ok") accessQueue = accessQueue.slice(1);
-    else accessFailure = result.error;
+    if (result.status === "ok") dismissAccess(current);
+    else if (accessQueue[0] === current) accessFailure = result.error;
   } catch (error) {
-    accessFailure = String(error);
+    if (accessQueue[0] === current) accessFailure = String(error);
   } finally {
     answering = false;
   }

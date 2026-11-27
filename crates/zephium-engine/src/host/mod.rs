@@ -76,6 +76,8 @@ mod style_worker;
 mod webext;
 #[cfg(target_os = "macos")]
 mod webext_downloads;
+#[cfg(any(target_os = "windows", test))]
+mod webext_modal_recovery;
 #[cfg(target_os = "windows")]
 mod webext_windows;
 #[cfg(all(

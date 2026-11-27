@@ -1363,6 +1363,8 @@ fn command_is_critical(command: &Command) -> bool {
                     | EngineEvent::ExtensionCreatedTabReplied { .. }
                     | EngineEvent::ExtensionPageClosed { .. }
                     | EngineEvent::ExtensionPageChanged { .. }
+                    | EngineEvent::WebExtensionAccessRequested(_)
+                    | EngineEvent::WebExtensionAccessDismissed { .. }
                     | EngineEvent::PermissionRequested { .. }
                     | EngineEvent::HttpAuthRequested { .. }
                     | EngineEvent::HttpAuthEnded { .. }

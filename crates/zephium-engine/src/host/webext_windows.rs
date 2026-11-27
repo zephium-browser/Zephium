@@ -1,5 +1,7 @@
 //! Windows owns native extension profiles and their bounded presentation views.
 use crate::platform::imp::extensions as native;
+#[path = "webext_windows_permissions.rs"]
+mod permissions;
 #[path = "webext_windows_popup.rs"]
 mod popup;
 
@@ -42,6 +44,7 @@ struct Action {
     popup: Option<String>,
     native_tab: Option<i64>,
     open_request: Option<(ItemId, std::time::Instant, u8)>,
+    permission_gesture_available: bool,
 }
 
 #[derive(Default)]
@@ -153,6 +156,7 @@ pub(super) struct WindowsExtensions {
     startups: HashMap<ProfileId, Rc<Startup>>,
     installs: HashMap<(ProfileId, ExtensionInstallId), Install>,
     generation: u64,
+    optional_permissions: permissions::OptionalPermissions,
     popup: Option<Popup>,
     // A failed explicit child close must not destroy its native parent first.
     retained_popup_window: Option<std::rc::Weak<popup::PopupWindow>>,
@@ -202,6 +206,7 @@ struct Install {
     native: ICoreWebView2BrowserExtension,
     bridge: ExtensionView,
     action: Rc<RefCell<Action>>,
+    permissions: permissions::PermissionState,
 }
 
 impl super::EngineHost {
@@ -262,6 +267,7 @@ impl super::EngineHost {
     }
 
     fn extension_host_crashed(&mut self, runtime: ExtensionRuntimeInstance) {
+        self.finish_windows_permission(|pending| pending.owner == runtime, false);
         let Some(install) = self
             .windows_extensions
             .installs
@@ -276,6 +282,7 @@ impl super::EngineHost {
             action.popup = None;
             action.native_tab = None;
             action.open_request = None;
+            action.permission_gesture_available = false;
             action.recovery.next(std::time::Instant::now())
         };
         self.sink.emit(EngineEvent::ExtensionActionsInvalidated {
@@ -379,6 +386,7 @@ impl super::EngineHost {
         {
             self.close_windows_extension_popup();
         }
+        self.finish_windows_permission(|pending| pending.owner.profile() == profile, false);
         let keys: Vec<_> = self
             .windows_extensions
             .installs
@@ -588,8 +596,10 @@ impl super::EngineHost {
                 native: item,
                 bridge,
                 action,
+                permissions: permissions::PermissionState::new(&path, load.install, &manifest),
             },
         );
+        self.windows_extensions.restore_autofill(runtime);
         Ok(loaded)
     }
 
@@ -599,11 +609,16 @@ impl super::EngineHost {
         }) {
             self.close_windows_extension_popup();
         }
+        self.finish_windows_permission(
+            |pending| pending.owner.profile() == profile && pending.owner.install_id() == install,
+            false,
+        );
         if let Some(install) = self.windows_extensions.installs.remove(&(profile, install)) {
             self.windows_extensions
                 .revoke_navigation(profile, &install.id);
             install.bridge.alive.set(false);
             let result = native::enable(&install.native, false);
+            self.windows_extensions.release_autofill(&install);
             self.close_extension_view(profile, install.bridge);
             if let Err(error) = result {
                 eprintln!("extensions: disable failed: {error}");
@@ -616,6 +631,20 @@ impl super::EngineHost {
 
     pub(crate) fn remove_web_extension(&mut self, profile: ProfileId, load: WebExtensionLoad) {
         self.close_windows_extension_popup();
+        self.finish_windows_permission(
+            |pending| {
+                pending.owner.profile() == profile && pending.owner.install_id() == load.install
+            },
+            false,
+        );
+        let profile_path = crate::erasure::profile_path(&self.profiles_root, profile);
+        if profile_path.is_dir()
+            && profile_path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical == profile_path)
+        {
+            permissions::erase_grants(&profile_path, load.install);
+        }
         let mut native_change_started = false;
         let result = (|| -> Result<(), String> {
             if let Some(install) = self
@@ -628,6 +657,7 @@ impl super::EngineHost {
                 install.bridge.alive.set(false);
                 native_change_started = true;
                 let result = native::remove(&install.native);
+                self.windows_extensions.release_autofill(&install);
                 self.close_extension_view(profile, install.bridge);
                 return result;
             }
@@ -759,6 +789,12 @@ impl super::EngineHost {
             .with_download_policy(wry::DownloadPolicy::DenyWithoutMetadata)
             .with_page_close_policy(wry::PageClosePolicy::Ignore)
             .with_new_window_req_handler(move |url, features| {
+                if url.starts_with(permissions::REQUEST_URL_PREFIX) {
+                    let _ = super::dispatch::try_with(move |host| {
+                        host.request_windows_permissions(runtime, &url, features);
+                    });
+                    return wry::NewWindowResponse::Deny;
+                }
                 super::dispatch::try_open_windows_extension_tab(runtime, &url, features)
             })
             .with_navigation_handler(move |target| {
@@ -778,6 +814,20 @@ impl super::EngineHost {
                 let Ok(value) = serde_json::from_str::<Value>(message.body()) else {
                     return;
                 };
+                if matches!(
+                    value["kind"].as_str(),
+                    Some(
+                        "permissions-state"
+                            | "permissions-remove"
+                            | "permissions-privacy"
+                            | "permissions-toolbar-request"
+                    )
+                ) {
+                    let _ = super::dispatch::try_with(move |host| {
+                        host.windows_permission_message(runtime, value);
+                    });
+                    return;
+                }
                 if value["kind"] == "ready" {
                     sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
                     return;
@@ -950,6 +1000,9 @@ impl super::EngineHost {
         let Some(popup) = self.windows_extensions.popup.take() else {
             return;
         };
+        if popup.window.permission_pending() {
+            self.finish_windows_permission(|pending| pending.owner == popup.runtime, false);
+        }
         let restore_focus = popup.window.restore_owner_focus();
         drop(popup.escape);
         let ExtensionView {
@@ -1236,12 +1289,17 @@ impl super::EngineHost {
                 std::time::Instant::now() + std::time::Duration::from_secs(5),
                 8,
             ));
+            action.permission_gesture_available = true;
             drop(action);
-            install
+            if install
                 .bridge
                 .view
                 .evaluate_script(&format!("window.__zephiumClick?.({native_tab})"))
-                .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?;
+                .is_err()
+            {
+                install.action.borrow_mut().permission_gesture_available = false;
+                return Err(ExtensionActionRejection::NativeAdmissionFailed);
+            }
             return Ok(ExtensionActionSettlement::Dispatched);
         };
         let window_id = action
@@ -1426,6 +1484,7 @@ impl super::EngineHost {
                 return Err(ExtensionActionRejection::PopupUnavailable);
             }
         };
+        self.windows_extensions.restore_autofill(runtime);
         let crash_observer = self.observe_extension_crashes(&view, runtime, alive.clone(), true);
         let crash_failed = crash_observer.is_err();
         let escape = popup::EscapeRegistration::new(&view, hwnd, alive.clone());

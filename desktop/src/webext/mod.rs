@@ -600,7 +600,7 @@ pub(crate) async fn web_extension_answer_access(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_answer_access") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
         let app = caller.app_handle().clone();
         let shell = shell.inner().clone();
@@ -616,6 +616,19 @@ pub(crate) async fn web_extension_answer_access(
             )
         })
         .await
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let profile = ProfileId::parse(&request.profile_id).ok_or("Invalid profile.")?;
+        let request = request.request.parse().map_err(|_| "Invalid request.")?;
+        if !shell.dispatch(zephium_app::Command::AnswerWebExtensionAccess {
+            profile,
+            request,
+            allowed,
+        }) {
+            return Err(UNAVAILABLE.into());
+        }
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

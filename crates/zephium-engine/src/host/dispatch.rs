@@ -263,6 +263,8 @@ enum HostTaskKey {
     TemporarySpare(ProfileId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
+    #[cfg(target_os = "windows")]
+    ExtensionPermissionTimeout(u64),
     #[cfg(target_os = "macos")]
     Scriptlets(ProfileId),
     // A closed page's answer deadline: a full queue of ordinary work must not
@@ -600,6 +602,8 @@ pub(crate) fn install(
         });
         Ok::<(), String>(())
     })?;
+    #[cfg(target_os = "windows")]
+    super::webext_modal_recovery::install(parent);
     Ok(cleanup_advisory)
 }
 
@@ -1222,6 +1226,18 @@ pub(super) fn with_extension_lifecycle<F>(
     let _ = with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::Extension(runtime, popup)),
+        f,
+    );
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_extension_permission_timeout(
+    request: u64,
+    f: impl FnOnce(&mut EngineHost) + 'static,
+) {
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ExtensionPermissionTimeout(request)),
         f,
     );
 }

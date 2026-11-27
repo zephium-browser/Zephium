@@ -2459,16 +2459,9 @@ impl EngineHost {
             // profile's data folder, until Zephium has its own manager.
             // Private tabs and agent views keep it off.
             if !matches!(partition, Partition::Ephemeral(_))
-                && unsafe { view.webview().Settings() }
-                    .and_then(|settings| {
-                        windows_core::Interface::cast::<
-                            webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4,
-                        >(&settings)
-                    })
-                    .and_then(|settings| unsafe {
-                        settings.SetIsPasswordAutosaveEnabled(true)?;
-                        settings.SetIsGeneralAutofillEnabled(true)
-                    })
+                && self
+                    .windows_extensions
+                    .apply_autofill(partition.profile(), &view.webview())
                     .is_err()
             {
                 eprintln!("engine: WebView2 autofill could not be enabled");
