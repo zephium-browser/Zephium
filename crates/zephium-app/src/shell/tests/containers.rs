@@ -50,7 +50,7 @@ fn assigning_a_container_is_denied_when_its_space_scope_excludes_the_tab() {
 
 #[test]
 fn revoked_space_access_detaches_the_container_and_recreates_its_tabs() {
-    let (mut shell, _engine, screen) = setup();
+    let (mut shell, engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let profile = shell.windows.focused().unwrap().profile;
     let space = shell.windows.focused().unwrap().space;
@@ -69,6 +69,10 @@ fn revoked_space_access_detaches_the_container_and_recreates_its_tabs() {
             container: Some(container),
         })));
     assert_ne!(assigned.outcome, OperationOutcome::Rejected);
+    assert_eq!(
+        shell.container_recreates.get(&tab).unwrap().0,
+        Some(container)
+    );
 
     let updated = shell.handle_operation(Command::Container(Box::new(ContainerCommand::Update {
         id: container,
@@ -80,9 +84,16 @@ fn revoked_space_access_detaches_the_container_and_recreates_its_tabs() {
     assert_ne!(updated.outcome, OperationOutcome::Rejected);
     assert!(!shell.containers.get(container).unwrap().available_in(space));
     assert_eq!(shell.items.tab(tab).unwrap().container, None);
-    assert!(
-        shell.items.tab(tab).unwrap().has_view() || shell.container_recreates.contains_key(&tab)
-    );
+    let (recreate_container, recreate_url) = shell.container_recreates.get(&tab).unwrap();
+    assert_eq!(*recreate_container, None);
+    assert_eq!(recreate_url.as_str(), "https://revoke.example/");
+
+    shell.on_view_capacity_retry(tab);
+
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call.starts_with(&format!("create {tab} https://revoke.example/ [default]"))));
 }
 
 #[test]
