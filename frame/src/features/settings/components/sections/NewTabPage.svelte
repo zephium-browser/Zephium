@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import NewTabPageRow from "../NewTabPageRow.svelte";
   import { tabs } from "$domain/tabs";
   import { commands } from "$shared/ipc/bindings";
   import { retryImage } from "$session/newtab-background.svelte";
@@ -16,6 +17,7 @@
 
   let importing = $state(false);
   let resetting = $state(false);
+  let destinationReset = $state(0);
   let failure = $state("");
   let live = true;
   onDestroy(() => {
@@ -70,7 +72,10 @@
     failure = "";
     try {
       if (!(await preferences.resetNewTab())) failure = m.about_reset_failed();
-      else retryImage();
+      else {
+        destinationReset += 1;
+        retryImage();
+      }
     } finally {
       resetting = false;
     }
@@ -78,6 +83,10 @@
 
   const set = (key: preferences.PreferenceKey, value: string) => void preferences.set(key, value);
 </script>
+
+<SettingsGroup title={m.ntp_destination()}>
+  {#key destinationReset}<NewTabPageRow {resetting} />{/key}
+</SettingsGroup>
 
 <SettingsGroup title={m.ntp_background()}>
   <SettingsRow

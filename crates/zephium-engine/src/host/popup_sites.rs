@@ -7,6 +7,8 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
+#[cfg(target_os = "windows")]
+use windows::{core::Interface, Win32::Foundation::HWND};
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::permissions::PageOrigin;
 use zephium_core::ports::store::MAX_POPUP_SITES;
@@ -44,6 +46,8 @@ pub(super) struct ViewPopupPolicy {
     sites: Rc<PopupSites>,
     #[cfg(target_os = "macos")]
     webview: RefCell<Option<objc2::rc::Weak<objc2_web_kit::WKWebView>>>,
+    #[cfg(target_os = "windows")]
+    windows_opener: std::cell::Cell<Option<(HWND, *mut std::ffi::c_void)>>,
 }
 
 impl ViewPopupPolicy {
@@ -52,6 +56,8 @@ impl ViewPopupPolicy {
             sites,
             #[cfg(target_os = "macos")]
             webview: RefCell::new(None),
+            #[cfg(target_os = "windows")]
+            windows_opener: std::cell::Cell::new(None),
         }
     }
 
@@ -60,6 +66,28 @@ impl ViewPopupPolicy {
         let native = crate::platform::macos::native_webview(view);
         if let Ok(mut slot) = self.webview.try_borrow_mut() {
             *slot = Some(objc2::rc::Weak::from_retained(&native));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn bind(&self, view: &wry::WebView) {
+        use wry::WebViewExtWindows;
+        self.windows_opener
+            .set(Some((view.hwnd(), view.webview().as_raw())));
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn apply_click_disposition(
+        &self,
+        clicked: bool,
+        features: &mut wry::NewWindowFeatures,
+    ) {
+        let Some((hwnd, identity)) = self.windows_opener.get() else {
+            return;
+        };
+        if features.opener.webview.as_raw() == identity {
+            features.foreground =
+                crate::platform::imp::middle_click::foreground(hwnd, clicked, features.foreground);
         }
     }
 

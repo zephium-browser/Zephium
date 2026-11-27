@@ -59,6 +59,7 @@ pub(crate) mod browse_reader;
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
+pub(crate) mod extension_navigation;
 pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
@@ -186,8 +187,8 @@ use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
-const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
-const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
+const PAGE_URL_UTF16_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
+const PAGE_URL_UTF8_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
 const WINDOWS_PATH_UTF16_LIMIT: usize = 32_767;
 const WINDOWS_PATH_UTF8_LIMIT: usize = 4 * WINDOWS_PATH_UTF16_LIMIT;
 const VERSION_UTF16_LIMIT: usize = 256;
@@ -221,7 +222,7 @@ pub fn user_style_refusal(
         .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
 }
 
-fn take_pwstr_bounded(
+pub(crate) fn take_pwstr_bounded(
     source: PWSTR,
     max_utf16_units: usize,
     max_utf8_bytes: usize,
@@ -594,6 +595,7 @@ impl SecurityPolicy {
     pub fn judge_frame_navigations(
         &mut self,
         blocks: impl Fn(&str) -> bool + 'static,
+        unreadable: impl Fn() + 'static,
     ) -> windows_core::Result<()> {
         if self.refused_frame_requests.is_none() {
             // Without it a refused frame is still never shown; only its
@@ -615,9 +617,12 @@ impl SecurityPolicy {
             };
             unsafe {
                 let mut uri = PWSTR::null();
-                let uri = args.Uri(&mut uri).ok().and_then(|()| {
-                    take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
-                });
+                let received = args.Uri(&mut uri);
+                let uri = take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT);
+                let uri = received.ok().and(uri);
+                if uri.is_none() {
+                    unreadable();
+                }
                 if frame_refused(uri.as_deref(), &blocks) {
                     args.SetCancel(true)?;
                     if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {
@@ -1762,6 +1767,19 @@ pub fn install_privileged_environment_registration(
             "privileged WebView2 observer registry changed during installation",
         ))
     }
+}
+
+/// The browser process of the privileged environment registered for
+/// `label`, whose exit the final teardown proves. A WebView that joins that
+/// process, as a mini window's toolbar joins the launcher's, is covered by
+/// that proof and registers nothing of its own.
+pub fn privileged_environment_process(label: &str) -> Option<u32> {
+    PRIVILEGED_ENVIRONMENT_REGISTRATIONS.with(|registrations| {
+        let registrations = registrations.try_borrow().ok()?;
+        registrations
+            .get(label)
+            .map(|registration| registration.exit_guard.expected_process_id())
+    })
 }
 
 /// Remove only the runtime-update event when a privileged window is

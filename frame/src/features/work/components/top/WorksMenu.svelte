@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isComposing } from "$shared/lib/keyboard";
   import { Popover } from "bits-ui";
   import { tick } from "svelte";
   import type { WorkEnvironmentSummary } from "$shared/ipc/bindings";
@@ -161,6 +162,7 @@
   }
 
   function renameKey(event: KeyboardEvent, work: WorkEnvironmentSummary) {
+    if (isComposing(event)) return;
     event.stopPropagation();
     if (event.key === "Enter") {
       event.preventDefault();

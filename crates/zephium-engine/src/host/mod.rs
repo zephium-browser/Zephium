@@ -15,6 +15,8 @@ mod browser_windows_qualification;
 mod browsing_data;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod certificates;
+#[cfg(target_os = "macos")]
+mod closing;
 mod construction;
 mod content_rules;
 mod content_styles;
@@ -108,6 +110,8 @@ pub(crate) use dispatch::try_perform_extension_command;
 ))]
 pub(crate) use dispatch::try_with_agent_context_terminal;
 pub(crate) use dispatch::try_with_discard_state_erasure;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use dispatch::try_with_window_release;
 #[cfg(target_os = "macos")]
 pub(crate) use dispatch::with_extension_browser_request_terminal;
 #[cfg(target_os = "macos")]
@@ -406,6 +410,7 @@ impl Drop for ObservedView {
             }
             use wry::WebViewExtWindows;
             if !self.native_close_attempted {
+                crate::platform::imp::middle_click::forget_view(self.view.hwnd());
                 self.native_close_attempted = true;
                 if let Err(debt) = self.view.close() {
                     let debt = OwnedWindowsCleanupDebt::new(debt, self.native_resource.take());
@@ -435,6 +440,7 @@ impl ObservedView {
             .content_policy_registration
             .take()
             .is_some_and(|registration| registration.retire().is_err());
+        crate::platform::imp::middle_click::forget_view(self.view.hwnd());
         self.native_close_attempted = true;
         let debt = self
             .view
@@ -673,9 +679,16 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
     #[cfg(target_os = "macos")]
+    closing: closing::ClosingViews<ObservedView, crate::platform::imp::ContentPolicyTimeout>,
+    #[cfg(target_os = "macos")]
     next_fullscreen_retirement: u64,
     #[cfg(target_os = "macos")]
     stages: HashMap<WindowId, Retained<ContentStage>>,
+    // Windows other than the main one, such as a mini window, host their
+    // stage in their own native window. A missing entry is the main window;
+    // `None` is a window that was released and may not have a stage again.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    window_parents: HashMap<WindowId, Option<ParentHandle>>,
     #[cfg(not(target_os = "macos"))]
     stages: HashMap<WindowId, crate::platform::imp::Stage>,
     // Native callback admission failure, exhausted stage retries, or

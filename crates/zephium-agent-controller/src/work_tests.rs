@@ -850,6 +850,22 @@ fn input_with_navigation_account(
     .expect("input")
 }
 
+/// The first two looks after a reloading consent press fail as the page
+/// replaces its document.
+fn reloading_look(fault: Fault, calls: &[u8]) -> Option<SemanticRuntimePortFailure> {
+    #[cfg(feature = "probe-harness")]
+    if fault == Fault::ConsentReload {
+        let press = calls.iter().position(|&call| call == 7)?;
+        return match calls[press..].iter().filter(|&&call| call == 3).count() {
+            1 => Some(SemanticRuntimePortFailure::Stale),
+            2 => Some(SemanticRuntimePortFailure::DocumentReplaced),
+            _ => None,
+        };
+    }
+    let _ = (fault, calls);
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fault {
     PlainRead,
@@ -863,6 +879,10 @@ enum Fault {
     DecisionRefresh,
     #[cfg(feature = "probe-harness")]
     DecisionTargetChanged,
+    /// A consent press the page refuses as changed while it loads itself
+    /// again: its next looks find the document stale, then replaced.
+    #[cfg(feature = "probe-harness")]
+    ConsentReload,
     #[cfg(feature = "probe-harness")]
     Navigation(NavigationFault),
     #[cfg(feature = "probe-harness")]
@@ -1192,7 +1212,10 @@ impl AgentBrowserPort for Port {
         #[cfg(feature = "probe-harness")]
         let wire = if matches!(
             self.fault,
-            Fault::DecisionClick(_) | Fault::DecisionTargetChanged | Fault::DecisionRefresh
+            Fault::DecisionClick(_)
+                | Fault::DecisionTargetChanged
+                | Fault::ConsentReload
+                | Fault::DecisionRefresh
         ) {
             let applied = matches!(self.fault, Fault::DecisionClick(true));
             format!(
@@ -1278,6 +1301,7 @@ impl AgentBrowserPort for Port {
                 ));
             }
         }
+        let reloading = reloading_look(self.fault, &lock(&self.calls));
         self.send(ContextNativeEvent::SemanticRuntimeSettled(Box::new(
             SemanticRuntimeSettlement::try_new(
                 correlation,
@@ -1295,6 +1319,8 @@ impl AgentBrowserPort for Port {
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 3
                 {
                     Err(SemanticRuntimePortFailure::NotReady)
+                } else if let Some(failure) = reloading {
+                    Err(failure)
                 } else if (self.fault == Fault::TimedOutLook
                     && lock(&self.calls).iter().filter(|call| **call == 3).count() < 2)
                     || self.fault == Fault::TimedOutLooks
@@ -1403,7 +1429,7 @@ impl AgentBrowserPort for Port {
                 completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
                 return ContextDispatch::Scheduled;
             }
-            Fault::DecisionTargetChanged => {
+            Fault::DecisionTargetChanged | Fault::ConsentReload => {
                 let now = request.requested_at();
                 completion(request.fail(SemanticActionNativeFailure::TargetChanged, now));
                 return ContextDispatch::Scheduled;
@@ -2841,12 +2867,12 @@ fn provider_fixture_with_discovery_account(
                                         .filter_map(|line| {
                                             line.split_whitespace().nth(1).map(str::to_owned)
                                         })
-                                        .last(),
+                                        .next_back(),
                                     serde_json::Value::Array(items) => {
-                                        items.iter().filter_map(reference).last()
+                                        items.iter().filter_map(reference).next_back()
                                     }
                                     serde_json::Value::Object(items) => {
-                                        items.values().filter_map(reference).last()
+                                        items.values().filter_map(reference).next_back()
                                     }
                                     _ => None,
                                 }
@@ -2980,9 +3006,8 @@ fn provider_fixture_with_discovery_account(
         ProviderFault::ActionRepair
             | ProviderFault::ActionRepairRepeated
             | ProviderFault::ActionRepairCancelled
-    ) {
-        input_with_effects(&[SemanticEffectClass::Read])
-    } else if matches!(fault, ProviderFault::Native(native) if native.unissued_human()) {
+    ) || matches!(fault, ProviderFault::Native(native) if native.unissued_human())
+    {
         input_with_effects(&[SemanticEffectClass::Read])
     } else {
         input()

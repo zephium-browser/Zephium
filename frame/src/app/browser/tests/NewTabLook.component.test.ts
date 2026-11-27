@@ -45,6 +45,9 @@ const native = vi.hoisted(() => ({
   settings: {} as Record<string, string>,
   profile: "00000000000000000000000501",
 }));
+
+// The new tab is drawn here as on macOS; NewTabMaterial covers Windows' caption band.
+vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({

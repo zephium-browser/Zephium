@@ -131,22 +131,20 @@ impl EngineHost {
             let observed = view.view.webview();
             if Retained::as_ptr(&observed).cast::<()>()
                 != Retained::as_ptr(&features.opener.webview).cast::<()>()
-                || !observed
-                    .window()
+                || !crate::platform::imp::home_window(&observed)
                     .is_some_and(|window| window.isVisible() && window.isKeyWindow())
             {
                 return NewWindowResponse::Deny;
             }
         }
         #[cfg(target_os = "windows")]
-        let features = {
+        {
             use windows::core::Interface;
             use windows::Win32::Foundation::HWND;
             use windows::Win32::UI::WindowsAndMessaging::{
                 GetAncestor, GetForegroundWindow, GA_ROOT,
             };
             use wry::WebViewExtWindows;
-            let mut features = features;
             if view.view.webview().as_raw() != features.opener.webview.as_raw() {
                 return NewWindowResponse::Deny;
             }
@@ -156,14 +154,7 @@ impl EngineHost {
             {
                 return NewWindowResponse::Deny;
             }
-            if clicked {
-                features.foreground = crate::platform::imp::middle_click::take_foreground(
-                    view.view.hwnd(),
-                    features.foreground,
-                );
-            }
-            features
-        };
+        }
         self.adopt_native_tab(source, permit, activity, url, features, clicked, || true)
     }
 

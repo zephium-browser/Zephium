@@ -179,7 +179,7 @@ mod tests {
             source
                 .split("menu_text::label(\"")
                 .skip(1)
-                // The tab and bookmark menus: `item(0, "Reload Tab", …)`.
+                // The tab and bookmark menus: `item(0, "Refresh", …)`.
                 .chain(source.split("item(").skip(1).filter_map(|rest| {
                     let (index, rest) = rest.split_once(", \"")?;
                     index.parse::<usize>().is_ok().then_some(rest)

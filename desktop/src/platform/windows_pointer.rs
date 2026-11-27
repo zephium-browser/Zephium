@@ -23,10 +23,10 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos,
-    GetMessageTime, IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND,
-    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
+    CreateWindowExW, DestroyWindow, GetAncestor, GetForegroundWindow, GetMessagePos, GetMessageTime,
+    IsIconic, IsWindow, KillTimer, SetTimer, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, GA_ROOTOWNER, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINEVENT_OUTOFCONTEXT, WM_INPUT, WM_TIMER,
 };
 
 /// About a display frame, as often as the pointer was read while it moved.
@@ -90,12 +90,7 @@ pub fn forget(window: HWND, listener: Listener) {
 }
 
 pub fn listen_buttons(window: HWND, listener: ButtonListener) {
-    BUTTON_LISTENERS.with(|listeners| {
-        let mut listeners = listeners.borrow_mut();
-        if !listeners.contains(&(window, listener)) {
-            listeners.push((window, listener));
-        }
-    });
+    set_button_listener(window, listener, true);
     if ensure_sink() {
         follow_front();
     } else {
@@ -104,12 +99,22 @@ pub fn listen_buttons(window: HWND, listener: ButtonListener) {
 }
 
 pub fn forget_buttons(window: HWND, listener: ButtonListener) {
-    BUTTON_LISTENERS.with(|listeners| {
-        listeners
-            .borrow_mut()
-            .retain(|entry| *entry != (window, listener));
-    });
+    set_button_listener(window, listener, false);
     follow_front();
+}
+
+fn set_button_listener(window: HWND, listener: ButtonListener, enabled: bool) {
+    BUTTON_LISTENERS.with(|listeners| {
+        let mut listeners = listeners.borrow_mut();
+        let entry = (window, listener);
+        if enabled {
+            if !listeners.contains(&entry) {
+                listeners.push(entry);
+            }
+        } else {
+            listeners.retain(|registered| *registered != entry);
+        }
+    });
 }
 
 fn button_owner(front: HWND) -> Option<HWND> {
@@ -215,10 +220,18 @@ fn follow_front() {
     let front = unsafe { GetForegroundWindow() };
     let owner = button_owner(front);
     super::middle_click_foreground_changed(owner);
-    let wanted = owner.is_some() || (listening_in_front(front) && !SETTLING.get());
+    let wanted = wants_registration(owner, SETTLING.get(), || listening_in_front(front));
     if wanted != REGISTERED.get() {
         register(wanted);
     }
+}
+
+fn wants_registration(
+    button_owner: Option<HWND>,
+    settling: bool,
+    moves_in_front: impl FnOnce() -> bool,
+) -> bool {
+    button_owner.is_some() || (moves_in_front() && !settling)
 }
 
 fn register(on: bool) {
@@ -292,14 +305,18 @@ fn notify() {
 
 unsafe extern "system" fn front_changed(
     _: HWINEVENTHOOK,
-    _: u32,
-    _: HWND,
+    event: u32,
+    window: HWND,
     _: i32,
     _: i32,
     _: u32,
     _: u32,
 ) {
     let _ = std::panic::catch_unwind(|| {
+        if event == EVENT_SYSTEM_FOREGROUND {
+            // Observe loss of ownership even if focus has already returned.
+            super::middle_click_foreground_changed(button_owner(window));
+        }
         follow_front();
         notify();
     });
@@ -346,33 +363,62 @@ fn notify_input(data: LPARAM) -> bool {
     let mut input = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     // SAFETY: WM_INPUT supplies the handle. The output is aligned and bounded
-    // by size. Read the union only after validating its tag and record length.
-    let buttons = unsafe {
-        let read = GetRawInputData(
+    // by size.
+    let read = unsafe {
+        GetRawInputData(
             HRAWINPUT(data.0 as *mut _),
             RID_INPUT,
             Some((&mut input as *mut RAWINPUT).cast()),
             &mut size,
             size_of::<RAWINPUTHEADER>() as u32,
-        );
-        if read == u32::MAX || read < size_of::<RAWINPUTHEADER>() as u32 {
-            return false;
-        }
-        if read != size_of::<RAWINPUT>() as u32 || input.header.dwType != RIM_TYPEMOUSE.0 {
-            return false;
-        }
-        input.data.mouse.Anonymous.Anonymous.usButtonFlags
+        )
     };
-    if buttons & 0x03ff == 0 {
-        return true;
+    let Some(buttons) = mouse_buttons(&input, read) else {
+        return false;
+    };
+    notify_buttons(
+        buttons,
+        // SAFETY: read foreground ownership once for all button listeners.
+        || button_owner(unsafe { GetForegroundWindow() }),
+        button_metadata,
+    );
+    true
+}
+
+fn mouse_buttons(input: &RAWINPUT, read: u32) -> Option<u16> {
+    if read != size_of::<RAWINPUT>() as u32 || input.header.dwType != RIM_TYPEMOUSE.0 {
+        return None;
     }
-    // SAFETY: read foreground ownership once for all button listeners.
-    let Some(owner) = button_owner(unsafe { GetForegroundWindow() }) else {
-        return true;
+    // SAFETY: the complete record's type tag identifies the mouse union field.
+    Some(unsafe { input.data.mouse.Anonymous.Anonymous.usButtonFlags })
+}
+
+fn notify_buttons(
+    buttons: u16,
+    read_owner: impl FnOnce() -> Option<HWND>,
+    read_metadata: impl FnOnce() -> (POINT, bool, Duration),
+) {
+    if buttons & 0x03ff == 0 {
+        return;
+    }
+    let owner = read_owner();
+    super::middle_click_foreground_changed(owner);
+    let Some(owner) = owner else {
+        return;
     };
-    // SAFETY: these describe the input message currently being dispatched,
-    // including queued modifiers, rather than the later hardware state.
-    let (position, shift, age) = unsafe {
+    let (position, shift, age) = read_metadata();
+    let listeners = BUTTON_LISTENERS.with(|listeners| listeners.borrow().clone());
+    for (window, listener) in listeners {
+        if window == owner {
+            listener(buttons, position, shift, age);
+        }
+    }
+}
+
+fn button_metadata() -> (POINT, bool, Duration) {
+    // SAFETY: position and time describe the last retrieved message.
+    // GetKeyState reads the calling thread's queued modifier state.
+    unsafe {
         let packed = GetMessagePos();
         (
             POINT {
@@ -384,14 +430,7 @@ fn notify_input(data: LPARAM) -> bool {
                 GetTickCount().wrapping_sub(GetMessageTime() as u32),
             )),
         )
-    };
-    let listeners = BUTTON_LISTENERS.with(|listeners| listeners.borrow().clone());
-    for (window, listener) in listeners {
-        if window == owner {
-            listener(buttons, position, shift, age);
-        }
     }
-    true
 }
 
 impl Drop for Sink {
@@ -402,5 +441,74 @@ impl Drop for Sink {
                 let _ = UnhookWinEvent(hook);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::Input::RIM_TYPEKEYBOARD;
+    use windows::Win32::UI::WindowsAndMessaging::RI_MOUSE_MIDDLE_BUTTON_DOWN;
+
+    thread_local! {
+        static BUTTON_REPORTS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    fn count_button_report(_: u16, _: POINT, _: bool, _: Duration) {
+        BUTTON_REPORTS.set(BUTTON_REPORTS.get() + 1);
+    }
+
+    #[test]
+    fn only_complete_mouse_records_supply_button_flags() {
+        let mut input = RAWINPUT::default();
+        let size = size_of::<RAWINPUT>() as u32;
+        assert_eq!(mouse_buttons(&input, size), Some(0));
+        assert_eq!(mouse_buttons(&input, size - 1), None);
+        assert_eq!(mouse_buttons(&input, u32::MAX), None);
+        input.header.dwType = RIM_TYPEKEYBOARD.0;
+        assert_eq!(mouse_buttons(&input, size), None);
+    }
+
+    #[test]
+    fn button_dispatch_skips_movement_and_unowned_input() {
+        for buttons in [0, 0x0400] {
+            notify_buttons(
+                buttons,
+                || panic!("movement and wheel input need no ownership lookup"),
+                || panic!("movement and wheel input need no button metadata"),
+            );
+        }
+        notify_buttons(
+            RI_MOUSE_MIDDLE_BUTTON_DOWN as u16,
+            || None,
+            || panic!("unowned input needs no button metadata"),
+        );
+    }
+
+    #[test]
+    fn button_registration_deduplicates_and_removes_only_the_matching_window() {
+        let owner = HWND(std::ptr::dangling_mut());
+        let other = HWND(2_usize as *mut _);
+        for window in [owner, owner, other] {
+            set_button_listener(window, count_button_report, true);
+        }
+        let metadata = || (POINT::default(), false, Duration::ZERO);
+        let buttons = RI_MOUSE_MIDDLE_BUTTON_DOWN as u16;
+        notify_buttons(buttons, || Some(owner), metadata);
+        assert_eq!(BUTTON_REPORTS.get(), 1);
+        set_button_listener(owner, count_button_report, false);
+        notify_buttons(buttons, || Some(owner), metadata);
+        assert_eq!(BUTTON_REPORTS.get(), 1);
+        notify_buttons(buttons, || Some(other), metadata);
+        assert_eq!(BUTTON_REPORTS.get(), 2);
+    }
+
+    #[test]
+    fn button_listeners_keep_raw_input_registered_while_movement_settles() {
+        let owner = HWND(std::ptr::dangling_mut());
+        assert!(wants_registration(Some(owner), true, || false));
+        assert!(!wants_registration(None, true, || true));
+        assert!(wants_registration(None, false, || true));
+        assert!(!wants_registration(None, false, || false));
     }
 }

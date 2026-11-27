@@ -12,8 +12,8 @@ import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.sve
 
 const native = vi.hoisted(() => ({ call: vi.fn(), admit: vi.fn(), resource: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     workCall: native.call,
     mediaAdmitRemote: native.admit,
     resourceCall: native.resource,

@@ -69,11 +69,17 @@
         .forEach((element) => delete element.dataset.highlighted);
       row.dataset.highlighted = "true";
       row.tabIndex = -1;
-      row.scrollIntoView({ block: "center" });
-      row.focus();
+      // Scroll inside `content` only: `scrollIntoView` also scrolls
+      // `documentElement` when the target stays below center, sliding the
+      // Settings sidebar header off the top.
+      const bounds = content.getBoundingClientRect();
+      const targetBounds = row.getBoundingClientRect();
+      content.scrollTop +=
+        targetBounds.top - bounds.top - (bounds.height - targetBounds.height) / 2;
+      row.focus({ preventScroll: true });
     } else {
       content.scrollTop = 0;
-      content.querySelector<HTMLElement>("h1")?.focus();
+      content.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
     }
   }
   $effect(() => {

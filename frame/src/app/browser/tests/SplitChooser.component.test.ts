@@ -234,6 +234,15 @@ test("Escape restores the mounted tool, its draft and the invoking control", asy
   window.dispatchEvent(composing);
   expect(composing.defaultPrevented).toBe(false);
   expect(sidebar.fullColumnShown()).toBe(true);
+  const legacyComposition = new KeyboardEvent("keydown", {
+    key: "Escape",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(legacyComposition);
+  expect(legacyComposition.defaultPrevented).toBe(false);
+  expect(sidebar.fullColumnShown()).toBe(true);
   await userEvent.keyboard("{Escape}");
   await expect.element(draft).toBeVisible();
   expect(draft.element()).toBe(input);

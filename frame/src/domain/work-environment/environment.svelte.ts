@@ -13,12 +13,11 @@ import { commandId, validRevision } from "$domain/work";
 import { events } from "$shared/ipc/native-events";
 import { observe } from "$shared/lib/observe";
 import { registerCloseTask } from "$shared/lib/close";
-import { onDraftsForgotten, readDraft, writeDraft } from "$shared/lib/drafts";
+import { onDraftsForgotten } from "$shared/lib/drafts";
+import { WorkComposer, type ComposerSubmission } from "./composer.svelte";
 import { SvelteMap } from "svelte/reactivity";
 
 type Pending = Extract<WorkEnvironmentCall, { kind: "command" | "checkpoint" }>;
-const DRAFT_KIND = "work-composer";
-const DRAFT_PAUSE_MS = 500;
 /** Profile/Space-scoped native projections plus document-lifetime unresolved operands. */
 export class WorkEnvironmentSession {
   readonly profile: string;
@@ -36,8 +35,7 @@ export class WorkEnvironmentSession {
   remoteView = $state.raw<{ sequence: number; view: WorkEnvironmentView } | null>(null);
   private remoteSequence = 0;
   /** The words in the ask bar. Kept across a relaunch, per profile and space. */
-  #composer = $state("");
-  #draftTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly words: WorkComposer;
   objectiveSubmission = $state.raw<{
     objective: string;
     command: string;
@@ -45,12 +43,14 @@ export class WorkEnvironmentSession {
     /** Selected context is connected to the goal card once; retries skip it. */
     related?: boolean;
     context: WorkContextSelectionV1 | null;
+    composer: ComposerSubmission;
   } | null>(null);
   objectiveToAttach = $state<string | null>(null);
   viewDraft = $state.raw<{ id: string; expected: string; view: WorkEnvironmentView } | null>(null);
   /** Where the person is looking, kept here until the next write or until the Work is left. */
   private camera: { id: string; x: number; y: number; zoom_milli: number } | null = null;
   private active = false;
+  private retired = false;
   private launched = false;
   private generation = 0;
   private reads = 0;
@@ -64,38 +64,72 @@ export class WorkEnvironmentSession {
   constructor(profile: string, space: string) {
     this.profile = profile;
     this.space = space;
-    this.#composer = readDraft(DRAFT_KIND, [profile, space]) ?? "";
+    this.words = new WorkComposer(profile, space, (request) => this.call(request));
     this.removeCloseTask = registerCloseTask(async () => {
-      // Words in the ask bar are kept and restored, so they never hold up a
-      // close; only a save that has not landed does.
-      this.keepComposer();
+      if (this.retired) return true;
+      if (!(await this.flushComposer())) return this.retired;
       if (this.writing) await this.writing;
-      if (this.pending && !(await this.retry())) return false;
-      return this.flushView();
+      if (this.retired) return true;
+      if (this.pending && !(await this.retry())) return this.retired;
+      const saved = await this.flushView();
+      return this.retired || saved;
     });
   }
   get composer() {
-    return this.#composer;
+    return this.words.text;
   }
   set composer(text: string) {
-    if (text === this.#composer) return;
-    this.#composer = text;
-    clearTimeout(this.#draftTimer);
-    // Sending or clearing is final at once; typing is written once it pauses.
-    if (text) this.#draftTimer = setTimeout(() => this.keepComposer(), DRAFT_PAUSE_MS);
-    else this.keepComposer();
+    this.words.set(text);
   }
-  private keepComposer() {
-    clearTimeout(this.#draftTimer);
-    writeDraft(DRAFT_KIND, [this.profile, this.space], this.#composer);
+  get composerFailure() {
+    return this.words.failure;
+  }
+  flushComposer() {
+    return this.words.flush();
+  }
+  prepareComposer() {
+    return this.words.prepare();
+  }
+  clearComposer(submitted: ComposerSubmission) {
+    return this.words.clear(submitted);
+  }
+  /** A confirmed scope deletion retires every document-owned draft and listener. */
+  retire() {
+    if (this.retired) return;
+    this.retired = true;
+    this.words.forget();
+    this.stopObserving();
+    this.pending = null;
+    this.viewDraft = null;
+    this.camera = null;
+    this.objectiveSubmission = null;
+    this.objectiveToAttach = null;
+    this.snapshot = null;
+    this.works = [];
+    this.selected = null;
+    this.remoteView = null;
+    this.running = null;
+    this.next = null;
+    this.failure = null;
+    this.delivery = "ready";
+    this.removeCloseTask();
+  }
+  resolveComposer(mode: "retry" | "load" | "replace") {
+    return this.words.resolve(mode);
   }
   get disposable() {
     return (
-      !this.active && !this.pending && !this.viewDraft && !this.writing && !this.objectiveToAttach
+      this.retired ||
+      (this.words.disposable &&
+        !this.active &&
+        !this.pending &&
+        !this.viewDraft &&
+        !this.writing &&
+        !this.objectiveToAttach)
     );
   }
   async start(defaultTitle: string) {
-    if (this.active) return;
+    if (this.retired || this.active) return;
     this.active = true;
     const generation = ++this.generation;
     const refresh = () => {
@@ -146,6 +180,7 @@ export class WorkEnvironmentSession {
   }
   /** Shows `id` when the canvas opens next, or at once while it is open. */
   show(id: string) {
+    if (this.retired) return;
     this.selected = id;
     this.launched = true;
     if (this.active) void this.open(id);
@@ -159,24 +194,30 @@ export class WorkEnvironmentSession {
     clearTimeout(this.invalidation);
     this.stop?.();
     this.stop = null;
-    void this.flushView();
+    if (!this.retired) void this.flushView();
     this.loading = false;
   }
   dispose() {
+    if (this.retired) return;
     this.stopObserving();
-    this.keepComposer();
+    void this.flushComposer();
     this.removeCloseTask();
   }
   private async call(request: WorkEnvironmentCall): Promise<WorkReplyV1> {
+    if (this.retired) return { kind: "error", error: "unavailable" };
     try {
       const result = await observe(
         Promise.resolve().then(() =>
-          commands.workCall(this.profile, { kind: "environment", version: 1, request }),
+          this.retired
+            ? null
+            : commands.workCall(this.profile, { kind: "environment", version: 1, request }),
         ),
         9000,
       );
       if (
+        this.retired ||
         result.state !== "received" ||
+        !result.value ||
         result.value.version !== 1 ||
         result.value.profile !== this.profile
       )
@@ -188,6 +229,7 @@ export class WorkEnvironmentSession {
   }
   private admit(snapshot: WorkEnvironmentSnapshot, id?: string): boolean {
     if (
+      this.retired ||
       snapshot.version !== 1 ||
       snapshot.profile !== this.profile ||
       snapshot.space !== this.space ||
@@ -347,11 +389,12 @@ export class WorkEnvironmentSession {
     });
   }
   private mutate(intent: WorkEnvironmentIntent) {
-    if (this.pending || this.writing) return Promise.resolve(false);
+    if (this.retired || this.pending || this.writing) return Promise.resolve(false);
     this.pending = { kind: "command", command: commandId(), intent };
     return this.retry();
   }
   retry(): Promise<boolean> {
+    if (this.retired) return Promise.resolve(false);
     if (this.writing) return this.writing;
     const pending = this.pending;
     if (!pending) return Promise.resolve(true);
@@ -365,7 +408,7 @@ export class WorkEnvironmentSession {
   }
   private async settle(pending: Pending): Promise<boolean> {
     const reply = await this.call(pending);
-    if (this.pending !== pending) return false;
+    if (this.retired || this.pending !== pending) return false;
     if (
       pending.kind === "checkpoint" &&
       reply.kind === "environment" &&
@@ -474,6 +517,7 @@ export class WorkEnvironmentSession {
    * the Work is left, so panning never writes.
    */
   checkpoint(view: WorkEnvironmentView) {
+    if (this.retired) return;
     const snapshot = this.snapshot;
     if (!snapshot || snapshot.lifecycle !== "active") return;
     const drafted = this.viewDraft?.id === snapshot.id;
@@ -510,7 +554,9 @@ export class WorkEnvironmentSession {
   }
   async flushView(): Promise<boolean> {
     clearTimeout(this.timer);
+    if (this.retired) return false;
     if (this.writing && !(await this.writing)) return false;
+    if (this.retired) return false;
     if (this.pending) return false;
     this.draftCamera();
     const draft = this.viewDraft;
@@ -532,9 +578,11 @@ function arranged(before: WorkEnvironmentView, after: WorkEnvironmentView) {
 const sessions = new SvelteMap<string, WorkEnvironmentSession>();
 // A deleted profile or space takes the words in its ask bar with it.
 onDraftsForgotten((profile, space) => {
-  for (const session of sessions.values())
-    if (session.profile === profile && (space === undefined || session.space === space))
-      session.composer = "";
+  for (const [key, session] of sessions)
+    if (session.profile === profile && (space === undefined || session.space === space)) {
+      session.retire();
+      sessions.delete(key);
+    }
 });
 export function environmentSession(profile: string, space: string): WorkEnvironmentSession | null {
   const key = `${profile}:${space}`;

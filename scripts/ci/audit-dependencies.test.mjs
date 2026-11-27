@@ -84,3 +84,23 @@ test("high and critical advisories remain blocking even for development tooling"
     assert.throws(() => inspect(audit), /Unresolved security advisories/);
   }
 });
+
+test("an unfixed tooling advisory is excepted only on its versions, development paths and dates", () => {
+  const picomatch = (findings, now = new Date("2026-11-18T00:00:00Z")) => {
+    const audit = report({ github_advisory_id: "GHSA-fc5q-39xc-vjpf", module_name: "picomatch", findings });
+    const warnings = [];
+    const checked = inspect(audit, undefined, (message) => warnings.push(message), now);
+    return { checked, warnings };
+  };
+  const tool = (version) => ({ version, dev: true, paths: ["frame>vite>picomatch"] });
+  const { checked, warnings } = picomatch([tool("4.0.7"), tool("2.3.2")]);
+  assert.equal(checked, 0);
+  assert.match(warnings[0], /GHSA-fc5q-39xc-vjpf/);
+  assert.throws(() => picomatch([tool("4.0.8")]), /does not cover this version/);
+  assert.throws(() => picomatch([{ ...tool("4.0.7"), dev: false }]), /build tooling only/);
+  assert.throws(() => picomatch([{ ...tool("4.0.7"), paths: [] }]), /dependency paths/);
+  assert.throws(() => picomatch([]), /dependency paths/);
+  assert.throws(() => picomatch([tool("4.0.7")], new Date("2027-01-31T00:00:00Z")), /expired/);
+  assert.throws(() => inspect(report({ github_advisory_id: "GHSA-fc5q-39xc-vjpf", module_name: "micromatch" })),
+    /Unresolved security advisories/);
+});

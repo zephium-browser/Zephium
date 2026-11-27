@@ -143,7 +143,7 @@ jobs:
           node-version-file: .node-version
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -178,7 +178,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-nextest@0.9.137
           fallback: none
@@ -191,9 +191,17 @@ jobs:
       - name: Report flaky tests
         if: ${{ !cancelled() }}
         run: python3 scripts/ci/flaky-summary.py target/nextest/ci/junit.xml
-      # The desktop tests regenerate the TypeScript IPC bindings.
+      # The desktop export test regenerates all three IPC contracts.
       - name: Bindings drift
-        run: git diff --exit-code frame/src/shared/ipc/bindings.ts
+        run: |
+          drift="$(git status --porcelain --untracked-files=all -- \
+            frame/src/shared/ipc/bindings.ts \
+            frame/src/shared/ipc/work-constants.ts \
+            frame/src/shared/ipc/theme-presets.json)"
+          if [ -n "$drift" ]; then
+            printf '%s\n' "$drift"
+            exit 1
+          fi
       # Proves the bundled seed lists compile in the real
       # WKContentRuleListStore, which a seed refresh can break.
       - name: Prove the exact bundled blocker seed compiles in native WKContentRuleListStore
@@ -236,7 +244,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install --profile minimal
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-nextest@0.9.137
           fallback: none

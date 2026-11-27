@@ -200,6 +200,16 @@ test("Shift ranges use the last plain or toggled anchor; a plain click clears an
 test("Escape clears selection even when the sidebar has lost focus", async () => {
   const { click, selected } = await list();
   click("b", { ctrlKey: true });
+  const composing = new KeyboardEvent("keydown", {
+    key: "Escape",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(composing);
+  flushSync();
+  expect(composing.defaultPrevented).toBe(false);
+  expect(selected()).toEqual(["a", "b"]);
   window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   flushSync();
   expect(selected()).toEqual([]);

@@ -161,7 +161,11 @@ pub fn init(
         // A visual enhancement must never remove access to window controls.
         let _ = window.set_decorations(true);
     }
-    let hardened = harden_privileged(window, expected_user_data_folder, on_runtime_update);
+    let hardened = harden_privileged(
+        window,
+        expected_user_data_folder,
+        PrivilegedEnvironment::Own(on_runtime_update),
+    );
     if hardened.is_ok() {
         if let Ok(hwnd) = window.hwnd() {
             pointer::listen_buttons(hwnd, zephium_engine::record_middle_click);
@@ -198,13 +202,23 @@ fn bridge_caption_keys(window: &WebviewWindow) {
     }
 }
 
+/// Whose browser process a privileged WebView runs in.
+pub enum PrivilegedEnvironment {
+    /// Its own: the WebView registers it, so teardown proves its exit.
+    Own(RuntimeUpdateCallback),
+    /// The one already registered under this label, which it shares through
+    /// the same user-data folder and arguments, as a mini window's toolbar
+    /// shares the launcher's. Teardown's proof for that label covers it.
+    Joined(&'static str),
+}
+
 /// Tauri does not expose Wry's permission callback. Install the WebView2
 /// policy directly for privileged chrome so an XSS cannot prompt for ambient
 /// capabilities or persist password/form suggestions in its shared UDF.
 pub fn harden_privileged(
     window: &WebviewWindow,
     expected_user_data_folder: &Path,
-    on_runtime_update: RuntimeUpdateCallback,
+    environment_owner: PrivilegedEnvironment,
 ) -> Result<(), StartupFailure> {
     let installed = Arc::new(AtomicBool::new(false));
     let completed = installed.clone();
@@ -449,15 +463,34 @@ pub fn harden_privileged(
                 })),
                 &mut external_token,
             )?;
-            zephium_engine::install_privileged_environment_registration(
-                label,
-                &environment,
-                on_runtime_update,
-            )?;
-            let mut browser = 0_u32;
-            // An id left unread records nothing, which invalidates the record.
-            let _ = core.BrowserProcessId(&mut browser);
-            crate::privileged_runtime_windows::record_browser_process(browser);
+            match environment_owner {
+                PrivilegedEnvironment::Own(on_runtime_update) => {
+                    zephium_engine::install_privileged_environment_registration(
+                        label,
+                        &environment,
+                        on_runtime_update,
+                    )?;
+                    let mut browser = 0_u32;
+                    // An id left unread records nothing, which invalidates the record.
+                    let _ = core.BrowserProcessId(&mut browser);
+                    crate::privileged_runtime_windows::record_browser_process(browser);
+                }
+                PrivilegedEnvironment::Joined(owner) => {
+                    // A browser this run's record and exit proof do not
+                    // cover must never host privileged chrome.
+                    let mut browser = 0_u32;
+                    core.BrowserProcessId(&mut browser)?;
+                    if browser == 0
+                        || zephium_engine::privileged_environment_process(owner) != Some(browser)
+                    {
+                        return Err(windows::core::Error::new(
+                            windows::Win32::Foundation::E_ACCESSDENIED,
+                            "privileged WebView2 did not join its registered browser process",
+                        )
+                        .into());
+                    }
+                }
+            }
             Ok(())
         })();
         if let Err(error) = result {
@@ -875,6 +908,15 @@ impl PresentationChrome for ChromeAdapter {
         done: ChromePresentationCallback,
     ) -> ChromePresentationDispatch {
         crate::apply_chrome_presentation(&self.window, presentation, done)
+    }
+
+    fn apply_mini_presentation(
+        &self,
+        window: u64,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        crate::mini::apply_presentation(self.window.app_handle(), window, presentation, done)
     }
 }
 

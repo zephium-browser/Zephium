@@ -327,6 +327,7 @@ impl AgentWorkController {
                 None
             };
             consent_dismissed |= consent.is_some();
+            let pressing_consent = consent.is_some() && rows_scroll.is_none();
             let proposed = match consent {
                 Some(consent) => Some(consent),
                 None if actionable => answers
@@ -570,16 +571,31 @@ impl AgentWorkController {
                         .emit(AgentWorkEventKind::DecisionPlanner(
                             AgentWorkDecisionRoute::NativeRefused,
                         ))?;
+                    let looked = Self::look_begins(state)?;
                     observation = Box::pin(Self::observe(state, worker, browser)).await?;
-                    captured_at = SemanticCaptureInstant::from_millis(
-                        state
-                            .session
-                            .as_mut()
-                            .ok_or_else(|| crate::contract!())?
-                            .policy_now()
-                            .map_err(AgentWorkFailure::Browser)?
-                            .millis(),
-                    );
+                    captured_at = SemanticCaptureInstant::from_millis(looked.millis());
+                    progress = state.task_progress(&observation)?;
+                    break;
+                }
+                // A consent press commits nothing: the page that saved the
+                // choice and loaded itself again under it is looked at anew.
+                Err(AgentWorkFailure::Browser(
+                    error @ (AgentBrowserProviderError::Action(_)
+                    | AgentBrowserProviderError::ActionRejected(_)
+                    | AgentBrowserProviderError::ActionUnverified),
+                )) if pressing_consent => {
+                    let session = state.session.as_mut().ok_or_else(|| crate::contract!())?;
+                    let _ = session.take_rejected_refusal();
+                    if !session
+                        .close_failed_owned_action()
+                        .map_err(AgentWorkFailure::Browser)?
+                    {
+                        return Err(AgentWorkFailure::Browser(error));
+                    }
+                    let looked;
+                    (observation, looked) =
+                        Box::pin(Self::observe_settled(state, worker, browser)).await?;
+                    captured_at = SemanticCaptureInstant::from_millis(looked.millis());
                     progress = state.task_progress(&observation)?;
                     break;
                 }
@@ -622,6 +638,30 @@ impl AgentWorkController {
             }
         }
         Ok((observation, captured_at, progress, false))
+    }
+
+    /// Looks at a page that may still be replacing its document: a stale or
+    /// replaced look is taken again, briefly, instead of ending the read.
+    /// The look is dated by when it began.
+    async fn observe_settled(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(SemanticObservation, AgentPolicyInstant), AgentWorkFailure> {
+        let mut waits = 0u8;
+        loop {
+            let looked = Self::look_begins(state)?;
+            match Self::observe(state, worker, browser).await {
+                Err(AgentWorkFailure::Observation(
+                    SemanticRuntimePortFailure::Stale
+                    | SemanticRuntimePortFailure::DocumentReplaced,
+                )) if waits < MAX_SETTLING_LOOKS => {
+                    waits += 1;
+                    Self::settle_pause(state, worker, browser).await?;
+                }
+                result => return Ok((result?, looked)),
+            }
+        }
     }
 
     /// A catalog read's records: one cell batch locates their text columns
@@ -893,18 +933,7 @@ impl AgentWorkController {
                         .is_some_and(AgentNavigationDiscovery::is_site_session) =>
                 {
                     waits += 1;
-                    let wake = Instant::now() + Duration::from_millis(500);
-                    if wake >= state.native.deadline {
-                        return Err(AgentWorkFailure::Deadline);
-                    }
-                    tokio::select! {
-                        biased;
-                        event = state.native.next_event(worker, browser) => {
-                            state.native.retain(event?)?;
-                            return Err(AgentWorkFailure::Mailbox);
-                        }
-                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
-                    }
+                    Self::settle_pause(state, worker, browser).await?;
                 }
                 result => break result?,
             }
@@ -990,6 +1019,27 @@ impl AgentWorkController {
             SemanticCaptureInstant::from_millis(looked.millis()),
             transition,
         ))
+    }
+
+    /// One half-second pause while a page settles, within the run's
+    /// deadline; a native event ends it for the mailbox to handle.
+    async fn settle_pause(
+        state: &mut WorkState,
+        worker: &mut AgentRuntimeWorker,
+        browser: &WorkBrowser<'_>,
+    ) -> Result<(), AgentWorkFailure> {
+        let wake = Instant::now() + Duration::from_millis(500);
+        if wake >= state.native.deadline {
+            return Err(AgentWorkFailure::Deadline);
+        }
+        tokio::select! {
+            biased;
+            event = state.native.next_event(worker, browser) => {
+                state.native.retain(event?)?;
+                Err(AgentWorkFailure::Mailbox)
+            }
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => Ok(()),
+        }
     }
 
     fn look_begins(state: &mut WorkState) -> Result<AgentPolicyInstant, AgentWorkFailure> {

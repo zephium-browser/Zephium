@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isComposing } from "$shared/lib/keyboard";
   import { NodeResizer, NodeToolbar, Position, type NodeProps, type Node } from "@xyflow/svelte";
   import { getContext, tick } from "svelte";
   import { on } from "svelte/events";
@@ -71,6 +72,7 @@
         aria-label={m.work_area_title()}
         maxlength="128"
         onkeydown={(event) => {
+          if (isComposing(event)) return;
           if (event.key === "Enter") {
             event.preventDefault();
             commit();

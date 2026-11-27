@@ -24,6 +24,9 @@ let accessFailure = $state<string | null>(null);
 // own remove control asks to confirm.
 let removalAsked = $state<string | null>(null);
 let removalTimer: ReturnType<typeof setTimeout> | undefined;
+// An extension whose Remove… was chosen from its toolbar button; its row on
+// the Extensions page asks to confirm.
+let removalRequested = $state<string | null>(null);
 
 export const isAvailable = () => available === true;
 export const list = () => installed;
@@ -44,6 +47,9 @@ export const pinnedCount = () =>
   installed.filter((extension) => extension.pinned && extension.enabled).length;
 export const isRemovalAsked = (id: string) => removalAsked === id;
 export const settleRemovalAsk = () => (removalAsked = null);
+export const requestRemoval = (id: string) => (removalRequested = id);
+export const isRemovalRequested = (id: string) => removalRequested === id;
+export const settleRemovalRequest = () => (removalRequested = null);
 
 /** What the store's in-page button shows on the listing `extensionId` in
  * `tabId`; native shows it only on that listing in front. */
