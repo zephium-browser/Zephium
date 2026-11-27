@@ -20,6 +20,8 @@
   let icon = $state<SpaceIconView | null>({ kind: "symbol", index: 1 });
   let selectedSpaces = $state<string[]>([]);
   let busy = $state(false);
+  let operationError = $state(false);
+  let removeRetry = $state<ContainerView | null>(null);
   let error = $state(false);
   const currentSpace = $derived(tabDomain.activeSpaceId());
   const currentTab = $derived(tabDomain.activeTab());
@@ -77,7 +79,18 @@
     }
   }
   async function remove(container: ContainerView) {
-    await tabDomain.removeContainerFromSpace(container.id);
+    removeRetry = null;
+    operationError = false;
+    try {
+      const result = await tabDomain.removeContainerFromSpace(container.id);
+      if (result.outcome !== "applied" && result.outcome !== "deferred") {
+        removeRetry = container;
+        operationError = true;
+      }
+    } catch {
+      removeRetry = container;
+      operationError = true;
+    }
   }
   function radioKeys(event: KeyboardEvent) {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
@@ -269,6 +282,14 @@
           </div>
         {/each}
       </div>
+      {#if operationError}
+        <p class="error" role="alert">
+          Couldn’t update this container. Try again.
+          {#if removeRetry}<button type="button" onclick={() => void remove(removeRetry!)}
+              >Retry</button
+            >{/if}
+        </p>
+      {/if}
       {#if !currentTab}<p class="hint">Open a tab to assign it to a container.</p>{/if}
     {/if}
   </div>
