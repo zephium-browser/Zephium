@@ -214,6 +214,7 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        active: Option<ItemId>,
         motion: Option<StageMotion>,
     ) -> bool {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -227,7 +228,7 @@ impl EngineHost {
         if released(&self.window_parents, window) {
             return true;
         }
-        let applied = self.apply_content(window, tree, region, motion);
+        let applied = self.apply_content(window, tree, region, active, motion);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.fullscreen_layout_applied(window, &shown);
         applied
@@ -239,6 +240,7 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        _active: Option<ItemId>,
         motion: Option<StageMotion>,
     ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
@@ -402,6 +404,7 @@ impl EngineHost {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        active: Option<ItemId>,
         _motion: Option<StageMotion>,
     ) -> bool {
         let Some(stage) = self.ensure_stage(window) else {
@@ -467,8 +470,16 @@ impl EngineHost {
         if let Some(motion) = _motion {
             stage.hint_motion(motion);
         }
-        if !stage.apply(region, tree, &tabs) {
+        #[cfg(target_os = "windows")]
+        if !stage.apply(region, tree, &tabs, active) {
             return false;
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = active;
+            if !stage.apply(region, tree, &tabs) {
+                return false;
+            }
         }
         // Off-screen views keep their memory: the low-memory hint only paged
         // it out to be paged back in on return, and freed no commit. Actual

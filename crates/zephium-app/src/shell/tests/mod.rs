@@ -369,6 +369,7 @@ pub(crate) struct FakeEngine {
     fills_window_for_fullscreen: std::sync::atomic::AtomicBool,
     fullscreen_exits: Mutex<Vec<ItemId>>,
     layout_regions: Mutex<Vec<Option<Rect>>>,
+    layout_actives: Mutex<Vec<Option<ItemId>>>,
     tab_preview_completions: Mutex<Vec<HeldTabPreview>>,
     site_permission_reply: Mutex<Option<Option<Vec<zephium_core::permissions::SitePermission>>>>,
     data_calls: Mutex<Vec<(Partition, zephium_core::browsing_data::EngineDataCall)>>,
@@ -877,8 +878,10 @@ impl Engine for FakeEngine {
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        active: Option<ItemId>,
     ) -> NativeDispatch {
         self.layout_regions.lock().unwrap().push(region);
+        self.layout_actives.lock().unwrap().push(active);
         let ids: Vec<String> = match (tree, region) {
             (Some(t), Some(_)) => t.tabs().iter().map(|id| id.to_string()).collect(),
             _ => Vec::new(),

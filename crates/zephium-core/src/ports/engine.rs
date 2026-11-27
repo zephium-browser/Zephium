@@ -943,13 +943,15 @@ pub trait Engine {
     }
     fn close(&self, id: ItemId) -> NativeDispatch;
     /// Lay the split `tree` into `region` of `window`, or hide that window's
-    /// content when `region` is `None`. The engine owns pane geometry so
-    /// resize stays in the native pass.
+    /// content when `region` is `None`. `active` identifies the leaf that
+    /// should receive keyboard focus if focus transfers onto the stage. The
+    /// engine owns pane geometry so resize stays in the native pass.
     fn set_content(
         &self,
         window: WindowId,
         tree: Option<Pane>,
         region: Option<Rect>,
+        active: Option<ItemId>,
     ) -> NativeDispatch;
     fn set_drop_indicator(&self, window: WindowId, preview: Option<DropPreview>) -> NativeDispatch;
     /// Whether a window other than the main one can host a page in its own

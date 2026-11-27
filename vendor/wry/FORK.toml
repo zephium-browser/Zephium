@@ -26,6 +26,10 @@ name = "WebView2 staged construction and teardown"
 paths = ["src/native_cleanup.rs", "src/webview2/mod.rs", "src/error.rs", "src/lib.rs"]
 
 [[patch_sets]]
+name = "WebView2 parent focus parking during active-page handoff"
+paths = ["src/lib.rs", "src/webview2/mod.rs"]
+
+[[patch_sets]]
 name = "host-owned page-close lifecycle"
 paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs"]
 

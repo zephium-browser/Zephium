@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2Controller, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+};
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -25,14 +27,18 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetAncestor, GetClientRect,
     GetForegroundWindow, GetWindowLongPtrW, IsChild, IsIconic, IsWindowVisible, KillTimer,
     LoadCursorW, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
     UpdateLayeredWindow, GA_ROOT, GWLP_USERDATA, HWND_TOP, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, ULW_ALPHA,
-    USER_TIMER_MINIMUM, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    USER_TIMER_MINIMUM, WA_INACTIVE, WM_ACTIVATE, WM_ERASEBKGND, WM_KILLFOCUS, WM_MOUSEACTIVATE,
+    WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use wry::WebViewExtWindows;
 
@@ -190,6 +196,75 @@ struct State {
     /// The card on its way in or out, and the timer that steps the cut.
     card_motion: Option<CardMotion>,
     card_tick: Option<super::ContentPolicyTimeout>,
+    /// The active leaf in `tree` chosen by the shell for focus handoff.
+    active: Option<ItemId>,
+    pending_page_focus: Option<FocusHandoff>,
+}
+
+/// The parent temporarily holds keyboard focus on the outgoing page's behalf.
+/// Leaving the parent or deactivating the window ends that intent, even if the
+/// same HWND has focus again by the time the replacement is ready.
+struct FocusHandoff {
+    parent: HWND,
+    id: usize,
+}
+
+impl FocusHandoff {
+    fn install(parent: HWND) -> Option<Self> {
+        let id = NEXT_FOCUS_HANDOFF.with(|next| {
+            let id = next.get();
+            next.set(id.wrapping_add(1));
+            id
+        });
+        // SAFETY: the stage owns focus handoffs on the window's thread. The
+        // callback needs only the subclass identity and holds no Rust pointer.
+        if unsafe { SetWindowSubclass(parent, Some(focus_handoff_proc), id, 0) }.as_bool() {
+            Some(Self { parent, id })
+        } else {
+            None
+        }
+    }
+
+    fn owns_keyboard(&self) -> bool {
+        let (focus, foreground) = hidden_focus_snapshot();
+        // SAFETY: queries on the UI thread with no activation or callbacks.
+        focus == self.parent
+            && foreground == self.parent
+            && unsafe {
+                !IsIconic(self.parent).as_bool()
+                    && GetWindowSubclass(self.parent, Some(focus_handoff_proc), self.id, None)
+                        .as_bool()
+            }
+    }
+
+    fn restore_chrome(self) {
+        if self.owns_keyboard() {
+            wry::forward_webview2_parent_focus(self.parent);
+        }
+    }
+}
+
+impl Drop for FocusHandoff {
+    fn drop(&mut self) {
+        // SAFETY: the registration is owned and used on the window's thread.
+        let _ = unsafe { RemoveWindowSubclass(self.parent, Some(focus_handoff_proc), self.id) };
+    }
+}
+
+unsafe extern "system" fn focus_handoff_proc(
+    parent: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    if matches!(msg, WM_KILLFOCUS | WM_NCDESTROY)
+        || (msg == WM_ACTIVATE && wparam.0 & 0xffff == WA_INACTIVE as usize)
+    {
+        let _ = unsafe { RemoveWindowSubclass(parent, Some(focus_handoff_proc), id) };
+    }
+    unsafe { DefSubclassProc(parent, msg, wparam, lparam) }
 }
 
 /// A hidden sidebar's card sliding in or out, as the share of its slide that
@@ -284,6 +359,7 @@ impl PreviewMove {
 }
 
 thread_local! {
+    static NEXT_FOCUS_HANDOFF: Cell<usize> = const { Cell::new(1) };
     static CAPTION_STAGES: RefCell<Vec<(isize, Weak<RefCell<State>>)>> = const { RefCell::new(Vec::new()) };
     static CAPTION_OFFSETS: RefCell<HashMap<isize, (f64, bool)>> = RefCell::new(HashMap::new());
     /// `SetTimer` callbacks run on the window thread. A thread-local weak map
@@ -430,6 +506,8 @@ impl Stage {
             card_clip: None,
             card_motion: None,
             card_tick: None,
+            active: None,
+            pending_page_focus: None,
         }));
         CAPTION_STAGES.with(|stages| {
             stages
@@ -448,8 +526,14 @@ impl Stage {
         }
     }
 
-    pub fn apply(&self, region: Option<Rect>, tree: Option<Pane>, visible: &[ItemId]) -> bool {
-        let hide_now = {
+    pub fn apply(
+        &self,
+        region: Option<Rect>,
+        tree: Option<Pane>,
+        visible: &[ItemId],
+        active: Option<ItemId>,
+    ) -> bool {
+        let (hide_now, cancelled_focus) = {
             let Ok(mut s) = self.state.try_borrow_mut() else {
                 return false;
             };
@@ -530,12 +614,25 @@ impl Stage {
             }
             s.tree = tree;
             s.visible = next_visible;
+            s.active = if s.hidden {
+                None
+            } else {
+                active.filter(|id| s.visible.contains(id))
+            };
+            let cancelled_focus = if s.active.is_none() {
+                s.pending_page_focus.take()
+            } else {
+                None
+            };
             s.revision = s.revision.wrapping_add(1);
-            hide_now
+            (hide_now, cancelled_focus)
         };
         // Preserve the old no-flash invariant: obsolete panes are hidden in
         // this call; positioning/showing the latest panes is coalesced.
         hide_views(&self.state, &hide_now);
+        if let Some(handoff) = cancelled_focus {
+            handoff.restore_chrome();
+        }
         if let Some(transition) = self.state.borrow().fullscreen_transition.clone() {
             transition.layout_changed();
         }
@@ -660,18 +757,43 @@ impl Stage {
 
     pub fn remove_view(&self, id: ItemId) {
         // wry owns the container window; dropping the webview destroys it.
-        let mut state = self.state.borrow_mut();
-        if state.preview.is_some_and(|moving| moving.id == id) {
-            state.preview = None;
-        }
-        let container = state.views.remove(&id).map(|view| view.container);
-        state.ready.remove(&id);
-        state.dirty.remove(&id);
-        state.visibility_uncertain.remove(&id);
-        state.visible.remove(&id);
-        let cover = state.covers.remove(&id);
-        drop(state);
+        let (container, has_surviving_active, hidden, revision, cover) = {
+            let mut state = self.state.borrow_mut();
+            if state.preview.is_some_and(|moving| moving.id == id) {
+                state.preview = None;
+            }
+            let container = state.views.remove(&id).map(|view| view.container);
+            state.ready.remove(&id);
+            state.dirty.remove(&id);
+            state.visibility_uncertain.remove(&id);
+            state.visible.remove(&id);
+            if state.active == Some(id) {
+                state.active = None;
+            }
+            let has_surviving_active = !state.hidden
+                && state
+                    .active
+                    .is_some_and(|active| state.visible.contains(&active));
+            let cover = state.covers.remove(&id);
+            (
+                container,
+                has_surviving_active,
+                state.hidden,
+                state.revision,
+                cover,
+            )
+        };
         if let Some(container) = container {
+            // Destroying the focused child HWND drops Win32 focus to NULL
+            // unless we hand focus to parent first and arm transfer to the
+            // surviving or next-revealed active page.
+            let (focus, foreground) = hidden_focus_snapshot();
+            if let Some(parent) = focus_owner_parent(container, focus, foreground, false) {
+                hand_off_focus(&self.state, parent, focus, revision, !hidden);
+                if has_surviving_active {
+                    schedule_sync(&self.state);
+                }
+            }
             super::sidebar_card::forget(container);
         }
         if let Some((cover, _)) = cover {
@@ -1227,7 +1349,9 @@ unsafe extern "system" fn layout_timer_proc(_: HWND, _: u32, timer: usize, _: u3
 fn schedule_sync(state: &Rc<RefCell<State>>) {
     {
         let state = state.borrow();
-        if state.layout_timer.is_some() || state.dirty.is_empty() {
+        if state.layout_timer.is_some()
+            || (state.dirty.is_empty() && state.pending_page_focus.is_none())
+        {
             return;
         }
     }
@@ -1336,11 +1460,40 @@ fn hide_views(state: &Rc<RefCell<State>>, ids: &[ItemId]) {
             current.dirty.insert(hide.id);
         }
         let selected = current.visible.contains(&hide.id);
+        let has_active_page = !current.hidden
+            && current
+                .active
+                .is_some_and(|active| current.visible.contains(&active));
         drop(current);
-        // Hiding WebView2 does not release its native keyboard focus. Give it
-        // back to chrome only if focus still belongs to a deselected page.
+        // Hiding WebView2 does not release its native keyboard focus. Return
+        // it to the parent only if it still belongs to a deselected page.
         // A selected page hidden while navigating must keep its focus.
-        return_hidden_focus(hide.container, selected);
+        return_hidden_focus(
+            state,
+            hide.container,
+            selected,
+            hide.revision,
+            has_active_page,
+        );
+    }
+}
+
+fn focus_owner_parent(
+    container: HWND,
+    focus: HWND,
+    foreground: HWND,
+    require_hidden: bool,
+) -> Option<HWND> {
+    // SAFETY: Win32 validates these borrowed handles. The queries neither
+    // activate windows nor keep a native object alive across a callback.
+    unsafe {
+        let parent = GetAncestor(container, GA_ROOT);
+        (!parent.0.is_null()
+            && parent == foreground
+            && !IsIconic(parent).as_bool()
+            && (!require_hidden || !IsWindowVisible(container).as_bool())
+            && (focus == container || IsChild(container, focus).as_bool()))
+        .then_some(parent)
     }
 }
 
@@ -1353,23 +1506,110 @@ fn hidden_focus_parent(
     if selected {
         return None;
     }
-    // SAFETY: Win32 validates these borrowed handles. The queries neither
-    // activate windows nor keep a native object alive across a callback.
-    unsafe {
-        let parent = GetAncestor(container, GA_ROOT);
-        (!parent.0.is_null()
-            && parent == foreground
-            && !IsIconic(parent).as_bool()
-            && !IsWindowVisible(container).as_bool()
-            && (focus == container || IsChild(container, focus).as_bool()))
-        .then_some(parent)
+    focus_owner_parent(container, focus, foreground, true)
+}
+
+fn return_hidden_focus(
+    state: &Rc<RefCell<State>>,
+    container: HWND,
+    selected: bool,
+    revision: u64,
+    has_active_page: bool,
+) {
+    let (focus, foreground) = hidden_focus_snapshot();
+    if let Some(parent) = hidden_focus_parent(container, focus, foreground, selected) {
+        hand_off_focus(state, parent, focus, revision, has_active_page);
     }
 }
 
-fn return_hidden_focus(container: HWND, selected: bool) {
-    let (focus, foreground) = hidden_focus_snapshot();
-    if let Some(parent) = hidden_focus_parent(container, focus, foreground, selected) {
+fn hand_off_focus(
+    state: &Rc<RefCell<State>>,
+    parent: HWND,
+    outgoing: HWND,
+    revision: u64,
+    keep_for_page: bool,
+) {
+    let handoff = if keep_for_page {
+        FocusHandoff::install(parent)
+    } else {
+        None
+    };
+    let Some(handoff) = handoff else {
         set_hidden_focus(parent);
+        return;
+    };
+    #[cfg(test)]
+    let parked_by_test = focus_tests::record_focus_target(parent);
+    #[cfg(not(test))]
+    let parked_by_test = false;
+    if !parked_by_test {
+        wry::park_webview2_parent_focus(parent, outgoing);
+    }
+    if !handoff.owns_keyboard() {
+        return;
+    }
+    if let Ok(mut current) = state.try_borrow_mut() {
+        if current.revision == revision {
+            current.pending_page_focus = Some(handoff);
+            return;
+        }
+    }
+    handoff.restore_chrome();
+}
+
+fn select_focus_target(state: &State) -> Option<&HostView> {
+    let target = state.active?;
+    if !state.visible.contains(&target)
+        || !state.ready.contains(&target)
+        || state.visibility_uncertain.contains(&target)
+    {
+        return None;
+    }
+    let view = state.views.get(&target)?;
+    let applied = view.applied.get();
+    (view.generation.load(Ordering::Acquire)
+        && view.presentation_permit.load(Ordering::Acquire)
+        && applied.window_visible == Some(true)
+        && applied.controller_visible == Some(true)
+        && unsafe { IsWindowVisible(view.container).as_bool() })
+    .then_some(view)
+}
+
+fn restore_page_focus(state: &Rc<RefCell<State>>, revision: u64) {
+    let (handoff, controller) = {
+        let Ok(mut current) = state.try_borrow_mut() else {
+            return;
+        };
+        if current.revision != revision {
+            return;
+        }
+        let Some(handoff) = current.pending_page_focus.as_ref() else {
+            return;
+        };
+        if !handoff.owns_keyboard() {
+            current.pending_page_focus = None;
+            return;
+        }
+        let controller = if current.hidden || current.visible.is_empty() {
+            None
+        } else {
+            let Some(view) = select_focus_target(&current) else {
+                return;
+            };
+            Some(view.controller.clone())
+        };
+        let Some(handoff) = current.pending_page_focus.take() else {
+            return;
+        };
+        (handoff, controller)
+    };
+    let moved = controller.is_some_and(|controller| {
+        // SAFETY: called on the stage's UI thread with no State borrow held.
+        handoff.owns_keyboard()
+            && unsafe { controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC) }.is_ok()
+    });
+    if !moved {
+        handoff.restore_chrome();
     }
 }
 
@@ -1526,7 +1766,7 @@ fn sync(state: &Rc<RefCell<State>>) {
                 )
             });
         let dirty = std::mem::take(&mut state.dirty);
-        if dirty.is_empty() {
+        if dirty.is_empty() && state.pending_page_focus.is_none() {
             return;
         }
         let (origin, size, offset) = travelling
@@ -1669,6 +1909,7 @@ fn sync(state: &Rc<RefCell<State>>) {
     if let Some(transition) = transition {
         transition.raise();
     }
+    restore_page_focus(state, revision);
     // The next step of the journey is the next pass: every visible pane is
     // due to move again, on the stage's own frame-paced timer.
     let travelling = state.try_borrow().is_ok_and(|state| {
@@ -1927,8 +2168,23 @@ fn apply_native_placement(state: &Rc<RefCell<State>>, placement: &NativePlacemen
         // Finishing can schedule another pass or retire the view. Recheck its
         // identity and revision, then release State before transferring focus.
         if placement_is_current(state, placement) {
-            let selected = state.borrow().visible.contains(&placement.id);
-            return_hidden_focus(placement.container, selected);
+            let (selected, has_active_page) = {
+                let current = state.borrow();
+                (
+                    current.visible.contains(&placement.id),
+                    !current.hidden
+                        && current
+                            .active
+                            .is_some_and(|active| current.visible.contains(&active)),
+                )
+            };
+            return_hidden_focus(
+                state,
+                placement.container,
+                selected,
+                placement.revision,
+                has_active_page,
+            );
         }
         return;
     }

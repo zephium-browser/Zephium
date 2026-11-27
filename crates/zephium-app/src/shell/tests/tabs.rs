@@ -1289,3 +1289,55 @@ fn closing_one_private_tab_hands_over_to_another() {
     assert_eq!(active_id(&screen), first);
     assert!(shell.incognito_profile(focused_scope(&shell).0));
 }
+
+#[test]
+fn closing_a_split_pane_passes_its_successor_as_active_layout_target() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: first,
+        input: "https://a.example".into(),
+    });
+    shell.handle(Command::Open);
+    let second = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: second,
+        input: "https://b.example".into(),
+    });
+    shell.handle(Command::Open);
+    let third = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: third,
+        input: "https://c.example".into(),
+    });
+
+    shell.windows.focused_mut().unwrap().splits = Some(Pane::Branch {
+        axis: Axis::Row,
+        ratio: 0.33,
+        a: Box::new(Pane::leaf(first)),
+        b: Box::new(Pane::Branch {
+            axis: Axis::Row,
+            ratio: 0.5,
+            a: Box::new(Pane::leaf(second)),
+            b: Box::new(Pane::leaf(third)),
+        }),
+    });
+    shell.handle(Command::Activate(second));
+    assert_eq!(
+        engine.layout_actives.lock().unwrap().last().copied(),
+        Some(Some(second))
+    );
+
+    shell.handle(Command::Close(second));
+
+    assert_eq!(active_id(&screen), third);
+    assert_eq!(
+        engine.last_layout(),
+        vec![first.to_string(), third.to_string()]
+    );
+    assert_eq!(
+        engine.layout_actives.lock().unwrap().last().copied(),
+        Some(Some(third))
+    );
+}
