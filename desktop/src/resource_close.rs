@@ -105,7 +105,7 @@ impl Gate {
     fn forget_window(&mut self, label: &str) -> Vec<(String, String)> {
         self.touched.remove(label);
         self.pending.remove(label);
-        if self.prepared && !self.system_closing {
+        if !self.flushed.is_empty() && !self.system_closing {
             self.prepared = false;
             std::mem::take(&mut self.flushed)
                 .into_iter()
@@ -780,6 +780,26 @@ mod tests {
             ),
             "destroy drops its outstanding reply"
         );
+    }
+
+    #[test]
+    fn closing_a_renderer_cancels_successful_terminal_flush_for_survivors() {
+        let mut gate = Gate {
+            prepared: false,
+            ..Gate::default()
+        };
+        gate.touched.insert("browser-1".into());
+        gate.touched.insert("browser-2".into());
+        gate.flushed = vec![
+            ("browser-1".into(), "closing-token".into()),
+            ("browser-2".into(), "survivor-token".into()),
+        ];
+
+        let cancelled = gate.forget_window("browser-1");
+
+        assert!(!gate.prepared);
+        assert!(gate.flushed.is_empty());
+        assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
     }
 
     #[test]
