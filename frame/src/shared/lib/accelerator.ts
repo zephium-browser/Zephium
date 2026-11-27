@@ -182,7 +182,14 @@ function layoutKey(key: string): string | null {
 }
 
 function spell(event: KeyboardEvent, mac: boolean, key: string): string | null {
-  if (!event.code || !key || MODIFIER_CODES.has(event.code)) return null;
+  if (
+    event.isComposing ||
+    event.keyCode === 229 ||
+    !event.code ||
+    !key ||
+    MODIFIER_CODES.has(event.code)
+  )
+    return null;
   const parts: string[] = [];
   if (event.ctrlKey) parts.push("Ctrl");
   if (event.altKey) parts.push("Alt");

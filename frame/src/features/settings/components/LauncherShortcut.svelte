@@ -5,6 +5,7 @@
   import type { DoubleTap, LauncherTrigger, Rejection } from "$shared/ipc/bindings";
   import { IS_MAC } from "$shared/platform";
   import { acceleratorFrom, acceleratorKeys, heldModifiers } from "$shared/lib/accelerator";
+  import { isComposing } from "$shared/lib/keyboard";
   import SettingsGroup from "$shared/ui/SettingsGroup";
   import SettingsRow from "$shared/ui/SettingsRow";
   import Select from "$shared/ui/Select";
@@ -102,7 +103,7 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (!recording) return;
+    if (!recording || isComposing(event)) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.key === "Escape" && !event.metaKey && !event.ctrlKey && !event.altKey) {

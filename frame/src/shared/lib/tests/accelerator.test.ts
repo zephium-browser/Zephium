@@ -39,6 +39,10 @@ describe("accelerators", () => {
       "Ctrl+Shift+KeyK",
     );
     expect(acceleratorFrom(press({ code: "MetaLeft", metaKey: true }), true)).toBeNull();
+    expect(acceleratorFrom(press({ code: "KeyK", ctrlKey: true, keyCode: 229 }), false)).toBeNull();
+    expect(
+      acceleratorFrom(press({ code: "KeyK", metaKey: true, isComposing: true }), true),
+    ).toBeNull();
     expect(heldModifiers(press({ metaKey: true, shiftKey: true }), true)).toEqual(["⇧", "⌘"]);
     expect(heldModifiers(press({ ctrlKey: true, altKey: true }), false)).toEqual(["Ctrl", "Alt"]);
     expect(heldModifiers(press({}), false)).toEqual([]);
