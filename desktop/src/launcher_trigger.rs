@@ -529,6 +529,7 @@ fn should_attempt_install(owns: bool, shutting_down: bool) -> bool {
     owns && !shutting_down
 }
 
+#[cfg(test)]
 fn should_install_after_reservation(owns: bool, shutting_down: bool, can_record: bool) -> bool {
     should_attempt_install(owns, shutting_down) && can_record
 }
