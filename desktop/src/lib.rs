@@ -2500,6 +2500,22 @@ fn emit_to_privileged<T: Serialize>(app: &tauri::AppHandle, label: &str, event: 
     let _ = try_emit_to_privileged(app, label, event, payload);
 }
 
+fn browser_projection_label(window_id: Option<&str>) -> String {
+    window_id
+        .and_then(|id| id.parse::<u64>().ok())
+        .filter(|id| *id > 0)
+        .map(browser_window::label)
+        .unwrap_or_else(|| MAIN_LABEL.to_owned())
+}
+
+fn emit_to_browser_owner<T: Serialize>(app: &tauri::AppHandle, event: &str, payload: &T) {
+    let window_id = app
+        .try_state::<overlay::ContextCache>()
+        .and_then(|context| context.owner_window_id());
+    let label = browser_projection_label(window_id.as_deref());
+    let _ = try_emit_to_privileged_only(app, &label, event, payload);
+}
+
 /// Applies one exact revision-bearing tab projection and verifies the
 /// privileged DOM state in the same JavaScript evaluation. The callback is a
 /// lifecycle fact only; the shell independently revalidates id, URL and native
@@ -7747,7 +7763,7 @@ fn finish_browser_setup(
             blocker_bench::items(&state);
             spaces::follow(&emit_handle, &state);
             page_assist::observe_items(&state);
-            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_ITEMS, &state)
+            emit_to_browser_owner(&emit_handle, EVENT_ITEMS, &state)
         }
         Projection::Tab(tab) => {
             #[cfg(feature = "adblock-qa")]
@@ -7863,7 +7879,7 @@ fn finish_browser_setup(
             if let Some(keymap) = emit_handle.try_state::<keymap::Keymap>() {
                 keymap.set_work_pane_shown(&emit_handle, layout.work_pane.is_some());
             }
-            emit_to_privileged(&emit_handle, MAIN_LABEL, EVENT_LAYOUT, &layout)
+            emit_to_browser_owner(&emit_handle, EVENT_LAYOUT, &layout)
         }
         Projection::HostFullscreen(active) => content_fullscreen::follow(&emit_handle, active),
         Projection::RaiseWindow => {
@@ -9020,6 +9036,17 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_projections_are_routed_to_their_panel_owner_window() {
+        assert_eq!(super::browser_projection_label(Some("1")), super::MAIN_LABEL);
+        assert_eq!(super::browser_projection_label(Some("2")), "browser-2");
+        assert_eq!(super::browser_projection_label(None), super::MAIN_LABEL);
+        assert_eq!(
+            super::browser_projection_label(Some("invalid")),
+            super::MAIN_LABEL
+        );
+    }
+
     fn composed_setup_source(production: &str) -> String {
         let initial = production
             .split(".setup(move |app| {")
