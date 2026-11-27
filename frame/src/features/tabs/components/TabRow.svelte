@@ -121,7 +121,10 @@
     />
   {/if}
   {#if tab.capture}
-    <span class="tab-status" style:margin-inline-end={closable ? "28px" : "4px"}>
+    <span
+      class="tab-status"
+      style:margin-inline-end={closable ? (tab.container_id ? "40px" : "28px") : "4px"}
+    >
       <CaptureControl
         site={tab.url ?? tab.title}
         capture={tab.capture}
