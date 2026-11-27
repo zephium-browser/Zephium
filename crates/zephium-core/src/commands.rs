@@ -50,7 +50,7 @@ impl Keys {
     pub const fn on(self, platform: Platform) -> Option<&'static str> {
         match platform {
             Platform::Mac => self.mac,
-            Platform::Other => self.other,
+            Platform::Windows | Platform::Other => self.other,
         }
     }
 }
@@ -414,9 +414,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         mac_only("CmdOrCtrl+Shift+["),
         "tab.previous",
     ),
-    // The same walk down the sidebar, on the arrows that point
-    // along it. Ctrl+Alt stays clear of text: only letters and digits are
-    // AltGr's.
+    // The same walk down the sidebar, using arrows so Ctrl+Alt stays clear of text.
     command(
         "tab.above",
         "Select Tab Above",
@@ -788,7 +786,7 @@ fn validate_binding_on(
 mod tests {
     use super::*;
 
-    const PLATFORMS: [Platform; 2] = [Platform::Mac, Platform::Other];
+    const PLATFORMS: [Platform; 3] = [Platform::Mac, Platform::Windows, Platform::Other];
 
     #[test]
     fn ids_are_unique() {

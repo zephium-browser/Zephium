@@ -161,6 +161,45 @@ describe("keymap", () => {
     expect(keymap.commandFor(press({ isComposing: true }), false, "Ctrl+KeyT")).toBeNull();
   });
 
+  it("matches Windows number-row and keypad shortcuts independently", async () => {
+    native.entries.mockResolvedValue([
+      entry("tab.select.1", "Ctrl+1"),
+      entry("space.select.1", "Ctrl+Shift+1"),
+      entry("tab.new", "Ctrl+Numpad1"),
+    ]);
+    const keymap = await import("../keymap.svelte");
+    await keymap.init();
+    const numberRow = press({ code: "Digit1", key: "&", ctrlKey: true });
+    expect(keymap.commandFor(numberRow, false, "Ctrl+&", true)).toBe("tab.select.1");
+    const shifted = press({ code: "Digit1", key: "!", ctrlKey: true, shiftKey: true });
+    expect(keymap.commandFor(shifted, false, "Ctrl+Shift+!", true)).toBe("space.select.1");
+    const keypad = press({ code: "Numpad1", key: "1", ctrlKey: true });
+    expect(keymap.commandFor(keypad, false, "Ctrl+Numpad1", true)).toBe("tab.new");
+  });
+
+  it("keeps existing Windows Shift+Equals bindings ahead of the plus alias", async () => {
+    native.entries.mockResolvedValue([
+      entry("zoom.in", "Ctrl+="),
+      entry("theme.system", "Ctrl+Shift+="),
+    ]);
+    const keymap = await import("../keymap.svelte");
+    await keymap.init();
+    const plus = press({ code: "Equal", key: "+", ctrlKey: true, shiftKey: true });
+    expect(keymap.commandFor(plus, false, "Ctrl+Shift++", true)).toBe("theme.system");
+    native.entries.mockResolvedValue([entry("zoom.in", "Ctrl+=")]);
+    native.listener?.();
+    await vi.waitFor(() => expect(keymap.all()).toHaveLength(1));
+    expect(keymap.commandFor(plus, false, "Ctrl+Shift++", true)).toBe("zoom.in");
+    expect(
+      keymap.commandFor(
+        press({ code: "NumpadAdd", key: "+", ctrlKey: true }),
+        false,
+        "Ctrl+NumpadAdd",
+        true,
+      ),
+    ).toBe("zoom.in");
+  });
+
   it("reads the keymap again when native says it changed", async () => {
     const keymap = await import("../keymap.svelte");
     await keymap.init();
@@ -168,6 +207,22 @@ describe("keymap", () => {
     native.listener?.();
     await vi.waitFor(() => expect(keymap.all()[0]?.accelerator).toBe("Ctrl+N"));
     expect(keymap.commandFor(press({}), false, "Ctrl+KeyT")).toBeNull();
+  });
+
+  it("discards an older projection when layout refreshes settle out of order", async () => {
+    const keymap = await import("../keymap.svelte");
+    await keymap.init();
+    let finishOlder!: (entries: KeymapEntry[]) => void;
+    const older = new Promise<KeymapEntry[]>((resolve) => {
+      finishOlder = resolve;
+    });
+    native.entries.mockReturnValueOnce(older).mockResolvedValueOnce([entry("tab.new", "Ctrl+,")]);
+    native.listener?.();
+    native.listener?.();
+    await vi.waitFor(() => expect(keymap.all()[0]?.accelerator).toBe("Ctrl+,"));
+    finishOlder([entry("tab.new", "Ctrl+Shift+,")]);
+    await older;
+    expect(keymap.all()[0]?.accelerator).toBe("Ctrl+,");
   });
 
   it("reports a conflict without refreshing, and refreshes after a change", async () => {

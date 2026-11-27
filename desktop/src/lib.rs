@@ -7602,8 +7602,23 @@ fn finish_browser_setup(
         }
     });
     let keys_engine = engine.clone();
+    #[cfg(target_os = "windows")]
+    let keys_app = handle.clone();
+    #[cfg(target_os = "windows")]
+    let apply_keys = move |_: &keymap::Keymap| {
+        let app = keys_app.clone();
+        let engine = keys_engine.clone();
+        let _ = keys_app.run_on_main_thread(move || {
+            engine.set_shortcuts(app.state::<keymap::Keymap>().engine_table());
+        });
+    };
+    #[cfg(not(target_os = "windows"))]
+    let apply_keys =
+        move |keymap: &keymap::Keymap| keys_engine.set_shortcuts(keymap.engine_table());
     app.state::<keymap::Keymap>()
-        .attach_engine(Box::new(move |table| keys_engine.set_shortcuts(table)));
+        .attach_engine(Box::new(apply_keys));
+    #[cfg(target_os = "windows")]
+    keymap::install_layout_observer(&window);
     #[cfg(target_os = "macos")]
     let _ = std::thread::Builder::new()
         .name("webkit-private-api".into())

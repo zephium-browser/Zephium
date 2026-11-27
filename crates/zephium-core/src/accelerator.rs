@@ -7,12 +7,15 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
     Mac,
+    Windows,
     Other,
 }
 
 impl Platform {
     pub const CURRENT: Platform = if cfg!(target_os = "macos") {
         Platform::Mac
+    } else if cfg!(target_os = "windows") {
+        Platform::Windows
     } else {
         Platform::Other
     };
@@ -24,6 +27,8 @@ pub enum Key {
     Letter(u8),
     /// ASCII digit.
     Digit(u8),
+    /// ASCII digit on the Windows numeric keypad.
+    NumpadDigit(u8),
     Comma,
     Period,
     Minus,
@@ -51,10 +56,12 @@ pub enum Key {
     PageDown,
     /// F1 through F12.
     Function(u8),
+    /// Any other printable character, matched by the active keyboard layout.
+    Character(char),
 }
 
 impl Key {
-    fn parse(token: &str) -> Option<Key> {
+    fn parse(token: &str, platform: Platform) -> Option<Key> {
         let upper = token.to_ascii_uppercase();
         let bytes = upper.as_bytes();
         if bytes.len() == 1 {
@@ -80,6 +87,14 @@ impl Key {
                 }
                 _ => None,
             };
+        }
+        if platform == Platform::Windows {
+            if let Some(rest) = upper.strip_prefix("NUMPAD") {
+                return match rest.as_bytes() {
+                    [byte] if byte.is_ascii_digit() => Some(Key::NumpadDigit(*byte)),
+                    _ => None,
+                };
+            }
         }
         if let Some(number) = upper.strip_prefix('F').and_then(|n| n.parse::<u8>().ok()) {
             return (1..=12).contains(&number).then_some(Key::Function(number));
@@ -110,15 +125,26 @@ impl Key {
             "END" => Key::End,
             "PAGEUP" => Key::PageUp,
             "PAGEDOWN" => Key::PageDown,
+            _ if platform == Platform::Windows => {
+                let mut characters = token.chars();
+                match (characters.next(), characters.next()) {
+                    (Some(character), None)
+                        if !character.is_control() && !character.is_whitespace() =>
+                    {
+                        Key::Character(character)
+                    }
+                    _ => return None,
+                }
+            }
             _ => return None,
         })
     }
 
-    /// The token written into canonical accelerator text. Every token is
-    /// accepted by both this parser and the native menu parser.
+    /// The token written into canonical accelerator text.
     fn token(self) -> String {
         let named = match self {
             Key::Letter(byte) | Key::Digit(byte) => return char::from(byte).to_string(),
+            Key::NumpadDigit(byte) => return format!("Numpad{}", char::from(byte)),
             Key::Function(number) => return format!("F{number}"),
             Key::Comma => ",",
             Key::Period => ".",
@@ -145,12 +171,12 @@ impl Key {
             Key::End => "End",
             Key::PageUp => "PageUp",
             Key::PageDown => "PageDown",
+            Key::Character(character) => return character.to_string(),
         };
         named.to_owned()
     }
 
-    /// The character the key types with no modifiers held, for keys that
-    /// type one. Letters are lowercase.
+    /// The character named by the accelerator. Letters are lowercase.
     pub fn character(self) -> Option<char> {
         Some(match self {
             Key::Letter(byte) => char::from(byte.to_ascii_lowercase()),
@@ -166,6 +192,7 @@ impl Key {
             Key::Slash => '/',
             Key::Backslash => '\\',
             Key::Backquote => '`',
+            Key::Character(character) => character,
             _ => return None,
         })
     }
@@ -175,6 +202,7 @@ impl Key {
     pub fn virtual_key(self) -> u32 {
         match self {
             Key::Letter(byte) | Key::Digit(byte) => u32::from(byte),
+            Key::NumpadDigit(byte) => 0x60 + u32::from(byte - b'0'),
             Key::Function(number) => 0x6F + u32::from(number),
             Key::Comma => 0xBC,
             Key::Period => 0xBE,
@@ -201,7 +229,13 @@ impl Key {
             Key::End => 0x23,
             Key::PageUp => 0x21,
             Key::PageDown => 0x22,
+            Key::Character(character) => u32::from(character),
         }
+    }
+
+    /// Whether a Windows binding could intercept Ctrl+Alt text entry.
+    pub fn is_windows_text_key(self) -> bool {
+        self.character().is_some() || matches!(self, Key::Space | Key::NumpadDigit(_))
     }
 }
 
@@ -246,7 +280,7 @@ impl Accelerator {
         for part in modifiers.split('+').filter(|part| !part.is_empty()) {
             let flag = match (part.to_ascii_uppercase().as_str(), platform) {
                 ("CMDORCTRL" | "COMMANDORCONTROL", Platform::Mac) => &mut meta,
-                ("CMDORCTRL" | "COMMANDORCONTROL", Platform::Other) => &mut ctrl,
+                ("CMDORCTRL" | "COMMANDORCONTROL", _) => &mut ctrl,
                 ("CMD" | "COMMAND" | "SUPER" | "META", Platform::Mac) => &mut meta,
                 ("CTRL" | "CONTROL", _) => &mut ctrl,
                 ("ALT" | "OPTION", _) => &mut alt,
@@ -258,7 +292,14 @@ impl Accelerator {
             }
             *flag = true;
         }
-        let key = Key::parse(if last == "+" { "=" } else { last })?;
+        let key = Key::parse(
+            if last == "+" && platform != Platform::Windows {
+                "="
+            } else {
+                last
+            },
+            platform,
+        )?;
         Some(Accelerator {
             meta,
             ctrl,
@@ -299,7 +340,7 @@ impl Accelerator {
     fn has_primary(&self, platform: Platform) -> bool {
         match platform {
             Platform::Mac => self.meta || self.ctrl,
-            Platform::Other => self.ctrl,
+            Platform::Windows | Platform::Other => self.ctrl,
         }
     }
 
@@ -310,7 +351,7 @@ impl Accelerator {
         // Alt+Left, Alt+Right and Alt+Home are the browser's own keys on
         // Windows and Linux. Without Control they are not AltGr, and no text
         // field gives them a meaning. Option+Arrow moves by word on macOS.
-        let alt_navigation = platform == Platform::Other
+        let alt_navigation = platform != Platform::Mac
             && self.alt
             && !self.ctrl
             && !self.shift
@@ -319,11 +360,12 @@ impl Accelerator {
             return Err(AcceleratorError::Unbindable);
         }
         // Ctrl+Alt is AltGr on many Windows and Linux layouts: it types text.
-        if platform == Platform::Other
-            && self.ctrl
-            && self.alt
-            && matches!(self.key, Key::Letter(_) | Key::Digit(_))
-        {
+        let altgr_key = match platform {
+            Platform::Windows => self.key.is_windows_text_key(),
+            Platform::Other => matches!(self.key, Key::Letter(_) | Key::Digit(_)),
+            Platform::Mac => false,
+        };
+        if self.ctrl && self.alt && altgr_key {
             return Err(AcceleratorError::Unbindable);
         }
         if self.reserved(platform) {
@@ -362,7 +404,7 @@ impl Accelerator {
                     || (meta && ctrl && !alt && !shift && (letter(b'Q') || letter(b'F')))
                     || (ctrl && !meta && !alt && key == Key::Space)
             }
-            Platform::Other => {
+            Platform::Windows | Platform::Other => {
                 let plain_ctrl = ctrl && !alt && !shift;
                 (plain_ctrl
                     && (letter(b'C')
@@ -406,7 +448,7 @@ mod tests {
 
     #[test]
     fn canonical_text_round_trips() {
-        for platform in [Platform::Mac, Platform::Other] {
+        for platform in [Platform::Mac, Platform::Windows, Platform::Other] {
             for text in [
                 "CmdOrCtrl+,",
                 "CmdOrCtrl+Alt+N",
@@ -441,6 +483,55 @@ mod tests {
         );
         assert_eq!(Accelerator::parse("Cmd+KeyKK", Platform::Mac), None);
         assert_eq!(Accelerator::parse("Cmd+Digit", Platform::Mac), None);
+    }
+
+    #[test]
+    fn printable_layout_characters_round_trip() {
+        for text in ["Ctrl++", "Ctrl+!", "Ctrl+?", "Ctrl+é", "Ctrl+ù"] {
+            let accelerator = parse(text, Platform::Windows);
+            assert_eq!(accelerator.format(Platform::Windows), text);
+        }
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(parse("Ctrl++", platform), parse("Ctrl+=", platform));
+            assert_eq!(Accelerator::parse("Ctrl+é", platform), None);
+        }
+    }
+
+    #[test]
+    fn windows_bindings_leave_altgr_text_available() {
+        let platform = Platform::Windows;
+        for text in [
+            "Ctrl+Alt+@",
+            "Ctrl+Alt+Shift+é",
+            "Ctrl+Alt+[",
+            "Ctrl+Alt+Space",
+            "Ctrl+Alt+Numpad1",
+        ] {
+            assert_eq!(
+                parse(text, platform).bindable(platform),
+                Err(AcceleratorError::Unbindable)
+            );
+        }
+        assert_eq!(parse("Ctrl+Alt+Right", platform).bindable(platform), Ok(()));
+        assert_eq!(
+            parse("Ctrl+A", platform).bindable(platform),
+            Err(AcceleratorError::Reserved)
+        );
+    }
+
+    #[test]
+    fn windows_keypad_digits_have_their_own_tokens() {
+        let platform = Platform::Windows;
+        for digit in 0..=9 {
+            let text = format!("Ctrl+Numpad{digit}");
+            let parsed = parse(&text, platform);
+            assert_eq!(parsed.format(platform), text);
+            assert_eq!(parsed.key.virtual_key(), 0x60 + digit);
+        }
+        for text in ["Ctrl+Numpad00", "Ctrl+NumpadAdd"] {
+            assert_eq!(Accelerator::parse(text, platform), None);
+        }
+        assert_eq!(Accelerator::parse("Ctrl+Numpad1", Platform::Mac), None);
     }
 
     #[test]

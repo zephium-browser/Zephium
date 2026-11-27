@@ -402,6 +402,8 @@ fn build(app: &tauri::AppHandle, opened: MiniOpenedView) -> bool {
     if !factory.engine.attach_window(opened.window, handle) {
         return fail(&window);
     }
+    #[cfg(target_os = "windows")]
+    crate::keymap::install_layout_observer(&window);
     let events = window.clone();
     let id = opened.window;
     window.on_window_event(move |event| {

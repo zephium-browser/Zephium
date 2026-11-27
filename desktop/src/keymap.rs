@@ -15,7 +15,13 @@ const SETTING: &str = "keymap";
 const FEATURES: [&str; 5] = ["ai", "work", "notes", "tasks", "time"];
 const MAX_ACCELERATOR_BYTES: usize = 64;
 
-type EngineTable = Box<dyn Fn(Vec<Shortcut>) + Send + Sync>;
+#[cfg(any(target_os = "windows", test))]
+#[path = "keymap_windows.rs"]
+mod windows_layout;
+#[cfg(target_os = "windows")]
+pub(crate) use windows_layout::install as install_layout_observer;
+
+type EngineTable = Box<dyn Fn(&Keymap) + Send + Sync>;
 
 #[derive(Default)]
 pub(crate) struct Keymap {
@@ -28,6 +34,8 @@ pub(crate) struct Keymap {
     /// aside so the keys reach the recorder instead of running commands.
     recording: AtomicBool,
     engine: OnceLock<EngineTable>,
+    #[cfg(target_os = "windows")]
+    layout: windows_layout::Layout,
     /// Read by the GTK key handlers of the main and launcher windows.
     #[cfg(target_os = "linux")]
     window_table: Arc<RwLock<Vec<Shortcut>>>,
@@ -41,6 +49,12 @@ pub(crate) struct Keymap {
 
 impl Keymap {
     pub(crate) fn load() -> Self {
+        #[cfg(target_os = "windows")]
+        let keymap = Self {
+            layout: windows_layout::Layout::on_window_thread(),
+            ..Self::default()
+        };
+        #[cfg(not(target_os = "windows"))]
         let keymap = Self::default();
         if let Some(store) = APP_STORE.get() {
             for (flag, feature) in keymap.off.iter().zip(FEATURES) {
@@ -72,27 +86,42 @@ impl Keymap {
         read(&self.overrides).clone()
     }
 
-    pub(crate) fn resolved(&self) -> Vec<ResolvedCommand> {
+    fn resolved(&self) -> Vec<ResolvedCommand> {
         commands::resolve(&read(&self.overrides))
     }
 
     /// The engine applies its table on its own thread; installing it pushes
     /// the current table immediately.
     pub(crate) fn attach_engine(&self, apply: EngineTable) {
-        apply(self.engine_table());
         let _ = self.engine.set(apply);
+        self.refresh_engine();
+    }
+
+    fn refresh_engine(&self) {
+        if let Some(apply) = self.engine.get() {
+            apply(self);
+        }
     }
 
     /// Commands a page-level key table may fire. The launcher is global and
     /// registered on its own; Work keys exist only while the pane is shown, so
     /// a bare Escape never leaves an ordinary page.
-    fn engine_table(&self) -> Vec<Shortcut> {
+    pub(crate) fn engine_table(&self) -> Vec<Shortcut> {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
+        let available = |command: &ResolvedCommand| {
+            command.id != "launcher.toggle"
+                && (shown || command.group != Group::Work)
+                && self.offers(command.id)
+        };
+        #[cfg(target_os = "windows")]
+        {
+            windows_layout::page_shortcuts(self.resolved(), self.layout.scan(), available)
+        }
+
+        #[cfg(not(target_os = "windows"))]
         self.resolved()
             .iter()
-            .filter(|command| command.id != "launcher.toggle")
-            .filter(|command| shown || command.group != Group::Work)
-            .filter(|command| self.offers(command.id))
+            .filter(|command| available(command))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
             .collect()
     }
@@ -113,9 +142,7 @@ impl Keymap {
     }
 
     fn refresh_tables(&self) {
-        if let Some(apply) = self.engine.get() {
-            apply(self.engine_table());
-        }
+        self.refresh_engine();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let recording = self.recording.load(Ordering::Acquire);
         #[cfg(target_os = "linux")]
@@ -250,6 +277,10 @@ impl Keymap {
         if install_menu_bar(app, &self.overrides(), self.work_pane_shown()).is_err() {
             write_diagnostic(format_args!("keymap: menu bar was not rebuilt"));
         }
+        Self::emit_changed(app);
+    }
+
+    fn emit_changed(app: &tauri::AppHandle) {
         emit_to_privileged(
             app,
             MAIN_LABEL,
@@ -269,9 +300,8 @@ fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A page-level key for platforms that match virtual keys. The system key is
-/// never part of one; on macOS these tables are unused.
-pub(crate) fn shortcut(id: &str, accelerator: &str) -> Option<Shortcut> {
+#[cfg(not(target_os = "windows"))]
+fn shortcut(id: &str, accelerator: &str) -> Option<Shortcut> {
     let parsed = Accelerator::parse(accelerator, Platform::CURRENT)?;
     if parsed.meta {
         return None;
@@ -366,9 +396,14 @@ pub(crate) fn keymap_entries(caller: WebviewWindow, app: tauri::AppHandle) -> Ve
     let Some(keymap) = app.try_state::<Keymap>() else {
         return Vec::new();
     };
-    keymap
-        .resolved()
+    let resolved = keymap.resolved();
+    #[cfg(target_os = "windows")]
+    let resolved = windows_layout::bindings(resolved, keymap.layout.scan())
         .into_iter()
+        .map(|(command, _)| command);
+    #[cfg(not(target_os = "windows"))]
+    let resolved = resolved.into_iter();
+    resolved
         .map(|command| {
             let spec = commands::get(command.id);
             KeymapEntry {
@@ -411,7 +446,17 @@ pub(crate) fn keymap_bind(
         return KeymapOutcome::Unavailable;
     };
     let resolved = keymap.resolved();
-    let mut result = commands::validate_binding(&resolved, &id, accelerator.as_deref());
+    #[cfg(target_os = "windows")]
+    let scan = keymap.layout.scan();
+    let validate = |resolved: &[ResolvedCommand]| {
+        #[cfg(target_os = "windows")]
+        {
+            windows_layout::validate_binding(resolved, &id, accelerator.as_deref(), &scan)
+        }
+        #[cfg(not(target_os = "windows"))]
+        commands::validate_binding(resolved, &id, accelerator.as_deref())
+    };
+    let mut result = validate(&resolved);
     let mut displaced = None;
     if let Err(KeymapError::Conflict(other)) = result {
         if replace && commands::get(other).is_some_and(|spec| spec.customizable()) {
@@ -425,7 +470,7 @@ pub(crate) fn keymap_bind(
                 })
                 .collect();
             displaced = Some(other);
-            result = commands::validate_binding(&freed, &id, accelerator.as_deref());
+            result = validate(&freed);
         }
     }
     match result {
@@ -505,31 +550,6 @@ pub(crate) fn keymap_reset(
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn custom_theme_keys_take_precedence_over_zoom_aliases_in_pages() {
-        for id in ["theme.system", "theme.light", "theme.dark"] {
-            let keymap = Keymap::default();
-            write(&keymap.overrides).insert(id.to_owned(), "Ctrl+Shift+=".to_owned());
-            let table = keymap.engine_table();
-            assert_eq!(
-                Shortcut::match_windows(&table, 0xBB, true, true, false)
-                    .map(|shortcut| shortcut.id.as_str()),
-                Some(id)
-            );
-            assert!(!table
-                .iter()
-                .any(|shortcut| shortcut.id == "launcher.toggle"));
-            write(&keymap.overrides).insert(id.to_owned(), String::new());
-            let table = keymap.engine_table();
-            assert_eq!(
-                Shortcut::match_windows(&table, 0xBB, true, true, false)
-                    .map(|shortcut| shortcut.id.as_str()),
-                Some("zoom.in")
-            );
-        }
-    }
-
     #[test]
     fn page_tables_carry_work_keys_only_while_the_pane_is_shown() {
         let keymap = Keymap::default();
@@ -598,6 +618,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn page_keys_use_the_platform_primary_modifier() {
         let reload = shortcut("nav.reload", "CmdOrCtrl+R");
@@ -610,6 +631,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn bare_function_keys_and_alt_arrows_match_as_written() {
         let f5 = shortcut("nav.reload.alt", "F5").expect("F5 key");

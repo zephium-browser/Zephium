@@ -6,8 +6,15 @@ import type { KeymapEntry, LauncherTrigger } from "$shared/ipc/bindings";
 import { keymap } from "$domain/keymap";
 import KeyboardPage from "../components/sections/KeyboardPage.svelte";
 
-// These tests read the macOS keycaps (⌘, ⌥, ⇧); Windows spells its shortcuts out.
-vi.mock("$shared/platform", () => ({ IS_MAC: true, IS_WINDOWS: false }));
+const platform = vi.hoisted(() => ({ IS_MAC: true, IS_WINDOWS: false }));
+vi.mock("$shared/platform", () => ({
+  get IS_MAC() {
+    return platform.IS_MAC;
+  },
+  get IS_WINDOWS() {
+    return platform.IS_WINDOWS;
+  },
+}));
 
 const entry = (id: string, title: string, accelerator: string | null, customized = false) =>
   ({
@@ -49,6 +56,8 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 beforeEach(async () => {
+  platform.IS_MAC = true;
+  platform.IS_WINDOWS = false;
   native.entries.mockResolvedValue([
     entry("tab.new", "New Tab", "Cmd+T"),
     entry("tab.close", "Close Tab", "Cmd+W"),
@@ -108,6 +117,17 @@ test("records a shortcut, names a conflict, and takes the keys when asked", asyn
   await page.viewport(720, 640);
   await page.screenshot({ path: "../../../../../target/settings-keyboard.png" });
   delete document.documentElement.dataset.theme;
+});
+
+test("reports reserved Ctrl+A when recorded on Windows AZERTY", async () => {
+  platform.IS_MAC = false;
+  platform.IS_WINDOWS = true;
+  native.bind.mockResolvedValue({ kind: "reserved" });
+  const screen = await render(KeyboardPage);
+  await screen.getByRole("button", { name: "Change the shortcut for New tab" }).click();
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyQ", key: "a", ctrlKey: true }));
+  await vi.waitFor(() => expect(native.bind).toHaveBeenLastCalledWith("tab.new", "Ctrl+A", false));
+  await expect.element(screen.getByText("That shortcut belongs to the system.")).toBeVisible();
 });
 
 test("Delete clears a shortcut, Escape keeps it, and Reset restores the default", async () => {
