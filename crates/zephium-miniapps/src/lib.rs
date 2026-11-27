@@ -13,7 +13,7 @@ mod model;
 mod policy;
 mod registry;
 
-pub use discovery::{manifest_href, site_metadata, SiteMetadata};
+pub use discovery::{document_base_url, manifest_href, site_metadata, SiteMetadata};
 pub use error::MiniAppError;
 pub use manifest::{parse_manifest, MAX_MANIFEST_BYTES};
 pub use model::{DisplayMode, MiniApp};

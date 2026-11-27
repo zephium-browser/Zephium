@@ -23,6 +23,7 @@ export const commands = {
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
 	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1_Deserialize) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
 	miniAppsList: () => __TAURI_INVOKE<MiniAppView[]>("mini_apps_list"),
+	miniAppsOpen: (id: string) => __TAURI_INVOKE<boolean>("mini_apps_open", { id }),
 	miniAppsInstall: (url: string) => typedError<MiniAppView, string>(__TAURI_INVOKE("mini_apps_install", { url })),
 	miniAppsRemove: (id: string) => __TAURI_INVOKE<boolean>("mini_apps_remove", { id }),
 	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),

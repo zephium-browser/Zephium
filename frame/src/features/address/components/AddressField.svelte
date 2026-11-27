@@ -162,18 +162,23 @@
 
   async function installMiniApp() {
     if (miniAppBusy || !activeUrl.startsWith("https://")) return;
+    const installUrl = activeUrl;
+    const installTabId = tabs.activeId();
+    const isInstallPageActive = () =>
+      tabs.activeId() === installTabId && tabs.activeTab()?.url === installUrl;
     miniAppBusy = true;
     miniAppError = null;
     miniAppReady = false;
     miniAppRecovered = false;
     try {
-      const result = await commands.miniAppsInstall(activeUrl);
+      const result = await commands.miniAppsInstall(installUrl);
+      if (!isInstallPageActive()) return;
       if (result.status === "ok") {
         miniAppReady = true;
         miniAppRecovered = result.data.registry_recovered;
       } else miniAppError = result.error;
     } catch {
-      miniAppError = m.miniapps_failed();
+      if (isInstallPageActive()) miniAppError = m.miniapps_failed();
     } finally {
       miniAppBusy = false;
     }

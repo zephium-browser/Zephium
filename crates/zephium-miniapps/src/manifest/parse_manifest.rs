@@ -25,7 +25,7 @@ struct RawManifest {
     theme_color: Option<String>,
     background_color: Option<String>,
     #[serde(default)]
-    icons: Vec<RawIcon>,
+    icons: Vec<serde_json::Value>,
 }
 
 /// Parses one Web App Manifest into an installation descriptor. Relative
@@ -40,6 +40,12 @@ pub fn parse_manifest(
         return Err(MiniAppError::ManifestTooLarge);
     }
     let raw: RawManifest = serde_json::from_slice(bytes).map_err(|_| MiniAppError::InvalidJson)?;
+    let icons = raw
+        .icons
+        .iter()
+        .take(32)
+        .filter_map(|icon| serde_json::from_value::<RawIcon>(icon.clone()).ok())
+        .collect::<Vec<_>>();
     let start = raw
         .start_url
         .as_deref()
@@ -67,13 +73,14 @@ pub fn parse_manifest(
     let canonical_start = start_url.to_string();
     Ok(MiniApp {
         id: app_id(&canonical_start),
+        storage_id: String::new(),
         name,
         start_url: canonical_start,
         scope: scope.to_string(),
         display: DisplayMode::from_manifest(raw.display.as_deref()),
         theme_color: pick_color(raw.theme_color.as_deref()),
         background_color: pick_color(raw.background_color.as_deref()),
-        icon: pick_icon(&raw.icons, manifest_url),
+        icon: pick_icon(&icons, manifest_url),
         installed_at,
     })
 }

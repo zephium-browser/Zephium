@@ -4019,7 +4019,7 @@
   "miniapps_install_label": "Site address",
   "miniapps_install_placeholder": "https://example.com",
   "miniapps_install": "Install",
-  "miniapps_installing": "InstallingвЂ¦",
+  "miniapps_installing": "Installing…",
   "miniapps_installed_notice": "Mini app installed",
   "miniapps_recovered": "We repaired the saved app list. A backup was kept; reinstall any apps that are missing.",
   "miniapps_empty": "No mini apps installed yet.",

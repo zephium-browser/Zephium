@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MiniApp {
     pub id: String,
+    /// Per-install storage identity. Empty is the legacy id-derived path.
+    #[serde(default)]
+    pub storage_id: String,
     pub name: String,
     pub start_url: String,
     pub scope: String,

@@ -139,9 +139,7 @@
             <span>{host(app.start_url)}</span>
           </span>
           <span class="scope">{m.miniapps_scope({ scope: app.scope })}</span>
-          <Button
-            size="compact"
-            onclick={() => void commands.browserOpenUrl(app.start_url, true).catch(() => {})}
+          <Button size="compact" onclick={() => void commands.miniAppsOpen(app.id).catch(() => {})}
             >{m.miniapps_open()}</Button
           >
           <IconButton

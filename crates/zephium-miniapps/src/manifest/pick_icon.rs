@@ -18,11 +18,8 @@ pub struct RawIcon {
 pub fn pick_icon(icons: &[RawIcon], base: &Url) -> Option<String> {
     let mut best: Option<(u32, String)> = None;
     for icon in icons.iter().take(32) {
-        if icon
-            .purpose
-            .split_whitespace()
-            .any(|value| value == "monochrome")
-        {
+        let purposes = icon.purpose.split_whitespace().collect::<Vec<_>>();
+        if purposes.contains(&"monochrome") && !purposes.contains(&"any") {
             continue;
         }
         if !icon.kind.is_empty() && !icon.kind.starts_with("image/") {
@@ -58,4 +55,37 @@ fn largest_size(sizes: &str) -> (u32, u32) {
         })
         .max_by_key(|(width, height)| width.saturating_mul(*height))
         .unwrap_or((1, 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn icon(src: &str, sizes: &str, purpose: &str) -> RawIcon {
+        RawIcon {
+            src: src.to_owned(),
+            sizes: sizes.to_owned(),
+            kind: "image/png".to_owned(),
+            purpose: purpose.to_owned(),
+        }
+    }
+
+    #[test]
+    fn mixed_any_and_monochrome_purpose_is_accepted() {
+        let base = Url::parse("https://example.com/manifest.json").unwrap();
+        assert_eq!(
+            pick_icon(&[icon("/app.png", "192x192", "any monochrome")], &base),
+            Some("https://example.com/app.png".to_owned())
+        );
+    }
+
+    #[test]
+    fn monochrome_only_and_oversized_icons_are_skipped() {
+        let base = Url::parse("https://example.com/manifest.json").unwrap();
+        let icons = [
+            icon("/mono.png", "512x512", "monochrome"),
+            icon("/large.png", "2048x2048", "any"),
+        ];
+        assert_eq!(pick_icon(&icons, &base), None);
+    }
 }

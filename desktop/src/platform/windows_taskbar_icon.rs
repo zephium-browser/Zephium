@@ -12,16 +12,17 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Variant::VT_LPWSTR;
+use windows::Win32::System::Variant::{VT_EMPTY, VT_LPWSTR};
+use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, LoadImageW, SendMessageW, SetWindowPos, GWL_EXSTYLE, HICON, ICON_BIG, ICON_SMALL,
-    ICON_SMALL2, IMAGE_ICON, LR_DEFAULTSIZE, LR_LOADFROMFILE, LR_SHARED, SWP_FRAMECHANGED,
+    ICON_SMALL2, IMAGE_ICON, LR_LOADFROMFILE, LR_SHARED, SM_CXICON, SM_CXSMICON, SWP_FRAMECHANGED,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_SETICON, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 /// Non-shared icons loaded from mini-app files remain live until their window closes.
-static OWNED_ICONS: LazyLock<Mutex<HashMap<String, isize>>> =
+static OWNED_ICONS: LazyLock<Mutex<HashMap<String, Vec<isize>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Assigns an optional window identity and icon, then opts it into the taskbar.
@@ -40,13 +41,40 @@ pub fn set_taskbar_icon(
                 "mini_apps: taskbar identity could not be assigned: {error}"
             ));
         }
+        let label = window.label().to_owned();
+        let hwnd_value = hwnd.0 as isize;
+        window.on_window_event(move |event| match event {
+            tauri::WindowEvent::CloseRequested { .. } => {
+                let hwnd = HWND(hwnd_value as *mut _);
+                if let Err(error) = clear_window_app_user_model_id(hwnd) {
+                    crate::write_diagnostic(format_args!(
+                        "mini_apps: taskbar identity could not be cleared: {error}"
+                    ));
+                }
+            }
+            tauri::WindowEvent::Destroyed => destroy_owned_for_label(&label),
+            _ => {}
+        });
     }
 
-    let (icon, owned) = icon_path
-        .and_then(load_file_icon)
-        .map(|icon| (icon, true))
-        .or_else(|| load_application_icon().map(|icon| (icon, false)))
-        .unwrap_or_else(|| (HICON::default(), false));
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    let small_size = unsafe { GetSystemMetricsForDpi(SM_CXSMICON, dpi) }.max(1);
+    let large_size = unsafe { GetSystemMetricsForDpi(SM_CXICON, dpi) }.max(1);
+    let icons = [
+        (ICON_BIG, large_size),
+        (ICON_SMALL, small_size),
+        (ICON_SMALL2, small_size),
+    ]
+    .into_iter()
+    .filter_map(|(kind, size)| {
+        let icon = icon_path.and_then(|path| load_file_icon(path, size));
+        let icon = match icon {
+            Some(icon) => Some((icon, true)),
+            None => load_application_icon(size).map(|icon| (icon, false)),
+        }?;
+        Some((kind, icon.0, icon.1))
+    })
+    .collect::<Vec<_>>();
 
     // SAFETY: `hwnd` is this live Tauri top-level window. Preserve its other
     // extended styles while opting into taskbar presence and removing the
@@ -64,23 +92,25 @@ pub fn set_taskbar_icon(
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
         );
-        if !icon.0.is_null() {
-            // Set every icon slot because Shell surfaces can query different
-            // sizes. File-backed HICONs are retained until HWND destruction.
-            for icon_type in [ICON_BIG, ICON_SMALL, ICON_SMALL2] {
+        if !icons.is_empty() {
+            for (icon_type, icon, _) in &icons {
                 SendMessageW(
                     hwnd,
                     WM_SETICON,
-                    Some(windows::Win32::Foundation::WPARAM(icon_type as usize)),
+                    Some(windows::Win32::Foundation::WPARAM(*icon_type as usize)),
                     Some(windows::Win32::Foundation::LPARAM(icon.0 as isize)),
                 );
             }
         }
     }
 
-    if owned {
-        retain_until_window_closes(window, icon);
-    }
+    retain_until_window_closes(
+        window,
+        icons
+            .into_iter()
+            .filter_map(|(_, icon, owned)| owned.then_some(icon))
+            .collect(),
+    );
 }
 
 /// Gives each installed mini-app a stable identity distinct from Zephium.
@@ -95,6 +125,33 @@ fn set_window_app_user_model_id(hwnd: HWND, app_user_model_id: &str) -> windows:
     set_property_store_app_user_model_id(&store, app_user_model_id)?;
     // Windows applies this property immediately. Commit is harmless for a
     // window store and required for some shortcut property stores.
+    unsafe { store.Commit() }
+}
+
+/// Clears a mini-app window's Shell identity before its HWND is destroyed.
+fn clear_window_app_user_model_id(hwnd: HWND) -> windows::core::Result<()> {
+    const APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+    // VT_EMPTY removes the per-window override so Windows can release its
+    // taskbar grouping association before the native handle goes away.
+    let value = PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_EMPTY,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0::default(),
+            }),
+        },
+    };
+    // SAFETY: `hwnd` is the live top-level window for its CloseRequested event.
+    let store: IPropertyStore = unsafe { SHGetPropertyStoreForWindow(hwnd)? };
+    // SAFETY: the property key and empty PROPVARIANT match the Shell contract.
+    unsafe { store.SetValue(&APP_USER_MODEL_ID, &value)? };
+    // SAFETY: this commits only the property update above.
     unsafe { store.Commit() }
 }
 
@@ -143,7 +200,7 @@ fn string_propvariant(value: &str) -> windows::core::Result<PROPVARIANT> {
     })
 }
 
-fn load_file_icon(path: &std::path::Path) -> Option<HICON> {
+fn load_file_icon(path: &std::path::Path, size: i32) -> Option<HICON> {
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // SAFETY: `path` is NUL-terminated and remains alive for this synchronous
     // call. Without LR_SHARED, the returned HICON is owned by this process.
@@ -152,16 +209,16 @@ fn load_file_icon(path: &std::path::Path) -> Option<HICON> {
             None,
             PCWSTR(path.as_ptr()),
             IMAGE_ICON,
-            0,
-            0,
-            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            size,
+            size,
+            LR_LOADFROMFILE,
         )
     }
     .ok()
     .map(|handle| HICON(handle.0))
 }
 
-fn load_application_icon() -> Option<HICON> {
+fn load_application_icon(size: i32) -> Option<HICON> {
     // `tauri-build` embeds the configured icon as resource 32512 (IDI_ICON).
     // SAFETY: the executable module remains loaded for the process lifetime.
     unsafe {
@@ -170,23 +227,28 @@ fn load_application_icon() -> Option<HICON> {
             Some(HINSTANCE(module.0)),
             PCWSTR(32512usize as *const u16),
             IMAGE_ICON,
-            0,
-            0,
-            LR_DEFAULTSIZE | LR_SHARED,
+            size,
+            size,
+            LR_SHARED,
         )
         .ok()
         .map(|handle| HICON(handle.0))
     }
 }
 
-fn retain_until_window_closes(window: &WebviewWindow, icon: HICON) {
+fn retain_until_window_closes(window: &WebviewWindow, icons: Vec<HICON>) {
     let label = window.label().to_owned();
     let previous = OWNED_ICONS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(label.clone(), icon.0 as isize);
+        .insert(
+            label.clone(),
+            icons.into_iter().map(|icon| icon.0 as isize).collect(),
+        );
     if let Some(previous) = previous {
-        destroy_icon(previous);
+        for icon in previous {
+            destroy_icon(icon);
+        }
     }
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -200,8 +262,10 @@ fn destroy_owned_for_label(label: &str) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(label);
-    if let Some(icon) = icon {
-        destroy_icon(icon);
+    if let Some(icons) = icon {
+        for icon in icons {
+            destroy_icon(icon);
+        }
     }
 }
 

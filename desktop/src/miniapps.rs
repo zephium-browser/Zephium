@@ -7,9 +7,9 @@
 //! confined to the manifest scope (or the installing page's origin for a site
 //! without a manifest), with out-of-scope HTTPS links handed to the browser.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-#[cfg(target_os = "windows")]
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(target_os = "windows")]
 use std::{
@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, WebviewWindow};
 use zephium_core::ports::store::{AppSettingReadback, Store};
 use zephium_miniapps::{
-    app_id, is_public_host, is_public_ip, manifest_href, parse_manifest, same_origin,
-    site_metadata, DisplayMode, MiniApp, MiniAppError, Registry, MAX_MANIFEST_BYTES,
+    app_id, document_base_url, is_public_host, is_public_ip, manifest_href, parse_manifest,
+    same_origin, site_metadata, DisplayMode, MiniApp, MiniAppError, Registry, MAX_MANIFEST_BYTES,
 };
 
 use crate::{authorize, CallerPolicy, Command, Handle, APP_STORE};
@@ -43,6 +43,7 @@ const MAX_REDIRECTS: usize = 3;
 /// Serialises read-modify-write cycles. A registry write is small, but two
 /// installs arriving together must not drop one of them.
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+static NAVIGATION_SCOPES: RwLock<Option<HashMap<String, Url>>> = RwLock::new(None);
 #[cfg(target_os = "windows")]
 static STANDALONE_WINDOW_OPENED: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
@@ -99,9 +100,25 @@ pub(crate) fn mini_apps_list(caller: WebviewWindow) -> Vec<MiniAppView> {
     if !authorize(&caller, CallerPolicy::Main, "mini_apps_list") {
         return Vec::new();
     }
-    load_registry()
-        .map(|registry| registry.apps().iter().map(MiniAppView::from).collect())
-        .unwrap_or_default()
+    let Ok(registry) = load_registry() else {
+        refresh_navigation_scopes();
+        return Vec::new();
+    };
+    publish_navigation_scopes(&registry);
+    registry.apps().iter().map(MiniAppView::from).collect()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) fn mini_apps_open(
+    caller: WebviewWindow,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "mini_apps_open") || !valid_id(&id) {
+        return false;
+    }
+    open_from_launch(&app_handle, &id)
 }
 
 #[tauri::command]
@@ -117,33 +134,59 @@ pub(crate) async fn mini_apps_install(
     {
         return Err("This address cannot be installed.".into());
     }
-    let discovered = discover_and_parse(&url).await?;
-    let mini_app = discovered.app;
+    let discovered = tokio::time::timeout(Duration::from_secs(30), discover_and_parse(&url))
+        .await
+        .map_err(|_| "The app took too long to install.".to_owned())??;
+    let mut mini_app = discovered.app;
+    #[cfg(target_os = "windows")]
+    {
+        mini_app.storage_id = new_storage_id()?;
+    }
     let mut view = MiniAppView::from(&mini_app);
-    let _guard = REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let (mut registry, recovered) = registry_for_install()?;
-    view.registry_recovered = recovered;
-    registry
-        .add(mini_app.clone())
-        .map_err(|error| installation_error(&error))?;
-    let json = registry
-        .to_json()
-        .map_err(|error| installation_error(&error))?;
-    let stored = APP_STORE
-        .get()
-        .is_some_and(|store| store.set_app_setting(REGISTRY_SETTING.into(), json));
-    if !stored {
-        return Err("The app could not be saved.".into());
+    {
+        let _guard = REGISTRY_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (mut registry, recovered) = registry_for_install()?;
+        registry
+            .add(mini_app.clone())
+            .map_err(|error| installation_error(&error))?;
+        let json = registry
+            .to_json()
+            .map_err(|error| installation_error(&error))?;
+        let stored = APP_STORE
+            .get()
+            .is_some_and(|store| store.set_app_setting(REGISTRY_SETTING.into(), json));
+        if !stored {
+            return Err("The app could not be saved.".into());
+        }
+        view.registry_recovered = recovered;
+        publish_navigation_scopes(&registry);
     }
     #[cfg(target_os = "windows")]
-    if let Some(icon) = discovered.native_icon.as_ref() {
-        persist_windows_app_icon(&app_handle, &mini_app, icon);
-    }
-    #[cfg(target_os = "windows")]
-    for destination in ["start_menu", "desktop"] {
-        create_windows_shortcut(&app_handle, &mini_app, destination)?;
+    {
+        let post_commit = tauri::async_runtime::spawn_blocking(move || {
+            if let Some(icon) = discovered.native_icon.as_ref() {
+                persist_windows_app_icon(&app_handle, &mini_app, icon);
+            }
+            let mut failures = Vec::new();
+            for destination in ["start_menu", "desktop"] {
+                if let Err(error) = create_windows_shortcut(&app_handle, &mini_app, destination) {
+                    failures.push(error);
+                }
+            }
+            failures
+        })
+        .await
+        .map_err(|_| "Windows shortcut creation failed.".to_owned())?;
+        if !post_commit.is_empty() {
+            // The durable install remains authoritative and launchable; the
+            // UI can retry shortcut creation without misreporting rollback.
+            crate::write_diagnostic(format_args!(
+                "mini_apps: installed app but shortcut creation needs retry: {}",
+                post_commit.join("; ")
+            ));
+        }
     }
     #[cfg(not(target_os = "windows"))]
     let _ = (app_handle, discovered.native_icon);
@@ -152,43 +195,56 @@ pub(crate) async fn mini_apps_install(
 
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn mini_apps_remove(
+pub(crate) async fn mini_apps_remove(
     caller: WebviewWindow,
     app_handle: tauri::AppHandle,
     id: String,
 ) -> bool {
-    if !authorize(&caller, CallerPolicy::Main, "mini_apps_remove") {
+    if !authorize(&caller, CallerPolicy::Main, "mini_apps_remove") || !valid_id(&id) {
         return false;
     }
-    let _guard = REGISTRY_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let Ok(mut registry) = load_registry() else {
-        return false;
-    };
-    let Some(removed) = registry.find(&id).cloned() else {
-        return false;
-    };
-    if registry.remove(&id).is_err() {
+    tauri::async_runtime::spawn_blocking(move || remove_installed_app(&app_handle, &id))
+        .await
+        .unwrap_or(false)
+}
+
+fn remove_installed_app(app_handle: &tauri::AppHandle, id: &str) -> bool {
+    if !valid_id(id) {
         return false;
     }
-    let Ok(json) = registry.to_json() else {
-        return false;
+    let removed = {
+        let _guard = REGISTRY_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Ok(mut registry) = load_registry() else {
+            return false;
+        };
+        let Some(removed) = registry.find(id).cloned() else {
+            return false;
+        };
+        if registry.remove(id).is_err() {
+            return false;
+        }
+        let Ok(json) = registry.to_json() else {
+            return false;
+        };
+        let saved = APP_STORE
+            .get()
+            .is_some_and(|store| store.set_app_setting(REGISTRY_SETTING.into(), json));
+        if !saved {
+            return false;
+        }
+        publish_navigation_scopes(&registry);
+        removed
     };
-    let saved = APP_STORE
-        .get()
-        .is_some_and(|store| store.set_app_setting(REGISTRY_SETTING.into(), json));
-    if saved {
-        close_app_window(&app_handle, &removed.id);
-    }
+
+    close_app_window(app_handle, &removed.id);
     #[cfg(target_os = "windows")]
-    if saved {
-        remove_windows_shortcuts(&app_handle, &removed);
-        remove_app_storage(&app_handle, &removed.id);
+    {
+        remove_windows_shortcuts(app_handle, &removed);
+        remove_app_storage(app_handle, &removed);
     }
-    #[cfg(not(target_os = "windows"))]
-    let _ = removed;
-    saved
+    true
 }
 
 fn close_app_window(app: &tauri::AppHandle, id: &str) {
@@ -212,12 +268,12 @@ fn app_storage_path(app: &tauri::AppHandle, id: &str) -> Result<PathBuf, String>
 }
 
 #[cfg(target_os = "windows")]
-fn remove_app_storage(app: &tauri::AppHandle, id: &str) {
-    let Ok(path) = app_storage_path(app, id) else {
+fn remove_app_storage(app: &tauri::AppHandle, mini_app: &MiniApp) {
+    let Ok(path) = app_storage_path(app, mini_app_storage_id(mini_app)) else {
         return;
     };
-    // This path is derived from a validated fixed-length hex id beneath the
-    // application data directory, never from site-controlled manifest data.
+    // This path uses a validated per-install hex id beneath app data, never a
+    // site-controlled path. Reinstallations receive a different directory.
     let _ = std::thread::Builder::new()
         .name("Zephium-mini-app-data-cleanup".into())
         .spawn(move || {
@@ -274,7 +330,7 @@ fn create_windows_shortcut(
         .path()
         .resolve("icons/icon.ico", tauri::path::BaseDirectory::Resource)
         .unwrap_or(executable.clone());
-    let icon = app_storage_path(app, &mini_app.id)
+    let icon = app_storage_path(app, mini_app_storage_id(mini_app))
         .ok()
         .map(|directory| directory.join("icon.ico"))
         .filter(|path| path.is_file())
@@ -316,6 +372,9 @@ fn create_windows_shortcut(
             &app_user_model_id,
         )
         .map_err(|_| "Windows could not set the shortcut identity.".to_owned())?;
+        property_store
+            .Commit()
+            .map_err(|_| "Windows could not save the shortcut identity.".to_owned())?;
         let persist: IPersistFile = link
             .cast()
             .map_err(|_| "Windows shortcut storage is unavailable.".to_owned())?;
@@ -324,6 +383,14 @@ fn create_windows_shortcut(
             .Save(PCWSTR(shortcut_wide.as_ptr()), true)
             .map_err(|_| "Windows could not save the app shortcut.".to_owned())
     }?;
+    let marker = app_storage_path(app, mini_app_storage_id(mini_app))?
+        .join(format!("shortcut-name-{destination}.txt"));
+    if fs::write(marker, &filename).is_err() {
+        if shortcut_is_owned(&shortcut, mini_app) {
+            let _ = fs::remove_file(&shortcut);
+        }
+        return Err("The app shortcut settings could not be saved.".into());
+    }
     for legacy_name in [
         safe_filename(&format!(
             "{} - {host} [{}]",
@@ -333,7 +400,7 @@ fn create_windows_shortcut(
         safe_filename(&format!("{} - {host}", mini_app.name)),
     ] {
         let legacy = folder_path.join(format!("{legacy_name}.lnk"));
-        if legacy != shortcut {
+        if legacy != shortcut && shortcut_is_owned(&legacy, mini_app) {
             let _ = fs::remove_file(legacy);
         }
     }
@@ -348,34 +415,37 @@ fn shortcut_filename(
     folder: &std::path::Path,
     host: &str,
 ) -> Result<String, String> {
-    let data_directory = app_storage_path(app, &mini_app.id)?;
+    let data_directory = app_storage_path(app, mini_app_storage_id(mini_app))?;
     fs::create_dir_all(&data_directory)
         .map_err(|_| "The app shortcut settings could not be saved.".to_owned())?;
     let marker = data_directory.join(format!("shortcut-name-{destination}.txt"));
     if let Ok(name) = fs::read_to_string(&marker) {
         let name = name.trim();
-        if !name.is_empty() && safe_filename(name) == name && name.len() <= 100 {
+        let marked_path = folder.join(format!("{name}.lnk"));
+        if valid_shortcut_name(name)
+            && (!marked_path.exists() || shortcut_is_owned(&marked_path, mini_app))
+        {
             return Ok(name.to_owned());
         }
     }
 
-    let mut name = safe_filename(&mini_app.name);
-    if name.is_empty() {
-        name = "Web app".into();
+    let mut base = safe_filename(&mini_app.name);
+    if base.is_empty() {
+        base = "Web app".into();
     }
-    if folder.join(format!("{name}.lnk")).exists() {
-        name = safe_filename(&format!("{name} ({host})"));
-    }
-    if folder.join(format!("{name}.lnk")).exists() {
-        name = safe_filename(&format!("{name} [{}]", &mini_app.id[..8]));
-    }
-    let path = folder.join(format!("{name}.lnk"));
-    if path.exists() {
-        return Err("A shortcut with this app name already exists.".into());
-    }
-    fs::write(marker, &name)
-        .map_err(|_| "The app shortcut settings could not be saved.".to_owned())?;
-    Ok(name)
+    let candidates = [
+        base.clone(),
+        safe_filename(&format!("{base} ({host})")),
+        safe_filename(&format!("{base} [{}]", &mini_app.id[..8])),
+    ];
+    candidates
+        .into_iter()
+        .find(|name| {
+            valid_shortcut_name(name)
+                && (!folder.join(format!("{name}.lnk")).exists()
+                    || shortcut_is_owned(&folder.join(format!("{name}.lnk")), mini_app))
+        })
+        .ok_or_else(|| "A shortcut with this app name already exists.".to_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -386,7 +456,7 @@ fn remove_windows_shortcuts(app: &tauri::AppHandle, mini_app: &MiniApp) {
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_default();
-    let mut filenames = vec![
+    let legacy_filenames = [
         format!(
             "{}.lnk",
             safe_filename(&format!(
@@ -400,19 +470,11 @@ fn remove_windows_shortcuts(app: &tauri::AppHandle, mini_app: &MiniApp) {
             safe_filename(&format!("{} - {host}", mini_app.name))
         ),
     ];
-    if let Ok(directory) = app_storage_path(app, &mini_app.id) {
-        for destination in ["desktop", "start_menu"] {
-            if let Ok(name) =
-                fs::read_to_string(directory.join(format!("shortcut-name-{destination}.txt")))
-            {
-                let name = name.trim();
-                if !name.is_empty() && safe_filename(name) == name && name.len() <= 100 {
-                    filenames.push(format!("{name}.lnk"));
-                }
-            }
-        }
-    }
-    for folder_id in [&FOLDERID_Desktop, &FOLDERID_Programs] {
+    let data_directory = app_storage_path(app, mini_app_storage_id(mini_app)).ok();
+    for (folder_id, destination) in [
+        (&FOLDERID_Desktop, "desktop"),
+        (&FOLDERID_Programs, "start_menu"),
+    ] {
         let Ok(folder) = (unsafe { SHGetKnownFolderPath(folder_id, Default::default(), None) })
         else {
             continue;
@@ -425,16 +487,21 @@ fn remove_windows_shortcuts(app: &tauri::AppHandle, mini_app: &MiniApp) {
         let Ok(folder) = folder_path else {
             continue;
         };
-        let Ok(entries) = fs::read_dir(folder) else {
-            continue;
-        };
-        for entry in entries.flatten().take(512) {
-            let path = entry.path();
-            if path.file_name().is_some_and(|name| {
-                filenames
-                    .iter()
-                    .any(|filename| name == std::ffi::OsStr::new(filename))
-            }) {
+        let folder = PathBuf::from(folder);
+        let mut filenames = Vec::with_capacity(3);
+        if let Some(directory) = data_directory.as_ref() {
+            let marker = directory.join(format!("shortcut-name-{destination}.txt"));
+            if let Ok(name) = fs::read_to_string(marker) {
+                let name = name.trim();
+                if valid_shortcut_name(name) {
+                    filenames.push(format!("{name}.lnk"));
+                }
+            }
+        }
+        filenames.extend(legacy_filenames.iter().cloned());
+        for filename in filenames {
+            let path = folder.join(filename);
+            if path.is_file() && shortcut_is_owned(&path, mini_app) {
                 let _ = fs::remove_file(path);
             }
         }
@@ -442,20 +509,105 @@ fn remove_windows_shortcuts(app: &tauri::AppHandle, mini_app: &MiniApp) {
 }
 
 #[cfg(target_os = "windows")]
-fn safe_filename(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| {
-            !matches!(
-                *character,
-                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+fn shortcut_is_owned(path: &std::path::Path, mini_app: &MiniApp) -> bool {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Storage::FileSystem::WIN32_FIND_DATAW;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink, SLGP_RAWPATH};
+
+    if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
+        return false;
+    }
+    struct ComApartment;
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            unsafe { CoUninitialize() };
+        }
+    }
+    let _apartment = ComApartment;
+
+    let Some(expected) = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::canonicalize(path).ok())
+    else {
+        return false;
+    };
+    let path_wide = wide(path.as_os_str());
+    // SAFETY: COM is initialized as an STA on this worker thread. All buffers
+    // passed to ShellLink are owned, writable UTF-16 arrays for these calls.
+    unsafe {
+        let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        else {
+            return false;
+        };
+        let Ok(persist) = link.cast::<IPersistFile>() else {
+            return false;
+        };
+        if persist.Load(PCWSTR(path_wide.as_ptr()), STGM_READ).is_err() {
+            return false;
+        }
+        let mut target = vec![0u16; 32_768];
+        if link
+            .GetPath(
+                &mut target,
+                std::ptr::null_mut::<WIN32_FIND_DATAW>(),
+                SLGP_RAWPATH.0 as u32,
             )
-        })
-        .take(80)
-        .collect::<String>()
-        .trim()
-        .trim_end_matches('.')
-        .to_owned()
+            .is_err()
+        {
+            return false;
+        }
+        let mut arguments = vec![0u16; 4_096];
+        if link.GetArguments(&mut arguments).is_err() {
+            return false;
+        }
+        let target_end = target
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(target.len());
+        let arguments_end = arguments
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(arguments.len());
+        let target = std::path::PathBuf::from(std::ffi::OsString::from_wide(&target[..target_end]));
+        let same_target = std::fs::canonicalize(target).is_ok_and(|target| {
+            target
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy())
+        });
+        let arguments = String::from_utf16_lossy(&arguments[..arguments_end]);
+        same_target
+            && arguments.split_whitespace().collect::<Vec<_>>()
+                == ["--mini-app", mini_app.id.as_str()]
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn safe_filename(value: &str) -> String {
+    let mut result = String::new();
+    let mut utf16_len = 0;
+    for character in value.chars().filter(|character| {
+        !matches!(
+            *character,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+        )
+    }) {
+        utf16_len += character.len_utf16();
+        if utf16_len > 64 {
+            break;
+        }
+        result.push(character);
+    }
+    result.trim().trim_end_matches('.').to_owned()
+}
+
+#[cfg(target_os = "windows")]
+fn valid_shortcut_name(value: &str) -> bool {
+    !value.is_empty() && safe_filename(value) == value && value.encode_utf16().count() <= 64
 }
 
 #[cfg(target_os = "windows")]
@@ -506,11 +658,19 @@ pub(crate) fn open_from_launch(app: &tauri::AppHandle, id: &str) -> bool {
         let mini_app = mini_app.clone();
         let id = id.to_owned();
         let opening_id = id.clone();
+        let guard_id = opening_id.clone();
         let window_app = app.clone();
         let scheduled = app
             .run_on_main_thread(move || {
-                let _opening = OpeningWindow(opening_id);
-                create_app_window(window_app, mini_app);
+                let _opening = OpeningWindow(guard_id);
+                let Ok(registry) = load_registry() else {
+                    return;
+                };
+                if registry.find(&opening_id).is_some_and(|current| {
+                    current.id == mini_app.id && current.storage_id == mini_app.storage_id
+                }) {
+                    create_app_window(window_app, mini_app);
+                }
             })
             .is_ok();
         if !scheduled {
@@ -534,6 +694,23 @@ fn valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(target_os = "windows")]
+fn mini_app_storage_id(mini_app: &MiniApp) -> &str {
+    if valid_id(&mini_app.storage_id) {
+        &mini_app.storage_id
+    } else {
+        &mini_app.id
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn new_storage_id() -> Result<String, String> {
+    let mut random = [0u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|_| "A private app storage identity could not be created.".to_owned())?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// Mini-app WebViews are the only unprivileged windows allowed to navigate to
 /// remote pages. Resolve every navigation against the installed registry so a
 /// guessed window label cannot widen the HTTPS scope.
@@ -541,25 +718,26 @@ pub(crate) fn allows_navigation(label: &str, url: &Url) -> bool {
     let Some(id) = label.strip_prefix("miniapp-") else {
         return false;
     };
-    if !valid_id(id)
-        || url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !url.host_str().is_some_and(is_public_host)
-    {
+    if !valid_id(id) {
         return false;
     }
-    let Ok(registry) = load_registry() else {
-        return false;
-    };
-    let Some(mini_app) = registry.find(id) else {
-        return false;
-    };
-    Url::parse(&mini_app.scope).is_ok_and(|scope| zephium_miniapps::is_in_scope(url, &scope))
+    let scopes = NAVIGATION_SCOPES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    navigation_scope_allows(scopes.as_ref().and_then(|scopes| scopes.get(id)), url)
+}
+
+fn navigation_scope_allows(scope: Option<&Url>, url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.host_str().is_some_and(is_public_host)
+        && scope.is_some_and(|scope| zephium_miniapps::is_in_scope(url, scope))
 }
 
 /// A shortcut launch shares the browser process and services, but should not
 /// reveal the browser's chrome window alongside the standalone app window.
+#[cfg(target_os = "windows")]
 pub(crate) fn launched_standalone() -> bool {
     let id = std::env::args_os()
         .skip(1)
@@ -614,7 +792,7 @@ fn create_app_window_inner(app: tauri::AppHandle, mini_app: &MiniApp) -> bool {
     else {
         return false;
     };
-    let Ok(data_directory) = app_storage_path(&app, &mini_app.id) else {
+    let Ok(data_directory) = app_storage_path(&app, mini_app_storage_id(mini_app)) else {
         return false;
     };
     if fs::create_dir_all(&data_directory).is_err() {
@@ -684,7 +862,7 @@ fn create_app_window_inner(app: tauri::AppHandle, mini_app: &MiniApp) -> bool {
             }
             let app_user_model_id =
                 crate::platform::windows_taskbar_icon::windows_app_user_model_id(&mini_app.id);
-            let taskbar_icon = app_storage_path(&app, &mini_app.id)
+            let taskbar_icon = app_storage_path(&app, mini_app_storage_id(mini_app))
                 .ok()
                 .map(|path| path.join("icon.ico"))
                 .filter(|path| path.is_file());
@@ -697,6 +875,7 @@ fn create_app_window_inner(app: tauri::AppHandle, mini_app: &MiniApp) -> bool {
                 super::write_diagnostic(format_args!(
                     "mini_apps: native mini window could not be shown: {error}"
                 ));
+                let _ = window.close();
                 return false;
             }
             opened
@@ -741,6 +920,32 @@ fn load_registry() -> Result<Registry, MiniAppError> {
         .and_then(|store| store.app_setting(REGISTRY_SETTING))
         .unwrap_or_default();
     Registry::from_json(&raw)
+}
+
+pub(crate) fn refresh_navigation_scopes() {
+    let scopes = load_registry().ok();
+    let scopes = scopes.map(|registry| navigation_scopes(&registry));
+    *NAVIGATION_SCOPES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = scopes;
+}
+
+fn publish_navigation_scopes(registry: &Registry) {
+    *NAVIGATION_SCOPES
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(navigation_scopes(registry));
+}
+
+fn navigation_scopes(registry: &Registry) -> HashMap<String, Url> {
+    registry
+        .apps()
+        .iter()
+        .filter_map(|app| {
+            Url::parse(&app.scope)
+                .ok()
+                .map(|scope| (app.id.clone(), scope))
+        })
+        .collect()
 }
 
 fn registry_for_install() -> Result<(Registry, bool), String> {
@@ -828,8 +1033,9 @@ async fn discover_and_parse(raw_url: &str) -> Result<DiscoveredMiniApp, String> 
         return Ok(DiscoveredMiniApp { app, native_icon });
     }
     let html = String::from_utf8_lossy(&body);
-    let metadata = site_metadata(&html, &effective);
-    let mut app = if let Some(manifest_url) = manifest_href(&html, &effective) {
+    let document_base = document_base_url(&html, &effective);
+    let metadata = site_metadata(&html, &document_base);
+    let mut app = if let Some(manifest_url) = manifest_href(&html, &document_base) {
         match fetch(&manifest_url).await {
             Ok((manifest, manifest_url, _)) => parse_manifest(&manifest, &manifest_url, now())
                 .ok()
@@ -870,6 +1076,9 @@ async fn discover_and_parse(raw_url: &str) -> Result<DiscoveredMiniApp, String> 
 fn site_app(page_url: &Url, page_name: Option<&str>) -> MiniApp {
     let mut start = page_url.clone();
     start.set_fragment(None);
+    if start.query().is_some_and(str::is_empty) {
+        start.set_query(None);
+    }
     let mut scope = start.clone();
     scope.set_path("/");
     scope.set_query(None);
@@ -882,6 +1091,7 @@ fn site_app(page_url: &Url, page_name: Option<&str>) -> MiniApp {
     let start_url = start.to_string();
     MiniApp {
         id: app_id(&start_url),
+        storage_id: String::new(),
         name,
         start_url,
         scope: scope.to_string(),
@@ -901,17 +1111,16 @@ async fn fetch_app_icon(candidates: Vec<String>) -> (Option<String>, Option<imag
         let Ok((bytes, _, _)) = fetch_limited(&url, MAX_ICON_BYTES).await else {
             continue;
         };
-        let Some(rgba) = crate::favicon_probe::rasterize(&bytes) else {
+        let Some((rgba, native_icon)) = crate::miniapp_icons::rasterize(&bytes) else {
             continue;
         };
-        let native_icon = crate::miniapp_icons::rasterize(&bytes);
         use base64::Engine as _;
         return (
             Some(format!(
                 "rgba32:{}",
                 base64::engine::general_purpose::STANDARD.encode(rgba)
             )),
-            native_icon,
+            Some(native_icon),
         );
     }
     (None, None)
@@ -919,7 +1128,7 @@ async fn fetch_app_icon(candidates: Vec<String>) -> (Option<String>, Option<imag
 
 #[cfg(target_os = "windows")]
 fn persist_windows_app_icon(app: &tauri::AppHandle, mini_app: &MiniApp, icon: &image::RgbaImage) {
-    let Ok(directory) = app_storage_path(app, &mini_app.id) else {
+    let Ok(directory) = app_storage_path(app, mini_app_storage_id(mini_app)) else {
         return;
     };
     if fs::create_dir_all(&directory).is_err() {
@@ -981,10 +1190,14 @@ async fn fetch_limited(url: &Url, byte_limit: usize) -> Result<(Vec<u8>, Url, St
             .host_str()
             .ok_or_else(|| "Only public HTTPS web apps can be installed.".to_owned())?;
         let port = target.port_or_known_default().unwrap_or(443);
-        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-            .await
-            .map_err(|_| "The app could not be reached.".to_owned())?
-            .collect();
+        let addresses: Vec<SocketAddr> = tokio::time::timeout(
+            Duration::from_secs(8),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await
+        .map_err(|_| "The app could not be reached.".to_owned())?
+        .map_err(|_| "The app could not be reached.".to_owned())?
+        .collect();
         if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
             return Err("Only public HTTPS web apps can be installed.".to_owned());
         }
@@ -1081,4 +1294,39 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::navigation_scope_allows;
+    use reqwest::Url;
+
+    #[test]
+    fn navigation_requires_available_scope_public_https_and_scope_membership() {
+        let scope = Url::parse("https://example.com/app/").unwrap();
+        assert!(navigation_scope_allows(
+            Some(&scope),
+            &Url::parse("https://example.com/app/page").unwrap()
+        ));
+        assert!(!navigation_scope_allows(
+            Some(&scope),
+            &Url::parse("https://example.com/outside").unwrap()
+        ));
+        assert!(!navigation_scope_allows(
+            None,
+            &Url::parse("https://example.com/app/page").unwrap()
+        ));
+        assert!(!navigation_scope_allows(
+            Some(&scope),
+            &Url::parse("http://example.com/app/page").unwrap()
+        ));
+        assert!(!navigation_scope_allows(
+            Some(&scope),
+            &Url::parse("https://user@example.com/app/page").unwrap()
+        ));
+        assert!(!navigation_scope_allows(
+            Some(&scope),
+            &Url::parse("https://127.0.0.1/app/page").unwrap()
+        ));
+    }
 }

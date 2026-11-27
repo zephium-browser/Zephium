@@ -85,7 +85,11 @@ pub fn site_metadata(html: &str, page_url: &Url) -> SiteMetadata {
         })
         .collect();
     icons.sort_unstable();
-    icons.dedup_by(|left, right| left.2 == right.2);
-    let icons = icons.into_iter().take(3).map(|(_, _, url)| url).collect();
+    let mut seen = std::collections::HashSet::new();
+    let icons = icons
+        .into_iter()
+        .filter_map(|(_, _, url)| seen.insert(url.clone()).then_some(url))
+        .take(3)
+        .collect();
     SiteMetadata { name, icons }
 }

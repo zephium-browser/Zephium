@@ -13,6 +13,20 @@ const native = vi.hoisted(() => ({
   page: null as string | null,
   edit: vi.fn(async () => true),
   answer: vi.fn(async () => ({ accepted: true, operation_id: null })),
+  install: vi.fn(async () => ({
+    status: "ok" as const,
+    data: {
+      id: "0123456789abcdef0123456789abcdef",
+      name: "Example",
+      start_url: "https://www.wikipedia.org/wiki/Premium",
+      scope: "https://www.wikipedia.org/",
+      display: "standalone",
+      theme_color: null,
+      background_color: null,
+      icon: null,
+      registry_recovered: false,
+    },
+  })),
 }));
 
 vi.mock("$domain/surface", () => ({ surface: { currentPage: () => native.page } }));
@@ -45,6 +59,7 @@ vi.mock("$shared/ipc/bindings", async () => {
     tabsBootstrap: async () => {},
     runCommand: async () => ({ accepted: true, operation_id: null }),
     launcherEdit: native.edit,
+    miniAppsInstall: native.install,
     tabsAnswerPageRequest: native.answer as never,
     settingGet: async (key: string) => (key === "zoom.default" ? native.defaultZoom : null),
   });
@@ -61,6 +76,21 @@ afterEach(() => {
   native.defaultZoom = "100";
   native.page = null;
   native.edit.mockClear();
+  native.install.mockReset();
+  native.install.mockResolvedValue({
+    status: "ok",
+    data: {
+      id: "0123456789abcdef0123456789abcdef",
+      name: "Example",
+      start_url: "https://www.wikipedia.org/wiki/Premium",
+      scope: "https://www.wikipedia.org/",
+      display: "standalone",
+      theme_color: null,
+      background_color: null,
+      icon: null,
+      registry_recovered: false,
+    },
+  });
 });
 
 async function field(
@@ -155,6 +185,53 @@ test("editing shows the whole address and rests on the host", async () => {
   await expect.poll(() => input.value).toBe("https://www.wikipedia.org/wiki/Premium");
   input.blur();
   await expect.poll(() => input.value).toBe("www.wikipedia.org");
+});
+
+test("the HTTPS install action installs once and reports registry recovery", async () => {
+  native.install.mockResolvedValueOnce({
+    status: "ok",
+    data: {
+      id: "0123456789abcdef0123456789abcdef",
+      name: "Example",
+      start_url: "https://www.wikipedia.org/wiki/Premium",
+      scope: "https://www.wikipedia.org/",
+      display: "standalone",
+      theme_color: null,
+      background_color: null,
+      icon: null,
+      registry_recovered: true,
+    },
+  });
+  const { screen } = await field();
+  await screen.getByRole("button", { name: "Install" }).click();
+  expect(native.install).toHaveBeenCalledWith("https://www.wikipedia.org/wiki/Premium");
+  await expect.element(screen.getByText(/We repaired the saved app list/u)).toBeVisible();
+});
+
+test("the install action is disabled while its command is pending", async () => {
+  let finish: ((value: Awaited<ReturnType<typeof native.install>>) => void) | undefined;
+  native.install.mockImplementationOnce(
+    () => new Promise((resolve) => (finish = resolve)) as ReturnType<typeof native.install>,
+  );
+  const { screen } = await field();
+  const install = screen.getByRole("button", { name: "Install" });
+  await install.click();
+  await expect.element(install).toBeDisabled();
+  finish?.({
+    status: "ok",
+    data: {
+      id: "0123456789abcdef0123456789abcdef",
+      name: "Example",
+      start_url: "https://www.wikipedia.org/wiki/Premium",
+      scope: "https://www.wikipedia.org/",
+      display: "standalone",
+      theme_color: null,
+      background_color: null,
+      icon: null,
+      registry_recovered: false,
+    },
+  });
+  await expect.element(install).toBeDisabled();
 });
 
 test("a press anywhere else in the chrome ends editing", async () => {

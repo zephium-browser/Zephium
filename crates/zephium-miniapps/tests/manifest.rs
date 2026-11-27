@@ -128,6 +128,20 @@ fn drops_unknown_display_modes_and_invalid_colours() {
 }
 
 #[test]
+fn malformed_icon_entries_do_not_reject_an_installable_manifest() {
+    let manifest = r#"{
+        "name":"X",
+        "start_url":"https://example.com/",
+        "icons":[{"src":12,"sizes":"192x192"},{"src":"/good.png","sizes":"64x64"}]
+    }"#;
+    let app = parse_manifest(manifest.as_bytes(), &base(), 0).unwrap();
+    assert_eq!(
+        app.icon.as_deref(),
+        Some("https://mail.example.com/good.png")
+    );
+}
+
+#[test]
 fn identities_are_stable_and_distinct() {
     let a = app_id("https://example.com/app");
     let b = app_id("https://example.com/app");

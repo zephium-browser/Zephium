@@ -622,6 +622,7 @@ impl UiStartupGate {
             self.reveal_browser(window);
             return;
         }
+        #[cfg(target_os = "windows")]
         if miniapps::launched_standalone() {
             if !miniapps::standalone_launch_finished() {
                 // The mini window is still being created on the UI thread.
@@ -1990,6 +1991,7 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_running,
             work_product::work_context_preview,
             miniapps::mini_apps_list,
+            miniapps::mini_apps_open,
             miniapps::mini_apps_install,
             miniapps::mini_apps_remove,
             media::media_import,
@@ -7440,13 +7442,20 @@ fn finish_browser_setup(
         .build()?;
     #[cfg(target_os = "windows")]
     {
-        let icon = image::load_from_memory(include_bytes!("../icons/128x128.png"))?.into_rgba8();
-        let (width, height) = (icon.width(), icon.height());
-        window.set_icon(tauri::image::Image::new_owned(
-            icon.into_raw(),
-            width,
-            height,
-        ))?;
+        match image::load_from_memory(include_bytes!("../icons/128x128.png")) {
+            Ok(icon) => {
+                let icon = icon.into_rgba8();
+                let (width, height) = (icon.width(), icon.height());
+                if let Err(error) = window.set_icon(tauri::image::Image::new_owned(
+                    icon.into_raw(),
+                    width,
+                    height,
+                )) {
+                    diagnostic!("startup: could not apply browser window icon: {error}");
+                }
+            }
+            Err(error) => diagnostic!("startup: could not decode browser window icon: {error}"),
+        }
         platform::windows_taskbar_icon::set_taskbar_icon(&window, None, None);
     }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -8672,10 +8681,9 @@ pub fn run() {
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             let arguments: Vec<String> = argv.into_iter().skip(1).collect();
-            if !arguments.iter().any(|argument| argument == "--mini-app") {
+            if !external_links::hand_off(app, arguments, true) {
                 external_links::bring_forward(app);
             }
-            external_links::hand_off(app, arguments, true);
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -8871,6 +8879,7 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                miniapps::refresh_navigation_scopes();
                 let startup = startup_recovery::begin(&data_dir);
                 let recovery_needed = match &startup {
                     Ok(attempt) => attempt.requires_recovery(),

@@ -1,6 +1,6 @@
 use url::Url;
 use zephium_miniapps::{
-    parse_manifest, MiniAppError, Registry, MAX_INSTALLED_APPS, MAX_REGISTRY_BYTES,
+    app_id, parse_manifest, MiniAppError, Registry, MAX_INSTALLED_APPS, MAX_REGISTRY_BYTES,
 };
 
 fn app(start: &str) -> zephium_miniapps::MiniApp {
@@ -85,4 +85,17 @@ fn corrupt_foreign_or_duplicated_documents_are_refused() {
         MiniAppError::RegistryTooLarge
     );
     assert_eq!(Registry::from_json("   ").unwrap().apps().len(), 0);
+}
+
+#[test]
+fn restoration_rejects_credentialed_start_urls_even_with_a_matching_id() {
+    let mut installed = app("https://example.com/");
+    installed.start_url = "https://user:secret@example.com/".into();
+    installed.id = app_id(&installed.start_url);
+    let mut registry = Registry::new();
+    registry.add(installed).unwrap();
+    assert_eq!(
+        Registry::from_json(&registry.to_json().unwrap()).unwrap_err(),
+        MiniAppError::InvalidRegistry
+    );
 }

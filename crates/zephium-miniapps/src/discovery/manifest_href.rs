@@ -5,7 +5,7 @@ use url::Url;
 /// Finds the document's Web App Manifest link. Only the first valid HTTPS
 /// candidate is returned; a page can name many links but never more than one
 /// installation target per call.
-pub fn manifest_href(html: &str, page_url: &Url) -> Option<Url> {
+pub fn manifest_href(html: &str, base_url: &Url) -> Option<Url> {
     if html.len() > 4 * 1024 * 1024 {
         return None;
     }
@@ -25,7 +25,7 @@ pub fn manifest_href(html: &str, page_url: &Url) -> Option<Url> {
                 return None;
             }
             let href = link.attr("href")?.to_string();
-            normalize_https_url(page_url, &href).ok()
+            normalize_https_url(base_url, &href).ok()
         })
 }
 
