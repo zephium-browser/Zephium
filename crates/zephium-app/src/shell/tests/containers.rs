@@ -47,3 +47,31 @@ fn assigning_a_container_is_denied_when_its_space_scope_excludes_the_tab() {
     assert_eq!(denied.reason, OperationReason::InvalidScope);
     assert_eq!(shell.items.tab(tab).unwrap().container, Some(available));
 }
+
+#[test]
+fn container_recreation_uses_pending_navigation() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
+    let tab = active_id(&screen);
+    let created = shell.handle_operation(Command::Container(Box::new(ContainerCommand::Create {
+        name: "Pending".into(),
+        look: SpaceLook::default(),
+        spaces: SpaceAccess::Selected(vec![space]),
+    })));
+    assert_eq!(created.outcome, OperationOutcome::Applied);
+    let container = shell.containers.for_profile(profile).next().unwrap().id;
+    let _ = shell.items.navigate(tab, "https://first-load.example/");
+    let assigned =
+        shell.handle_operation(Command::Container(Box::new(ContainerCommand::AssignTab {
+            tab,
+            container: Some(container),
+        })));
+
+    assert_ne!(assigned.outcome, OperationOutcome::Rejected);
+    assert_eq!(
+        shell.container_recreates.get(&tab).unwrap().1.as_str(),
+        "https://first-load.example/"
+    );
+}

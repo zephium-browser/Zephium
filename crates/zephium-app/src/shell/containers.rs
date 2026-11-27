@@ -14,7 +14,12 @@ impl Shell {
         tab: zephium_core::ids::ItemId,
         container: Option<zephium_core::ids::ContainerId>,
     ) {
-        let Some(url) = self.items.tab(tab).and_then(|state| state.url.clone()) else {
+        let Some(url) = self
+            .items
+            .tab(tab)
+            .and_then(|state| state.url.clone())
+            .or_else(|| self.items.pending_navigation_url(tab).cloned())
+        else {
             return;
         };
         self.container_recreates.insert(tab, (container, url));
