@@ -33,14 +33,14 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn failed_attach_does_not_install_key_monitor() {
+    fn failed_attach_skips_monitor() {
         let installed = Cell::new(false);
         assert!(!after_engine_attach(|| false, || installed.set(true)));
         assert!(!installed.get());
     }
 
     #[test]
-    fn successful_attach_installs_key_monitor() {
+    fn attached_window_gets_monitor() {
         let installed = Cell::new(false);
         assert!(after_engine_attach(|| true, || installed.set(true)));
         assert!(installed.get());

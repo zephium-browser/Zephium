@@ -9046,7 +9046,7 @@ mod frame_sources;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn closing_main_with_other_browser_windows_flushes_before_destruction() {
+    fn main_close_flushes_with_siblings() {
         let source = include_str!("lib.rs");
         let close = source
             .split("if browser_window::labels(&exit_handle).len() > 1 {")
@@ -9065,7 +9065,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_projections_are_routed_to_their_panel_owner_window() {
+    fn projections_follow_owner_window() {
         assert_eq!(super::browser_projection_label(Some("1")), super::MAIN_LABEL);
         assert_eq!(super::browser_projection_label(Some("2")), "browser-2");
         assert_eq!(super::browser_projection_label(None), super::MAIN_LABEL);

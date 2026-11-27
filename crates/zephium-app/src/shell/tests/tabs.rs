@@ -61,7 +61,7 @@ fn switching_tabs_shows_only_active() {
 }
 
 #[test]
-fn closing_a_tab_skips_successors_active_in_another_window() {
+fn close_uses_free_successor() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);

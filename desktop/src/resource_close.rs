@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_renderer_cancels_successful_terminal_flush_for_survivors() {
+    fn terminal_close_cancels_survivor_flush() {
         let mut gate = Gate {
             prepared: false,
             ..Gate::default()
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_main_renderer_removes_it_and_cancels_survivors() {
+    fn main_close_clears_gate() {
         let mut gate = Gate {
             prepared: true,
             ..Gate::default()

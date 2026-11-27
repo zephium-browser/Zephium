@@ -102,7 +102,7 @@ fn a_tab_active_in_another_browser_window_cannot_blank_its_content_stage() {
 }
 
 #[test]
-fn previous_tab_cycle_skips_tabs_active_in_another_window() {
+fn previous_cycle_skips_busy_tabs() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let first = active_id(&screen);
@@ -140,7 +140,7 @@ fn previous_tab_cycle_skips_tabs_active_in_another_window() {
 }
 
 #[test]
-fn split_and_drop_reject_tabs_visible_in_another_window() {
+fn split_drop_reject_cross_window_panes() {
     let (mut shell, _engine, screen) = setup();
     shell.handle(Command::Bootstrap);
     let active = active_id(&screen);
