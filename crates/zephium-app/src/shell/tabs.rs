@@ -198,6 +198,20 @@ struct KeptSlot {
 }
 
 impl Shell {
+    pub(super) fn item_visible_in_other_window(&self, id: ItemId, profile: ProfileId) -> bool {
+        let focused = self.windows.focused().map(|window| window.id);
+        self.windows.iter().any(|window| {
+            Some(window.id) != focused
+                && window.kind == zephium_core::windows::WindowKind::Main
+                && window.profile == profile
+                && (window.active == Some(id)
+                    || window
+                        .splits
+                        .as_ref()
+                        .is_some_and(|tree| tree.contains(id)))
+        })
+    }
+
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
         self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
@@ -862,6 +876,15 @@ impl Shell {
             || !self.item_in_scope(dropped, profile, space)
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
+        }
+        if [target, dropped]
+            .into_iter()
+            .any(|id| self.item_visible_in_other_window(id, profile))
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
         }
         if [target, dropped].into_iter().any(|id| {
             self.items

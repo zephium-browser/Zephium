@@ -816,6 +816,15 @@ impl Shell {
         {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        if [active, other]
+            .into_iter()
+            .any(|id| self.item_visible_in_other_window(id, profile))
+        {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::LayoutUnavailable,
+            );
+        }
         if [active, other].into_iter().any(|id| {
             self.items.tab(id).is_some_and(|tab| {
                 matches!(tab.content, zephium_core::item::TabContent::BrowserOwned(_))
