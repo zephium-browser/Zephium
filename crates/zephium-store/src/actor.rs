@@ -1927,26 +1927,27 @@ fn actor(
                 Err(_) => break,
             }
         };
+        let mut settings_durable = false;
         if cmd.is_some() {
             absorb_latest_session(&latest_session, &mut pending);
-            if !matches!(
-                &cmd,
-                Some(Cmd::Flush(_) | Cmd::Shutdown(_) | Cmd::PendingProfileDeletions(_))
-            ) {
-                let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
-                let _ = flush_visits(
-                    &mut hub,
-                    &pending_visits,
-                    &mut pending,
-                    &mut visit_retry,
-                    false,
-                );
+            if !matches!(&cmd, Some(Cmd::Flush(_) | Cmd::Shutdown(_))) {
+                settings_durable =
+                    flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
+                if settings_durable {
+                    let _ = flush_visits(
+                        &mut hub,
+                        &pending_visits,
+                        &mut pending,
+                        &mut visit_retry,
+                        false,
+                    );
+                }
                 let _ = activity.flush(&mut hub, &mut pending, false);
             }
         }
         match cmd {
             None => {
-                let settings_durable =
+                settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
                 if settings_durable
                     && pending
@@ -2547,9 +2548,10 @@ fn actor(
         }
         // Non-save traffic must not reset either deadline. Long-running reads
         // may overshoot it, so check again after every command as well.
-        if pending
-            .as_ref()
-            .is_some_and(|pending| pending.due(Instant::now()))
+        if settings_durable
+            && pending
+                .as_ref()
+                .is_some_and(|pending| pending.due(Instant::now()))
             && flush(&mut hub, &mut pending)
         {
             let _ = flush_visits(
@@ -2565,9 +2567,9 @@ fn actor(
     // Never make the dropping/UI thread wait here. Normal shutdown already
     // used its caller-owned deadline barrier. On an unexpected sender drop,
     // this detached actor gets one best-effort terminal durability attempt.
-    let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
+    let settings_durable = flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
     let _ = activity.flush(&mut hub, &mut pending, true);
-    if flush(&mut hub, &mut pending) {
+    if settings_durable && flush(&mut hub, &mut pending) {
         let _ = flush_visits(
             &mut hub,
             &pending_visits,
