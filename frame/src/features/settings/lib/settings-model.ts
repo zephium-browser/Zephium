@@ -62,6 +62,13 @@ const allSections = [
     icon: Search01Icon,
   },
   {
+    id: "miniapps",
+    group: "browser",
+    title: m.section_miniapps,
+    description: m.section_miniapps_description,
+    icon: DashboardSquare02Icon,
+  },
+  {
     id: "privacy",
     group: "browser",
     title: m.section_privacy,

@@ -8,6 +8,8 @@ mod window_controls;
 #[cfg(target_os = "windows")]
 pub mod windows;
 #[cfg(target_os = "windows")]
+pub mod windows_taskbar_icon;
+#[cfg(target_os = "windows")]
 pub use windows as imp;
 
 #[cfg(all(unix, not(target_os = "macos")))]

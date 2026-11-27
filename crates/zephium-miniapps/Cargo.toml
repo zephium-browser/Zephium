@@ -1,0 +1,16 @@
+[package]
+name = "zephium-miniapps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dom_query = { version = "=0.28.0", default-features = false }
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

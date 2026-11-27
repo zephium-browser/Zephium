@@ -41,6 +41,7 @@ zephium-update-transport = { path = "crates/zephium-update-transport", version =
 zephium-app = { path = "crates/zephium-app", version = "=0.1.0" }
 zephium-work-composition = { path = "crates/zephium-work-composition", version = "=0.1.0" }
 zephium-page-assist = { path = "crates/zephium-page-assist", version = "=0.1.0" }
+zephium-miniapps = { path = "crates/zephium-miniapps", version = "=0.1.0" }
 
 tauri = { version = "=2.11.3", features = ["macos-private-api"] }
 tauri-build = "2"

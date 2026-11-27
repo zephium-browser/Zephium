@@ -16,6 +16,7 @@
     ]
   },
   "bundle": {
+    "targets": ["nsis"],
     "windows": {
       "allowDowngrades": false,
       "nsis": {

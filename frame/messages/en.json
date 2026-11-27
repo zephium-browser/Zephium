@@ -4013,5 +4013,21 @@
   "mini_open_in_main_hint": "Move this page into Zephium as a tab",
   "mini_choose_space": "Choose a space",
   "command_mini_open_in_main": "Open mini window in Zephium",
-  "command_mini_keep_on_top": "Keep mini window on top"
+  "command_mini_keep_on_top": "Keep mini window on top",
+  "miniapps_title": "Install a mini app",
+  "miniapps_description": "Paste a site's address. Zephium reads its Web App Manifest and saves the app details. On Windows it creates Start menu and desktop shortcuts that open a standalone window without browser controls. Each app keeps separate site data, so sign in to it separately. To pin one, right-click its Start menu entry and choose Pin to taskbar.",
+  "miniapps_install_label": "Site address",
+  "miniapps_install_placeholder": "https://example.com",
+  "miniapps_install": "Install",
+  "miniapps_installing": "InstallingвЂ¦",
+  "miniapps_installed_notice": "Mini app installed",
+  "miniapps_recovered": "We repaired the saved app list. A backup was kept; reinstall any apps that are missing.",
+  "miniapps_empty": "No mini apps installed yet.",
+  "miniapps_open": "Open",
+  "miniapps_remove": "Remove",
+  "miniapps_scope": "Scoped to {scope}",
+  "miniapps_failed": "The app could not be installed. Check the address and try again.",
+  "miniapps_invalid": "Enter a full HTTPS address.",
+  "section_miniapps": "Mini apps",
+  "section_miniapps_description": "Install a site as its own focused app, using the browser you already trust."
 }

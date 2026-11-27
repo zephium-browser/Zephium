@@ -42,8 +42,10 @@ fn main() {
         // resource library only reaches bin targets. Emit it through the linker
         // for standalone unit tests too, without embedding a duplicate in bins.
         tauri_build::try_build(
-            tauri_build::Attributes::new()
-                .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest()),
+            tauri_build::Attributes::new().windows_attributes(
+                tauri_build::WindowsAttributes::new_without_app_manifest()
+                    .window_icon_path("icons/icon.ico"),
+            ),
         )
         .expect("Tauri Windows build configuration");
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");

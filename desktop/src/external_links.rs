@@ -23,6 +23,16 @@ pub(crate) fn hand_off(
     arguments: impl IntoIterator<Item = String>,
     forward: bool,
 ) {
+    let mut arguments: Vec<String> = arguments.into_iter().collect();
+    if let Some(index) = arguments
+        .iter()
+        .position(|argument| argument == "--mini-app")
+    {
+        if let Some(id) = arguments.get(index + 1) {
+            let _ = super::miniapps::open_from_launch(app, id);
+        }
+        arguments.drain(index..=(index + 1).min(arguments.len() - 1));
+    }
     let urls: Vec<String> = arguments
         .into_iter()
         .filter_map(|argument| external_target(&argument))
@@ -78,5 +88,34 @@ pub(crate) fn bring_forward(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_LABEL) {
         let _ = window.unminimize();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn mini_app_switch_and_id_are_removed_without_dropping_other_arguments() {
+        let mut arguments = vec![
+            "--mini-app".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+            "https://example.com".to_owned(),
+        ];
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "--mini-app")
+            .unwrap();
+        arguments.drain(index..=(index + 1).min(arguments.len() - 1));
+        assert_eq!(arguments, ["https://example.com"]);
+    }
+
+    #[test]
+    fn mini_app_switch_without_id_is_removed_safely() {
+        let mut arguments = vec!["--mini-app".to_owned()];
+        let index = arguments
+            .iter()
+            .position(|argument| argument == "--mini-app")
+            .unwrap();
+        arguments.drain(index..=(index + 1).min(arguments.len() - 1));
+        assert!(arguments.is_empty());
     }
 }

@@ -7801,6 +7801,7 @@ dependencies = [
  "zephium-engine",
  "zephium-import",
  "zephium-ipc",
+ "zephium-miniapps",
  "zephium-notes",
  "zephium-store",
  "zephium-voice",
@@ -7913,6 +7914,18 @@ dependencies = [
  "windows",
  "zephium-credentials",
  "zeroize",
+]
+
+[[package]]
+name = "zephium-miniapps"
+version = "0.1.0"
+dependencies = [
+ "dom_query 0.28.0",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
