@@ -21,6 +21,7 @@
     tabs: () => import("./sections/TabsPage.svelte"),
     profiles: () => import("./sections/ProfilesPage.svelte"),
     search: () => import("./sections/SearchPage.svelte"),
+    miniapps: () => import("./sections/MiniappsPage.svelte"),
     privacy: () => import("./sections/PrivacyPage.svelte"),
     shortcuts: () => import("./sections/KeyboardPage.svelte"),
     features: () => import("./sections/FeaturesPage.svelte"),

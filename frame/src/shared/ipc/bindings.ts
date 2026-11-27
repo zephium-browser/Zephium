@@ -22,6 +22,11 @@ export const commands = {
 	workRunning: () => __TAURI_INVOKE<boolean>("work_running"),
 	/**  Manifest preview for the composer. Bodies never cross this boundary. */
 	workContextPreview: (expectedProfile: string, purpose: WorkContextPurpose, selection: WorkContextSelectionV1_Deserialize) => __TAURI_INVOKE<WorkContextPreviewV1_Serialize>("work_context_preview", { expectedProfile, purpose, selection }),
+	miniAppsList: () => __TAURI_INVOKE<MiniAppView[]>("mini_apps_list"),
+	miniAppsOpen: (id: string) => __TAURI_INVOKE<boolean>("mini_apps_open", { id }),
+	miniAppsInstall: (url: string) => typedError<MiniAppView, string>(__TAURI_INVOKE("mini_apps_install", { url })),
+	miniAppsRetryShortcuts: (id: string) => __TAURI_INVOKE<boolean>("mini_apps_retry_shortcuts", { id }),
+	miniAppsRemove: (id: string) => __TAURI_INVOKE<boolean>("mini_apps_remove", { id }),
 	mediaImport: (expectedProfile: string) => typedError<MediaImportV1_Serialize, null>(__TAURI_INVOKE("media_import", { expectedProfile })),
 	/**
 	 *  Opens a non-image asset with the OS default application. The blob is the
@@ -1921,6 +1926,19 @@ export type MediaPlayerView = {
 	in_pip: boolean,
 	muted: boolean,
 	can_mute: boolean,
+};
+
+export type MiniAppView = {
+	id: string,
+	name: string,
+	start_url: string,
+	scope: string,
+	display: string,
+	theme_color: string | null,
+	background_color: string | null,
+	icon: string | null,
+	registry_recovered: boolean,
+	shortcuts_need_retry: boolean,
 };
 
 export type MiniChanged = MiniView;

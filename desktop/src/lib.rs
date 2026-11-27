@@ -103,6 +103,8 @@ mod media;
 mod memory_pressure;
 mod menu_text;
 mod mini;
+mod miniapp_icons;
+mod miniapps;
 mod notes;
 #[cfg(target_os = "windows")]
 mod onboarding_host;
@@ -619,6 +621,20 @@ impl UiStartupGate {
         if self.handed_over.load(Ordering::Acquire) {
             self.reveal_browser(window);
             return;
+        }
+        #[cfg(target_os = "windows")]
+        if miniapps::launched_standalone() {
+            if !miniapps::standalone_launch_finished() {
+                // The mini window is still being created on the UI thread.
+                // Its completion calls this gate again.
+                return;
+            }
+            if miniapps::standalone_window_opened() {
+                self.visible.store(true, Ordering::Release);
+                diagnostic!("startup: standalone mini app ready; browser window remains hidden");
+                return;
+            }
+            diagnostic!("startup: mini app could not open; showing browser window");
         }
         if self
             .visible
@@ -1974,6 +1990,11 @@ fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             work_product::work_operation_status,
             work_product::work_running,
             work_product::work_context_preview,
+            miniapps::mini_apps_list,
+            miniapps::mini_apps_open,
+            miniapps::mini_apps_install,
+            miniapps::mini_apps_retry_shortcuts,
+            miniapps::mini_apps_remove,
             media::media_import,
             media::media_open,
             media::media_admit_remote,
@@ -2384,6 +2405,9 @@ fn cleanup_privileged_runtime_after_exit() -> bool {
 fn navigation_lock() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri::plugin::Builder::new("ui-navigation-lock")
         .on_navigation(|webview, url| {
+            if miniapps::allows_navigation(webview.label(), url) {
+                return true;
+            }
             let allowed = if webview.label() == MAIN_LABEL {
                 webview.try_state::<UiStartupGate>().map_or_else(
                     || ui_navigation_allowed(url),
@@ -7240,6 +7264,27 @@ fn finish_browser_setup(
     runtime_security_advisories: zephium_core::runtime_security::RuntimeSecurityAdvisories,
     #[cfg(target_os = "windows")] setup_privileged_environments: Arc<AtomicU8>,
 ) -> SetupResult {
+    #[cfg(target_os = "windows")]
+    if let Some(id) = std::env::args()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--mini-app").then(|| pair[1].clone()))
+    {
+        let app = app.clone();
+        let window_app = app.clone();
+        if app
+            .run_on_main_thread(move || {
+                if !miniapps::open_from_launch(&window_app, &id) {
+                    miniapps::finish_standalone_launch(&window_app, false);
+                }
+            })
+            .is_err()
+        {
+            miniapps::finish_standalone_launch(&app, false);
+        }
+    }
+    #[cfg(target_os = "windows")]
     let shutdown = app
         .try_state::<ShutdownCoordinator>()
         .ok_or_else(|| std::io::Error::other("shutdown coordinator state is unavailable"))?;
@@ -7396,6 +7441,24 @@ fn finish_browser_setup(
             }
         })
         .build()?;
+    #[cfg(target_os = "windows")]
+    {
+        match image::load_from_memory(include_bytes!("../icons/128x128.png")) {
+            Ok(icon) => {
+                let icon = icon.into_rgba8();
+                let (width, height) = (icon.width(), icon.height());
+                if let Err(error) = window.set_icon(tauri::image::Image::new_owned(
+                    icon.into_raw(),
+                    width,
+                    height,
+                )) {
+                    diagnostic!("startup: could not apply browser window icon: {error}");
+                }
+            }
+            Err(error) => diagnostic!("startup: could not decode browser window icon: {error}"),
+        }
+        platform::windows_taskbar_icon::set_taskbar_icon(&window, None, None);
+    }
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     window_frame::install(
         &window,
@@ -8618,8 +8681,10 @@ pub fn run() {
         // stale instance holding the global hotkey and the profile dbs)
         // focuses the running window and exits.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            external_links::bring_forward(app);
-            external_links::hand_off(app, argv.into_iter().skip(1), true);
+            let arguments: Vec<String> = argv.into_iter().skip(1).collect();
+            if !external_links::hand_off(app, arguments, true) {
+                external_links::bring_forward(app);
+            }
         }));
     // global-hotkey is X11-only on Linux. Initializing its Tauri plugin on a
     // native Wayland session can report success while receiving no keys (or
@@ -8815,6 +8880,7 @@ pub fn run() {
                 APP_STORE.set(store.clone()).map_err(|_| {
                     std::io::Error::other("process-global application store is already installed")
                 })?;
+                miniapps::refresh_navigation_scopes();
                 let startup = startup_recovery::begin(&data_dir);
                 let recovery_needed = match &startup {
                     Ok(attempt) => attempt.requires_recovery(),

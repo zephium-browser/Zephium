@@ -7,6 +7,7 @@
     ArrowDown01Icon,
     ArrowUp01Icon,
     Cancel01Icon,
+    Globe02Icon,
     Search01Icon,
   } from "@hugeicons/core-free-icons";
   import { settle } from "$domain/operations";
@@ -65,6 +66,10 @@
   let editing = $state(false);
   let pending = $state(false);
   let failed = $state(false);
+  let miniAppBusy = $state(false);
+  let miniAppError = $state<string | null>(null);
+  let miniAppReady = $state(false);
+  let miniAppRecovered = $state(false);
   // What hangs from the field (its tray) is as wide as the field.
   let fieldWidth = $state(0);
   let composing = false;
@@ -73,6 +78,12 @@
     editing ? (shortcutPrefix(draft, preferences.searchShortcuts())?.shortcut ?? null) : null,
   );
   let activeUrl = $derived(tabs.activeTab()?.url ?? "");
+  $effect(() => {
+    void activeUrl;
+    miniAppError = null;
+    miniAppReady = false;
+    miniAppRecovered = false;
+  });
   // A failure that fills the pane (a refused or unopened page) names its own
   // address; the page behind it, if any, is not what the person sees. The
   // pane shows it on the same terms as the shell's failedPane.
@@ -148,6 +159,30 @@
         }
       : null,
   );
+
+  async function installMiniApp() {
+    if (miniAppBusy || !activeUrl.startsWith("https://")) return;
+    const installUrl = activeUrl;
+    const installTabId = tabs.activeId();
+    const isInstallPageActive = () =>
+      tabs.activeId() === installTabId && tabs.activeTab()?.url === installUrl;
+    miniAppBusy = true;
+    miniAppError = null;
+    miniAppReady = false;
+    miniAppRecovered = false;
+    try {
+      const result = await commands.miniAppsInstall(installUrl);
+      if (!isInstallPageActive()) return;
+      if (result.status === "ok") {
+        miniAppReady = true;
+        miniAppRecovered = result.data.registry_recovered;
+      } else miniAppError = result.error;
+    } catch {
+      if (isInstallPageActive()) miniAppError = m.miniapps_failed();
+    } finally {
+      miniAppBusy = false;
+    }
+  }
 
   /** ⌘L edits a page's address in the launcher, which has room for what a
    *  sidebar-wide field cannot show; a click edits it here. False where
@@ -436,9 +471,23 @@
         onclick={() => find.hide()}
       />
     {:else if !compact}
+      {#if activeContent === "web" && activeUrl.startsWith("https://")}
+        <IconButton
+          icon={Globe02Icon}
+          label={miniAppReady ? m.miniapps_installed_notice() : m.miniapps_install()}
+          size={14}
+          buttonSize={24}
+          disabled={miniAppBusy || miniAppReady}
+          onclick={() => void installMiniApp()}
+        />
+      {/if}
       {#if trailing}{@render trailing(sitePage)}{/if}
     {/if}
   </div>
+  {#if miniAppError}<p class="miniapp-note" role="alert">{miniAppError}</p>{/if}
+  {#if miniAppReady}<p class="miniapp-note" role="status">
+      {miniAppRecovered ? m.miniapps_recovered() : m.miniapps_installed_notice()}
+    </p>{/if}
   {#if !compact && listedInstalled}
     {#if removing}
       <div
@@ -503,6 +552,17 @@
 </form>
 
 <style>
+  .miniapp-note {
+    margin: 5px 8px 0;
+    font-size: 11px;
+    line-height: 15px;
+    color: var(--color-label-secondary);
+  }
+
+  .miniapp-note[role="alert"] {
+    color: var(--color-danger);
+  }
+
   .store-remove {
     display: flex;
     align-items: center;
