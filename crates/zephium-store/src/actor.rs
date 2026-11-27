@@ -1946,13 +1946,15 @@ fn actor(
         }
         match cmd {
             None => {
-                if pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.due(Instant::now()))
+                let settings_durable =
+                    flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
+                if settings_durable
+                    && pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.due(Instant::now()))
                 {
                     let _ = flush(&mut hub, &mut pending);
                 }
-                let _ = flush_settings(&mut hub, &pending_settings, &mut setting_retry, false);
                 let _ = flush_visits(
                     &mut hub,
                     &pending_visits,
@@ -2498,7 +2500,7 @@ fn actor(
             Some(Cmd::Flush(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
-                let session_durable = flush(&mut hub, &mut pending);
+                let session_durable = settings_durable && flush(&mut hub, &mut pending);
                 let activity_durable = activity.flush(&mut hub, &mut pending, true);
                 let visits_durable = session_durable
                     && flush_visits(
@@ -2515,7 +2517,7 @@ fn actor(
             Some(Cmd::Shutdown(ack)) => {
                 let settings_durable =
                     flush_settings(&mut hub, &pending_settings, &mut setting_retry, true);
-                let session_durable = flush(&mut hub, &mut pending);
+                let session_durable = settings_durable && flush(&mut hub, &mut pending);
                 let activity_durable = activity.flush(&mut hub, &mut pending, true) || {
                     let lost = activity.only_unrecoverable_records();
                     if lost {
