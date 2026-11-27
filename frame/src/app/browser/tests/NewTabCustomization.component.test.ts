@@ -19,6 +19,7 @@ async function settingsScreen() {
 
 const native = vi.hoisted(() => ({
   settings: {} as Record<string, string>,
+  newTabSave: null as Promise<void> | null,
   profile: "00000000000000000000000901",
   import: vi.fn(),
   media: vi.fn(),
@@ -51,6 +52,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     settingGet: async (key) => native.settings[key] ?? null,
     settingSet: async (key, value) => {
+      if (key === "tabs.new-page") await native.newTabSave;
       native.settings[key] = value;
       emitNativeEvent("uiCommand", `preference.${key}=${value}`);
       return { accepted: true, operation_id: null };
@@ -95,6 +97,7 @@ function imported(kind: "image" | "pdf" = "image"): MediaImportV1_Deserialize {
 }
 beforeEach(async () => {
   native.settings = {};
+  native.newTabSave = null;
   native.profile = "00000000000000000000000901";
   native.import.mockReset().mockResolvedValue({ status: "ok", data: imported() });
   native.media.mockReset().mockReturnValue("/src/shared/sky/assets/sky-day.avif");
@@ -309,6 +312,40 @@ test("native image import commits only the admitted digest, and cancellation kee
   await expect.poll(() => preferences.value("ui.newtab-background")).toBe("image");
   expect(native.import).toHaveBeenLastCalledWith(native.profile);
   expect(preferences.value("ui.newtab-image")).toBe(digest);
+});
+
+test("a refused wallpaper save can be retried when another preference write finishes", async () => {
+  await preferences.init();
+  const settings = await settingsScreen();
+  let finishImport!: () => void;
+  native.import.mockReturnValueOnce(
+    new Promise((resolve) => {
+      finishImport = () => resolve({ status: "ok", data: imported() });
+    }),
+  );
+  await chooseImage(settings);
+
+  let finishSave!: () => void;
+  native.newTabSave = new Promise((resolve) => (finishSave = resolve));
+  const saving = preferences.set("tabs.new-page", "https://example.com/");
+  try {
+    expect(preferences.saving()).toBe(true);
+    finishImport();
+    await expect
+      .poll(() => settings.container.querySelector(".failure")?.textContent, { timeout: 2000 })
+      .toBe("This change could not be verified. Try again.");
+    expect(preferences.saving()).toBe(true);
+    expect(preferences.value("ui.newtab-background")).toBe("sky");
+    expect(preferences.value("ui.newtab-image")).toBe("");
+  } finally {
+    finishSave();
+    await saving;
+  }
+
+  await chooseImage(settings);
+  await expect.poll(() => preferences.value("ui.newtab-background")).toBe("image");
+  expect(preferences.value("ui.newtab-image")).toBe(digest);
+  expect(settings.container.querySelector(".failure")).toBeNull();
 });
 
 test("non-images and failed imports keep the choice, and switching profile during the picker cannot apply it", async () => {
