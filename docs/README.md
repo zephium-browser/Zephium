@@ -14,6 +14,7 @@ controls product intent.
 
 ## Browser features
 
+- [Choose a user data directory](user-data-directory.md): select where a Zephium instance keeps its local data.
 - [Interface design](frontend.md#native-surfaces-and-presentation): why the browser chrome is shaped the way it is.
 - [Interface system](frontend.md#interface-rules): tokens, shared components and how to inspect them.
 - [Settings](frontend.md#ownership-ipc-and-lifetimes): settings structure, search and navigation.
