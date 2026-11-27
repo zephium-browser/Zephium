@@ -21,6 +21,36 @@ fn document(bytes: &[u8], limits: DocLimits) -> Doc {
     .unwrap()
 }
 
+#[test]
+fn disclosure_labels_collect_visible_text_within_one_byte_budget() {
+    let html = b"<nav><button aria-controls='menu'>Menu</button><div aria-hidden='true' id='menu'>
+        <a href='/cloud'><span>Cloud</span> <span hidden>Skip</span> Hosting</a>
+        <a href='/other' aria-label='Override'>O<b>ther</b></a>
+        <a href='/api'>A<b>P</b>I<br>Reference</a></div></nav>";
+    for (cap, label, truncated) in [(13, "Cloud Hosting", false), (12, "Cloud Hostin", true)] {
+        let doc = document(
+            html,
+            DocLimits {
+                node_text_bytes: cap,
+                ..DocLimits::SITE_PAGE
+            },
+        );
+        let links = doc.menu_links.values().next().unwrap();
+        assert_eq!(links[0].text, label);
+        assert_eq!(links[1].name, "Override");
+        assert_eq!(links[1].text, if truncated { "Othe" } else { "Other" });
+        assert_eq!(
+            links[2].text,
+            if cap == 13 {
+                "API Reference"
+            } else {
+                "API Referenc"
+            }
+        );
+        assert_eq!(doc.body_truncated(), truncated);
+    }
+}
+
 fn large_page() -> String {
     const ELEMENTS: usize = 60_000;
     const BYTES: usize = 3 * 1024 * 1024;
@@ -553,4 +583,64 @@ fn linked_answers_match_clean_text_but_never_empty_structural_nodes() {
         .nodes()
         .iter()
         .all(|n| n.text == "ab" || !n.marks.has(Marks::ACCEPTED)));
+}
+
+#[test]
+fn disclosure_normalizes_the_name_before_charging_its_bytes() {
+    for (name, expected) in [("      ", ""), ("&#x200b;", ""), ("  A   B  ", "A B")] {
+        let html = format!("<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g' aria-label='{name}'>Guide</a></div></nav>");
+        let doc = document(
+            html.as_bytes(),
+            DocLimits {
+                text_bytes: ("https://example.com/g".len() + expected.len() + "Guide".len()) as u32,
+                ..DocLimits::SITE_PAGE
+            },
+        );
+        let link = &doc.menu_links.values().next().unwrap()[0];
+        assert_eq!(link.name, expected);
+        assert_eq!(link.text, "Guide");
+        assert!(!doc.body_truncated());
+    }
+}
+
+#[test]
+fn disclosure_name_and_text_share_the_document_byte_limit() {
+    let html = "<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g' aria-label='Guide'>Café</a></div></nav>";
+    let room = "https://example.com/g".len() + "Guide".len() + "Café".len();
+    for (limit, truncated) in [(room, false), (room - 1, true)] {
+        let doc = document(
+            html.as_bytes(),
+            DocLimits {
+                text_bytes: limit as u32,
+                ..DocLimits::SITE_PAGE
+            },
+        );
+        assert_eq!(doc.body_truncated(), truncated);
+        let link = &doc.menu_links.values().next().unwrap()[0];
+        assert_eq!(link.name, "Guide");
+        assert_eq!(link.text, if truncated { "Caf" } else { "Café" });
+        assert!(link.url.as_str().len() + link.name.len() + link.text.len() <= limit);
+    }
+}
+
+#[test]
+fn disclosure_metadata_shares_the_node_byte_limit() {
+    let doc = document(b"<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a lang='fr' aria-label='Name' href='/g'></a></div></nav>",
+        DocLimits { node_text_bytes: 5, ..DocLimits::SITE_PAGE });
+    let link = &doc.menu_links.values().next().unwrap()[0];
+    assert_eq!(link.name, "Name");
+    assert!(link.text.is_empty());
+    assert!(link.language.is_none());
+}
+
+#[test]
+fn disclosure_reports_clipped_attributes_like_the_walk() {
+    let html = format!("<nav><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g' title='{}'>Guide</a></div></nav>", "x".repeat(MAX_NODE_TEXT_BYTES + 1));
+    assert!(document(html.as_bytes(), DocLimits::SITE_PAGE).body_truncated());
+}
+
+#[test]
+fn an_excluded_control_does_not_reserve_disclosure_bytes() {
+    let doc = document(b"<nav><div class='sponsored'><button aria-controls='x'></button><div id='x' aria-hidden='true'><a href='/g'>Guide</a></div></div></nav>", DocLimits::SITE_PAGE);
+    assert!(doc.menu_links.is_empty());
 }

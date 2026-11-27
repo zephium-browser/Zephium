@@ -164,8 +164,22 @@ pub enum Role {
     FrameBoundary,
 }
 
+impl Role {
+    pub(crate) fn outside_menu(self) -> bool {
+        matches!(
+            self,
+            Self::Document
+                | Self::Landmark {
+                    landmark: Some(
+                        Landmark::Main | Landmark::Complementary | Landmark::Contentinfo
+                    )
+                }
+        )
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub struct Marks(u8);
+pub struct Marks(u16);
 impl Marks {
     pub const SPONSORED: Self = Self(1);
     pub const ACCEPTED: Self = Self(2);
@@ -174,6 +188,8 @@ impl Marks {
     pub const FEATURED: Self = Self(16);
     pub const WIDGET: Self = Self(32);
     pub(crate) const ANCILLARY: Self = Self(64);
+    pub(crate) const LANGUAGE_HOST: Self = Self(512);
+    pub(crate) const ACTION: Self = Self(256);
     pub(crate) const PROSE: Self = Self(128);
     pub fn has(self, mark: Self) -> bool {
         self.0 & mark.0 != 0
@@ -186,12 +202,14 @@ pub struct Node {
     pub role: Role,
     pub parent: Option<u32>,
     pub name: String,
+    pub(crate) link_prefix_bytes: usize,
     pub text: String,
     pub destination: Option<Url>,
     pub image_source: Option<Url>,
     pub hidden: bool,
     pub marks: Marks,
     pub language: Option<String>,
+    pub(crate) link_language: Option<String>,
     pub element_id: Option<String>,
     pub element_id_cleaned: bool,
 }
@@ -221,12 +239,14 @@ impl Node {
             role,
             parent,
             name: String::new(),
+            link_prefix_bytes: 0,
             text: String::new(),
             destination: None,
             image_source: None,
             hidden: false,
             marks: Marks::default(),
             language: None,
+            link_language: None,
             element_id: None,
             element_id_cleaned: false,
         }
@@ -239,6 +259,7 @@ pub struct Head {
     pub title: String,
     pub canonical: Option<Url>,
     pub site_name: String,
+    pub application_name: String,
     pub alternates: Vec<Alternate>,
     pub linked_data: Vec<String>,
 }
@@ -251,9 +272,17 @@ pub struct Alternate {
 
 pub struct Doc {
     page: Url,
+    pub(crate) menu_links: std::collections::BTreeMap<usize, Vec<MenuLink>>,
     nodes: Vec<Node>,
     head: Head,
     truncated: bool,
+}
+pub(crate) struct MenuLink {
+    pub url: Url,
+    pub name: String,
+    pub text: String,
+    pub language: Option<String>,
+    pub action: bool,
 }
 impl Doc {
     pub fn page(&self) -> &Url {
@@ -287,6 +316,7 @@ impl DocBuilder {
         Ok(Self {
             doc: Doc {
                 page: page.clone(),
+                menu_links: Default::default(),
                 nodes: Vec::new(),
                 head: Head::default(),
                 truncated: false,
@@ -341,6 +371,7 @@ impl DocBuilder {
             .len()
             .saturating_add(node.text.len())
             .saturating_add(node.language.as_deref().map_or(0, str::len))
+            .saturating_add(node.link_language.as_deref().map_or(0, str::len))
             .saturating_add(node.element_id.as_deref().map_or(0, str::len));
         if size > self.limits.node_text_bytes as usize
             || size > self.limits.text_bytes as usize - self.text_bytes
@@ -356,6 +387,13 @@ impl DocBuilder {
 
     pub fn finish(mut self) -> Doc {
         for n in &mut self.doc.nodes {
+            n.link_prefix_bytes = n.text.get(..n.link_prefix_bytes).map_or(0, |prefix| {
+                prefix
+                    .chars()
+                    .filter(|&c| crate::visible_char(c))
+                    .map(char::len_utf8)
+                    .sum()
+            });
             n.text.retain(crate::visible_char);
             n.name.retain(crate::visible_char);
             if let Some(id) = &mut n.element_id {
@@ -366,6 +404,7 @@ impl DocBuilder {
         }
         self.doc.head.title.retain(crate::visible_char);
         self.doc.head.site_name.retain(crate::visible_char);
+        self.doc.head.application_name.retain(crate::visible_char);
         for a in &mut self.doc.head.alternates {
             a.title.retain(crate::visible_char);
         }

@@ -42,6 +42,6 @@ fn visible(nodes: &[Node], at: usize) -> bool {
 fn visible_char(c: char) -> bool {
     !matches!(c, '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
 }
-fn clean_text(text: &str) -> String {
+pub fn clean_text(text: &str) -> String {
     text.chars().filter(|&c| visible_char(c)).collect()
 }

@@ -19,6 +19,8 @@ mod types;
 pub use memo::*;
 pub use types::*;
 
+const SEARCH_SLOTS: usize = 2;
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Work {
     Robots,
@@ -78,6 +80,11 @@ enum Pending {
     Cache(usize),
     Job(Job),
 }
+#[derive(Clone, Copy)]
+enum Unseeded {
+    Searching,
+    Failed(Failure),
+}
 struct Seed {
     site: PlaceKey,
     result: Link,
@@ -127,6 +134,10 @@ struct SiteState {
     clean: bool,
     stale: bool,
     external: BTreeMap<PageMatch, PageKey>,
+    asked: BTreeSet<site::EntryId>,
+    probed_section: bool,
+    eager: Vec<site::SectionRead>,
+    memo: Option<SiteMemo>,
 }
 impl SiteState {
     fn new(seed: Seed) -> Self {
@@ -151,6 +162,10 @@ impl SiteState {
             clean: true,
             stale: false,
             external: BTreeMap::new(),
+            asked: BTreeSet::new(),
+            probed_section: false,
+            eager: Vec::new(),
+            memo: None,
         }
     }
 }
@@ -174,7 +189,8 @@ impl SiteState {
 }
 pub struct Session {
     cfg: Config,
-    query: QueryRead,
+    query: Option<QueryRead>,
+    opening: Option<Opening>,
     sequence: u32,
     elapsed: Duration,
     finished: bool,
@@ -183,16 +199,104 @@ pub struct Session {
     queue: VecDeque<Job>,
     seen: BTreeSet<(Work, PageMatch)>,
     robots: BTreeMap<String, Robots>,
+    landings: BTreeMap<String, Vec<(Job, FetchResult)>>,
     hosts: BTreeMap<String, u32>,
     started: u32,
     sections: u32,
-    sites: [Option<SiteState>; 2],
+    sites: [Option<SiteState>; SEARCH_SLOTS],
+    unseeded: [Option<Unseeded>; SEARCH_SLOTS],
     articles: BTreeMap<usize, Doc>,
     first_passage: Option<Passage>,
     passages: Vec<Passage>,
 }
+
+#[derive(Clone, serde::Serialize)]
+pub struct HeldSite {
+    payload: SitePayload,
+    memo: Option<SiteMemo>,
+}
+
+impl HeldSite {
+    pub fn place(&self) -> &Place {
+        &self.payload.place
+    }
+
+    pub fn robots(&self) -> &BTreeMap<String, Robots> {
+        &self.payload.robots
+    }
+
+    pub fn check_open(&self, id: &str) -> Result<(), OpenRefusal> {
+        self.open_index(id).map(|_| ())
+    }
+
+    fn open_index(&self, id: &str) -> Result<usize, OpenRefusal> {
+        let place = self.place();
+        if let Some(index) = place.sections.iter().position(|e| e.id.as_str() == id) {
+            return place
+                .entry_openable(&place.sections[index].id, self.robots())
+                .then_some(index)
+                .ok_or(OpenRefusal::NotOpenable);
+        }
+        if place
+            .sections
+            .iter()
+            .flat_map(|e| &e.children)
+            .any(|e| e.id.as_str() == id)
+        {
+            return Err(OpenRefusal::NotOpenable);
+        }
+        Err(OpenRefusal::UnknownEntry)
+    }
+
+    fn bounded(mut self) -> Option<Self> {
+        let place = self.place();
+        if place.sections.len() > site::MAX_SECTIONS
+            || !place.sections.iter().all(|entry| {
+                entry.children.len() <= site::MAX_CHILDREN
+                    && entry.children.iter().all(|child| child.children.is_empty())
+            })
+            || place.check_ids().is_err()
+        {
+            return None;
+        }
+        if !self.fits() {
+            self.memo = None;
+            if !self.fits() {
+                return None;
+            }
+        }
+        Some(self)
+    }
+
+    fn fits(&mut self) -> bool {
+        // Reserve space for the longest serialized read state on every top-level row.
+        let state = ReadState::Skipped {
+            budget: Budget::HostConcurrent,
+        };
+        let sections = &mut self.payload.place.sections;
+        let reads: Vec<_> = sections
+            .iter_mut()
+            .map(|entry| entry.read.replace(state))
+            .collect();
+        let fits = memo::encode_bounded(self).is_ok();
+        for (entry, read) in self.payload.place.sections.iter_mut().zip(reads) {
+            entry.read = read;
+        }
+        fits
+    }
+}
+
+struct Opening {
+    held: HeldSite,
+    slot: u8,
+    index: usize,
+    confidence: Confidence,
+    stale: bool,
+    clean: bool,
+}
+
 impl Session {
-    pub fn start(mut cfg: Config, query_text: &str) -> Result<(Self, Vec<Effect>), QueryError> {
+    pub fn start(cfg: Config, query_text: &str) -> Result<(Self, Vec<Effect>), QueryError> {
         let query = read_query(query_text)?;
         if cfg.custom_template.len() > crate::key::MAX_URL_BYTES {
             return Err(QueryError::Search);
@@ -201,11 +305,121 @@ impl Session {
             .engine
             .configured_search(query_text, &cfg.custom_template)
             .ok_or(QueryError::Search)?;
-        cfg.tighten();
         let kind = query.kind().clone();
-        let mut s = Self {
+        let mut s = Self::new(cfg, Some(query));
+        let mut out = Vec::new();
+        s.emit(MapEvent::Kind { kind }, &mut out);
+        let id = s.id();
+        s.pending.insert(id, Pending::Results);
+        s.counts(Phase::Results).started += 1;
+        out.push(Effect::LoadResults { id, url });
+        Ok((s, out))
+    }
+
+    pub fn open(
+        cfg: Config,
+        held: HeldSite,
+        slot: u8,
+        id: &str,
+        confidence: Confidence,
+        stale: bool,
+    ) -> Result<(Self, Vec<Effect>), OpenRefusal> {
+        if usize::from(slot) >= SEARCH_SLOTS {
+            return Err(OpenRefusal::NotOpenable);
+        }
+        let index = held.open_index(id)?;
+        let url = held.place().sections[index].key.as_url().clone();
+        let key = held.place().sections[index].key.page_match();
+        let mut s = Self::new(cfg, None);
+        s.robots = held.robots().clone();
+        s.opening = Some(Opening {
+            held,
+            slot,
+            index,
+            confidence,
+            stale,
+            clean: true,
+        });
+        s.enqueue(Work::Section(usize::from(slot), key), url);
+        let mut out = Vec::new();
+        s.schedule(&mut out);
+        Ok((s, out))
+    }
+
+    pub fn hold_place(&self, slot: u8, place: Place) -> Option<HeldSite> {
+        if let Some(open) = self.opening.as_ref().filter(|open| open.slot == slot) {
+            return Some(open.held.clone());
+        }
+        let memo = self
+            .sites
+            .get(usize::from(slot))
+            .and_then(Option::as_ref)
+            .and_then(|site| site.memo.clone());
+        HeldSite {
+            payload: SitePayload {
+                robots: self.place_robots(&place),
+                place,
+            },
+            memo,
+        }
+        .bounded()
+    }
+
+    pub fn result_places(&self) -> impl Iterator<Item = (&PlaceKey, SiteKey)> {
+        self.sites
+            .iter()
+            .flatten()
+            .filter_map(|site| Some((&site.seed.site, SiteKey::from_url(&site.seed.url)?)))
+    }
+
+    pub fn section_fetch(&self, id: Id) -> Option<(u8, &site::EntryId)> {
+        let Some(Pending::Job(Job {
+            work: Work::Section(slot, key),
+            ..
+        })) = self.pending.get(&id)
+        else {
+            return None;
+        };
+        let site = self.sites.get(*slot)?.as_ref()?;
+        let id = site
+            .place
+            .as_ref()?
+            .sections
+            .iter()
+            .flat_map(|e| std::iter::once(e).chain(&e.children))
+            .find(|entry| {
+                entry.read == Some(ReadState::Queued) && site.discovered.get(&entry.id) == Some(key)
+            })
+            .map(|entry| &entry.id)
+            .or_else(|| {
+                site.discovered
+                    .iter()
+                    .find(|(_, discovered)| *discovered == key)
+                    .map(|(id, _)| id)
+            })?;
+        Some((*slot as u8, id))
+    }
+
+    fn place_robots(&self, place: &Place) -> BTreeMap<String, Robots> {
+        self.robots
+            .iter()
+            .filter(|(host, _)| {
+                Url::parse(host)
+                    .ok()
+                    .and_then(|url| SiteKey::from_url(&url))
+                    .as_ref()
+                    == Some(&place.site)
+            })
+            .map(|(host, rules)| (host.clone(), rules.clone()))
+            .collect()
+    }
+
+    fn new(mut cfg: Config, query: Option<QueryRead>) -> Self {
+        cfg.tighten();
+        Self {
             cfg,
             query,
+            opening: None,
             sequence: 0,
             elapsed: Duration::ZERO,
             finished: false,
@@ -214,21 +428,16 @@ impl Session {
             queue: VecDeque::new(),
             seen: BTreeSet::new(),
             robots: BTreeMap::new(),
+            landings: BTreeMap::new(),
             hosts: BTreeMap::new(),
             started: 0,
             sections: 0,
             sites: [None, None],
+            unseeded: [None, None],
             articles: BTreeMap::new(),
             first_passage: None,
             passages: Vec::new(),
-        };
-        let mut out = Vec::new();
-        s.emit(MapEvent::Kind { kind }, &mut out);
-        let id = s.id();
-        s.pending.insert(id, Pending::Results);
-        s.counts(Phase::Results).started += 1;
-        out.push(Effect::LoadResults { id, url });
-        Ok((s, out))
+        }
     }
     fn id(&mut self) -> Id {
         self.sequence += 1;
@@ -274,6 +483,8 @@ impl Session {
         self.queue.push_back(Job { work, url });
     }
     fn lookup(&mut self, side: usize, seed: Seed, out: &mut Vec<Effect>) {
+        let Some(query) = &self.query else { return };
+        self.unseeded[side] = None;
         if self.elapsed >= self.cfg.last_start {
             self.budget(Budget::LastStart);
             self.emit(
@@ -286,7 +497,7 @@ impl Session {
             return;
         }
         let site = seed.site.clone();
-        let role = match self.query.kind() {
+        let role = match query.kind() {
             QueryKind::Place { section, .. } => section.map(|s| s.role),
             QueryKind::Compare { shared, .. } => shared.map(|s| s.role),
             _ => None,
@@ -299,7 +510,7 @@ impl Session {
                 entity,
                 fresh: is_fresh,
                 ..
-            } = self.query.kind()
+            } = query.kind()
             {
                 fresh = *is_fresh;
                 if let Some((brand, rest)) = entity.split_first() {
@@ -351,10 +562,11 @@ impl Session {
         Seed::official(&self.read(doc, &read).ok()?)
     }
     fn results(&mut self, doc: Doc, out: &mut Vec<Effect>) -> Result<(), Failure> {
+        let query = self.query.as_ref().ok_or(Failure::Unreadable)?;
         let layer = match results::read_results_with_stats(
             self.cfg.engine,
             None,
-            &self.query,
+            query,
             &doc,
             &mut self.stats.results,
         ) {
@@ -363,12 +575,12 @@ impl Session {
         };
         let mut seeds = Vec::new();
         let mut missing = Vec::new();
-        match self.query.kind() {
+        match query.kind() {
             QueryKind::Instant | QueryKind::List => {}
             QueryKind::Place { .. } => {
                 let seed = Seed::official(&layer).or_else(|| {
                     let hit = layer.organic.first()?;
-                    (self.query.confidence() == Confidence::High && !hit.sitelinks.is_empty())
+                    (query.confidence() == Confidence::High && !hit.sitelinks.is_empty())
                         .then(|| Seed::new(hit, Confidence::Low))
                         .flatten()
                 });
@@ -392,19 +604,13 @@ impl Session {
                         .organic
                         .iter()
                         .find(|hit| hit.key.page_match() == f.cites.page_match())
-                        .and_then(|r| passage::featured(&self.query, f, r));
+                        .and_then(|r| passage::featured(query, f, r));
                 }
                 let count = self.cfg.result_pages as usize;
-                if layer.organic.len() > count {
-                    self.budget(Budget::ResultPages);
-                }
-                for (i, r) in layer.organic.iter().take(count).enumerate() {
-                    self.enqueue(Work::Passage(i), r.url.clone());
-                }
                 if let Some(hit) = layer.organic.first() {
                     if let Some(site) = SiteKey::from_url(&hit.url) {
                         let name = site.as_str().split('.').next().unwrap_or_default();
-                        if self.query.terms().iter().any(|w| {
+                        if query.terms().iter().any(|w| {
                             w.trim_end_matches('?') == site.as_str()
                                 || !hit.sitelinks.is_empty() && w == name
                         }) {
@@ -413,6 +619,12 @@ impl Session {
                             }
                         }
                     }
+                }
+                if layer.organic.len() > count {
+                    self.budget(Budget::ResultPages);
+                }
+                for (i, r) in layer.organic.iter().take(count).enumerate() {
+                    self.enqueue(Work::Passage(i), r.url.clone());
                 }
             }
         }
@@ -424,12 +636,17 @@ impl Session {
             self.lookup(side, seed, out);
         }
         for (side, query) in missing {
+            self.unseeded[side] = Some(Unseeded::Failed(Failure::Missing));
             if let Some(url) = self
                 .cfg
                 .engine
                 .configured_search(&query, &self.cfg.custom_template)
             {
+                let queued = self.queue.len();
                 self.enqueue(Work::Anonymous(side, query), url);
+                if self.queue.len() > queued {
+                    self.unseeded[side] = Some(Unseeded::Searching);
+                }
             }
         }
         Ok(())
@@ -454,7 +671,7 @@ impl Session {
             }
             state.stale = stale;
             let Ok(place) = site::with_results(
-                m.payload.place,
+                m.payload.place.clone(),
                 &state.seed.links,
                 state.section_hint.as_ref(),
                 state.requested.as_ref(),
@@ -465,22 +682,26 @@ impl Session {
             };
             state.place = Some(place.clone());
             let complete = !stale
+                && (self.cfg.sections == Sections::Asked || m.eager)
                 && state.section_hint.is_none()
-                && (state.requested.is_none() || place.focus.is_some());
+                && state.requested.is_none();
             state.complete = complete;
-            self.emit_place(i, place, stale, confidence, complete, out);
             if complete {
                 if let Some(pos) = shared_passage {
                     self.queue.push_back(Job {
                         work: Work::Passage(pos),
-                        url,
+                        url: url.clone(),
                     });
                 }
-                for (host, rules) in m.payload.robots {
-                    if !self.pending.values().any(|p|matches!(p,Pending::Job(j) if j.work==Work::Robots && origin(&j.url)==host)){
-                        self.robots.entry(host).or_insert(rules);
+                for (host, rules) in &m.payload.robots {
+                    if !self.pending.values().any(|p|matches!(p,Pending::Job(j) if j.work==Work::Robots && origin(&j.url)==*host)){
+                        self.robots.entry(host.clone()).or_insert_with(|| rules.clone());
                     }
                 }
+                state.memo = Some(m);
+            }
+            self.emit_place(i, place, stale, confidence, complete, out);
+            if complete {
                 return;
             }
         } else if supplied {
@@ -503,6 +724,9 @@ impl Session {
     }
 
     fn update_passages(&mut self, out: &mut Vec<Effect>) {
+        let Some(query) = self.query.as_ref() else {
+            return;
+        };
         let mut ordered: BTreeMap<_, _> =
             self.articles.iter().map(|(pos, doc)| (*pos, doc)).collect();
         for site in self.sites.iter().flatten() {
@@ -512,7 +736,7 @@ impl Session {
         }
         let pages: Vec<_> = ordered.into_values().collect();
         let mut passages: Vec<_> = self.first_passage.clone().into_iter().collect();
-        for p in passage::read_passages(&self.query, &pages) {
+        for p in passage::read_passages(query, &pages) {
             if !passages
                 .iter()
                 .any(|f| f.source.page_match() == p.source.page_match())
@@ -552,6 +776,7 @@ impl Session {
         );
     }
     fn rebuild(&mut self, i: usize, out: &mut Vec<Effect>) {
+        let probe_available = !self.sites.iter().flatten().any(|s| s.probed_section);
         let Some(state) = self.sites[i].as_mut() else {
             return;
         };
@@ -564,7 +789,7 @@ impl Session {
             sitemaps: state.maps.iter().map(|(k, v)| (k.clone(), v)).collect(),
             pages: state.pages.iter().map(|(k, v)| (k.clone(), v)).collect(),
         };
-        let Ok((mut place, mut detail)) =
+        let Ok((mut place, mut detail, eager)) =
             site::read_site_for(doc, &inputs, state.requested.as_ref())
         else {
             state.entry_failure = Some(Failure::Unreadable);
@@ -577,7 +802,7 @@ impl Session {
         detail.sitemap_truncated |= state.cut.contains(&Phase::Sitemap);
         detail.llms_truncated |= state.cut.contains(&Phase::Llms);
         place.notes.truncated |= detail.truncated();
-        self.stats.places.insert(i as u8, detail);
+
         if let Some(previous) = &state.place {
             place.keep_discovery(previous);
             if place.check_ids().is_err() {
@@ -586,12 +811,42 @@ impl Session {
                 return;
             }
         }
-        let candidates: BTreeSet<_> = place
-            .fetch_sections()
-            .into_iter()
-            .map(|e| e.id.clone())
-            .collect();
-        for entry in &mut place.sections {
+        let candidates: BTreeSet<_> = match self.cfg.sections {
+            Sections::All => {
+                for read in &eager {
+                    state
+                        .discovered
+                        .entry(read.id.clone())
+                        .or_insert_with(|| read.key.page_match());
+                }
+                state.eager = eager;
+                state.eager.iter().map(|e| e.id.clone()).collect()
+            }
+            Sections::Asked => {
+                state
+                    .asked
+                    .extend(place.asked_sections(doc.page()).map(|e| e.id.clone()));
+                if place.focus.is_none() && state.asked.is_empty() && probe_available {
+                    if let Some(entry) = state
+                        .requested
+                        .as_ref()
+                        .and_then(|role| place.likely_section(role, doc.page()))
+                    {
+                        state.asked.insert(entry.id.clone());
+                        state.probed_section = true;
+                    }
+                }
+                state.asked.clone()
+            }
+        };
+        detail.probed_section = state.probed_section;
+        self.stats.places.insert(i as u8, detail);
+        let mut update_read = |entry: &mut site::Entry| {
+            if entry.menu_only
+                || self.cfg.sections == Sections::Asked && !candidates.contains(&entry.id)
+            {
+                return;
+            }
             let discovered = state
                 .discovered
                 .entry(entry.id.clone())
@@ -604,7 +859,14 @@ impl Session {
             if let Some(key) = state.external.get(discovered) {
                 entry.off_site = SiteKey::from_url(key.as_url()).as_ref() != Some(&place.site);
                 entry.key = key.clone();
+                entry.localized = false;
                 entry.locator = Locator::default();
+            }
+        };
+        for entry in &mut place.sections {
+            update_read(entry);
+            if self.cfg.sections == Sections::Asked {
+                entry.children.iter_mut().for_each(&mut update_read);
             }
         }
         if !std::mem::take(&mut state.stale) && state.place.as_ref() == Some(&place) {
@@ -621,12 +883,27 @@ impl Session {
         let Some(place) = state.place.as_ref() else {
             return;
         };
-        let keys: Vec<_> = place
-            .fetch_sections()
-            .into_iter()
-            .filter(|e| e.read == Some(ReadState::Queued))
-            .map(|e| e.key.clone())
-            .collect();
+        let keys: Vec<_> = match self.cfg.sections {
+            Sections::All => state
+                .eager
+                .iter()
+                .filter(|r| {
+                    state
+                        .discovered
+                        .get(&r.id)
+                        .and_then(|key| state.reads.get(key))
+                        .is_none_or(|s| *s == ReadState::Queued)
+                })
+                .map(|r| r.key.clone())
+                .collect(),
+            Sections::Asked => place
+                .sections
+                .iter()
+                .flat_map(|e| std::iter::once(e).chain(&e.children))
+                .filter(|e| e.read == Some(ReadState::Queued))
+                .map(|e| e.key.clone())
+                .collect(),
+        };
         for key in keys {
             self.enqueue(Work::Section(i, key.page_match()), key.as_url().clone());
         }
@@ -661,26 +938,13 @@ impl Session {
             let Some(state) = &self.sites[i] else {
                 continue;
             };
-            let Some((doc, place)) = state.doc.as_ref().zip(state.place.as_ref()) else {
-                continue;
-            };
+            let Some(doc) = &state.doc else { continue };
             if state.maps_wanted >= MAX_SITEMAP_READS
-                || place
-                    .sections
-                    .iter()
-                    .filter(|e| {
-                        e.sources.iter().any(|s| {
-                            matches!(
-                                s,
-                                Source::PrimaryNav
-                                    | Source::Footer
-                                    | Source::MenuGroup
-                                    | Source::Llms
-                            )
-                        })
-                    })
-                    .count()
-                    >= SITEMAP_SECTION_THRESHOLD
+                || self
+                    .stats
+                    .places
+                    .get(&(i as u8))
+                    .is_some_and(|p| p.navigation_sections >= SITEMAP_SECTION_THRESHOLD)
             {
                 continue;
             }
@@ -719,8 +983,13 @@ impl Session {
         match input {
             Input::Cancel => {
                 self.stats.cancelled = true;
+                if self.opening.is_some() {
+                    self.done(&mut out);
+                    return out;
+                }
                 for i in 0..self.sites.len() {
                     let Some(state) = self.sites[i].as_mut() else {
+                        self.close_slot(i, Failure::Cancelled, &mut out);
                         continue;
                     };
                     if state.complete {
@@ -786,6 +1055,7 @@ impl Session {
                                 if let Some(seed) = self.side_seed(&doc, &text) {
                                     self.lookup(i, seed, &mut out);
                                 } else {
+                                    self.unseeded[i] = None;
                                     self.emit(
                                         MapEvent::PlaceFailed {
                                             slot: i as u8,
@@ -796,6 +1066,7 @@ impl Session {
                                 }
                             }
                             Err(failure) => {
+                                self.unseeded[i] = None;
                                 self.refused(Phase::AnonymousResults, failure);
                                 self.emit(
                                     MapEvent::PlaceFailed {
@@ -876,6 +1147,7 @@ impl Session {
         self.finished = true;
         self.pending.clear();
         self.queue.clear();
+        self.landings.clear();
         self.emit(
             MapEvent::End {
                 outcome: if self.stats.cancelled {
@@ -890,6 +1162,19 @@ impl Session {
     }
     fn close_slot(&mut self, i: usize, missing: Failure, out: &mut Vec<Effect>) {
         let Some(s) = &self.sites[i] else {
+            if let Some(unseeded) = self.unseeded[i].take() {
+                let failure = match unseeded {
+                    Unseeded::Searching => missing,
+                    Unseeded::Failed(failure) => failure,
+                };
+                self.emit(
+                    MapEvent::PlaceFailed {
+                        slot: i as u8,
+                        failure,
+                    },
+                    out,
+                );
+            }
             return;
         };
         if s.complete {
@@ -910,8 +1195,54 @@ impl Session {
             self.emit_place(i, place, s.stale, s.seed.confidence, true, out);
         }
     }
+
+    fn finish_open(&mut self, out: &mut Vec<Effect>) {
+        let Some(open) = self.opening.as_ref() else {
+            return;
+        };
+        let robots = self.place_robots(open.held.place());
+        let Some(open) = self.opening.as_mut() else {
+            return;
+        };
+        let mut updated = open.held.clone();
+        updated.payload.robots = robots;
+        if let Some(updated) = updated.bounded() {
+            open.held = updated;
+        }
+        let remember = if open.clean && self.stats.budgets.is_empty() {
+            open.held.memo.clone().and_then(|mut memo| {
+                let mut updated = open.held.clone();
+                memo.payload.robots.clone_from(&open.held.payload.robots);
+                let bytes = memo.encode().ok()?;
+                let site = memo.payload.place.key.clone();
+                updated.memo = Some(memo);
+                let retained = updated.bounded()?;
+                retained.memo.as_ref()?;
+                open.held = retained;
+                Some((site, bytes))
+            })
+        } else {
+            None
+        };
+        let (slot, place, stale, confidence) = (
+            open.slot,
+            open.held.place().clone(),
+            open.stale,
+            open.confidence,
+        );
+        self.emit_place(usize::from(slot), place, stale, confidence, true, out);
+        if let Some((site, memo)) = remember {
+            let id = self.id();
+            out.push(Effect::RememberSite { id, site, memo });
+        }
+        self.done(out);
+    }
     fn finish(&mut self, out: &mut Vec<Effect>) {
         if self.elapsed >= self.cfg.elapsed {
+            let waiting = std::mem::take(&mut self.landings)
+                .into_values()
+                .flatten()
+                .map(|(job, _)| job);
             let jobs: Vec<_> = self
                 .pending
                 .values()
@@ -920,8 +1251,12 @@ impl Session {
                     _ => None,
                 })
                 .chain(self.queue.drain(..))
+                .chain(waiting)
                 .collect();
             for job in jobs {
+                if self.opening.is_some() && matches!(job.work, Work::Section(..)) {
+                    self.refused(Phase::Section, Failure::Timeout);
+                }
                 self.set_read(
                     &job,
                     ReadState::Skipped {
@@ -931,12 +1266,16 @@ impl Session {
                 );
             }
         }
-        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
-            && self.sites.iter().any(Option::is_some)
+        if self.opening.is_some() {
+            self.finish_open(out);
+            return;
+        }
+        let kind = self.query.as_ref().map(|q| q.kind().clone());
+        if matches!(kind, Some(QueryKind::Passage { .. })) && self.sites.iter().any(Option::is_some)
         {
             self.update_passages(out);
         }
-        if matches!(self.query.kind(), QueryKind::Passage { kind: _ })
+        if matches!(kind, Some(QueryKind::Passage { .. }))
             && self.passages.is_empty()
             && self
                 .stats
@@ -953,7 +1292,9 @@ impl Session {
         }
         for i in 0..self.sites.len() {
             self.close_slot(i, Failure::Limit, out);
-            let Some(s) = &self.sites[i] else { continue };
+            let Some(s) = &mut self.sites[i] else {
+                continue;
+            };
             if s.clean
                 && self.stats.budgets.is_empty()
                 && s.place
@@ -980,16 +1321,22 @@ impl Session {
                 let site = s.seed.site.clone();
                 let memo = SiteMemo {
                     version: MEMO_VERSION,
+                    eager: self.cfg.sections == Sections::All,
                     read_at: self.cfg.now,
                     payload: SitePayload { place, robots },
                 };
-                if let Ok(memo) = memo.encode() {
+                if let Ok(bytes) = memo.encode() {
+                    s.memo = Some(memo);
                     let id = self.id();
-                    out.push(Effect::RememberSite { id, site, memo });
+                    out.push(Effect::RememberSite {
+                        id,
+                        site,
+                        memo: bytes,
+                    });
                 }
             }
         }
-        if let QueryKind::Compare { shared, .. } = self.query.kind() {
+        if let Some(QueryKind::Compare { shared, .. }) = kind {
             let place = |i: usize| self.sites[i].as_ref()?.place.as_ref();
             if let Some((l, r)) = place(0).zip(place(1)) {
                 self.emit(
@@ -1003,10 +1350,131 @@ impl Session {
         self.done(out);
     }
 }
-fn origin(url: &Url) -> String {
+pub(crate) fn origin(url: &Url) -> String {
     url.origin().ascii_serialization()
 }
 mod scheduler;
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    const RESULT: &str =
+        "<main><article><h2><a href='https://acme.com/'>Acme workshop</a></h2></article></main>";
+    fn doc(url: &str, markup: &str) -> Doc {
+        Doc::from_html(
+            &Url::parse(url).unwrap(),
+            markup.as_bytes(),
+            None,
+            DocLimits::RESULTS,
+        )
+        .unwrap()
+    }
+    fn closing(
+        anonymous: Option<Result<&str, Failure>>,
+        cancel_at_anonymous: bool,
+        engine_robots: Option<&str>,
+    ) -> Vec<String> {
+        let (mut session, effects) = Session::start(Config::default(), "acme vs other").unwrap();
+        let mut queue: VecDeque<_> = effects.into();
+        let mut last: [Option<String>; 2] = [None, None];
+        let mut ended = false;
+        while let Some(effect) = queue.pop_front() {
+            assert!(!ended);
+            let input = match effect {
+                Effect::LoadResults { id, .. } => Some(Input::Results {
+                    id,
+                    result: Ok(doc("https://duckduckgo.com/", RESULT)),
+                }),
+                Effect::Fetch { id, url, .. } => Some(Input::Fetch {
+                    id,
+                    result: match (url.host_str(), url.path(), engine_robots) {
+                        (_, "/", _) => Ok(FetchResult {
+                            final_url: url,
+                            content_type: "text/html".into(),
+                            charset: None,
+                            bytes: b"<nav><a href='/about'>About</a></nav>".to_vec(),
+                            truncated: false,
+                        }),
+                        (Some("duckduckgo.com"), "/robots.txt", Some(rules)) => Ok(FetchResult {
+                            final_url: url,
+                            content_type: "text/plain".into(),
+                            charset: None,
+                            bytes: rules.as_bytes().to_vec(),
+                            truncated: false,
+                        }),
+                        _ => Err(Failure::Missing),
+                    },
+                }),
+                Effect::ReadResultsAnonymously { id, .. } => {
+                    if cancel_at_anonymous {
+                        Some(Input::Cancel)
+                    } else {
+                        anonymous.map(|answer| Input::Results {
+                            id,
+                            result: answer.map(|markup| doc("https://duckduckgo.com/", markup)),
+                        })
+                    }
+                }
+                Effect::LookupSite { id, .. } => Some(Input::Cache { id, memo: None }),
+                Effect::Emit { event, .. } => {
+                    match event {
+                        MapEvent::Place { slot, complete, .. } => {
+                            last[slot as usize] = Some(format!("place {complete}"))
+                        }
+                        MapEvent::PlaceFailed { slot, failure } => {
+                            last[slot as usize] = Some(format!("failed {failure:?}"))
+                        }
+                        MapEvent::End { .. } => ended = true,
+                        _ => {}
+                    }
+                    None
+                }
+                Effect::Render { id, .. } => Some(Input::Render {
+                    id,
+                    result: Err(Failure::Unavailable),
+                }),
+                Effect::RememberSite { .. } => None,
+            };
+            if let Some(input) = input {
+                queue.extend(session.handle(input));
+            }
+            if queue.is_empty() && !ended {
+                queue.extend(session.handle(Input::Elapsed { time: MAX_ELAPSED }));
+            }
+        }
+        assert!(ended);
+        last.into_iter().map(Option::unwrap_or_default).collect()
+    }
+    #[test]
+    fn every_opened_comparison_side_closes_before_the_end() {
+        let other = RESULT.replace("acme.com", "other.com");
+        assert_eq!(
+            closing(Some(Ok(&other)), false, None),
+            ["place true", "place true"]
+        );
+        assert_eq!(
+            closing(Some(Err(Failure::Unavailable)), false, None),
+            ["place true", "failed Unavailable"]
+        );
+        assert_eq!(
+            closing(Some(Ok("<main></main>")), false, None),
+            ["place true", "failed Missing"]
+        );
+        assert_eq!(closing(None, false, None), ["place true", "failed Limit"]);
+        assert_eq!(
+            closing(None, true, None),
+            ["failed Cancelled", "failed Cancelled"]
+        );
+    }
+    #[test]
+    fn a_refused_comparison_search_reports_its_own_reason() {
+        let other = RESULT.replace("acme.com", "other.com");
+        assert_eq!(
+            closing(Some(Ok(&other)), false, Some("User-agent: *\nDisallow: /")),
+            ["place true", "failed Robots"]
+        );
+    }
+}
 
 #[cfg(test)]
 mod arrival_tests {

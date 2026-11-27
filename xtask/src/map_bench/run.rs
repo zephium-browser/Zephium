@@ -8,6 +8,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::task::{Id as TaskId, JoinSet};
 use url::Url;
+use zephium_map::{
+    session::{ReadState, Sections},
+    Entry,
+};
 use zephium_public_fetch::{
     PublicReader, ReadRefusal, ReadRequest, ReadSession, ReaderLimits, RouteSource,
 };
@@ -21,7 +25,7 @@ use super::score::{self, Reason, Score, Verdict};
 use super::store::{
     self, query_dir, write_json, Journal, MatchPolicy, RecordedMatch, ResultsSlot, Transfer,
 };
-use super::{platform, BenchError, Options, Result};
+use super::{platform, session, BenchError, Options, Result};
 
 const SCHEMA: u32 = 1;
 pub(super) const BETWEEN_QUERIES: Duration = Duration::from_millis(500);
@@ -29,6 +33,7 @@ pub(super) const MANIFEST: &str = "run.json";
 pub(super) const OUTCOME: &str = "outcome.json";
 pub(super) const MEASURE: &str = "measure.json";
 pub(super) const REPLAY: &str = "replay.json";
+const SECTION_COMPARISON: &str = "sections.json";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct RunManifest {
@@ -385,6 +390,8 @@ struct QueryIo<'a> {
     failure: Option<Reason>,
     submitted: usize,
     claimed: BTreeSet<usize>,
+    open_record: Option<usize>,
+    matched: BTreeMap<usize, usize>,
     active: BTreeMap<usize, (usize, Option<u64>)>,
     ready: BTreeMap<(Option<usize>, Duration, usize), Ready>,
 }
@@ -421,6 +428,8 @@ impl<'a> QueryIo<'a> {
             failure: None,
             submitted: 0,
             claimed: BTreeSet::new(),
+            open_record: None,
+            matched: BTreeMap::new(),
             active: BTreeMap::new(),
             ready: BTreeMap::new(),
         }
@@ -447,14 +456,23 @@ impl<'a> QueryIo<'a> {
         };
         if let Some(matched) = self.journal.find(
             &request,
-            |index| probe || !self.claimed.contains(&index),
+            |index| {
+                probe
+                    || !self.claimed.contains(&index)
+                        && (request.expect != super::engine::Expectation::Html
+                            || self.open_record.is_none_or(|record| record == index))
+            },
             policy,
         ) {
             self.claimed.insert(matched.index);
-            self.ready.insert(
-                (Some(matched.order), matched.end, token),
-                Ready::Recorded(matched),
-            );
+            self.matched.insert(token, matched.index);
+            let end = if self.open_record.is_some() {
+                self.elapsed.saturating_add(matched.duration)
+            } else {
+                matched.end
+            };
+            self.ready
+                .insert((Some(matched.order), end, token), Ready::Recorded(matched));
         } else if let Some(live) = &mut self.live {
             let index = self.journal.reserve(&request, self.query, live.elapsed())?;
             self.claimed.insert(index);
@@ -880,6 +898,167 @@ fn replay_query(
     Ok(result)
 }
 
+#[derive(Serialize)]
+struct SectionComparison {
+    slot: u8,
+    id: String,
+    role: Option<String>,
+    state: &'static str,
+    read: Option<ReadState>,
+    requests: u64,
+    decoded_bytes: u64,
+    not_recorded: u64,
+    difference: Option<SectionDifference>,
+}
+
+#[derive(Serialize)]
+struct SectionDifference {
+    all_children: usize,
+    asked_children: usize,
+    all_more: u32,
+    asked_more: u32,
+    all_only: usize,
+    asked_only: usize,
+    changed: usize,
+}
+
+fn section_difference(all: &Entry, asked: &Entry) -> Option<SectionDifference> {
+    if all.children == asked.children && all.more == asked.more {
+        return None;
+    }
+    let missing = |left: &Entry, right: &Entry| {
+        left.children
+            .iter()
+            .filter(|child| !right.children.iter().any(|other| child.id == other.id))
+            .count()
+    };
+    Some(SectionDifference {
+        all_children: all.children.len(),
+        asked_children: asked.children.len(),
+        all_more: all.more,
+        asked_more: asked.more,
+        all_only: missing(all, asked),
+        asked_only: missing(asked, all),
+        changed: all
+            .children
+            .iter()
+            .filter(|child| {
+                asked
+                    .children
+                    .iter()
+                    .any(|other| child.id == other.id && *child != other)
+            })
+            .count(),
+    })
+}
+
+fn compare_sections(
+    root: &Path,
+    query: &CorpusQuery,
+    clock: RunClock,
+    index: usize,
+) -> Result<Vec<SectionComparison>> {
+    let path = query_dir(root, &query.label.id, false)?;
+    let replay_io = || -> Result<QueryIo<'_>> {
+        let mut io = QueryIo::new(&path, Journal::load(&path)?, clock, None);
+        io.query_index = index;
+        Ok(io)
+    };
+    let mut all_io = replay_io()?;
+    let all = session::search(query, &mut all_io, Sections::All, true);
+    let asked = session::search(query, &mut replay_io()?, Sections::Asked, true);
+    let mut comparisons = Vec::new();
+    for attempt in &all.sections {
+        let mut comparison = SectionComparison {
+            slot: attempt.slot,
+            id: attempt.id.as_str().to_owned(),
+            role: None,
+            state: "missing_recorded_response",
+            read: None,
+            requests: 0,
+            decoded_bytes: 0,
+            not_recorded: 0,
+            difference: None,
+        };
+        if let Some(&record) = all_io.matched.get(&attempt.token) {
+            let slot = usize::from(attempt.slot);
+            let find = |capture: &session::Capture| -> Option<Entry> {
+                capture.places[slot]
+                    .as_ref()?
+                    .place()
+                    .sections
+                    .iter()
+                    .find(|entry| entry.id == attempt.id)
+                    .cloned()
+            };
+            let baseline = find(&all);
+            comparison.role = baseline
+                .as_ref()
+                .and_then(|entry| entry.role)
+                .map(|role| format!("{role:?}"));
+            comparison.state = "missing_asked_place";
+            if let Some(held) = &asked.places[slot] {
+                let mut open_io = replay_io()?;
+                open_io.open_record = Some(record);
+                let before = find(&asked);
+                if let Some(entry) = before
+                    .as_ref()
+                    .filter(|entry| entry.read == Some(ReadState::Read))
+                {
+                    comparison.state = "already_read";
+                    comparison.read = entry.read;
+                    comparison.difference = baseline
+                        .as_ref()
+                        .and_then(|all| section_difference(all, entry));
+                } else {
+                    match session::open(
+                        query,
+                        &mut open_io,
+                        held.clone(),
+                        attempt.slot,
+                        &comparison.id,
+                    ) {
+                        Ok(opened) => {
+                            comparison.state = "opened";
+                            comparison.requests = open_io.activity.site_requests;
+                            comparison.not_recorded = open_io.activity.not_recorded;
+                            comparison.decoded_bytes = opened
+                                .outcome
+                                .stats
+                                .iter()
+                                .filter(|(key, _)| {
+                                    key.starts_with("phase.") && key.ends_with(".bytes")
+                                })
+                                .map(|(_, bytes)| bytes)
+                                .sum();
+                            if let Some(entry) = find(&opened) {
+                                comparison.read = entry.read;
+                                comparison.difference = baseline
+                                    .as_ref()
+                                    .and_then(|all| section_difference(all, &entry));
+                            } else {
+                                comparison.state = "missing_opened_entry";
+                            }
+                        }
+                        Err(zephium_map::session::OpenRefusal::UnknownEntry) => {
+                            comparison.state = "missing_asked_entry"
+                        }
+                        Err(zephium_map::session::OpenRefusal::NotOpenable) => {
+                            comparison.state = "not_openable";
+                            comparison.read = before.as_ref().and_then(|entry| entry.read);
+                        }
+                    }
+                }
+                if baseline.is_none() {
+                    comparison.state = "missing_all_entry";
+                }
+            }
+        }
+        comparisons.push(comparison);
+    }
+    Ok(comparisons)
+}
+
 pub(super) fn replay(
     root: &Path,
     corpus: &Corpus,
@@ -927,6 +1106,20 @@ pub(super) fn replay(
             },
         )?;
         save_outcome(&path.join(OUTCOME), result)?;
+        if crate::map_bench_section_flags::get().compare
+            && matches!(
+                query.label.kind,
+                super::corpus::Kind::Place | super::corpus::Kind::Compare
+            )
+        {
+            match compare_sections(root, query, recorded.clock(), index) {
+                Ok(comparisons) => write_json(&path.join(SECTION_COMPARISON), &comparisons)?,
+                Err(error) => {
+                    write_json(&path.join("sections-error.json"), &error.class)?;
+                    eprintln!("map bench: {}", error.for_query(&query.label.id));
+                }
+            }
+        }
     }
     let manifest = ReplayManifest {
         started_unix_ns,

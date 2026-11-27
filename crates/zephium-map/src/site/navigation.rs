@@ -80,18 +80,47 @@ impl Build<'_> {
             {
                 continue;
             }
+            let label = menus::link_label(n);
+            let marked_action = n.marks.has(crate::doc::Marks::ACTION);
             let parent = ancestors(nodes, i).skip(1).find_map(|a| {
                 owners
                     .get(&a)
                     .copied()
                     .filter(|_| n.parent_index() != Some(a) || nodes[a].role == Role::ListItem)
             });
+            let hint = |name: &str| LinkName {
+                text: clip(&crate::clean_text(name), TITLE_BYTES),
+                action: marked_action,
+                host_root: url.path() == "/" && url.query().is_none(),
+                language_host: n.marks.has(crate::doc::Marks::LANGUAGE_HOST),
+            };
             if nav && !footer && parent.is_none() {
-                if let Some((item, label)) = ancestors(nodes, i)
+                if let Some((item, group)) = ancestors(nodes, i)
                     .take_while(|&a| !matches!(nodes[a].role, Role::Landmark { landmark: _ }))
                     .find_map(|a| menu_labels.get(&a).map(|s| (a, *s)))
                 {
-                    if let Some(section) = self.entry_for(url, label, Source::PrimaryNav) {
+                    let group = if marked_action || card::action_target(url, label) {
+                        label
+                    } else {
+                        group
+                    };
+                    if let Some(section) = self.entry_for(url, group, Source::PrimaryNav) {
+                        let name = if section_role(label, url).is_some()
+                            && normal(label)
+                                == normal(
+                                    url.path()
+                                        .trim_matches('/')
+                                        .rsplit('/')
+                                        .next()
+                                        .unwrap_or_default(),
+                                ) {
+                            label
+                        } else {
+                            group
+                        };
+                        self.names
+                            .entry(section.id.clone())
+                            .or_insert_with(|| hint(name));
                         let index = self.section(section);
                         owners.insert(item, index);
                     }
@@ -108,6 +137,14 @@ impl Build<'_> {
             let Some(mut entry) = self.entry_for(url, n.accessible_name(), source) else {
                 continue;
             };
+            let name = self
+                .names
+                .entry(entry.id.clone())
+                .or_insert_with(|| hint(label));
+            name.action |= marked_action;
+            if card::sentence(&name.text) && !card::sentence(label) && !label.is_empty() {
+                name.text = clip(&crate::clean_text(label), TITLE_BYTES);
+            }
             if footer {
                 entry.group = ancestors(nodes, i).find_map(|a| group_labels.get(&a).cloned());
             }
@@ -156,6 +193,7 @@ impl Build<'_> {
             }
             if let Some(url) = &n.destination {
                 if n.accessible_name().is_empty()
+                    || menus::skip_node(n, url, menus::link_label(n), doc.page())
                     || n.accessible_name().chars().count() > MAX_CLUSTER_LABEL_CHARS
                     || SiteKey::from_url(url).as_ref() != Some(&self.site)
                 {
@@ -260,6 +298,7 @@ impl Build<'_> {
         if !crate::key::same_page(doc.page(), self.sections[index].key.as_url())
             || doc.page().fragment().is_some()
         {
+            self.sections[index].localized = self.localized.contains(&key.page_match());
             self.sections[index].locator = element_locator(doc.page()).unwrap_or_default();
         }
         self.sections[index].key = key.clone();

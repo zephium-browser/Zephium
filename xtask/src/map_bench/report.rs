@@ -93,6 +93,7 @@ struct Summary {
 struct SessionTotals {
     sites: u64,
     places_with_three_sections: u64,
+    card_quality: BTreeMap<&'static str, BTreeMap<&'static str, Defects>>,
     sources: Counts,
     shells: u64,
     walls: u64,
@@ -102,6 +103,12 @@ struct SessionTotals {
     budgets: BTreeMap<String, u64>,
     requests_per_query_by_phase: BTreeMap<String, Distribution>,
     passage: Counts,
+}
+
+#[derive(Default, Serialize)]
+struct Defects {
+    rows: u64,
+    places: u64,
 }
 
 impl SessionTotals {
@@ -174,6 +181,18 @@ impl SessionTotals {
             if let Some(&sections) = outcome.stats.get(&format!("place.{index}.sections")) {
                 if site_count > 0 {
                     self.places_with_three_sections += u64::from(sections >= 3);
+                    if let Some(mode) = ["all", "asked"]
+                        .into_iter()
+                        .find(|m| count(&format!("card.{m}")) > 0)
+                    {
+                        let quality = self.card_quality.entry(mode).or_default();
+                        for class in super::session::quality::CLASSES {
+                            let rows = count(&format!("place.{index}.card.{class}"));
+                            let defects = quality.entry(class).or_default();
+                            defects.rows = defects.rows.saturating_add(rows);
+                            defects.places += u64::from(rows != 0);
+                        }
+                    }
                     samples.sections.push(sections);
                     samples
                         .primary
@@ -204,6 +223,20 @@ Places with at least 3 sections — {} of {} place and compare sites.
 ",
             self.places_with_three_sections, self.sites,
         );
+        for (mode, quality) in &self.card_quality {
+            let _ = writeln!(
+                markdown,
+                "\n### Card quality ({mode})\n\n| Defect | Rows | Place cards |\n|---|---:|---:|"
+            );
+            for (class, defects) in quality {
+                let _ = writeln!(
+                    markdown,
+                    "| {class} | {} | {} |",
+                    defects.rows, defects.places
+                );
+            }
+            markdown.push('\n');
+        }
         markdown.push_str(
             "| Session activity | Count |
 | --- | ---: |
