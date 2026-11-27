@@ -80,6 +80,8 @@ struct BoundedClosedTab {
     title: String,
     zoom: f64,
     #[serde(default)]
+    container: Option<zephium_core::ids::ContainerId>,
+    #[serde(default)]
     session_id: Option<zephium_core::ids::ClosedSessionId>,
     #[serde(default)]
     closed_at_ms: Option<u64>,
@@ -292,6 +294,7 @@ impl BoundedSessionState {
                     url: entry.url,
                     title: entry.title,
                     zoom: entry.zoom,
+                    container: entry.container,
                     session_id: entry.session_id,
                     closed_at_ms: entry.closed_at_ms,
                     position: None,
@@ -597,6 +600,7 @@ mod qa_settings_recovery_tests {
                 url,
                 title: "Closed long link".into(),
                 zoom: 1.0,
+                container: None,
                 session_id: None,
                 closed_at_ms: None,
                 position: None,

@@ -1085,6 +1085,7 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
         url: "https://closed.example/path".into(),
         title: "Closed tab".into(),
         zoom: 1.25,
+        container: None,
         session_id: Some(zephium_core::ids::ClosedSessionId::from(42)),
         closed_at_ms: Some(1_700_000_000_123),
         position: None,

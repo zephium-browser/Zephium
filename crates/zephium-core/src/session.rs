@@ -101,6 +101,9 @@ pub struct PersistedClosedTab {
     pub url: String,
     pub title: String,
     pub zoom: f64,
+    /// Preserves the website session when a container tab is reopened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerId>,
     /// Absent on legacy snapshots. Never manufacture historical metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<ClosedSessionId>,
@@ -461,6 +464,7 @@ fn canonical_recently_closed(
                 } else {
                     1.0
                 },
+                container: entry.container,
                 session_id: entry.session_id,
                 closed_at_ms: entry.closed_at_ms,
                 position: entry
@@ -698,17 +702,20 @@ mod tests {
                 url: format!("https://example.com/{index}"),
                 title: format!("Title {index}\u{202e}"),
                 zoom: 2.0,
+                container: None,
                 session_id: None,
                 closed_at_ms: None,
                 position: None,
             })
             .collect::<Vec<_>>();
+        recent[3].container = Some(ContainerId::from(55));
         recent.push(PersistedClosedTab {
             profile: ProfileId::from(999),
             space,
             url: "https://foreign.example/".into(),
             title: "Foreign".into(),
             zoom: 1.0,
+            container: None,
             session_id: None,
             closed_at_ms: None,
             position: None,
@@ -719,6 +726,7 @@ mod tests {
             url: "file:///private.txt".into(),
             title: "Local".into(),
             zoom: 1.0,
+            container: None,
             session_id: None,
             closed_at_ms: None,
             position: None,
@@ -735,6 +743,10 @@ mod tests {
         );
         assert_eq!(state.recently_closed.len(), MAX_RECENTLY_CLOSED_TABS);
         assert_eq!(state.recently_closed[0].url, "https://example.com/3");
+        assert_eq!(
+            state.recently_closed[0].container,
+            Some(ContainerId::from(55))
+        );
         assert!(state
             .recently_closed
             .iter()
@@ -755,6 +767,7 @@ mod tests {
             url: "https://example.test/place".into(),
             title: "Place".into(),
             zoom: 1.0,
+            container: None,
             session_id: Some(ClosedSessionId::from(11)),
             closed_at_ms: Some(1_700_000_000_000),
             position,
@@ -795,6 +808,7 @@ mod tests {
             url: format!("https://example.test/{suffix}"),
             title: suffix.into(),
             zoom: 1.0,
+            container: None,
             session_id,
             closed_at_ms,
             position: None,

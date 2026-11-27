@@ -77,6 +77,28 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
     );
     navigate_and_commit(&mut shell, closed, "restore.example/path");
     shell.items.set_title(closed, "Restorable title".into());
+    let space = shell.windows.focused().unwrap().space;
+    let created = shell.handle_operation(Command::Container(Box::new(
+        crate::ContainerCommand::Create {
+            name: "Restore".into(),
+            look: Default::default(),
+            spaces: zephium_core::containers::SpaceAccess::Selected(vec![space]),
+        },
+    )));
+    assert_eq!(created.outcome, OperationOutcome::Applied);
+    let container = shell
+        .containers
+        .for_profile(closed_profile)
+        .next()
+        .unwrap()
+        .id;
+    let assigned = shell.handle_operation(Command::Container(Box::new(
+        crate::ContainerCommand::AssignTab {
+            tab: closed,
+            container: Some(container),
+        },
+    )));
+    assert_ne!(assigned.outcome, OperationOutcome::Rejected);
     shell.handle(Command::Close(closed));
     assert_eq!(shell.recently_closed.len(), 1);
     let profile = shell.windows.focused().unwrap().profile;
@@ -92,11 +114,12 @@ fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
         Some("https://restore.example/path")
     );
     assert_eq!(tab.title, "Restorable title");
+    assert_eq!(tab.container, Some(container));
     // The page comes back at what its site shows, not what the tab held.
     assert_eq!(engine.last_zoom_request().0, restored);
     assert_eq!(engine.last_zoom_request().1, 1.25);
     assert!(engine.calls().iter().any(|call| {
-        call == &format!("create {restored} https://restore.example/path [default]")
+        call == &format!("create {restored} https://restore.example/path [container]")
     }));
     assert!(store
         .saved
