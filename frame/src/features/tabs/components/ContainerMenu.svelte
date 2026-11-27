@@ -511,7 +511,7 @@
       background: var(--row-hover);
     }
 
-    .unassigned-container .edit {
+    .container-option-wrap.unassigned-container .edit {
       display: grid;
       width: 24px;
       height: 24px;
