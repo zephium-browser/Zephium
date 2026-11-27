@@ -92,8 +92,8 @@ importers:
         specifier: 1.7.1
         version: 1.7.1(svelte@5.58.0(@typescript-eslint/types@8.73.0))
       bits-ui:
-        specifier: 2.21.0
-        version: 2.21.0(@internationalized/date@3.12.2)(svelte@5.58.0(@typescript-eslint/types@8.73.0))
+        specifier: 2.18.1
+        version: 2.18.1(@internationalized/date@3.12.2)(svelte@5.58.0(@typescript-eslint/types@8.73.0))
       elkjs:
         specifier: 0.12.1
         version: 0.12.1
@@ -1665,8 +1665,8 @@ packages:
     resolution: {integrity: sha512-XDrb+zql0RbFPKgj7MuH9zOc78R3Fa/P/VSGnnpdwYsvNZPWjcMYMdAkKCOQEL2A7yqgjSMTDRFp6gfSDW+/QQ==}
     hasBin: true
 
-  bits-ui@2.21.0:
-    resolution: {integrity: sha512-kfJonux4r+XOnqGCBQaqFfhRUvDbuZQgyjXADfk0/QJGc8LlQchkrGc6rCd+ldo1EixCJEXlM7znKVIUtuf7OQ==}
+  bits-ui@2.18.1:
+    resolution: {integrity: sha512-KkemzKFH4T3gt3H+P86JcnAWExjByv/6vlwjm/BoCwTPHu03yiCdxbghdJLvFReQTe0acCAiRcKfmixxD6XvlA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@internationalized/date': ^3.8.1
@@ -4384,7 +4384,7 @@ snapshots:
 
   binaryen@130.0.0: {}
 
-  bits-ui@2.21.0(@internationalized/date@3.12.2)(svelte@5.58.0(@typescript-eslint/types@8.73.0)):
+  bits-ui@2.18.1(@internationalized/date@3.12.2)(svelte@5.58.0(@typescript-eslint/types@8.73.0)):
     dependencies:
       '@floating-ui/core': 1.8.0
       '@floating-ui/dom': 1.8.0

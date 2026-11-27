@@ -42,7 +42,7 @@
     "@tiptap/extension-text": "3.34.0",
     "@tiptap/pm": "3.34.0",
     "@xyflow/svelte": "1.7.1",
-    "bits-ui": "2.21.0",
+    "bits-ui": "2.18.1",
     "elkjs": "0.12.1",
     "marked": "18.2.1",
     "svelte": "5.58.0"
