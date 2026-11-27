@@ -46,6 +46,7 @@ impl Cleanup {
                 let result = native.clone();
                 engine.erase_profile_data(
                     profile,
+                    Vec::new(),
                     Box::new(move |outcome| {
                         result.store(
                             match outcome {

@@ -2031,6 +2031,7 @@ pub(crate) fn erase_profile_data(
     process_provenance_valid: bool,
     roots: Vec<std::path::PathBuf>,
     profile: zephium_core::ids::ProfileId,
+    _containers: Vec<zephium_core::ids::ContainerId>,
     completion: Arc<crate::erasure::Completion>,
 ) {
     if !process_provenance_valid {

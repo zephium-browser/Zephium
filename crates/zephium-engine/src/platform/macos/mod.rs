@@ -446,6 +446,7 @@ fn validate_ephemeral_data_store(store: &WebsiteDataStore) -> Result<(), &'stati
 #[derive(Clone)]
 struct ProfileErasure {
     profile: zephium_core::ids::ProfileId,
+    container_store_ids: Vec<[u8; 16]>,
     completion: Arc<crate::erasure::Completion>,
     attempt: Arc<AtomicBool>,
 }
@@ -453,10 +454,12 @@ struct ProfileErasure {
 impl ProfileErasure {
     fn new(
         profile: zephium_core::ids::ProfileId,
+        containers: Vec<zephium_core::ids::ContainerId>,
         completion: Arc<crate::erasure::Completion>,
     ) -> Self {
         Self {
             profile,
+            container_store_ids: containers.into_iter().map(|id| id.bytes()).collect(),
             attempt: completion.attempt_flag(),
             completion,
         }
@@ -544,16 +547,18 @@ fn apply_ephemeral_cohort_progress(progress: EphemeralCohortProgress, erasure: P
     }
 }
 
-/// Remove a profile's named WKWebsiteDataStore only after the host has
-/// released every WKWebView using it. Apple reports completion errors, but a
-/// successful callback alone is not our proof boundary: enumerate the app's
-/// identifiers again and acknowledge only when this identifier is absent.
+/// Remove a profile's and its containers' named WKWebsiteDataStores only
+/// after the host has released every WKWebView using them. Apple reports
+/// completion errors, but a successful callback alone is not our proof
+/// boundary: enumerate the app's identifiers again and acknowledge only when
+/// every owned identifier is absent.
 pub(crate) fn erase_profile_data(
     profile: zephium_core::ids::ProfileId,
+    containers: Vec<zephium_core::ids::ContainerId>,
     mut ephemeral_stores: Vec<WebsiteDataStore>,
     completion: Arc<crate::erasure::Completion>,
 ) {
-    let erasure = ProfileErasure::new(profile, completion);
+    let erasure = ProfileErasure::new(profile, containers, completion);
     let mut seen = std::collections::HashSet::new();
     ephemeral_stores.retain(|store| seen.insert(Retained::as_ptr(store) as usize));
     if ephemeral_stores.is_empty() {
@@ -625,11 +630,21 @@ fn erase_named_profile_data(erasure: ProfileErasure) {
         return;
     }
     // The profile's own store, then Work's own store for the profile.
-    let identifiers = vec![
-        browsing_data::profile_store_identifier(erasure.profile),
-        crate::work_website_data::identifier(erasure.profile),
-    ];
+    let identifiers =
+        named_profile_store_identifiers(erasure.profile, &erasure.container_store_ids);
     remove_named_stores(identifiers, Vec::new(), erasure);
+}
+
+fn named_profile_store_identifiers(
+    profile: zephium_core::ids::ProfileId,
+    container_store_ids: &[[u8; 16]],
+) -> Vec<[u8; 16]> {
+    let mut identifiers = vec![
+        browsing_data::profile_store_identifier(profile),
+        crate::work_website_data::identifier(profile),
+    ];
+    identifiers.extend(container_store_ids.iter().copied());
+    identifiers
 }
 
 /// Removes each present named store in turn. Every step re-enumerates the
@@ -750,6 +765,21 @@ mod tests {
     }
 
     #[test]
+    fn profile_erasure_includes_every_owned_container_store() {
+        let profile = zephium_core::ids::ProfileId::from(7);
+        let first = zephium_core::ids::ContainerId::from(11);
+        let second = zephium_core::ids::ContainerId::from(12);
+        let identifiers =
+            named_profile_store_identifiers(profile, &[first.bytes(), second.bytes()]);
+
+        assert!(identifiers.contains(&browsing_data::profile_store_identifier(profile)));
+        assert!(identifiers.contains(&crate::work_website_data::identifier(profile)));
+        assert!(identifiers.contains(&first.bytes()));
+        assert!(identifiers.contains(&second.bytes()));
+        assert_eq!(identifiers.len(), 4);
+    }
+
+    #[test]
     fn failed_ephemeral_verification_cannot_be_forgotten_by_a_retry() {
         let (tx, rx) = mpsc::channel();
         let attempt = Arc::new(AtomicBool::new(true));
@@ -768,7 +798,11 @@ mod tests {
         );
         apply_ephemeral_cohort_progress(
             progress,
-            ProfileErasure::new(zephium_core::ids::ProfileId::from(7), completion),
+            ProfileErasure::new(
+                zephium_core::ids::ProfileId::from(7),
+                Vec::new(),
+                completion,
+            ),
         );
 
         assert_eq!(

@@ -1146,6 +1146,7 @@ impl Engine for FakeEngine {
     fn erase_profile_data(
         &self,
         profile: ProfileId,
+        _containers: Vec<zephium_core::ids::ContainerId>,
         done: Box<dyn FnOnce(zephium_core::ports::engine::ProfileDataErasureOutcome) + Send>,
     ) {
         self.log(format!("erase-profile {profile}"));

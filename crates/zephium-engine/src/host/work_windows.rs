@@ -193,6 +193,7 @@ impl EngineHost {
             clean,
             vec![root],
             native_profile,
+            Vec::new(),
             completion,
         );
     }

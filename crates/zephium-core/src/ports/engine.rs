@@ -1366,6 +1366,7 @@ pub trait Engine {
     fn erase_profile_data(
         &self,
         _profile: ProfileId,
+        _containers: Vec<ContainerId>,
         done: Box<dyn FnOnce(ProfileDataErasureOutcome) + Send>,
     );
     /// Close every native view/context on its owning thread. Completion runs
