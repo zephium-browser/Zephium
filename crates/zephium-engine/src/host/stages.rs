@@ -470,12 +470,10 @@ impl EngineHost {
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
-        // Off-screen views keep their memory: the low-memory hint only paged
-        // it out to be paged back in on return, and freed no commit. Actual
-        // suspension waits for the shell's idle verdict; becoming visible
-        // resumes a suspended view natively.
         #[cfg(target_os = "windows")]
         {
+            use wry::{MemoryUsageLevel, WebViewExtWindows as _};
+
             let mut woken = Vec::new();
             for id in self.views.keys() {
                 // A layout belongs to one window; resource policy belongs to
@@ -491,10 +489,11 @@ impl EngineHost {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
                     self.desired_dormant.remove(id);
+                    self.dormant_cycles.remove(id);
                     // Keep the in-flight slot until its exact callback settles.
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
-                    self.suspend_failed.remove(id);
+                    self.suspend_failures.clear_failure(*id);
                     self.suspend_retries.remove(id);
                     woken.push(*id);
                 }
@@ -504,6 +503,12 @@ impl EngineHost {
                 self.refresh_missed_styles(id);
                 self.resume_store_button_poll(id);
             }
+            self.suspend_failures.restore_visible(&self.hidden, |id| {
+                self.views.get(&id).is_none_or(|view| {
+                    view.set_memory_usage_level(MemoryUsageLevel::Normal)
+                        .is_ok()
+                })
+            });
         }
         self.refresh_visible_generic_styles();
         true

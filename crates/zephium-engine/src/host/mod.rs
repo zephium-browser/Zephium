@@ -78,6 +78,8 @@ mod webext;
 mod webext_downloads;
 #[cfg(target_os = "windows")]
 mod webext_windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_dormancy;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
@@ -745,7 +747,7 @@ pub(crate) struct EngineHost {
     #[cfg(target_os = "windows")]
     suspending: std::collections::HashSet<ItemId>,
     #[cfg(target_os = "windows")]
-    suspend_failed: std::collections::HashSet<ItemId>,
+    suspend_failures: windows_dormancy::SuspendFailures,
     // A refused view's one retry.
     #[cfg(target_os = "windows")]
     suspend_retries: HashMap<ItemId, discard::SuspendRetry>,

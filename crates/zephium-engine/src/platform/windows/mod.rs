@@ -2309,7 +2309,8 @@ pub fn install_zoom_listener(
 
 // Edge's sleeping-tabs primitive: a suspended view frees most of its
 // renderer working set and wakes on SetIsVisible(true).
-pub fn try_suspend(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bool {
+// A failed completion has no suspension verdict.
+pub fn try_suspend(view: &wry::WebView, done: impl FnOnce(Option<bool>) + 'static) -> bool {
     use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2_3;
     use webview2_com::TrySuspendCompletedHandler;
     use windows_core::Interface;
@@ -2321,7 +2322,7 @@ pub fn try_suspend(view: &wry::WebView, done: impl FnOnce(bool) + 'static) -> bo
         return false;
     };
     let handler = TrySuspendCompletedHandler::create(Box::new(move |result, suspended| {
-        done(result.is_ok() && suspended);
+        done(result.is_ok().then_some(suspended));
         Ok(())
     }));
     if let Err(e) = unsafe { v3.TrySuspend(&handler) } {
