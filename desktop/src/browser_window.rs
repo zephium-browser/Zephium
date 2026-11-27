@@ -17,6 +17,35 @@ use crate::UiStartupGate;
 use crate::{shutdown_started, MAIN_LABEL};
 
 const LABEL_PREFIX: &str = "browser-";
+
+#[cfg(target_os = "macos")]
+fn after_engine_attach(attach: impl FnOnce() -> bool, install_monitor: impl FnOnce()) -> bool {
+    if !attach() {
+        return false;
+    }
+    install_monitor();
+    true
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::after_engine_attach;
+    use std::cell::Cell;
+
+    #[test]
+    fn failed_attach_does_not_install_key_monitor() {
+        let installed = Cell::new(false);
+        assert!(!after_engine_attach(|| false, || installed.set(true)));
+        assert!(!installed.get());
+    }
+
+    #[test]
+    fn successful_attach_installs_key_monitor() {
+        let installed = Cell::new(false);
+        assert!(after_engine_attach(|| true, || installed.set(true)));
+        assert!(installed.get());
+    }
+}
 static ALLOWED_CLOSES: OnceLock<Mutex<BTreeSet<u64>>> = OnceLock::new();
 
 fn allowed_closes() -> &'static Mutex<BTreeSet<u64>> {
@@ -197,17 +226,21 @@ fn build(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) -> bool {
         let _ = window.destroy();
         return false;
     }
-    crate::material::install(&window, false);
-    let keymap = app.state::<crate::keymap::Keymap>().key_table();
-    let shortcut_app = app.clone();
-    crate::platform::imp::install_key_monitor(&window, keymap, move |command| {
-        let _ = crate::execute_command(&shortcut_app, command);
-    });
     let Ok(handle) = window.window_handle().map(|handle| handle.as_raw()) else {
         let _ = window.destroy();
         return false;
     };
-    if !factory.engine.attach_window(opened.window, handle) {
+    crate::material::install(&window, false);
+    let keymap = app.state::<crate::keymap::Keymap>().key_table();
+    let shortcut_app = app.clone();
+    if !after_engine_attach(
+        || factory.engine.attach_window(opened.window, handle),
+        || {
+            crate::platform::imp::install_key_monitor(&window, keymap, move |command| {
+                let _ = crate::execute_command(&shortcut_app, command);
+            });
+        },
+    ) {
         let _ = window.destroy();
         return false;
     }
