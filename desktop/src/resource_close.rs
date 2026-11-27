@@ -102,10 +102,10 @@ impl Gate {
         true
     }
 
-    fn forget_window(&mut self, label: &str) -> Vec<(String, String)> {
+    fn forget_window(&mut self, label: &str, cancel_survivors: bool) -> Vec<(String, String)> {
         self.touched.remove(label);
         self.pending.remove(label);
-        if !self.flushed.is_empty() && !self.system_closing {
+        if cancel_survivors && !self.flushed.is_empty() && !self.system_closing {
             self.prepared = false;
             std::mem::take(&mut self.flushed)
                 .into_iter()
@@ -278,7 +278,7 @@ pub(super) fn forget_window(app: &tauri::AppHandle, label: &str) {
     let flushed = gate()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .forget_window(label);
+        .forget_window(label, !super::shutdown_started(app));
     for (participant, token) in flushed {
         super::try_emit_to_privileged_only(
             app,
@@ -767,7 +767,7 @@ mod tests {
         gate.pending
             .insert("browser-1".into(), ("closing-token".into(), send));
 
-        let cancelled = gate.forget_window("browser-1");
+        let cancelled = gate.forget_window("browser-1", true);
 
         assert!(!gate.prepared);
         assert!(!gate.touched.contains("browser-1"));
@@ -795,10 +795,29 @@ mod tests {
             ("browser-2".into(), "survivor-token".into()),
         ];
 
-        let cancelled = gate.forget_window("browser-1");
+        let cancelled = gate.forget_window("browser-1", true);
 
         assert!(!gate.prepared);
         assert!(gate.flushed.is_empty());
+        assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
+    }
+
+    #[test]
+    fn closing_the_main_renderer_removes_it_and_cancels_survivors() {
+        let mut gate = Gate {
+            prepared: true,
+            ..Gate::default()
+        };
+        gate.touched.insert(super::super::MAIN_LABEL.into());
+        gate.touched.insert("browser-2".into());
+        gate.flushed = vec![
+            (super::super::MAIN_LABEL.into(), "main-token".into()),
+            ("browser-2".into(), "survivor-token".into()),
+        ];
+
+        let cancelled = gate.forget_window(super::super::MAIN_LABEL, true);
+
+        assert!(!gate.touched.contains(super::super::MAIN_LABEL));
         assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
     }
 

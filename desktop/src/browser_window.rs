@@ -140,7 +140,10 @@ pub(crate) fn open(app: &tauri::AppHandle, opened: BrowserWindowOpenedView) {
 fn close_after_flush(window: WebviewWindow, id: u64) {
     let app = window.app_handle().clone();
     let callback_app = app.clone();
-    crate::resource_close::request(app, move || {
+    crate::resource_close::request_with_result(app, move |proceed| {
+        if !proceed {
+            return;
+        }
         allowed_closes()
             .lock()
             .unwrap_or_else(|e| e.into_inner())

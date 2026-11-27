@@ -8299,7 +8299,15 @@ fn finish_browser_setup(
                         api.prevent_close();
                         if updates::blocks_exit(&exit_handle) { return; }
                         if browser_window::labels(&exit_handle).len() > 1 {
-                            resize_shell.dispatch(Command::BrowserWindowClosed(1));
+                            let shell = resize_shell.clone();
+                            resource_close::request_with_result(
+                                exit_handle.clone(),
+                                move |proceed| {
+                                    if proceed {
+                                        shell.dispatch(Command::BrowserWindowClosed(1));
+                                    }
+                                },
+                            );
                             return;
                         }
                         let owner=window_shutdown.clone();
@@ -8310,6 +8318,7 @@ fn finish_browser_setup(
                     // Fallback for platform/programmatic destruction paths
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
+                        resource_close::forget_window(&exit_handle, MAIN_LABEL);
                         #[cfg(target_os = "macos")]
                         platform::imp::remove_key_monitor(MAIN_LABEL);
                         #[cfg(target_os = "windows")]
@@ -9036,6 +9045,25 @@ mod frame_sources;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn closing_main_with_other_browser_windows_flushes_before_destruction() {
+        let source = include_str!("lib.rs");
+        let close = source
+            .split("if browser_window::labels(&exit_handle).len() > 1 {")
+            .nth(1)
+            .expect("main close with sibling windows")
+            .split("let owner=window_shutdown.clone()")
+            .next()
+            .expect("sibling close branch ends before app shutdown");
+        let flush = close
+            .find("resource_close::request_with_result")
+            .expect("flush before destroying main");
+        let destroy = close
+            .find("Command::BrowserWindowClosed(1)")
+            .expect("destroy main after flush decision");
+        assert!(flush < destroy);
+    }
+
     #[test]
     fn browser_projections_are_routed_to_their_panel_owner_window() {
         assert_eq!(super::browser_projection_label(Some("1")), super::MAIN_LABEL);
