@@ -27,7 +27,7 @@ while IFS= read -r path; do
       Cargo.toml | Cargo.lock | rust-toolchain.toml | deny.toml | .cargo/* | .config/*)
       rust=true
       ;;
-    .github/* | scripts/ci/*)
+    .github/* | scripts/ci/* | scripts/release/*)
       rust=true
       frontend=true
       workflows=true

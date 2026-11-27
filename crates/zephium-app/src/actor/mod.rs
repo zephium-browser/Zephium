@@ -73,6 +73,7 @@ struct ShellHandoff<Agent = NoAgentLifecycle> {
     store: SharedStore,
     blocker: SharedBlocker,
     agent_lifecycle: Agent,
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     terminal_failure: ShellTerminalFailureCallback,
     chrome: SharedChrome,
     emit: EmitFn,
@@ -590,6 +591,14 @@ pub struct CallbackHandle {
 }
 
 impl CallbackHandle {
+    /// A background producer may stop preparing work after shutdown seals ingress.
+    /// This observation does not reserve admission; dispatch remains authoritative.
+    pub fn is_accepting_commands(&self) -> bool {
+        self.queue
+            .upgrade()
+            .is_some_and(|inner| (CommandQueue { inner }).is_accepting_commands())
+    }
+
     /// Sticky retained state is polled after every Shell command. A full queue
     /// already owns that progress; a sealed queue owns the shutdown barrier,
     /// which waits on the original resource notification epoch instead. Only
@@ -960,6 +969,23 @@ impl Handle {
         }
         receiver
     }
+    pub fn site_permissions(
+        &self,
+        origin: Option<zephium_core::permissions::PageOrigin>,
+    ) -> std::sync::mpsc::Receiver<Option<zephium_ipc::SitePermissionsView>> {
+        let (reply, receiver) = sync_channel(1);
+        if let Err(
+            TryPushError::Full(command)
+            | TryPushError::Sealed(command)
+            | TryPushError::Closed(command),
+        ) = self
+            .queue
+            .try_push(Command::SitePermissions { origin, reply })
+        {
+            finish_unprocessed_command(command, ShutdownOutcome::Unclean);
+        }
+        receiver
+    }
     pub fn focused_content_policy_status(&self) -> FocusedContentPolicyStatusRequest {
         let (reply, receiver) = sync_channel(1);
         let command = Command::FocusedContentPolicyStatus { reply };
@@ -1152,8 +1178,8 @@ impl Handle {
     }
 
     /// Requests an ordered shutdown without waiting for queue capacity on the
-    /// caller (normally the UI thread). Only `RetryableFailure` leaves the
-    /// actor and native engine available for another attempt.
+    /// caller (normally the UI thread). An admitted shutdown is terminal even
+    /// when storage fails; `RetryableFailure` only reports refused admission.
     pub fn shutdown(&self) -> ShutdownRequest {
         self.shutdown_with_deadline(self.shutdown_deadline())
     }
@@ -1219,6 +1245,9 @@ fn finish_unprocessed_command(command: Command, outcome: ShutdownOutcome) {
         Command::BlockerStatistics { reply, .. } => {
             let _ = reply.try_send(None);
         }
+        Command::SitePermissions { reply, .. } => {
+            let _ = reply.try_send(None);
+        }
         Command::FocusedContentPolicyStatus { reply } => {
             let _ = reply.send(BlockerStatusView::unavailable());
         }
@@ -1260,8 +1289,13 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::Navigate { .. }
             | Command::Reload(_)
             | Command::AnswerPageRequest { .. }
+            | Command::AnswerHttpAuth { .. }
+            | Command::ContinuePastCertificate(_)
+            | Command::ContinuePastBlock { .. }
+            | Command::LeaveBlockedPage(_)
             | Command::GoBack(_)
             | Command::GoForward(_)
+            | Command::GoToHistoryEntry { .. }
             | Command::SplitWith { .. }
             | Command::Unsplit
             | Command::LeaveSplit(_)
@@ -1273,7 +1307,10 @@ fn tracked_operation_command(command: &Command) -> bool {
             | Command::RunSearchAction { .. }
             | Command::InvokeExtensionAction { .. }
             | Command::RespondToPagePermissionPrompt { .. }
+            | Command::SetSitePermission { .. }
             | Command::StopMediaCapture { .. }
+            | Command::SetTabMuted { .. }
+            | Command::MediaPlayer { .. }
             | Command::OpenUrl { .. }
             | Command::SetAppSetting { .. }
             | Command::Focus(_)
@@ -1411,6 +1448,33 @@ pub fn spawn_suspended(
             store,
             blocker,
             agent_lifecycle: NoAgentLifecycle,
+            profile_cleanup: None,
+            terminal_failure,
+            chrome,
+            emit,
+        },
+        spawn_worker,
+    )
+}
+
+/// Starts a suspended Shell with the external profile erasure owner installed
+/// before journal recovery can enter any cleanup phase.
+pub fn spawn_suspended_with_profile_cleanup(
+    engine: SharedEngine,
+    store: SharedStore,
+    blocker: SharedBlocker,
+    terminal_failure: ShellTerminalFailureCallback,
+    chrome: SharedChrome,
+    emit: EmitFn,
+    profile_cleanup: Arc<dyn crate::profile_cleanup::ProfileCleanup>,
+) -> Result<Handle, SpawnFailure> {
+    spawn_suspended_with_worker_spawner(
+        ShellHandoff {
+            engine,
+            store,
+            blocker,
+            agent_lifecycle: NoAgentLifecycle,
+            profile_cleanup: Some(profile_cleanup),
             terminal_failure,
             chrome,
             emit,
@@ -1441,6 +1505,7 @@ pub fn spawn_agentic_suspended(
             store,
             blocker,
             agent_lifecycle: PendingAgentBrowserLifecycle(agent_lifecycle),
+            profile_cleanup: None,
             terminal_failure,
             chrome,
             emit,
@@ -1488,6 +1553,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         store,
         blocker,
         agent_lifecycle,
+        profile_cleanup,
         terminal_failure,
         chrome,
         emit,
@@ -1532,11 +1598,13 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
             store,
             blocker,
             agent_lifecycle,
+            profile_cleanup,
             terminal_failure,
             chrome,
             emit,
         } = handoff;
-        let ports = ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit);
+        let ports = ShellPorts::new(engine, store, blocker, terminal_failure, chrome, emit)
+            .with_profile_cleanup(profile_cleanup);
         #[cfg(feature = "agentic-browser")]
         let ports = ports.with_agent_lifecycle(agent_lifecycle.into_shell_lifecycle());
         #[cfg(not(feature = "agentic-browser"))]
@@ -1610,6 +1678,20 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                     Err(TryPushError::Full(_)) => timer_queue.schedule_focus(Some(
                         std::time::Instant::now() + std::time::Duration::from_millis(25),
                     )),
+                    Err(TryPushError::Closed(_)) => break,
+                },
+                TimerWake::Audio => match timer_queue.try_push(Command::AudioWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_audio(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    ),
+                    Err(TryPushError::Closed(_)) => break,
+                },
+                TimerWake::VisitTitles => match timer_queue.try_push(Command::VisitTitlesWake) {
+                    Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                    Err(TryPushError::Full(_)) => timer_queue.schedule_visit_titles(
+                        std::time::Instant::now() + std::time::Duration::from_millis(25),
+                    ),
                     Err(TryPushError::Closed(_)) => break,
                 },
                 TimerWake::Persist => match timer_queue.try_push(Command::Persist) {
@@ -1698,6 +1780,18 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                         Err(TryPushError::Closed(_)) => break,
                     }
                 }
+                TimerWake::BlockerStartup { profile, token } => {
+                    match timer_queue.try_push(Command::BlockerStartupDeadline { profile, token }) {
+                        Ok(()) | Err(TryPushError::Sealed(_)) => {}
+                        Err(TryPushError::Full(_)) => timer_queue
+                            .schedule_blocker_startup_deadline(
+                                profile,
+                                token,
+                                std::time::Instant::now() + std::time::Duration::from_millis(25),
+                            ),
+                        Err(TryPushError::Closed(_)) => break,
+                    }
+                }
                 TimerWake::BlockerCatalog { operation, attempt } => {
                     match timer_queue.try_push(Command::BlockerCatalogPoll { operation, attempt }) {
                         Ok(()) | Err(TryPushError::Sealed(_)) => {}
@@ -1754,6 +1848,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
         store,
         blocker,
         agent_lifecycle,
+        profile_cleanup,
         terminal_failure,
         chrome,
         emit,
@@ -1766,6 +1861,7 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 store,
                 blocker,
                 agent_lifecycle,
+                profile_cleanup,
                 terminal_failure,
                 chrome,
                 emit,
@@ -1777,6 +1873,8 @@ fn spawn_suspended_with_worker_spawner<Agent: PendingAgentLifecycle>(
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(engine))).is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(store))).is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(blocker))).is_ok(),
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(profile_cleanup)))
+                    .is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(terminal_failure)))
                     .is_ok(),
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(chrome))).is_ok(),

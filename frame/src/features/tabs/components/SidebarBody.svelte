@@ -6,29 +6,44 @@
   import Icon from "$shared/ui/Icon";
   import type { SidebarEntry } from "../lib/sidebar-model";
   import TabList from "./TabList.svelte";
+  import TabSelectionBar from "./TabSelectionBar.svelte";
+  import { TabSelection } from "../lib/tab-selection.svelte";
   import SpaceBar from "./SpaceBar.svelte";
-  import SpaceEmpty from "./SpaceEmpty.svelte";
   import SpacePeek from "./SpacePeek.svelte";
   import { remember } from "../lib/space-memory";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
-  import { untrack } from "svelte";
+  import { openOnBackgroundMiddleClick } from "../lib/middle-click";
+  import { untrack, type Snippet } from "svelte";
 
   let {
     pinned,
     today,
     splitting,
     onSelect,
+    extras,
   }: {
     pinned: SidebarEntry[];
     today: SidebarEntry[];
     splitting: boolean;
     onSelect: (id: string) => void;
+    /** Set beside the way to open a tab: pinned extensions. */
+    extras?: Snippet;
   } = $props();
+
+  const selection = new TabSelection();
+  const backgroundClick = openOnBackgroundMiddleClick(tabs.open);
+  export function clearSelection() {
+    selection.clear();
+  }
+
+  let pinnedOrder = $state.raw<string[]>([]);
+  let todayOrder = $state.raw<string[]>([]);
+  const rangeOrder = $derived([...pinnedOrder, ...todayOrder]);
+  let spacePanelOpen = $state(false);
 
   // Private browsing keeps one space, so it has no switcher.
   const spaced = $derived(tabs.profile()?.kind !== "incognito" && tabs.activeSpace() !== undefined);
   const order = $derived(tabs.spaces().map((space) => space.id));
-  const empty = $derived(pinned.length === 0 && today.length === 0);
   let stage = $state<HTMLElement>();
   let sheet = $state<HTMLElement>();
   // The neighbours are drawn only while a swipe has them in view.
@@ -73,11 +88,16 @@
   the difference by having no close control.
 -->
 <!-- Opening a tab never scrolls away with the tabs it adds to. -->
-{#if spaced}<SpaceBar />{:else}<div class="new-tab-slot" data-cascade style:--cascade={0}>
+{#if spaced}<SpaceBar {extras} onOpenChange={(open) => (spacePanelOpen = open)} />{:else}<div
+    class="new-tab-slot"
+    data-cascade
+    style:--cascade={0}
+  >
     <button type="button" class="new-tab" onclick={tabs.open}>
       <Icon icon={Add01Icon} size={16} />
       <span>{m.new_tab()}</span>
     </button>
+    {@render extras?.()}
   </div>{/if}
 
 <div
@@ -94,8 +114,13 @@
       use:rememberScroll={`${tabs.profile()?.id}/${tabs.activeSpaceId()}/tabs`}
       class="tab-scroller scroll-edges"
       data-glide-scroller
+      {...backgroundClick}
     >
       <TabList
+        {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (pinnedOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={pinned}
         section="pinned"
         label={m.pinned_tabs()}
@@ -109,6 +134,10 @@
       {/if}
 
       <TabList
+        {selection}
+        {rangeOrder}
+        onVisibleOrder={(order) => (todayOrder = order)}
+        selectionEscapeBlocked={spacePanelOpen}
         entries={today}
         section="today"
         label={m.open_tabs()}
@@ -116,9 +145,8 @@
         {splitting}
         {onSelect}
       />
-
-      {#if empty && spaced}<SpaceEmpty space={tabs.activeSpace()!} onopen={tabs.open} />{/if}
     </div>
+    <TabSelectionBar {selection} />
     {#if peeking && after}<SpacePeek space={after} side="next" />{/if}
   </div>
 </div>
@@ -157,7 +185,10 @@
   }
 
   .new-tab-slot {
+    display: flex;
     flex: none;
+    align-items: center;
+    gap: 2px;
     padding-inline: var(--sidebar-inset);
     padding-block: 2px calc(var(--sidebar-row-gap) + 2px);
   }

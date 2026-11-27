@@ -15,6 +15,8 @@ use std::{
 use block2::Block;
 #[cfg(target_os = "macos")]
 use block2::RcBlock;
+#[cfg(target_os = "macos")]
+use objc2::runtime::AnyObject;
 use objc2::{
   define_class, msg_send,
   rc::Retained,
@@ -149,6 +151,27 @@ impl WryNSWindowDelegate {
   }
 }
 
+pub(crate) struct WryWebViewUIDelegateOptions {
+  #[cfg(target_os = "macos")]
+  pub page_close_handler: Option<Box<dyn Fn()>>,
+  pub new_window_req_handler:
+    Option<std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>>,
+  pub permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
+  #[cfg(target_os = "macos")]
+  pub permission_request_handler:
+    Option<Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>>,
+  #[cfg(target_os = "macos")]
+  pub file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
+  #[cfg(target_os = "macos")]
+  pub autofill_button_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub media_return_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
+  #[cfg(target_os = "macos")]
+  pub native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
+}
+
 pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   page_close_handler: Option<Box<dyn Fn()>>,
@@ -166,7 +189,13 @@ pub struct WryWebViewUIDelegateIvars {
   #[cfg(target_os = "macos")]
   file_upload_handler: Option<Box<crate::file_upload::FileUploadHandler>>,
   #[cfg(target_os = "macos")]
-  script_dialogs: super::super::script_dialog::ScriptDialogs,
+  autofill_button_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  media_return_handler: Option<Box<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  script_dialogs: Rc<super::super::script_dialog::ScriptDialogs>,
+  #[cfg(target_os = "macos")]
+  native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
 }
 
 #[cfg(target_os = "macos")]
@@ -185,6 +214,19 @@ define_class!(
   pub struct WryWebViewUIDelegate;
 
   unsafe impl NSObjectProtocol for WryWebViewUIDelegate {}
+
+  // WKUIDelegatePrivate. The picture-in-picture window's return button sends
+  // it, then WebKit waits for the page to become visible before it takes the
+  // video back.
+  #[cfg(target_os = "macos")]
+  impl WryWebViewUIDelegate {
+    #[unsafe(method(_webViewFullscreenMayReturnToInline:))]
+    fn media_may_return_to_inline(&self, _webview: &WryWebView) {
+      if let Some(handler) = &self.ivars().media_return_handler {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(handler));
+      }
+    }
+  }
 
   unsafe impl WKUIDelegate for WryWebViewUIDelegate {
     #[cfg(target_os = "macos")]
@@ -246,7 +288,13 @@ define_class!(
       completion_handler: &Block<dyn Fn(*mut objc2_foundation::NSString)>,
     ) {
       let completion = completion_handler.copy();
-      let default = default_text.map(|text| text.to_string()).unwrap_or_default();
+      let default = match default_text {
+        Some(text) => match super::super::script_dialog::dialog_text(text) {
+          Some(text) => text,
+          None => return completion.call((null_mut(),)),
+        },
+        None => String::new(),
+      };
       self.ivars().script_dialogs.present(
         webview,
         frame,
@@ -384,10 +432,13 @@ define_class!(
       (|| -> Option<Retained<objc2_web_kit::WKWebView>> {
         if let Some(new_window_req_handler) = &self.ivars().new_window_req_handler {
           let request = action.request();
-          let url = request
+          let Some(url) = request
             .URL()
             .and_then(|url| url.absoluteString())
-            .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))?;
+            .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT)) else {
+              crate::report_native_url_refused(self.ivars().native_url_refused_handler.as_ref(), crate::NativeUrlTarget::NewWindow);
+              return None;
+            };
 
           let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             new_window_req_handler(
@@ -516,6 +567,48 @@ define_class!(
       })()
     }
   }
+
+  impl WryWebViewUIDelegate {
+    // Public on macOS 27; WebKit asks through the private spelling below on
+    // the releases before it. Each is called only when this delegate answers
+    // `respondsToSelector:`, and both settle through the same broker. They
+    // sit outside the protocol impl: objc2 verifies protocol methods against
+    // the runtime's protocol, which has neither before macOS 27 and never the
+    // private one, and fails class registration if one is missing.
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+    fn request_geolocation_permission(
+      &self,
+      _webview: &WryWebView,
+      origin: &WKSecurityOrigin,
+      _frame: &WKFrameInfo,
+      decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+    ) {
+      self.geolocation_permission(origin, decision_handler);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(_webView:requestGeolocationPermissionForOrigin:initiatedByFrame:decisionHandler:))]
+    fn request_geolocation_permission_before_27(
+      &self,
+      _webview: &WryWebView,
+      origin: &WKSecurityOrigin,
+      _frame: &WKFrameInfo,
+      decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+    ) {
+      self.geolocation_permission(origin, decision_handler);
+    }
+
+    // Private; WebKit sends it for a click on the AutoFill button a content
+    // world allowed to drive AutoFill put in a field.
+    #[cfg(target_os = "macos")]
+    #[unsafe(method(_webView:didClickAutoFillButtonWithUserInfo:))]
+    fn did_click_autofill_button(&self, _webview: &WryWebView, _user_info: Option<&AnyObject>) {
+      if let Some(handler) = &self.ivars().autofill_button_handler {
+        handler();
+      }
+    }
+  }
 );
 
 impl WryWebViewUIDelegate {
@@ -603,6 +696,25 @@ impl WryWebViewUIDelegate {
   }
 
   #[cfg(target_os = "macos")]
+  fn geolocation_permission(
+    &self,
+    origin: &WKSecurityOrigin,
+    decision_handler: &Block<dyn Fn(WKPermissionDecision)>,
+  ) {
+    let kind = PermissionRequestKind::Single(PermissionKind::Geolocation);
+    if self.broker_permission_request(origin, kind, decision_handler) {
+      return;
+    }
+    let decision = self
+      .ivars()
+      .permission_handler
+      .as_ref()
+      .map(|handler| permission_decision(handler(PermissionKind::Geolocation)))
+      .unwrap_or(WKPermissionDecision::Deny);
+    decision_handler.call((decision,));
+  }
+
+  #[cfg(target_os = "macos")]
   pub fn resolve_permission_request(
     &self,
     request: PermissionRequestId,
@@ -621,41 +733,34 @@ impl WryWebViewUIDelegate {
     true
   }
 
-  pub fn new(
-    mtm: MainThreadMarker,
-    #[cfg(target_os = "macos")] page_close_handler: Option<Box<dyn Fn()>>,
-    new_window_req_handler: Option<
-      std::rc::Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>,
-    >,
-    permission_handler: Option<Box<dyn Fn(PermissionKind) -> PermissionResponse + Send + Sync>>,
-    #[cfg(target_os = "macos")] permission_request_handler: Option<
-      Box<dyn Fn(PermissionRequest) -> PermissionRequestDisposition>,
-    >,
-    #[cfg(target_os = "macos")] file_upload_handler: Option<
-      Box<crate::file_upload::FileUploadHandler>,
-    >,
-  ) -> Retained<Self> {
+  pub fn new(mtm: MainThreadMarker, options: WryWebViewUIDelegateOptions) -> Retained<Self> {
     #[cfg(target_os = "ios")]
-    let _new_window_req_handler = new_window_req_handler;
+    let _new_window_req_handler = options.new_window_req_handler;
 
     let delegate = mtm
       .alloc::<WryWebViewUIDelegate>()
       .set_ivars(WryWebViewUIDelegateIvars {
         #[cfg(target_os = "macos")]
-        page_close_handler,
+        page_close_handler: options.page_close_handler,
         #[cfg(target_os = "macos")]
-        new_window_req_handler,
+        new_window_req_handler: options.new_window_req_handler,
         #[cfg(target_os = "macos")]
         new_windows: Rc::new(RefCell::new(vec![])),
-        permission_handler,
+        permission_handler: options.permission_handler,
         #[cfg(target_os = "macos")]
-        permission_request_handler,
+        permission_request_handler: options.permission_request_handler,
         #[cfg(target_os = "macos")]
         pending_permission_requests: RefCell::new(BoundedPendingPermissionRequests::new()),
         #[cfg(target_os = "macos")]
-        file_upload_handler,
+        file_upload_handler: options.file_upload_handler,
         #[cfg(target_os = "macos")]
-        script_dialogs: Default::default(),
+        autofill_button_handler: options.autofill_button_handler,
+        #[cfg(target_os = "macos")]
+        media_return_handler: options.media_return_handler,
+        #[cfg(target_os = "macos")]
+        script_dialogs: options.script_dialogs,
+        #[cfg(target_os = "macos")]
+        native_url_refused_handler: options.native_url_refused_handler,
       });
     unsafe { msg_send![super(delegate), init] }
   }

@@ -1,4 +1,6 @@
-import { tick } from "svelte";
+import { preferences } from "$domain/preferences";
+import { shortcutPrefix, emptyShortcutBackspace } from "$shared/lib/search-shortcuts";
+import { tick, untrack } from "svelte";
 import type { IconSvgElement } from "@hugeicons/svelte";
 import { CheckListIcon } from "@hugeicons/core-free-icons";
 import * as m from "$shared/i18n/messages";
@@ -52,6 +54,8 @@ export function createSearchSurface(options: {
   /** Saves the typed line as a task; resolves to the title saved, or null. */
   onCapture?: (text: string) => Promise<string | null>;
   captureKeys?: string[];
+  /** The presentation offers only sites: no destinations and no capture. */
+  sitesOnly?: () => boolean;
 }) {
   const anchored = options.tabId !== null;
 
@@ -87,6 +91,7 @@ export function createSearchSurface(options: {
   const CALCULATION_ID = "calculation";
   /** The launcher's current presentation; null while it is put away. */
   let context: PanelState | null = null;
+  let presentation = 0;
 
   /** Intent expressed before the answer arrived. Resolved against the settled
    *  result set so a click or Enter is never silently dropped, and never runs
@@ -102,10 +107,17 @@ export function createSearchSurface(options: {
   let list: HTMLElement | undefined;
   let controller: ReturnType<typeof createSearchController> | undefined;
 
+  $effect(() => {
+    void preferences.searchShortcuts();
+    untrack(() => {
+      if (controller && query && (!anchored || open)) controller.change(query);
+    });
+  });
+
   // At rest the host offers destinations on their own; typing their name
   // brings them into the list.
   const matchingTools = $derived(
-    anchored || !query.trim()
+    anchored || options.sitesOnly?.() || !query.trim()
       ? []
       : options.destinations.filter((destination) =>
           destination.label.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
@@ -165,7 +177,7 @@ export function createSearchSurface(options: {
     })),
     // Anything typed can become a task, last so it never displaces the page or
     // search the line most often means.
-    ...(query.trim() && !anchored && options.onCapture
+    ...(query.trim() && !anchored && !options.sitesOnly?.() && options.onCapture
       ? [
           {
             id: CAPTURE_ID,
@@ -194,19 +206,20 @@ export function createSearchSurface(options: {
 
   async function capture() {
     const text = query.trim();
-    if (running || !text || !options.onCapture) return;
+    if (running || !text || !options.onCapture || options.sitesOnly?.()) return;
+    const startedIn = presentation;
     running = true;
     failed = false;
     try {
       const title = await options.onCapture(text);
-      if (disposed) return;
+      if (disposed || startedIn !== presentation) return;
       running = false;
       if (title) {
         captured = title;
         fulfilled = true;
       } else failed = true;
     } catch {
-      if (!disposed) {
+      if (!disposed && startedIn === presentation) {
         running = false;
         failed = true;
       }
@@ -242,14 +255,16 @@ export function createSearchSurface(options: {
     }
     const expected = controller?.context();
     if (!row.result || !expected) return;
-    background = background && !anchored && !!addressOf(row);
+    // A mini window's launcher opens only in the foreground, as native does.
+    background = background && !anchored && !options.sitesOnly?.() && !!addressOf(row);
+    const startedIn = presentation;
     running = true;
     failed = false;
     try {
       const admission = anchored
         ? await settle(commands.newtabRun(row.result.action, expected))
         : await commands.launcherRun(row.result.action, expected, background);
-      if (disposed) return;
+      if (disposed || startedIn !== presentation) return;
       const rejected =
         "accepted" in admission
           ? !admission.accepted
@@ -260,12 +275,16 @@ export function createSearchSurface(options: {
       else if (background) announce("opened");
       else fulfilled = true;
     } catch {
-      if (!disposed) {
+      if (!disposed && startedIn === presentation) {
         running = false;
         failed = true;
       }
     }
   }
+
+  /** A mini window's launcher opens only in the foreground, so a background
+   *  request there is an ordinary one, queued like it while results load. */
+  const foregroundOnly = (background: boolean) => background && !options.sitesOnly?.();
 
   /** Runs now when the visible rows answer the current query, otherwise waits
    *  for the answer rather than doing nothing. */
@@ -274,6 +293,7 @@ export function createSearchSurface(options: {
     !!row.tool || row.id === CAPTURE_ID || row.id === CALCULATION_ID;
 
   function activate(row: SurfaceRow, background = false) {
+    background = foregroundOnly(background);
     if (settled || local(row)) void run(row, background);
     else if (!background) queued = row.id;
   }
@@ -288,15 +308,11 @@ export function createSearchSurface(options: {
   async function move(offset: number) {
     if (!rows.length) return;
     const at = rows.findIndex((row) => row.id === selectedId);
-    const next = at + offset;
-    // No wrap. Past the top the selection returns to the typed action; past
-    // the bottom it stays put, so holding a key never cycles the list.
-    if (next < 0) {
-      moved = false;
-      selected = null;
-      return;
-    }
-    if (next >= rows.length) return;
+    let next = at + offset;
+    // Up from the first row reaches the last; Down still stops at the end.
+    if (next < 0) next = rows.length - 1;
+    // A single row wraps to itself, which is not an explicit selection.
+    if (next >= rows.length || next === at) return;
     moved = true;
     selected = rows[next]!.id;
     await tick();
@@ -336,6 +352,7 @@ export function createSearchSurface(options: {
 
   function submit(background = false) {
     if (composing) return;
+    background = foregroundOnly(background);
     const row = rows.find((candidate) => candidate.id === selectedId);
     if (row && (settled || row.id === CALCULATION_ID || (moved && local(row)))) {
       void run(row, background);
@@ -343,7 +360,10 @@ export function createSearchSurface(options: {
     }
     // Sending something behind the current tab is a deliberate choice about
     // a row the user can see; it is never deferred onto an answer they cannot.
-    if (query.trim() && !background) queued = row?.id ?? "";
+    // Until the user aims at a row, the row on screen is the previous query's
+    // typed action, whose identity carries the previous text. Queuing that id
+    // would match nothing in the answer and drop the Enter.
+    if (query.trim() && !background) queued = moved ? (row?.id ?? "") : "";
   }
 
   async function copy() {
@@ -356,11 +376,12 @@ export function createSearchSurface(options: {
   }
 
   async function copyText(text: string, notice: SurfaceNotice) {
+    const startedIn = presentation;
     try {
       await navigator.clipboard.writeText(text);
-      if (!disposed) announce(notice);
+      if (!disposed && startedIn === presentation) announce(notice);
     } catch {
-      if (!disposed) failed = true;
+      if (!disposed && startedIn === presentation) failed = true;
     }
   }
 
@@ -418,6 +439,7 @@ export function createSearchSurface(options: {
   let fulfilled = false;
   let expiry: ReturnType<typeof setTimeout> | undefined;
   let expiresAt = 0;
+  let profileId: string | null | undefined;
   /** The last answer to an empty field, shown again when the launcher resets
    *  so its home list is complete on the frame it appears. */
   let home: SearchResult[] = [];
@@ -425,10 +447,20 @@ export function createSearchSurface(options: {
   /** Binds the launcher to one presentation, resuming whatever it was left
    *  showing unless that has since expired. */
   function begin(next: PanelState) {
-    if (expiresAt && Date.now() >= expiresAt) toHome();
+    if (context) end();
+    if (profileId !== undefined && next.profile_id !== profileId) {
+      home = [];
+      toHome();
+    } else if (expiresAt && Date.now() >= expiresAt) toHome();
+    profileId = next.profile_id;
     expiresAt = 0;
     clearTimeout(expiry);
+    presentation += 1;
     context = next;
+    // Before the controller exists, so its first request is for the address
+    // and not for an empty field that the seed immediately replaces.
+    if (next.seed) seed(next.seed);
+    else seededQuery = "";
     if (listening) void initialize();
   }
 
@@ -436,6 +468,7 @@ export function createSearchSurface(options: {
    *  for a short while, and the reset to home happens while still hidden so
    *  the window never changes size on the frame it is shown. */
   function end() {
+    presentation += 1;
     context = null;
     controller?.dispose();
     controller = undefined;
@@ -447,7 +480,7 @@ export function createSearchSurface(options: {
     clearTimeout(noticeTimer);
     notice = null;
     clearTimeout(expiry);
-    if (fulfilled || !query) toHome();
+    if (fulfilled || !query || query === seededQuery) toHome();
     else {
       expiresAt = Date.now() + RESUME_MS;
       expiry = setTimeout(toHome, RESUME_MS);
@@ -488,7 +521,9 @@ export function createSearchSurface(options: {
     controller?.dispose();
     controller = createSearchController({
       owner,
+      shortcuts: preferences.searchShortcuts,
       emptyQuery: anchored ? "skip" : "search",
+      shown: { results, answered },
       send: (value, requestId) =>
         options.tabId
           ? commands.newtabSearch(value, { ...owner, request_id: requestId })
@@ -534,10 +569,24 @@ export function createSearchSurface(options: {
 
   return {
     mount,
+    backspace() {
+      if (composing) return false;
+      const next = emptyShortcutBackspace(query, preferences.searchShortcuts());
+      if (next === null) return false;
+      changed(next);
+      return true;
+    },
+    get activeShortcut() {
+      void query;
+      return (
+        controller?.activeShortcut() ??
+        shortcutPrefix(query, preferences.searchShortcuts())?.shortcut ??
+        null
+      );
+    },
     begin,
     end,
     changed,
-    seed,
     submit,
     capture,
     copy,
@@ -610,7 +659,13 @@ export function createSearchSurface(options: {
       return rows.find((row) => row.id === selectedId) ?? null;
     },
     get capturable() {
-      return !anchored && !!options.onCapture && !!query.trim() && query !== seededQuery;
+      return (
+        !anchored &&
+        !options.sitesOnly?.() &&
+        !!options.onCapture &&
+        !!query.trim() &&
+        query !== seededQuery
+      );
     },
     get failed() {
       return failed;

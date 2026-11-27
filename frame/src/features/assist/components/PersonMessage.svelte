@@ -55,7 +55,7 @@
       {/each}
     </ul>
   {/if}
-  {#if words}<p class="bubble ui-shine">{words}</p>{/if}
+  {#if words}<p class="bubble ui-shine" data-selectable>{words}</p>{/if}
 </div>
 
 <style>
@@ -108,6 +108,9 @@
     box-sizing: border-box;
     margin: 0;
     padding: 8px 13px;
+    /* stylelint-disable-next-line property-no-vendor-prefix */
+    -webkit-user-select: text;
+    user-select: text;
     color: var(--color-text);
     font-size: 13.5px;
     letter-spacing: -0.003em;

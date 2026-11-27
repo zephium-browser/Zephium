@@ -279,7 +279,8 @@ impl UpdaterBuilder {
         self
     }
 
-    /// Function to run before we run the installer and exit the app through `std::process::exit(0)` on Windows
+    /// Function to run before launching the installer on Windows. The host must
+    /// terminate the application after successful installation admission.
     pub fn on_before_exit<F: Fn() + Send + Sync + 'static>(mut self, f: F) -> Self {
         self.on_before_exit.replace(Arc::new(f));
         self
@@ -793,6 +794,19 @@ impl Update {
         };
 
         let updater_type = self.extract(bytes)?;
+        let installer = match &updater_type {
+            WindowsUpdaterType::Nsis { .. } => "nsis",
+            WindowsUpdaterType::Msi { .. } => "msi",
+        };
+        let target = format!("windows-{}-{installer}", std::env::consts::ARCH);
+        verify_windows_payload(
+            bytes,
+            &self.signature,
+            &self.config.pubkey,
+            &self.version,
+            &self.current_version,
+            &target,
+        )?;
 
         let install_mode = self.config.install_mode();
         let current_args = &self.current_exe_args()[1..];
@@ -864,7 +878,11 @@ impl Update {
         };
         installer_launch_result(launched as isize)?;
 
-        std::process::exit(0);
+        // The host owns final log flushing and bounded process termination.
+        // Preserve the temporary installer until that termination, as upstream
+        // did by exiting without running its destructor.
+        std::mem::forget(updater_type);
+        Ok(())
     }
 
     fn installer_args(&self) -> Vec<&OsStr> {
@@ -1466,6 +1484,15 @@ mod metadata_limit_tests {
     }
 
     #[test]
+    fn successful_windows_launch_returns_for_host_log_flush_and_termination() {
+        let source = include_str!("updater.rs");
+        let tail = source.split("installer_launch_result(launched as isize)?;").nth(1).unwrap().split("fn installer_args").next().unwrap();
+        assert!(!tail.contains("std::process::exit"));
+        assert!(tail.contains("std::mem::forget(updater_type)"));
+        assert!(tail.contains("Ok(())"));
+    }
+
+    #[test]
     fn failed_windows_launch_returns_to_the_retained_update_owner() {
         for result in [-1, 0, 2, 5, 8, 31, 32] {
             assert!(matches!(
@@ -1495,7 +1522,7 @@ fn installer_launch_result(result: isize) -> Result<()> {
 }
 
 // Validate signature
-fn verify_signature(data: &[u8], release_signature: &str, pub_key: &str) -> Result<bool> {
+fn verify_signature(data: &[u8], release_signature: &str, pub_key: &str) -> Result<Signature> {
     // we need to convert the pub key
     let pub_key_decoded = base64_to_string(pub_key)?;
     let public_key = PublicKey::decode(&pub_key_decoded)?;
@@ -1504,7 +1531,7 @@ fn verify_signature(data: &[u8], release_signature: &str, pub_key: &str) -> Resu
 
     // Validate signature or bail out
     public_key.verify(data, &signature, true)?;
-    Ok(true)
+    Ok(signature)
 }
 
 fn base64_to_string(base64_string: &str) -> Result<String> {
@@ -1706,5 +1733,72 @@ mod tests {
         for (orig, escaped) in cases.iter().zip(cases_escaped) {
             assert_eq!(escape_nsis_current_exe_arg(&OsStr::new(orig)), escaped);
         }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn verify_windows_payload(
+    data: &[u8],
+    signature: &str,
+    public_key: &str,
+    advertised: &str,
+    current: &str,
+    target: &str,
+) -> Result<()> {
+    // minisign-verify authenticates both the payload and the global signature
+    // over this trusted comment. Never derive release identity from the URL,
+    // unsigned JSON, installer filename, or an untrusted signature comment.
+    let signature = verify_signature(data, signature, public_key)?;
+    let version = Version::parse(advertised)?;
+    let current = Version::parse(current)?;
+    let expected = format!("zephium-updater-v1 version={} target={target}", version);
+    if advertised != version.to_string()
+        || !version.cmp_precedence(&current).is_gt()
+        || signature.trusted_comment() != expected
+    {
+        return Err(Error::ReleaseBindingMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod windows_release_binding_tests {
+    use super::*;
+
+    #[test]
+    fn signed_old_payload_cannot_be_relabelled_or_downgraded() {
+        let f: serde_json::Value =
+            serde_json::from_str(include_str!("windows-signature-fixtures.json")).unwrap();
+        let verify = |name: &str, advertised: &str, current: &str, target: &str| {
+            verify_windows_payload(
+                f["payload"].as_str().unwrap().as_bytes(),
+                f[name].as_str().unwrap(),
+                f["public_key"].as_str().unwrap(),
+                advertised,
+                current,
+                target,
+            )
+        };
+        assert!(verify("upgrade", "1.2.4", "1.2.3", "windows-x86_64-nsis").is_ok());
+        assert!(verify("old", "9.9.9", "1.2.3", "windows-x86_64-nsis").is_err());
+        assert!(verify("legacy", "9.9.9", "1.2.3", "windows-x86_64-nsis").is_err());
+        assert!(verify("upgrade", "1.2.4", "1.2.4", "windows-x86_64-nsis").is_err());
+        assert!(verify("old", "1.2.3", "1.2.4", "windows-x86_64-nsis").is_err());
+        assert!(verify("other_target", "1.2.4", "1.2.3", "windows-x86_64-nsis").is_err());
+        assert!(verify("upgrade", "1.2.4", "1.2.4+build", "windows-x86_64-nsis").is_err());
+        let decoded = base64_to_string(f["old"].as_str().unwrap()).unwrap();
+        let tampered = base64::engine::general_purpose::STANDARD
+            .encode(decoded.replace("version=1.2.3", "version=9.9.9"));
+        assert!(matches!(
+            verify_windows_payload(
+                f["payload"].as_str().unwrap().as_bytes(),
+                &tampered,
+                f["public_key"].as_str().unwrap(),
+                "9.9.9",
+                "1.2.3",
+                "windows-x86_64-nsis"
+            ),
+            Err(Error::Minisign(_))
+        ));
     }
 }

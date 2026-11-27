@@ -40,6 +40,7 @@ export function secretByName(name: string): boolean {
 /**
  * A command line split into words the way a shell would for the simple
  * cases people paste: spaces separate, quotes group, a backslash escapes.
+ * Windows drive and UNC paths keep their separators.
  * `null` when a quote is left open.
  */
 export function splitCommand(line: string): string[] | null {
@@ -47,9 +48,16 @@ export function splitCommand(line: string): string[] | null {
   let word = "";
   let started = false;
   let quote: string | null = null;
+  let windowsPath = false;
   for (let index = 0; index < line.length; index++) {
     const c = line.charAt(index);
-    if (c === "\\" && quote !== "'" && index + 1 < line.length) {
+    if (!word) windowsPath ||= /^(?:[A-Za-z]:\\|\\\\)/u.test(line.slice(index));
+    if (
+      c === "\\" &&
+      (!windowsPath || (!quote && line.charAt(index + 1) === "'")) &&
+      quote !== "'" &&
+      index + 1 < line.length
+    ) {
       word += line.charAt(++index);
       started = true;
     } else if (quote) {
@@ -62,6 +70,7 @@ export function splitCommand(line: string): string[] | null {
       if (started) words.push(word);
       word = "";
       started = false;
+      windowsPath = false;
     } else {
       word += c;
       started = true;

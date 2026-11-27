@@ -7,23 +7,89 @@
 #![cfg(target_os = "macos")]
 
 mod access;
+mod api;
+mod auth;
+mod background;
+mod bookmarks;
 mod bridge;
 pub mod compat;
+mod cookies;
+mod data;
 mod delegate;
+mod downloads;
+mod events;
+mod history;
+mod idle;
 mod json;
 mod lifetime;
 mod native;
+mod notifications;
 mod offscreen;
+mod page_script;
+mod privacy;
 mod runtime;
+mod sessions;
 mod socket;
 mod surface;
+mod top_sites;
 
+use std::ffi::CStr;
 use std::sync::OnceLock;
 
 use objc2::rc::Retained;
-use objc2_foundation::{NSError, NSLocalizedDescriptionKey, NSMutableDictionary, NSString};
+use objc2_foundation::{
+    NSError, NSLocalizedDescriptionKey, NSMutableDictionary, NSOperatingSystemVersion,
+    NSProcessInfo, NSString,
+};
 
+pub use api::BROWSER_PERMISSIONS;
+pub use auth::{AuthAnswer, AuthDetails};
+pub use downloads::{DownloadAnswer, DownloadItem, DownloadRequest};
+pub use page_script::PageScript;
 pub use runtime::{ExtensionSpec, Grants, LoadedExtension, Runtime};
+
+/// WebKit's extension runtime requires macOS 15.4 or later.
+pub fn supported() -> bool {
+    NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+        majorVersion: 15,
+        minorVersion: 4,
+        patchVersion: 0,
+    })
+}
+
+/// Looks up an NSString constant exported by the loaded system WebKit.
+/// Missing symbols and null constants are unavailable on older systems.
+fn webkit_string(name: &CStr) -> Option<&'static NSString> {
+    #[cfg(test)]
+    if MISSING_WEBKIT_STRING.with(|missing| missing.get() == Some(name)) {
+        return None;
+    }
+    // SAFETY: callers pass only names of WebKit's process-lifetime NSString
+    // constants. dlsym returns the address of the pointer, not the object.
+    unsafe {
+        let symbol = libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()).cast::<*const NSString>();
+        symbol.as_ref().and_then(|value| value.as_ref())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MISSING_WEBKIT_STRING: std::cell::Cell<Option<&'static CStr>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn without_webkit_string<T>(name: &'static CStr, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<&'static CStr>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            MISSING_WEBKIT_STRING.with(|missing| missing.set(self.0));
+        }
+    }
+    let _restore = Restore(MISSING_WEBKIT_STRING.with(|missing| missing.replace(Some(name))));
+    run()
+}
 
 /// A readable message for any error WebKit reports.
 pub fn describe_error(error: &NSError) -> String {
@@ -76,6 +142,24 @@ pub enum TabRequest {
     FocusWindow {
         window: u64,
     },
+    /// Done with the copy.
+    Duplicate {
+        tab: u64,
+    },
+    Mute {
+        tab: u64,
+        muted: bool,
+    },
+    /// `None` restores the browser's default level.
+    Zoom {
+        tab: u64,
+        factor: Option<f64>,
+    },
+    /// Puts `tabs`, in order, before `before` in their window, or last.
+    Move {
+        tabs: Vec<u64>,
+        before: Option<u64>,
+    },
 }
 
 /// Completion for a [`TabRequest`]: the created or affected tab, or a message
@@ -125,6 +209,54 @@ pub trait Host {
         let _ = request;
         done(false);
     }
+
+    /// The extension gave up access it had (`permissions.remove`); the host
+    /// keeps it from being granted again on the next start.
+    fn access_removed(&self, extension: &str, permissions: &[String], patterns: &[String]) {
+        let _ = (extension, permissions, patterns);
+    }
+
+    /// Whether the browser should offer its own password filling in this
+    /// profile; password managers turn it off through `chrome.privacy`.
+    fn password_filling_changed(&self, enabled: bool) {
+        let _ = enabled;
+    }
+
+    /// An extension changed its toolbar action as shown in a window's active
+    /// tab (or its default, which every tab without its own follows).
+    fn action_changed(&self, extension: &str) {
+        let _ = extension;
+    }
+
+    /// Reads or changes the profile's history, bookmarks or closed tabs for
+    /// an extension holding the permission. Answers `Unavailable` unless the
+    /// host keeps such data.
+    fn browser_data(
+        &self,
+        extension: &str,
+        call: zephium_core::extension_data::ExtensionDataCall,
+        done: Box<dyn FnOnce(zephium_core::extension_data::ExtensionDataReply)>,
+    ) {
+        let _ = (extension, call);
+        done(zephium_core::extension_data::ExtensionDataReply::Unavailable);
+    }
+
+    /// Runs a `chrome.downloads` request through the browser's download
+    /// manager. Declines unless the host has one.
+    fn downloads(
+        &self,
+        request: DownloadRequest,
+        done: Box<dyn FnOnce(Result<DownloadAnswer, String>)>,
+    ) {
+        let _ = request;
+        done(Err("Downloads are not available.".into()));
+    }
+
+    /// Which data changes extensions now listen to; the host reports them
+    /// through [`Runtime::data_changed`].
+    fn data_interest(&self, interest: zephium_core::extension_data::ExtensionDataInterest) {
+        let _ = interest;
+    }
 }
 
 /// Closes the bridges an extension's worker opened. WebKit numbers message
@@ -134,6 +266,7 @@ pub trait Host {
 /// old connection's ping).
 pub(crate) fn worker_gone(shared: &runtime::Shared, extension: &str) {
     socket::close_extension(shared, extension);
+    events::worker_gone(shared, extension);
     native::close_extension(shared, extension);
 }
 
@@ -185,5 +318,29 @@ pub(crate) fn error(message: &str) -> Retained<NSError> {
             1,
             Some(&info),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_constants_resolve_on_supported_hosts_and_missing_names_do_not() {
+        assert!(webkit_string(c"WKZephiumMadeUpConstant").is_none());
+        if !supported() {
+            return;
+        }
+        for name in [
+            c"WKWebExtensionContextErrorDomain",
+            c"WKWebExtensionDataTypeLocal",
+            c"WKWebExtensionDataTypeSession",
+            c"WKWebExtensionDataTypeSynchronized",
+            c"WKWebExtensionPermissionClipboardWrite",
+            c"WKWebExtensionPermissionCookies",
+        ] {
+            let value = webkit_string(name).unwrap_or_else(|| panic!("missing {name:?}"));
+            assert!(!value.is_empty(), "empty {name:?}");
+        }
     }
 }

@@ -1,8 +1,8 @@
 //! Find in page through WebView2's Find API with its own dialog suppressed:
 //! chrome draws the field, WebView2 highlights and counts. Runtimes older than
-//! the API report nothing and find stays unavailable.
+//! the API refuse the search so the host can answer it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -23,11 +23,15 @@ pub(crate) struct FindSession {
     find: ICoreWebView2Find,
     environment: ICoreWebView2Environment15,
     query: Rc<RefCell<String>>,
+    generation: Rc<Cell<u64>>,
+    report: Rc<FindReport>,
     tokens: [i64; 2],
 }
 
 impl Drop for FindSession {
     fn drop(&mut self) {
+        self.query.borrow_mut().clear();
+        self.generation.set(0);
         unsafe {
             let _ = self.find.remove_MatchCountChanged(self.tokens[0]);
             let _ = self.find.remove_ActiveMatchIndexChanged(self.tokens[1]);
@@ -68,7 +72,7 @@ fn open(core: &ICoreWebView2, report: FindReport) -> windows_core::Result<FindSe
         }
         Ok(())
     }));
-    let (moved_query, moved_report) = (query.clone(), report);
+    let (moved_query, moved_report) = (query.clone(), report.clone());
     let moved = FindActiveMatchIndexChangedEventHandler::create(Box::new(move |find, _| {
         if let Some(find) = find {
             let (matches, active) = state(&find);
@@ -84,6 +88,8 @@ fn open(core: &ICoreWebView2, report: FindReport) -> windows_core::Result<FindSe
         find,
         environment,
         query,
+        generation: Rc::new(Cell::new(0)),
+        report,
         tokens,
     })
 }
@@ -115,6 +121,10 @@ pub(crate) fn find(
         } else if repeat {
             active.find.FindPrevious()
         } else {
+            let Some(generation) = active.generation.get().checked_add(1) else {
+                return false;
+            };
+            active.generation.set(generation);
             *active.query.borrow_mut() = request.query.clone();
             active
                 .environment
@@ -127,12 +137,28 @@ pub(crate) fn find(
                     Ok(options)
                 })
                 .and_then(|options| {
+                    let query = active.query.clone();
+                    let expected = request.query.clone();
+                    let report = active.report.clone();
+                    let current = active.generation.clone();
                     active.find.Start(
                         &options,
-                        &FindStartCompletedHandler::create(Box::new(|_| Ok(()))),
+                        &FindStartCompletedHandler::create(Box::new(move |result| {
+                            if result.is_err()
+                                && current.get() == generation
+                                && *query.borrow() == expected
+                            {
+                                query.borrow_mut().clear();
+                                report(expected.clone(), 0, None);
+                            }
+                            Ok(())
+                        })),
                     )
                 })
         }
     };
+    if stepped.is_err() {
+        active.query.borrow_mut().clear();
+    }
     stepped.is_ok()
 }

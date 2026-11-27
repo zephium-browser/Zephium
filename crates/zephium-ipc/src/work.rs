@@ -552,7 +552,12 @@ pub struct WorkCommandV1 {
 }
 impl WorkCommandV1 {
     pub fn into_request(self) -> Result<port::WorkRequest, WorkError> {
-        if self.version != 1 {
+        if self.version != 1 || match &self.intent {
+            WorkRuntimeIntent::BeginAgent { grant, .. } => grant.no_usage_charge,
+            WorkRuntimeIntent::Approve { spec } => spec.nodes.iter().any(|node| matches!(&node.capability,
+                zephium_core::work::runtime::WorkCapability::Agent { grant } if grant.no_usage_charge)),
+            _ => false,
+        } {
             return Err(WorkError::Invalid);
         }
         Ok(port::WorkRequest::RuntimeCommand {
@@ -781,5 +786,31 @@ mod tests {
             .register::<WorkCommandV1>()
             .register::<WorkEvidencePreviewV1>()
             .register::<WorkSignalV1>();
+    }
+    #[test]
+    fn wire_cannot_mint_a_trusted_zero_charge_grant() {
+        let id = WorkId::from(1).to_string();
+        let limits = serde_json::json!({ "model_tokens": 1000, "cost_micro_usd": 1000,
+            "operations": 16, "timeout_seconds": 60, "max_workers": 1 });
+        let grant = serde_json::json!({ "provider": "browser", "model": "duckduckgo",
+            "max_turns": 8, "max_steps": 24, "browse_hops": 4,
+            "lead": { "provider": "compatible", "wire": "chat_completions", "model": "local-fixture" } });
+        let mut input = serde_json::json!({ "version": 1, "work": id, "expected_revision": "1", "command": id,
+            "intent": { "kind": "begin_agent", "grant": grant, "limits": limits } });
+        let legacy: WorkCommandV1 = serde_json::from_value(input.clone()).unwrap();
+        let WorkRuntimeIntent::BeginAgent { grant, .. } = &legacy.intent else {
+            panic!()
+        };
+        assert!(!grant.no_usage_charge);
+        assert!(legacy.into_request().is_ok());
+        input["intent"]["grant"]["no_usage_charge"] = true.into();
+        let forged: WorkCommandV1 = serde_json::from_value(input.clone()).unwrap();
+        assert!(matches!(forged.into_request(), Err(WorkError::Invalid)));
+        let grant = input["intent"]["grant"].clone();
+        input["intent"] = serde_json::json!({ "kind": "approve", "spec": {
+            "plan_revision": "1", "limits": limits, "nodes": [{ "node": id,
+                "capability": { "kind": "agent", "grant": grant }, "limits": limits }] } });
+        let forged: WorkCommandV1 = serde_json::from_value(input).unwrap();
+        assert!(matches!(forged.into_request(), Err(WorkError::Invalid)));
     }
 }

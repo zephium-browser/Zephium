@@ -27,6 +27,8 @@ use zephium_core::ports::engine::{EngineEvent, WebExtensionLoad, WebExtensionLoa
 
 struct ExtensionView {
     crash_observer: Option<crate::platform::imp::CrashObserver>,
+    navigation_policy:
+        Option<crate::platform::imp::extension_navigation::ExtensionNavigationPolicy>,
     view: wry::WebView,
     resource: NativeResourceLease,
     alive: Rc<Cell<bool>>,
@@ -200,7 +202,6 @@ struct Install {
     native: ICoreWebView2BrowserExtension,
     bridge: ExtensionView,
     action: Rc<RefCell<Action>>,
-    options: Option<String>,
 }
 
 impl super::EngineHost {
@@ -454,21 +455,18 @@ impl super::EngineHost {
         }
         let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
             .map_err(|e| e.to_string())?;
-        self.ensure_windows_profile_environment_at_path(
-            profile,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-            path.clone(),
-            true,
-        )
-        .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
+        let environment_bootstrap = self
+            .ensure_windows_profile_environment_at_path(
+                profile,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                path.clone(),
+                true,
+            )
+            .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
         zephium_webext::ExtensionId::parse(&load.extension_id)
             .ok_or("Invalid extension identity.")?;
         let manifest =
             zephium_webext::manifest::Manifest::load(&load.root).map_err(|e| e.to_string())?;
-        let loaded = WebExtensionLoaded {
-            name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
-            version: manifest.version().unwrap_or_default().to_owned(),
-        };
         let next = self
             .windows_extensions
             .generation
@@ -500,6 +498,8 @@ impl super::EngineHost {
                 return Err(error);
             }
         };
+        // A new browser keeps its bootstrap until this management controller exists.
+        drop(environment_bootstrap);
         let mut rollback_failed = false;
         let result = (|| {
             let native_profile = native::profile(&bridge.view.webview())
@@ -572,7 +572,14 @@ impl super::EngineHost {
                     &format!("chrome-extension://{}/", load.extension_id),
                     path,
                 )
-            });
+            })
+            .and_then(|url| url::Url::parse(&url).ok())
+            .map(Box::new);
+        let loaded = WebExtensionLoaded {
+            name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
+            version: manifest.version().unwrap_or_default().to_owned(),
+            options,
+        };
         self.windows_extensions.installs.insert(
             (profile, load.install),
             Install {
@@ -581,7 +588,6 @@ impl super::EngineHost {
                 native: item,
                 bridge,
                 action,
-                options,
             },
         );
         Ok(loaded)
@@ -629,13 +635,14 @@ impl super::EngineHost {
             // controller to remove their native record without enabling them.
             let path = crate::erasure::prepare_profile_directory(&self.profiles_root, profile)
                 .map_err(|error| error.to_string())?;
-            self.ensure_windows_profile_environment_at_path(
-                profile,
-                std::time::Instant::now() + std::time::Duration::from_secs(5),
-                path,
-                true,
-            )
-            .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
+            let environment_bootstrap = self
+                .ensure_windows_profile_environment_at_path(
+                    profile,
+                    std::time::Instant::now() + std::time::Duration::from_secs(5),
+                    path,
+                    true,
+                )
+                .map_err(|error| format!("Extension profile startup failed: {error:?}"))?;
             let runtime = ExtensionRuntimeInstance::new(
                 profile,
                 load.install,
@@ -647,6 +654,7 @@ impl super::EngineHost {
                 Rc::new(RefCell::new(Action::default())),
                 runtime,
             )?;
+            drop(environment_bootstrap);
             let result = (|| {
                 let native_profile =
                     native::profile(&bridge.view.webview()).map_err(|error| error.to_string())?;
@@ -674,6 +682,7 @@ impl super::EngineHost {
     fn close_extension_view(&mut self, profile: ProfileId, owned: ExtensionView) {
         let ExtensionView {
             crash_observer,
+            navigation_policy,
             mut view,
             resource,
             alive,
@@ -683,7 +692,8 @@ impl super::EngineHost {
         if let Err(debt) = view.close() {
             self.retain_windows_cleanup_debt(
                 profile,
-                super::OwnedWindowsCleanupDebt::new(debt, Some(resource)),
+                super::OwnedWindowsCleanupDebt::new(debt, Some(resource))
+                    .with_parent(navigation_policy),
             );
         }
     }
@@ -719,8 +729,21 @@ impl super::EngineHost {
         );
         let expected = url.clone();
         let navigation_url = url.clone();
+        let navigation_policy = Rc::new(RefCell::new(None));
+        let installed_policy = navigation_policy.clone();
+        let frame_extension = extension.to_owned();
         let builder = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(move |_, core| {
+                crate::reputation::configure(core)?;
+                *installed_policy.borrow_mut() = Some(
+                    crate::platform::imp::extension_navigation::ExtensionNavigationPolicy::install(
+                        core,
+                        frame_extension.clone(),
+                    )?,
+                );
+                Ok(())
+            })
             .with_browser_extension_startup_gate(move |environment, core| {
                 startup.authenticate(environment, core)
             })
@@ -829,6 +852,7 @@ impl super::EngineHost {
                 let _ = view.set_memory_usage_level(wry::MemoryUsageLevel::Low);
                 let mut owned = ExtensionView {
                     crash_observer: None,
+                    navigation_policy: navigation_policy.borrow_mut().take(),
                     view,
                     resource,
                     alive,
@@ -849,12 +873,18 @@ impl super::EngineHost {
             }
             Err(error) => {
                 let mut resource = Some(resource);
-                for debt in wry::pending_webview2_cleanup_debts() {
-                    self.retain_windows_cleanup_debt(
-                        profile,
-                        super::OwnedWindowsCleanupDebt::new(debt, resource.take()),
-                    );
-                }
+                crate::extension_navigation::retain_failed_construction(
+                    wry::pending_webview2_cleanup_debts(),
+                    navigation_policy,
+                    wry::webview2_cleanup_overflowed(),
+                    |debt, guard| {
+                        self.retain_windows_cleanup_debt(
+                            profile,
+                            super::OwnedWindowsCleanupDebt::new(debt, resource.take())
+                                .with_parent(guard),
+                        )
+                    },
+                );
                 Err(error.to_string())
             }
         }
@@ -884,7 +914,7 @@ impl super::EngineHost {
                 .views
                 .get(&tab)
                 .ok_or(ExtensionActionRejection::TabDiscarded)?;
-            let window = native::window_id(&view.webview())
+            let window = extension_window(view)
                 .map_err(|_| ExtensionActionRejection::NativeAdmissionFailed)?;
             let mut states = Vec::new();
             for ((owner, _), install) in &self.windows_extensions.installs {
@@ -924,6 +954,7 @@ impl super::EngineHost {
         drop(popup.escape);
         let ExtensionView {
             crash_observer,
+            navigation_policy,
             mut view,
             resource,
             alive,
@@ -935,7 +966,8 @@ impl super::EngineHost {
             self.windows_extensions.retained_popup_window = Some(Rc::downgrade(&window));
             self.retain_windows_cleanup_debt(
                 popup.runtime.profile(),
-                super::OwnedWindowsCleanupDebt::new(debt, Some(resource)).with_parent(window),
+                super::OwnedWindowsCleanupDebt::new(debt, Some(resource))
+                    .with_parent((window, navigation_policy)),
             );
         }
         if restore_focus {
@@ -1017,40 +1049,13 @@ impl super::EngineHost {
         &mut self,
         request: ExtensionActionRequest,
     ) -> ExtensionActionSettlement {
+        if request.is_menu() {
+            return ExtensionActionSettlement::Rejected(
+                ExtensionActionRejection::UnsupportedPlatform,
+            );
+        }
         let result = self.present_windows_extension_popup(request);
         result.unwrap_or_else(ExtensionActionSettlement::Rejected)
-    }
-
-    pub(crate) fn open_web_extension_options(&mut self, profile: ProfileId, extension_id: &str) {
-        let Some(install) = self
-            .windows_extensions
-            .installs
-            .values()
-            .find(|install| install.runtime.profile() == profile && install.id == extension_id)
-        else {
-            return;
-        };
-        let Some(url) = install.options.as_ref() else {
-            return;
-        };
-        let Some(tab) = self
-            .extension_browser_surfaces
-            .get(&profile)
-            .and_then(|surface| surface.windows().iter().find_map(|window| window.active()))
-        else {
-            return;
-        };
-        install.action.borrow_mut().open_request = Some((
-            tab,
-            std::time::Instant::now() + std::time::Duration::from_secs(5),
-            8,
-        ));
-        // The existing native adoption path retains Chromium's extension origin
-        // and web_accessible_resources enforcement; this does not serve HTML.
-        let _ = install.bridge.view.evaluate_script(&format!(
-            "chrome.tabs.create({{url:{},active:true}})",
-            json!(url)
-        ));
     }
 
     pub(super) fn open_windows_extension_tab(
@@ -1076,8 +1081,8 @@ impl super::EngineHost {
         {
             return wry::NewWindowResponse::Deny;
         }
-        // A manager may open a child only during a bounded, explicit toolbar /
-        // options command. Unsolicited hidden-worker opens remain denied here.
+        // A manager may open a child only during a bounded, explicit toolbar
+        // command. Unsolicited hidden-worker opens remain denied here.
         let popup = self.windows_extensions.popup.as_ref().filter(|popup| {
             popup.runtime == runtime
                 && popup.view.alive.get()
@@ -1157,13 +1162,23 @@ impl super::EngineHost {
             return wry::NewWindowResponse::Deny;
         }
         let permit = view.event_permit.clone();
-        self.adopt_native_tab(source, &permit, activity, url, features, move || {
-            // Construction pumps native messages: closing or defocusing the
-            // popup during that interval must invalidate its pending request.
-            unsafe {
-                GetForegroundWindow() == opener_window && IsWindowVisible(opener_window).as_bool()
-            }
-        })
+        let clicked = features.user_initiated;
+        self.adopt_native_tab(
+            source,
+            &permit,
+            activity,
+            url,
+            features,
+            clicked,
+            move || {
+                // Construction pumps native messages: closing or defocusing the
+                // popup during that interval must invalidate its pending request.
+                unsafe {
+                    GetForegroundWindow() == opener_window
+                        && IsWindowVisible(opener_window).as_bool()
+                }
+            },
+        )
     }
 
     fn present_windows_extension_popup(
@@ -1270,7 +1285,7 @@ impl super::EngineHost {
             .views
             .get(&request.tab())
             .ok_or(ExtensionActionRejection::TabDiscarded)?;
-        if native::window_id(&view.webview()).ok() != Some(window_id) {
+        if extension_window(view).ok() != Some(window_id) {
             return Err(ExtensionActionRejection::TabUnavailable);
         }
         let resource = self
@@ -1303,8 +1318,21 @@ impl super::EngineHost {
         let message_alive = alive.clone();
         let close_alive = alive.clone();
         let message_base = base.clone();
+        let navigation_policy = Rc::new(RefCell::new(None));
+        let installed_policy = navigation_policy.clone();
+        let frame_extension = extension_id.clone();
         let built = wry::WebViewBuilder::new()
             .with_environment(environment)
+            .with_controller_initialization_hook(move |_, core| {
+                crate::reputation::configure(core)?;
+                *installed_policy.borrow_mut() = Some(
+                    crate::platform::imp::extension_navigation::ExtensionNavigationPolicy::install(
+                        core,
+                        frame_extension.clone(),
+                    )?,
+                );
+                Ok(())
+            })
             .with_browser_extension_startup_gate(move |env, core| startup.authenticate(env, core))
             .with_initialization_script(&initialization)
             .with_initialization_script(zephium_webext::windows::POPUP_SIZE_SCRIPT)
@@ -1383,13 +1411,18 @@ impl super::EngineHost {
                 if !debts.is_empty() {
                     self.windows_extensions.retained_popup_window = Some(Rc::downgrade(&window));
                 }
-                for debt in debts {
-                    self.retain_windows_cleanup_debt(
-                        profile,
-                        super::OwnedWindowsCleanupDebt::new(debt, resource.take())
-                            .with_parent(window.clone()),
-                    );
-                }
+                crate::extension_navigation::retain_failed_construction(
+                    debts,
+                    Rc::new((window, navigation_policy)),
+                    wry::webview2_cleanup_overflowed(),
+                    |debt, guard| {
+                        self.retain_windows_cleanup_debt(
+                            profile,
+                            super::OwnedWindowsCleanupDebt::new(debt, resource.take())
+                                .with_parent(guard),
+                        )
+                    },
+                );
                 return Err(ExtensionActionRejection::PopupUnavailable);
             }
         };
@@ -1404,6 +1437,7 @@ impl super::EngineHost {
             escape: escape.ok(),
             view: ExtensionView {
                 crash_observer: crash_observer.ok(),
+                navigation_policy: navigation_policy.borrow_mut().take(),
                 view,
                 resource,
                 alive,
@@ -1473,3 +1507,12 @@ mod tests {
 #[cfg(test)]
 #[path = "webext_windows_qualification.rs"]
 mod qualification;
+
+fn extension_window(view: &super::ObservedView) -> Result<i64, String> {
+    if let Some(window) = view.extension_window.get() {
+        return Ok(window);
+    }
+    let window = native::window_id(&view.webview())?;
+    view.extension_window.set(Some(window));
+    Ok(window)
+}

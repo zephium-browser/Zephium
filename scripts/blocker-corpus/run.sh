@@ -1,0 +1,64 @@
+#!/bin/zsh
+# One release pass for crates/zephium-blocker/src/webkit_pruned.txt: records the page corpus with
+# no blocking, loading only the reviewed sites of scripts/blocker-corpus/hosts-allowed.txt, replays
+# it through WebKit with every rule of the bundled lists reporting its matches, and writes the
+# wildcard block rules nothing matched. See docs/adblock.md.
+# usage: scripts/blocker-corpus/run.sh OUT_DIR
+set -euo pipefail
+here=${0:A:h}
+repo=${here:h:h}
+out=${1:?usage: run.sh OUT_DIR}
+if [[ ${out:A} == "$here" ]]; then
+  print -u2 "run.sh: OUT_DIR must not be scripts/blocker-corpus itself"
+  exit 2
+fi
+mkdir -p "$out"
+out=${out:A}
+# The run reads only its own copy of the reviewed host list, taken now, so an
+# edit during the run, or another run, cannot widen what it loads.
+hosts=$(mktemp "$out/hosts-allowed.XXXXXX")
+cp "$here/hosts-allowed.txt" "$hosts"
+chmod 444 "$hosts"
+
+for tool in record replay; do
+  xcrun swiftc -parse-as-library -O -warnings-as-errors -module-cache-path "$out/swift-cache" \
+    -framework WebKit "$here/$tool.swift" -o "$out/$tool"
+done
+{
+  print '(async () => {'
+  cat "$here/consent-youtube.js"
+  sed -e 's/__RECIPE__/null/' -e "s/__MODE__/'act'/" -e 's/__WAIT__/4000/' \
+    "$repo/xtask/src/blocker_bench/consent.js"
+  print '})().catch(() => {});'
+} > "$out/consent.js"
+
+cd "$repo"
+# The corpus loads real pages in WebKit; never below the pinned security floor.
+cargo xtask blocker-prune host-floor
+rm -f "$out/rules.json"
+cargo xtask blocker-prune materialize --output "$out/rules.json"
+cargo xtask blocker-prune notify --rules "$out/rules.json" --output "$out/notify.json"
+cargo xtask blocker-prune hosts --rules "$out/rules.json" --output "$out/rulehosts.txt"
+
+pages=0
+corpora=() visits=()
+for list in "$here"/pages/*.txt "$out/rulehosts.txt"; do
+  name=${list:t:r}
+  # Only reviewed sites load; the rest are printed for review.
+  cargo xtask blocker-prune admit --allowed "$hosts" --pages "$list" \
+    --output "$out/admitted-$name.txt"
+  echo "recording $name ($(grep -c . "$out/admitted-$name.txt") pages)"
+  "$out/record" "$out/admitted-$name.txt" "$out/corpus-$name.jsonl" "$out/visits-$name.jsonl" 5 \
+    "$out/consent.js" "$hosts" 2> "$out/record-$name.log"
+  grep '^refused ' "$out/record-$name.log" > "$out/refused-$name.txt" || true
+  corpora+=("$out/corpus-$name.jsonl") visits+=("$out/visits-$name.jsonl")
+  pages=$(( pages + $(grep -c . "$out/admitted-$name.txt") ))
+done
+cat "${corpora[@]}" > "$out/corpus.jsonl"
+echo "replaying $(wc -l < "$out/corpus.jsonl" | tr -d ' ') loads"
+"$out/replay" "$out/corpus.jsonl" "$out/matches.jsonl" "$out/rules.json" "$out/notify.json" \
+  2> "$out/replay.log"
+cargo xtask blocker-prune build --rules "$out/rules.json" --loads "$out/corpus.jsonl" \
+  --matches "$out/matches.jsonl" --visits "${visits[@]}" \
+  --corpus "recorded $(date +%F) on $pages pages" \
+  --output crates/zephium-blocker/src/webkit_pruned.txt

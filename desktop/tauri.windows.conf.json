@@ -17,6 +17,7 @@
   },
   "bundle": {
     "windows": {
+      "allowDowngrades": false,
       "nsis": {
         "installerHooks": "windows/installer-hooks.nsh",
         "installMode": "currentUser",

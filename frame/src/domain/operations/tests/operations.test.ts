@@ -225,3 +225,32 @@ it("disposal releases a hung ledger observation without waiting for the IPC time
   await expect(pending).resolves.toEqual({ state: "pending", operation_id: "0000000000000030" });
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it("keeps an event-only observer after a timed-out sheet and releases it on completion", async () => {
+  const operations = await import("../operations");
+  await operations.init();
+  const receive = vi.fn();
+  const stop = operations.onDisposition("00000000000000a1", receive);
+  expect(receive).not.toHaveBeenCalled();
+  native.emit(disposition("00000000000000a2"));
+  expect(receive).not.toHaveBeenCalled();
+  native.emit(disposition("00000000000000a1"));
+  expect(receive).toHaveBeenCalledExactlyOnceWith(disposition("00000000000000a1"));
+  stop();
+  native.emit(disposition("00000000000000a1"));
+  expect(receive).toHaveBeenCalledTimes(1);
+  const cached = vi.fn();
+  operations.onDisposition("00000000000000a1", cached)();
+  expect(cached).toHaveBeenCalledExactlyOnceWith(disposition("00000000000000a1"));
+});
+
+it("acknowledges completion even when a retained observer throws", async () => {
+  const operations = await loadOperations();
+  await operations.init();
+  operations.onDisposition("00000000000000b1", () => {
+    throw new Error("storage unavailable");
+  });
+  expect(() => native.emit(disposition("00000000000000b1"))).not.toThrow();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(native.commands.operationAcknowledge).toHaveBeenCalledWith("00000000000000b1");
+});

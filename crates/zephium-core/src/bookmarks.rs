@@ -7,12 +7,16 @@ pub const MAX_BOOKMARKS: u32 = 50_000;
 /// Folders nest at most this deep, counting the top level as one.
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_TITLE_BYTES: usize = 512;
-/// Rows one folder listing or search returns.
+/// Rows one folder listing returns, extended when needed to include all folders.
 pub const MAX_LISTING: u32 = 5_000;
 pub const MAX_SEARCH_RESULTS: u32 = 100;
 pub const MAX_QUERY_BYTES: usize = 512;
 /// The longest address a bookmark keeps, as the store enforces it.
 pub const MAX_URL_BYTES: usize = 8 * 1024;
+/// Nodes one subtree read returns, for extensions reading the whole tree.
+pub const MAX_SUBTREE: u32 = 10_000;
+/// Bookmarks one extension lookup or search names or returns.
+pub const MAX_ENTRIES: u32 = 1_000;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BookmarkNode {
@@ -35,7 +39,8 @@ impl BookmarkNode {
 /// alone sees the tree they apply to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BookmarkRequest {
-    /// A folder's children in order; `None` is the top level.
+    /// A folder's children, folders first and then links, each in sibling
+    /// order; `None` is the top level. Every folder is included.
     Children {
         parent: Option<i64>,
     },
@@ -46,6 +51,9 @@ pub enum BookmarkRequest {
     Search {
         query: String,
     },
+    /// Every folder and link with siblings in order, for an export. Child
+    /// counts are not filled in.
+    All,
     /// `if_absent` returns the existing bookmark for the same address instead
     /// of adding a second one.
     AddLink {
@@ -80,6 +88,93 @@ pub enum BookmarkRequest {
         folder: String,
         nodes: Vec<ImportNode>,
     },
+    /// Each of `ids`; refused when any is missing.
+    Entries {
+        ids: Vec<i64>,
+    },
+    /// A folder's children in order, `None` being the top level.
+    ChildEntries {
+        parent: Option<i64>,
+    },
+    /// `root` and everything below it, each folder before its contents;
+    /// `None` is the whole tree. Refused as `Full` past [`MAX_SUBTREE`].
+    Subtree {
+        root: Option<i64>,
+    },
+    /// Links, newest first.
+    Recent {
+        limit: u32,
+    },
+    /// Folders and links whose title or address holds every word of `query`,
+    /// and whose address and title equal `url` and `title` when given.
+    Find {
+        query: Option<String>,
+        url: Option<String>,
+        title: Option<String>,
+    },
+    /// A link when `url` is given, else a folder, at `index` among its new
+    /// siblings or last.
+    Create {
+        parent: Option<i64>,
+        index: Option<u32>,
+        title: String,
+        url: Option<String>,
+    },
+    /// Only a link has an address to change.
+    Update {
+        id: i64,
+        title: Option<String>,
+        url: Option<String>,
+    },
+    /// Moves as Chrome counts: `index` is a place among the siblings before
+    /// the move, so moving later in the same folder lands one place earlier.
+    /// An absent `parent` keeps the folder; an absent `index` goes last.
+    Relocate {
+        id: i64,
+        parent: Option<Option<i64>>,
+        index: Option<u32>,
+    },
+    /// Refused as `Invalid` for a folder that still holds anything unless
+    /// `recursive`.
+    Delete {
+        id: i64,
+        recursive: bool,
+    },
+}
+
+/// A bookmark with its place among its siblings and when it was added.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookmarkEntry {
+    pub id: i64,
+    pub parent: Option<i64>,
+    pub index: u32,
+    /// None for a folder.
+    pub url: Option<String>,
+    pub title: String,
+    /// Unix seconds.
+    pub added_at: i64,
+}
+
+/// A change to the tree as Chrome's bookmark events describe it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BookmarkChange {
+    Created(BookmarkEntry),
+    Changed {
+        id: i64,
+        title: String,
+        url: Option<String>,
+    },
+    Moved {
+        id: i64,
+        parent: Option<i64>,
+        index: u32,
+        old_parent: Option<i64>,
+        old_index: u32,
+    },
+    /// The node as it was; a folder's contents went with it.
+    Removed(BookmarkEntry),
+    /// Another browser's bookmarks were merged in.
+    Imported,
 }
 
 /// A bookmark as another browser kept it.
@@ -100,8 +195,12 @@ pub enum BookmarkReply {
     Nodes(Vec<BookmarkNode>),
     /// The bookmark added, or the existing one an `if_absent` add found.
     Added(i64),
-    /// Links an import added; folders are not counted.
-    Imported(u32),
+    /// Links an import added, and whether capacity stopped it; folders are not counted.
+    Imported {
+        added: u32,
+        partial: bool,
+    },
+    Entries(Vec<BookmarkEntry>),
     Done,
     Failed(BookmarkFailure),
 }

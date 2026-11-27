@@ -12,6 +12,7 @@ import { sidebarTree } from "../lib/sidebar-model";
 
 const native = vi.hoisted(() => ({
   open: vi.fn(),
+  close: vi.fn(),
   switchTo: vi.fn(),
   step: vi.fn(),
   create: vi.fn(),
@@ -26,6 +27,7 @@ vi.mock("$shared/ipc/bindings", async () => {
   return mockBindings({
     tabsBootstrap: async () => {},
     tabsOpen: native.open.mockImplementation(ok),
+    tabsClose: native.close.mockImplementation(ok),
     spacesSwitch: native.switchTo.mockImplementation(ok),
     spacesStep: native.step.mockImplementation(ok),
     spacesCreate: native.create.mockImplementation(ok),
@@ -99,6 +101,105 @@ test("the row names the space and its plus opens a tab, with no pager beside the
   expect(screen.container.querySelectorAll(".space-bar button")).toHaveLength(2);
 });
 
+test("middle-click opens a tab only on the empty list background", async () => {
+  const screen = await mount();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
+  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const position = { x: 24, y: background.clientHeight - 20 };
+
+  await userEvent.click(background, { position });
+  expect(native.open).not.toHaveBeenCalled();
+  await userEvent.click(background, { button: "middle", position });
+  expect(native.open).toHaveBeenCalledOnce();
+
+  const row = screen.getByRole("button", { name: "Alpha", exact: true });
+  await userEvent.click(row, { button: "middle" });
+  expect(native.close).toHaveBeenCalledExactlyOnceWith("a");
+  expect(native.open).toHaveBeenCalledOnce();
+
+  // A press on a row may end on the scroller; that is not a background click.
+  row.element().dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+  expect(native.open).toHaveBeenCalledOnce();
+
+  const press = new MouseEvent("mousedown", { button: 1, bubbles: true, cancelable: true });
+  background.dispatchEvent(press);
+  expect(press.defaultPrevented).toBe(true);
+});
+
+test("releasing over a row does not open a tab even when auxclick targets the background", async () => {
+  const screen = await mount();
+  const background = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  const row = screen.getByRole("button", { name: "Alpha", exact: true }).element();
+
+  background.dispatchEvent(new MouseEvent("mousedown", { button: 1, bubbles: true }));
+  row.dispatchEvent(new MouseEvent("mouseup", { button: 1, bubbles: true }));
+  background.dispatchEvent(new MouseEvent("auxclick", { button: 1, bubbles: true }));
+  expect(native.open).not.toHaveBeenCalled();
+  expect(native.close).not.toHaveBeenCalled();
+});
+
+test("middle-clicking the padding beneath the last tab opens a tab", async () => {
+  const screen = await mount();
+  screen.container.style.cssText = "display:flex;flex-direction:column;block-size:480px";
+  const list = screen.container.querySelector<HTMLElement>(".tab-list:not([hidden])")!;
+
+  await userEvent.click(list, {
+    button: "middle",
+    position: { x: 24, y: list.clientHeight - 1 },
+  });
+  expect(native.open).toHaveBeenCalledOnce();
+});
+
+test("a space press released outside its row cannot become a drag", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const first = screen.getByRole("menuitemradio").first();
+  await expect.element(first).toBeVisible();
+  const row = first.element() as HTMLButtonElement;
+  const capture = vi.spyOn(row, "setPointerCapture").mockImplementation(() => {});
+  const y = row.getBoundingClientRect().top + 4;
+  const pointer = { bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 };
+  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
+  window.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  expect(capture).not.toHaveBeenCalled();
+  expect(native.reorder).not.toHaveBeenCalled();
+
+  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
+  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 1, clientY: y + 200 }));
+  const studio = screen.getByRole("menuitemradio", { name: "Studio" }).element();
+  studio.dispatchEvent(new PointerEvent("click", { ...pointer, pointerId: 2, detail: 1 }));
+  expect(native.switchTo).not.toHaveBeenCalled();
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, pointerId: 2, clientY: y + 200 }));
+  expect(native.reorder).not.toHaveBeenCalled();
+  row.dispatchEvent(new PointerEvent("pointerup", { ...pointer, clientY: y + 200 }));
+  expect(native.reorder).toHaveBeenCalledExactlyOnceWith("home", null);
+  studio.dispatchEvent(new PointerEvent("click", { ...pointer, detail: 1 }));
+  expect(native.switchTo).not.toHaveBeenCalled();
+});
+
+test("Enter switches spaces after a drag loses pointer capture", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  const studio = screen.getByRole("menuitemradio", { name: "Studio" });
+  await expect.element(studio).toBeVisible();
+  const row = studio.element() as HTMLButtonElement;
+  vi.spyOn(row, "setPointerCapture").mockImplementation(() => {});
+  const y = row.getBoundingClientRect().top + 4;
+  const pointer = { bubbles: true, pointerId: 1, pointerType: "mouse", button: 0 };
+  row.dispatchEvent(new PointerEvent("pointerdown", { ...pointer, buttons: 1, clientY: y }));
+  row.dispatchEvent(new PointerEvent("pointermove", { ...pointer, buttons: 1, clientY: y + 200 }));
+  row.dispatchEvent(new PointerEvent("lostpointercapture", pointer));
+  expect(native.reorder).not.toHaveBeenCalled();
+
+  row.focus();
+  await userEvent.keyboard("{Enter}");
+  expect(native.switchTo).toHaveBeenCalledExactlyOnceWith("studio");
+});
+
 test("the switcher lists every space, checks the one shown and moves to another", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
@@ -122,6 +223,7 @@ test("a row is a name, with the icons of its first tabs and a count of the rest,
     ],
   });
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await expect.element(screen.getByRole("menuitemradio", { name: "Busy" })).toBeVisible();
   const rows = [...screen.container.querySelectorAll<HTMLElement>("[data-space-row]")];
   expect(rows).toHaveLength(3);
   expect(rows[1]!.querySelectorAll(".switch-fav")).toHaveLength(3);
@@ -146,8 +248,9 @@ test("holding Control names the keys on every row", async () => {
 test("a right-click on a row opens its name to be typed over", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
-  const row = screen.container.querySelectorAll<HTMLElement>("[data-space-row]")[1]!;
-  row.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
+    button: "right",
+  });
   const name = screen.getByRole("textbox", { name: "Name" });
   await expect.element(name).toHaveValue("Studio");
   await expect.element(name).toHaveFocus();
@@ -199,6 +302,30 @@ test("Escape puts the space back as it was", async () => {
   await expect.element(screen.getByRole("menuitemradio").first()).toBeVisible();
 });
 
+test("an IME Escape leaves the space editor open", async () => {
+  const screen = await mount();
+  await screen.getByRole("button", { name: "Spaces — Home" }).click();
+  await userEvent.click(screen.getByRole("menuitemradio", { name: "Studio" }), {
+    button: "right",
+  });
+  const name = screen.getByRole("textbox", { name: "Name" });
+  await expect.element(name).toHaveFocus();
+
+  const escape = new KeyboardEvent("keydown", {
+    key: "Escape",
+    keyCode: 229,
+    bubbles: true,
+    cancelable: true,
+  });
+  name.element().dispatchEvent(escape);
+  expect(escape.defaultPrevented).toBe(false);
+  await expect.element(name).toHaveFocus();
+  expect(native.update).not.toHaveBeenCalled();
+
+  await userEvent.keyboard("{Escape}");
+  await expect.element(screen.getByRole("menuitemradio", { name: "Studio" })).toBeVisible();
+});
+
 test("deleting asks first and says how many tabs will close", async () => {
   const screen = await mount();
   await screen.getByRole("button", { name: "Spaces — Home" }).click();
@@ -229,10 +356,11 @@ test("New Space makes one at once, with no icon, and opens it to be named", asyn
   await expect.element(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Space 3");
 });
 
-test("an empty space offers a new tab instead of a blank column", async () => {
+test("a space with nothing listed draws no empty state; the row's plus still opens a tab", async () => {
   const screen = await mount(true);
-  await expect.element(screen.getByText("Nothing open in Home")).toBeVisible();
-  await screen.getByRole("button", { name: "New tab", exact: true }).nth(1).click();
+  await expect.element(screen.getByRole("button", { name: "Spaces — Home" })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Nothing open");
+  await screen.getByRole("button", { name: "New tab", exact: true }).click();
   expect(native.open).toHaveBeenCalledOnce();
 });
 
@@ -317,6 +445,19 @@ test("a neighbour the window has shown is drawn as it was, its own tab lit", asy
   expect(next.inert).toBe(true);
 });
 
+test("a neighbour holding no tab peeks as empty until the window opens a tab in it", async () => {
+  const screen = await mount();
+  const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+  project({ spaces: [HOME, spaceFixture("quiet", "Quiet", { tabs: 0 })] });
+  await frame();
+  swipe(list, 30);
+  await frame();
+  await frame();
+  const next = screen.container.querySelector<HTMLElement>('.peek[data-sheet="next"]')!;
+  expect(next.textContent).toContain("Nothing open in Quiet");
+  expect(next.querySelector("button")).toBeNull();
+});
+
 test("a swipe the native side refuses brings the sheet back", async () => {
   native.step.mockImplementationOnce(async () => ({ accepted: false, operation_id: null }));
   const screen = await mount();
@@ -324,6 +465,30 @@ test("a swipe the native side refuses brings the sheet back", async () => {
   swipe(list, 30);
   await frame();
   await expect.poll(() => sheetOf(screen).style.transform, { timeout: 2000 }).toBe("");
+});
+
+test("reduced motion admits only one swipe until the space arrives", async () => {
+  const screen = await mount();
+  const root = document.documentElement;
+  const previous = root.dataset.reduceMotion;
+  root.dataset.reduceMotion = "true";
+  try {
+    const list = screen.container.querySelector<HTMLElement>(".tab-scroller")!;
+    swipe(list, 30);
+    // The wheel fallback can recognize a sharp increase as a fresh gesture.
+    swipe(list, 100);
+    expect(native.step).toHaveBeenCalledExactlyOnceWith(1);
+    expect(sheetOf(screen).style.transform).toBe("");
+
+    project({ active_space_id: "studio" });
+    await frame();
+    swipe(list, -100);
+    expect(native.step.mock.calls).toEqual([[1], [-1]]);
+    expect(sheetOf(screen).style.transform).toBe("");
+  } finally {
+    if (previous === undefined) delete root.dataset.reduceMotion;
+    else root.dataset.reduceMotion = previous;
+  }
 });
 
 test("a space something else switched to slides in without a sheet", async () => {

@@ -1,16 +1,24 @@
-//! Anonymous origin icon probe for Work sources the agent did not read.
+//! Anonymous icon fetching: an origin's icon for Work sources the agent did
+//! not read, and the icon addresses a page declared.
 //!
-//! One cookie-free client: HTTPS to public hosts only, at most two redirects,
-//! a fixed timeout and byte caps. `/favicon.ico` first, then the icon links in
-//! the root document's head. Icon bytes are decoded by a bounded, memory-safe
-//! decoder and leave this module only as the fixed 32x32 RGBA raster the
-//! renderer path produces. Diagnostics carry origin, bytes and outcome class.
+//! One client with no cookie store, no credentials, no referrer and no page
+//! state, so what a site learns is what a plain request to a public address
+//! tells it. HTTPS to public hosts only, resolved by a resolver that refuses
+//! private addresses, at most two redirects, a fixed timeout and byte caps. An
+//! origin is tried at `/favicon.ico`, then the icon links in its root
+//! document's head; a page's addresses are tried best first. Icon bytes are
+//! decoded by a bounded, memory-safe decoder and leave this module only as the
+//! fixed 32x32 RGBA raster the renderer path produces. An icon that needs the
+//! page's cookies, or a vector, is the page's to decode. Diagnostics carry
+//! bytes and outcome class, never an address.
 
 use std::io::Cursor;
 use std::time::Duration;
 
 use reqwest::{redirect::Policy, Client, Url};
-use zephium_app::{CallbackHandle, Command};
+use zephium_app::{
+    CallbackHandle, Command, FaviconPageSource, FaviconProbe, FaviconProberAttachment,
+};
 use zephium_core::icon::{ICON_SIDE, RGBA32_BYTES};
 use zephium_core::ids::ProfileId;
 
@@ -21,6 +29,10 @@ pub(crate) const MAX_REDIRECTS: usize = 2;
 /// Largest declared icon side the head parser picks.
 pub(crate) const MAX_CANDIDATE_SIDE: u32 = 256;
 const MAX_CANDIDATES_TRIED: usize = 3;
+/// Most PNG the web engine may hand over for one icon.
+const MAX_ENGINE_ICON_BYTES: usize = 256 * 1024;
+/// What the shell remembers as the source of an icon the engine chose.
+const ENGINE_SOURCE: &str = "engine";
 const MAX_LINKS: usize = 64;
 const MAX_DECODED_SIDE: u32 = 1024;
 const MAX_DECODE_ALLOC: u64 = 16 * 1024 * 1024;
@@ -41,25 +53,32 @@ pub(crate) enum ProbeOutcome {
 }
 
 #[derive(Clone, Copy)]
-struct ProbePolicy {
-    public_https: bool,
+enum ProbePolicy {
+    Product,
+    #[cfg(test)]
+    Local,
 }
 
 impl ProbePolicy {
-    const PRODUCT: Self = Self { public_https: true };
-
     fn admits(self, url: &Url) -> bool {
-        if self.public_https {
-            zephium_agentic::public_asset::public_https(url)
-        } else {
-            matches!(url.scheme(), "http" | "https")
+        match self {
+            Self::Product => zephium_agentic::public_asset::public_https(url),
+            #[cfg(test)]
+            Self::Local => matches!(url.scheme(), "http" | "https"),
         }
     }
 }
 
 fn client(policy: ProbePolicy) -> Option<Client> {
-    Client::builder()
-        .https_only(policy.public_https)
+    let builder = Client::builder().no_proxy();
+    let builder = match policy {
+        ProbePolicy::Product => builder
+            .https_only(true)
+            .dns_resolver(zephium_agentic::public_asset::public_resolver()),
+        #[cfg(test)]
+        ProbePolicy::Local => builder,
+    };
+    builder
         .redirect(Policy::custom(move |attempt| {
             if attempt.previous().len() > MAX_REDIRECTS || !policy.admits(attempt.url()) {
                 attempt.stop()
@@ -78,26 +97,63 @@ fn client(policy: ProbePolicy) -> Option<Client> {
 }
 
 /// Attaches the prober to the shell. Each request answers exactly once.
-pub(crate) fn install(shell: &zephium_app::Handle) {
-    let Some(client) = client(ProbePolicy::PRODUCT) else {
+/// `_routes` is the route every anonymous reader shares; the prober does not
+/// consult it yet.
+pub(crate) fn install(
+    shell: &zephium_app::Handle,
+    _routes: zephium_agentic::public_asset::RouteSource,
+) {
+    let Some(client) = client(ProbePolicy::Product) else {
         crate::write_diagnostic(format_args!("favicon: probe client did not build"));
         return;
     };
     let reply = shell.callback_handle();
-    let prober: zephium_app::FaviconProber = std::sync::Arc::new(move |profile, origin| {
+    let cancel_network = tokio::sync::watch::Sender::new(());
+    let cancellations = cancel_network.clone();
+    let prober: zephium_app::FaviconProber = std::sync::Arc::new(move |request| {
         let client = client.clone();
         let reply = reply.clone();
+        let mut cancelled = cancellations.subscribe();
         tauri::async_runtime::spawn(async move {
-            let (rgba, bytes, outcome) = probe(&client, ProbePolicy::PRODUCT, &origin).await;
-            crate::work_provider::record_diagnostic(format_args!(
-                "favicon: phase=probe bytes={bytes} outcome={outcome:?}"
-            ));
-            answer(&reply, profile, origin, rgba).await;
+            match request {
+                FaviconProbe::Origin { profile, origin } => {
+                    let (rgba, bytes, outcome) = tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => (None, 0, ProbeOutcome::Refused),
+                        result = probe(&client, ProbePolicy::Product, &origin) => result,
+                    };
+                    crate::work_provider::record_diagnostic(format_args!(
+                        "favicon: phase=probe bytes={bytes} outcome={outcome:?}"
+                    ));
+                    answer(&reply, profile, origin, rgba).await;
+                }
+                FaviconProbe::Page { ticket, source, .. } => {
+                    let fetched = if matches!(source, FaviconPageSource::Encoded(_)) {
+                        fetch_page_icon(&client, ProbePolicy::Product, source).await
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = cancelled.changed() => PageFetch::default(),
+                            result = fetch_page_icon(&client, ProbePolicy::Product, source) => result,
+                        }
+                    };
+                    crate::work_provider::record_diagnostic(format_args!(
+                        "favicon: phase=page bytes={} found={} failed={}",
+                        fetched.bytes,
+                        fetched.rgba.is_some(),
+                        fetched.failed.len()
+                    ));
+                    answer_page(&reply, ticket, fetched).await;
+                }
+            }
         });
     });
-    if !shell.dispatch(Command::AttachFaviconProber(
-        zephium_app::FaviconProberAttachment(prober),
-    )) {
+    if !shell.dispatch(Command::AttachFaviconProber(FaviconProberAttachment {
+        probe: prober,
+        cancel_network: std::sync::Arc::new(move || {
+            cancel_network.send_replace(());
+        }),
+    })) {
         crate::write_diagnostic(format_args!("favicon: the shell refused its prober"));
     }
 }
@@ -115,6 +171,75 @@ async fn answer(reply: &CallbackHandle, profile: ProfileId, origin: String, rgba
         }
         tokio::time::sleep(REPLY_RETRY).await;
     }
+}
+
+/// What one page request produced.
+#[derive(Default)]
+struct PageFetch {
+    rgba: Option<Vec<u8>>,
+    /// The address that decoded, or [`ENGINE_SOURCE`].
+    source: Option<String>,
+    /// Addresses this prober could not use, for any reason.
+    failed: Vec<String>,
+    bytes: usize,
+}
+
+async fn answer_page(reply: &CallbackHandle, ticket: u64, fetched: PageFetch) {
+    for _ in 0..REPLY_ATTEMPTS {
+        if reply.dispatch(Command::FaviconFetched {
+            ticket,
+            rgba: fetched.rgba.clone(),
+            source: fetched.source.clone(),
+            failed: fetched.failed.clone(),
+        }) {
+            return;
+        }
+        tokio::time::sleep(REPLY_RETRY).await;
+    }
+}
+
+/// The best-first addresses a page declared, one request each until one
+/// decodes, or the engine's own PNG. An address is only ever asked for here,
+/// never sent anything of the page's.
+async fn fetch_page_icon(
+    client: &Client,
+    policy: ProbePolicy,
+    source: FaviconPageSource,
+) -> PageFetch {
+    let addresses = match source {
+        FaviconPageSource::Encoded(png) => {
+            let rgba = (png.len() <= MAX_ENGINE_ICON_BYTES)
+                .then(|| rasterize(&png))
+                .flatten();
+            return PageFetch {
+                source: rgba.is_some().then(|| ENGINE_SOURCE.to_owned()),
+                rgba,
+                failed: Vec::new(),
+                bytes: png.len(),
+            };
+        }
+        FaviconPageSource::Addresses(addresses) => addresses,
+    };
+    let mut fetched = PageFetch::default();
+    for address in addresses.into_iter().take(MAX_CANDIDATES_TRIED) {
+        let Some(url) = Url::parse(&address).ok().filter(|url| policy.admits(url)) else {
+            fetched.failed.push(address);
+            continue;
+        };
+        match fetch(client, url, MAX_ICON_BYTES, false).await {
+            Ok((bytes, _)) => {
+                fetched.bytes += bytes.len();
+                if let Some(rgba) = rasterize(&bytes) {
+                    fetched.rgba = Some(rgba);
+                    fetched.source = Some(address);
+                    return fetched;
+                }
+                fetched.failed.push(address);
+            }
+            Err(_) => fetched.failed.push(address),
+        }
+    }
+    fetched
 }
 
 async fn probe(
@@ -491,7 +616,7 @@ mod tests {
 
     #[test]
     fn product_policy_admits_only_public_https() {
-        let policy = ProbePolicy::PRODUCT;
+        let policy = ProbePolicy::Product;
         assert!(policy.admits(&base()));
         for refused in [
             "http://example.com/",
@@ -559,12 +684,46 @@ mod tests {
             .into_bytes()
     }
 
-    const LOCAL: ProbePolicy = ProbePolicy {
-        public_https: false,
-    };
-
     fn run<T>(future: impl std::future::Future<Output = T>) -> T {
         tauri::async_runtime::block_on(future)
+    }
+
+    #[test]
+    fn product_client_ignores_inherited_https_proxy() {
+        const CHILD: &str = "ZEPHIUM_TEST_FAVICON_PROXY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            use std::error::Error;
+
+            let client = client(ProbePolicy::Product).unwrap();
+            // Exercise the connector directly with a hostname that resolves locally.
+            let error = run(async { client.get("https://localhost/").send().await }).unwrap_err();
+            let mut sources = std::iter::successors(error.source(), |&source| source.source());
+            assert!(
+                sources.any(|source| {
+                    source.to_string() == "non-public address answer or resolution limit"
+                }),
+                "{error:?}"
+            );
+            return;
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        let output = child
+            .env(CHILD, "1")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .args([
+                "--exact",
+                "favicon_probe::tests::product_client_ignores_inherited_https_proxy",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -578,8 +737,8 @@ mod tests {
             ),
             ok("image/png", &icon),
         ]);
-        let client = client(LOCAL).unwrap();
-        let (rgba, bytes, outcome) = run(probe(&client, LOCAL, &origin));
+        let client = client(ProbePolicy::Local).unwrap();
+        let (rgba, bytes, outcome) = run(probe(&client, ProbePolicy::Local, &origin));
         assert_eq!(outcome, ProbeOutcome::Found);
         assert_eq!(rgba.map(|rgba| rgba.len()), Some(RGBA32_BYTES));
         assert!(bytes > icon.len());
@@ -593,7 +752,7 @@ mod tests {
             ok("image/png", &vec![0; MAX_ICON_BYTES + 1]),
             ok("text/html", &vec![b' '; MAX_HEAD_BYTES * 2]),
         ]);
-        let client = client(LOCAL).unwrap();
+        let client = client(ProbePolicy::Local).unwrap();
         let base = Url::parse(&origin).unwrap();
         assert_eq!(
             run(fetch(
@@ -616,7 +775,7 @@ mod tests {
             redirect("/two"),
             ok("image/png", &icon),
         ]);
-        let client = client(LOCAL).unwrap();
+        let client = client(ProbePolicy::Local).unwrap();
         let url = Url::parse(&origin).unwrap().join("/favicon.ico").unwrap();
         let (bytes, landed) = run(fetch(&client, url, MAX_ICON_BYTES, false)).unwrap();
         assert_eq!(bytes, icon);
@@ -637,8 +796,128 @@ mod tests {
 
     #[test]
     fn a_redirect_off_https_is_not_followed_by_the_product_client() {
-        let policy = ProbePolicy::PRODUCT;
+        let policy = ProbePolicy::Product;
         assert!(!policy.admits(&Url::parse("http://example.com/favicon.ico").unwrap()));
         assert!(client(policy).is_some());
+    }
+
+    #[test]
+    fn a_page_tries_its_addresses_best_first_and_names_the_ones_that_gave_nothing() {
+        let icon = png(32, 32);
+        let (origin, paths) = serve(vec![
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            ok("text/html", b"<html>sign in</html>"),
+            ok("image/png", &icon),
+            ok("image/png", &icon),
+        ]);
+        let client = client(ProbePolicy::Local).unwrap();
+        let addresses: Vec<String> = ["/a.png", "/login.png", "/c.png", "/never.png"]
+            .iter()
+            .map(|path| format!("{origin}{path}"))
+            .collect();
+        let fetched = run(fetch_page_icon(
+            &client,
+            ProbePolicy::Local,
+            FaviconPageSource::Addresses(addresses.clone()),
+        ));
+        assert_eq!(fetched.rgba.map(|rgba| rgba.len()), Some(RGBA32_BYTES));
+        assert_eq!(fetched.source.as_deref(), Some(addresses[2].as_str()));
+        assert_eq!(fetched.failed, addresses[..2]);
+        let seen: Vec<String> = paths.try_iter().collect();
+        assert_eq!(seen, ["/a.png", "/login.png", "/c.png"]);
+    }
+
+    #[test]
+    fn at_most_three_addresses_are_asked_for_and_all_of_them_are_named_when_none_works() {
+        let (origin, paths) = serve(vec![
+            ok("text/html", b"x"),
+            ok("text/html", b"x"),
+            ok("text/html", b"x"),
+            ok("text/html", b"x"),
+        ]);
+        let client = client(ProbePolicy::Local).unwrap();
+        let addresses: Vec<String> = (0..5).map(|n| format!("{origin}/{n}.png")).collect();
+        let fetched = run(fetch_page_icon(
+            &client,
+            ProbePolicy::Local,
+            FaviconPageSource::Addresses(addresses.clone()),
+        ));
+        assert!(fetched.rgba.is_none() && fetched.source.is_none());
+        assert_eq!(fetched.failed, addresses[..3]);
+        assert_eq!(paths.try_iter().count(), 3);
+    }
+
+    #[test]
+    fn the_product_client_never_asks_for_a_plain_or_inward_address() {
+        let client = client(ProbePolicy::Product).unwrap();
+        let fetched = run(fetch_page_icon(
+            &client,
+            ProbePolicy::Product,
+            FaviconPageSource::Addresses(vec![
+                "http://example.com/i.png".into(),
+                "https://127.0.0.1/i.png".into(),
+                "https://printer.local/i.png".into(),
+                "not an address".into(),
+            ]),
+        ));
+        assert!(fetched.rgba.is_none());
+        assert_eq!(fetched.bytes, 0);
+        assert_eq!(
+            fetched.failed.len(),
+            3,
+            "the fourth address is never considered"
+        );
+    }
+
+    #[test]
+    fn a_request_carries_nothing_of_the_page_or_the_person() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (head, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut request = [0u8; 4096];
+            let read = stream.read(&mut request).unwrap_or(0);
+            let _ = head.send(String::from_utf8_lossy(&request[..read]).to_ascii_lowercase());
+            let _ = stream.write_all(&ok("image/png", &png(16, 16)));
+        });
+        let client = client(ProbePolicy::Local).unwrap();
+        let fetched = run(fetch_page_icon(
+            &client,
+            ProbePolicy::Local,
+            FaviconPageSource::Addresses(vec![format!("{origin}/i.png")]),
+        ));
+        assert!(fetched.rgba.is_some());
+        let head = seen.recv().unwrap();
+        for header in ["cookie:", "authorization:", "referer:", "origin:"] {
+            assert!(!head.contains(header), "{header} was sent:\n{head}");
+        }
+        assert!(head.contains("user-agent: zephium-agent-browser"));
+    }
+
+    #[test]
+    fn the_engines_png_is_decoded_and_a_malformed_or_oversized_one_is_refused() {
+        let client = client(ProbePolicy::Local).unwrap();
+        let fetched = run(fetch_page_icon(
+            &client,
+            ProbePolicy::Local,
+            FaviconPageSource::Encoded(png(48, 48)),
+        ));
+        assert_eq!(fetched.rgba.map(|rgba| rgba.len()), Some(RGBA32_BYTES));
+        assert_eq!(fetched.source.as_deref(), Some(ENGINE_SOURCE));
+        for refused in [
+            vec![1, 2, 3],
+            vec![0; MAX_ENGINE_ICON_BYTES + 1],
+            png(2048, 2048),
+        ] {
+            let fetched = run(fetch_page_icon(
+                &client,
+                ProbePolicy::Local,
+                FaviconPageSource::Encoded(refused),
+            ));
+            assert!(fetched.rgba.is_none() && fetched.source.is_none());
+        }
     }
 }

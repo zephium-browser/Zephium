@@ -35,6 +35,7 @@
   );
   let offered = $derived(kinds.filter((kind) => source?.kinds.includes(kind)));
   let running = $derived(browserImport.busy());
+  let refused = $derived(browserImport.startFailure());
   let jobSource = $derived(found?.find((candidate) => candidate.id === job?.source) ?? null);
   let jobName = $derived(jobSource?.name ?? "");
   const number = new Intl.NumberFormat();
@@ -97,10 +98,11 @@
         return m.import_kind_skipped();
       case "failed":
         return problemText(entry.problem, jobName);
+      case "partial":
+        return m.import_kind_partial();
       case "done":
-        return entry.done > 0
-          ? m.import_kind_added({ count: number.format(entry.done) })
-          : m.import_kind_current();
+        if (entry.done > 0) return m.import_kind_added({ count: number.format(entry.done) });
+        return entry.total === 0 ? m.import_kind_none() : m.import_kind_current();
     }
   }
 
@@ -142,6 +144,13 @@
           : m.import_importing({ browser: jobName })}</strong
       >
       {#if job.finished}
+        {#if job.kinds.some((entry) => entry.problem === "permission")}
+          <Button
+            size="compact"
+            onclick={() => void browserImport.openPermissionSettings(job.source)}
+            >{m.onb_import_allow()}</Button
+          >
+        {/if}
         <Button size="compact" onclick={browserImport.dismiss}>{m.import_dismiss()}</Button>
       {:else}
         <Button size="compact" variant="ghost" onclick={() => void browserImport.cancel()}
@@ -156,8 +165,10 @@
             >{#if entry.state === "done"}<Icon
                 icon={Tick02Icon}
                 size={14}
-              />{:else if entry.state === "failed"}<Icon icon={Alert02Icon} size={14} />{:else}<i
-              ></i>{/if}</span
+              />{:else if entry.state === "failed" || entry.state === "partial"}<Icon
+                icon={Alert02Icon}
+                size={14}
+              />{:else}<i></i>{/if}</span
           >
           <span class="kind">{kindName(entry.kind)}</span>
           <span class="detail">{progressText(entry)}</span>
@@ -175,12 +186,18 @@
       <Button
         size="compact"
         variant="primary"
-        disabled={running || offered.length === 0 || profileId === null}
+        pending={running}
+        disabled={offered.length === 0 || profileId === null}
         onclick={() => profileId && void browserImport.start(source.id, profileId, offered)}
         >{m.onb_import_action()}</Button
       >
     {/if}
   </SettingsRow>
+{/if}
+{#if refused && (job || source?.id === refused.id)}
+  <p class="start-error" role="alert">{m.import_start_failed({ browser: refused.name })}</p>
+{/if}
+{#if !job}
   {#if found && found.length > 0}
     <div class="sources" role="radiogroup" aria-label={m.onb_import_from()}>
       {#each found as candidate, index (candidate.id)}
@@ -232,6 +249,13 @@
 {/if}
 
 <style>
+  .start-error {
+    margin: 0;
+    padding: 0 18px 12px;
+    color: var(--color-danger);
+    font-size: var(--text-label);
+  }
+
   /* The browsers sit under the row that names them, as one choice. */
   .sources {
     display: flex;

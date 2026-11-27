@@ -173,6 +173,7 @@ impl Hub {
     }
 
     fn pending_profile_deletion_entries(
+        &self,
         entries: &[ProfileDeletionJournalEntry],
     ) -> Vec<PendingProfileDeletion> {
         entries
@@ -182,7 +183,7 @@ impl Hub {
             // while its authorization remains internally durable until a
             // later process start verifies absence. Do not make the shell
             // repeat a completed local operation during the same run.
-            .filter(|entry| entry.local_unlink_process.is_none())
+            .filter(|entry| entry.local_unlink_process != Some(self.deletion_process_generation))
             .map(ProfileDeletionJournalEntry::pending)
             .collect()
     }
@@ -225,29 +226,35 @@ impl Hub {
             ));
         }
 
+        // Retire backup WAL frames while the durable deletion obligations
+        // still exist. A busy checkpoint leaves all journal rows retryable.
+        let tx = self.meta.transaction()?;
+        for (profile, _, absent) in &resolutions {
+            if *absent {
+                session::discard_profile_backup(&tx, *profile)?;
+            }
+        }
+        tx.commit()?;
+        let checkpoint_complete = match session::checkpoint_session_backup(&self.meta) {
+            Ok(()) => true,
+            Err(error) => {
+                // Keep startup available while the existing deletion recovery
+                // queue retries local cleanup with native proof intact. Only
+                // checkpoint errors take this path; journal writes still fail.
+                eprintln!("store: session backup checkpoint deferred: {error}");
+                false
+            }
+        };
         let tx = self.meta.transaction()?;
         for (profile, prior_process, absent) in resolutions {
-            let changed = if absent {
-                tx.execute(
-                    "DELETE FROM profile_deletion_journal
-                     WHERE profile_id = ?1
-                       AND native_erasure_verified = 1
-                       AND local_unlink_process = ?2",
-                    params![profile.to_string(), prior_process.to_string()],
-                )?
-            } else {
-                // The filesystem did not preserve the prior unlink across
-                // restart. Keep native proof, reopen only the idempotent local
-                // phase, and retain the original deletion authorization.
-                tx.execute(
-                    "UPDATE profile_deletion_journal
-                     SET local_unlink_process = NULL
-                     WHERE profile_id = ?1
-                       AND native_erasure_verified = 1
-                       AND local_unlink_process = ?2",
-                    params![profile.to_string(), prior_process.to_string()],
-                )?
-            };
+            if absent && checkpoint_complete {
+                continue;
+            }
+            let changed = tx.execute(
+                "UPDATE profile_deletion_journal SET local_unlink_process = NULL
+                 WHERE profile_id = ?1 AND native_erasure_verified = 1 AND local_unlink_process = ?2",
+                params![profile.to_string(), prior_process.to_string()],
+            )?;
             if changed != 1 {
                 return Err(invalid_data(
                     "profile deletion tombstone changed during restart reconciliation",
@@ -261,9 +268,7 @@ impl Hub {
     pub(crate) fn pending_profile_deletions(
         &self,
     ) -> rusqlite::Result<Vec<PendingProfileDeletion>> {
-        Ok(Self::pending_profile_deletion_entries(
-            &self.profile_deletion_journal_entries()?,
-        ))
+        Ok(self.pending_profile_deletion_entries(&self.profile_deletion_journal_entries()?))
     }
 
     #[cfg(test)]
@@ -302,7 +307,7 @@ impl Hub {
         self.profiles
             .retain(|profile, _| self.registry.contains(profile));
         let journal = self.profile_deletion_journal_entries()?;
-        let pending = Self::pending_profile_deletion_entries(&journal);
+        let pending = self.pending_profile_deletion_entries(&journal);
         if !journal.is_empty() {
             let authoritative = self.meta.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_snapshot WHERE id = 1)",
@@ -369,12 +374,19 @@ impl Hub {
         // a crash or unavailable journal repeats this purge on the next try.
         #[cfg(all(target_os = "windows", feature = "work-execution"))]
         self.purge_windows_work_artifacts(profile)?;
-        if deletion.local_unlink_process.is_some() && require_restart_confirmation {
-            // The first process has already completed its local phase. Only a
-            // Hub carrying a different process generation may clear this
-            // tombstone after re-observing the recovered filesystem namespace.
+        let prior_completion = deletion
+            .local_unlink_process
+            .is_some_and(|generation| generation != self.deletion_process_generation);
+        if deletion.local_unlink_process == Some(self.deletion_process_generation)
+            && require_restart_confirmation
+        {
             return Ok(true);
         }
+        let prior_absent = prior_completion
+            && self
+                .dir
+                .as_ref()
+                .is_some_and(|dir| matches!(profile_artifacts_absent(dir, profile), Ok(true)));
 
         // Persist native proof before deleting the SQLite file. A crash after
         // this commit resumes only the local file phase; a crash before it
@@ -394,6 +406,11 @@ impl Hub {
         }
 
         self.profiles.remove(&profile);
+        if let Some(media) = &self.media {
+            media
+                .retire_profile(profile)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
         if let Some(dir) = &self.dir {
             // Only this exact durable row authorizes unlinking. Arbitrary
             // profile-shaped orphans are never discovered or removed here.
@@ -405,20 +422,25 @@ impl Hub {
             return Err(invalid_data("injected failure after local profile purge"));
         }
 
-        let changed = if require_restart_confirmation {
-            self.meta.execute(
+        let tx = self.meta.transaction()?;
+        session::discard_profile_backup(&tx, profile)?;
+        tx.commit()?;
+        session::checkpoint_session_backup(&self.meta)?;
+        let tx = self.meta.transaction()?;
+        let changed = if require_restart_confirmation && !prior_absent {
+            tx.execute(
                 "UPDATE profile_deletion_journal
                  SET local_unlink_process = ?2
                  WHERE profile_id = ?1
                    AND native_erasure_verified = 1
-                   AND local_unlink_process IS NULL",
+                   AND (local_unlink_process IS NULL OR local_unlink_process != ?2)",
                 params![
                     profile.to_string(),
                     self.deletion_process_generation.to_string()
                 ],
             )?
         } else {
-            self.meta.execute(
+            tx.execute(
                 "DELETE FROM profile_deletion_journal
                  WHERE profile_id = ?1 AND native_erasure_verified = 1",
                 [profile.to_string()],
@@ -429,6 +451,7 @@ impl Hub {
                 "profile deletion journal changed during completion",
             ));
         }
+        tx.commit()?;
         self.degraded_profiles.remove(&profile);
         Ok(true)
     }
@@ -457,8 +480,19 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     // physical secure erasure on copy-on-write filesystems or SSD media.
     // Notes go first: if erasing them fails, the database and its journal
     // authorization remain and the whole cleanup is retried.
-    remove_notes_directory(dir, profile)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    for owner in ["notes", "media", "work-frames"] {
+        remove_profile_directory(dir, profile, owner)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    }
+    for path in super::filesystem::profile_owned_artifacts(dir, profile)? {
+        if path
+            .parent()
+            .is_some_and(|parent| parent == dir.join("connections"))
+        {
+            remove_file_if_present(&path)?;
+        }
+    }
+    remove_extension_profile_artifacts(dir, profile)?;
     let path = dir.join(format!("profile-{profile}.sqlite"));
     if regular_file_exists(&path)? {
         let scrub = scrub_profile_database(&path);
@@ -492,11 +526,52 @@ fn purge_profile_file(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// The profile's notes folder and index, `notes/<profile>`. The directory is
-/// first renamed aside so a partial removal can never be mistaken for a live
-/// folder, then removed without following any link inside it.
-fn remove_notes_directory(dir: &Path, profile: ProfileId) -> std::io::Result<()> {
-    let notes = dir.join("notes");
+fn remove_extension_profile_artifacts(dir: &Path, profile: ProfileId) -> rusqlite::Result<()> {
+    let [registry, temporary, staged] =
+        super::filesystem::extension_profile_artifacts(dir, profile)?;
+    {
+        let mut registry_io = zephium_core::extensions::REGISTRY_IO.lock().map_err(|_| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                "Extension registry state is unavailable.",
+            )))
+        })?;
+        registry_io.cancel(registry.parent().unwrap().parent().unwrap(), profile);
+        remove_file_if_present(&temporary)?;
+        remove_file_if_present(&registry)?;
+    }
+    match std::fs::symlink_metadata(&staged) {
+        Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(&staged),
+        Ok(_) => std::fs::remove_file(&staged),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    #[cfg(unix)]
+    for parent in [
+        registry.parent().unwrap(),
+        staged.parent().unwrap(),
+        registry.parent().unwrap().parent().unwrap(),
+    ] {
+        match sync_directory(parent) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+        }
+    }
+    Ok(())
+}
+
+/// Renames a profile-owned content directory aside before removing it, so a
+/// partial removal is never mistaken for a live folder. Links are unlinked,
+/// never traversed, and an aliased owner directory fails closed.
+fn remove_profile_directory(dir: &Path, profile: ProfileId, owner: &str) -> std::io::Result<()> {
+    let notes = dir.join(owner);
+    match std::fs::symlink_metadata(&notes) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let live = notes.join(profile.to_string());
     let erasing = notes.join(format!(".erasing-{profile}"));
     match std::fs::symlink_metadata(&live) {
@@ -544,6 +619,9 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM work_payload_usage;
          DELETE FROM page_permission_grants;
          DELETE FROM page_permission_catalog;
+         DELETE FROM popup_sites;
+         DELETE FROM download_sites;
+         DELETE FROM app_link_sites;
          DELETE FROM task_list_receipts;
          DELETE FROM task_lists;
          DELETE FROM user_resource_receipts;
@@ -563,6 +641,8 @@ fn scrub_profile_database(path: &Path) -> rusqlite::Result<()> {
          DELETE FROM history;
          DELETE FROM history_usage;
          DELETE FROM favicons;
+         DELETE FROM page_favicons;
+         DELETE FROM site_zoom;
          DELETE FROM settings;
          DELETE FROM items;
          DELETE FROM spaces;
@@ -605,6 +685,72 @@ mod tests {
     const PROFILE_SCRUB_MARKER: &str = "zephiumscrubmarker97613";
 
     #[test]
+    fn profile_erasure_inventory_and_purge_include_external_file_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(71);
+        for owner in ["media", "work-frames"] {
+            let dir = temp.path().join(owner).join(profile.to_string());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("private-content"), b"private").unwrap();
+        }
+        let connections = temp.path().join("connections");
+        std::fs::create_dir_all(&connections).unwrap();
+        for suffix in ["json", "tools.json", "json.123", "tools.json.123"] {
+            std::fs::write(
+                connections.join(format!("profile-{profile}.{suffix}")),
+                b"private config",
+            )
+            .unwrap();
+        }
+        assert!(profile_artifacts_exist(temp.path(), profile).unwrap());
+        purge_profile_file(temp.path(), profile).unwrap();
+        assert!(profile_artifacts_absent(temp.path(), profile).unwrap());
+        assert_eq!(std::fs::read_dir(connections).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn prior_process_completion_remains_pending_until_external_reverification() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(72);
+        let prior = ProfileId::from(73);
+        let mut hub = Hub::open(temp.path().to_path_buf()).unwrap();
+        hub.save(&SessionState::default()).unwrap();
+        hub.meta.execute("INSERT INTO profile_deletion_journal(profile_id,authorized_at,native_erasure_verified,local_unlink_process) VALUES(?1,1,1,?2)", params![profile.to_string(),prior.to_string()]).unwrap();
+        drop(hub);
+        let mut reopened = Hub::open(temp.path().to_path_buf()).unwrap();
+        assert_eq!(reopened.pending_profile_deletions().unwrap().len(), 1);
+        assert_eq!(
+            reopened.profile_deletion_journal_entries().unwrap().len(),
+            1
+        );
+        assert!(reopened
+            .finalize_profile_deletion_requiring_restart_confirmation(profile)
+            .unwrap());
+        assert!(reopened
+            .profile_deletion_journal_entries()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_erasure_refuses_aliased_owner_parents_without_touching_the_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let profile = ProfileId::from(74);
+        let target = outside.path().join(profile.to_string());
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("private"), b"must remain").unwrap();
+        std::os::unix::fs::symlink(outside.path(), temp.path().join("media")).unwrap();
+        assert!(profile_artifacts_exist(temp.path(), profile).is_err());
+        assert!(purge_profile_file(temp.path(), profile).is_err());
+        assert_eq!(
+            std::fs::read(target.join("private")).unwrap(),
+            b"must remain"
+        );
+    }
+
+    #[test]
     fn profile_scrub_covers_every_current_user_data_and_authority_table() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("profile-test.sqlite");
@@ -637,6 +783,16 @@ mod tests {
         )
         .unwrap();
         conn.execute(
+            "INSERT INTO page_favicons(page, icon, fetched_at) VALUES (?1, zeroblob(4096), 1)",
+            [format!("https://history.example/{PROFILE_SCRUB_MARKER}")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO site_zoom(site, percent, set_at) VALUES (?1, 125, 1)",
+            [format!("{PROFILE_SCRUB_MARKER}.example")],
+        )
+        .unwrap();
+        conn.execute(
             "INSERT INTO userscripts(
                  id, revision, enabled, metadata_format, source, source_sha256_v1
              ) VALUES (?1, 1, 1, 1, ?2, ?3)",
@@ -652,6 +808,21 @@ mod tests {
                  id, revision, origin, kind, decision
              ) VALUES (?1, 1, 'https://private.example', 'camera', 'allow')",
             ["00000000000000000000000002"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO popup_sites(origin) VALUES ('https://private.example')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO download_sites(origin, allowed) VALUES ('https://private.example', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO app_link_sites(origin, scheme) VALUES ('https://private.example', 'zoommtg')",
+            [],
         )
         .unwrap();
         conn.execute("INSERT INTO works(id, schema_version, revision, status, objective, created_unix_ms, updated_unix_ms, lifecycle, objective_revision, context_revision, objective_author) VALUES ('00000000000000000000000001', 2, 1, 'draft', ?1, 1, 1, 'active', 1, 1, 'user')", [PROFILE_SCRUB_MARKER]).unwrap();
@@ -733,11 +904,13 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         let expected_tables = [
+            "app_link_sites",
             "blocker_statistics",
             "bookmarks",
             "chats",
             "download_cleanup",
             "download_preferences",
+            "download_sites",
             "downloads",
             "favicons",
             "focus",
@@ -749,8 +922,10 @@ mod tests {
             "history_fts_idx",
             "history_usage",
             "items",
+            "page_favicons",
             "page_permission_catalog",
             "page_permission_grants",
+            "popup_sites",
             "resource_titles_fts",
             "resource_titles_fts_config",
             "resource_titles_fts_data",
@@ -758,6 +933,7 @@ mod tests {
             "resource_titles_fts_idx",
             "search_queries",
             "settings",
+            "site_zoom",
             "spaces",
             "sqlite_sequence",
             "task_list_receipts",
@@ -817,11 +993,16 @@ mod tests {
             "history",
             "history_usage",
             "favicons",
+            "page_favicons",
+            "site_zoom",
             "settings",
             "userscript_catalog",
             "userscripts",
             "page_permission_catalog",
             "page_permission_grants",
+            "popup_sites",
+            "download_sites",
+            "app_link_sites",
             "works",
             "work_payload_usage",
             "work_plans",

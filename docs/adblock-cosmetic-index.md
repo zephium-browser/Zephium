@@ -11,7 +11,7 @@ one shared `Arc<str>`.
 
 On Windows, protection-on pages load as fast or faster than protection-off
 pages but never use less peak memory (Yahoo 349 → 365 MiB, GitHub 418 →
-451 MiB; see [windows-protection-performance.md](windows-protection-performance.md)).
+451 MiB; see [historical Windows protection report](https://github.com/zephium-browser/Zephium/blob/86730cee0aabfd16c0d4d971742c59aaf8172fc9/docs/windows-protection-performance.md)).
 macOS has the same per-document cost. The product goal is that protection makes
 pages lighter, not just faster.
 

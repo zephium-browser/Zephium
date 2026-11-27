@@ -1,8 +1,10 @@
 //! Bounded launcher search and asynchronous history reconciliation.
 
 use super::*;
+use crate::store_reads::{BookmarkHit, Sources};
 use zephium_core::search::{
-    kind_capacity, match_quality, result_section, scoped_query, SearchScope, MAX_RESULTS,
+    capacity_group, interleave_bookmarks, kind_capacity, match_quality, result_section,
+    scoped_query, SearchScope, MAX_RESULTS,
 };
 
 const MAX_ASYNC_SEARCH_QUERY_BYTES: usize = 4 * 1024;
@@ -22,10 +24,13 @@ pub(super) struct SearchState {
     pub(super) query: String,
     pub(super) custom_url: String,
     pub(super) engine: zephium_core::search::SearchEngine,
+    pub(super) shortcuts: zephium_core::search::ShortcutRegistry,
     /// Pages visited before are offered as places to go. An explicit
     /// history search still reads them.
     pub(super) include_history: bool,
     pub(super) context: Option<zephium_ipc::SearchContext>,
+    /// The bound launcher is choosing a page for a mini window.
+    pub(super) mini: bool,
     pub(super) results: Vec<SearchResult>,
     pub(super) pending: Option<PendingSearch>,
     pub(super) generation: u64,
@@ -33,6 +38,20 @@ pub(super) struct SearchState {
 
 impl Shell {
     fn publish_search(&mut self, mut results: SearchResults) {
+        results.shortcut = (scoped_query(&results.query).0 == SearchScope::All)
+            .then(|| {
+                self.search
+                    .shortcuts
+                    .parse(&results.query)
+                    .shortcut
+                    .map(str::to_owned)
+            })
+            .flatten();
+        if self.search.mini {
+            results
+                .results
+                .retain(|result| matches!(result.action, SearchAction::OpenUrl { .. }));
+        }
         let mut identities = std::collections::HashSet::new();
         results.results.retain(|result| {
             identities.insert(match &result.action {
@@ -53,9 +72,10 @@ impl Shell {
             .sort_by_key(|result| result_section(&result.kind));
         let mut taken: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         results.results.retain(|result| {
-            let count = taken.entry(result.kind.clone()).or_default();
+            let group = capacity_group(&result.kind);
+            let count = taken.entry(group.to_owned()).or_default();
             *count += 1;
-            *count <= kind_capacity(&result.kind)
+            *count <= kind_capacity(group)
         });
         results.results.truncate(MAX_RESULTS);
         results.completion = self.search_completion(&results.query, &results.results);
@@ -99,6 +119,7 @@ impl Shell {
         }
         self.search.supplementary_pending = false;
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: Some(context),
@@ -143,6 +164,7 @@ impl Shell {
         let mut combined = self.search.results.clone();
         combined.extend(results);
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: Some(context),
@@ -151,24 +173,24 @@ impl Shell {
         });
     }
 
-    pub(super) fn search_scoped(&mut self, query: &str, context: zephium_ipc::SearchContext) {
+    pub(super) fn search_scoped(
+        &mut self,
+        query: &str,
+        context: zephium_ipc::SearchContext,
+        mini: bool,
+    ) {
         if !self.search_context_current(&context) {
             return;
         }
-        // A launcher panel is created fresh each time it opens, so a new
-        // session id means its raster cache is empty again.
-        let reopened = !context.session_id.starts_with("newtab:")
-            && self
-                .search
-                .context
-                .as_ref()
-                .is_none_or(|current| current.session_id != context.session_id);
-        if reopened {
-            self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
-        }
+        // The launcher's page stays mounted between presentations and keeps
+        // the rasters it was sent, so a new session needs none of them again.
+        // Only a page that has been loaded afresh starts empty (`PanelLoaded`).
         self.search.supplementary_pending = !query.trim().is_empty();
         self.search.query = query.to_owned();
         self.search.context = Some(context);
+        // A private session's tabs and history must not become a regular
+        // Mini page's address.
+        self.search.mini = mini && !self.private_shown();
         self.search(query);
     }
 
@@ -219,6 +241,7 @@ impl Shell {
             self.search.pending = None;
             self.search.supplementary_pending = false;
             self.search.context = None;
+            self.search.mini = false;
             self.search.results.clear();
         }
     }
@@ -229,6 +252,7 @@ impl Shell {
         action: SearchAction,
         background: bool,
         replace: Option<String>,
+        new_mini: bool,
     ) -> OperationDisposition {
         if !self.search_context_current(&context)
             || self.search.context.as_ref() != Some(&context)
@@ -247,13 +271,11 @@ impl Shell {
                 .iter()
                 .find(|result| result.action == action)
             {
+                let parsed = self.search.shortcuts.parse(&self.search.query);
                 let query = if result.kind == "suggestion" {
                     Some(result.title.as_str())
                 } else if result.kind == "search" {
-                    Some(
-                        zephium_core::search::engine_shortcut(&self.search.query)
-                            .map_or(self.search.query.as_str(), |(_, query)| query),
-                    )
+                    Some(parsed.query.as_ref())
                 } else {
                     None
                 };
@@ -305,6 +327,14 @@ impl Shell {
                 {
                     // The launcher stood in for the page's own address field.
                     self.operation_navigate(id, url)
+                } else if replace
+                    .as_deref()
+                    .and_then(ItemId::parse)
+                    .and_then(|id| self.mini_window_of(id))
+                    .is_some_and(|window| self.navigate_mini(window, &url))
+                    || (new_mini && !self.private_shown() && self.open_mini(url.clone()))
+                {
+                    operation_result(OperationOutcome::Applied, OperationReason::OpenedInMini)
                 } else {
                     self.operation_open_url(url, true)
                 }
@@ -330,11 +360,25 @@ impl Shell {
         else {
             return;
         };
-        let (scope, q) = scoped_query(query);
+        let (scope, scoped) = scoped_query(query);
+        let parsed = self.search.shortcuts.parse(query);
+        let shortcut = if scope == SearchScope::All {
+            parsed
+                .shortcut
+                .and_then(|id| self.search.shortcuts.get(id))
+                .cloned()
+        } else {
+            None
+        };
+        let q = if shortcut.is_some() {
+            parsed.query.as_ref()
+        } else {
+            scoped
+        };
         let needle = q.to_lowercase();
         let mut stack = Vec::new();
         for placement in [
-            Placement::Favorites { profile },
+            Placement::Favorites { space },
             Placement::Space {
                 space,
                 section: SpaceSection::Pinned,
@@ -356,6 +400,15 @@ impl Shell {
             }
             stack.extend(self.items.children(id).iter().rev().copied());
         }
+        // A blank tab is not a site, and it must not use up a row.
+        if self.search.mini {
+            tabs.retain(|id| {
+                self.items
+                    .tab(*id)
+                    .and_then(|tab| tab.url.as_ref())
+                    .is_some_and(|url| navigation::is_allowed_str(url.as_str()))
+            });
+        }
         tabs.sort_by_key(|id| std::cmp::Reverse(self.residency.last_focus.get(id).copied()));
         let mut results = Vec::new();
         self.search.generation = self.search.generation.wrapping_add(1);
@@ -365,7 +418,7 @@ impl Shell {
         let generation = self.search.generation;
         self.search.pending = None;
 
-        if q.is_empty() {
+        if q.is_empty() && shortcut.is_none() {
             results.extend(
                 tabs.iter()
                     .filter_map(|id| {
@@ -374,6 +427,7 @@ impl Shell {
                                 *id,
                                 t,
                                 self.icon_ref(self.search_surface(), t, Some(profile)),
+                                self.search.mini,
                             )
                         })
                     })
@@ -397,26 +451,32 @@ impl Shell {
                     *id,
                     t,
                     self.icon_ref(self.search_surface(), t, Some(profile)),
+                    self.search.mini,
                 )
             }));
 
             if let Some(url) = (scope == SearchScope::All)
                 .then(|| {
-                    self.search
-                        .engine
-                        .configured_classify(q, &self.search.custom_url)
+                    self.search.shortcuts.resolve(
+                        query,
+                        self.search.engine,
+                        &self.search.custom_url,
+                    )
                 })
                 .flatten()
             {
-                if navigation::is_query(q) {
+                if shortcut.is_some() || navigation::is_query(q) {
                     results.push(SearchResult {
                         kind: "search".into(),
-                        title: zephium_core::search::engine_shortcut(q)
-                            .map_or(q, |(_, query)| query)
-                            .into(),
-                        detail: zephium_core::search::engine_shortcut(q)
-                            .map_or(self.search.engine, |(engine, _)| engine)
-                            .name()
+                        title: if q.is_empty() {
+                            shortcut.as_ref().map_or("", |item| item.name.as_str())
+                        } else {
+                            q
+                        }
+                        .into(),
+                        detail: shortcut
+                            .as_ref()
+                            .map_or(self.search.engine.name(), |item| item.name.as_str())
                             .into(),
                         icon: None,
                         action: SearchAction::OpenUrl {
@@ -472,15 +532,26 @@ impl Shell {
             // presentation-only and arrives asynchronously; the exact query
             // generation below prevents a slow old result replacing newer UI.
             self.publish_search(SearchResults {
+                shortcut: None,
                 pending: false,
                 completion: None,
                 context: self.search.context.clone(),
                 query: query.into(),
                 results: results.clone(),
             });
+            // Saved pages are a choice the user made, so they are offered
+            // whether or not visited pages are; `@history` looks at visits
+            // alone.
+            let sources = Sources {
+                history: scope == SearchScope::History || self.search.include_history,
+                bookmarks: scope == SearchScope::All
+                    && self.profiles.get(profile).is_some_and(|profile| {
+                        profile.kind != zephium_core::profiles::ProfileKind::Incognito
+                    }),
+            };
             if q.len() > MAX_ASYNC_SEARCH_QUERY_BYTES
                 || !matches!(scope, SearchScope::All | SearchScope::History)
-                || (scope == SearchScope::All && !self.search.include_history)
+                || !(sources.history || sources.bookmarks)
             {
                 return;
             }
@@ -493,18 +564,20 @@ impl Shell {
                 base_results: results,
             });
             if let Some(reads) = &self.store_reads {
-                if !reads.request_history(generation, profile, q.to_owned()) {
+                if !reads.request_history(generation, profile, q.to_owned(), sources) {
                     self.search.pending = None;
                 }
             } else {
                 #[cfg(test)]
                 {
-                    let hits = self.store.search_history(profile, q, 6);
+                    let (hits, bookmarks) =
+                        crate::store_reads::read_suggestions(&*self.store, profile, q, sources);
                     self.on_store_read(StoreReadResult::History {
                         generation,
                         profile,
                         query: q.to_owned(),
                         hits,
+                        bookmarks,
                     });
                 }
                 #[cfg(not(test))]
@@ -519,6 +592,7 @@ impl Shell {
         }
 
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: self.search.context.clone(),
@@ -533,6 +607,7 @@ impl Shell {
         profile: ProfileId,
         query: String,
         hits: Vec<zephium_core::ports::store::HistoryHit>,
+        bookmarks: Vec<BookmarkHit>,
     ) {
         if self
             .search
@@ -566,28 +641,60 @@ impl Shell {
         // values reach privileged launcher markup.
         let mut results = pending.base_results;
         let mut seen = pending.open_urls;
+        let rank = |title: &str, url: &str| match_quality(&pending.lookup_query, title, url);
+        // A saved page is claimed before the visits, so the same address
+        // shown as both appears once, as the bookmark.
+        let mut saved = Vec::new();
+        for hit in bookmarks.into_iter().take(10) {
+            let quality = rank(&hit.title, &hit.url);
+            if quality == 0
+                || !navigation::is_allowed_str(&hit.url)
+                || !seen.insert(hit.url.clone())
+            {
+                continue;
+            }
+            saved.push((
+                quality,
+                SearchResult {
+                    kind: "bookmark".into(),
+                    title: if hit.title.is_empty() {
+                        hit.url.clone()
+                    } else {
+                        hit.title
+                    },
+                    detail: hit.url.clone(),
+                    icon: None,
+                    action: SearchAction::OpenUrl { url: hit.url },
+                },
+            ));
+        }
+        let mut visited = Vec::new();
         for hit in hits.into_iter().take(10) {
             if !navigation::is_allowed_str(&hit.url) || !seen.insert(hit.url.clone()) {
                 continue;
             }
             let title = zephium_core::item::sanitize_page_title(&hit.title);
-            results.push(SearchResult {
-                kind: if zephium_core::search::is_search_url(&hit.url) {
-                    "search_history"
-                } else {
-                    "history"
-                }
-                .into(),
-                title: if title.is_empty() {
-                    hit.url.clone()
-                } else {
-                    title
+            visited.push((
+                rank(&title, &hit.url),
+                SearchResult {
+                    kind: if zephium_core::search::is_search_url(&hit.url) {
+                        "search_history"
+                    } else {
+                        "history"
+                    }
+                    .into(),
+                    title: if title.is_empty() {
+                        hit.url.clone()
+                    } else {
+                        title
+                    },
+                    detail: hit.url.clone(),
+                    icon: self.icon_ref_for_url(self.search_surface(), profile, &hit.url),
+                    action: SearchAction::OpenUrl { url: hit.url },
                 },
-                detail: hit.url.clone(),
-                icon: self.icon_ref_for_url(self.search_surface(), profile, &hit.url),
-                action: SearchAction::OpenUrl { url: hit.url },
-            });
+            ));
         }
+        results.extend(interleave_bookmarks(saved, visited));
         // Only stored hits are asked for icons: a typed address changes with
         // every keystroke and must never reach the network as a probe.
         self.want_icons(
@@ -599,6 +706,7 @@ impl Shell {
                 .map(|result| result.detail.as_str()),
         );
         self.publish_search(SearchResults {
+            shortcut: None,
             pending: false,
             completion: None,
             context: self.search.context.clone(),
@@ -608,7 +716,12 @@ impl Shell {
     }
 }
 
-fn tab_result(id: ItemId, tab: &TabState, icon: Option<zephium_ipc::IconRef>) -> SearchResult {
+fn tab_result(
+    id: ItemId,
+    tab: &TabState,
+    icon: Option<zephium_ipc::IconRef>,
+    mini: bool,
+) -> SearchResult {
     let detail = tab
         .url
         .as_ref()
@@ -619,6 +732,12 @@ fn tab_result(id: ItemId, tab: &TabState, icon: Option<zephium_ipc::IconRef>) ->
         title: tab.title.clone(),
         detail,
         icon,
-        action: SearchAction::ActivateTab { id: id.to_string() },
+        action: match tab.url.as_ref().filter(|_| mini) {
+            // The tab stays where it is; its site opens in the mini window.
+            Some(url) => SearchAction::OpenUrl {
+                url: url.to_string(),
+            },
+            None => SearchAction::ActivateTab { id: id.to_string() },
+        },
     }
 }

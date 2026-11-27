@@ -1,4 +1,5 @@
 use super::*;
+use crate::SpaceCommand;
 
 #[test]
 fn run_commands_drive_tabs_zoom_and_engine() {
@@ -370,6 +371,38 @@ fn tab_close_command_closes_extensions_tab() {
     let _disposition = shell.operation_run_command("tab.close");
     assert_eq!(active_id(&screen), web);
     assert!(shell.items.tab(extensions).is_none());
+}
+
+#[test]
+fn home_opens_a_new_tab_until_there_is_a_home_page_then_goes_there_in_the_front_tab() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "example.com");
+    let tabs = last(&screen).tabs.len();
+
+    let _disposition = shell.operation_run_command("nav.home");
+    assert_eq!(last(&screen).tabs.len(), tabs + 1);
+    assert_ne!(active_id(&screen), first);
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.home".into(),
+        value: "home.example.org".into(),
+    });
+    let front = active_id(&screen);
+    let _disposition = shell.operation_run_command("nav.home");
+    assert_eq!(last(&screen).tabs.len(), tabs + 1);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {front} https://home.example.org/ [default]")));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.home".into(),
+        value: "".into(),
+    });
+    let _disposition = shell.operation_run_command("nav.home");
+    assert_eq!(last(&screen).tabs.len(), tabs + 2);
 }
 
 #[test]
@@ -876,7 +909,7 @@ fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "essential.example");
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     let original_url = shell.items.tab(id).unwrap().url.clone();
     let before = engine.calls().len();
     let result = shell.handle_operation(Command::SetTabEssential {
@@ -890,7 +923,7 @@ fn essential_move_preserves_the_active_native_tab_and_can_be_reversed() {
     ));
     assert_eq!(
         shell.items.get(id).unwrap().placement,
-        Placement::Favorites { profile }
+        Placement::Favorites { space }
     );
     assert_eq!(shell.items.tab(id).unwrap().url, original_url);
     assert!(shell.items.tab(id).unwrap().has_view());
@@ -932,11 +965,12 @@ fn essential_move_rejects_foreign_and_invalid_drop_targets() {
     });
     assert_eq!(denied.outcome, OperationOutcome::Rejected);
     let foreign_profile = add_inactive_named_profile(&mut shell, 900);
+    let foreign_space = shell.spaces.first_for(foreign_profile).unwrap();
     let foreign_tab = ItemId::from(902_u128);
     assert!(shell.items.insert_tab(
         foreign_tab,
         Placement::Favorites {
-            profile: foreign_profile
+            space: foreign_space
         }
     ));
     let denied = shell.handle_operation(Command::SetTabEssential {
@@ -948,7 +982,7 @@ fn essential_move_rejects_foreign_and_invalid_drop_targets() {
     assert_eq!(
         shell.items.get(foreign_tab).unwrap().placement,
         Placement::Favorites {
-            profile: foreign_profile
+            space: foreign_space
         }
     );
 }
@@ -960,7 +994,7 @@ fn essential_move_survives_session_restore() {
     shell.handle(Command::Bootstrap);
     let id = active_id(&screen);
     navigate_and_commit(&mut shell, id, "saved-essential.example");
-    let profile = shell.windows.focused().unwrap().profile;
+    let space = shell.windows.focused().unwrap().space;
     shell.handle_operation(Command::SetTabEssential {
         id,
         essential: true,
@@ -971,7 +1005,7 @@ fn essential_move_survives_session_restore() {
     restored.handle(Command::Bootstrap);
     assert_eq!(
         restored.items.get(id).unwrap().placement,
-        Placement::Favorites { profile }
+        Placement::Favorites { space }
     );
     assert_eq!(
         restored
@@ -999,6 +1033,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: String::new(),
         context: Box::new(context.clone()),
     });
@@ -1010,6 +1045,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         },
         background: false,
         replace: None,
+        new_mini: false,
     });
     assert_eq!(forged.reason, OperationReason::InvalidScope);
     shell.handle(Command::CancelSearch {
@@ -1020,6 +1056,7 @@ fn scoped_launcher_actions_reject_stale_requests_and_unoffered_actions() {
         action: SearchAction::ActivateTab { id: id.to_string() },
         background: false,
         replace: None,
+        new_mini: false,
     });
     assert_eq!(stale.reason, OperationReason::InvalidScope);
 }
@@ -1038,6 +1075,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -1055,6 +1093,7 @@ fn a_background_launcher_open_keeps_the_current_tab_and_the_search() {
             action: action.clone(),
             background: true,
             replace: None,
+            new_mini: false,
         });
         // Deferred: the new view settles once native has created it.
         assert!(matches!(
@@ -1082,6 +1121,7 @@ fn an_address_chosen_while_editing_replaces_the_page_in_front() {
         space_id: window.space.to_string(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -1108,6 +1148,7 @@ fn an_address_chosen_while_editing_replaces_the_page_in_front() {
         action,
         background: false,
         replace: Some(active.to_string()),
+        new_mini: false,
     });
     assert!(matches!(
         opened.outcome,
@@ -1166,6 +1207,72 @@ fn sidebar_shape_slides_precede_layout() {
         .rposition(|call| call.starts_with("layout@"))
         .unwrap();
     assert!(hinted < laid);
+}
+
+#[test]
+fn a_hidden_sidebar_gives_the_page_the_window_and_comes_over_it_on_request() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    navigate_and_commit(&mut shell, id, "hidden.example");
+    let window = shell.windows.focused().unwrap().id;
+    let raises = |engine: &FakeEngine| {
+        engine
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("raise@"))
+            .collect::<Vec<_>>()
+    };
+
+    // A sidebar that is shown has nothing beneath the page to bring up.
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    assert!(raises(&engine).is_empty());
+
+    shell.handle(Command::SetSidebarHidden(true));
+    let region = engine
+        .layout_regions
+        .lock()
+        .unwrap()
+        .last()
+        .copied()
+        .flatten();
+    assert_eq!(region.map(|region| region.x), Some(8.0));
+
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    shell.handle(Command::PeekSidebar {
+        peek: false,
+        slide: false,
+    });
+    // Pinning ends the native peek without waiting for the frame.
+    shell.handle(Command::PeekSidebar {
+        peek: true,
+        slide: false,
+    });
+    shell.handle(Command::SetSidebarHidden(false));
+    assert_eq!(
+        raises(&engine),
+        [
+            format!("raise@{window} false"),
+            format!("raise@{window} true"),
+            format!("raise@{window} false"),
+            format!("raise@{window} true"),
+            format!("raise@{window} false"),
+        ]
+    );
+    let region = engine
+        .layout_regions
+        .lock()
+        .unwrap()
+        .last()
+        .copied()
+        .flatten();
+    assert!(region.is_some_and(|region| region.x > 8.0));
 }
 
 #[test]
@@ -1292,7 +1399,7 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
                 item(
                     favorite,
                     None,
-                    Placement::Favorites { profile },
+                    Placement::Favorites { space },
                     page("favorite.example"),
                 ),
                 item(
@@ -1319,6 +1426,12 @@ fn keyboard_selection_walks_the_sidebar_from_favorites_through_pinned_folders() 
         })),
         ..Default::default()
     });
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.startup".into(), "continue".into());
+
     let (mut shell, _engine, screen) = setup_with(store);
     shell.handle(Command::Bootstrap);
 
@@ -1451,6 +1564,19 @@ fn find_follows_the_page_in_front_and_answers_only_for_it() {
             active: Some(1),
         }]
     );
+    engine
+        .reject_native_dispatch
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    shell.handle(Command::Find(request("needle", true)));
+    assert_eq!(
+        results.lock().unwrap().last().unwrap(),
+        &zephium_ipc::FindResultView {
+            query: "needle".into(),
+            matches: 0,
+            active: None,
+        }
+    );
+    assert!(shell.find_target.is_none());
 }
 
 #[test]
@@ -1893,4 +2019,238 @@ fn links_from_other_apps_follow_new_tabs_unless_placed_on_their_own() {
     shell.handle(Command::Activate(first));
     shell.handle(Command::OpenExternal(vec!["https://next.example/".into()]));
     assert!(follows(&screen, active_id(&screen)));
+}
+
+#[test]
+fn new_tab_destination_opens_fresh_tabs_without_redirecting_explicit_urls() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "https://start.example/".into(),
+    });
+    shell.handle(Command::Open);
+    let first = active_id(&screen);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {first} https://start.example/ [default]")));
+    navigate_and_commit(&mut shell, first, "https://start.example/");
+    shell.handle(Command::Run("tab.new".into()));
+    let second = active_id(&screen);
+    assert_ne!(first, second);
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|call| call == &format!("create {second} https://start.example/ [default]")));
+
+    let before = engine.calls().len();
+    shell.handle(Command::OpenUrl {
+        input: "https://other.example/".into(),
+        new_tab: true,
+    });
+    let explicit = active_id(&screen);
+    assert!(engine.calls()[before..]
+        .iter()
+        .all(|call| !call.contains("start.example")));
+    assert!(engine.calls()[before..]
+        .iter()
+        .any(|call| call == &format!("create {explicit} https://other.example/ [default]")));
+
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "".into(),
+    });
+    shell.handle(Command::Open);
+    assert!(shell.is_untouched_new_tab(active_id(&screen)));
+}
+
+#[test]
+fn private_new_tabs_keep_the_builtin_page_with_a_custom_destination() {
+    let (mut shell, engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    shell.handle(Command::SetAppSetting {
+        key: "tabs.new-page".into(),
+        value: "https://start.example/".into(),
+    });
+    shell.handle(Command::Run("window.newPrivate".into()));
+    assert!(shell.incognito_profile(shell.windows.focused().unwrap().profile));
+    shell.handle(Command::Open);
+    assert!(shell.is_untouched_new_tab(active_id(&screen)));
+    assert!(engine
+        .calls()
+        .iter()
+        .all(|call| !call.contains("start.example")));
+}
+
+const NEW_TAB_DESTINATION: &str = "https://start.example/";
+
+fn custom_new_tab(destination: &str, first_url: &str) -> (Shell, Arc<FakeEngine>, Screen) {
+    let store = Arc::new(FakeStore::default());
+    store
+        .settings
+        .lock()
+        .unwrap()
+        .insert("tabs.new-page".into(), destination.into());
+    let (mut shell, engine, screen) = setup_with(store);
+    shell.handle(Command::Bootstrap);
+    let id = active_id(&screen);
+    commit_url(&mut shell, id, first_url);
+    present_committed(&mut shell, id, first_url);
+    (shell, engine, screen)
+}
+
+#[test]
+fn closing_the_lone_destination_tab_is_a_no_op_even_after_reload() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let id = active_id(&screen);
+    shell.handle(Command::Reload(id));
+    commit_url(&mut shell, id, NEW_TAB_DESTINATION);
+
+    let before = engine.calls();
+    let closed = shell.handle_operation(Command::Close(id));
+
+    assert_eq!(closed.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), id);
+    assert_eq!(engine.calls(), before);
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn closing_a_destination_tab_with_another_tab_open_skips_recently_closed() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let first = active_id(&screen);
+    shell.handle(Command::Open);
+    let stand_in = active_id(&screen);
+    assert_ne!(stand_in, first);
+    commit_url(&mut shell, stand_in, NEW_TAB_DESTINATION);
+    present_committed(&mut shell, stand_in, NEW_TAB_DESTINATION);
+    assert!(shell.is_new_tab_stand_in(stand_in));
+
+    shell.handle(Command::Close(stand_in));
+
+    assert!(shell.items.tab(stand_in).is_none());
+    assert_eq!(active_id(&screen), first);
+    assert!(engine.calls().contains(&format!("close {stand_in}")));
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn a_destination_redirect_stands_in_until_a_later_commit_changes_url() {
+    let redirected = "https://www.start.example/";
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, redirected);
+    let id = active_id(&screen);
+    let before = engine.calls();
+    assert!(before.contains(&format!("create {id} {NEW_TAB_DESTINATION} [default]")));
+    assert_eq!(last(&screen).tabs.len(), 1);
+    assert_eq!(
+        shell.new_tab_destinations.get(&id).map(url::Url::as_str),
+        Some(redirected)
+    );
+
+    let closed = shell.handle_operation(Command::Close(id));
+    assert_eq!(closed.outcome, OperationOutcome::NoOp);
+    assert_eq!(active_id(&screen), id);
+    assert_eq!(engine.calls(), before);
+    assert!(shell.recently_closed.is_empty());
+
+    let elsewhere = "https://elsewhere.example/";
+    commit_url(&mut shell, id, elsewhere);
+    shell.handle(Command::Close(id));
+
+    assert_ne!(active_id(&screen), id);
+    assert!(shell.items.tab(id).is_none());
+    assert!(engine.calls().contains(&format!("close {id}")));
+    assert_eq!(shell.recently_closed.len(), 1);
+    assert_eq!(shell.recently_closed[0].url, elsewhere);
+}
+
+#[test]
+fn an_https_upgraded_destination_stands_in_until_a_later_commit() {
+    let destination = "http://start.example/";
+    let upgraded = navigation::https_upgrade(&url::Url::parse(destination).unwrap()).unwrap();
+    let (mut shell, engine, screen) = custom_new_tab(destination, upgraded.as_str());
+    let id = active_id(&screen);
+    assert!(engine
+        .calls()
+        .contains(&format!("create {id} {upgraded} [default]")));
+    assert_eq!(shell.new_tab_destinations.get(&id), Some(&upgraded));
+    assert!(shell.is_new_tab_stand_in(id));
+
+    commit_url(&mut shell, id, "https://elsewhere.example/");
+
+    assert!(!shell.new_tab_destinations.contains_key(&id));
+    assert!(!shell.is_new_tab_stand_in(id));
+}
+
+#[test]
+fn leaving_a_space_keeps_the_destination_tab_and_returning_focuses_it() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let home = shell.windows.focused().unwrap().space;
+    let stand_in = active_id(&screen);
+    shell.handle(Command::Space(Box::new(SpaceCommand::Create {
+        name: "Studio".into(),
+        look: Default::default(),
+    })));
+    let studio = shell.windows.focused().unwrap().space;
+    assert_ne!(studio, home);
+    let studio_tab = active_id(&screen);
+    commit_url(&mut shell, studio_tab, NEW_TAB_DESTINATION);
+    present_committed(&mut shell, studio_tab, NEW_TAB_DESTINATION);
+    assert_eq!(shell.regular_tabs(home), [stand_in]);
+    assert!(!engine.calls().contains(&format!("close {stand_in}")));
+
+    shell.handle(Command::Space(Box::new(SpaceCommand::Switch(home))));
+
+    assert_eq!(shell.windows.focused().unwrap().space, home);
+    assert_eq!(active_id(&screen), stand_in);
+    assert_eq!(shell.regular_tabs(studio), [studio_tab]);
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn reopening_a_tab_keeps_the_destination_tab_beside_it() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "https://closed.example/");
+    shell.handle(Command::Close(first));
+    let stand_in = active_id(&screen);
+    assert_ne!(stand_in, first);
+    commit_url(&mut shell, stand_in, NEW_TAB_DESTINATION);
+    present_committed(&mut shell, stand_in, NEW_TAB_DESTINATION);
+
+    shell.handle(Command::Run("tab.reopen".into()));
+
+    let restored = active_id(&screen);
+    assert_ne!(restored, stand_in);
+    let space = shell.windows.focused().unwrap().space;
+    let tabs = shell.regular_tabs(space);
+    assert_eq!(tabs.len(), 2);
+    assert!(tabs.contains(&stand_in) && tabs.contains(&restored));
+    assert_eq!(
+        shell
+            .items
+            .tab(restored)
+            .and_then(|tab| tab.url.as_ref())
+            .map(url::Url::as_str),
+        Some("https://closed.example/")
+    );
+    assert!(!engine.calls().contains(&format!("close {stand_in}")));
+    assert!(shell.recently_closed.is_empty());
+}
+
+#[test]
+fn a_destination_tab_that_navigated_away_can_close_after_returning() {
+    let (mut shell, engine, screen) = custom_new_tab(NEW_TAB_DESTINATION, NEW_TAB_DESTINATION);
+    let used = active_id(&screen);
+    commit_url(&mut shell, used, "https://elsewhere.example/");
+    commit_url(&mut shell, used, NEW_TAB_DESTINATION);
+
+    shell.handle(Command::Close(used));
+
+    assert_ne!(active_id(&screen), used);
+    assert!(shell.items.tab(used).is_none());
+    assert!(engine.calls().contains(&format!("close {used}")));
+    assert_eq!(shell.recently_closed.len(), 1);
+    assert_eq!(shell.recently_closed[0].url, NEW_TAB_DESTINATION);
 }

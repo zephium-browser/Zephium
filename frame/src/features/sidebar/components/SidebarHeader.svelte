@@ -9,6 +9,7 @@
   } from "@hugeicons/core-free-icons";
   import { tabs } from "$domain/tabs";
   import { blocker, siteMenuState } from "$domain/blocker";
+  import { pageSite } from "$domain/site-data";
   import { extensions } from "$domain/extensions";
   import { webext } from "$domain/webext";
   import { uiCommands as ui } from "$domain/ui-commands";
@@ -26,6 +27,7 @@
     ontoggle,
     pageControls = true,
     launcher = false,
+    search = true,
   }: {
     compact: boolean;
     ontoggle: () => void;
@@ -33,6 +35,8 @@
     pageControls?: boolean;
     /** Beside a tool panel, search stands where the shape toggle would. */
     launcher?: boolean;
+    /** Tab search in the rail's head; a tool in full has no tabs to search. */
+    search?: boolean;
   } = $props();
 
   let active = $derived(tabs.activeTab());
@@ -48,6 +52,11 @@
     const anchor = target.getBoundingClientRect();
     menuAnchor = anchor;
     const { siteProtected, canHide } = siteMenuState(blocker.status());
+    // A private window keeps nothing to clear, and only a web page has a site.
+    const canClearData =
+      tabs.profile()?.kind !== "incognito" &&
+      (active?.content ?? "web") === "web" &&
+      pageSite(active?.url) !== null;
     const listed = extensions
       .activeActions(tabs.profile()?.id ?? null, tabs.activeId())
       .map((action) => ({
@@ -61,9 +70,17 @@
       anchor.bottom,
       siteProtected,
       canHide,
+      canClearData,
       listed,
       webext.isAvailable(),
     );
+  }
+
+  // Back and Forward hold the pages behind and ahead; a held press or a right
+  // click lists them in a native menu.
+  function openHistoryMenu(forward: boolean, anchor: DOMRect) {
+    const id = tabs.activeId();
+    if (id) void commands.historyMenuPopup(id, forward, anchor.left, anchor.bottom);
   }
 
   let handledCommand = 0;
@@ -105,18 +122,18 @@
       <div style:height="8px" aria-hidden="true"></div>
     {/if}
     <ModeTabs compact />
-    <div class="flex items-center gap-0.5">
-      <!-- Its menu acts on the page and the column's shape; Work has neither. -->
-      {#if pageControls}<IconButton
-          icon={EllipsisIcon}
-          label={m.ui_sidebar_options()}
-          size={15}
-          buttonSize={26}
-          haspopup
-          onclick={openSidebarMenu}
-        />{/if}
-      <SidebarSearch small />
-    </div>
+    {#if pageControls || search}<div class="flex items-center gap-0.5">
+        <!-- Its menu acts on the page and the column's shape; Work has neither. -->
+        {#if pageControls}<IconButton
+            icon={EllipsisIcon}
+            label={m.ui_sidebar_options()}
+            size={15}
+            buttonSize={26}
+            haspopup
+            onclick={openSidebarMenu}
+          />{/if}
+        {#if search}<SidebarSearch small />{/if}
+      </div>{/if}
     <span class="mt-[6px] mb-[7px] h-px w-[22px] rounded-full bg-border" aria-hidden="true"></span>
   </header>
 {:else}
@@ -154,6 +171,7 @@
           size={16}
           disabled={active?.can_go_back !== true}
           onclick={tabs.backActive}
+          onmenu={(anchor) => openHistoryMenu(false, anchor)}
         />
         <IconButton
           icon={ArrowRight02Icon}
@@ -163,6 +181,7 @@
           size={16}
           disabled={active?.can_go_forward !== true}
           onclick={tabs.forwardActive}
+          onmenu={(anchor) => openHistoryMenu(true, anchor)}
         />
         <IconButton
           icon={Refresh01Icon}

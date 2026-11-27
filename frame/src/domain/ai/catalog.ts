@@ -95,14 +95,10 @@ export function pickerGroups(
     const seen = new Set<string>();
     const offered = entries
       .filter((entry) => {
-        if (
-          entry.model.provider !== provider ||
-          !(entry.roles.includes(role) || (role !== "decision" && entry.roles.includes("lead")))
-        )
-          return false;
-        if (seen.has(entry.id)) return false;
+        if (entry.model.provider !== provider || seen.has(entry.id)) return false;
         seen.add(entry.id);
-        return true;
+        // Native resolves known IDs from the catalog before provider listings.
+        return entry.roles.includes(role) || (role !== "decision" && entry.roles.includes("lead"));
       })
       .sort((a, b) => Number(b.recommended) - Number(a.recommended));
     if (usable(models, provider)) {

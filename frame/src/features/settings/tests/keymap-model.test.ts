@@ -27,12 +27,20 @@ describe("keymap model", () => {
       entry("tab.next", "window"),
       entry("tab.below", "window"),
       entry("space.next", "keys"),
+      entry("profile.next", "keys"),
+      entry("profile.previous", "keys"),
       entry("tool.downloads", "window"),
       entry("launcher.toggle", "global", false),
       entry("work.pane.close", "work", false),
       entry("work.dictate", "keys"),
     ]);
-    expect(sections.map((section) => section.id)).toEqual(["browser", "tabs", "spaces", "work"]);
+    expect(sections.map((section) => section.id)).toEqual([
+      "browser",
+      "tabs",
+      "spaces",
+      "profiles",
+      "work",
+    ]);
     expect(sections[0]!.entries.map((e) => e.id)).toEqual([
       "browser.settings",
       "tab.new",
@@ -45,13 +53,52 @@ describe("keymap model", () => {
     ]);
     expect(sections[2]!.entries.map((e) => e.id)).toEqual(["space.next"]);
     expect(commandTitle(sections[2]!.entries[0]!)).toBe("Next space");
-    expect(sections[3]!.entries.map((e) => e.id)).toEqual(["work.dictate"]);
-    expect(commandTitle(sections[3]!.entries[0]!)).toBe("Dictate in Work");
+    expect(sections[3]!.entries.map((e) => e.id)).toEqual(["profile.next", "profile.previous"]);
+    expect(commandTitle(sections[3]!.entries[0]!)).toBe("Next profile");
+    expect(commandTitle(sections[3]!.entries[1]!)).toBe("Previous profile");
+    expect(sections[4]!.entries.map((e) => e.id)).toEqual(["work.dictate"]);
+    expect(commandTitle(sections[4]!.entries[0]!)).toBe("Dictate in Work");
     expect(
       keymapSections(
         [entry("tab.new", "file"), entry("work.dictate", "keys")],
         (id) => id !== "work.dictate",
       ).map((section) => section.id),
     ).toEqual(["browser"]);
+  });
+  it("files the new browser keys with their commands and hides keys a platform lacks", () => {
+    const keyed = (id: string, group: KeymapEntry["group"], accelerator: string | null) => ({
+      ...entry(id, group),
+      accelerator,
+      default_accelerator: accelerator,
+    });
+    const sections = keymapSections([
+      keyed("settings.clearData", "keys", "Ctrl+Shift+Delete"),
+      keyed("nav.reload", "view", "Ctrl+R"),
+      keyed("nav.reload.alt", "keys", "F5"),
+      keyed("nav.hardReload", "view", "Ctrl+Shift+R"),
+      keyed("window.fullscreen", "keys", "F11"),
+      keyed("nav.back", "history", "Ctrl+["),
+      keyed("nav.back.alt", "keys", "Alt+Left"),
+      keyed("tab.next.alt", "keys", "Ctrl+PageDown"),
+    ]);
+    const ids = (id: string) => sections.find((s) => s.id === id)?.entries.map((e) => e.id);
+    expect(ids("browser")).toEqual(["settings.clearData"]);
+    expect(ids("view")).toEqual([
+      "nav.reload",
+      "nav.reload.alt",
+      "nav.hardReload",
+      "window.fullscreen",
+    ]);
+    expect(ids("history")).toEqual(["nav.back", "nav.back.alt"]);
+    expect(ids("tabs")).toEqual(["tab.next.alt"]);
+    expect(commandTitle(sections.find((s) => s.id === "view")!.entries[1]!)).toBe(
+      "Reload page (alternate)",
+    );
+
+    const mac = keymapSections([
+      entry("nav.reload.alt", "keys"),
+      entry("window.fullscreen", "keys"),
+    ]);
+    expect(mac).toEqual([]);
   });
 });

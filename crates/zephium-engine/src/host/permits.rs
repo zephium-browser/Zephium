@@ -82,6 +82,17 @@ impl EventPermit {
             })
     }
 
+    /// A frame inside this view's page may show `target` only while the view
+    /// is live and its profile grants that enabled extension.
+    #[cfg(target_os = "windows")]
+    pub(super) fn allows_extension_frame(&self, target: &str) -> bool {
+        self.active_token().is_some()
+            && url::Url::parse(target)
+                .ok()
+                .is_some_and(|url| navigation::extension_document_id(&url).is_some())
+            && self.allows_target(target)
+    }
+
     pub(super) fn allows_target(&self, target: &str) -> bool {
         if navigation::is_allowed_str(target) {
             return true;
@@ -210,6 +221,7 @@ pub(super) fn queue_navigation_commit(
     let admitted = with_navigation_commit(id, move |host| {
         if host.rearm_navigation_presentation(id, &queued_permit, &queued_navigation, epoch) {
             host.emit_navigation_observation(id, &queued_permit, &queued_navigation, epoch);
+            host.apply_popup_policy(id);
         }
     });
     if !admitted {
@@ -256,7 +268,7 @@ pub(super) fn queue_navigation_failure(
     navigation: &NavigationEpochTracker,
     failed: NavigationEpoch,
     restored: Option<NavigationEpoch>,
-    cancelled: bool,
+    ending: super::navigation::FailedNavigationEnd,
 ) {
     if permit.active_token().is_none() {
         return;
@@ -270,7 +282,7 @@ pub(super) fn queue_navigation_failure(
             &queued_navigation,
             failed,
             restored,
-            cancelled,
+            ending,
         );
     });
 }

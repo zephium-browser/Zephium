@@ -85,13 +85,26 @@ export function planIcs(
 
 /** A file-system-safe name for the plan's calendar file. */
 export function icsFileName(plan: PlanView): string {
-  const base = (plan.title ?? "")
+  let base = (plan.title ?? "")
     .replace(/[\\/:*?"<>|]/g, " ")
     .replace(/\p{Cc}/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^\.+/, "")
-    .slice(0, 80)
-    .trim();
-  return `${base || "plan"}.ics`;
+    .trim()
+    .replace(/[. ]+$/u, "");
+  const device = base.split(".")[0]!.trimEnd();
+  if (/^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/iu.test(device)) base = `plan ${base}`;
+  // Native admits at most 120 UTF-8 bytes, including the extension.
+  let stem = "";
+  let bytes = 0;
+  let characters = 0;
+  for (const character of base) {
+    const width = encoder.encode(character).length;
+    if (bytes + width > 116 || characters === 80) break;
+    stem += character;
+    bytes += width;
+    characters++;
+  }
+  return `${stem.trimEnd().replace(/\.+$/u, "") || "plan"}.ics`;
 }

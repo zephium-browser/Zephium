@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
-  width: vi.fn(async () => undefined),
+  width: vi.fn(async (_width: number | null, _travel: boolean, _revision: number | null) => {}),
+  hidden: vi.fn(async (_hidden: boolean) => {}),
 }));
 
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     sidebarSetWidth: native.width,
+    sidebarSetHidden: native.hidden,
     settingSet: vi.fn(async () => ({ operation_id: null, accepted: true })),
     settingGet: vi.fn(async () => null),
   });
@@ -17,6 +19,7 @@ const {
   COMPACT_WIDTH,
   MAX_EXPANDED_WIDTH,
   MIN_EXPANDED_WIDTH,
+  PANEL_GAP,
   SNAP_THRESHOLD,
   applyDragWidth,
   adoptResizeWidth,
@@ -24,17 +27,65 @@ const {
   finishSidebarResize,
   cancelSidebarResize,
   expanded,
+  effectiveWidth,
+  expandBriefly,
+  fullColumnShown,
+  isHidden,
   resolveDragWidth,
   adoptMode,
+  holdShown,
   setPanelExtent,
+  setMode,
   sidebarMode,
   toggleMode,
 } = await import("../sidebar-mode.svelte");
 
+describe("temporary full browser column", () => {
+  it("holds hidden and tool layouts until every owner releases, without changing the chosen mode", () => {
+    setMode("hidden");
+    setPanelExtent(336);
+    const first = expandBriefly({ fullColumn: true });
+    const second = expandBriefly({ fullColumn: true });
+    try {
+      expect(fullColumnShown()).toBe(true);
+      expect(sidebarMode()).toBe("hidden");
+      expect(isHidden()).toBe(false);
+      expect(effectiveWidth()).toBe(expanded());
+      first();
+      first();
+      expect(fullColumnShown()).toBe(true);
+      expect(effectiveWidth()).toBe(expanded());
+      second();
+      expect(fullColumnShown()).toBe(false);
+      expect(isHidden()).toBe(true);
+      expect(effectiveWidth()).toBe(COMPACT_WIDTH + PANEL_GAP + 336);
+    } finally {
+      first();
+      second();
+      setPanelExtent(0);
+      setMode("default");
+    }
+  });
+
+  it("keeps a mode deliberately chosen while the column was held", () => {
+    setMode("hidden");
+    const release = expandBriefly({ fullColumn: true });
+    try {
+      setMode("default");
+      release();
+      expect(sidebarMode()).toBe("default");
+      expect(isHidden()).toBe(false);
+    } finally {
+      release();
+      setMode("default");
+    }
+  });
+});
+
 describe("resolveDragWidth", () => {
-  it("snaps to the rail below the threshold", () => {
+  it("puts the column away below the threshold", () => {
     for (const value of [0, 1, COMPACT_WIDTH, SNAP_THRESHOLD - 1]) {
-      expect(resolveDragWidth(value).mode).toBe("compact");
+      expect(resolveDragWidth(value).mode).toBe("hidden");
     }
   });
 
@@ -55,9 +106,9 @@ describe("resolveDragWidth", () => {
     }
   });
 
-  it("treats a non-finite width as the rail rather than propagating it", () => {
+  it("treats a non-finite width as put away rather than propagating it", () => {
     for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      expect(resolveDragWidth(value).mode).toBe("compact");
+      expect(resolveDragWidth(value).mode).toBe("hidden");
     }
   });
 });
@@ -65,11 +116,17 @@ describe("resolveDragWidth", () => {
 describe("which width changes the page travels with", () => {
   const last = () => native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean];
 
+  const hidden = () => native.hidden.mock.calls.at(-1)?.[0];
+
   it("slides for a deliberate change of shape and follows a drag directly", () => {
+    const width = expanded();
     toggleMode();
-    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    // Hidden, the column keeps its width for when it comes over the page.
+    expect(last()).toEqual([width, true]);
+    expect(hidden()).toBe(true);
     toggleMode();
     expect(last()[1]).toBe(true);
+    expect(hidden()).toBe(false);
 
     applyDragWidth(300);
     expect(last()).toEqual([300, false]);
@@ -78,9 +135,31 @@ describe("which width changes the page travels with", () => {
 
     // Crossing the snap point is a change of shape, however it was reached.
     applyDragWidth(SNAP_THRESHOLD - 1);
-    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    expect(last()).toEqual([310, true]);
+    expect(hidden()).toBe(true);
     applyDragWidth(SNAP_THRESHOLD + 40);
-    expect(last()[1]).toBe(true);
+    expect(last()).toEqual([MIN_EXPANDED_WIDTH, false]);
+    expect(hidden()).toBe(true);
+    toggleMode();
+    expect(hidden()).toBe(false);
+  });
+
+  it("keeps a hidden column out while a rail destination holds it", () => {
+    toggleMode();
+    expect(hidden()).toBe(true);
+    holdShown(true);
+    expect(hidden()).toBe(false);
+    holdShown(false);
+    expect(hidden()).toBe(true);
+    toggleMode();
+  });
+
+  it("reads a rail chosen before hiding existed as hidden", () => {
+    // The store reports the last toggle's save first, as it would.
+    adoptMode("default");
+    adoptMode("compact");
+    expect(sidebarMode()).toBe("hidden");
+    adoptMode("default");
   });
 
   it("slides when a tool opens beside the rail and when it closes", () => {
@@ -90,7 +169,7 @@ describe("which width changes the page travels with", () => {
     expect(last()[1]).toBe(true);
   });
 
-  it("keeps the sidebar and layout fixed while a guide moves, then commits once", () => {
+  it("keeps the sidebar and layout fixed while a guide moves, then commits once, travelling", () => {
     const originalWidth = expanded();
     const originalMode = sidebarMode();
     const before = native.width.mock.calls.length;
@@ -101,7 +180,7 @@ describe("which width changes the page travels with", () => {
     expect(native.width.mock.calls.length).toBe(before);
     finishSidebarResize(315);
     expect(native.width.mock.calls.length).toBe(before + 1);
-    expect(last()).toEqual([315, false]);
+    expect(last()).toEqual([315, true]);
   });
 
   it("cancellation leaves the original shape untouched and emits no layout", () => {
@@ -121,7 +200,7 @@ describe("which width changes the page travels with", () => {
     beginSidebarResize();
     finishSidebarResize(MAX_EXPANDED_WIDTH + 200);
     expect(expanded()).toBe(MAX_EXPANDED_WIDTH);
-    expect(last()).toEqual([MAX_EXPANDED_WIDTH, false]);
+    expect(last()).toEqual([MAX_EXPANDED_WIDTH, true]);
     beginSidebarResize();
     finishSidebarResize(315);
   });
@@ -142,8 +221,8 @@ describe("which width changes the page travels with", () => {
     cancelSidebarResize();
     finishSidebarResize(300);
     expect(native.width.mock.calls.length).toBe(before + 1);
-    expect(sidebarMode()).toBe("compact");
-    expect(last()).toEqual([COMPACT_WIDTH, true]);
+    expect(sidebarMode()).toBe("hidden");
+    expect(last()[1]).toBe(true);
     toggleMode();
   });
 });
@@ -154,16 +233,14 @@ describe("the stored preference catching up with a toggle", () => {
     vi.useFakeTimers();
     native.width.mockClear();
     toggleMode();
-    expect(sidebarMode()).toBe("compact");
-    expect(native.width.mock.calls.map((call) => call.slice(0, 2))).toEqual([
-      [COMPACT_WIDTH, true],
-    ]);
+    expect(sidebarMode()).toBe("hidden");
+    expect(native.width.mock.calls.map((call) => call[1])).toEqual([true]);
 
     // The store still holds the old value, then reports the new one: neither
     // is a change of shape, so neither moves anything.
     adoptMode("default");
-    adoptMode("compact");
-    expect(sidebarMode()).toBe("compact");
+    adoptMode("hidden");
+    expect(sidebarMode()).toBe("hidden");
     expect(native.width.mock.calls).toHaveLength(1);
     vi.useRealTimers();
   });
@@ -174,7 +251,7 @@ describe("the stored preference catching up with a toggle", () => {
     toggleMode();
     const shape = sidebarMode();
     const sent = native.width.mock.calls.length;
-    adoptMode(shape === "compact" ? "default" : "compact");
+    adoptMode(shape === "hidden" ? "default" : "hidden");
     adoptMode(shape);
     expect(sidebarMode()).toBe(shape);
     expect(native.width.mock.calls).toHaveLength(sent);
@@ -186,7 +263,7 @@ describe("the stored preference catching up with a toggle", () => {
     toggleMode();
     const shape = sidebarMode();
     vi.advanceTimersByTime(2000);
-    const other = shape === "compact" ? "default" : "compact";
+    const other = shape === "hidden" ? "default" : "hidden";
     adoptMode(other);
     expect(sidebarMode()).toBe(other);
     expect((native.width.mock.calls.at(-1)?.slice(0, 2) as unknown as [number, boolean])[1]).toBe(

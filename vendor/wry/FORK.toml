@@ -42,7 +42,15 @@ name = "WebKit callback and prompt hardening"
 paths = ["src/wkwebview"]
 
 [[patch_sets]]
+name = "bounded NSString dialog inputs before Rust allocation"
+paths = ["src/wkwebview/script_dialog.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
+
+[[patch_sets]]
 name = "WebKit frame-scoped extension resource admission"
+paths = ["src/wkwebview/navigation.rs"]
+
+[[patch_sets]]
+name = "WebKit navigation responses without a native response fail closed"
 paths = ["src/wkwebview/navigation.rs"]
 
 [[patch_sets]]
@@ -94,6 +102,42 @@ paths = ["src/lib.rs", "src/webview2/mod.rs", "src/webkitgtk/mod.rs", "src/wkweb
 [[patch_sets]]
 name = "optional aggregate content-rule load counts"
 paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
+
+[[patch_sets]]
+name = "extension-independent retained-controller initialization"
+paths = ["src/lib.rs", "src/native_controller_init.rs", "src/webview2/mod.rs"]
+
+[[patch_sets]]
+name = "content-rule refusal category and refused address"
+paths = ["src/lib.rs", "src/wkwebview/navigation.rs"]
+
+[[patch_sets]]
+name = "MSRV-compatible native class bundle identity"
+paths = ["src/wkwebview/class/wry_web_view.rs"]
+
+[[patch_sets]]
+name = "macOS https-first navigation policy"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs"]
+
+[[patch_sets]]
+name = "macOS navigation source frame and context-menu download marker"
+paths = ["src/lib.rs", "src/native_bounds.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs"]
+
+[[patch_sets]]
+name = "opt-in macOS media return to inline callback"
+paths = ["src/lib.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
+
+[[patch_sets]]
+name = "retained WebKit navigation identity and policy-refused registration retirement"
+paths = ["src/wkwebview/navigation.rs"]
+
+[[patch_sets]]
+name = "committed-document WebKit script-dialog suppression"
+paths = ["src/wkwebview/script_dialog.rs", "src/wkwebview/navigation.rs", "src/wkwebview/mod.rs", "src/wkwebview/class/wry_navigation_delegate.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs", "Cargo.toml", "Cargo.lock"]
+
+[[patch_sets]]
+name = "bounded long native navigation URLs and metadata-free refusal feedback"
+paths = ["src/lib.rs", "src/native_bounds.rs", "src/webview2/mod.rs", "src/wkwebview/mod.rs", "src/wkwebview/navigation.rs", "src/wkwebview/class/wry_navigation_delegate.rs", "src/wkwebview/class/wry_web_view_ui_delegate.rs"]
 
 [[patch_sets]]
 name = "opt-in held main-frame navigation policy"

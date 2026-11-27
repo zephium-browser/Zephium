@@ -14,7 +14,9 @@ use crate::ids::ItemId;
 use super::{ExtensionBrowserSurfaceGeneration, ExtensionRuntimeInstance};
 
 /// One snapshot carries at most one action per installed extension.
-pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 8;
+pub const MAX_EXTENSION_INSTALLS_PER_PROFILE: usize = 64;
+/// Each running extension on Windows keeps a hidden WebView2 page of its own.
+pub const WINDOWS_RUNNING_EXTENSIONS: usize = 8;
 /// Stable settlement reason used to retry Windows admission after a slot opens.
 pub const WINDOWS_EXTENSION_CAPACITY_MESSAGE: &str =
     "This Windows build supports eight running extensions.";
@@ -287,8 +289,31 @@ impl ExtensionPopupAnchor {
     }
 }
 
+/// A validated browser-owned row to append to the native action menu.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ExtensionButtonMenuRow {
+    Item {
+        id: String,
+        label: String,
+        enabled: bool,
+    },
+    Separator,
+}
+
+impl ExtensionButtonMenuRow {
+    pub fn after_extension_items(
+        rows: &[Self],
+        needs_separator: bool,
+    ) -> impl Iterator<Item = &Self> {
+        (needs_separator && !rows.is_empty())
+            .then_some(&Self::Separator)
+            .into_iter()
+            .chain(rows)
+    }
+}
+
 /// One browser-chrome-authored request to invoke a native action.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExtensionActionRequest {
     id: ExtensionActionRequestId,
     runtime: ExtensionRuntimeInstance,
@@ -296,6 +321,7 @@ pub struct ExtensionActionRequest {
     surface_generation: ExtensionBrowserSurfaceGeneration,
     action_revision: ExtensionActionRevision,
     anchor: ExtensionPopupAnchor,
+    menu: Option<Arc<[ExtensionButtonMenuRow]>>,
 }
 
 impl ExtensionActionRequest {
@@ -314,30 +340,46 @@ impl ExtensionActionRequest {
             surface_generation,
             action_revision,
             anchor,
+            menu: None,
         }
     }
 
-    pub const fn id(self) -> ExtensionActionRequestId {
+    /// Shows the action's context menu, followed by the browser's rows.
+    #[must_use]
+    pub fn for_menu(mut self, rows: Arc<[ExtensionButtonMenuRow]>) -> Self {
+        self.menu = Some(rows);
+        self
+    }
+
+    pub fn menu_rows(&self) -> Option<&Arc<[ExtensionButtonMenuRow]>> {
+        self.menu.as_ref()
+    }
+
+    pub const fn is_menu(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    pub const fn id(&self) -> ExtensionActionRequestId {
         self.id
     }
 
-    pub const fn runtime(self) -> ExtensionRuntimeInstance {
+    pub const fn runtime(&self) -> ExtensionRuntimeInstance {
         self.runtime
     }
 
-    pub const fn tab(self) -> ItemId {
+    pub const fn tab(&self) -> ItemId {
         self.tab
     }
 
-    pub const fn surface_generation(self) -> ExtensionBrowserSurfaceGeneration {
+    pub const fn surface_generation(&self) -> ExtensionBrowserSurfaceGeneration {
         self.surface_generation
     }
 
-    pub const fn action_revision(self) -> ExtensionActionRevision {
+    pub const fn action_revision(&self) -> ExtensionActionRevision {
         self.action_revision
     }
 
-    pub const fn anchor(self) -> ExtensionPopupAnchor {
+    pub const fn anchor(&self) -> ExtensionPopupAnchor {
         self.anchor
     }
 }

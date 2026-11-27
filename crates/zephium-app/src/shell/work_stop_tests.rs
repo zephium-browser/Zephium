@@ -56,13 +56,45 @@ impl WorkPublicSearchProvider for NoSearch {
 
 #[tokio::test]
 async fn stop_settles_a_noncooperating_model_within_one_second_without_refunding_it() {
-    stopped_call(false).await;
+    stopped_call(false, false, false).await;
 }
 #[tokio::test]
 async fn stop_interrupts_provider_retry_backoff_without_retrying() {
-    stopped_call(true).await;
+    stopped_call(true, false, false).await;
 }
-async fn stopped_call(refusal: bool) {
+#[tokio::test]
+async fn stopping_a_fully_local_run_keeps_unknown_tokens_without_inventing_a_charge() {
+    stopped_call(false, true, false).await;
+}
+struct FreeSearch;
+impl WorkPublicSearchProvider for FreeSearch {
+    fn grant(&self) -> Option<(WorkSearchProvider, String)> {
+        Some((WorkSearchProvider::Browser, "duckduckgo".into()))
+    }
+    fn search<'a>(
+        &'a self,
+        _: &'a WorkPublicSearchScope,
+        _: &'a [zephium_core::work::context::WorkContextBody],
+        _: WorkExecutionLimits,
+    ) -> WorkPublicSearchFuture<'a> {
+        panic!("no search requested")
+    }
+}
+#[tokio::test]
+async fn stopping_a_local_call_in_a_mixed_run_preserves_paid_accounting() {
+    stopped_call(false, true, true).await;
+}
+#[test]
+fn caller_cannot_claim_an_execution_has_no_usage_charge() {
+    let mut request = command(WorkId::generate(), WorkRevision::INITIAL);
+    assert!(request.clone().into_request().is_ok());
+    let WorkRuntimeIntent::BeginAgent { grant, .. } = &mut request.intent else {
+        panic!()
+    };
+    grant.no_usage_charge = true;
+    assert!(matches!(request.into_request(), Err(WorkError::Invalid)));
+}
+async fn stopped_call(refusal: bool, local: bool, paid_helper: bool) {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
     let (mut shell, queue, handle, profile) = fixture(store);
     let create = handle
@@ -78,10 +110,23 @@ async fn stopped_call(refusal: bool) {
         dropped: AtomicBool::new(false),
         refusal,
     });
-    let lead = model(client.clone());
+    let mut lead = model(client.clone());
+    if local {
+        lead.entry.model.provider = WorkModelProvider::Compatible;
+        lead.entry.price = Some(WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        });
+    }
+    let page = if paid_helper {
+        model(client.clone())
+    } else {
+        lead.clone()
+    };
     let models = WorkLeadModels {
         lead: lead.clone(),
-        page: lead.clone(),
+        page,
         light: lead,
     };
     let service = WorkLeadService::new(handle.clone());
@@ -90,7 +135,7 @@ async fn stopped_call(refusal: bool) {
         command(work, WorkRevision::INITIAL),
         None,
         models,
-        &NoSearch,
+        if local { &FreeSearch } else { &NoSearch },
         |_, _| async { panic!("No browser work was requested") },
         |_| {},
     );
@@ -195,7 +240,23 @@ async fn stopped_call(refusal: bool) {
     // Logical cancellation preserves its admitted reservation until the
     // original owner/journal can establish what actually happened. A late
     // provider return cannot silently refund or replace this unknown usage.
-    assert!(execution.attempts[0].usage.is_none());
+    assert_eq!(
+        execution.agent_grant().unwrap().no_usage_charge,
+        local && !paid_helper
+    );
+    if local && !paid_helper {
+        let usage = execution.attempts[0]
+            .usage
+            .expect("local unknown usage retains a zero-price reservation");
+        assert_eq!(usage.cost_micro_usd, 0);
+        assert!(usage.model_tokens > 0);
+        assert_eq!(
+            usage.accounting,
+            WorkUsageAccounting::ConservativeReservation
+        );
+    } else {
+        assert!(execution.attempts[0].usage.is_none());
+    }
     assert!(execution.spec.limits.model_tokens > 0);
     assert!(execution.spec.limits.cost_micro_usd > 0);
     if !refusal {

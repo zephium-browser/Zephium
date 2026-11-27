@@ -1,32 +1,50 @@
 //! Authoritative browser-shell state machine and effect coordination.
 
 mod archive;
+mod audio;
+mod blocked;
 mod blocker;
 mod blocker_sites;
 mod blocker_statistics;
 mod bookmarks;
 mod bootstrap;
+mod browsing_data;
+mod certificates;
 mod effects;
 mod engine_events;
 mod extension_actions;
 mod extension_browser_requests;
 mod extension_browser_surface;
+mod extension_data;
 mod extension_store;
 mod favicon_probe;
 mod favicons;
 mod fullscreen;
 mod history;
+mod history_list;
+mod https_first;
+mod media;
+mod mini;
+mod network;
+pub use mini::{
+    admitted_mini_size, MAX_MINI_WINDOWS, MINI_PAGE_INSET, MINI_TOOLBAR_HEIGHT,
+    MINI_WINDOW_MIN_SIZE, MINI_WINDOW_SIZE,
+};
 mod operations;
 mod page_permissions;
 mod page_requests;
+mod page_source;
 mod persistence;
 mod presentation;
 mod private;
 mod profile_deletion;
 mod profile_roster;
 mod projections;
+mod recent_tabs;
 mod scope;
 mod search;
+mod site_permissions;
+mod tab_previews;
 mod tabs;
 mod time;
 mod user_content_status;
@@ -40,9 +58,9 @@ mod zoom;
 use effects::{mutation_result, operation_result, NativeWork};
 use extension_actions::ExtensionActionState;
 use extension_browser_surface::ExtensionBrowserSurfaceState;
-use favicons::{origin_of, FaviconState};
 #[cfg(test)]
-use favicons::{FAVICON_POLL_DELAYS, ICON_CACHE_CAPACITY};
+use favicons::ICON_CACHE_CAPACITY;
+use favicons::{origin_of, FaviconState};
 use page_permissions::PagePermissionPromptState;
 #[cfg(test)]
 use presentation::PendingPresentation;
@@ -58,11 +76,11 @@ use view_lifecycle::{CrashState, PendingDiscardProbe, ResidencyState, LIVE_VIEW_
 #[cfg(test)]
 use view_lifecycle::{LIVE_VIEW_PRESSURE_LIMIT, MAX_CONCURRENT_DISCARD_PROBES};
 use window_layout::GrabbedDivider;
-use zoom::ZoomState;
+use zoom::{ZoomOrigin, ZoomState, ZoomStep};
 
 use persistence::PersistenceState;
 #[cfg(test)]
-use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_INTERVAL};
+use persistence::{PERSIST_DEBOUNCE, PERSIST_MAX_AGE, URL_CHECKPOINT_DELAY};
 
 #[cfg(test)]
 use crate::actor::{spawn, Handle, TryPushError};
@@ -70,14 +88,14 @@ use crate::actor::{CallbackHandle, CommandQueue};
 #[cfg(feature = "agentic-browser")]
 use crate::api::AgentLifecycle;
 use crate::api::PagePermissionPromptDecision;
+#[cfg(test)]
+use crate::api::PresentationChrome;
 use crate::api::TabAction;
 use crate::api::{
-    ChromePresentation, ChromePresentationDispatch, Command, ContentPolicyStatusQueryOutcome,
-    EmitFn, SharedBlocker, SharedChrome, SharedEngine, SharedStore, ShellTerminalFailure,
-    ShellTerminalFailureCallback, ShutdownOutcome,
+    ChromePresentation, ChromePresentationCallback, ChromePresentationDispatch, Command,
+    ContentPolicyStatusQueryOutcome, EmitFn, SharedBlocker, SharedChrome, SharedEngine,
+    SharedStore, ShellTerminalFailure, ShellTerminalFailureCallback, ShutdownOutcome,
 };
-#[cfg(test)]
-use crate::api::{ChromePresentationCallback, PresentationChrome};
 #[cfg(test)]
 use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
 use crate::store_reads::{StoreReadQueue, StoreReadResult};
@@ -141,10 +159,30 @@ use zephium_ipc::{
 pub(crate) const MAX_VISIBLE_PANES: usize = 8;
 pub(super) const MAX_OPERATION_ID_BYTES: usize = 64;
 pub(super) const MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-#[cfg(not(test))]
+
+/// A person opening, switching, closing or navigating tabs, or a page
+/// changing address or loading: what keeps a warm spare worth holding.
+fn browsing_activity(cmd: &Command) -> bool {
+    match cmd {
+        Command::Open
+        | Command::Activate(_)
+        | Command::Close(_)
+        | Command::Navigate { .. }
+        | Command::Reload(_)
+        | Command::Engine(EngineEvent::UrlChanged { .. })
+        | Command::Engine(EngineEvent::LoadingChanged { .. }) => true,
+        Command::Operation { command, .. } => browsing_activity(command),
+        _ => false,
+    }
+}
 // FIFO wait, storage-reader quiescence, snapshot construction, durability,
 // native teardown, and thread joins consume
-// this one caller-owned deadline.
+// this one caller-owned deadline. Under CPU load a WebView2 browser took up
+// to 13 s to exit, so Windows gets room for its 20 s process wait.
+#[cfg(all(not(test), target_os = "windows"))]
+pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24);
+#[cfg(all(not(test), not(target_os = "windows")))]
 pub(super) const END_TO_END_SHUTDOWN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 // A clean shutdown joins the shell, timer and storage-reader threads, which
@@ -217,23 +255,61 @@ pub struct Shell {
     items: Items,
     recently_closed: Vec<zephium_core::session::PersistedClosedTab>,
     windows: Windows,
+    recent_tabs: recent_tabs::RecentTabs,
+    tab_previews: tab_previews::TabPreviews,
+    mini: mini::MiniState,
     pending_size: Size,
     favicons: FaviconState,
     history: history::HistoryState,
     bookmarks: bookmarks::BookmarkState,
+    extension_data: extension_data::ExtensionDataState,
+    history_lists: history_list::HistoryListState,
+    sources: page_source::SourceState,
     search: SearchState,
     tab_preferences: tabs::TabPreferences,
+    new_tab_destinations: std::collections::HashMap<ItemId, url::Url>,
+    proxy: network::ProxyPreference,
     presentation: PresentationState,
     zoom: ZoomState,
+    /// Tabs gone quiet whose speaker is still held.
+    audio_quiet: std::collections::HashSet<ItemId>,
+    /// What each watched tab's media is doing, for the sidebar's player.
+    media: zephium_core::media::MediaPlayers,
     divider: Option<GrabbedDivider>,
     private: Option<private::PrivateSession>,
+    private_projected: (bool, Option<u32>),
+    /// The Recently Closed entries the menus were last told of.
+    closed_projected: Vec<(ProfileId, zephium_core::ids::ClosedSessionId)>,
     roster: profile_roster::RosterState,
     space_memory: spaces::SpaceMemory,
-    /// Sites allowed to open a kind of application link without asking,
-    /// for this run only.
-    external_apps_allowed: std::collections::HashSet<(ProfileId, String, String)>,
+    /// Kinds of application link each profile's sites may open without
+    /// asking, as (site, scheme). Saved profiles read theirs from the store;
+    /// a private profile keeps them only until the session ends.
+    app_link_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<(zephium_core::permissions::PageOrigin, String)>,
+    >,
+    /// Sites each saved profile lets open new tabs without a click, as read
+    /// from the store; a profile is absent until its list has been read.
+    popup_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeSet<zephium_core::permissions::PageOrigin>,
+    >,
+    /// Whether each site may save files, per profile: true to allow, false to
+    /// block. Saved profiles read theirs from the store; a private profile
+    /// keeps what the person answers only until the session ends.
+    download_sites: std::collections::HashMap<
+        ProfileId,
+        std::collections::BTreeMap<zephium_core::permissions::PageOrigin, bool>,
+    >,
+    /// Local https origins whose refused certificate the person continued
+    /// past, for this run only; their pages never look secure.
+    continued_certificates:
+        std::collections::HashSet<(ProfileId, zephium_core::http_auth::AuthOrigin)>,
+    https_first: https_first::HttpsFirst,
     residency: ResidencyState,
     last_visits: std::collections::HashMap<ItemId, (String, std::time::Instant)>,
+    pending_visit_titles: std::collections::HashSet<ItemId>,
     time: time::TimeState,
     window_visible: bool,
     window_focused: bool,
@@ -248,10 +324,14 @@ pub struct Shell {
     browser_return_ready: bool,
     /// Set while the window lays out for a return that a queued command is about to change.
     browser_return_hidden: bool,
+    /// One of the browser's own dialogs is open over the window.
+    chrome_modal: bool,
     browser_return: Option<browser_pages::PendingBrowserReturn>,
     work_pane: Option<work_pane::WorkPane>,
     work_pane_generation: u32,
     runtime_restart_required: bool,
+    /// Profiles whose browser engine only a restart can trust again.
+    restart_profiles: std::collections::HashSet<ProfileId>,
     /// The saved session could not be restored this launch and was set aside.
     session_set_aside: bool,
     user_content_status: user_content_status::UserContentStatus,
@@ -285,6 +365,7 @@ pub struct Shell {
     store: SharedStore,
     store_reads: Option<StoreReadQueue>,
     notes: Option<zephium_core::ports::notes::SharedNotes>,
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     chrome: SharedChrome,
     emit: EmitFn,
     #[cfg(test)]
@@ -292,6 +373,7 @@ pub struct Shell {
 }
 
 pub(super) struct ShellPorts {
+    profile_cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
     engine: SharedEngine,
     store: SharedStore,
     blocker: SharedBlocker,
@@ -312,6 +394,7 @@ impl ShellPorts {
         emit: EmitFn,
     ) -> Self {
         Self {
+            profile_cleanup: None,
             engine,
             store,
             blocker,
@@ -321,6 +404,14 @@ impl ShellPorts {
             chrome,
             emit,
         }
+    }
+
+    pub(super) fn with_profile_cleanup(
+        mut self,
+        cleanup: Option<Arc<dyn crate::profile_cleanup::ProfileCleanup>>,
+    ) -> Self {
+        self.profile_cleanup = cleanup;
+        self
     }
 
     #[cfg(feature = "agentic-browser")]
@@ -426,6 +517,7 @@ impl Shell {
         #[cfg(test)] auto_settle_content_rules: bool,
     ) -> Self {
         let ShellPorts {
+            profile_cleanup,
             engine,
             store,
             blocker,
@@ -441,12 +533,21 @@ impl Shell {
             items: Items::default(),
             recently_closed: Vec::new(),
             windows: Windows::default(),
+            mini: mini::MiniState::default(),
             pending_size: Size::default(),
             favicons: FaviconState::default(),
             history: history::HistoryState::default(),
             bookmarks: bookmarks::BookmarkState::default(),
+            extension_data: Default::default(),
+            history_lists: history_list::HistoryListState::default(),
+            sources: page_source::SourceState::default(),
             time: time::TimeState::load(&store),
             search: SearchState {
+                shortcuts: store
+                    .app_setting("search.shortcuts")
+                    .as_deref()
+                    .and_then(zephium_core::search::ShortcutRegistry::from_setting)
+                    .unwrap_or_default(),
                 custom_url: store.app_setting("search.custom-url").unwrap_or_default(),
                 engine: store
                     .app_setting("search.engine")
@@ -459,15 +560,26 @@ impl Shell {
                 ..SearchState::default()
             },
             tab_preferences: tabs::TabPreferences::load(&*store),
+            new_tab_destinations: Default::default(),
+            proxy: network::ProxyPreference::load(&*store),
             presentation: PresentationState::default(),
-            zoom: ZoomState::default(),
+            zoom: ZoomState::load(&*store),
+            audio_quiet: std::collections::HashSet::new(),
+            media: zephium_core::media::MediaPlayers::default(),
             divider: None,
             private: None,
+            private_projected: (false, None),
+            closed_projected: Vec::new(),
             roster: profile_roster::RosterState::default(),
             space_memory: spaces::SpaceMemory::default(),
-            external_apps_allowed: std::collections::HashSet::new(),
+            app_link_sites: std::collections::HashMap::new(),
+            popup_sites: std::collections::HashMap::new(),
+            download_sites: std::collections::HashMap::new(),
+            continued_certificates: std::collections::HashSet::new(),
+            https_first: https_first::HttpsFirst::default(),
             residency: ResidencyState::load(&*store),
             last_visits: std::collections::HashMap::new(),
+            pending_visit_titles: std::collections::HashSet::new(),
             window_visible: true,
             window_focused: false,
             content_fullscreen: std::cell::Cell::new(None),
@@ -478,10 +590,12 @@ impl Shell {
             browser_after_return: None,
             browser_return_ready: false,
             browser_return_hidden: false,
+            chrome_modal: false,
             browser_return: None,
             work_pane: None,
             work_pane_generation: 0,
             runtime_restart_required: false,
+            restart_profiles: std::collections::HashSet::new(),
             session_set_aside: false,
             user_content_status: user_content_status::UserContentStatus::default(),
             crash: CrashState::default(),
@@ -493,6 +607,8 @@ impl Shell {
             bootstrap_started: None,
             persistence: PersistenceState::default(),
             shutdown_result: None,
+            recent_tabs: Default::default(),
+            tab_previews: Default::default(),
             self_queue: None,
             profile_deletion: ProfileDeletionCoordinator::default(),
             degraded_storage_profiles: std::collections::HashSet::new(),
@@ -522,6 +638,7 @@ impl Shell {
             store,
             store_reads: store_reads.into(),
             notes: None,
+            profile_cleanup,
             chrome,
             emit,
             #[cfg(test)]
@@ -534,6 +651,12 @@ impl Shell {
     }
 
     pub(super) fn attach_queue(&mut self, queue: CommandQueue) {
+        let waker = queue.clone();
+        self.blocker
+            .service
+            .set_change_waker(std::sync::Arc::new(move || {
+                let _ = waker.try_push(Command::BlockerCatalogChanged);
+            }));
         self.attach_queue_for_terminal_cleanup(queue);
         self.schedule_blocker_catalog_activation_poll();
     }
@@ -562,7 +685,28 @@ impl Shell {
             }
             return;
         }
+        if browsing_activity(&cmd) {
+            self.note_browsing_activity();
+        }
         match cmd {
+            Command::BeginTabSwitcher {
+                session,
+                reverse,
+                keyboard,
+            } => self.begin_tab_switcher(session, reverse, keyboard),
+            Command::TabSwitcher { session, action } => self.tab_switcher_action(session, action),
+            Command::RevealTabSwitcher { session } => self.reveal_tab_switcher(session),
+            Command::CaptureTabPreview => self.capture_tab_preview(),
+            Command::TabPreviewReady { request, bytes } => self.tab_preview_ready(request, bytes),
+            Command::ReadTabPreview {
+                window,
+                tab,
+                revision,
+                done,
+            } => {
+                let bytes = self.read_tab_preview(window, tab, revision);
+                let _ = done.send(bytes);
+            }
             Command::WorkDocument(submission) => self.work_document(submission),
             Command::WorkEnvironmentChanged(change) => {
                 if self.windows.focused().is_some_and(|window| {
@@ -691,6 +835,25 @@ impl Shell {
                     }
                     return;
                 }
+                if let Command::SetSitePermission {
+                    origin,
+                    kind,
+                    decision,
+                    scheme,
+                } = &command
+                {
+                    if let Some(mut completion) = self.begin_site_permission_change(
+                        operation_id.clone(),
+                        origin.clone(),
+                        *kind,
+                        *decision,
+                        scheme.clone(),
+                    ) {
+                        completion.operation_id = operation_id;
+                        (self.emit)(Projection::OperationProcessed(completion));
+                    }
+                    return;
+                }
                 if let Command::ChangeBlockerSite { context, action } = &command {
                     if let Some(mut completion) =
                         self.begin_blocker_site_mutation(operation_id.clone(), context, action)
@@ -717,11 +880,16 @@ impl Shell {
             Command::SetWebExtensions {
                 profile,
                 extensions,
-            } => self.set_web_extensions(profile, extensions),
+                failures,
+                retry,
+            } => self.set_prepared_web_extensions(profile, extensions, failures, retry),
             Command::OpenWebExtensionOptions {
                 profile,
                 extension_id,
             } => {
+                #[cfg(target_os = "windows")]
+                self.open_web_extension_options(profile, extension_id);
+                #[cfg(not(target_os = "windows"))]
                 let _ = self
                     .engine
                     .open_web_extension_options(profile, extension_id);
@@ -802,8 +970,28 @@ impl Shell {
             Command::Reload(id) => {
                 let _ = self.operation_reload(id);
             }
-            Command::AnswerPageRequest { id, decision } => {
-                let _ = self.operation_answer_page_request(id, decision);
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => {
+                let _ = self.operation_answer_page_request(id, request, decision);
+            }
+            Command::AnswerHttpAuth {
+                id,
+                request,
+                credentials,
+            } => {
+                let _ = self.operation_answer_http_auth(id, request, credentials);
+            }
+            Command::ContinuePastCertificate(id) => {
+                let _ = self.operation_continue_past_certificate(id);
+            }
+            Command::ContinuePastBlock { id, url } => {
+                let _ = self.operation_continue_past_block(id, &url);
+            }
+            Command::LeaveBlockedPage(id) => {
+                let _ = self.operation_leave_blocked_page(id);
             }
             Command::GoBack(id) => {
                 let _ = self.operation_history(id, false);
@@ -811,6 +999,11 @@ impl Shell {
             Command::GoForward(id) => {
                 let _ = self.operation_history(id, true);
             }
+            Command::GoToHistoryEntry { id, offset, url } => {
+                let _ = self.operation_go_to_history_entry(id, offset, url);
+            }
+            Command::HistoryList { id, done } => self.history_list(id, done),
+            Command::PageSource { id, done } => self.page_source(id, done),
             Command::SplitWith { other, axis } => {
                 let _ = self.operation_split(other, axis);
             }
@@ -829,6 +1022,7 @@ impl Shell {
             Command::SetWindowSize(size) => match self.windows.focused_mut() {
                 Some(win) => {
                     win.size = size;
+                    self.refresh_sidebar_peek();
                     // macOS resizes natively via autoresizing masks; Windows
                     // and Linux have no equivalent, the shell must relayout.
                     let _ = self.relayout();
@@ -844,6 +1038,12 @@ impl Shell {
             Command::StopMediaCapture { item, navigation } => {
                 let _ = self.operation_stop_media_capture(item, navigation);
             }
+            Command::SetTabMuted { id, muted } => {
+                let _ = self.operation_set_tab_muted(id, muted);
+            }
+            Command::MediaPlayer { id, action } => {
+                let _ = self.operation_media_player(id, action);
+            }
             Command::SetWindowVisible(visible) => {
                 if self.window_visible != visible {
                     self.window_visible = visible;
@@ -851,6 +1051,9 @@ impl Shell {
                     // use when the window minimized. The ordinary idle grace
                     // still applies after every content view becomes hidden.
                     if !visible {
+                        if self.windows.focused().is_some_and(|win| win.sidebar_peek) {
+                            self.peek_sidebar(false, false);
+                        }
                         // OS pointer capture cannot remain authoritative while
                         // its window is hidden/minimized.
                         self.drop_divider();
@@ -873,6 +1076,7 @@ impl Shell {
                 if let Some(win) = self.windows.focused_mut() {
                     win.metrics.sidebar_width = zephium_core::layout::clamp_sidebar_width(width);
                 }
+                self.refresh_sidebar_peek();
                 if animate {
                     if let Some(win) = self.windows.focused() {
                         let _ = self.engine.hint_stage_motion(win.id, StageMotion::Slide);
@@ -880,9 +1084,49 @@ impl Shell {
                 }
                 let _ = self.relayout_with(animate);
             }
+            Command::SetSidebarHidden(hidden) => {
+                let Some(win) = self.windows.focused_mut() else {
+                    return;
+                };
+                if win.metrics.sidebar_hidden == hidden {
+                    return;
+                }
+                win.metrics.sidebar_hidden = hidden;
+                let id = win.id;
+                // A visibility change ends the peek even if the old chrome
+                // document never delivers its delayed lowering.
+                self.peek_sidebar(false, false);
+                let _ = self.engine.hint_stage_motion(id, StageMotion::Slide);
+                let _ = self.relayout_with(true);
+            }
+            Command::PeekSidebar { peek, slide } => {
+                self.peek_sidebar(peek, slide);
+            }
+            Command::SetPagePermissionCardHost(available) => {
+                self.set_page_permission_card_host(available)
+            }
+            Command::SetChromeModal(open) => {
+                if self.chrome_modal != open {
+                    self.chrome_modal = open;
+                    let _ = self.relayout();
+                }
+            }
             Command::SidebarResizeGuide(width) => {
                 if let Some(win) = self.windows.focused() {
                     let zone = width.filter(|width| width.is_finite()).map(|width| {
+                        // A hidden sidebar is resized from the card's edge.
+                        if win.metrics.sidebar_hidden {
+                            let mut metrics = win.metrics;
+                            metrics.sidebar_width =
+                                zephium_core::layout::clamp_sidebar_width(width);
+                            let card = layout::hidden_card(win.size, metrics);
+                            return Rect::new(
+                                (card.x + card.width - 2.0).max(card.x),
+                                card.y,
+                                2.0,
+                                card.height,
+                            );
+                        }
                         let padding = win.metrics.padding;
                         let x = (padding + zephium_core::layout::clamp_sidebar_width(width) - 2.0)
                             .min((win.size.width - padding - 2.0).max(padding));
@@ -934,19 +1178,37 @@ impl Shell {
                 call,
                 done,
             } => self.history_call(expected_profile, *call, done),
+            Command::BrowsingDataCall {
+                expected_profile,
+                call,
+                done,
+            } => self.browsing_data_call(expected_profile, *call, done),
             Command::BookmarkCall {
                 expected_profile,
                 call,
                 done,
             } => self.bookmark_call(expected_profile, *call, done),
-            Command::Import { work, done } => self.import_into_focused(*work, done),
-            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment.0),
+            Command::ImportDestination { done } => done.finish(self.import_destination()),
+            Command::Import {
+                destination,
+                work,
+                done,
+            } => self.import_into_profile(destination, *work, done),
+            Command::Export { kind, done } => self.export_from_focused(kind, done),
+            Command::AttachFaviconProber(attachment) => self.attach_favicon_prober(attachment),
+            Command::AttachAppProxy(attachment) => self.proxy.attach(attachment.0),
             Command::ProbeFavicons { profile, origins } => self.probe_favicons(profile, origins),
             Command::FaviconProbed {
                 profile,
                 origin,
                 rgba,
             } => self.favicon_probed(profile, origin, rgba),
+            Command::FaviconFetched {
+                ticket,
+                rgba,
+                source,
+                failed,
+            } => self.favicon_fetched(ticket, rgba, source, failed),
             Command::AttachNotes(attachment) => {
                 self.notes.get_or_insert(attachment.0);
             }
@@ -1088,6 +1350,29 @@ impl Shell {
             // This privileged mutation must carry a desktop operation id.
             Command::InvokeExtensionAction { .. } => {}
             Command::RespondToPagePermissionPrompt { .. } => {}
+            Command::SetSitePermission { .. } => {}
+            Command::SitePermissions { origin, reply } => {
+                self.query_site_permissions(origin, reply)
+            }
+            Command::SitePermissionCatalogLoaded {
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                outcome,
+            } => self.site_permission_catalog_loaded(
+                operation_id,
+                profile,
+                origin,
+                kind,
+                decision,
+                *outcome,
+            ),
+            Command::SitePermissionSettled {
+                operation_id,
+                applied,
+            } => self.site_permission_settled(operation_id, applied),
             Command::PagePermissionCatalogLoaded {
                 profile,
                 item,
@@ -1107,6 +1392,7 @@ impl Shell {
             } => self.on_page_permission_timeout(profile, item, request),
             Command::Search(query) => {
                 self.search.context = None;
+                self.search.mini = false;
                 self.search(&query);
             }
             Command::SearchSupplementaryFinished { context, query } => {
@@ -1117,21 +1403,37 @@ impl Shell {
                 query,
                 results,
             } => self.search_additional(*context, query, results),
-            Command::SearchScoped { query, context } => self.search_scoped(&query, *context),
+            Command::SearchScoped {
+                query,
+                context,
+                mini,
+            } => self.search_scoped(&query, *context, mini),
             Command::CancelSearch { session_id } => self.cancel_scoped_search(&session_id),
+            Command::PanelLoaded => {
+                self.forget_delivered_icons(zephium_ipc::IconSurface::Panel);
+                self.project_tab_switcher();
+            }
             Command::RunSearchAction {
                 context,
                 action,
                 background,
                 replace,
+                new_mini,
             } => {
-                let _ = self.operation_run_search_action(*context, action, background, replace);
+                let _ = self
+                    .operation_run_search_action(*context, action, background, replace, new_mini);
             }
             Command::OpenUrl { input, new_tab } => {
                 let _ = self.operation_open_url(input, new_tab);
             }
             Command::OpenExternal(urls) => self.open_external(urls),
+            Command::MiniAttached { window, size } => self.mini_attached(window, size),
+            Command::MiniResized { window, size } => self.mini_resized(window, size),
+            Command::Mini { window, action } => {
+                let _ = self.mini_action(window, action);
+            }
             Command::Find(request) => self.find_in_page(request),
+            Command::ShowStoreButton { tab, button } => self.show_store_button(tab, button),
             Command::SetAppSetting { key, value } => {
                 let _ = self.operation_set_app_setting(key, value);
             }
@@ -1220,12 +1522,16 @@ impl Shell {
                 self.consume_blocker_store_result(profile);
                 self.consume_blocker_site_result(profile);
             }
+            Command::BlockerStartupDeadline { profile, token } => {
+                self.on_blocker_startup_deadline(profile, token)
+            }
             Command::BlockerPreferenceRetry { profile, token } => {
                 self.on_blocker_preference_reconciliation_retry(profile, token)
             }
             Command::BlockerCatalogPoll { operation, attempt } => {
                 self.on_blocker_catalog_poll(operation, attempt)
             }
+            Command::BlockerCatalogChanged => self.maintain_blocker_catalog(),
             Command::ProfileDeletionRetry {
                 profile,
                 generation,
@@ -1249,6 +1555,7 @@ impl Shell {
                     }
                 }
                 self.maintain_blocker_statistics();
+                self.flush_visit_titles();
                 self.flush_time(None);
                 self.maintain_blocker_catalog();
                 self.drain_blocker_inbox();
@@ -1261,11 +1568,12 @@ impl Shell {
                         "extensions: maintenance could not reconcile browser metadata"
                     );
                 }
-                let extension_actions = self.maintain_extension_actions();
+                let extension_actions = self.retry_extension_actions();
                 if extension_actions.rejected {
                     crate::diagnostic!("extensions: maintenance could not refresh toolbar actions");
                 }
                 self.archive_idle_tabs();
+                self.release_idle_spare();
                 if self.maintain_views() {
                     self.project_items();
                 }
@@ -1277,6 +1585,11 @@ impl Shell {
                 call,
                 done,
             } => self.time_call(expected_profile, *call, done),
+            Command::ZoomCall {
+                expected_profile,
+                call,
+                done,
+            } => self.zoom_call(expected_profile, *call, done),
             Command::TimeReportRead {
                 profile,
                 report,
@@ -1286,6 +1599,8 @@ impl Shell {
             Command::SetSystemAwake(awake) => self.set_system_awake(awake),
             Command::SetMemoryPressure(pressure) => self.on_memory_pressure(pressure),
             Command::FocusWake => self.focus_wake(),
+            Command::AudioWake => self.audio_wake(),
+            Command::VisitTitlesWake => self.flush_visit_titles(),
             // Accepted only through `Command::Operation`.
             Command::Focus(_) => {}
         }
@@ -1602,6 +1917,14 @@ impl Shell {
     }
 
     fn shutdown_until(&mut self, deadline: std::time::Instant, ack: SyncSender<ShutdownOutcome>) {
+        for window in self.windows.iter_mut() {
+            window.sidebar_peek = false;
+        }
+        // Reserve the last quarter of the remaining budget for native teardown.
+        let now = std::time::Instant::now();
+        let storage_deadline = deadline - deadline.saturating_duration_since(now) / 4;
+        let mut terminal_clean = now < deadline;
+        self.flush_visit_titles();
         #[cfg(feature = "work-runtime")]
         crate::work_commands::shutdown();
         #[cfg(feature = "work-execution")]
@@ -1629,22 +1952,15 @@ impl Shell {
         if let Some(work) = &mut self.work {
             work.begin_shutdown();
         }
-        if std::time::Instant::now() >= deadline {
-            self.retryable_shutdown_failure(ack);
-            return;
-        }
-
         self.cancel_pending_page_permission_for_shutdown();
 
-        let mut terminal_clean = true;
         if let Some(reads) = &self.store_reads {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                reads.quiesce_until(deadline)
+                reads.quiesce_until(storage_deadline)
             })) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.retryable_shutdown_failure(ack);
-                    return;
+                    terminal_clean = false;
                 }
                 Err(_) => {
                     crate::diagnostic!("shutdown: storage-reader quiescence panicked");
@@ -1664,8 +1980,7 @@ impl Shell {
         })) {
             Ok(true) => {}
             Ok(false) => {
-                self.retryable_shutdown_failure(ack);
-                return;
+                terminal_clean = false;
             }
             Err(_) => {
                 crate::diagnostic!("shutdown: focus admission preflight panicked");
@@ -1677,16 +1992,11 @@ impl Shell {
             terminal_clean = false;
         }
 
-        // Preserve retryability only while every earlier boundary is still
-        // known-good.
+        // A failed durability barrier is terminal, but cannot skip native teardown.
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.store.flush_until(deadline)
+            self.store.flush_until(storage_deadline)
         })) {
             Ok(true) => {}
-            Ok(false) if terminal_clean => {
-                self.retryable_shutdown_failure(ack);
-                return;
-            }
             Ok(false) => {
                 crate::diagnostic!("shutdown: storage durability preflight was not proven");
                 terminal_clean = false;
@@ -1698,7 +2008,7 @@ impl Shell {
         }
 
         #[cfg(feature = "agentic-browser")]
-        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(deadline);
+        let agent_lifecycle_clean = self.shutdown_agent_lifecycle_until(storage_deadline);
         #[cfg(not(feature = "agentic-browser"))]
         let agent_lifecycle_clean = true;
         // Fold every result already published before Store's terminal
@@ -1706,7 +2016,7 @@ impl Shell {
         // follow-up reconciliation is then ordered ahead of Store shutdown.
         // A projection or adapter panic is terminal, but cannot skip the
         // independent Store/native/blocker barriers below.
-        let pre_store_coordination_clean = if std::time::Instant::now() >= deadline {
+        let pre_store_coordination_clean = if std::time::Instant::now() >= storage_deadline {
             crate::diagnostic!("shutdown: pre-Store blocker result folding deadline passed");
             false
         } else if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1722,9 +2032,9 @@ impl Shell {
         if !pre_store_coordination_clean {
             crate::diagnostic!("shutdown: pre-Store blocker result folding panicked");
         }
-        terminal_clean &= self.flush_blocker_statistics_until(deadline);
+        terminal_clean &= self.flush_blocker_statistics_until(storage_deadline);
         let storage_clean = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.store.shutdown_until(deadline)
+            self.store.shutdown_until(storage_deadline)
         })) {
             Ok(StoreShutdownOutcome::Clean) => true,
             Ok(StoreShutdownOutcome::RetryableFailure) => {
@@ -1751,7 +2061,9 @@ impl Shell {
                 self.discard_blocker_inbox_for_shutdown();
                 self.finish_pending_blocker_operations_for_shutdown();
                 self.fail_pending_history_calls();
+                self.fail_pending_history_lists();
                 self.fail_pending_bookmark_calls();
+                self.fail_pending_extension_data();
             }))
             .is_ok();
         if !post_store_coordination_clean {
@@ -1784,6 +2096,8 @@ impl Shell {
         } else {
             ShutdownOutcome::Unclean
         };
+        self.recent_tabs = Default::default();
+        self.tab_previews = Default::default();
         self.shutdown_result = Some(outcome);
         let _ = ack.send(outcome);
     }
@@ -1966,52 +2280,6 @@ impl Shell {
         }
     }
 
-    fn retryable_shutdown_failure(&mut self, ack: SyncSender<ShutdownOutcome>) {
-        let recovered = self
-            .self_queue
-            .as_ref()
-            .map(CommandQueue::reopen_after_failed_shutdown)
-            .unwrap_or_default();
-        // These callbacks were truthfully rejected after the barrier, but the
-        // browser is about to resume. Fold their bounded latest state into the
-        // actor before acknowledging failure or accepting newly dispatched
-        // work.
-        for command in recovered {
-            self.handle(command);
-        }
-        let now = std::time::Instant::now();
-        if let Some(queue) = &self.self_queue {
-            // A timer wake removes its entry before trying to enter the actor.
-            // If it raced the shutdown barrier it was truthfully rejected as
-            // sealed, so explicitly restore every still-live exact reveal
-            // obligation when the retryable barrier reopens. Both maps remain
-            // bounded to one entry per logical item.
-            for (id, pending) in &self.presentation.pending_presentations {
-                queue.schedule_presentation(*id, pending.navigation, now, pending.hard_deadline);
-            }
-        }
-        if let Some(reads) = &self.store_reads {
-            reads.resume();
-        }
-        // A failed terminal storage admission may have invalidated pending
-        // presentation reads. Restart only currently visible leaves (at most
-        // the split ceiling), never all restored tabs.
-        let visible = self
-            .pane_tree()
-            .map(|tree| tree.tabs())
-            .or_else(|| {
-                self.windows
-                    .focused()
-                    .and_then(|window| window.active)
-                    .map(|id| vec![id])
-            })
-            .unwrap_or_default();
-        for id in visible {
-            self.maybe_discover_favicon(id);
-        }
-        let _ = ack.send(ShutdownOutcome::RetryableFailure);
-    }
-
     fn clear_pending_store_reads(&mut self) {
         self.clear_pending_favicon_probe_lookups();
         self.search.pending = None;
@@ -2026,15 +2294,16 @@ impl Shell {
                 profile,
                 query,
                 hits,
-            } => self.on_history_read(generation, profile, query, hits),
+                bookmarks,
+            } => self.on_history_read(generation, profile, query, hits, bookmarks),
             StoreReadResult::Favicon {
                 generation,
                 id,
                 profile,
                 origin,
-                rgba,
-                stale,
-            } => self.on_favicon_read(generation, id, profile, origin, rgba, stale),
+                icon,
+                page,
+            } => self.on_favicon_read(generation, id, profile, origin, icon, page),
             StoreReadResult::FaviconBatch {
                 generation,
                 profile,
@@ -2064,6 +2333,13 @@ impl Shell {
                 reply,
             } => self.on_bookmarks_read(token, profile, reply),
             StoreReadResult::Imported { token, added } => self.on_import_read(token, added),
+            StoreReadResult::Exported { token, text } => self.on_export_read(token, text),
+            StoreReadResult::ExtensionData { token, reply } => {
+                self.on_extension_data_read(token, reply)
+            }
+            StoreReadResult::ExtensionDataChanged { profile, change } => {
+                self.on_extension_data_changed(profile, *change)
+            }
         }
     }
 }

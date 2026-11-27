@@ -1,6 +1,9 @@
 use super::*;
 mod activity_writes;
 mod chats;
+mod composers;
+mod startup_recovery;
+mod zoom;
 use rusqlite::{params, Connection};
 use zephium_core::blocker::{BlockerConfig, BlockerConfigRevision, ProfileBlockerConfig};
 use zephium_core::ids::{ItemId, PagePermissionGrantId, SpaceId, UserscriptId};
@@ -67,6 +70,48 @@ fn test_store_with_sender(tx: SyncSender<Cmd>) -> SqliteStore {
         }),
         shutdown_clean: AtomicBool::new(false),
     }
+}
+
+#[test]
+fn non_session_history_admission_keeps_the_eight_kib_queue_bound() {
+    let (send, receive) = mpsc::sync_channel(8);
+    let store = test_store_with_sender(send);
+    let profile = ProfileId::from(1);
+    let prefix = "https://example.test/";
+    let at_limit = format!("{prefix}{}", "x".repeat(hub::MAX_URL_BYTES - prefix.len()));
+    let over_limit = format!("{at_limit}x");
+    assert_eq!(at_limit.len(), 8192);
+    assert!(navigation::is_allowed_str(&over_limit));
+    assert!(over_limit.len() < navigation::MAX_URL_BYTES);
+
+    let expanded = format!("{prefix}{}", "é".repeat(2000));
+    assert!(expanded.len() < hub::MAX_URL_BYTES);
+    assert!(url::Url::parse(&expanded).unwrap().as_str().len() > hub::MAX_URL_BYTES);
+    assert!(navigation::is_allowed_str(&expanded));
+    store.record_visit(profile, expanded.clone(), "expanded visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(!store.record_search(profile, "query".into(), expanded.clone()));
+    assert!(!store.amend_visit_title(profile, expanded, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, over_limit.clone(), "oversized visit".into());
+    assert!(store.pending_visits.lock().unwrap().is_empty());
+    assert!(receive.try_recv().is_err());
+    assert!(!store.record_search(profile, "query".into(), over_limit.clone()));
+    assert!(!store.amend_visit_title(profile, over_limit, "title".into()));
+    assert!(receive.try_recv().is_err());
+
+    store.record_visit(profile, at_limit.clone(), "bounded visit".into());
+    assert_eq!(store.pending_visits.lock().unwrap().len(), 1);
+    assert!(matches!(receive.try_recv(), Ok(Cmd::VisitWake)));
+    assert!(store.record_search(profile, "query".into(), at_limit.clone()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::RecordSearch(owner, _, url)) if owner == profile && url == at_limit)
+    );
+    assert!(store.amend_visit_title(profile, at_limit.clone(), "title".into()));
+    assert!(
+        matches!(receive.try_recv(), Ok(Cmd::AmendVisitTitle(owner, url, _)) if owner == profile && url == at_limit)
+    );
 }
 
 #[cfg(feature = "work-execution")]
@@ -1042,6 +1087,7 @@ fn recently_closed_tabs_roundtrip_in_the_authoritative_bounded_snapshot() {
         zoom: 1.25,
         session_id: Some(zephium_core::ids::ClosedSessionId::from(42)),
         closed_at_ms: Some(1_700_000_000_123),
+        position: None,
     });
     store.save_session(session.clone());
     assert_eq!(loaded(&store), session);
@@ -1511,7 +1557,12 @@ fn first_visit_lands_even_inside_the_save_debounce() {
     // save is still pending (debounced) when the visit arrives
     store.save_session(sample());
     store.record_visit(profile, "https://news.ycombinator.com/".into(), "HN".into());
-    let hits = store.search_history(profile, "news", 10);
+    let (reply, received) = mpsc::channel();
+    store
+        .tx
+        .send(Cmd::SearchHistory(profile, "news".into(), 10, reply))
+        .unwrap();
+    let hits = received.recv_timeout(REPLY_TIMEOUT).unwrap();
     assert_eq!(hits.len(), 1, "visit must not race the registry flush");
 }
 
@@ -1713,16 +1764,161 @@ fn favicons_roundtrip_with_age() {
     assert_eq!(raster, bytes);
     assert!(age < 5);
 
-    hub.save_favicon(profile, "https://example.com/path", None, &rgba());
+    for refused in [
+        "https://example.com:443",
+        "https://example.com/path?q=1",
+        "https://example.com/path#top",
+        "ftp://example.com",
+    ] {
+        hub.save_favicon(profile, refused, None, &rgba());
+        assert!(hub.favicon_bytes(profile, refused).is_none(), "{refused}");
+    }
     hub.save_favicon(profile, "https://invalid.example", None, &[1, 2, 3]);
-    assert_eq!(hub.favicon_bytes(profile, "https://example.com/path"), None);
-    assert_eq!(hub.favicon_bytes(profile, "https://invalid.example"), None);
+    assert!(hub
+        .favicon_bytes(profile, "https://invalid.example")
+        .is_none());
 
     assert_eq!(hub.favicon_bytes(ProfileId::from(99), origin), None);
     assert_eq!(
         hub.favicon_raster_with_age(ProfileId::from(99), origin),
         None
     );
+}
+
+#[test]
+fn a_page_keeps_its_own_icon_beside_the_origin_row() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let origin = "https://example.com";
+    let page = "https://example.com/sheets/d/1";
+    let (site, sheet) = (rgba(), vec![9; zephium_core::icon::RGBA32_BYTES]);
+
+    hub.save_favicon(profile, origin, None, &site);
+    assert!(hub.favicon_bytes(profile, page).is_none());
+    hub.save_favicon(profile, page, None, &sheet);
+    assert_eq!(hub.favicon_bytes(profile, page).unwrap().1, sheet);
+    assert_eq!(hub.favicon_bytes(profile, origin).unwrap().1, site);
+    let (raster, age) = hub.favicon_raster_with_age(profile, page).unwrap();
+    assert_eq!(raster, sheet);
+    assert!(age < 5 && hub.favicon_age(profile, page).unwrap() < 5);
+    assert_eq!(
+        (hub.favicon_rows(profile), hub.page_favicon_rows(profile)),
+        (1, 1)
+    );
+
+    hub.save_favicon(profile, page, None, &site);
+    assert_eq!(hub.favicon_bytes(profile, page).unwrap().1, site);
+    assert_eq!(hub.page_favicon_rows(profile), 1);
+
+    hub.forget_page_favicon(profile, page);
+    assert!(hub.favicon_bytes(profile, page).is_none());
+    assert_eq!(hub.favicon_bytes(profile, origin).unwrap().1, site);
+    hub.forget_page_favicon(profile, origin);
+    assert_eq!(hub.favicon_bytes(profile, origin).unwrap().1, site);
+}
+
+#[test]
+fn only_canonical_page_addresses_are_stored_as_page_icons() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let long = format!("https://example.com/{}", "a".repeat(2048));
+    for refused in [
+        "https://example.com/a?x=1",
+        "https://example.com/a#x",
+        "https://user@example.com/a",
+        "https://EXAMPLE.com/a",
+        "https://example.com:443/a",
+        "file:///a",
+        long.as_str(),
+    ] {
+        hub.save_favicon(profile, refused, None, &rgba());
+        assert!(hub.favicon_bytes(profile, refused).is_none(), "{refused}");
+    }
+    hub.save_favicon(profile, "https://example.com/a", None, &[1, 2, 3]);
+    assert_eq!(hub.page_favicon_rows(profile), 0);
+}
+
+#[test]
+fn page_icons_are_capped_and_the_oldest_go_without_touching_origin_rows() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.save_favicon(profile, "https://kept.example", None, &rgba());
+    for index in 0..520 {
+        hub.save_favicon(
+            profile,
+            &format!("https://example.com/page/{index}"),
+            None,
+            &rgba(),
+        );
+    }
+    assert_eq!(hub.page_favicon_rows(profile), 512);
+    assert_eq!(hub.favicon_rows(profile), 1);
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/page/0")
+        .is_none());
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/page/7")
+        .is_none());
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/page/8")
+        .is_some());
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/page/519")
+        .is_some());
+}
+
+#[test]
+fn clearing_history_forgets_page_icons_but_not_origin_icons() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let seed = |hub: &mut Hub| {
+        hub.save_favicon(profile, "https://example.com", None, &rgba());
+        hub.save_favicon(profile, "https://example.com/old", None, &rgba());
+        hub.backdate_page_favicons(profile, 7 * 24 * 3600);
+        hub.save_favicon(profile, "https://example.com/recent", None, &rgba());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    seed(&mut hub);
+    hub.clear_history(profile, Some(now - 3600));
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/old")
+        .is_some());
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/recent")
+        .is_none());
+
+    hub.clear_history(profile, None);
+    assert_eq!(hub.page_favicon_rows(profile), 0);
+    assert!(hub.favicon_bytes(profile, "https://example.com").is_some());
+}
+
+#[test]
+fn forgetting_a_page_from_history_forgets_its_icon_whatever_the_query() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    hub.record_visit(profile, "https://example.com/a?id=1#top", "A");
+    hub.save_favicon(profile, "https://example.com/a", None, &rgba());
+    hub.save_favicon(profile, "https://example.com/b", None, &rgba());
+
+    assert_eq!(
+        hub.forget_history_urls(profile, &["https://example.com/a?id=1#top".to_owned()]),
+        1
+    );
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/a")
+        .is_none());
+    assert!(hub
+        .favicon_bytes(profile, "https://example.com/b")
+        .is_some());
 }
 
 #[test]
@@ -1802,6 +1998,52 @@ fn favicon_raster_batch_is_single_request_bounded_and_exact() {
 }
 
 #[test]
+fn page_icons_travel_the_actor_like_origin_icons() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let (origin, page) = ("https://example.com", "https://example.com/sheets/");
+    let (site, sheet) = (rgba(), vec![9; zephium_core::icon::RGBA32_BYTES]);
+    let store = SqliteStore::spawn(hub).unwrap();
+
+    store.save_favicon(profile, origin.into(), None, site.clone());
+    store.save_favicon(profile, page.into(), None, sheet.clone());
+    store.save_favicon(
+        profile,
+        "https://example.com/a?q=1".into(),
+        None,
+        sheet.clone(),
+    );
+
+    assert!(store.flush());
+
+    assert_eq!(
+        store.favicon_rasters(profile, &[origin.to_owned(), page.to_owned()]),
+        vec![
+            (origin.to_owned(), site.clone()),
+            (page.to_owned(), sheet.clone())
+        ]
+    );
+    assert!(store
+        .favicon_rasters(
+            profile,
+            &[origin.to_owned(), "https://example.com/a?q=1".to_owned()]
+        )
+        .is_empty());
+    let (raster, age) = store.favicon_raster_with_age(profile, page).unwrap();
+    assert!(raster == sheet && age < 5);
+    assert!(store
+        .favicon_age(profile, "https://example.com/other")
+        .is_none());
+
+    store.forget_page_favicon(profile, page.into());
+    store.forget_page_favicon(profile, origin.into());
+    assert!(store.flush());
+    assert!(store.favicon_bytes(profile, page).is_none());
+    assert!(store.favicon_bytes(profile, origin).is_some());
+}
+
+#[test]
 fn permission_setting_readback_distinguishes_missing_value_and_unavailable() {
     use zephium_core::ports::store::AppSettingReadback as Readback;
     let store = SqliteStore::in_memory().unwrap();
@@ -1842,6 +2084,147 @@ fn app_settings_roundtrip() {
         store.app_setting(&"k".repeat(MAX_SETTING_KEY_BYTES + 1)),
         None
     );
+}
+
+#[test]
+fn main_window_frame_roundtrip_and_settings_migration() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let dir = tempfile::tempdir().unwrap();
+    // The record uses the existing settings schema, including databases from
+    // before the latest metadata migration; no parallel file is introduced.
+    let mut meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    migrations::apply(&mut meta, &migrations::META[..migrations::META.len() - 1]).unwrap();
+    meta.execute("INSERT INTO settings VALUES ('appearance', 'dark')", [])
+        .unwrap();
+    let frame = WindowFrame {
+        bounds: WindowRect {
+            x: -1400.0,
+            y: 40.0,
+            width: 1000.0,
+            height: 700.0,
+        },
+        monitor: WindowMonitor {
+            name: Some("External".into()),
+            bounds: WindowRect {
+                x: -1920.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+        },
+        maximized: true,
+    };
+    meta.execute(
+        "INSERT INTO settings VALUES ('window.main.frame.v1', ?1)",
+        [serde_json::to_string(&frame).unwrap()],
+    )
+    .unwrap();
+    drop(meta);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.main_window_frame(),
+        Some(frame.clone()),
+        "metadata migration preserves the frame setting"
+    );
+    let frame = WindowFrame {
+        maximized: false,
+        ..frame
+    };
+    assert!(store.save_main_window_frame(&frame));
+    assert!(store.flush());
+    assert_eq!(store.main_window_frame(), Some(frame.clone()));
+    drop(store);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(store.main_window_frame(), Some(frame));
+    assert_eq!(store.app_setting("appearance").as_deref(), Some("dark"));
+}
+
+#[test]
+fn main_window_frame_fractional_monitor_identity_survives_store_roundtrip() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    // Windows supplies physical geometry divided by the display scale. At
+    // 175%, these logical bounds cannot be represented by terminating decimals.
+    let monitor = WindowMonitor {
+        name: Some("External at 175%".into()),
+        bounds: WindowRect {
+            x: -1920.0 / 1.75,
+            y: 120.0 / 1.75,
+            width: 1920.0 / 1.75,
+            height: 1080.0 / 1.75,
+        },
+    };
+    let mut frame = WindowFrame {
+        bounds: WindowRect {
+            x: -1000.0,
+            y: 100.0,
+            width: 900.0,
+            height: 500.0,
+        },
+        monitor: monitor.clone(),
+        maximized: false,
+    };
+    for width in [
+        800, 900, 1024, 1080, 1200, 1280, 1366, 1440, 1600, 1920, 2560, 3440, 3840,
+    ] {
+        frame.monitor.bounds.width = f64::from(width) / 1.75;
+        assert!(store.save_main_window_frame(&frame));
+        assert!(store.flush());
+        assert_eq!(store.main_window_frame().unwrap().monitor, frame.monitor);
+    }
+    drop(store);
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(store.main_window_frame().unwrap().monitor, frame.monitor);
+}
+
+#[test]
+fn main_window_frame_rejects_malformed_records_and_non_finite_writes() {
+    use crate::{WindowFrame, WindowMonitor, WindowRect};
+    let store = SqliteStore::in_memory().unwrap();
+    assert_eq!(
+        store.main_window_frame(),
+        None,
+        "first run has no invented frame"
+    );
+    for value in [
+        "{",
+        "{}",
+        r#"{"bounds":{"x":null}}"#,
+        r#"{"bounds":{"x":1e999}}"#,
+    ] {
+        assert!(store.set_app_setting("window.main.frame.v1".into(), value.into()));
+        assert!(store.flush());
+        assert_eq!(store.main_window_frame(), None);
+    }
+    let bounds = WindowRect {
+        x: 0.0,
+        y: 0.0,
+        width: 1200.0,
+        height: 800.0,
+    };
+    let mut frame = WindowFrame {
+        bounds,
+        monitor: WindowMonitor { name: None, bounds },
+        maximized: false,
+    };
+    for bad in [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        0.0,
+        10_000_001.0,
+    ] {
+        frame.bounds.width = bad;
+        assert!(
+            !store.save_main_window_frame(&frame),
+            "accepted width {bad}"
+        );
+    }
+    frame.bounds = bounds;
+    frame.monitor.name = Some("x".repeat(1025));
+    assert!(!store.save_main_window_frame(&frame));
 }
 
 #[test]
@@ -2156,11 +2539,86 @@ fn valid_multi_profile_compatibility_state_loads_in_canonical_container_order() 
     let state = hub.load().unwrap().unwrap();
     assert_eq!(
         state.items.iter().map(|item| item.id).collect::<Vec<_>>(),
-        vec![first_favorite, second_favorite, first_today, second_today]
+        vec![first_favorite, first_today, second_favorite, second_today]
     );
     assert_eq!(state.active_space, Some(second_space));
     assert_eq!(state.active_item, Some(second_today));
     assert_eq!(state.splits, Some(Pane::Leaf(second_today)));
+}
+
+#[test]
+fn compatibility_essentials_reach_every_space_of_their_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let (first_space, second_space) = (SpaceId::from(11), SpaceId::from(12));
+
+    let mut meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    migrations::apply(&mut meta, migrations::META).unwrap();
+    meta.execute(
+        "INSERT INTO profiles(id, name, kind, position) VALUES (?1, 'Personal', 'default', 0)",
+        [profile.to_string()],
+    )
+    .unwrap();
+    meta.execute(
+        "INSERT INTO state(id, last_profile) VALUES (1, ?1)",
+        [profile.to_string()],
+    )
+    .unwrap();
+    drop(meta);
+
+    let mut conn = Connection::open(dir.path().join(format!("profile-{profile}.sqlite"))).unwrap();
+    migrations::apply(&mut conn, migrations::PROFILE).unwrap();
+    for (position, space) in [first_space, second_space].into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO spaces(id, name, position) VALUES (?1, 'Space', ?2)",
+            params![space.to_string(), position as i64],
+        )
+        .unwrap();
+    }
+    for (position, id) in [31_u128, 32].into_iter().enumerate() {
+        conn.execute(
+            "INSERT INTO items(
+                 id, parent_id, space_id, section, position, kind, name, url, title, zoom
+             ) VALUES (?1, NULL, NULL, 'favorites', ?2, 'tab', NULL, ?3, 'Favorite', 1)",
+            params![
+                ItemId::from(id).to_string(),
+                position as i64,
+                format!("https://favorite-{position}.example/")
+            ],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO focus(id, active_space, active_item, splits) VALUES (1, NULL, NULL, NULL)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = hub.load().unwrap().unwrap();
+
+    let urls_in = |space: SpaceId| -> Vec<String> {
+        state
+            .items
+            .iter()
+            .filter(|item| item.placement == Placement::Favorites { space })
+            .filter_map(|item| match &item.kind {
+                PersistedKind::Tab { url, .. } => Some(url.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let expected = ["https://favorite-0.example/", "https://favorite-1.example/"];
+    assert_eq!(urls_in(first_space), expected);
+    assert_eq!(urls_in(second_space), expected);
+    let kept: Vec<ItemId> = state
+        .items
+        .iter()
+        .filter(|item| item.placement == Placement::Favorites { space: first_space })
+        .map(|item| item.id)
+        .collect();
+    assert_eq!(kept, [ItemId::from(31), ItemId::from(32)]);
 }
 
 #[test]
@@ -3036,9 +3494,20 @@ fn windows_style_local_deletion_keeps_authorization_until_restart_confirms_absen
     );
     drop(hub);
 
-    // A new process generation occurs after filesystem recovery. Only
-    // this observation is allowed to retire the Windows tombstone.
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    // Filesystem absence alone cannot prove external credential/cache erasure.
+    // Restart exposes the exact obligation for the composed cleanup owner.
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let pending = hub.pending_profile_deletions().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].native_erasure_verified);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    // The caller reaches finalization only after external release succeeded.
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()
@@ -3128,7 +3597,15 @@ fn restart_reopens_local_cleanup_if_a_completed_artifact_is_observed() {
         );
     }
 
-    let hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    let mut hub = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    assert_eq!(hub.pending_profile_deletions().unwrap().len(), 1);
+    assert_eq!(
+        hub.completed_profile_deletion_tombstones().unwrap(),
+        vec![profile]
+    );
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
     assert!(hub.pending_profile_deletions().unwrap().is_empty());
     assert!(hub
         .completed_profile_deletion_tombstones()
@@ -3876,6 +4353,7 @@ fn downloads_are_profile_scoped_and_recover_interrupted_native_ownership() {
         identity: None,
         writer: None,
         writer_released: false,
+        insecure: false,
     };
     assert!(matches!(
         hub.download_call(profile, DownloadStoreCall::Save(Box::new(record.clone()))),
@@ -3948,6 +4426,7 @@ fn clearing_downloads_forgets_finished_records_and_keeps_live_ones() {
         identity: None,
         writer: None,
         writer_released: false,
+        insecure: false,
     };
     let live = record(DownloadState::Pending);
     let finished = record(DownloadState::Cancelled);
@@ -3969,6 +4448,58 @@ fn clearing_downloads_forgets_finished_records_and_keeps_live_ones() {
         hub.download_call(profile, DownloadStoreCall::Get(live.id)),
         DownloadStoreReply::Record(Some(_))
     ));
+}
+
+#[test]
+fn clearing_downloads_since_keeps_older_and_live_records() {
+    use zephium_core::downloads::*;
+    use zephium_core::ids::DownloadId;
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let session = DownloadId::generate();
+    let record = |created_at, state| DownloadRecord {
+        id: DownloadId::generate(),
+        session,
+        revision: 1,
+        created_at,
+        filename: "fixture.txt".into(),
+        source: "https://example.com".into(),
+        source_is_context: false,
+        state,
+        received: 0,
+        total: None,
+        error: None,
+        destination: None,
+        staging: None,
+        staging_identity: None,
+        identity: None,
+        writer: None,
+        writer_released: false,
+        insecure: false,
+    };
+    let old = record(100, DownloadState::Cancelled);
+    let recent = record(200, DownloadState::Cancelled);
+    let live = record(300, DownloadState::Pending);
+    for value in [&old, &recent, &live] {
+        assert!(matches!(
+            hub.download_call(profile, DownloadStoreCall::Save(Box::new(value.clone()))),
+            DownloadStoreReply::Saved
+        ));
+    }
+    assert!(matches!(
+        hub.download_call(profile, DownloadStoreCall::ClearSince(200)),
+        DownloadStoreReply::Saved
+    ));
+    let held = |hub: &mut Hub, id| {
+        matches!(
+            hub.download_call(profile, DownloadStoreCall::Get(id)),
+            DownloadStoreReply::Record(Some(_))
+        )
+    };
+    assert!(held(&mut hub, old.id));
+    assert!(!held(&mut hub, recent.id));
+    assert!(held(&mut hub, live.id));
 }
 
 #[test]
@@ -4224,4 +4755,394 @@ fn imported_history_keeps_its_times_and_is_not_added_twice() {
         vec![1_700_000_500, 1_700_000_000]
     );
     assert_eq!(hub.import_history(ProfileId::from(99), &visits), None);
+}
+
+#[test]
+fn checked_history_pages_distinguish_queue_refusal_timeout_and_storage_errors_from_eof() {
+    let profile = ProfileId::from(1);
+    let (tx, _rx) = mpsc::sync_channel(0);
+    let store = test_store_with_sender(tx);
+    assert_eq!(
+        store.history_page_checked(profile, "", None, None, 10),
+        Err(HistoryPageError::NotAdmitted)
+    );
+    let (tx, _rx) = mpsc::sync_channel(1);
+    let store = test_store_with_sender(tx);
+    assert_eq!(
+        store.history_page_checked(profile, "", None, None, 10),
+        Err(HistoryPageError::TimedOut)
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    hub.save(&sample()).unwrap();
+    assert_eq!(
+        hub.history_page_checked(profile, "", None, None, 10),
+        Ok(Vec::new())
+    );
+    Connection::open(dir.path().join(format!("profile-{profile}.sqlite")))
+        .unwrap()
+        .execute_batch("DROP TABLE history")
+        .unwrap();
+    assert_eq!(
+        hub.history_page_checked(profile, "", None, None, 10),
+        Err(HistoryPageError::Failed)
+    );
+}
+
+#[test]
+fn checked_history_pages_skip_disallowed_rows_without_shortening_export_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = ProfileId::from(1);
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    hub.save(&sample()).unwrap();
+    let visits: Vec<_> = (1..=405)
+        .map(|id| zephium_core::ports::store::ImportedVisit {
+            url: format!("https://visit{id}.example/"),
+            title: "Kept".into(),
+            visited_at: id,
+        })
+        .collect();
+    assert_eq!(hub.import_history(profile, &visits), Some(405));
+    let conn = Connection::open(dir.path().join(format!("profile-{profile}.sqlite"))).unwrap();
+    conn.execute(
+        "UPDATE history SET url = 'javascript:invalid' WHERE id BETWEEN 200 AND 203 OR id = 405",
+        [],
+    )
+    .unwrap();
+    for query in ["", "kept"] {
+        let mut cursor = None;
+        let mut exported = Vec::new();
+        for expected_size in [200, 200, 0] {
+            let page = hub
+                .history_page_checked(profile, query, None, cursor, 200)
+                .unwrap();
+            assert_eq!(page.len(), expected_size, "{query}");
+            assert!(page.iter().all(|row| navigation::is_allowed_str(&row.url)));
+            cursor = page.last().map(|row| row.id).or(cursor);
+            exported.extend(page.into_iter().map(|row| row.id));
+        }
+        let expected: Vec<_> = (1..=404)
+            .rev()
+            .filter(|id| !(200..=203).contains(id))
+            .collect();
+        assert_eq!(exported, expected, "{query}");
+    }
+}
+
+#[test]
+fn an_idle_store_expires_its_backup_without_a_command_or_session_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = SessionState::default();
+    Hub::open(dir.path().to_path_buf())
+        .unwrap()
+        .save(&state)
+        .unwrap();
+    let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    meta.execute(
+        "INSERT INTO session_snapshot_backup VALUES (1, ?1, 1, ?2)",
+        params![
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                - 30 * 24 * 3600
+                + 2,
+            serde_json::to_vec(&state).unwrap()
+        ],
+    )
+    .unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining: i64 = meta
+            .query_row("SELECT count(*) FROM session_snapshot_backup", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        if remaining == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "idle expiry requires no mailbox command"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(store);
+}
+
+#[test]
+fn session_backup_disposal_reports_committed_failure_and_retries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SqliteStore::open(dir.path()).unwrap();
+    let profile = ProfileId::from(1);
+    let state = SessionState {
+        profiles: vec![PersistedProfile {
+            id: profile,
+            name: "P".into(),
+            kind: ProfileKind::Default,
+        }],
+        ..Default::default()
+    };
+    store.save_session(state.clone());
+    let (tx, rx) = mpsc::channel();
+    assert!(store.discard_session_backup(
+        profile,
+        Box::new(move |ok| {
+            tx.send(ok).unwrap();
+        })
+    ));
+    assert!(
+        rx.recv_timeout(REPLY_TIMEOUT).unwrap(),
+        "first-run session is published before disposal"
+    );
+    let meta = Connection::open(dir.path().join("meta.sqlite")).unwrap();
+    meta.execute(
+        "INSERT INTO session_snapshot_backup VALUES (1, ?1, 1, ?2)",
+        params![
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            serde_json::to_vec(&state).unwrap()
+        ],
+    )
+    .unwrap();
+    meta.execute_batch("CREATE TRIGGER fail_backup_delete BEFORE DELETE ON session_snapshot_backup BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+    let (tx, rx) = mpsc::channel();
+    assert!(store.discard_session_backup(
+        profile,
+        Box::new(move |ok| {
+            tx.send(ok).unwrap();
+        })
+    ));
+    assert!(!rx.recv_timeout(REPLY_TIMEOUT).unwrap());
+    meta.execute_batch("DROP TRIGGER fail_backup_delete")
+        .unwrap();
+    let (tx, rx) = mpsc::channel();
+    assert!(store.discard_session_backup(
+        profile,
+        Box::new(move |ok| {
+            tx.send(ok).unwrap();
+        })
+    ));
+    assert!(rx.recv_timeout(REPLY_TIMEOUT).unwrap());
+    assert_eq!(
+        meta.query_row("SELECT count(*) FROM session_snapshot_backup", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn panicking_session_backup_completion_does_not_stop_store() {
+    let store = SqliteStore::in_memory().unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    store.save_session(state);
+    assert!(store.discard_session_backup(profile, Box::new(|_| panic!("fixture completion panic"))));
+    assert!(matches!(store.load_session(), SessionLoad::Loaded { .. }));
+}
+
+#[test]
+fn checked_history_forget_drains_failed_pending_visits_before_erasure() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    hub.save(&state).unwrap();
+    hub.history_page(profile, "", None, None, 10);
+    let observer = Connection::open(dir.path().join(format!("profile-{profile}.sqlite"))).unwrap();
+    observer.execute_batch("CREATE TRIGGER fail_visit BEFORE INSERT ON history BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+    let store = SqliteStore::spawn(hub).unwrap();
+    let urls = vec!["https://forget.example/".to_owned()];
+    store.record_visit(profile, urls[0].clone(), "Example".into());
+    assert_eq!(store.forget_history_urls_checked(profile, &urls), None);
+    observer.execute_batch("DROP TRIGGER fail_visit").unwrap();
+    assert_eq!(store.forget_history_urls_checked(profile, &urls), Some(1));
+    assert!(store.flush_until(Instant::now() + REPLY_TIMEOUT));
+    assert!(store.history_page(profile, "", None, None, 10).is_empty());
+}
+
+#[test]
+fn extension_profile_deletion_erases_registry_temporary_and_owned_staging() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    hub.save(&state).unwrap();
+    let root = dir.path().join("webext");
+    let registries = root.join("profiles");
+    std::fs::create_dir_all(&registries).unwrap();
+    let registry = registries.join(format!("{profile}.json"));
+    let temporary = registry.with_extension("json.tmp");
+    std::fs::write(&registry, br#"{"extensions":[]}"#).unwrap();
+    std::fs::write(&temporary, b"private pending access choices").unwrap();
+    let staged = root.join("staging").join(profile.to_string());
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(staged.join("private-source"), b"private staged package").unwrap();
+    let other = registries.join(format!("{}.json", ProfileId::from(999)));
+    std::fs::write(&other, b"keep other profile").unwrap();
+    assert_eq!(
+        hub.authorize_profile_deletion(profile, &SessionState::default())
+            .unwrap(),
+        ProfileDeletionAuthorizeOutcome::Authorized
+    );
+    assert!(hub
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
+    for path in [&registry, &temporary, &staged] {
+        assert!(
+            !path.exists(),
+            "deleted profile retained {}",
+            path.display()
+        );
+    }
+    assert_eq!(std::fs::read(other).unwrap(), b"keep other profile");
+    drop(hub);
+    let mut reopened = Hub::open_for_new_process(dir.path().to_path_buf()).unwrap();
+    assert_eq!(reopened.pending_profile_deletions().unwrap().len(), 1);
+    assert!(reopened
+        .finalize_profile_deletion_requiring_restart_confirmation(profile)
+        .unwrap());
+    assert!(reopened.pending_profile_deletions().unwrap().is_empty());
+    assert!(!registry.exists());
+}
+
+#[test]
+fn extension_profile_deletion_revokes_publication_without_waiting_for_ticket_drop() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    hub.save(&state).unwrap();
+    let root = dir.path().join("webext");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    let (ticket, unrelated) = {
+        let mut io = zephium_core::extensions::REGISTRY_IO.lock().unwrap();
+        (
+            io.register(root.clone(), profile).unwrap(),
+            io.register(root.clone(), ProfileId::from(999)).unwrap(),
+        )
+    };
+    assert_eq!(
+        hub.authorize_profile_deletion(profile, &SessionState::default())
+            .unwrap(),
+        ProfileDeletionAuthorizeOutcome::Authorized
+    );
+    assert!(hub.finalize_profile_deletion(profile).unwrap());
+    let _io = zephium_core::extensions::REGISTRY_IO.lock().unwrap();
+    assert!(!ticket.allows(&root, profile));
+    assert!(unrelated.allows(&root, ProfileId::from(999)));
+}
+
+#[test]
+fn extension_profile_deletion_does_not_wait_for_package_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    hub.save(&state).unwrap();
+    let publication = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.path().join("extension-publication.lock"))
+        .unwrap();
+    publication.lock().unwrap();
+    assert_eq!(
+        hub.authorize_profile_deletion(profile, &SessionState::default())
+            .unwrap(),
+        ProfileDeletionAuthorizeOutcome::Authorized
+    );
+    assert!(hub.finalize_profile_deletion(profile).unwrap());
+}
+
+#[test]
+fn extension_cleanup_failure_keeps_the_deletion_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = Hub::open(dir.path().to_path_buf()).unwrap();
+    let state = sample();
+    let profile = state.profiles[0].id;
+    hub.save(&state).unwrap();
+    hub.authorize_profile_deletion(profile, &SessionState::default())
+        .unwrap();
+    let root = dir.path().join("webext");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("staging"), b"invalid namespace").unwrap();
+    assert!(hub.finalize_profile_deletion(profile).is_err());
+    assert_eq!(hub.pending_profile_deletions().unwrap().len(), 1);
+    std::fs::remove_file(root.join("staging")).unwrap();
+    assert!(hub.finalize_profile_deletion(profile).unwrap());
+}
+
+#[test]
+fn a_sites_origins_come_from_its_history_and_icons_with_their_ports() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    for url in [
+        "https://www.example.com/a",
+        "http://example.com:8080/b?c",
+        "https://www.example.com/again",
+        "https://notexample.com/",
+        "https://example.com.evil.test/",
+        "http://127.0.0.1:3000/",
+    ] {
+        hub.record_visit(profile, url, "Page");
+    }
+    hub.save_favicon(profile, "https://cdn.example.com", None, &rgba());
+    hub.save_favicon(profile, "https://shop.example.com:8443/cart", None, &rgba());
+
+    let (origins, complete) = hub.site_origins(profile, "example.com");
+    assert!(complete);
+    assert_eq!(origins.len(), 4, "{origins:?}");
+    for origin in [
+        "https://www.example.com",
+        "http://example.com:8080",
+        "https://cdn.example.com",
+        "https://shop.example.com:8443",
+    ] {
+        assert!(origins.iter().any(|o| o == origin), "{origin}: {origins:?}");
+    }
+    assert_eq!(
+        hub.site_origins(profile, "127.0.0.1"),
+        (vec!["http://127.0.0.1:3000".to_owned()], true)
+    );
+    // Nothing can be read for a name that is no site or a profile not held.
+    assert_eq!(
+        hub.site_origins(profile, "https://example.com"),
+        (Vec::new(), false)
+    );
+    assert_eq!(
+        hub.site_origins(ProfileId::from(9), "example.com"),
+        (Vec::new(), false)
+    );
+}
+
+#[test]
+fn a_sites_origins_stop_at_their_cap() {
+    let mut hub = Hub::in_memory().unwrap();
+    hub.save(&sample()).unwrap();
+    let profile = ProfileId::from(1);
+    let visits: Vec<(String, String)> = (0..zephium_core::browsing_data::MAX_SITE_ORIGINS + 20)
+        .map(|n| (format!("https://s{n}.example.com/"), "Page".to_owned()))
+        .collect();
+    for (url, title) in &visits {
+        hub.record_visit(profile, url, title);
+    }
+    let (origins, complete) = hub.site_origins(profile, "example.com");
+    assert!(!complete, "stopped at the cap, so some may be left out");
+    assert_eq!(origins.len(), zephium_core::browsing_data::MAX_SITE_ORIGINS);
+    // Newest visits first.
+    assert_eq!(
+        origins[0],
+        format!(
+            "https://s{}.example.com",
+            zephium_core::browsing_data::MAX_SITE_ORIGINS + 19
+        )
+    );
 }

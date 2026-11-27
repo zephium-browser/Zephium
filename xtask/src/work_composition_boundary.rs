@@ -166,7 +166,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     require(&read("crates/zephium-app/src/work.rs")?, &[
         "self.controller.profile_storage_binding()? != (binding.profile(), binding.storage_class())",
         "profile == Some(crate::AgentWorkProfileReadiness::Ready(binding))",
-        "if !profile_valid { self.stopping = true; self.fail(AgentWorkFailure::Contract); self.abort_staged(); }",
+        "if !profile_valid { self.stopping = true; self.fail(crate::contract_failure!()); self.abort_staged(); }",
     ])?;
     require(&read("crates/zephium-app/src/shell/mod.rs")?, &[
         "let profile = self.work_profile_binding(); if let Some(work) = &mut self.work { work.admit(submission, Some(profile)); }",
@@ -194,7 +194,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
     )?;
     require(&read("desktop/src/lib.rs")?, &[
         "#[cfg(all(feature = \"macos-work-navigation-probe\", any(not(debug_assertions), not(target_os = \"macos\"))))] compile_error!",
-        "#[cfg(all(feature = \"macos-work-navigation-probe\", not(feature = \"macos-work-profile-enrollment\"), target_os = \"macos\"))] navigation_probe::install(app.handle())?;",
+        "#[cfg(all(feature = \"macos-work-navigation-probe\", not(feature = \"macos-work-profile-enrollment\"), target_os = \"macos\"))] navigation_probe::install(app)?;",
     ])?;
     production(&native)?;
     require(
@@ -242,7 +242,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         ],
     )?;
     preparation_precedes_attachment(&desktop)?;
-    require(&read("desktop/src/lib.rs")?, &["#[cfg(feature = \"macos-work\")] mod work;", "#[cfg(feature = \"macos-work\")] if !work::install(app.handle(), engine.clone(), store.clone())"])?;
+    require(&read("desktop/src/lib.rs")?, &["#[cfg(feature = \"macos-work\")] mod work;", "#[cfg(feature = \"macos-work\")] if !work::install(app, engine.clone(), store.clone())"])?;
     require(&read("desktop/Cargo.toml")?, &["macos-work = [\"dep:zephium-work-composition\", \"zephium-work-composition/macos-work\"]", "zephium-work-composition = { workspace = true, optional = true }"])?;
     let manifest = read("crates/zephium-work-composition/Cargo.toml")?;
     require(

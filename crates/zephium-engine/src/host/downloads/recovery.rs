@@ -459,7 +459,7 @@ impl Downloads {
                 state.queue.push_back(profile);
             }
         }
-        (self.notify)(profile);
+        self.changed(profile);
         self.next_recovery_profile();
     }
 }
@@ -495,6 +495,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         let identity = record.staging_identity.clone().unwrap();
         state.remember_private(profile, &record);

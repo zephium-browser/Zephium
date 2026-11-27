@@ -3,7 +3,8 @@
 </script>
 
 <script lang="ts">
-  import { Folder01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { Folder01Icon } from "@hugeicons/core-free-icons";
+  import { tabFallbackIcon } from "../lib/tab-icon";
   import type { SpaceView, TabView } from "$shared/ipc/bindings";
   import { favicons } from "$domain/favicons";
   import FavIcon from "$shared/ui/FavIcon";
@@ -61,9 +62,7 @@
           tone={favicons.tone(row.tab.icon)}
           size={16}
           lit={row.tab.id === sheet?.active}
-          fallback={row.tab.content === "extensions" || row.tab.content === "extension_owned"
-            ? PuzzleIcon
-            : Globe02Icon}
+          fallback={tabFallbackIcon(row.tab.content)}
         />
       </li>{/if}
   {:else}
@@ -78,9 +77,7 @@
           tone={favicons.tone(row.tab.icon)}
           size={16}
           lit={row.tab.id === sheet?.active}
-          fallback={row.tab.content === "extensions" || row.tab.content === "extension_owned"
-            ? PuzzleIcon
-            : Globe02Icon}
+          fallback={tabFallbackIcon(row.tab.content)}
         />
         <span class="peek-label">{row.tab.title}</span>
       {:else}

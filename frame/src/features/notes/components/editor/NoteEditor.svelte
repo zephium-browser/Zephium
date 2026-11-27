@@ -50,7 +50,7 @@
   let selecting = $state(false);
   let linking = $state(false);
   let trigger = $state.raw<Trigger | null>(null);
-  let found = $state.raw<NoteSummary[]>([]);
+  let found = $state.raw<{ query: string; notes: NoteSummary[] } | null>(null);
   const keys: { current: ((event: KeyboardEvent) => boolean) | null } = { current: null };
 
   let showBar = $derived.by(() => {
@@ -102,14 +102,15 @@
           : []),
       ];
     const query = trigger.query.trim();
-    const items: Suggestion[] = found.map((note) => ({
+    const matches = found?.query === trigger.query ? found.notes : [];
+    const items: Suggestion[] = matches.map((note) => ({
       id: note.id,
       label: note.title,
       detail: note.preview || undefined,
       icon: Note01Icon,
       choose: () => linkTo(note.title),
     }));
-    if (query && !found.some((note) => note.title.toLowerCase() === query.toLowerCase()))
+    if (query && !matches.some((note) => note.title.toLowerCase() === query.toLowerCase()))
       items.push({
         id: "create",
         label: m.note_link_create({ name: query }),
@@ -126,7 +127,7 @@
     let live = true;
     const timer = setTimeout(() => {
       void find(query).then((notes) => {
-        if (live) found = notes;
+        if (live) found = { query, notes };
       });
     }, 80);
     return () => {

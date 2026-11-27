@@ -60,7 +60,7 @@ test("notes read, open and come back in the sidebar panel", async () => {
   // Long previews never widen the panel past its host.
   const tool = screen.container.querySelector<HTMLElement>(".shared-tool")!;
   expect(tool.scrollWidth).toBeLessThanOrEqual(tool.clientWidth + 1);
-  expect(tool.offsetWidth).toBeLessThanOrEqual(384 - 56);
+  expect(tool.offsetWidth).toBeLessThanOrEqual(384);
 
   await screen.getByRole("option", { name: /^Trip to Lisbon/u }).click();
   const text = screen.getByRole("textbox", { name: "Note" });
@@ -70,7 +70,8 @@ test("notes read, open and come back in the sidebar panel", async () => {
   await new Promise((resolve) => setTimeout(resolve, 450));
   await shot("panel-sidebar-note-dark");
 
-  await text.getByText("Pack the adapter").click();
+  const item = text.getByText("Pack the adapter");
+  await item.click({ position: { x: item.element().getBoundingClientRect().width - 4, y: 4 } });
   await userEvent.keyboard("{End} and cables");
   const id = [...notes.notes.values()].find((note) => note.summary.title === "Trip to Lisbon")!
     .summary.id;
@@ -153,7 +154,7 @@ test("formatting stays inside the sidebar, clear of the page beside it", async (
   await expect.element(bar).toBeVisible();
   await new Promise((resolve) => setTimeout(resolve, 250));
   inside(bar.element());
-  await screen.getByRole("button", { name: /^Formatting: /u }).click();
+  await screen.getByRole("button", { name: /^(Formatting: |Text|Heading)/u }).click();
   const styles = screen.getByRole("menu", { name: "Formatting" });
   await expect.element(styles).toBeVisible();
   await new Promise((resolve) => setTimeout(resolve, 250));

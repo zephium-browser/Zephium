@@ -185,22 +185,28 @@ impl WorkLeadService {
         let WorkRuntimeIntent::BeginAgent { grant, .. } = &mut command.intent else {
             return Err(WorkError::Invalid);
         };
-        if command.version != 1 || !grant.accounts.is_empty() {
+        if command.version != 1 || !grant.accounts.is_empty() || grant.no_usage_charge {
             return Err(WorkError::Invalid);
         }
         grant.lead = Some(models.lead.entry.model.clone());
-        if let Some((provider, model)) = search.grant() {
+        let search_grant = search.grant();
+        let search_fallback = search.fallback();
+        let free_search = search_grant.as_ref().is_some_and(|(provider, _)| {
+            *provider == zephium_core::work::search::WorkSearchProvider::Browser
+        }) && search_fallback.is_none();
+        if let Some((provider, model)) = search_grant {
             grant.provider = provider;
             grant.model = model;
-            grant.search_fallback = search.fallback();
+            grant.search_fallback = search_fallback;
         }
         grant.max_turns = u8::MAX;
         grant.max_steps = u8::MAX;
         grant.validate()?;
+        let no_usage_charge = models.all_free() && free_search;
         let work = command.work;
         let command_id = command.command;
         let block_selection = selection.clone();
-        let (request, bodies, tabs) = match selection {
+        let (mut request, bodies, tabs) = match selection {
             Some(selection) => {
                 let admitted = crate::work_context::WorkContextAdmission::new(self.handle.clone())
                     .admit(profile, context::WorkContextPurpose::Agent, &selection)
@@ -227,6 +233,15 @@ impl WorkLeadService {
             }
             None => (command.into_request()?, Vec::new(), Vec::new()),
         };
+        let intent = match &mut request {
+            WorkRequest::RuntimeCommand { intent, .. }
+            | WorkRequest::RuntimeCommandDisclosed { intent, .. } => intent,
+            _ => return Err(WorkError::Invalid),
+        };
+        let WorkRuntimeIntent::BeginAgent { grant, .. } = intent else {
+            return Err(WorkError::Invalid);
+        };
+        grant.no_usage_charge = no_usage_charge;
         request.validate()?;
         let starting =
             crate::work_runtime::WorkStartingAgent::acquire(&self.handle, profile, work)?;
@@ -461,10 +476,8 @@ async fn conclude(
             // or override a person's Stop. Keep uncertain accounting explicit.
             let limits = run.limits();
             run.charge(WorkUsage {
-                model_tokens: limits.model_tokens,
-                cost_micro_usd: limits.cost_micro_usd,
                 operations: 0,
-                accounting: WorkUsageAccounting::ConservativeReservation,
+                ..run.grant.reserved_usage(limits)
             });
             if step.has_unconfirmed_effect()
                 || (status == WorkAttemptStatus::Failed && !out_of_time)
@@ -508,15 +521,7 @@ async fn settled_usage(run: &run::LeadRun, status: WorkAttemptStatus) -> Option<
             .operations
             .max(u32::try_from(execution.steps.len()).unwrap_or(u32::MAX));
     }
-    if !usage.within(limits) {
-        usage = WorkUsage {
-            model_tokens: usage.model_tokens.min(limits.model_tokens),
-            cost_micro_usd: usage.cost_micro_usd.min(limits.cost_micro_usd),
-            operations: usage.operations.min(limits.operations),
-            accounting: WorkUsageAccounting::ConservativeReservation,
-        };
-    }
-    Some(usage)
+    Some(usage.bounded_by(limits))
 }
 
 /// What the person brought, as inputs left of the request.

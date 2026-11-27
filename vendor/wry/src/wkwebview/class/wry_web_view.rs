@@ -278,7 +278,7 @@ fn is_webkit_area(area: &NSTrackingArea) -> bool {
   use std::sync::OnceLock;
 
   // SAFETY: a bundle lookup for a class loaded in this process.
-  let bundle = |class| Retained::as_ptr(&unsafe { NSBundle::bundleForClass(class) }).addr();
+  let bundle = |class| Retained::as_ptr(&unsafe { NSBundle::bundleForClass(class) }) as usize;
   static WEBKIT: OnceLock<usize> = OnceLock::new();
   let webkit = *WEBKIT.get_or_init(|| bundle(WKWebView::class()));
   // SAFETY: an installed area's owner outlives it, as AppKit requires.

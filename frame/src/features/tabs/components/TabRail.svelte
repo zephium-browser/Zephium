@@ -4,7 +4,8 @@
   import { tabs } from "$domain/tabs";
   import FavIcon from "$shared/ui/FavIcon";
   import { favicons } from "$domain/favicons";
-  import { Add01Icon, Cancel01Icon, Globe02Icon, PuzzleIcon } from "@hugeicons/core-free-icons";
+  import { Add01Icon, Cancel01Icon, GridViewIcon } from "@hugeicons/core-free-icons";
+  import { tabFallbackIcon } from "../lib/tab-icon";
   import Icon from "$shared/ui/Icon";
   import * as m from "$shared/i18n/messages";
   import { untrack } from "svelte";
@@ -12,23 +13,35 @@
   import * as tabDrag from "$session/tab-drag.svelte";
   import { RowDrag } from "$session/row-drag.svelte";
   import DragMark from "$shared/ui/DragMark";
+  import AudioControl from "$shared/ui/AudioControl";
+  import CaptureControl from "$shared/ui/CaptureControl";
   import SpacePeek from "./SpacePeek.svelte";
   import RailSpaces from "./RailSpaces.svelte";
   import { uiCommands as ui } from "$domain/ui-commands";
   import { remember } from "../lib/space-memory";
   import * as requests from "../lib/space-requests.svelte";
   import { arrive, spaceSwipe, stepSpace } from "../lib/space-swipe";
-  import { closeOnMiddleClick } from "../lib/middle-click";
+  import { closeOnMiddleClick, openOnBackgroundMiddleClick } from "../lib/middle-click";
 
   let {
     entries,
     closable = new Set<string>(),
     onSelect,
+    switcher,
+    spaces = true,
+    roomy = false,
   }: {
     entries: TabView[];
     /** Tabs the expanded list shows a close button for. */
     closable?: ReadonlySet<string>;
     onSelect: (id: string) => void;
+    /** Beside a tool the rail keeps only the current tab, and this opens the
+     *  switcher onto all of them in place of the new tab row. */
+    switcher?: () => void;
+    /** Work has no spaces of its own; Browse leads with them. */
+    spaces?: boolean;
+    /** With room beside it, the spaces open as a menu that names them. */
+    roomy?: boolean;
   } = $props();
 
   function handleContextMenu(event: MouseEvent, tab: TabView) {
@@ -45,17 +58,18 @@
     list: () => list,
     region: () => scroller,
     reorder: () => ({ essential: false }),
-    drop: ({ id, x, y, over, before }) => {
+    drop: ({ id, x, y, over, before, page }) => {
       const essential = !!over?.closest("[data-essentials-drop]");
       // A tab that cannot be kept goes back where it was.
       if (essential && !tabDrag.keepable(id)) return;
       if (tabs.inSplit(id) && (essential || over?.closest("[data-tabs-drop]")))
         void tabDrag.leaveSplit(id, essential || before ? { essential, before } : null);
       else if (essential) void tabDrag.move(id, true, before);
-      else tabs.dropTab(id, x, y);
+      else if (page) tabs.dropTab(id, x, y);
     },
   });
   const motion = new ListMotion({ enter: () => "rise" });
+  const backgroundClick = openOnBackgroundMiddleClick(tabs.open);
 
   const space = $derived(tabs.profile()?.kind === "incognito" ? undefined : tabs.activeSpace());
   const order = $derived(tabs.spaces().map((entry) => entry.id));
@@ -110,6 +124,7 @@
     void shape;
     untrack(() => motion.play(list));
   });
+  $effect(() => () => drag.abandon());
 </script>
 
 <!--
@@ -120,8 +135,8 @@
   `title` gives a real OS tooltip, which is the only label that can appear
   outside the chrome WebView's rectangle.
 -->
-{#if space}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
-    <RailSpaces active={space} />
+{#if space && spaces}<div class="rail-spaces-slot" data-cascade style:--cascade={0}>
+    <RailSpaces active={space} {roomy} />
   </div>{/if}
 <div
   bind:this={stage}
@@ -137,8 +152,16 @@
       class="rail-scroller scroll-edges"
       data-under-panel
       data-glide-scroller
+      {...backgroundClick}
     >
-      <ul bind:this={list} class="rail-list" data-tabs-drop role="list" aria-label={m.open_tabs()}>
+      <ul
+        bind:this={list}
+        class="rail-list"
+        data-tabs-drop
+        data-tab-list-background
+        role="list"
+        aria-label={m.open_tabs()}
+      >
         {#each entries as tab, index (tab.id)}
           {@const active = tab.id === tabs.activeId()}
           <li
@@ -148,6 +171,7 @@
             data-zephium-tab-id={tab.id}
             data-zephium-tab-url={tab.url ?? ""}
             data-zephium-projection-revision={tab.projection_revision}
+            data-audio-host
           >
             <button
               type="button"
@@ -170,12 +194,24 @@
                 loading={tab.loading}
                 lit={active}
                 size={16}
-                fallback={tab.content === "extensions" || tab.content === "extension_owned"
-                  ? PuzzleIcon
-                  : Globe02Icon}
+                fallback={tabFallbackIcon(tab.content)}
+                notched={!!tab.audio}
               />
               <span data-zephium-tab-label class="sr-only">{tab.title}</span>
             </button>
+            {#if tab.capture}<span class="rail-capture"
+                ><CaptureControl
+                  badge
+                  site={tab.url ?? tab.title}
+                  capture={tab.capture}
+                  onOpen={(x, y) => tabs.openMediaMenu(tab.id, x, y)}
+                /></span
+              >{/if}
+            {#if tab.audio}<AudioControl
+                audio={tab.audio}
+                size={16}
+                onToggle={(muted) => void tabs.setMuted(tab.id, muted)}
+              />{/if}
             <!-- A rail has no row to put a close control in, so it rides the
              mark's corner, the way a notification's does. -->
             {#if !tabs.loneNewTab(tab.id)}<button
@@ -189,15 +225,23 @@
           </li>
         {/each}
         <li data-cascade style:--cascade={entries.length + 1}>
-          <button
-            type="button"
-            class="rail-item rail-new"
-            title={m.new_tab()}
-            aria-label={m.new_tab()}
-            onclick={tabs.open}
-          >
-            <Icon icon={Add01Icon} size={16} />
-          </button>
+          {#if switcher}{@const label = m.tab_switcher_all({ count: tabs.tabs().length })}<button
+              type="button"
+              class="rail-item rail-new"
+              title={label}
+              aria-label={label}
+              onclick={switcher}
+            >
+              <Icon icon={GridViewIcon} size={16} />
+            </button>{:else}<button
+              type="button"
+              class="rail-item rail-new"
+              title={m.new_tab()}
+              aria-label={m.new_tab()}
+              onclick={tabs.open}
+            >
+              <Icon icon={Add01Icon} size={16} />
+            </button>{/if}
         </li>
       </ul>
     </div>
@@ -298,6 +342,12 @@
 
   .rail-list > li {
     position: relative;
+  }
+
+  .rail-capture {
+    position: absolute;
+    inset-block-end: -3px;
+    inset-inline-start: -3px;
   }
 
   /* A small raised disc on the mark's corner: it waits a beat before it

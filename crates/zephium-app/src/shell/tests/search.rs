@@ -74,6 +74,167 @@ fn search_ranks_tabs_primary_action_commands_and_history() {
     assert!(last.results.iter().all(|r| r.kind == "tab"));
 }
 
+fn kinds_and_urls(results: &SearchResults) -> Vec<(String, String)> {
+    results
+        .results
+        .iter()
+        .filter(|result| matches!(result.kind.as_str(), "bookmark" | "history"))
+        .map(|result| (result.kind.clone(), result.detail.clone()))
+        .collect()
+}
+
+fn hit(url: &str, title: &str) -> zephium_core::ports::store::HistoryHit {
+    zephium_core::ports::store::HistoryHit {
+        url: url.into(),
+        title: title.into(),
+        last_visit: 1,
+    }
+}
+
+fn shell_with_pages(
+    history: Vec<zephium_core::ports::store::HistoryHit>,
+    saved_pages: Vec<(&'static str, &'static str)>,
+    emit: EmitFn,
+) -> Shell {
+    let store = Arc::new(FakeStore {
+        history,
+        saved_pages,
+        ..Default::default()
+    });
+    let mut shell = Shell::new(
+        Arc::new(FakeEngine::default()),
+        store,
+        Arc::new(FakeChrome),
+        emit,
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    shell
+}
+
+#[test]
+fn a_bookmark_leads_the_visited_page_it_matches_as_well_as() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![
+            hit("https://rust-lang.org/", "Rust Programming"),
+            hit("https://blog.example/rust", "Rust Blog"),
+        ],
+        vec![
+            ("Rust Book", "https://doc.rust-lang.org/book/"),
+            ("Learn Rust", "https://learn.example/"),
+        ],
+        emit,
+    );
+    shell.handle(Command::Search("rust".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    let kinds: Vec<&str> = last.results.iter().map(|r| r.kind.as_str()).collect();
+    // The bookmark whose title starts with the query goes ahead of the visits
+    // that match it equally; the one that only contains it falls behind them.
+    assert_eq!(
+        kinds,
+        ["search", "bookmark", "history", "history", "bookmark"]
+    );
+    assert_eq!(
+        kinds_and_urls(&last)
+            .into_iter()
+            .map(|(_, url)| url)
+            .collect::<Vec<_>>(),
+        [
+            "https://doc.rust-lang.org/book/",
+            "https://rust-lang.org/",
+            "https://blog.example/rust",
+            "https://learn.example/",
+        ]
+    );
+}
+
+#[test]
+fn an_address_both_saved_and_visited_is_listed_once_as_the_bookmark() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![hit("https://docs.example/", "Docs")],
+        vec![("Docs", "https://docs.example/")],
+        emit,
+    );
+    shell.handle(Command::Search("docs".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("bookmark".to_owned(), "https://docs.example/".to_owned())]
+    );
+}
+
+#[test]
+fn bookmarks_share_the_visit_allowance_and_do_not_lengthen_the_list() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        (0..6)
+            .map(|at| hit(&format!("https://visit{at}.example/"), "Topic visit"))
+            .collect(),
+        vec![
+            ("Topic one", "https://one.example/"),
+            ("Topic two", "https://two.example/"),
+            ("Topic three", "https://three.example/"),
+            ("Topic four", "https://four.example/"),
+            ("Topic five", "https://five.example/"),
+        ],
+        emit,
+    );
+    shell.handle(Command::Search("topic".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    let kinds = kinds_and_urls(&last);
+    assert_eq!(kinds.len(), 4);
+    assert!(kinds.iter().all(|(kind, _)| kind == "bookmark"));
+    assert!(last.results.len() <= zephium_core::search::MAX_RESULTS);
+}
+
+#[test]
+fn bookmarks_are_offered_with_history_suggestions_off_and_not_to_a_history_search() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(
+        vec![hit("https://visited.example/", "Notes visited")],
+        vec![("Notes saved", "https://saved.example/")],
+        emit,
+    );
+    shell.search.include_history = false;
+    shell.handle(Command::Search("notes".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("bookmark".to_owned(), "https://saved.example/".to_owned())]
+    );
+
+    shell.handle(Command::Search("@history notes".into()));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        kinds_and_urls(&last),
+        [("history".to_owned(), "https://visited.example/".to_owned())]
+    );
+}
+
+#[test]
+fn a_bookmark_that_does_not_match_the_typing_is_dropped() {
+    let (seen, emit) = search_sink();
+    let mut shell = shell_with_pages(Vec::new(), Vec::new(), emit);
+    shell.store_reads = Some(StoreReadQueue::new());
+    let profile = shell.windows.focused().unwrap().profile;
+    shell.handle(Command::Search("zzz".into()));
+    let generation = shell.search.pending.as_ref().unwrap().generation;
+    shell.handle(Command::StoreRead(StoreReadResult::History {
+        generation,
+        profile,
+        query: "zzz".into(),
+        hits: Vec::new(),
+        bookmarks: vec![crate::store_reads::BookmarkHit {
+            title: "Unrelated".into(),
+            url: "https://other.example/".into(),
+        }],
+    }));
+    let last = seen.lock().unwrap().last().unwrap().clone();
+    assert!(kinds_and_urls(&last).is_empty());
+}
+
 #[test]
 fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
     let (seen, emit) = search_sink();
@@ -101,6 +262,7 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
             title: "Old".into(),
             last_visit: 1,
         }],
+        bookmarks: Vec::new(),
     }));
     assert_eq!(
         shell
@@ -121,6 +283,7 @@ fn stale_history_reply_cannot_replace_a_newer_launcher_query() {
             title: "New".into(),
             last_visit: 2,
         }],
+        bookmarks: Vec::new(),
     }));
     let last = seen.lock().unwrap().last().unwrap().clone();
     assert_eq!(last.query, "new");
@@ -153,6 +316,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example.com".into(),
         context: Box::new(context.clone()),
     });
@@ -163,7 +327,7 @@ fn newtab_search_cannot_execute_after_its_tab_has_navigated() {
         id,
         input: "other.example".into(),
     });
-    let disposition = shell.operation_run_search_action(context, action, false, None);
+    let disposition = shell.operation_run_search_action(context, action, false, None, false);
     assert_eq!(disposition.outcome, OperationOutcome::Rejected);
 }
 
@@ -214,6 +378,7 @@ fn empty_local_scope_stays_pending_until_its_providers_finish() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "@notes first".into(),
         context: Box::new(context.clone()),
     });
@@ -223,6 +388,7 @@ fn empty_local_scope_stays_pending_until_its_providers_finish() {
         ..context.clone()
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "@notes second".into(),
         context: Box::new(next.clone()),
     });
@@ -273,6 +439,7 @@ fn late_providers_extend_their_own_section_without_reordering_the_list() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example".into(),
         context: Box::new(context.clone()),
     });
@@ -354,6 +521,7 @@ fn one_talkative_provider_cannot_starve_the_other_sections() {
         request_id: "first".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "example".into(),
         context: Box::new(context.clone()),
     });
@@ -405,6 +573,7 @@ fn new_tab_offers_places_to_go_and_leaves_commands_to_the_launcher() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "reload".into(),
         context: Box::new(newtab.clone()),
     });
@@ -426,6 +595,7 @@ fn new_tab_offers_places_to_go_and_leaves_commands_to_the_launcher() {
         ..newtab
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "reload".into(),
         context: Box::new(panel),
     });
@@ -474,6 +644,7 @@ fn history_reaches_the_field_through_the_real_store_and_read_queue() {
         request_id: "request-1".into(),
     };
     shell.handle(Command::SearchScoped {
+        mini: false,
         query: "notion".into(),
         context: Box::new(context),
     });
@@ -552,4 +723,150 @@ fn recorded_searches_cannot_crowd_visited_pages_out_of_the_list() {
             .map(|result| (&result.kind, &result.title))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn shortcut_writes_and_projections_omit_retired_entries() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    shell.emit = Box::new(move |projection| {
+        if let Projection::UiCommand(command) = projection {
+            sink.lock().unwrap().push(command);
+        }
+    });
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries[0].enabled = false;
+    let expected = serde_json::to_string(&entries).unwrap();
+    let mut retired = entries[0].clone();
+    retired.id = "npm".into();
+    entries.push(retired);
+    let raw = serde_json::to_string(&entries).unwrap();
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    assert_eq!(
+        store.app_setting("search.shortcuts"),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![format!("preference.search.shortcuts={expected}")]
+    );
+    assert!(shell.search.shortcuts.get("npm").is_none());
+    assert!(!shell.search.shortcuts.entries()[0].enabled);
+    shell.operation_set_app_setting("search.shortcuts".into(), "not json".into());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(expected));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn near_limit_shortcut_write_remains_readable() {
+    use zephium_core::search::{ShortcutRegistry, MAX_SHORTCUT_SETTINGS_BYTES};
+    let mut entries: Vec<_> = (0..8)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("custom:near-limit-{index}"),
+                "name": "Near limit",
+                "keywords": [format!("near{index}")],
+                "search_url": format!("https://example.com/{}?q={{query}}", "s".repeat(2018)),
+                "home_url": format!("https://example.com/{}", "h".repeat(2028)),
+                "domain": "example.com",
+                "enabled": false
+            })
+        })
+        .collect();
+    let excess = serde_json::to_string(&entries).unwrap().len() - (MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let home = entries.last_mut().unwrap()["home_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    entries.last_mut().unwrap()["home_url"] = home[..home.len() - excess].into();
+    let raw = serde_json::to_string(&entries).unwrap();
+    assert_eq!(raw.len(), MAX_SHORTCUT_SETTINGS_BYTES - 1);
+    let registry = ShortcutRegistry::from_setting(&raw).unwrap();
+    let store = Arc::new(FakeStore::default());
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.operation_set_app_setting("search.shortcuts".into(), raw);
+    let saved = store.app_setting("search.shortcuts").unwrap();
+    assert!(saved.len() <= MAX_SHORTCUT_SETTINGS_BYTES);
+    assert_eq!(
+        ShortcutRegistry::from_setting(&saved).unwrap().entries(),
+        registry.entries()
+    );
+    assert_eq!(shell.search.shortcuts.entries(), registry.entries());
+}
+
+#[test]
+fn shortcuts_drive_typed_navigation_and_search_answers_after_settings_reload() {
+    use zephium_core::search::ShortcutRegistry;
+    let store = Arc::new(FakeStore::default());
+    let mut entries = ShortcutRegistry::default().entries().to_vec();
+    entries
+        .iter_mut()
+        .find(|entry| entry.id == "youtube")
+        .unwrap()
+        .keywords = vec!["video".into()];
+    let stored = serde_json::to_string(&entries).unwrap();
+    let (mut shell, _, _) = setup_with(store.clone());
+    shell.handle(Command::Bootstrap);
+    shell.operation_set_app_setting("search.shortcuts".into(), stored.clone());
+    assert_eq!(store.app_setting("search.shortcuts"), Some(stored));
+    drop(shell);
+    let (seen, emit) = search_sink();
+    let engine = Arc::new(FakeEngine::default());
+    let mut shell = Shell::new_with_failure(
+        engine.clone(),
+        store.clone(),
+        Arc::new(ImmediateAllowAllCompiler),
+        Box::new(|_| {}),
+        Arc::new(FakeChrome),
+        emit,
+    );
+    shell.handle(Command::SetWindowSize(Size::new(1200.0, 800.0)));
+    shell.handle(Command::Bootstrap);
+    let id = shell.windows.focused().unwrap().active.unwrap();
+    for (input, query) in [("video cats", "cats"), ("dogs !video", "dogs")] {
+        shell.handle(Command::Navigate {
+            id,
+            input: input.into(),
+        });
+        let expected = format!("https://www.youtube.com/results?search_query={query}");
+        assert!(engine
+            .calls()
+            .iter()
+            .filter_map(|call| {
+                call.strip_prefix(&format!("navigate {id} "))
+                    .or_else(|| call.strip_prefix(&format!("create {id} ")))
+                    .and_then(|rest| rest.split(' ').next())
+            })
+            .any(|url| url == expected));
+        shell.handle(Command::Search(input.into()));
+        let answer = seen.lock().unwrap().last().unwrap().clone();
+        assert_eq!(answer.shortcut.as_deref(), Some("youtube"));
+        let row = answer
+            .results
+            .iter()
+            .find(|row| row.kind == "search")
+            .unwrap();
+        assert_eq!(row.title, query);
+        assert_eq!(row.detail, "YouTube");
+    }
+    shell.handle(Command::Search("video ".into()));
+    let answer = seen.lock().unwrap().last().unwrap().clone();
+    assert!(
+        matches!(&answer.results[0].action, SearchAction::OpenUrl { url } if url == "https://www.youtube.com/")
+    );
+    shell.operation_set_app_setting("search.shortcuts".into(), "".into());
+    assert!(shell
+        .search
+        .shortcuts
+        .get("youtube")
+        .unwrap()
+        .keywords
+        .contains(&"yt".into()));
+    assert_eq!(store.app_setting("search.engine"), None);
+    let before = shell.search.shortcuts.entries().to_vec();
+    shell.operation_set_app_setting("search.shortcuts".into(), "{bad}".into());
+    assert_eq!(shell.search.shortcuts.entries(), before);
 }

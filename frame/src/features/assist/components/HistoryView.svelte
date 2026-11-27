@@ -27,6 +27,9 @@
       ><Icon icon={ArrowLeft01Icon} size={15} strokeWidth={1.9} />{m.assist_history()}</button
     >
   </header>
+  {#if past !== null}
+    <p class="retention">{m.assist_history_retention()}</p>
+  {/if}
   {#if past === null}
     <span class="sr-only" role="status">{m.panel_loading()}</span>
   {:else if past.length === 0}
@@ -104,6 +107,12 @@
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+
+  .retention {
+    margin: 6px 8px 12px;
+    color: var(--color-muted);
+    font-size: 12px;
   }
 
   .row {

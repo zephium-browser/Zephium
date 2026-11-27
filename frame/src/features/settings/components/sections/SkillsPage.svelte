@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import * as m from "$shared/i18n/messages";
+  import { reducedMotion } from "$shared/lib/motion";
   import { tabs } from "$domain/tabs";
   import { WorkSkillsSession } from "$domain/work-context";
   import type { WorkSkillFaultV1, WorkSkillRowV1 } from "$shared/ipc/bindings";
@@ -95,7 +96,7 @@
   }
   async function reveal() {
     await tick();
-    editor?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    editor?.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "instant" : "smooth" });
     editor?.querySelector<HTMLInputElement>("input")?.focus();
   }
   async function save() {

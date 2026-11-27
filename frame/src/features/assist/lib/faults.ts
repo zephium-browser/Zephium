@@ -95,6 +95,12 @@ function modelFault(fault: Extract<PageAssistFaultV1, { reason: "model" }>["faul
         fix: models(m.assist_fix_open_models()),
         retry: "no",
       };
+    case "plan_limit":
+      return {
+        message: m.work_fault_plan_limit(),
+        fix: models(m.assist_fix_open_models()),
+        retry: "no",
+      };
     case "rate_limited":
       return { message: m.assist_fault_rate_limited(), fix: null, retry: "wait" };
     case "provider_down":
@@ -120,6 +126,8 @@ function pageFault(reason: Exclude<PageAssistFaultV1["reason"], "model">): Fault
       return { message: m.assist_fault_step_failed(), fix: null, retry: "now" };
     case "too_long":
       return { message: m.assist_fault_too_long(), fix: null, retry: "now" };
+    case "timed_out":
+      return { message: m.assist_fault_timed_out(), fix: null, retry: "now" };
     case "busy":
       return { message: m.assist_fault_busy(), fix: null, retry: "no" };
     case "no_model":

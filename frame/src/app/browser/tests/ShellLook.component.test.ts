@@ -15,7 +15,10 @@ import Shell from "../Shell.svelte";
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    pagePermissionCardHost: async () => {},
     tabsBootstrap: async () => {},
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,
@@ -24,7 +27,7 @@ vi.mock("$shared/ipc/bindings", async () => {
 });
 
 afterEach(() => {
-  sidebar.adoptMode("default");
+  sidebar.setMode("default");
   favicons.dispose();
   surface.dispose();
   tabs.dispose();
@@ -164,7 +167,7 @@ test("the window at rest", async () => {
   await shot("window-dark-shelf");
   await page.getByRole("button", { name: "Tools", exact: true }).click();
 
-  sidebar.adoptMode("compact");
+  sidebar.setMode("compact");
   await settle();
   await shot("window-dark-compact");
   await screen.getByRole("button", { name: "Tools", exact: true }).click();

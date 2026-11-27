@@ -35,7 +35,26 @@ impl EngineHost {
 
     pub(crate) fn set_media_suspended(&self, id: ItemId, suspended: bool) {
         if let Some(view) = self.views.get(&id) {
+            #[cfg(target_os = "windows")]
+            if let Some(audio) = &view.audio_observer {
+                audio.set_focus_muted(suspended);
+                return;
+            }
             crate::platform::imp::set_media_suspended(view, suspended);
+        }
+    }
+
+    /// The person's mute for this view; it holds across its navigations.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn set_muted(&self, id: ItemId, muted: bool) {
+        let Some(view) = self.views.get(&id) else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        crate::platform::macos::audio::set_muted(view, muted);
+        #[cfg(target_os = "windows")]
+        if let Some(audio) = &view.audio_observer {
+            audio.set_muted(muted);
         }
     }
 }

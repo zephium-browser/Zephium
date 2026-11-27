@@ -88,6 +88,22 @@ describe("planIcs", () => {
 });
 
 describe("icsFileName", () => {
+  it("avoids Windows device names, including names with an extension", () => {
+    for (const title of ["CON", "nul", "COM1", "LPT9", "AUX.txt", "COM¹", "CON .txt"])
+      expect(icsFileName(plan([], title))).toBe(`plan ${title}.ics`);
+    expect(icsFileName(plan([], "CONFERENCE"))).toBe("CONFERENCE.ics");
+    expect(icsFileName(plan([], "Trip."))).toBe("Trip.ics");
+  });
+
+  it("keeps Unicode filenames inside the native UTF-8 byte limit", () => {
+    for (const title of ["予定".repeat(50), "🙂".repeat(80)]) {
+      const name = icsFileName(plan([], title));
+      expect(new TextEncoder().encode(name).length).toBeLessThanOrEqual(120);
+      expect(name).toMatch(/\.ics$/u);
+      expect(name).not.toContain("�");
+    }
+  });
+
   it("makes a safe name from the title", () => {
     expect(icsFileName(plan([], "Trip: Lisbon/Porto"))).toBe("Trip Lisbon Porto.ics");
     expect(icsFileName(plan([]))).toBe("plan.ics");

@@ -4,11 +4,12 @@
 
 use crate::filters::network::{NetworkFilterMask, NetworkFilterMaskHelper};
 
-use regex::{
-    Regex, bytes::Regex as BytesRegex, bytes::RegexBuilder as BytesRegexBuilder,
-    bytes::RegexSet as BytesRegexSet, bytes::RegexSetBuilder as BytesRegexSetBuilder,
-};
-use std::sync::LazyLock;
+use regex::Regex;
+use regex_automata::MatchKind;
+use regex_automata::meta::{self, BuildError, Regex as MetaRegex};
+use regex_automata::nfa::thompson::WhichCaptures;
+use regex_automata::util::syntax;
+use std::sync::{Arc, LazyLock};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -67,10 +68,10 @@ pub struct RegexDebugEntry {
 
 #[derive(Debug, Clone)]
 pub enum CompiledRegex {
-    Compiled(BytesRegex),
-    CompiledSet(BytesRegexSet),
+    Compiled(MetaRegex, Arc<str>),
+    CompiledSet(MetaRegex, Arc<[String]>),
     MatchAll,
-    RegexParsingError(regex::Error),
+    RegexParsingError(BuildError),
 }
 
 impl CompiledRegex {
@@ -78,10 +79,7 @@ impl CompiledRegex {
         match &self {
             CompiledRegex::MatchAll => true, // simple case for matching everything, e.g. for empty filter
             CompiledRegex::RegexParsingError(_e) => false, // no match if regex didn't even compile
-            CompiledRegex::Compiled(r) => r.is_match(pattern.as_bytes()),
-            CompiledRegex::CompiledSet(r) => {
-                // let matches: Vec<_> = r.matches(pattern).into_iter().collect();
-                // println!("Matching {} against RegexSet: {:?}", pattern, matches);
+            CompiledRegex::Compiled(r, _) | CompiledRegex::CompiledSet(r, _) => {
                 r.is_match(pattern.as_bytes())
             }
         }
@@ -93,8 +91,8 @@ impl fmt::Display for CompiledRegex {
         match &self {
             CompiledRegex::MatchAll => write!(f, ".*"), // simple case for matching everything, e.g. for empty filter
             CompiledRegex::RegexParsingError(_e) => write!(f, "ERROR"), // no match if regex didn't even compile
-            CompiledRegex::Compiled(r) => write!(f, "{}", r.as_str()),
-            CompiledRegex::CompiledSet(r) => write!(f, "{}", r.patterns().join(" | ")),
+            CompiledRegex::Compiled(_, pattern) => write!(f, "{pattern}"),
+            CompiledRegex::CompiledSet(_, patterns) => write!(f, "{}", patterns.join(" | ")),
         }
     }
 }
@@ -131,6 +129,7 @@ type RandomState = std::hash::BuildHasherDefault<seahash::SeaHasher>;
 pub struct RegexManager {
     map: HashMap<u64, RegexEntry, RandomState>,
     compiled_regex_count: usize,
+    omitted_regex_count: usize,
     prepared_pattern_bytes: usize,
     largest_prepared_regex_patterns: usize,
     largest_prepared_regex_pattern_bytes: usize,
@@ -152,6 +151,7 @@ impl Default for RegexManager {
         Self {
             map: Default::default(),
             compiled_regex_count: 0,
+            omitted_regex_count: 0,
             prepared_pattern_bytes: 0,
             largest_prepared_regex_patterns: 0,
             largest_prepared_regex_pattern_bytes: 0,
@@ -194,6 +194,37 @@ where
         mask.is_complete_regex(),
         size_limit_bytes,
         dfa_size_limit_bytes,
+    )
+}
+
+/// Whether a rule's regex compiles within these limits exactly as runtime
+/// preparation compiles it, so admission can leave out a rule that would
+/// otherwise fail the whole matcher. A rule that needs no regex compiles.
+pub fn regex_compiles_within(
+    mask: NetworkFilterMask,
+    patterns: &[&str],
+    size_limit_bytes: usize,
+    dfa_size_limit_bytes: usize,
+) -> bool {
+    if !mask.is_regex() && !mask.is_complete_regex() {
+        return true;
+    }
+    // Compilation slices a complete regex's slashes off unchecked.
+    if mask.is_complete_regex()
+        && patterns.iter().any(|pattern| {
+            pattern.len() < 2 || !pattern.starts_with('/') || !pattern.ends_with('/')
+        })
+    {
+        return false;
+    }
+    !matches!(
+        make_regexp_bounded(
+            mask,
+            patterns.iter().copied(),
+            size_limit_bytes,
+            dfa_size_limit_bytes
+        ),
+        CompiledRegex::RegexParsingError(_)
     )
 }
 
@@ -276,29 +307,132 @@ where
     if escaped_patterns.is_empty() {
         CompiledRegex::MatchAll
     } else if escaped_patterns.len() == 1 {
-        let pattern = &escaped_patterns[0];
-        match BytesRegexBuilder::new(pattern)
-            .unicode(false)
-            .size_limit(size_limit_bytes)
-            .dfa_size_limit(dfa_size_limit_bytes)
-            .build()
+        let pattern: Arc<str> = Arc::from(escaped_patterns.swap_remove(0));
+        match prepared_builder(
+            MatchKind::LeftmostFirst,
+            size_limit_bytes,
+            dfa_size_limit_bytes,
+        )
+        .build(&pattern)
         {
-            Ok(compiled) => CompiledRegex::Compiled(compiled),
-            Err(e) => {
-                // println!("Regex parsing failed ({:?})", e);
-                CompiledRegex::RegexParsingError(e)
-            }
-        }
-    } else {
-        match BytesRegexSetBuilder::new(escaped_patterns)
-            .unicode(false)
-            .size_limit(size_limit_bytes)
-            .dfa_size_limit(dfa_size_limit_bytes)
-            .build()
-        {
-            Ok(compiled) => CompiledRegex::CompiledSet(compiled),
+            Ok(compiled) => CompiledRegex::Compiled(compiled, pattern),
             Err(e) => CompiledRegex::RegexParsingError(e),
         }
+    } else {
+        let patterns: Arc<[String]> = Arc::from(escaped_patterns);
+        match prepared_builder(MatchKind::All, size_limit_bytes, dfa_size_limit_bytes)
+            .build_many(&patterns)
+        {
+            Ok(compiled) => CompiledRegex::CompiledSet(compiled, patterns),
+            Err(e) => CompiledRegex::RegexParsingError(e),
+        }
+    }
+}
+
+/// The engine `regex::bytes` builds, but never with a fully compiled DFA or
+/// capture slots: `regex` adds a full DFA to every small regex whenever any
+/// crate enables `regex-automata/dfa-build`, which with the shipped lists
+/// costs megabytes. The lazy DFA matches the same rules and keeps only the
+/// states lookups reach.
+fn prepared_config(
+    kind: MatchKind,
+    size_limit_bytes: usize,
+    dfa_size_limit_bytes: usize,
+) -> meta::Config {
+    meta::Config::new()
+        .match_kind(kind)
+        .nfa_size_limit(Some(size_limit_bytes))
+        .hybrid_cache_capacity(dfa_size_limit_bytes)
+        .utf8_empty(false)
+        .dfa(false)
+        .which_captures(WhichCaptures::None)
+}
+
+fn prepared_builder(
+    kind: MatchKind,
+    size_limit_bytes: usize,
+    dfa_size_limit_bytes: usize,
+) -> meta::Builder {
+    let mut builder = meta::Builder::new();
+    builder
+        .configure(prepared_config(
+            kind,
+            size_limit_bytes,
+            dfa_size_limit_bytes,
+        ))
+        .syntax(syntax::Config::new().unicode(false).utf8(false));
+    builder
+}
+
+#[cfg(test)]
+impl CompiledRegex {
+    /// Already escaped patterns compiled as one set, as preparation compiles them.
+    pub(crate) fn prepared_set(patterns: &[&str]) -> Self {
+        const SIZE_LIMIT: usize = 10 * 1024 * 1024;
+        const DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+        let patterns: Arc<[String]> = patterns.iter().map(|p| p.to_string()).collect();
+        let compiled = prepared_builder(MatchKind::All, SIZE_LIMIT, DFA_SIZE_LIMIT)
+            .build_many(&patterns)
+            .expect("test patterns compile");
+        CompiledRegex::CompiledSet(compiled, patterns)
+    }
+}
+
+#[cfg(test)]
+mod prepared_engine_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_regexes_never_build_a_full_dfa_or_capture_slots() {
+        let compile = |patterns: &[&str]| {
+            make_regexp_bounded(
+                NetworkFilterMask::IS_REGEX,
+                patterns.iter().copied(),
+                1024 * 1024,
+                1024 * 1024,
+            )
+        };
+        let CompiledRegex::Compiled(single, _) = compile(&["/ads/*.js^"]) else {
+            panic!("one pattern compiles to one regex");
+        };
+        let CompiledRegex::CompiledSet(set, _) = compile(&["/ads/*.js^", "/track/*^"]) else {
+            panic!("several patterns compile to one set");
+        };
+        for (regex, kind) in [(single, MatchKind::LeftmostFirst), (set, MatchKind::All)] {
+            let config = regex.get_config();
+            assert!(!config.get_dfa());
+            assert!(config.get_hybrid());
+            assert!(matches!(config.get_which_captures(), WhichCaptures::None));
+            assert_eq!(config.get_match_kind(), kind);
+            assert_eq!(config.get_nfa_size_limit(), Some(1024 * 1024));
+            assert_eq!(config.get_hybrid_cache_capacity(), 1024 * 1024);
+            assert_eq!(regex.group_info().all_group_len(), 0);
+        }
+    }
+
+    #[test]
+    fn prepared_regexes_match_as_regex_bytes_does() {
+        let compiled = make_regexp_bounded(
+            NetworkFilterMask::IS_REGEX | NetworkFilterMask::IS_LEFT_ANCHOR,
+            ["/ads/*.js^"].into_iter(),
+            1024 * 1024,
+            1024 * 1024,
+        );
+        assert!(matches!(compiled, CompiledRegex::Compiled(..)));
+        assert!(compiled.is_match("/ads/banner.js?x"));
+        assert!(compiled.is_match("/ads/banner.js"));
+        assert!(!compiled.is_match("/ads/banner.json"));
+        assert!(!compiled.is_match("x/ads/banner.js"));
+        // Bytes syntax: non-UTF-8 classes compile, as they do with regex::bytes.
+        assert!(!matches!(
+            make_regexp_bounded(
+                NetworkFilterMask::IS_COMPLETE_REGEX,
+                [r"/(?-u:\xff)/"].into_iter(),
+                1024 * 1024,
+                1024 * 1024
+            ),
+            CompiledRegex::RegexParsingError(_)
+        ));
     }
 }
 
@@ -323,8 +457,13 @@ impl RegexManager {
             return Ok(());
         }
         let regex = make_regexp_bounded(mask, filters, size_limit_bytes, dfa_size_limit_bytes);
+        // A regex past the limits, often several rules the optimizer merged,
+        // is kept as one that never matches and counted, so it cannot fail
+        // the whole matcher; frozen lookups still find it prepared.
         if matches!(regex, CompiledRegex::RegexParsingError(_)) {
-            return Err(());
+            self.omitted_regex_count += 1;
+        } else {
+            self.compiled_regex_count += 1;
         }
         self.map.insert(
             key,
@@ -334,7 +473,6 @@ impl RegexManager {
                 usage_count: 0,
             },
         );
-        self.compiled_regex_count += 1;
         Ok(())
     }
 
@@ -349,6 +487,10 @@ impl RegexManager {
 
     pub(crate) fn compiled_regex_count(&self) -> usize {
         self.compiled_regex_count
+    }
+
+    pub(crate) fn omitted_regex_count(&self) -> usize {
+        self.omitted_regex_count
     }
 
     pub(crate) fn prepared_pattern_bytes(&self) -> usize {

@@ -54,15 +54,18 @@ Its security-relevant deltas currently enforce these invariants:
   the adapter prevents a second attacker-sized Rust allocation and stops body
   streaming at the limit. `native_admission.rs` additionally allows at most 32
   asynchronous custom-protocol requests per WebView (per verified WebKitGTK
-  context on Linux); on macOS the bound is per scheme of each WebView, so IPC
-  and assets never hold each other back. Every accepted request carries a
-  unique non-cloneable RAII permit through response, cancellation, timeout, or
-  teardown. On macOS a request past the bound waits, in arrival order within
-  its scheme, in a main-thread wait list of at most 512 tasks and starts as a
-  permit is released; a stopped task leaves the list, and teardown clears it.
-  Only a request past both bounds (and, on other platforms, past the in-flight
-  bound) completes synchronously with an empty 503 response and never acquires
-  a native deferral. Teardown seals and drains accounting, and late permit drops
+  context on Linux); on macOS and Windows the bound is per scheme of each
+  WebView, so IPC and assets never hold each other back. Every accepted request
+  carries a unique non-cloneable RAII permit through response, cancellation,
+  timeout, or teardown. On macOS and Windows a request past the bound waits, in
+  arrival order within its scheme, in a main-thread wait list of at most 512
+  requests and starts as a permit is released; a stopped macOS task leaves the
+  list, and teardown clears it. On Windows a waiting request holds its WebView2
+  deferral, and teardown or a full list completes it exactly once with an empty
+  503. Only a request past both bounds (and, on Linux, past the in-flight bound)
+  is refused with an empty 503 response; on macOS and Linux the refusal is
+  synchronous and acquires no native deferral. Teardown seals and drains
+  accounting, and late permit drops
   cannot underflow or reopen it. Zephium's page-evaluation integration accepts
   primitive-only contracts: fixed-size discard and favicon results and one
   explicitly bounded HTML string. Page objects and attacker-controlled object
@@ -80,10 +83,15 @@ Its security-relevant deltas currently enforce these invariants:
   client-certificate event interfaces and registers deny handlers before the
   initial navigation. Basic authentication is cancelled; certificate
   selection is cancelled and marked handled, so neither can fall back to an
-  unowned native dialog. It also requires `ICoreWebView2_25` and cancels plus
-  suppresses `SaveAsUIShowing`, closing the independent native Save As surface
-  that context-menu, accelerator, PDF-toolbar, and download policy do not
-  comprehensively cover.
+  unowned native dialog. It also requires `ICoreWebView2_25` and registers a
+  `SaveAsUIShowing` gate. Browser-initiated document saves retain the default
+  dialog while their document gate is active. A resource save is admitted only
+  when download policy permits it, native context-menu and download handlers
+  are installed, and `native_resource_save_handler` accepts it; the default
+  dialog is suppressed and the native download broker owns its picker and path.
+  Every request is cancelled before configuring dialog suppression, and only
+  an admitted save clears cancellation afterward. A suppression failure or
+  resource handler panic therefore leaves the request denied.
 - WebView2 and WebKitGTK page-driven close requests default to a no-op.
   Destroying Wry's child container/widget is an explicit builder policy for
   embedders that can also reconcile native and logical-view ownership; a page
@@ -111,7 +119,9 @@ Its security-relevant deltas currently enforce these invariants:
   buffer before budget arithmetic or slicing. Its trusted print method calls
   `ICoreWebView2_16::ShowPrintUI` directly instead of evaluating the same
   page-controlled scripted-print primitives an embedder may deny at document
-  creation. Disabling browser accelerator keys is a construction postcondition:
+  creation. WKWebView printing works on a copy of the shared `NSPrintInfo` and
+  keeps the system margins unless the caller sets some, so printing never
+  rewrites the user's page setup. Disabling browser accelerator keys is a construction postcondition:
   the fork requires `ICoreWebView2Settings3`, applies the setting, and reads it
   back before an untrusted page can load.
 - Desktop navigation callbacks expose one opaque per-WebView identity across
@@ -222,6 +232,22 @@ SaveAsUIShowing cancellation registration because document Save As is distinct
 from DownloadStarting. Privileged/agent defaults remain unchanged. See the
 [application qualification record](../../docs/native-links-implementation.md).
 
+### Navigation source frame and context-menu download marker (macOS, 2026-11-05)
+
+`AppleNavigationAction.source` carries `AppleNavigationSource`: whether the
+action's `sourceFrame` is the main frame, and that frame's security-origin
+scheme, host and port. Scheme and host are read with `ORIGIN_PART_LIMIT`
+(512 UTF-16 units / UTF-8 bytes); one that does not fit is reported empty, never
+truncated, so the host can tell a frame it cannot name from the main frame and
+refuse it. `source` is `None` when WebKit names no source frame. The struct
+holds strings, so `AppleNavigationAction` is `Clone` and no longer `Copy`.
+
+`context_menu_download_in_progress()` is true while the native download handler
+runs for a download started from WebKit's own context menu
+(`_webView:contextMenuDidCreateDownload:`), marked by a scoped thread-local
+guard that restores the previous value on drop. The host uses it to tell a
+download the person chose from one a page started.
+
 ### Page dialogs and failure categories (macOS)
 
 `alert`, `confirm` and `prompt` show as an `NSAlert` sheet on the view's window,
@@ -229,7 +255,11 @@ titled by the initiating frame's security-origin host ("example.com says", or
 "An embedded page at … says"). A hidden view, or a window that already shows a
 sheet, gets the dismissed answer, as upstream's no-UI default did. From the
 second dialog within ten seconds the sheet offers to silence the page until its
-URL changes. Messages are bounded to 1,024 characters.
+URL changes. Messages are bounded to 1,024 characters. Message and prompt-default native
+strings are admitted at 2,048 UTF-16 units / 4,096 UTF-8 bytes before a Rust
+copy; oversized values dismiss once. Origin titles, document URLs and prompt
+answers also use native preallocation bounds. Native WebKit may already own
+its input NSString; this prevents duplicating an attacker-sized value in Rust.
 
 `navigation_failure_handler` reduces a failed main-frame navigation's
 `NSURLError` code to a category the host can explain (offline, host not found,
@@ -239,17 +269,106 @@ On Windows the same handler is fed from `NavigationCompleted`'s
 `WebErrorStatus` (cancellation and download conversion stay silent). The
 `ContentLoading` of WebView2's built-in error page is hidden like a commit but
 not reported as one, so the failure lands on the document the person asked for
-and the host can show its own explanation.
+and the host can show its own explanation. The handler's `FailedDocument` says
+when that error document replaced the shown page, with the address from Wry's
+in-flight navigation record.
+
+On macOS, `WebKitErrorDomain` 104 (a content rule blocked the frame load) maps
+to `NavigationFailure::Blocked`, and its `FailedDocument` is `Refused { url }`:
+the address the error's `NSURLErrorFailingURLErrorKey` names, bounded like
+every page URL. The view's own URL is still the previous page at that point,
+so the host must not name the refusal by it. Other macOS failures report
+`Kept`.
+
+### macOS https-first navigation policy (2026-11-05)
+
+`AppleHttpsUpgrade` and the builder's `with_https_upgrade` set WebKit's
+`WKWebpagePreferences.preferredHTTPSNavigationPolicy` on the view's default
+page preferences: `AutomaticFallback` tries plain http addresses over https and
+falls back to http when that fails; `UserMediatedFallback` asks first. The
+setter is called only where the preferences respond to it (macOS 15.2 and
+later); earlier systems keep WebKit's own upgrades of known https hosts. Other
+platforms ignore the attribute. Without the builder call nothing changes.
+
+### Independent Windows controller initialization (2026-10-27)
+
+`with_controller_initialization_hook` configures the retained controller before
+WebView initialization and navigation without changing browser-extension
+options. The separate extension startup gate retains its original admission
+role and runs first when present. Either failure follows owned controller cleanup.
+Zephium applies reputation settings through this hook for extension-disabled
+ordinary, private and agent controllers as well as admitted extension contexts.
+Portable callback tests execute OFF-preserving configuration and gate refusal;
+Windows builder tests cover the actual enablement field. The Windows-only native
+`native_controller_hook_applies_reputation_with_extensions_disabled` fixture
+constructs default/private/agent-shaped controllers with requested extensions OFF,
+verifies actual Settings8 reputation readback, and refuses an inert local extension
+install. An extension-enabled control must install that same fixture successfully.
+The resulting environment has no enablement getter, so this native control
+checks admission in addition to the builder option. It requires
+an unmanaged Windows desktop/WebView2 runtime; native execution remains pending here.
+Native Windows/WebView2 execution remains required; cross-target lint with an empty C-object shim is not
+native SDK or device evidence. The upstream revision and dependency graph are
+unchanged, so the application and standalone fork locks retain their versions.
+
+The required standalone formatter exposed pre-existing WebKit whitespace drift;
+only those formatter changes are normalized. The existing eight-argument
+`attach_handlers` registration boundary carries a scoped, Rust 1.77-compatible
+lint allowance with its retained-owner rationale in a comment. It does not use
+`#[expect]` or lint-reason syntax, which require Rust 1.81. Its signature/behavior
+is unchanged and workspace and standalone Clippy retain `-D warnings`.
+
+### Native class bundle identity compatibility (2026-10-27)
+
+The class-origin gate compares bundle pointers as numeric identities. It uses
+a pointer-to-`usize` cast, preserving that comparison under the inherited Rust
+1.77 manifest floor; `pointer.addr()` requires Rust 1.84. No pointer is recreated
+or dereferenced from the integer, and the admission policy is unchanged.
+The dependency graph and locked upstream versions remain unchanged. Strict
+standalone validation uses the manifest's default MSRV with no lint overrides.
+
+### Returning media to its page (macOS)
+
+`with_media_return_handler` answers the private `WKUIDelegatePrivate` selector
+`_webViewFullscreenMayReturnToInline:`. The picture-in-picture window's return
+button sends it, and WebKit then waits for the page to become visible before
+it takes the video back, so without a handler that brings the page on screen
+the button does nothing for a background tab. A missing handler keeps
+upstream's no-op; a panic is contained. Like the other private selectors it
+must be reviewed during upstream rebases.
+
+- Programmatic WebKit navigation records retain their `WKNavigation` objects
+  until terminal settlement or proven policy refusal is superseded. A refused
+  attempt that never starts releases its registry slot before a later owned
+  load. Unstarted attempts without a policy refusal keep their attribution so
+  overlapping and reentrant loads cannot exchange URLs. Action callbacks have
+  no navigation identity: URL correlation is used only when unambiguous; nested
+  or same-address ambiguity remains conservatively retained.
+
+- macOS script-dialog suppression is scoped to a committed main-frame
+  document generation. Same-document history/hash changes do not reopen
+  dialogs. A later document clears suppression; an old sheet's completion
+  cannot silence its replacement. The fork explicitly enables AppKit NSCell
+  and block2 APIs used by the suppression checkbox and sheet completion,
+  including in its independent dependency graph.
+
+- Native page navigation URLs use a 256 KiB allocation ceiling in both UTF-16
+  units and UTF-8 bytes, synchronized with Zephium's domain navigation bound.
+  Unreadable/oversized native main-frame and new-window addresses report a
+  metadata-free refusal instead of silently disappearing. WebKit identifies
+  child-frame refusals separately; these never manufacture a whole-tab
+  navigation failure or a partial URL/native identity.
 
 ### Held main-frame navigations (macOS)
 
-`with_main_frame_navigation_hold` lets the embedder keep WebKit's policy answer
-for an admitted main-frame navigation and give it later. It runs after the
-policy callback and the attempt observer, so it can only delay an allowed
-navigation, never admit one; denied, sub-frame and target-less actions are
-unaffected. Returning `true` hands the embedder a `resume` that answers Allow,
-which it must eventually call; `false` drops `resume` and the navigation
-proceeds at once. The view, its navigation epoch and its layout are created as
-usual, and WebKit only starts the page when answered. Zephium uses it to hold
-pages while the profile's extensions load at launch, bounded to 1.5 s, so
-restored tabs receive extensions' content scripts.
+`with_main_frame_navigation_hold` can delay an admitted main-frame navigation
+after the host policy and attempt observer run. The view's delegate owns one
+pending decision, tied to that exact action. The embedder receives a weak,
+one-shot handle and must release it after its load completes or times out.
+A newer main-frame attempt, stop, renderer exit or view teardown cancels the
+old decision. Releasing a cancelled handle has no effect. Denied, subframe
+and target-less actions do not enter the hold.
+
+Zephium's shell releases the blocker's startup hold before dispatching the
+first view or navigation. WebKit then waits for in-flight profile extensions,
+with a deadline of 1.5 s after the latest load began.

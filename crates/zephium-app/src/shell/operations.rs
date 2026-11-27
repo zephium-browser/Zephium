@@ -8,6 +8,8 @@ impl Shell {
             Command::StopMediaCapture { item, navigation } => {
                 self.operation_stop_media_capture(item, navigation)
             }
+            Command::SetTabMuted { id, muted } => self.operation_set_tab_muted(id, muted),
+            Command::MediaPlayer { id, action } => self.operation_media_player(id, action),
             Command::ShowBrowserPage(page) => self.operation_show_browser_page(page),
             Command::WorkPaneShow { target, rect } => self.operation_work_pane_show(target, rect),
             Command::WorkPaneHide => self.operation_work_pane_hide(),
@@ -39,11 +41,24 @@ impl Shell {
             } => self.operation_set_profile_avatar(profile, avatar, photo),
             Command::Navigate { id, input } => self.operation_navigate(id, input),
             Command::Reload(id) => self.operation_reload(id),
-            Command::AnswerPageRequest { id, decision } => {
-                self.operation_answer_page_request(id, decision)
-            }
+            Command::AnswerPageRequest {
+                id,
+                request,
+                decision,
+            } => self.operation_answer_page_request(id, request, decision),
+            Command::AnswerHttpAuth {
+                id,
+                request,
+                credentials,
+            } => self.operation_answer_http_auth(id, request, credentials),
+            Command::ContinuePastCertificate(id) => self.operation_continue_past_certificate(id),
+            Command::ContinuePastBlock { id, url } => self.operation_continue_past_block(id, &url),
+            Command::LeaveBlockedPage(id) => self.operation_leave_blocked_page(id),
             Command::GoBack(id) => self.operation_history(id, false),
             Command::GoForward(id) => self.operation_history(id, true),
+            Command::GoToHistoryEntry { id, offset, url } => {
+                self.operation_go_to_history_entry(id, offset, url)
+            }
             Command::SplitWith { other, axis } => self.operation_split(other, axis),
             Command::Unsplit => self.operation_unsplit(),
             Command::LeaveSplit(id) => self.operation_leave_split(id),
@@ -57,13 +72,16 @@ impl Shell {
                 action,
                 background,
                 replace,
-            } => self.operation_run_search_action(*context, action, background, replace),
+                new_mini,
+            } => self.operation_run_search_action(*context, action, background, replace, new_mini),
             Command::InvokeExtensionAction {
                 runtime,
                 revision,
                 anchor,
-            } => self.operation_invoke_extension_action(runtime, revision, anchor),
+                menu,
+            } => self.operation_invoke_extension_action(runtime, revision, anchor, menu),
             Command::OpenUrl { input, new_tab } => self.operation_open_url(input, new_tab),
+            Command::Mini { window, action } => self.mini_action(window, action),
             Command::SetAppSetting { key, value } => self.operation_set_app_setting(key, value),
             #[cfg(feature = "work-planning")]
             Command::SetWorkScreenshots(change) => self.operation_set_work_screenshots(change),
@@ -128,7 +146,7 @@ impl Shell {
         };
         let placement = if essential {
             Placement::Favorites {
-                profile: window.profile,
+                space: window.space,
             }
         } else {
             Placement::Space {
@@ -162,6 +180,17 @@ impl Shell {
     }
 
     fn operation_duplicate(&mut self, id: ItemId) -> OperationDisposition {
+        match self.duplicate_tab(id) {
+            Ok((_, native)) => mutation_result(native),
+            Err(disposition) => disposition,
+        }
+    }
+
+    /// Opens a copy of `id`'s page right after it in the focused space.
+    pub(super) fn duplicate_tab(
+        &mut self,
+        id: ItemId,
+    ) -> Result<(ItemId, NativeWork), OperationDisposition> {
         let Some(url) = self
             .items
             .tab(id)
@@ -169,16 +198,22 @@ impl Shell {
             .and_then(|tab| tab.url.as_ref())
             .map(ToString::to_string)
         else {
-            return operation_result(OperationOutcome::NoOp, OperationReason::InvalidInput);
+            return Err(operation_result(
+                OperationOutcome::NoOp,
+                OperationReason::InvalidInput,
+            ));
         };
         let Some(space) = self.windows.focused().map(|window| window.space) else {
-            return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
+            return Err(operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::NoFocusedWindow,
+            ));
         };
         let Some((copy, mut effects)) = self.open_tab_with_id() else {
-            return operation_result(
+            return Err(operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
-            );
+            ));
         };
         let today = Placement::Space {
             space,
@@ -190,7 +225,7 @@ impl Shell {
             self.items.move_tab_to_root(copy, today, before);
         }
         effects.extend(self.items.navigate(copy, &url));
-        mutation_result(self.commit(effects))
+        Ok((copy, self.commit(effects)))
     }
 
     /// Closes the space's open tabs other than `id`, or only those after it.
@@ -250,8 +285,9 @@ impl Shell {
         runtime: zephium_core::extensions::ExtensionRuntimeInstance,
         revision: zephium_core::extensions::ExtensionActionRevision,
         anchor: zephium_core::extensions::ExtensionPopupAnchor,
+        menu: Option<std::sync::Arc<[zephium_core::extensions::ExtensionButtonMenuRow]>>,
     ) -> OperationDisposition {
-        match self.invoke_extension_action(runtime, revision, anchor) {
+        match self.dispatch_extension_action(runtime, revision, anchor, menu) {
             Ok(_) => operation_result(
                 OperationOutcome::Deferred,
                 OperationReason::NativeWorkPending,
@@ -300,7 +336,7 @@ impl Shell {
         if self.windows.focused().is_none() {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         }
-        let Some((_id, effects)) = self.open_tab_with_id() else {
+        let Some((_id, effects)) = self.open_new_tab_with_id() else {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::ItemLimitReached,
@@ -318,8 +354,8 @@ impl Shell {
     ) -> OperationDisposition {
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -386,24 +422,51 @@ impl Shell {
             let _ = self.engine.find(previous, None);
             self.find_target = None;
         }
-        let (Some(page), Some(request)) = (page, request) else {
+        let Some(request) = request else {
             return;
         };
-        if self.engine.find(page, Some(request))
+        let Some(page) = page else {
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
+            return;
+        };
+        if self.engine.find(page, Some(request.clone()))
             != zephium_core::ports::engine::NativeDispatch::Rejected
         {
             self.find_target = Some(page);
+        } else {
+            self.find_target = None;
+            (self.emit)(Projection::FindResult(zephium_ipc::FindResultView {
+                query: request.query,
+                matches: 0,
+                active: None,
+            }));
         }
     }
 
     /// Opens what another application handed over, each in its own tab and
-    /// the last one in front, the way a clicked link opens elsewhere.
+    /// the last one in front, the way a clicked link opens elsewhere. With
+    /// mini windows chosen, each opens in one and the main window is left
+    /// as it was; a link no mini window can take still opens as a tab.
     pub(super) fn open_external(&mut self, urls: Vec<String>) {
         let limit = zephium_core::navigation::MAX_EXTERNAL_TARGETS;
         if !self.bootstrapped {
             let room = limit.saturating_sub(self.pending_external.len());
             self.pending_external.extend(urls.into_iter().take(room));
             return;
+        }
+        let mut urls: Vec<String> = urls.into_iter().take(limit).collect();
+        if self.external_links_open_mini() {
+            urls.retain(|url| {
+                zephium_core::navigation::external_target(url)
+                    .is_some_and(|url| !self.open_mini(url.to_string()))
+            });
+            if urls.is_empty() {
+                return;
+            }
         }
         // Another application's link is not a private page: it opens with
         // the regular tabs, the way a private window leaves it to another.
@@ -420,18 +483,54 @@ impl Shell {
             .tab_preferences
             .external_position
             .unwrap_or(self.tab_preferences.new_position);
-        for url in urls.into_iter().take(limit) {
+        let mut opened = false;
+        for url in urls {
             if let Some(url) = zephium_core::navigation::external_target(&url) {
                 let _ = self.open_url_in_new_tab_at(url.to_string(), position);
+                opened = true;
             }
+        }
+        if opened {
+            (self.emit)(Projection::ExternalTabsOpened);
+        }
+    }
+
+    /// Opens the startup list. The tab launch put in front is the first
+    /// page's, the rest follow it, and the first stays in front.
+    pub(super) fn open_startup_pages(&mut self) {
+        let mut pages = self.tab_preferences.startup_pages.clone().into_iter();
+        let blank = self
+            .windows
+            .focused()
+            .and_then(|window| window.active)
+            .filter(|id| self.items.tab(*id).is_some_and(|tab| tab.url.is_none()));
+        let Some(first) = pages.next() else {
+            return;
+        };
+        let front = match blank {
+            Some(id) => {
+                let effects = self.items.navigate(id, &first);
+                let _ = self.commit(effects);
+                Some(id)
+            }
+            None => {
+                let _ = self.open_url_in_new_tab_at(first, tabs::NewTabPosition::End);
+                self.windows.focused().and_then(|window| window.active)
+            }
+        };
+        for page in pages {
+            let _ = self.open_url_in_new_tab_at(page, tabs::NewTabPosition::End);
+        }
+        if let Some(front) = front {
+            let _ = self.operation_activate(front);
         }
     }
 
     pub(super) fn operation_open_url_background(&mut self, input: String) -> OperationDisposition {
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -515,6 +614,9 @@ impl Shell {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
+        if self.is_lone_new_tab(id) {
+            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
+        }
         if !self.browser_return_ready
             && self
                 .windows
@@ -577,8 +679,8 @@ impl Shell {
         }
         let Some(input) = self
             .search
-            .engine
-            .configured_classify(&input, &self.search.custom_url)
+            .shortcuts
+            .resolve(&input, self.search.engine, &self.search.custom_url)
             .map(|url| url.to_string())
         else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
@@ -619,6 +721,10 @@ impl Shell {
     }
 
     pub(super) fn operation_reload(&mut self, id: ItemId) -> OperationDisposition {
+        self.operation_reload_with(id, false)
+    }
+
+    fn operation_reload_with(&mut self, id: ItemId, ignoring_cache: bool) -> OperationDisposition {
         if !self.item_in_focused_scope(id) {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         }
@@ -647,7 +753,11 @@ impl Shell {
             return mutation_result(self.commit(effects));
         }
         let mut native = NativeWork::default();
-        native.record(self.engine.reload(id));
+        native.record(if ignoring_cache {
+            self.engine.hard_reload(id)
+        } else {
+            self.engine.reload(id)
+        });
         mutation_result(native)
     }
 
@@ -824,11 +934,28 @@ impl Shell {
             };
             return self.operation_set_work_screenshots(change);
         }
+        let value = if key == "search.shortcuts" && !value.is_empty() {
+            let Some(filtered) = zephium_core::search::ShortcutRegistry::from_setting(&value)
+                .and_then(|registry| registry.to_setting())
+            else {
+                return operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput);
+            };
+            filtered
+        } else {
+            value
+        };
         if !self.store.set_app_setting(key.clone(), value.clone()) {
             return operation_result(
                 OperationOutcome::Rejected,
                 OperationReason::StoreAdmissionRejected,
             );
+        }
+        if key == "search.shortcuts" {
+            self.search.shortcuts =
+                zephium_core::search::ShortcutRegistry::from_setting(&value).unwrap_or_default();
+            self.search.pending = None;
+            self.search.context = None;
+            self.search.results.clear();
         }
         if key == "search.custom-url" {
             self.search.custom_url = value.clone();
@@ -841,11 +968,21 @@ impl Shell {
             self.search.include_history = value == "true";
         }
         self.tab_preferences.apply(&key, &value);
+        if self.proxy.apply(&key, &value) {
+            let server = self.proxy.server();
+            let enabled = server.is_some();
+            self.engine.set_proxy(server);
+            self.proxy.report();
+            if enabled {
+                self.stop_network_favicon_probes();
+            }
+        }
         if key == "tabs.automatic-pip" && value == "false" {
             self.engine.cancel_automatic_pip();
         }
         self.apply_time_setting(&key, &value);
         self.apply_performance_setting(&key, &value);
+        self.apply_zoom_setting(&key, &value);
         // This projection is downstream of truthful store-queue admission.
         // The desktop composition root applies native theme state from this
         // signal, never optimistically from the IPC request itself.
@@ -908,7 +1045,19 @@ impl Shell {
         match id {
             "tab.new" => self.operation_open(),
             "window.newPrivate" => self.operation_enter_private(),
+            // The desktop opens the launcher for a mini window instead; this
+            // runs only while the private window is in front, whose pages
+            // never leave it, so the quick page is a private tab.
+            "window.newMini" => self.operation_open(),
+            // Keys a mini window answers; the desktop hands them to the one
+            // in front, and with none in front they do nothing.
+            "mini.openInMain" | "mini.keepOnTop" => {
+                operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged)
+            }
             "window.closePrivate" => self.operation_close_private(),
+            "window.togglePrivate" => self.operation_toggle_private(),
+            "window.showRegular" => self.operation_show_regular(),
+            "window.showPrivate" => self.operation_show_private(),
             "tab.close" if in_work => self.operation_work_pane_hide(),
             "tab.close" if window_page.is_some() => self.operation_show_browser_page(None),
             "tab.close" => active.map_or_else(
@@ -920,7 +1069,17 @@ impl Shell {
                 || operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
                 |id| self.operation_activate(id),
             ),
-            "tab.reopen" => self.operation_reopen_closed_tab(),
+            "tab.reopen" => self.operation_reopen_closed_tab(None),
+            _ if id.starts_with("tab.reopen=") => {
+                match zephium_core::ids::ClosedSessionId::parse(&id["tab.reopen=".len()..]) {
+                    Some(named) => self.operation_reopen_closed_tab(Some(named)),
+                    None => {
+                        operation_result(OperationOutcome::Rejected, OperationReason::InvalidInput)
+                    }
+                }
+            }
+            "tab.recent.next" => self.operation_recent_tab(false),
+            "tab.recent.previous" => self.operation_recent_tab(true),
             "tab.next" | "tab.below" => self.operation_cycle_tab(1),
             "tab.previous" | "tab.above" => self.operation_cycle_tab(-1),
             "nav.back" => active.map_or_else(
@@ -935,6 +1094,18 @@ impl Shell {
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| self.operation_reload(id),
             ),
+            "nav.hardReload" => active.map_or_else(
+                || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
+                |id| self.operation_reload_with(id, true),
+            ),
+            "nav.home" => match (active, self.tab_preferences.home.clone()) {
+                (Some(id), Some(home)) => self.operation_navigate(id, home),
+                (None, Some(home)) => {
+                    let position = self.tab_preferences.new_position;
+                    self.open_url_in_new_tab_at(home, position)
+                }
+                (_, None) => self.operation_open(),
+            },
             "nav.stop" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| {
@@ -945,6 +1116,8 @@ impl Shell {
             ),
             "space.next" => self.operation_space(crate::SpaceCommand::Step(1)),
             "space.previous" => self.operation_space(crate::SpaceCommand::Step(-1)),
+            "profile.next" => self.operation_step_profile(true),
+            "profile.previous" => self.operation_step_profile(false),
             id if id.starts_with("space.select.") => id["space.select.".len()..]
                 .parse::<usize>()
                 .ok()
@@ -981,6 +1154,9 @@ impl Shell {
                     mutation_result(native)
                 },
             ),
+            "page.viewSource" => self.operation_view_source(),
+            "page.save" => self.operation_save_page(),
+            "page.autofillPassword" => self.operation_autofill_password(),
             "page.devtools" => active.map_or_else(
                 || operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow),
                 |id| {
@@ -989,9 +1165,9 @@ impl Shell {
                     mutation_result(native)
                 },
             ),
-            "zoom.in" => self.operation_adjust_zoom(Some(0.1)),
-            "zoom.out" => self.operation_adjust_zoom(Some(-0.1)),
-            "zoom.reset" => self.operation_adjust_zoom(None),
+            "zoom.in" => self.operation_adjust_zoom(ZoomStep::In),
+            "zoom.out" => self.operation_adjust_zoom(ZoomStep::Out),
+            "zoom.reset" => self.operation_adjust_zoom(ZoomStep::Reset),
             "url.focus" => {
                 (self.emit)(Projection::UiCommand("url.focus".into()));
                 operation_result(OperationOutcome::Applied, OperationReason::MutationApplied)
@@ -1003,17 +1179,23 @@ impl Shell {
         }
     }
 
-    /// Restores the newest tab closed in the focused window's space. Nothing
-    /// to restore is a no-op, not a failure.
-    fn operation_reopen_closed_tab(&mut self) -> OperationDisposition {
+    /// Reopens the newest closed tab of the focused profile, or the one named,
+    /// in the space it came from. Nothing to restore is a no-op, not a
+    /// failure.
+    pub(super) fn operation_reopen_closed_tab(
+        &mut self,
+        named: Option<zephium_core::ids::ClosedSessionId>,
+    ) -> OperationDisposition {
         if self.active_browser_page().is_some() {
-            self.browser_after_return = Some(Box::new(Command::Run("tab.reopen".into())));
+            let command =
+                named.map_or_else(|| "tab.reopen".into(), |id| format!("tab.reopen={id}"));
+            self.browser_after_return = Some(Box::new(Command::Run(command)));
             return self.operation_show_browser_page(None);
         }
         let Some(profile) = self.windows.focused().map(|window| window.profile) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
-        match self.restore_recently_closed_tab(profile) {
+        match self.restore_recently_closed_tab(profile, named) {
             Some((_, native)) => mutation_result(native),
             None => operation_result(OperationOutcome::NoOp, OperationReason::MutationApplied),
         }
@@ -1026,7 +1208,7 @@ impl Shell {
         let Some(active) = win.active else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let tabs = self.keyboard_tabs(win.profile, win.space);
+        let tabs = self.keyboard_tabs(win.space);
         let Some(position) = tabs.iter().position(|id| *id == active) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
         };
@@ -1043,7 +1225,7 @@ impl Shell {
         let Some(win) = self.windows.focused() else {
             return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
         };
-        let tabs = self.keyboard_tabs(win.profile, win.space);
+        let tabs = self.keyboard_tabs(win.space);
         let target = match position {
             Some(position) => position.checked_sub(1).and_then(|index| tabs.get(index)),
             None => tabs.last(),
@@ -1052,34 +1234,5 @@ impl Shell {
             Some(id) if win.active != Some(*id) => self.operation_activate(*id),
             _ => operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged),
         }
-    }
-
-    fn operation_adjust_zoom(&mut self, delta: Option<f64>) -> OperationDisposition {
-        let Some(active) = self.windows.focused().and_then(|window| window.active) else {
-            return operation_result(OperationOutcome::NoOp, OperationReason::NoFocusedWindow);
-        };
-        let Some(settled) = self.items.tab(active).map(|tab| tab.zoom) else {
-            return operation_result(OperationOutcome::Rejected, OperationReason::InvalidScope);
-        };
-        let current = self
-            .zoom
-            .pending
-            .get(&active)
-            .map_or(settled, |pending| pending.desired_scale);
-        let zoom = match delta {
-            Some(delta) => (current + delta).clamp(0.3, 3.0),
-            None => 1.0,
-        };
-        if (zoom - current).abs() < f64::EPSILON {
-            return operation_result(OperationOutcome::NoOp, OperationReason::StateUnchanged);
-        }
-        // `Items.zoom` is durable authoritative state. Keep the responsive
-        // desired value in a separate bounded map until the exact native view
-        // generation reports what it actually applied; otherwise any
-        // unrelated session save could persist an optimistic lie.
-        let admission = self.request_zoom(active, zoom);
-        let mut native = NativeWork::default();
-        native.record(admission);
-        mutation_result(native)
     }
 }

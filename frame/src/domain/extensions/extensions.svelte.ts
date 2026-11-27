@@ -4,6 +4,7 @@ import type {
   ExtensionActionFailure,
   ExtensionActionView,
   ExtensionActionsView,
+  ExtensionButtonMenuEntry,
 } from "$shared/ipc/bindings";
 import { SvelteSet } from "svelte/reactivity";
 import { commands } from "$shared/ipc/bindings";
@@ -186,6 +187,25 @@ export function dispose() {
   shortcutModel.clear();
   shortcutState = shortcutModel.view;
   failure = null;
+}
+
+/** The button's context menu, including WebKit's action items. */
+export function menu(
+  profileId: string,
+  action: ExtensionActionView,
+  anchor: DOMRect,
+  entries: ExtensionButtonMenuEntry[],
+): void {
+  void commands
+    .extensionActionMenu(
+      profileId,
+      action.runtime.install_id,
+      action.runtime.generation,
+      action.revision,
+      { x: anchor.left, y: anchor.top, width: anchor.width, height: anchor.height },
+      entries,
+    )
+    .catch(() => {});
 }
 
 export async function invoke(

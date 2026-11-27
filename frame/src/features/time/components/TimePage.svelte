@@ -16,6 +16,7 @@
     LockIcon,
   } from "@hugeicons/core-free-icons";
   import * as m from "$shared/i18n/messages";
+  import { reducedMotion } from "$shared/lib/motion";
   import { commands } from "$shared/ipc/bindings";
   import { favicons } from "$domain/favicons";
   import { preferences } from "$domain/preferences";
@@ -307,7 +308,11 @@
           <aside class="side">
             <FocusCard
               size="page"
-              onmanage={() => shutSection?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              onmanage={() =>
+                shutSection?.scrollIntoView({
+                  behavior: reducedMotion() ? "instant" : "smooth",
+                  block: "start",
+                })}
             />
             {#if session.focus.length > 0}
               <section class="card stats" aria-label={m.focus_title()}>

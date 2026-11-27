@@ -4,6 +4,8 @@ import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import { TaskSession } from "$domain/resources";
 import WorkCanvas from "../components/WorkCanvas.svelte";
+// Prepare the lazy renderer before timing task interaction on the canvas.
+import "../components/objects/Plan.svelte";
 import { environmentBoards, environmentItems } from "../lib/project-environment";
 import { environmentStages } from "../lib/project-environment-board";
 import { artifactView } from "../lib/project-work";

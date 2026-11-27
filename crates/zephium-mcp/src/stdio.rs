@@ -27,7 +27,9 @@ pub struct StdioServer {
 
 /// The running child; dropping it ends the server and its group.
 pub struct Process {
-    child: Child,
+    child: Option<Child>,
+    #[cfg(all(test, unix))]
+    before_escalation: Option<Box<dyn FnOnce() + Send>>,
     group: Option<i32>,
     #[cfg(windows)]
     job: windows::Job,
@@ -39,15 +41,44 @@ impl Drop for Process {
         self.job.stop();
         #[cfg(unix)]
         if let Some(group) = self.group {
+            // Retain the unreaped leader until SIGKILL so its pid (and pgid)
+            // cannot be reused, including if spawning the worker fails.
+            let child = std::sync::Arc::new(self.child.take());
+            let retained = child.clone();
+            #[cfg(test)]
+            let before_escalation = self.before_escalation.take();
             // SAFETY: a negative pid addresses the group this process created
             // for its own child; no other process is named.
             unsafe {
                 libc::kill(-group, libc::SIGTERM);
             }
+            if std::thread::Builder::new()
+                .name("mcp-stop".into())
+                .spawn(move || {
+                    #[cfg(test)]
+                    if let Some(before_escalation) = before_escalation {
+                        before_escalation();
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    // SAFETY: this is the child's process group, as above.
+                    unsafe {
+                        libc::kill(-group, libc::SIGKILL);
+                    }
+                    drop(retained);
+                })
+                .is_err()
+            {
+                // SAFETY: if no worker can run, end the same group now.
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
         }
         #[cfg(not(unix))]
         let _ = self.group;
-        let _ = self.child.start_kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -91,7 +122,9 @@ impl StdioServer {
         }
         Ok((
             Process {
-                child,
+                child: Some(child),
+                #[cfg(all(test, unix))]
+                before_escalation: None,
                 group,
                 #[cfg(windows)]
                 job,
@@ -163,8 +196,251 @@ impl<R: AsyncRead + Unpin> AsyncRead for Bounded<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::Bounded;
-    use tokio::io::AsyncReadExt;
+    use super::{Bounded, ChildStdout, Process, StdioServer};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    const FIXTURE_TEST: &str = "stdio::tests::process_tree_fixture";
+    const FIXTURE_ROLE: &str = "ZEPHIUM_MCP_PROCESS_TREE_FIXTURE";
+    const DESCENDANT: &str = "mcp-fixture-descendant=";
+
+    #[cfg(unix)]
+    fn waited_pid(info: &libc::siginfo_t) -> libc::pid_t {
+        #[cfg(target_os = "linux")]
+        // SAFETY: waitid filled this zero-initialized child-status structure.
+        unsafe {
+            info.si_pid()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            info.si_pid
+        }
+    }
+
+    #[test]
+    #[ignore = "invoked by the process-tree parent test"]
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the fixture parent must exit before its owned descendant"
+    )]
+    fn process_tree_fixture() {
+        let Some(role) = std::env::var_os(FIXTURE_ROLE) else {
+            return;
+        };
+        if role == "descendant" {
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        assert_eq!(role, "parent");
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", FIXTURE_TEST, "--ignored", "--nocapture"])
+            .env(FIXTURE_ROLE, "descendant")
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        println!("{DESCENDANT}{}", child.id());
+        std::io::stdout().flush().unwrap();
+    }
+
+    pub(super) async fn orphaned_descendant() -> (Process, u32, BufReader<Bounded<ChildStdout>>) {
+        let server = StdioServer {
+            program: std::env::current_exe().unwrap(),
+            args: ["--exact", FIXTURE_TEST, "--ignored", "--nocapture"]
+                .map(str::to_owned)
+                .to_vec(),
+            env: vec![(FIXTURE_ROLE.into(), "parent".into())],
+            cwd: None,
+        };
+        let (mut process, stdout, stdin) = server.spawn().unwrap();
+        drop(stdin);
+        let mut output = BufReader::new(stdout).lines();
+        let descendant = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = output
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("fixture exited without a descendant");
+                // Libtest may prefix the marker with the test name on this line.
+                if let Some((_, pid)) = line.split_once(DESCENDANT) {
+                    break pid.trim().parse::<u32>().unwrap();
+                }
+            }
+        })
+        .await
+        .expect("fixture did not report its descendant");
+        #[cfg(not(unix))]
+        assert!(tokio::time::timeout(
+            Duration::from_secs(10),
+            process.child.as_mut().unwrap().wait()
+        )
+        .await
+        .expect("fixture parent did not exit")
+        .unwrap()
+        .success());
+        #[cfg(unix)]
+        {
+            // Observe exit without reaping the leader or releasing its pid.
+            let leader = process.child.as_mut().unwrap().id().unwrap();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    // SAFETY: siginfo_t contains only integer and pointer fields;
+                    // all-zero bits are valid before waitid fills the structure.
+                    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+                    assert_eq!(
+                        // SAFETY: info is writable and lives through the call;
+                        // leader identifies our child and WNOWAIT leaves it unreaped.
+                        unsafe {
+                            libc::waitid(
+                                libc::P_PID,
+                                leader,
+                                &mut info,
+                                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                            )
+                        },
+                        0
+                    );
+                    if waited_pid(&info) == i32::try_from(leader).unwrap() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("fixture parent did not exit");
+        }
+        (process, descendant, output.into_inner())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_server_ends_a_descendant_even_after_parent_exits() {
+        let (process, descendant, mut stdout) = orphaned_descendant().await;
+        assert_eq!(
+            // SAFETY: signal zero only probes this fixture pid and takes no pointers.
+            unsafe { libc::kill(i32::try_from(descendant).unwrap(), 0) },
+            0
+        );
+        drop(process);
+        // The sleeping descendant retains stdout until its process exits.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await
+        .expect("descendant survived after Process was dropped")
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_reserves_the_exited_leader_until_escalation() {
+        let (mut process, _, mut stdout) = orphaned_descendant().await;
+        let leader = process.child.as_ref().unwrap().id().unwrap();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let (started, worker) = std::sync::mpsc::channel();
+        process.before_escalation = Some(Box::new(move || {
+            started.send(()).unwrap();
+            let _ = gate.recv();
+        }));
+        drop(process);
+        worker.recv().unwrap();
+        // SAFETY: zero is a valid initial value for siginfo_t's integer and pointer fields.
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        // SAFETY: info remains writable for the call; leader is our child pid,
+        // and WNOWAIT observes its exit without reaping it.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                leader,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        // Release cleanup even if the ownership assertion fails.
+        drop(release);
+        assert_eq!(result, 0, "leader was reaped before escalation");
+        assert_eq!(waited_pid(&info), i32::try_from(leader).unwrap());
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // SAFETY: signal zero only probes the pid and takes no pointers.
+            while unsafe { libc::kill(i32::try_from(leader).unwrap(), 0) } == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader was not reaped after escalation");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_server_kills_a_group_ignoring_sigterm() {
+        let server = StdioServer {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "trap '' TERM; /bin/sleep 60 & echo $!; wait".into(),
+            ],
+            env: vec![],
+            cwd: None,
+        };
+        let (mut process, stdout, stdin) = server.spawn().unwrap();
+        drop(stdin);
+        let group = process.group.unwrap();
+        let mut stdout = BufReader::new(stdout);
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let descendant: i32 = line.trim().parse().unwrap();
+        // SAFETY: signal zero only probes the fixture pid and takes no pointers.
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+        let (started, worker) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        process.before_escalation = Some(Box::new(move || {
+            started.send(std::thread::current().id()).unwrap();
+            let _ = gate.recv();
+        }));
+        drop(process);
+        // Drop returns while escalation is still blocked on this test.
+        let worker_thread = worker.recv().unwrap();
+        drop(release);
+        assert_ne!(worker_thread, std::thread::current().id());
+        let ended = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::io::copy(&mut stdout, &mut tokio::io::sink()),
+        )
+        .await;
+        // Also clean up the fixture when exercising the unfixed implementation.
+        // SAFETY: group is the positive process group id created for this fixture;
+        // negating it targets that group, and kill takes no pointers.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+        ended
+            .expect("SIGTERM-ignoring descendant survived drop")
+            .unwrap();
+        for _ in 0..100 {
+            // SAFETY: both calls use signal zero to probe fixture pids without
+            // sending a signal or accessing memory through pointers.
+            if unsafe { libc::kill(descendant, 0) } != 0 && unsafe { libc::kill(group, 0) } != 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("server or descendant still exists");
+    }
 
     #[tokio::test]
     async fn a_newline_cannot_hide_an_overlong_message_in_one_read_or_across_reads() {

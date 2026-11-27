@@ -39,15 +39,9 @@ pub(crate) async fn media_import(
         return refused(ResourceError::Invalid);
     };
     let picker = app.clone();
-    let picked = tokio::task::spawn_blocking(move || {
-        picker
-            .dialog()
-            .file()
-            .set_title("Add to Work")
-            .blocking_pick_file()
-    })
-    .await
-    .map_err(|_| ())?;
+    let picked = tokio::task::spawn_blocking(move || picker.dialog().file().blocking_pick_file())
+        .await
+        .map_err(|_| ())?;
     let Some(picked) = picked else {
         return Ok(MediaImportV1::Cancelled);
     };
@@ -456,12 +450,54 @@ fn serve_page_frame(
 /// Scaled copies of pictures at the width the canvas draws them: a picture
 /// decoded at 1600 px costs six megabytes of the interface's memory to show
 /// at 300, so the interface asks for the small one. Made once, kept on disk.
+pub(crate) fn retire_profile_thumbnails(
+    app: &AppHandle,
+    profile: zephium_core::ids::ProfileId,
+) -> std::io::Result<()> {
+    thumb::retire(app, &profile.to_string())
+}
+
 mod thumb {
     use super::{AppHandle, Manager};
     use std::path::PathBuf;
 
+    static LIFECYCLE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    pub(super) fn retire(app: &AppHandle, profile: &str) -> std::io::Result<()> {
+        let mut retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        retired.insert(profile.into());
+        let dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(std::io::Error::other)?
+            .join("media-thumbs")
+            .join(profile);
+        let root = dir
+            .parent()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        match std::fs::symlink_metadata(root) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(&dir),
+            Ok(_) => std::fs::remove_file(&dir),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }?;
+        #[cfg(unix)]
+        std::fs::File::open(root)?.sync_all()?;
+        match std::fs::symlink_metadata(dir) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(std::io::Error::other("profile thumbnails remain")),
+        }
+    }
+
     /// The widths a copy is made at, so a few variants exist per picture.
-    const WIDTHS: [u32; 7] = [160, 240, 360, 540, 800, 1200, 1600];
+    const WIDTHS: [u32; 8] = [160, 240, 360, 540, 800, 1200, 1600, 2560];
     /// What the copies may hold on disk before the oldest go.
     const CACHE_BYTES: u64 = 96 * 1024 * 1024;
 
@@ -487,6 +523,10 @@ mod thumb {
         digest: &str,
         width: u32,
     ) -> Option<(Vec<u8>, &'static str)> {
+        let retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(profile) {
+            return None;
+        }
         let base = path(app, profile, digest, width)?;
         for (extension, mime) in [("jpg", "image/jpeg"), ("png", "image/png")] {
             if let Ok(bytes) = std::fs::read(base.with_extension(extension)) {
@@ -504,6 +544,10 @@ mod thumb {
         bytes: &[u8],
         mime: &str,
     ) {
+        let retired = LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(profile) {
+            return;
+        }
         use std::sync::atomic::{AtomicU32, Ordering};
         static WRITES: AtomicU32 = AtomicU32::new(0);
         let Some(base) = path(app, profile, digest, width) else {
@@ -560,7 +604,7 @@ mod thumb {
     /// scaled: an animation keeps its frames): JPEG, PNG where it has transparency.
     #[cfg(feature = "work-product")]
     pub(super) fn scaled(bytes: &[u8], width: u32) -> Option<(Vec<u8>, &'static str)> {
-        use image::{ImageFormat, ImageReader};
+        use image::{GenericImageView, ImageFormat, ImageReader};
         use std::io::Cursor;
         static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let format = image::guess_format(bytes).ok()?;
@@ -583,14 +627,14 @@ mod thumb {
         let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
         reader.limits(limits);
         let decoded = reader.decode().ok()?;
-        let alpha = decoded.color().has_alpha()
-            && decoded.to_rgba8().pixels().any(|pixel| pixel.0[3] < 255);
         let target = (u64::from(height) * u64::from(width)).div_ceil(u64::from(natural));
         let small = decoded.resize_exact(
             width,
             u32::try_from(target).ok()?.max(1),
             image::imageops::FilterType::Triangle,
         );
+        let alpha =
+            small.color().has_alpha() && small.pixels().any(|(_, _, pixel)| pixel.0[3] < 255);
         let mut out = Vec::new();
         if alpha {
             small
@@ -620,7 +664,9 @@ mod thumb {
             assert_eq!(width(Some("w=100")), Some(160));
             assert_eq!(width(Some("x=1&w=300")), Some(360));
             assert_eq!(width(Some("w=1600")), Some(1600));
-            assert_eq!(width(Some("w=2000")), None);
+            assert_eq!(width(Some("w=2000")), Some(2560));
+            assert_eq!(width(Some("w=2560")), Some(2560));
+            assert_eq!(width(Some("w=2561")), None);
             assert_eq!(width(Some("w=abc")), None);
             assert_eq!(width(None), None);
         }
@@ -644,6 +690,26 @@ mod thumb {
             assert_eq!(mime, "image/png");
             assert!(scaled(&png(300, 200, 255), 360).is_none());
             assert!(scaled(b"not a picture", 360).is_none());
+        }
+
+        #[cfg(feature = "work-product")]
+        #[test]
+        fn thumbnail_alpha_is_examined_only_at_display_size() {
+            let mut pixels =
+                image::RgbaImage::from_pixel(1600, 900, image::Rgba([10, 20, 30, 255]));
+            pixels.put_pixel(0, 0, image::Rgba([10, 20, 30, 254]));
+            let mut bytes = Vec::new();
+            pixels
+                .write_to(
+                    &mut std::io::Cursor::new(&mut bytes),
+                    image::ImageFormat::Png,
+                )
+                .unwrap();
+            let (_, mime) = scaled(&bytes, 160).unwrap();
+            assert_eq!(
+                mime, "image/jpeg",
+                "an opaque thumbnail needs no alpha copy or PNG encoding"
+            );
         }
     }
 }
@@ -1020,7 +1086,10 @@ pub(crate) async fn link_describe(
         if title.trim_start_matches("www.") != host.trim_start_matches("www.") {
             return Ok(false);
         }
-        let Some(details) = zephium_agentic::youtube_oembed::fetch(url).await else {
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return Ok(false);
+        };
+        let Ok(details) = zephium_agentic::youtube_oembed::fetch(&routes, url).await else {
             return Ok(false);
         };
         let title = format!("{}\n{}", details.title, details.channel);
@@ -1115,9 +1184,14 @@ async fn admit_remote(
             profile,
             environment,
         };
+        let Some(routes) = app.try_state::<zephium_agentic::public_asset::RouteSource>() else {
+            return refused(ResourceError::Unavailable);
+        };
         let resource = {
             let bytes =
-                match zephium_agentic::public_asset::fetch_public_image(parsed.as_str()).await {
+                match zephium_agentic::public_asset::fetch_public_image(&routes, parsed.as_str())
+                    .await
+                {
                     Ok(bytes) => bytes,
                     Err(error) => {
                         trace.fetch = Some(error);

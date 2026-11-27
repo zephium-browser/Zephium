@@ -3,6 +3,9 @@ import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { page } from "vitest/browser";
 import BoardCanvas from "./BoardCanvas.svelte";
+// This geometry test starts after the real lazy renderer has loaded. A cold CI
+// Vite transform is not canvas readiness and can exceed the poll budget.
+import "../components/objects/Picks.svelte";
 import { tripScene } from "./board-fixtures";
 
 vi.mock("$shared/ipc/bindings", async () => {
@@ -18,8 +21,8 @@ test("the gaps of a set of cards belong to the canvas, its cards to the set", as
   });
   screen.container.style.width = "1600px";
   screen.container.style.height = "1000px";
-  await expect.poll(() => document.querySelector(".object.picks .set > *")).toBeTruthy();
-  const set = document.querySelector(".object.picks .set")!;
+  await expect.poll(() => screen.container.querySelector(".object.picks .set > *")).toBeTruthy();
+  const set = screen.container.querySelector(".object.picks .set")!;
   const [first, second] = [...set.children] as HTMLElement[];
   const node = set.closest(".svelte-flow__node")!;
   const a = first!.getBoundingClientRect();

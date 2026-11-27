@@ -26,7 +26,7 @@ pub(crate) fn about_info(caller: WebviewWindow, app: tauri::AppHandle) -> Option
 }
 
 /// The names people see in their system's own About panels.
-fn arch_name(arch: &str) -> &str {
+pub(crate) fn arch_name(arch: &str) -> &str {
     match arch {
         "aarch64" => "arm64",
         "x86_64" => "x64",
@@ -35,7 +35,7 @@ fn arch_name(arch: &str) -> &str {
 }
 
 #[cfg(target_os = "macos")]
-fn os_name() -> String {
+pub(crate) fn os_name() -> String {
     let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
     format!(
         "macOS {}.{}.{}",
@@ -44,7 +44,7 @@ fn os_name() -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn os_name() -> String {
+pub(crate) fn os_name() -> String {
     use crate::default_browser::windows::read_machine_string;
     const KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
     let build = read_machine_string(KEY, "CurrentBuildNumber");
@@ -61,7 +61,7 @@ fn os_name() -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn os_name() -> String {
+pub(crate) fn os_name() -> String {
     std::fs::read_to_string("/etc/os-release")
         .ok()
         .and_then(|release| {

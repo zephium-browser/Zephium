@@ -2,6 +2,35 @@
 
 use super::*;
 
+pub(super) fn new_tab_destination_matches(destination: &url::Url, target: &url::Url) -> bool {
+    destination == target || navigation::https_upgrade(destination).as_ref() == Some(target)
+}
+
+/// A restored tab may hold the committed URL of a `www.` redirect.
+pub(super) fn restored_tab_is_new_tab_destination(
+    destination: &url::Url,
+    restored: &url::Url,
+) -> bool {
+    if new_tab_destination_matches(destination, restored) {
+        return true;
+    }
+    let (Some(destination_host), Some(restored_host)) = (destination.domain(), restored.domain())
+    else {
+        return false;
+    };
+    let differs_by_www = destination_host.strip_prefix("www.") == Some(restored_host)
+        || restored_host.strip_prefix("www.") == Some(destination_host);
+    if !differs_by_www
+        || !destination_host.trim_end_matches('.').contains('.')
+        || !restored_host.trim_end_matches('.').contains('.')
+    {
+        return false;
+    }
+    let mut restored = restored.clone();
+    restored.set_host(Some(destination_host)).is_ok()
+        && new_tab_destination_matches(destination, &restored)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum NewTabPosition {
     #[default]
@@ -41,12 +70,15 @@ impl ArchiveAfter {
 }
 
 /// The person's choices about how tabs open and close.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct TabPreferences {
     pub(super) new_position: NewTabPosition,
     /// Where a link handed over by another application opens; none
     /// follows `new_position`.
     pub(super) external_position: Option<NewTabPosition>,
+    /// A link handed over by another application opens in a mini window,
+    /// the default; a link no mini window can take still opens as a tab.
+    pub(super) external_mini: bool,
     pub(super) archive_after: ArchiveAfter,
     pub(super) after_close: AfterClose,
     /// Opening an address already open in this space goes to that tab.
@@ -54,6 +86,13 @@ pub(super) struct TabPreferences {
     pub(super) automatic_pip: bool,
     /// Launch puts a new tab in front instead of the one left there.
     pub(super) start_with_new_tab: bool,
+    /// Launch opens these pages instead, when there are any.
+    pub(super) start_with_pages: bool,
+    pub(super) startup_pages: Vec<String>,
+    /// Where the Home command goes.
+    pub(super) home: Option<String>,
+    /// A regular new tab opens this page; none keeps the built-in page.
+    pub(super) new_page: Option<url::Url>,
 }
 
 impl Default for TabPreferences {
@@ -61,16 +100,26 @@ impl Default for TabPreferences {
         Self {
             new_position: NewTabPosition::default(),
             external_position: None,
+            external_mini: true,
             archive_after: ArchiveAfter::default(),
             after_close: AfterClose::default(),
             switch_to_open: true,
             automatic_pip: true,
-            start_with_new_tab: false,
+            start_with_new_tab: true,
+            start_with_pages: false,
+            startup_pages: Vec::new(),
+            home: None,
+            new_page: None,
         }
     }
 }
 
 impl TabPreferences {
+    /// Whether launch opens a list of pages: chosen, and with something in it.
+    pub(super) fn opens_pages(&self) -> bool {
+        self.start_with_pages && !self.startup_pages.is_empty()
+    }
+
     pub(super) fn load(store: &dyn zephium_core::ports::store::Store) -> Self {
         let mut preferences = Self::default();
         for key in [
@@ -79,6 +128,9 @@ impl TabPreferences {
             "tabs.switch-to-open",
             "tabs.automatic-pip",
             "tabs.startup",
+            "tabs.startup-pages",
+            "tabs.home",
+            "tabs.new-page",
             "tabs.external-position",
             "tabs.archive",
         ] {
@@ -101,11 +153,33 @@ impl TabPreferences {
             ("tabs.after-close", "recent") => self.after_close = AfterClose::Recent,
             ("tabs.switch-to-open", value) => self.switch_to_open = value == "true",
             ("tabs.automatic-pip", value) => self.automatic_pip = value == "true",
-            ("tabs.startup", value) => self.start_with_new_tab = value == "new-tab",
-            ("tabs.external-position", "new-tab") => self.external_position = None,
-            ("tabs.external-position", "end") => self.external_position = Some(NewTabPosition::End),
+            ("tabs.startup", value) => {
+                self.start_with_new_tab = value == "new-tab";
+                self.start_with_pages = value == "pages";
+            }
+            ("tabs.startup-pages", value) => {
+                self.startup_pages = zephium_core::preferences::startup_pages(value)
+            }
+            ("tabs.home", value) => self.home = zephium_core::preferences::home_page(value),
+            ("tabs.new-page", value) => {
+                self.new_page = zephium_core::preferences::new_tab_page(value)
+                    .and_then(|page| url::Url::parse(&page).ok());
+            }
+            ("tabs.external-position", "new-tab") => {
+                self.external_position = None;
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "end") => {
+                self.external_position = Some(NewTabPosition::End);
+                self.external_mini = false;
+            }
             ("tabs.external-position", "after-current") => {
-                self.external_position = Some(NewTabPosition::AfterCurrent)
+                self.external_position = Some(NewTabPosition::AfterCurrent);
+                self.external_mini = false;
+            }
+            ("tabs.external-position", "mini") => {
+                self.external_position = None;
+                self.external_mini = true;
             }
             ("tabs.archive", "never") => self.archive_after = ArchiveAfter::Never,
             ("tabs.archive", "12h") => self.archive_after = ArchiveAfter::HalfDay,
@@ -125,9 +199,24 @@ struct KeptSlot {
 
 impl Shell {
     pub(super) fn open_tab(&mut self) -> Vec<Effect> {
-        self.open_tab_with_id()
+        self.open_new_tab_with_id()
             .map(|(_, effects)| effects)
             .unwrap_or_default()
+    }
+
+    /// Apply the destination only to a new-tab intent, never to an intermediate
+    /// tab allocated for a link, duplicate, extension page or explicit URL.
+    pub(super) fn open_new_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
+        let (id, mut effects) = self.open_tab_with_id()?;
+        if let Some(page) = self.tab_preferences.new_page.clone().filter(|_| {
+            self.windows
+                .focused()
+                .is_some_and(|window| !self.incognito_profile(window.profile))
+        }) {
+            effects.extend(self.items.navigate(id, page.as_str()));
+            self.new_tab_destinations.insert(id, page);
+        }
+        Some((id, effects))
     }
 
     pub(super) fn open_tab_with_id(&mut self) -> Option<(ItemId, Vec<Effect>)> {
@@ -213,40 +302,62 @@ impl Shell {
         self.residency.recent.retain(|r| *r != id);
         self.residency.recent.push(id);
         self.touch(id);
-        self.items.ensure_view(id)
+        let panes = self
+            .windows
+            .focused()
+            .and_then(|window| window.splits.as_ref())
+            .filter(|tree| tree.contains(id) && self.pane_in_scope(tree, profile, space))
+            .map(|tree| tree.tabs())
+            .unwrap_or_default();
+        let mut effects = self.items.ensure_view(id);
+        for pane in panes.into_iter().filter(|pane| *pane != id) {
+            self.touch(pane);
+            effects.extend(self.items.ensure_view(pane));
+        }
+        effects
+    }
+
+    /// A video in picture in picture asked to go back to its page. Its tab
+    /// comes to the front, from another space if need be, and so does the
+    /// window, as the picture-in-picture return button does in Safari.
+    pub(super) fn return_to_media(&mut self, id: ItemId) {
+        let focused = self.windows.focused().map(|window| window.profile);
+        if focused.is_none() || self.profile_of_item(id) != focused || self.items.tab(id).is_none()
+        {
+            return;
+        }
+        // WebKit takes the video back only once its page is on screen, so a
+        // browser page, Work included, steps back to browsing first.
+        let disposition = if self.active_browser_page().is_some() && !self.browser_return_ready {
+            self.browser_after_return = Some(Box::new(Command::Engine(
+                EngineEvent::MediaReturnRequested { id },
+            )));
+            self.operation_show_browser_page(None)
+        } else {
+            self.show_media_tab(id)
+        };
+        if disposition.outcome != OperationOutcome::Rejected {
+            (self.emit)(Projection::RaiseWindow);
+        }
     }
 
     pub(super) fn close(&mut self, id: ItemId) -> NativeWork {
-        if !self.item_in_focused_scope(id) {
+        if !self.item_in_focused_scope(id) || self.is_lone_new_tab(id) {
             return NativeWork::default();
         }
+        // A stand-in New Tab leaves nothing worth reopening.
+        let stand_in = self.is_new_tab_stand_in(id);
         self.forget_removed_tab_state(id);
         self.forget_content_fullscreen(id);
+        self.forget_tab_media(id);
         self.native_openers.remove(&id);
         // An Essential is kept, not closed: the page ends and the site stays.
         let kept = self.kept_slot(id);
-        let closed_at_ms = unix_millis();
-        let closed = kept
-            .is_none()
-            .then(|| self.windows.focused())
-            .flatten()
-            .and_then(|window| {
-                self.items.tab(id).and_then(|tab| {
-                    tab.url
-                        .as_ref()
-                        .map(|url| zephium_core::session::PersistedClosedTab {
-                            profile: window.profile,
-                            space: window.space,
-                            url: url.to_string(),
-                            title: tab.title.clone(),
-                            zoom: tab.zoom,
-                            session_id: closed_at_ms
-                                .map(|_| zephium_core::ids::ClosedSessionId::generate()),
-                            closed_at_ms,
-                        })
-                })
-            });
+        let closed = (kept.is_none() && !stand_in)
+            .then(|| self.closed_record(id, unix_millis()))
+            .flatten();
         self.cancel_page_permission_for_item(id);
+        self.forget_page_permission_documents_of_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
         if self.work_pane.as_ref().is_some_and(|pane| pane.tab == id) {
@@ -278,19 +389,16 @@ impl Shell {
         if was_active {
             win.active = None;
         }
-        let tabs_before = self.keyboard_tabs(profile, space);
-        let pos = tabs_before.iter().position(|x| *x == id);
+        let pos = self
+            .successor_pool(profile, space)
+            .iter()
+            .position(|x| *x == id);
         let mut fx = self.items.remove(id);
         if let Some(closed) = closed {
-            if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
-                self.recently_closed.remove(0);
-            }
-            self.recently_closed.push(closed);
+            self.remember_closed(closed);
         }
         if was_active {
-            if let Some(next) = self.successor(profile, space, pos) {
-                fx.extend(self.focus_tab(next));
-            }
+            fx.extend(self.take_over(profile, space, pos));
         }
         // Put back after the successor is chosen, so closing never refocuses
         // and reloads the Essential it just ended.
@@ -342,19 +450,31 @@ impl Shell {
         }
     }
 
+    /// The tabs a closed active one may hand the window to: the space's open
+    /// tabs only, so closing never wakes an Essential or a pinned page. The
+    /// private window has no such sections and keeps walking every tab.
+    pub(super) fn successor_pool(&self, profile: ProfileId, space: SpaceId) -> Vec<ItemId> {
+        if self.incognito_profile(profile) {
+            self.keyboard_tabs(space)
+        } else {
+            self.regular_tabs(space)
+        }
+    }
+
     /// Which tab takes over from a closed active one, by the person's choice.
-    /// `at` is where the closed tab stood in the sidebar's order.
+    /// `at` is where the closed tab stood in `successor_pool`; a tab outside
+    /// it stood above every open tab.
     pub(super) fn successor(
         &self,
         profile: ProfileId,
         space: SpaceId,
         at: Option<usize>,
     ) -> Option<ItemId> {
-        let tabs = self.keyboard_tabs(profile, space);
+        let tabs = self.successor_pool(profile, space);
         if tabs.is_empty() {
             return None;
         }
-        let at = at.unwrap_or(tabs.len());
+        let at = at.unwrap_or(0);
         match self.tab_preferences.after_close {
             AfterClose::Next => Some(tabs[at.min(tabs.len() - 1)]),
             AfterClose::Previous => Some(tabs[at.saturating_sub(1).min(tabs.len() - 1)]),
@@ -365,17 +485,94 @@ impl Shell {
         }
     }
 
+    /// Fronts the successor of an active tab that left `space`; a space with
+    /// none left gets a New Tab, so it is never shown empty. The private
+    /// window instead ends with its last tab.
+    pub(super) fn take_over(
+        &mut self,
+        profile: ProfileId,
+        space: SpaceId,
+        at: Option<usize>,
+    ) -> Vec<Effect> {
+        if let Some(next) = self.successor(profile, space, at) {
+            return self.focus_tab(next);
+        }
+        if self.incognito_profile(profile) {
+            return Vec::new();
+        }
+        self.open_new_tab_with_id()
+            .map(|(_, effects)| effects)
+            .unwrap_or_default()
+    }
+
+    /// A New Tab page nothing has been loaded or typed into. A tab whose
+    /// first page failed also has no address, but it is a page, not this.
+    pub(super) fn is_untouched_new_tab(&self, id: ItemId) -> bool {
+        self.items.tab(id).is_some_and(|tab| {
+            tab.url.is_none()
+                && tab.failure.is_none()
+                && !tab.loading
+                && tab.content == zephium_core::item::TabContent::Web
+        }) && self.items.pending_navigation_request(id).is_none()
+    }
+
+    /// Used to keep the lone New Tab open and to skip Recently Closed when
+    /// a stand-in is explicitly closed. A website can hold user input, so
+    /// automatic removal uses the untouched built-in New Tab check.
+    pub(super) fn is_new_tab_stand_in(&self, id: ItemId) -> bool {
+        self.is_untouched_new_tab(id)
+            || (self.new_tab_destination_is_current(id)
+                && self.items.get(id).is_some_and(|item| {
+                    matches!(
+                        item.placement,
+                        Placement::Space {
+                            section: SpaceSection::Today,
+                            ..
+                        }
+                    )
+                }))
+    }
+
+    pub(super) fn new_tab_destination_is_current(&self, id: ItemId) -> bool {
+        self.new_tab_destinations
+            .get(&id)
+            .is_some_and(|destination| {
+                self.items
+                    .pending_navigation_url(id)
+                    .is_none_or(|target| new_tab_destination_matches(destination, target))
+            })
+    }
+
+    pub(super) fn update_new_tab_destination(&mut self, id: ItemId, url: &url::Url, adopt: bool) {
+        let Some(destination) = self.new_tab_destinations.get_mut(&id) else {
+            return;
+        };
+        if adopt {
+            destination.clone_from(url);
+        } else if *destination != *url {
+            self.new_tab_destinations.remove(&id);
+        }
+    }
+
+    /// The front tab is the only open tab of its space and still stands in
+    /// for a page: closing it would only swap it for another new tab.
+    pub(super) fn is_lone_new_tab(&self, id: ItemId) -> bool {
+        self.windows.focused().is_some_and(|window| {
+            window.active == Some(id)
+                && !self.incognito_profile(window.profile)
+                && self.regular_tabs(window.space) == [id]
+        }) && self.is_new_tab_stand_in(id)
+    }
+
     /// The tab in this space already showing exactly `url`, if any.
     pub(super) fn open_tab_for(&self, url: &str) -> Option<ItemId> {
         let window = self.windows.focused()?;
-        self.keyboard_tabs(window.profile, window.space)
-            .into_iter()
-            .find(|id| {
-                self.items.tab(*id).is_some_and(|tab| {
-                    tab.content == zephium_core::item::TabContent::Web
-                        && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
-                })
+        self.keyboard_tabs(window.space).into_iter().find(|id| {
+            self.items.tab(*id).is_some_and(|tab| {
+                tab.content == zephium_core::item::TabContent::Web
+                    && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
             })
+        })
     }
 
     /// Folds a trusted native guest teardown back into the logical tab tree.
@@ -413,6 +610,7 @@ impl Shell {
             .collect::<Vec<_>>();
         self.native_openers.remove(&id);
         self.cancel_page_permission_for_item(id);
+        self.forget_page_permission_documents_of_item(id);
         self.cancel_pending_presentation(id);
         self.cancel_favicon_attempt(id);
         if matches!(
@@ -448,12 +646,16 @@ impl Shell {
         let _ = self.commit(effects);
     }
 
-    fn forget_removed_tab_state(&self, id: ItemId) {
+    fn forget_removed_tab_state(&mut self, id: ItemId) {
         let mut pending = vec![id];
         for _ in 0..zephium_core::session::MAX_SESSION_ITEMS {
             let Some(item) = pending.pop() else {
                 break;
             };
+            self.recent_tabs.forget(item);
+            self.tab_previews.forget(item);
+            self.new_tab_destinations.remove(&item);
+            self.sources.retain(|held| held != item);
             if let Some(profile) = self.profile_of_item(item) {
                 self.engine.forget_discarded_state(profile, Some(item));
             }
@@ -461,44 +663,125 @@ impl Shell {
         }
     }
 
-    /// Restores the newest closed tab owned by the focused profile and space.
-    /// A fresh item/native identity is always allocated; the closed record is
-    /// removed only after the logical item has been inserted successfully.
+    /// What a closed tab leaves in Recently Closed. None for what is never
+    /// reopened from there: a private tab, an Essential, a page without an
+    /// address.
+    pub(super) fn closed_record(
+        &self,
+        id: ItemId,
+        now: Option<u64>,
+    ) -> Option<zephium_core::session::PersistedClosedTab> {
+        let item = self.items.get(id)?;
+        let Placement::Space { space, section } = item.placement else {
+            return None;
+        };
+        let profile = self.spaces.get(space)?.profile;
+        if self.incognito_profile(profile) {
+            return None;
+        }
+        let tab = item.tab()?;
+        let position = (section == SpaceSection::Today && item.parent.is_none())
+            .then(|| {
+                self.items
+                    .roots(item.placement)
+                    .iter()
+                    .position(|root| *root == id)
+            })
+            .flatten()
+            .and_then(|at| u32::try_from(at).ok());
+        Some(zephium_core::session::PersistedClosedTab {
+            profile,
+            space,
+            url: tab.url.as_ref()?.to_string(),
+            title: tab.title.clone(),
+            zoom: tab.zoom,
+            session_id: now.map(|_| zephium_core::ids::ClosedSessionId::generate()),
+            closed_at_ms: now,
+            position,
+        })
+    }
+
+    pub(super) fn remember_closed(&mut self, record: zephium_core::session::PersistedClosedTab) {
+        if self.recently_closed.len() == zephium_core::session::MAX_RECENTLY_CLOSED_TABS {
+            self.recently_closed.remove(0);
+        }
+        let profile = record.profile;
+        self.recently_closed.push(record);
+        self.extension_sessions_changed(profile);
+    }
+
+    /// Reopens a closed tab of `profile`: the one named, else the newest, from
+    /// whichever of its spaces it was in. It returns to that space when it
+    /// still exists (the window follows it), else lands in the current one,
+    /// and takes its old place among the open tabs when that place is still
+    /// there. A fresh item/native identity is always allocated; the closed
+    /// record is removed only after the logical item has been inserted.
     pub(super) fn restore_recently_closed_tab(
         &mut self,
         profile: ProfileId,
+        named: Option<zephium_core::ids::ClosedSessionId>,
     ) -> Option<(ItemId, NativeWork)> {
-        let space = self
+        let current = self
             .windows
             .focused()
             .filter(|window| window.profile == profile)
             .map(|window| window.space)?;
-        let position = self
-            .recently_closed
-            .iter()
-            .rposition(|entry| entry.profile == profile && entry.space == space)?;
+        let position = self.recently_closed.iter().rposition(|entry| {
+            entry.profile == profile && named.is_none_or(|id| entry.session_id == Some(id))
+        })?;
         let entry = self.recently_closed[position].clone();
+        let space = if self
+            .spaces
+            .get(entry.space)
+            .is_some_and(|owner| owner.profile == profile)
+        {
+            entry.space
+        } else {
+            current
+        };
+        let today = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
         let id = (0..8).find_map(|_| {
             let candidate = ItemId::generate();
-            self.items
-                .insert_tab(
-                    candidate,
-                    Placement::Space {
-                        space,
-                        section: SpaceSection::Today,
-                    },
-                )
-                .then_some(candidate)
+            self.items.insert_tab(candidate, today).then_some(candidate)
         })?;
         if !self.items.set_committed_url_str(id, &entry.url) {
             let _ = self.items.remove(id);
             return None;
         }
         self.items.set_title(id, entry.title.clone());
-        self.items.set_zoom(id, entry.zoom);
         self.recently_closed.remove(position);
-        let effects = self.focus_tab(id);
-        Some((id, self.commit(effects)))
+        self.extension_sessions_changed(profile);
+        if let Some(before) = entry
+            .position
+            .and_then(|at| self.items.roots(today).get(at as usize).copied())
+            .filter(|root| *root != id)
+        {
+            self.items.move_tab_to_root(id, today, Some(before));
+        }
+        // A New Tab that was only there to keep the space from being empty
+        // gives way to the page that comes back.
+        let stand_in = self
+            .regular_tabs(space)
+            .into_iter()
+            .find(|tab| *tab != id)
+            .filter(|tab| self.is_untouched_new_tab(*tab))
+            .filter(|_| self.regular_tabs(space).len() == 2);
+        let mut left_behind = None;
+        let effects = if space == current {
+            self.focus_tab(id)
+        } else {
+            let (effects, blank) = self.show_space_at(space, id);
+            left_behind = blank;
+            effects
+        };
+        let native = self.commit(effects);
+        for stale in left_behind.into_iter().chain(stand_in) {
+            self.close_in_any_space(stale);
+        }
+        Some((id, native))
     }
 
     /// Removes a failed native leaf from the retained split immediately. A
@@ -612,6 +895,10 @@ impl Shell {
         foreground: bool,
         adoption: zephium_core::ports::engine::NativeTabAdoption,
     ) {
+        if self.mini_window_of(source).is_some() {
+            self.adopt_linked_mini(source, child, foreground, adoption);
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -700,6 +987,7 @@ impl Shell {
             return;
         }
         self.cancel_page_permission_for_item(child);
+        self.forget_page_permission_documents_of_item(child);
         self.cancel_pending_presentation(child);
         self.cancel_favicon_attempt(child);
         self.cancel_discard_probe(child);
@@ -723,6 +1011,12 @@ impl Shell {
     /// source, routed through the same navigation policy. The split group
     /// survives: the new tab shows alone, the group stays a tab away.
     pub(super) fn open_linked_tab(&mut self, source: ItemId, url: &str) {
+        if self.mini_window_of(source).is_some() {
+            if !self.open_linked_mini(source, url) {
+                self.open_mini_link_as_tab(source, url);
+            }
+            return;
+        }
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -826,4 +1120,55 @@ pub(super) fn unix_millis() -> Option<u64> {
         .ok()
         .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
         .filter(|ms| (1_000..=zephium_core::session::MAX_EXACT_MS).contains(ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restored_tab_is_new_tab_destination;
+    use url::Url;
+
+    #[test]
+    fn restored_destination_matches_www_redirects() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/"),
+            ("https://www.google.com/", "https://google.com/"),
+            ("http://google.com/", "https://www.google.com/"),
+        ] {
+            assert!(
+                restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
+
+    #[test]
+    fn restored_destination_rejects_other_url_changes() {
+        for (destination, restored) in [
+            ("https://google.com/", "https://www.google.com/other"),
+            ("https://google.com/", "https://www.google.com/?q=1"),
+            ("https://google.com/", "https://www.google.com/#top"),
+            ("https://google.com/", "https://www.google.com:8443/"),
+            ("https://google.com/", "http://www.google.com/"),
+            ("https://google.com/", "https://www.www.google.com/"),
+            ("https://www.com/", "https://com/"),
+            ("https://www.com./", "https://com./"),
+            ("http://127.0.0.1/", "https://127.0.0.1/"),
+            ("https://google.com/", "https://user@www.google.com/"),
+            (
+                "https://user:one@google.com/",
+                "https://user:two@www.google.com/",
+            ),
+        ] {
+            assert!(
+                !restored_tab_is_new_tab_destination(
+                    &Url::parse(destination).unwrap(),
+                    &Url::parse(restored).unwrap(),
+                ),
+                "{destination} and {restored}",
+            );
+        }
+    }
 }

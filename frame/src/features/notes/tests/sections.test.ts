@@ -1,9 +1,26 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import type { NoteSummary } from "$domain/notes";
 import { sections } from "../lib/sections";
-import { untilEditedChanges, untilTomorrow } from "../lib/format";
+import { rowDate, untilEditedChanges, untilTomorrow } from "../lib/format";
+import * as m from "$shared/i18n/messages";
 
 const now = new Date(2026, 8, 24, 15, 0).getTime();
+
+test("notes use local calendar boundaries across daylight saving changes", () => {
+  vi.stubEnv("TZ", "Europe/Paris");
+  try {
+    const today = new Date(2026, 9, 26, 12).getTime();
+    const yesterday = new Date(2026, 9, 25, 0, 30).getTime();
+    expect(sections([note("early", yesterday)], today, false)[0]?.id).toBe("yesterday");
+    expect(rowDate(yesterday, today)).toBe(m.note_yesterday());
+    const spring = new Date(2026, 2, 30, 12).getTime();
+    const beforeYesterday = new Date(2026, 2, 28, 23, 30).getTime();
+    expect(sections([note("late", beforeYesterday)], spring, false)[0]?.id).toBe("week");
+    expect(rowDate(beforeYesterday, spring)).not.toBe(m.note_yesterday());
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 const at = (days: number, hours = 12) => new Date(2026, 8, 24 - days, hours).getTime();
 function note(id: string, modified: number, pinned = false): NoteSummary {
   return {

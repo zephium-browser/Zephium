@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "tuf")]
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "tuf")]
 use url::Url;
 use zephium_blocker::PolicyCatalog;
+#[cfg(feature = "tuf")]
+use zephium_blocker::Sha256;
 
 /// Hard maximum for a shipped trusted root.
 pub(crate) const HARD_MAX_ROOT_BYTES: usize = 256 * 1024;
@@ -203,7 +203,7 @@ impl RepositoryConfig {
             hasher.update((license.len() as u64).to_be_bytes());
             hasher.update(license);
         }
-        hasher.finalize().into()
+        hasher.finalize()
     }
 
     #[cfg(test)]
@@ -352,7 +352,7 @@ fn repository_identity(
     digest.update(metadata_base_url.as_str().as_bytes());
     digest.update([0]);
     digest.update(targets_base_url.as_str().as_bytes());
-    digest.finalize().into()
+    digest.finalize()
 }
 
 #[cfg(feature = "tuf")]

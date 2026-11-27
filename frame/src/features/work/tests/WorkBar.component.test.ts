@@ -7,11 +7,14 @@ import type { WorkEnvironmentSnapshot, WorkRuntimeProjection } from "$shared/ipc
 import { tabFixture } from "$shared/testing/fixtures";
 import WorkEnvironmentWorkspace from "../components/WorkEnvironmentWorkspace.svelte";
 import { projection } from "./environment-fixtures";
+// Compile the lazy surfaces before the interaction readiness deadline starts.
+import "../components/WorkCanvas.svelte";
+import "../components/AgentLine.svelte";
 
 const native = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({ faviconProbe: async () => true, workCall: native.call });
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({ faviconProbe: async () => true, workCall: native.call });
 });
 
 const profile = "bar-profile";

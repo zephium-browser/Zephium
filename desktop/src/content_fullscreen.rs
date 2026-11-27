@@ -10,6 +10,13 @@ use tauri::{AppHandle, Manager};
 /// page holds it.
 static TAKEN: Mutex<Option<bool>> = Mutex::new(None);
 
+pub(crate) fn held() -> bool {
+    TAKEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
 pub(crate) fn follow(app: &AppHandle, active: bool) {
     let Some(window) = app.get_webview_window(crate::MAIN_LABEL) else {
         return;
@@ -28,13 +35,13 @@ pub(crate) fn follow(app: &AppHandle, active: bool) {
             *taken = Some(already);
             #[cfg(target_os = "windows")]
             crate::platform::imp::set_caption_suppressed(&window, true);
-            if !already && window.set_fullscreen(true).is_err() {
+            if !already && crate::platform::set_window_fullscreen(&window, true).is_err() {
                 crate::write_diagnostic(format_args!(
                     "fullscreen: the window could not follow its page"
                 ));
             }
         } else if let Some(already) = taken.take() {
-            if !already && window.set_fullscreen(false).is_err() {
+            if !already && crate::platform::set_window_fullscreen(&window, false).is_err() {
                 crate::write_diagnostic(format_args!(
                     "fullscreen: the window could not leave fullscreen"
                 ));

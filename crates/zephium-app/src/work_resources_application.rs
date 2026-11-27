@@ -359,6 +359,8 @@ pub(super) struct RetainedWork {
     native_shutdown: Option<RetainedNativeShutdown>,
     /// Where the native gate saw a public first load redirected.
     redirect: Option<zephium_agentic::WorkBrowserRedirect>,
+    /// Where the native view says its first load never reached the site.
+    unreachable: Option<zephium_agentic::WorkBrowserUnreachable>,
 }
 impl RetainedWork {
     /// The newest canvas frame of this resource's page, if the engine hosts one.
@@ -451,6 +453,7 @@ impl RetainedWork {
             unexpected_native: None,
             native_shutdown: None,
             redirect: None,
+            unreachable: None,
         }
     }
 
@@ -478,7 +481,7 @@ impl RetainedWork {
         work.phase = AdmissionPhase::Constructing;
         work.construction = Some(pending);
         if !exact {
-            work.fail(AgentWorkFailure::Contract);
+            work.fail(crate::contract_failure!());
         }
         work
     }
@@ -625,18 +628,15 @@ impl RetainedWork {
         {
             group.fail();
         }
-        // A lost document whose first load the gate refused as a redirect
-        // was redirected; its owner reads the destination from the slot.
-        let failure = if failure == AgentWorkFailure::ContextLost
-            && self
-                .redirect
+        let failure = named_loss(
+            failure,
+            self.redirect
                 .as_ref()
-                .is_some_and(|redirect| redirect.destination().is_some())
-        {
-            AgentWorkFailure::Redirected
-        } else {
-            failure
-        };
+                .is_some_and(|redirect| redirect.destination().is_some()),
+            self.unreachable
+                .as_ref()
+                .is_some_and(zephium_agentic::WorkBrowserUnreachable::unreachable),
+        );
         self.failure.get_or_insert(failure);
         self.phase = AdmissionPhase::Uncertain;
         self.stopping = true;
@@ -691,7 +691,7 @@ impl RetainedWork {
                     self.inventory = records;
                     #[cfg(feature = "work-execution-probe")]
                     self.public_claim_refusal_diagnostic();
-                    self.fail(AgentWorkFailure::Contract);
+                    self.fail(crate::contract_failure!());
                     return Ok(());
                 }
                 self.incarnation = Some(owner);
@@ -808,6 +808,9 @@ impl RetainedWork {
         Ok(())
     }
 
+    pub(super) fn set_unreachable(&mut self, unreachable: zephium_agentic::WorkBrowserUnreachable) {
+        self.unreachable = Some(unreachable);
+    }
     pub(super) fn set_redirect(&mut self, redirect: zephium_agentic::WorkBrowserRedirect) {
         self.redirect = Some(redirect);
     }
@@ -822,7 +825,7 @@ impl RetainedWork {
 
     fn activate(&mut self) {
         let Some(staged) = self.staged.take() else {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
             return;
         };
         if self.stopping || staged.deadline <= Instant::now() {
@@ -850,7 +853,7 @@ impl RetainedWork {
             Ok(pending) => pending,
             Err(_) => {
                 self.unstarted = handle.take_outcome();
-                self.fail(AgentWorkFailure::Contract);
+                self.fail(crate::contract_failure!());
                 return;
             }
         };
@@ -870,7 +873,7 @@ impl RetainedWork {
         });
         self.phase = AdmissionPhase::Running;
         if !started {
-            self.fail(AgentWorkFailure::Contract);
+            self.fail(crate::contract_failure!());
         }
     }
 
@@ -987,7 +990,7 @@ impl RetainedWork {
                         self.last_review = Some(Err(error));
                     }
                     self.persistence_failure.get_or_insert(error);
-                    self.fail(AgentWorkFailure::Contract);
+                    self.fail(crate::contract_failure!());
                     flight.uncertain = true;
                     flight.deadline =
                         Instant::now() + reconciliation_backoff(flight.reconciliations);
@@ -1038,7 +1041,7 @@ impl RetainedWork {
                             {
                                 let admission = self
                                     .incarnation
-                                    .ok_or(AgentWorkFailure::Contract)
+                                    .ok_or_else(|| crate::contract_failure!())
                                     .and_then(|owner| staged.controller.journal_admission(owner))
                                     .and_then(|admission| {
                                         if let Some(group) = &self.runtime_group {
@@ -1047,7 +1050,7 @@ impl RetainedWork {
                                                     self.resource.identity().context(),
                                                     admission.next(),
                                                 )
-                                                .map_err(|_| AgentWorkFailure::Contract)?;
+                                                .map_err(|_| crate::contract_failure!())?;
                                         }
                                         Ok(admission)
                                     });
@@ -1064,7 +1067,7 @@ impl RetainedWork {
                             }
                             Ok(staged) => {
                                 self.staged = Some(staged);
-                                self.fail(AgentWorkFailure::Contract);
+                                self.fail(crate::contract_failure!());
                             }
                             Err(error) => self.fail(error),
                         }
@@ -1095,7 +1098,7 @@ impl RetainedWork {
                         AgentRuntimeScopedDrain::Drained(drained) => active.drained = Some(drained),
                         AgentRuntimeScopedDrain::Unproven => {
                             crate::diagnostic!("work: phase=page event=terminal_refused stage=scoped_drain; content=redacted");
-                            failure = Some(AgentWorkFailure::Contract)
+                            failure = Some(crate::contract_failure!())
                         }
                     }
                 }
@@ -1240,7 +1243,7 @@ impl RetainedWork {
                         }
                         Err(error) => {
                             crate::diagnostic!("work: phase=page event=terminal_refused stage=journal_terminal error={error:?}; content=redacted");
-                            self.fail(AgentWorkFailure::Contract)
+                            self.fail(crate::contract_failure!())
                         }
                     }
                 }
@@ -1791,7 +1794,7 @@ impl RetainedWork {
                 return false;
             };
             let Ok(now) = clock.now() else {
-                self.fail(AgentWorkFailure::Contract);
+                self.fail(crate::contract_failure!());
                 return false;
             };
             if Instant::now() >= deadline {
@@ -1860,6 +1863,17 @@ pub(in crate::work_resources) static UNCONFIRMED_TERMINALS: std::sync::atomic::A
     std::sync::atomic::AtomicBool::new(false);
 
 const MAX_RECONCILIATIONS: u8 = 4;
+
+/// A lost document whose first load the gate refused as a redirect was
+/// redirected (its owner reads the destination from the slot); one whose
+/// load never reached its site was unreachable. Other losses stay as they are.
+fn named_loss(failure: AgentWorkFailure, redirected: bool, unreachable: bool) -> AgentWorkFailure {
+    match failure {
+        AgentWorkFailure::ContextLost if redirected => AgentWorkFailure::Redirected,
+        AgentWorkFailure::ContextLost if unreachable => AgentWorkFailure::Unreachable,
+        failure => failure,
+    }
+}
 
 /// Half a second, doubling: the last resend leaves within about 15 s of the
 /// first uncertainty, past a Store that is only slow, not one that is gone.
@@ -1980,6 +1994,15 @@ impl RetainedWork {
 #[cfg(test)]
 mod group_tests {
     use super::*;
+
+    #[test]
+    fn a_lost_page_is_named_by_what_its_first_load_met() {
+        use AgentWorkFailure::{ContextLost, Deadline, Redirected, Unreachable};
+        assert_eq!(named_loss(ContextLost, false, false), ContextLost);
+        assert_eq!(named_loss(ContextLost, false, true), Unreachable);
+        assert_eq!(named_loss(ContextLost, true, true), Redirected);
+        assert_eq!(named_loss(Deadline, false, true), Deadline);
+    }
 
     #[test]
     fn work_group_accepts_only_its_live_manifest_under_the_original_process_fence() {

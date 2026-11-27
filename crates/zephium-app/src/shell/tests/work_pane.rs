@@ -272,6 +272,14 @@ fn work_shortcuts_address_the_pane_tab_instead_of_the_hidden_browse_tab() {
         .iter()
         .any(|c| c == &format!("reload {first}")));
     assert_eq!(
+        shell.operation_run_command("nav.hardReload").outcome,
+        OperationOutcome::Deferred
+    );
+    assert!(engine
+        .calls()
+        .iter()
+        .any(|c| c == &format!("hard-reload {first}")));
+    assert_eq!(
         shell.operation_run_command("tab.close").outcome,
         OperationOutcome::Deferred
     );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editingAddress, restingAddress } from "../lib/address-model";
+import { addressSecurity, editingAddress, restingAddress } from "../lib/address-model";
 
 describe("address presentation", () => {
   it("shows only the host while browser chrome is at rest", () => {
@@ -16,5 +16,12 @@ describe("address presentation", () => {
   it("fails closed for absent or invalid authoritative URLs", () => {
     expect(restingAddress(null)).toBe("");
     expect(restingAddress("not a url")).toBe("");
+  });
+
+  it("never shows a page under a certificate exception as secure", () => {
+    expect(addressSecurity("https://nas.local/")).toBe("secure");
+    expect(addressSecurity("https://nas.local/", true)).toBe("untrusted");
+    expect(addressSecurity("http://nas.local/", true)).toBe("insecure");
+    expect(addressSecurity("about:blank", true)).toBe("none");
   });
 });

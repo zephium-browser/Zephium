@@ -32,7 +32,7 @@ impl PreparedRetainedWork {
             deadline: spec.expires_at,
             prepare: Box::new(move |browser, audit, waiting| {
                 if waiting.is_some() {
-                    return Err(AgentWorkFailure::Contract);
+                    return Err(crate::contract_failure!());
                 }
                 StagedActor::for_public_qualification(
                     input, browser, runtime, provider, access, audit, task,

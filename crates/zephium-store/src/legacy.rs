@@ -2,6 +2,7 @@
 //! session JSON blob). Understands both blob generations: v1 flat tabs and v2
 //! item-tree. Read-only; the hub writes the result into the new layout.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -17,6 +18,7 @@ use zephium_core::session::{
 };
 
 use crate::bounded_json;
+use crate::essentials;
 use crate::hub::{MAX_NAME_BYTES, MAX_TITLE_BYTES, MAX_URL_BYTES};
 use crate::pane::{self, StoredPane};
 
@@ -274,14 +276,21 @@ fn decode_v2(stored: StoredSession) -> Option<SessionState> {
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    let items = stored
-        .items
-        .into_iter()
-        .map(decode_item)
-        .collect::<Option<Vec<_>>>()?;
     let active_space = match stored.active_space {
         Some(raw) => Some(SpaceId::parse(&raw).filter(|id| id.to_string() == raw)?),
         None => None,
+    };
+    let mut homes = HashMap::new();
+    let items = stored
+        .items
+        .into_iter()
+        .map(|item| decode_item(item, &spaces, active_space, &mut homes))
+        .collect::<Option<Vec<_>>>()?;
+    // Essentials were once a profile's; every space of it gets a copy.
+    let items = if homes.is_empty() {
+        items
+    } else {
+        essentials::spread(items, &spaces, &homes)
     };
     let active_item = match stored.active_item {
         Some(raw) => Some(ItemId::parse(&raw).filter(|id| id.to_string() == raw)?),
@@ -302,11 +311,18 @@ fn decode_v2(stored: StoredSession) -> Option<SessionState> {
     })
 }
 
-fn decode_item(item: StoredItem) -> Option<PersistedItem> {
+fn decode_item(
+    item: StoredItem,
+    spaces: &[PersistedSpace],
+    active_space: Option<SpaceId>,
+    homes: &mut HashMap<ProfileId, SpaceId>,
+) -> Option<PersistedItem> {
     let placement = match (&item.profile, &item.space, &item.section) {
         (Some(profile), None, None) => {
             let profile = ProfileId::parse(profile).filter(|id| id.to_string() == *profile)?;
-            Placement::Favorites { profile }
+            let home = essentials::home_space(spaces, profile, active_space)?;
+            homes.insert(profile, home);
+            Placement::Favorites { space: home }
         }
         (None, Some(space), Some(section)) => Placement::Space {
             space: SpaceId::parse(space).filter(|id| id.to_string() == *space)?,
@@ -404,6 +420,35 @@ mod tests {
         assert_eq!(session.spaces.len(), 1);
         assert_eq!(session.items.len(), 2);
         assert_eq!(session.active_item, Some(session.items[1].id));
+    }
+
+    #[test]
+    fn v2_blob_essentials_reach_every_space_of_their_profile() {
+        let (profile, first, second) = (ProfileId::from(1), SpaceId::from(2), SpaceId::from(3));
+        let json = format!(
+            r#"{{"v":2,
+                "profiles":[{{"id":"{profile}","name":"P","kind":"default"}}],
+                "spaces":[{{"id":"{first}","profile":"{profile}","name":"A"}},
+                          {{"id":"{second}","profile":"{profile}","name":"B"}}],
+                "items":[{{"id":"{item}","parent":null,"profile":"{profile}","space":null,
+                           "section":null,"folder":null,"url":"https://mail.example/","title":"Mail"}}],
+                "active_space":"{second}","active_item":"{item}","splits":null}}"#,
+            item = ItemId::from(4),
+        );
+
+        let session = decode(&json).unwrap();
+
+        let kept = |space| {
+            session
+                .items
+                .iter()
+                .filter(|item| item.placement == Placement::Favorites { space })
+                .count()
+        };
+        assert_eq!((kept(first), kept(second)), (1, 1));
+        assert_eq!(session.active_item, Some(ItemId::from(4)));
+        assert!(session.items.iter().any(|item| item.id == ItemId::from(4)
+            && item.placement == Placement::Favorites { space: second }));
     }
 
     #[test]

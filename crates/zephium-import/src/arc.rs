@@ -2,40 +2,33 @@
 //! Chromium's bookmarks file: each space's pinned tabs (with folders) and the
 //! favorites above them, in `StorableSidebar.json`. Favorites come over as
 //! Essentials, pinned tabs as bookmarks. History is Chromium's.
+//!
+//! Arc's profiles are Chromium profiles: every space and every row of
+//! favorites belongs to one, and each has its own history.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::{child, Essential, ImportError, ImportNode, Locations, Profile};
+use crate::{child, chromium, Essential, ImportError, ImportNode, Locations, Os, Profile};
 
-const PROFILE: &str = "Default";
+/// The profile of a space that names none, and of Arc's first.
+const DEFAULT: &str = "Default";
+/// Arc runs its own pages in a profile the person never made or sees.
+const SYSTEM_PROFILE: &str = "__ARC_SYSTEM_PROFILE";
 
 fn root(locations: &Locations) -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        let root = locations
-            .home
-            .join("Library")
-            .join("Application Support")
-            .join("Arc");
-        return root.is_dir().then_some(root);
+    match locations.os {
+        Os::Mac => Some(locations.support().join("Arc")).filter(|root| root.is_dir()),
+        // Arc for Windows is a Store package.
+        Os::Windows => locations
+            .store_packages("TheBrowserCompany.Arc")
+            .into_iter()
+            .map(|package| package.join("LocalCache").join("Local").join("Arc"))
+            .find(|root| root.is_dir()),
+        Os::Linux => None,
     }
-    if cfg!(windows) {
-        let packages = locations.local_app_data.as_ref()?.join("Packages");
-        return std::fs::read_dir(packages)
-            .ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("TheBrowserCompany.Arc")
-            })
-            .map(|entry| entry.path().join("LocalCache").join("Local").join("Arc"))
-            .find(|root| root.is_dir());
-    }
-    None
 }
 
 pub(crate) fn profiles(locations: &Locations) -> Vec<Profile> {
@@ -43,37 +36,45 @@ pub(crate) fn profiles(locations: &Locations) -> Vec<Profile> {
         return Vec::new();
     };
     let sidebar = root.join("StorableSidebar.json").is_file();
-    let history = root
-        .join("User Data")
-        .join(PROFILE)
-        .join("History")
-        .is_file();
-    if !sidebar && !history {
-        return Vec::new();
+    let mut profiles: Vec<Profile> = chromium::profiles(&root.join("User Data"))
+        .into_iter()
+        .filter(|profile| profile.name != SYSTEM_PROFILE)
+        // Chromium's bookmarks file is not where Arc keeps them.
+        .map(|profile| Profile {
+            bookmarks: sidebar,
+            essentials: sidebar,
+            ..profile
+        })
+        .collect();
+    // A sidebar before any history: the first profile is still there.
+    if profiles.is_empty() && sidebar {
+        profiles.push(Profile {
+            id: DEFAULT.into(),
+            name: "Arc".into(),
+            bookmarks: true,
+            history: false,
+            essentials: true,
+        });
     }
-    vec![Profile {
-        id: PROFILE.into(),
-        name: "Arc".into(),
-        bookmarks: sidebar,
-        history,
-        essentials: sidebar,
-    }]
+    profiles
+}
+
+/// Only a profile Arc still lists may be read.
+fn listed(locations: &Locations, profile: &str) -> Result<PathBuf, ImportError> {
+    if !profiles(locations).iter().any(|known| known.id == profile) {
+        return Err(ImportError::Missing);
+    }
+    root(locations).ok_or(ImportError::Missing)
 }
 
 pub(crate) fn profile_dir(locations: &Locations, profile: &str) -> Result<PathBuf, ImportError> {
-    if profile != PROFILE {
-        return Err(ImportError::Missing);
-    }
-    let root = root(locations).ok_or(ImportError::Missing)?;
+    let root = listed(locations, profile)?;
     child(&root.join("User Data"), profile).ok_or(ImportError::Missing)
 }
 
 fn sidebar(locations: &Locations, profile: &str) -> Result<Sidebar, ImportError> {
-    if profile != PROFILE {
-        return Err(ImportError::Missing);
-    }
-    let root = root(locations).ok_or(ImportError::Missing)?;
-    parse_sidebar(&std::fs::read(root.join("StorableSidebar.json"))?)
+    let root = listed(locations, profile)?;
+    parse_sidebar(&std::fs::read(root.join("StorableSidebar.json"))?, profile)
 }
 
 pub(crate) fn bookmarks(
@@ -90,15 +91,15 @@ pub(crate) fn essentials(
     Ok(sidebar(locations, profile)?.favorites)
 }
 
-/// What the sidebar keeps: favorites, and one folder per space holding its
-/// pinned tabs.
+/// What one profile's sidebar keeps: its favorites, and one folder per space
+/// holding the space's pinned tabs.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Sidebar {
     favorites: Vec<Essential>,
     spaces: Vec<ImportNode>,
 }
 
-pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Sidebar, ImportError> {
+pub(crate) fn parse_sidebar(bytes: &[u8], profile: &str) -> Result<Sidebar, ImportError> {
     let file: Value = serde_json::from_slice(bytes).map_err(|_| ImportError::Unreadable)?;
     let container = file
         .get("sidebar")
@@ -117,7 +118,17 @@ pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Sidebar, ImportError> {
     let mut nodes = Vec::new();
     let mut seen = HashSet::new();
     let mut favorites = Vec::new();
-    let kept = marked_ids(container.get("topAppsContainerIDs"), None)
+    // Some files keep the favorites only in the sync mirror.
+    let mirrored = file
+        .get("sidebarSyncState")
+        .and_then(|state| state.get("container"))
+        .and_then(|container| container.get("value"))
+        .and_then(|value| value.get("topAppsContainerIDs"));
+    let top_apps = container
+        .get("topAppsContainerIDs")
+        .filter(|list| list.as_array().is_some_and(|list| !list.is_empty()))
+        .or(mirrored);
+    let kept = favorite_containers(top_apps, profile)
         .into_iter()
         .flat_map(|id| tree.children(id, &mut HashSet::new()));
     flatten(kept, &mut |title, url| {
@@ -126,10 +137,13 @@ pub(crate) fn parse_sidebar(bytes: &[u8]) -> Result<Sidebar, ImportError> {
         }
     });
     for space in entries(container.get("spaces")) {
+        if space.get("profile").and_then(profile_of).unwrap_or(DEFAULT) != profile {
+            continue;
+        }
         let ids = space
             .get("newContainerIDs")
             .or_else(|| space.get("containerIDs"));
-        let pinned: Vec<ImportNode> = marked_ids(ids, Some("pinned"))
+        let pinned: Vec<ImportNode> = marked_ids(ids, "pinned")
             .into_iter()
             .flat_map(|id| tree.children(id, &mut HashSet::new()))
             .collect();
@@ -174,18 +188,43 @@ fn entries(list: Option<&Value>) -> impl Iterator<Item = &Value> {
 
 /// Ids that follow a marker in a container list. The marker is a string
 /// ("pinned") in older files and an object (`{"pinned": {}}`) in newer ones.
-/// With no marker named, every id in the list is returned.
-fn marked_ids<'a>(list: Option<&'a Value>, marker: Option<&str>) -> Vec<&'a str> {
+fn marked_ids<'a>(list: Option<&'a Value>, marker: &str) -> Vec<&'a str> {
     let Some(list) = list.and_then(Value::as_array) else {
         return Vec::new();
-    };
-    let Some(marker) = marker else {
-        return list.iter().filter_map(Value::as_str).collect();
     };
     list.windows(2)
         .filter(|pair| pair[0].as_str() == Some(marker) || pair[0].get(marker).is_some())
         .filter_map(|pair| pair[1].as_str())
         .collect()
+}
+
+/// The profile directory a marker names: `{"default": true}` is the first
+/// profile, `{"custom": {"_0": {"directoryBasename": "Profile 2"}}}` another.
+fn profile_of(marker: &Value) -> Option<&str> {
+    if marker.get("default").is_some() {
+        return Some(DEFAULT);
+    }
+    marker
+        .get("custom")?
+        .get("_0")?
+        .get("directoryBasename")?
+        .as_str()
+}
+
+/// The containers of favorites that belong to `profile`. Each profile's id
+/// follows an object naming it; ids before any such object are the first
+/// profile's.
+fn favorite_containers<'a>(list: Option<&'a Value>, profile: &str) -> Vec<&'a str> {
+    let mut owner = DEFAULT;
+    let mut found = Vec::new();
+    for entry in list.and_then(Value::as_array).into_iter().flatten() {
+        match entry.as_str() {
+            Some(id) if owner == profile => found.push(id),
+            Some(_) => {}
+            None => owner = profile_of(entry).unwrap_or(DEFAULT),
+        }
+    }
+    found
 }
 
 struct Tree<'a> {
@@ -207,36 +246,43 @@ impl Tree<'_> {
             .into_iter()
             .flatten()
             .filter_map(Value::as_str)
-            .filter_map(|child| self.node(child, seen))
+            .flat_map(|child| self.node(child, seen))
             .collect()
     }
 
-    fn node(&self, id: &str, seen: &mut HashSet<String>) -> Option<ImportNode> {
-        let item = self.items.get(id)?;
-        let data = item.get("data")?;
+    /// What one item becomes: a link for a tab, a folder for a list. Anything
+    /// else (a split view, say) holds tabs but is not a place of its own, so
+    /// they stay where they are.
+    fn node(&self, id: &str, seen: &mut HashSet<String>) -> Vec<ImportNode> {
+        let Some(item) = self.items.get(id) else {
+            return Vec::new();
+        };
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.is_empty());
+        let Some(data) = item.get("data") else {
+            return Vec::new();
+        };
         if let Some(tab) = data.get("tab") {
-            let url = tab.get("savedURL")?.as_str()?.to_owned();
-            let title = item
-                .get("title")
-                .and_then(Value::as_str)
+            let Some(url) = tab.get("savedURL").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let title = title
                 .or_else(|| tab.get("savedTitle").and_then(Value::as_str))
                 .unwrap_or_default();
-            return Some(ImportNode::Link {
+            return vec![ImportNode::Link {
                 title: title.to_owned(),
-                url,
-            });
+                url: url.to_owned(),
+            }];
         }
-        if data.get("list").is_some() || item.get("childrenIds").is_some() {
-            return Some(ImportNode::Folder {
-                title: item
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Folder")
-                    .to_owned(),
+        if data.get("list").is_some() {
+            return vec![ImportNode::Folder {
+                title: title.unwrap_or("Folder").to_owned(),
                 children: self.children(id, seen),
-            });
+            }];
         }
-        None
+        self.children(id, seen)
     }
 }
 
@@ -271,7 +317,7 @@ mod tests {
             title: title.into(),
             url: url.into(),
         };
-        let sidebar = parse_sidebar(file).unwrap();
+        let sidebar = parse_sidebar(file, DEFAULT).unwrap();
         assert_eq!(
             sidebar.favorites,
             vec![Essential {
@@ -294,6 +340,179 @@ mod tests {
         );
     }
 
+    /// Two profiles' worth of sidebar, shaped like Arc's file: the first
+    /// profile's space and favorites, and a second profile's.
+    const TWO_PROFILES: &[u8] = br#"{"sidebar":{"containers":[{
+        "topAppsContainerIDs":[{"default":true},"top-a",{"custom":{"_0":{"directoryBasename":"Profile 2","machineID":"m"}}},"top-b"],
+        "spaces":[
+          "s1",{"id":"s1","title":"Personal","profile":{"default":true},"newContainerIDs":[{"pinned":{}},"pa"]},
+          "s2",{"id":"s2","title":"Studio","profile":{"custom":{"_0":{"directoryBasename":"Profile 2","machineID":"m"}}},"newContainerIDs":[{"pinned":{}},"pb"]}
+        ],
+        "items":[
+          "top-a",{"id":"top-a","childrenIds":["fa"],"data":{"itemContainer":{}}},
+          "fa",{"id":"fa","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://mail.example/","savedTitle":"Mail"}}},
+          "top-b",{"id":"top-b","childrenIds":["fb"],"data":{"itemContainer":{}}},
+          "fb",{"id":"fb","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://figma.example/","savedTitle":"Figma"}}},
+          "pa",{"id":"pa","childrenIds":["ta"],"data":{"itemContainer":{}}},
+          "ta",{"id":"ta","title":null,"childrenIds":[],"data":{"tab":{"savedURL":"https://notes.example/","savedTitle":"Notes"}}},
+          "pb",{"id":"pb","childrenIds":["tb"],"data":{"itemContainer":{}}},
+          "tb",{"id":"tb","title":"","childrenIds":[],"data":{"tab":{"savedURL":"https://board.example/","savedTitle":"Board"}}}
+        ]
+    }]}}"#;
+
+    #[test]
+    fn each_profile_gets_its_own_spaces_and_favorites() {
+        let personal = parse_sidebar(TWO_PROFILES, "Default").unwrap();
+        assert_eq!(
+            personal
+                .favorites
+                .iter()
+                .map(|f| f.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Mail"]
+        );
+        assert_eq!(
+            personal.spaces,
+            vec![ImportNode::Folder {
+                title: "Personal".into(),
+                children: vec![ImportNode::Link {
+                    title: "Notes".into(),
+                    url: "https://notes.example/".into()
+                }]
+            }]
+        );
+        let studio = parse_sidebar(TWO_PROFILES, "Profile 2").unwrap();
+        assert_eq!(
+            studio
+                .favorites
+                .iter()
+                .map(|f| f.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Figma"]
+        );
+        // A tab with an empty name shows the title it was saved with.
+        assert_eq!(
+            studio.spaces,
+            vec![ImportNode::Folder {
+                title: "Studio".into(),
+                children: vec![ImportNode::Link {
+                    title: "Board".into(),
+                    url: "https://board.example/".into()
+                }]
+            }]
+        );
+        let none = parse_sidebar(TWO_PROFILES, "Profile 9").unwrap();
+        assert!(none.favorites.is_empty() && none.spaces.is_empty());
+    }
+
+    #[test]
+    fn favorites_kept_only_in_the_sync_mirror_are_found_there() {
+        let file = br#"{
+          "sidebarSyncState":{"container":{"value":{"topAppsContainerIDs":[{"default":true},"top"]}}},
+          "sidebar":{"containers":[{
+            "topAppsContainerIDs":[],
+            "spaces":[],
+            "items":[
+              "top",{"id":"top","childrenIds":["fav"],"data":{"itemContainer":{}}},
+              "fav",{"id":"fav","childrenIds":[],"data":{"tab":{"savedURL":"https://mail.example/","savedTitle":"Mail"}}}
+            ]
+        }]}}"#;
+        let sidebar = parse_sidebar(file, DEFAULT).unwrap();
+        assert_eq!(sidebar.favorites.len(), 1);
+    }
+
+    #[test]
+    fn a_split_view_is_not_a_folder_and_an_easel_is_nothing() {
+        let file = br#"{"sidebar":{"containers":[{
+            "spaces":[{"id":"s","title":"Work","containerIDs":["pinned","p"]}],
+            "items":[
+              {"id":"p","childrenIds":["split","easel","t3"],"data":{"itemContainer":{}}},
+              {"id":"split","childrenIds":["t1","t2"],"data":{"splitView":{}}},
+              {"id":"t1","childrenIds":[],"data":{"tab":{"savedURL":"https://one.example/","savedTitle":"One"}}},
+              {"id":"t2","childrenIds":[],"data":{"tab":{"savedURL":"https://two.example/","savedTitle":"Two"}}},
+              {"id":"easel","title":"Sketch","childrenIds":[],"data":{"easel":{}}},
+              {"id":"t3","childrenIds":[],"data":{"tab":{"savedURL":"https://three.example/","savedTitle":"Three"}}}
+            ]
+        }]}}"#;
+        let titles: Vec<String> = match &parse_sidebar(file, DEFAULT).unwrap().spaces[..] {
+            [ImportNode::Folder { children, .. }] => children
+                .iter()
+                .map(|node| match node {
+                    ImportNode::Link { title, .. } => title.clone(),
+                    ImportNode::Folder { title, .. } => format!("[{title}]"),
+                })
+                .collect(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(titles, ["One", "Two", "Three"]);
+    }
+
+    #[test]
+    fn every_profile_is_offered_but_not_the_one_arc_keeps_for_itself() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("Library/Application Support/Arc");
+        let data = root.join("User Data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(root.join("StorableSidebar.json"), TWO_PROFILES).unwrap();
+        // As Arc writes it: the first profile, one made later, and the
+        // profile Arc runs its own pages in.
+        std::fs::write(
+            data.join("Local State"),
+            br#"{"profile":{"info_cache":{
+                "Default":{"name":"Your Arc"},
+                "Profile 1":{"name":"__ARC_SYSTEM_PROFILE"},
+                "Profile 2":{"name":"Development"}
+            }}}"#,
+        )
+        .unwrap();
+        for profile in ["Default", "Profile 1", "Profile 2"] {
+            std::fs::create_dir_all(data.join(profile)).unwrap();
+            std::fs::write(data.join(profile).join("History"), b"").unwrap();
+        }
+        let locations = Locations::scratch(Os::Mac, home.path());
+        let found = profiles(&locations);
+        assert_eq!(
+            found
+                .iter()
+                .map(|p| (
+                    p.id.as_str(),
+                    p.name.as_str(),
+                    p.bookmarks,
+                    p.history,
+                    p.essentials
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("Default", "Your Arc", true, true, true),
+                ("Profile 2", "Development", true, true, true)
+            ]
+        );
+        assert_eq!(
+            profile_dir(&locations, "Profile 2").unwrap(),
+            data.join("Profile 2")
+        );
+        assert!(profile_dir(&locations, "Profile 1").is_err());
+        assert!(profile_dir(&locations, "../Default").is_err());
+        assert_eq!(bookmarks(&locations, "Profile 2").unwrap().len(), 1);
+        assert_eq!(essentials(&locations, "Default").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn arc_for_windows_is_a_store_package_and_arc_is_not_on_linux() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home
+            .path()
+            .join("Local/Packages/TheBrowserCompany.Arc_ttt1ap7aakyb4/LocalCache/Local/Arc");
+        std::fs::create_dir_all(root.join("User Data/Default")).unwrap();
+        std::fs::write(root.join("User Data/Default/History"), b"").unwrap();
+        let windows = Locations::scratch(Os::Windows, home.path());
+        let found = profiles(&windows);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].history && !found[0].bookmarks);
+        assert!(profiles(&Locations::scratch(Os::Linux, home.path())).is_empty());
+        assert!(profiles(&Locations::scratch(Os::Mac, home.path())).is_empty());
+    }
+
     #[test]
     fn a_cycle_in_a_damaged_file_ends() {
         let file = br#"{"sidebar":{"containers":[{
@@ -303,8 +522,8 @@ mod tests {
               {"id":"b","title":"B","childrenIds":["a"],"data":{"list":{}}}
             ]
         }]}}"#;
-        let sidebar = parse_sidebar(file).unwrap();
+        let sidebar = parse_sidebar(file, DEFAULT).unwrap();
         assert_eq!(sidebar.spaces.len(), 1);
-        assert!(parse_sidebar(b"{\"sidebar\":{}}").is_err());
+        assert!(parse_sidebar(b"{\"sidebar\":{}}", DEFAULT).is_err());
     }
 }

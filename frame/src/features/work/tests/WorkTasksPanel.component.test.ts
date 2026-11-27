@@ -4,6 +4,7 @@ import { render } from "vitest-browser-svelte";
 import { page, userEvent } from "vitest/browser";
 import { resourceTestServer } from "$shared/testing/resources/server";
 import TasksPanelStage from "./TasksPanelStage.svelte";
+import { loadTasks } from "$features/tasks";
 
 const native = vi.hoisted(() => ({
   call: vi.fn(),
@@ -19,6 +20,8 @@ vi.mock("$domain/tabs", () => ({
 }));
 vi.mock("$domain/surface", () => ({ surface: { open: vi.fn() } }));
 
+// Prepare the lazy body before timing task entry and view interaction.
+await loadTasks();
 const shots = "../../../../../target/work-shell";
 
 test("the person's tasks over the canvas: pick a view, add one, complete it", async () => {

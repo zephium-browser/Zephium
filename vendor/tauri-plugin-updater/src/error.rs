@@ -16,6 +16,10 @@ pub enum Error {
     ManualInstallRequired,
     #[error("Could not start the update installer (system result {0})")]
     InstallerLaunchFailed(isize),
+    #[error(
+        "The signed updater release identity does not match a newer release for this platform"
+    )]
+    ReleaseBindingMismatch,
     /// IO errors.
     #[error(transparent)]
     Io(#[from] std::io::Error),

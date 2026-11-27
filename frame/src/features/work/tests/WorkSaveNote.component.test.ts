@@ -10,11 +10,13 @@ import { documentMarkdown } from "../lib/work-notes";
 
 const native = vi.hoisted(() => ({ work: vi.fn(), note: vi.fn(), resource: vi.fn() }));
 vi.mock("$shared/ipc/bindings", async () => {
-  const { mockBindings } = await import("$shared/testing/bindings");
-  return mockBindings({
+  const { mockComposerBindings } = await import("./composer-fixtures");
+  return mockComposerBindings({
     workCall: native.work,
     noteCall: native.note,
     resourceCall: native.resource,
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: async () => {},
   });
 });

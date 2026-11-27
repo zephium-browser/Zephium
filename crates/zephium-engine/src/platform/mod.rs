@@ -6,7 +6,7 @@ mod agent_cookie_preflight;
     any(target_os = "macos", target_os = "windows", test)
 ))]
 mod agent_navigation;
-#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+#[cfg(any(target_os = "windows", all(test, feature = "agentic-browser")))]
 mod agent_screenshot_buffer;
 #[cfg(all(target_os = "macos", feature = "native-agentic-semantic-probe"))]
 pub(crate) mod form_qualification;
@@ -61,6 +61,8 @@ pub mod linux;
 #[cfg(all(unix, not(target_os = "macos")))]
 pub use linux as imp;
 pub(crate) mod content_pause;
+pub(crate) mod content_protection;
+pub(crate) mod top_document;
 
 /// The frame's content ground in each theme (`--color-page`); native covers
 /// paint it so a page that has not painted yet reads as the empty pane.
@@ -68,3 +70,8 @@ pub(crate) mod content_pause;
 pub(crate) const PAGE_GROUND_DARK: (u8, u8, u8) = (0x1a, 0x1a, 0x1d);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) const PAGE_GROUND_LIGHT: (u8, u8, u8) = (0xf1, 0xf1, 0xf3);
+
+// The codec is the engine's one optional image dependency, which every
+// production build enables.
+#[cfg(all(feature = "agentic-browser", any(target_os = "windows", test)))]
+pub(crate) mod preview_image;

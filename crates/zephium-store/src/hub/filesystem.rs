@@ -235,10 +235,7 @@ fn same_file_identity(before: &FileIdentity, after: &FileIdentity) -> bool {
 
 pub(super) fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlite::Result<bool> {
     let base = dir.join(format!("profile-{profile}.sqlite"));
-    let notes = [
-        dir.join("notes").join(profile.to_string()),
-        dir.join("notes").join(format!(".erasing-{profile}")),
-    ];
+    let owned = profile_owned_artifacts(dir, profile)?;
     for path in ["", "-wal", "-shm"]
         .into_iter()
         .map(|suffix| {
@@ -246,7 +243,8 @@ pub(super) fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlit
             path.push(suffix);
             PathBuf::from(path)
         })
-        .chain(notes)
+        .chain(owned)
+        .chain(extension_profile_artifacts(dir, profile)?)
     {
         match std::fs::symlink_metadata(&path) {
             Ok(_) => return Ok(true),
@@ -257,6 +255,61 @@ pub(super) fn profile_artifacts_exist(dir: &Path, profile: ProfileId) -> rusqlit
         }
     }
     Ok(false)
+}
+
+pub(super) fn profile_owned_artifacts(
+    dir: &Path,
+    profile: ProfileId,
+) -> rusqlite::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for owner in ["notes", "media", "work-frames"] {
+        match std::fs::symlink_metadata(dir.join(owner)) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(rusqlite::Error::InvalidPath(dir.join(owner))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+        }
+        paths.push(dir.join(owner).join(profile.to_string()));
+        paths.push(dir.join(owner).join(format!(".erasing-{profile}")));
+    }
+    let connections = dir.join("connections");
+    match std::fs::symlink_metadata(&connections) {
+        Ok(meta) if meta.file_type().is_dir() => {}
+        Ok(_) => return Err(rusqlite::Error::InvalidPath(connections)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+    }
+    for suffix in ["json", "tools.json"] {
+        paths.push(connections.join(format!("profile-{profile}.{suffix}")));
+    }
+    let entries = match std::fs::read_dir(&connections) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(error) => return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= 10_000 {
+            return Err(super::invalid_data(
+                "connection artifact inventory exceeds limit",
+            ));
+        }
+        let entry =
+            entry.map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if [
+            format!("profile-{profile}.json."),
+            format!("profile-{profile}.tools.json."),
+        ]
+        .iter()
+        .any(|prefix| {
+            name.strip_prefix(prefix)
+                .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+        }) {
+            paths.push(entry.path());
+        }
+    }
+    Ok(paths)
 }
 
 pub(super) fn profile_artifacts_absent(dir: &Path, profile: ProfileId) -> rusqlite::Result<bool> {
@@ -386,10 +439,67 @@ pub(super) fn harden_registered_profile_files(
     Ok(degraded)
 }
 
+fn validate_directory(path: &Path) -> rusqlite::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_dir()
+                && std::fs::canonicalize(path).ok().as_deref() == Some(path) =>
+        {
+            Ok(())
+        }
+        Ok(_) => Err(rusqlite::Error::InvalidPath(path.into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
+    }
+}
+
+pub(super) fn extension_profile_artifacts(
+    dir: &Path,
+    profile: ProfileId,
+) -> rusqlite::Result<[PathBuf; 3]> {
+    let root = std::fs::canonicalize(dir)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let extensions = root.join("webext");
+    let profiles = extensions.join("profiles");
+    let staging = extensions.join("staging");
+    for path in [&extensions, &profiles, &staging] {
+        validate_directory(path)?;
+    }
+    let registry = profiles.join(format!("{profile}.json"));
+    Ok([
+        registry.clone(),
+        registry.with_extension("json.tmp"),
+        staging.join(profile.to_string()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::config::DbConfig;
+
+    #[test]
+    fn bundled_sqlite_security_floor_preserves_storage_policy() {
+        // libsqlite3-sys 0.39 bundles SQLite 3.54, fixing RUSTSEC-2026-0459.
+        assert!(rusqlite::version_number() >= 3_054_000);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("security-floor.sqlite");
+        let connection = open_database(&path).unwrap();
+        configure(&connection).unwrap();
+        let journal: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+        configure_profile(&connection).unwrap();
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1);
+    }
 
     #[test]
     fn authoritative_meta_creation_and_read_only_reopen_reach_exact_boundary() {

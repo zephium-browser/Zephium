@@ -78,6 +78,145 @@ fn establish_canonical_lock(root: &Path) {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+fn socket_fixture_ready_line(line: &str) -> bool {
+    line.split_whitespace().last() == Some("socket-fixture-ready")
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn socket_fixture_readiness_accepts_the_libtest_inline_prefix() {
+    for line in [
+        "socket-fixture-ready\n",
+        "test socket_fixture_child ... socket-fixture-ready\n",
+        "test socket_fixture_child ... socket-fixture-ready\r\n",
+    ] {
+        assert!(
+            socket_fixture_ready_line(line),
+            "missed fixture readiness: {line:?}"
+        );
+    }
+    for line in [
+        "test socket_fixture_child ... ",
+        "not-socket-fixture-ready\n",
+        "socket-fixture-ready trailing output\n",
+    ] {
+        assert!(
+            !socket_fixture_ready_line(line),
+            "accepted unrelated output: {line:?}"
+        );
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct SocketFixture(std::process::Child);
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl SocketFixture {
+    fn bind(root: &Path, name: &str) -> Self {
+        use std::io::BufRead as _;
+        use std::process::{Command, Stdio};
+
+        // sockaddr_un bounds the supplied path, not the canonical filesystem
+        // location. Only this child changes CWD, preserving parallel tests.
+        let mut fixture = Self(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "socket_fixture_child", "--nocapture"])
+                .current_dir(root)
+                .env("ZEPHIUM_PRIVATE_FS_SOCKET_FIXTURE_NAME", name)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stdout = fixture.0.stdout.take().unwrap();
+        let ready = std::thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let mut output = std::io::BufReader::new(stdout);
+                let ready = loop {
+                    let mut line = String::new();
+                    match output.read_line(&mut line) {
+                        Ok(0) | Err(_) => break false,
+                        Ok(_) if socket_fixture_ready_line(&line) => break true,
+                        Ok(_) => {}
+                    }
+                };
+                let _ = send.send(ready);
+            });
+            let ready = receive.recv_timeout(std::time::Duration::from_secs(5));
+            if !matches!(ready, Ok(true)) {
+                // Close stdout before the scoped reader must join, even if
+                // child initialization stalls or fails before readiness.
+                let _ = fixture.0.kill();
+                let _ = fixture.0.wait();
+            }
+            ready
+        });
+        assert_eq!(
+            ready,
+            Ok(true),
+            "hostile socket fixture did not become ready"
+        );
+        assert!(fixture.0.try_wait().unwrap().is_none());
+        fixture
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl Drop for SocketFixture {
+    fn drop(&mut self) {
+        // EOF releases the listener normally; kill/wait also owns teardown
+        // during an assertion panic without leaving a child behind.
+        drop(self.0.stdin.take());
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn socket_fixture_child() {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixListener;
+
+    let Ok(name) = std::env::var("ZEPHIUM_PRIVATE_FS_SOCKET_FIXTURE_NAME") else {
+        return;
+    };
+    let name = entry_name(&name);
+    let _listener = UnixListener::bind(name.as_str()).unwrap();
+    std::io::stdout()
+        .write_all(b"socket-fixture-ready\n")
+        .unwrap();
+    std::io::stdout().flush().unwrap();
+    assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn socket_fixture_preserves_a_long_canonical_root_and_the_parent_working_directory() {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    let working_directory = std::env::current_dir().unwrap();
+    let parent = private_parent();
+    let deep = parent.path().join("long-canonical-parent-".repeat(8));
+    create_private_root(&deep);
+    let root = namespace_root(&deep);
+    let namespace = open(&root);
+    let socket = entry_name("hostile.socket");
+    assert!(root.as_os_str().len() > 104);
+    let _fixture = SocketFixture::bind(&root, socket.as_str());
+    assert!(fs::symlink_metadata(root.join(socket.as_str()))
+        .unwrap()
+        .file_type()
+        .is_socket());
+    assert_eq!(
+        namespace.directory().inspect_entry(&socket),
+        Err(PrivateFsError::Unsafe)
+    );
+    assert_eq!(std::env::current_dir().unwrap(), working_directory);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 struct ErrorAtEof {
     bytes: Cursor<Vec<u8>>,
 }
@@ -167,6 +306,93 @@ fn exact_lock_rejects_a_second_owner_until_drop() {
     drop(first);
     assert!(LockedPrivateNamespace::open_or_create(&root).is_ok());
     assert_eq!(fs::read(root.join(LOCK_NAME)).unwrap(), LOCK_MARKER);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn final_child_drop_releases_lock_while_spawn_waits_before_exec() {
+    use std::net::Shutdown;
+    use std::os::unix::{net::UnixStream, process::CommandExt};
+    use std::process::{Child, Command};
+    use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    struct PausedSpawn {
+        gate: UnixStream,
+        spawning: Option<JoinHandle<std::io::Result<Child>>>,
+    }
+
+    impl Drop for PausedSpawn {
+        fn drop(&mut self) {
+            // Shutdown also affects the socket copy inherited by the child,
+            // so assertion failure cannot leave pre_exec waiting for EOF.
+            let _ = self.gate.shutdown(Shutdown::Both);
+            if let Some(spawning) = self.spawning.take() {
+                if let Ok(Ok(mut child)) = spawning.join() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+    }
+
+    let parent = private_parent();
+    let root = namespace_root(parent.path());
+    let namespace = open(&root);
+    let child = namespace
+        .directory()
+        .create_private_child(&component("objects"))
+        .unwrap();
+    let (gate, child_gate) = UnixStream::pair().unwrap();
+    for socket in [&gate, &child_gate] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+    }
+    let spawning = std::thread::spawn(move || {
+        let mut command = Command::new("/bin/true");
+        // SAFETY: the child only invokes read/write syscalls on an already
+        // allocated socket and creates allocation-free OS errors before exec.
+        unsafe {
+            command.pre_exec(move || {
+                let fail = |error: rustix::io::Errno| {
+                    std::io::Error::from_raw_os_error(error.raw_os_error())
+                };
+                if rustix::io::write(&child_gate, &[1]).map_err(fail)? != 1
+                    || rustix::io::read(&child_gate, &mut [0]).map_err(fail)? != 1
+                {
+                    return Err(fail(rustix::io::Errno::PIPE));
+                }
+                Ok(())
+            });
+        }
+        command.spawn()
+    });
+    let mut paused = PausedSpawn {
+        gate,
+        spawning: Some(spawning),
+    };
+    paused.gate.read_exact(&mut [0]).unwrap();
+
+    drop(namespace);
+    assert_eq!(
+        LockedPrivateNamespace::open_or_create(&root).err(),
+        Some(PrivateFsError::LockUnavailable),
+    );
+    drop(child);
+    let released = LockedPrivateNamespace::open_or_create(&root);
+    assert!(
+        !paused.spawning.as_ref().unwrap().is_finished(),
+        "spawn escaped the pre-exec gate"
+    );
+    assert!(
+        released.is_ok(),
+        "final capability did not release its lock: {:?}",
+        released.err()
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -378,6 +604,7 @@ fn canonical_admission_refuses_busy_staging_then_recovers_after_release() {
         PrivateFsError::LockUnavailable
     );
     assert_eq!(fs::read(&staging).unwrap(), LOCK_MARKER);
+    rustix::fs::flock(&staging_owner, rustix::fs::FlockOperation::Unlock).unwrap();
     drop(staging_owner);
 
     let namespace = LockedPrivateNamespace::open_or_create(&root).unwrap();
@@ -1326,7 +1553,6 @@ fn rejects_symlinks_hardlinks_and_nonprivate_modes() {
 #[test]
 fn entry_inspection_rejects_links_special_nodes_and_unsafe_modes_without_blocking() {
     use std::os::unix::fs::{symlink, PermissionsExt};
-    use std::os::unix::net::UnixListener;
 
     let parent = private_parent();
     let root = namespace_root(parent.path());
@@ -1371,11 +1597,7 @@ fn entry_inspection_rejects_links_special_nodes_and_unsafe_modes_without_blockin
     assert_eq!(directory.inspect_entry(&fifo), Err(PrivateFsError::Unsafe));
 
     let socket = entry_name("Hostile Socket");
-    let _listener = match UnixListener::bind(root.join(socket.as_str())) {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("failed to create hostile socket fixture: {error}"),
-    };
+    let _listener = SocketFixture::bind(&root, socket.as_str());
     assert_eq!(
         directory.inspect_entry(&socket),
         Err(PrivateFsError::Unsafe)
@@ -1785,7 +2007,6 @@ fn fifo_nonblocking_probe_child() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn fifo_and_socket_rejection_is_nonblocking_and_bounded() {
-    use std::os::unix::net::UnixListener;
     use std::time::{Duration, Instant};
 
     let parent = private_parent();
@@ -1820,17 +2041,7 @@ fn fifo_and_socket_rejection_is_nonblocking_and_bounded() {
     assert!(child_status.success());
 
     let namespace = open(&root);
-    let socket = root.join("hostile.socket");
-    let _listener = match UnixListener::bind(&socket) {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            // Some managed macOS sandboxes deny AF_UNIX bind inside the
-            // checkout. Native and CI hosts execute the assertion below; the
-            // FIFO branch still exercises the nonblocking-open defense.
-            return;
-        }
-        Err(error) => panic!("failed to create hostile socket fixture: {error}"),
-    };
+    let _listener = SocketFixture::bind(&root, "hostile.socket");
     assert_eq!(
         namespace
             .directory()
@@ -2156,9 +2367,14 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
         .unwrap();
     let source = staging
         .create_new_private_child(&component("source"))
+        .unwrap();
+    let child = source
+        .create_new_private_child(&component("child"))
         .unwrap()
         .seal()
         .unwrap();
+    drop(child);
+    let source = source.seal().unwrap();
     let identity = source.identity();
     let installed = source
         .publish_noreplace(&objects, &component("installed"))
@@ -2166,6 +2382,22 @@ fn linux_sealed_directory_publication_supports_distinct_parents() {
     assert_eq!(installed.identity(), identity);
     assert!(!root.join("staging/source").exists());
     assert_eq!(unix_mode(&root.join("objects/installed")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
+
+    let source = staging
+        .create_new_private_child(&component("refused"))
+        .unwrap()
+        .seal()
+        .unwrap();
+    let error = source
+        .publish_noreplace(&objects, &component("installed"))
+        .err()
+        .unwrap();
+    let (error, source) = error.into_parts();
+    assert_eq!(error, PrivateFsError::AlreadyExists);
+    source.unwrap().with_verified_path(|_| ()).unwrap();
+    assert_eq!(unix_mode(&root.join("staging/refused")), 0o500);
+    assert_eq!(unix_mode(&root.join("objects/installed/child")), 0o500);
 }
 
 #[cfg(target_os = "macos")]

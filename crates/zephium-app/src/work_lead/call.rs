@@ -26,6 +26,11 @@ pub struct WorkLeadModels {
     pub light: LeadModel,
 }
 impl WorkLeadModels {
+    pub fn all_free(&self) -> bool {
+        [&self.lead, &self.page, &self.light]
+            .iter()
+            .all(|model| model.entry.is_free_compatible())
+    }
     pub fn for_role(&self, role: WorkModelRole) -> &LeadModel {
         match role {
             WorkModelRole::Page => &self.page,
@@ -61,6 +66,7 @@ pub(crate) fn usage(entry: &WorkModelEntry, usage: WorkModelUsage) -> WorkUsage 
     let fresh = usage.input_tokens - cached;
     let tokens = fresh.saturating_add(usage.output_tokens);
     let (cost, accounting) = match (usage.cost_micros, &entry.price) {
+        _ if entry.is_free_compatible() => (0, WorkUsageAccounting::Exact),
         (Some(cost), _) => (cost, WorkUsageAccounting::Exact),
         (None, Some(price)) => (
             priced(price, fresh, cached, usage.output_tokens),
@@ -132,7 +138,7 @@ pub(crate) async fn call(
                 let remaining = run.remaining();
                 run.charge(WorkUsage {
                     model_tokens: remaining.model_tokens,
-                    cost_micro_usd: remaining.cost_micro_usd,
+                    cost_micro_usd: if model.entry.is_free_compatible() { 0 } else { remaining.cost_micro_usd },
                     operations: 1,
                     accounting: WorkUsageAccounting::ConservativeReservation,
                 });
@@ -312,6 +318,28 @@ mod tests {
             },
             price,
         }
+    }
+
+    #[test]
+    fn local_calls_never_charge_and_mixed_calls_keep_paid_usage() {
+        let mut local = entry(Some(WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        }));
+        local.model.provider = WorkModelProvider::Compatible;
+        let reported = WorkModelUsage {
+            input_tokens: 1000,
+            output_tokens: 100,
+            cost_micros: Some(9000),
+            ..Default::default()
+        };
+        let free = usage(&local, reported);
+        assert_eq!(free.cost_micro_usd, 0);
+        assert_eq!(free.model_tokens, 1100);
+        assert_eq!(free.accounting, WorkUsageAccounting::Exact);
+        let paid = usage(&entry(None), reported);
+        assert_eq!(free.cost_micro_usd + paid.cost_micro_usd, 9000);
     }
 
     #[test]

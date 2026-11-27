@@ -3,6 +3,7 @@ use super::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tauri::Manager;
 
 #[test]
 #[ignore = "crashes only an owned blank WebView2 renderer; run alone on Windows"]

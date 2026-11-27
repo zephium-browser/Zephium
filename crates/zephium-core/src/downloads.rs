@@ -17,6 +17,9 @@ pub enum DownloadState {
     Receiving,
     // The retained native transfer can resume; never replay its request URL.
     Paused,
+    // Fully received but of a type that can harm the computer. It stays in
+    // its hidden staging folder until the person keeps or deletes it.
+    Held,
     Cancelling,
     Finalizing,
     Completed,
@@ -91,6 +94,10 @@ pub struct DownloadRecord {
     /// A native completion/cancellation or process-exit proof ended writes.
     #[serde(default)]
     pub writer_released: bool,
+    /// The file came over plain http from a host outside the person's own
+    /// network. Left out when false, so earlier builds still read the row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +171,7 @@ impl DownloadRecord {
             received: self.received.to_string(),
             total: self.total.map(|value| value.to_string()),
             error: self.error,
+            insecure: self.insecure,
         }
     }
 }
@@ -182,6 +190,8 @@ pub struct DownloadView {
     pub received: String,
     pub total: Option<String>,
     pub error: Option<DownloadError>,
+    /// The file came over a connection that is not encrypted.
+    pub insecure: bool,
 }
 
 /// The default saves straight to the system Downloads folder, as other
@@ -218,17 +228,50 @@ impl DownloadPreferences {
 pub enum DownloadCall {
     Updates,
     RetryCleanup,
-    List { before: Option<String>, limit: u32 },
-    Cancel { id: String },
-    Resume { id: String },
-    Open { id: String },
-    Reveal { id: String },
-    Forget { id: String },
+    List {
+        before: Option<String>,
+        limit: u32,
+    },
+    Cancel {
+        id: String,
+    },
+    /// Stops receiving and keeps what was received for `Resume`.
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
+    /// Publishes a finished download that was held for its type.
+    Keep {
+        id: String,
+    },
+    /// Deletes a finished download that was held for its type.
+    Discard {
+        id: String,
+    },
+    Open {
+        id: String,
+    },
+    Reveal {
+        id: String,
+    },
+    Forget {
+        id: String,
+    },
     // Forgets every finished download; files on disk are untouched.
     Clear,
+    // Forgets the finished downloads started at or after `since` (unix
+    // seconds). Only the shell sends it; a frame cannot.
+    #[serde(skip)]
+    ClearSince {
+        since: i64,
+    },
     Preferences,
     ChooseDirectory,
-    SetAskDestination { enabled: bool },
+    SetAskDestination {
+        enabled: bool,
+    },
 }
 impl DownloadCall {
     pub fn validate(&self) -> bool {
@@ -239,14 +282,260 @@ impl DownloadCall {
                     && before.as_ref().is_none_or(|id| canonical_id(id))
             }
             Self::Cancel { id }
+            | Self::Pause { id }
             | Self::Resume { id }
+            | Self::Keep { id }
+            | Self::Discard { id }
             | Self::Open { id }
             | Self::Reveal { id }
             | Self::Forget { id } => canonical_id(id),
+            Self::ClearSince { since } => *since > 0,
             _ => true,
         }
     }
 }
+/// Types an operating system runs, installs or opens as a program, or that
+/// carry macros or scripts a click can start: the ones other browsers also
+/// ask about before keeping. Archives and documents are not here; the system
+/// checks what they hold when they are opened.
+const DANGEROUS_EXTENSIONS: &[&str] = &[
+    // Windows programs, installers and shortcuts
+    "exe",
+    "msi",
+    "msp",
+    "mst",
+    "com",
+    "scr",
+    "pif",
+    "cpl",
+    "dll",
+    "sys",
+    "drv",
+    "ocx",
+    "lnk",
+    "url",
+    "website",
+    "scf",
+    "msc",
+    "library-ms",
+    "search-ms",
+    "searchconnector-ms",
+    "settingcontent-ms",
+    "gadget",
+    "application",
+    "appref-ms",
+    "appx",
+    "appxbundle",
+    "msix",
+    "msixbundle",
+    "appinstaller",
+    "msu",
+    "diagcab",
+    "diagcfg",
+    "diagpkg",
+    "xll",
+    "wll",
+    "xnk",
+    "ade",
+    "adp",
+    "mde",
+    "mdb",
+    "mda",
+    "mdz",
+    "mdt",
+    "mdw",
+    // Scripts and shells
+    "bat",
+    "cmd",
+    "ps1",
+    "ps1xml",
+    "ps2",
+    "ps2xml",
+    "psc1",
+    "psc2",
+    "psm1",
+    "psd1",
+    "msh",
+    "msh1",
+    "msh2",
+    "mshxml",
+    "msh1xml",
+    "msh2xml",
+    "vb",
+    "vbe",
+    "vbs",
+    "vbscript",
+    "jse",
+    "ws",
+    "wsc",
+    "wsf",
+    "wsh",
+    "hta",
+    "inf",
+    "ins",
+    "isp",
+    "reg",
+    "sct",
+    "shb",
+    "shs",
+    "pcd",
+    "plg",
+    "prf",
+    "prg",
+    "ops",
+    "sh",
+    "bash",
+    "zsh",
+    "csh",
+    "tcsh",
+    "ksh",
+    "shar",
+    "command",
+    "tool",
+    "terminal",
+    "scpt",
+    "scptd",
+    "applescript",
+    "workflow",
+    "wflow",
+    "action",
+    // Java, browser and office carriers
+    "jar",
+    "jnlp",
+    "class",
+    "xbap",
+    "crx",
+    "oxt",
+    "iqy",
+    "vsmacros",
+    "vss",
+    "vst",
+    "vsw",
+    "docm",
+    "dotm",
+    "xlsm",
+    "xltm",
+    "xlam",
+    "pptm",
+    "potm",
+    "ppam",
+    "ppsm",
+    "sldm",
+    "vsdm",
+    "vssm",
+    "vstm",
+    // macOS and Linux packages and applications
+    "app",
+    "dmg",
+    "pkg",
+    "mpkg",
+    "iso",
+    "img",
+    "dmgpart",
+    "imgpart",
+    "udif",
+    "ndif",
+    "smi",
+    "dc42",
+    "diskcopy42",
+    "sparseimage",
+    "sparsebundle",
+    "dvdr",
+    "toast",
+    "dylib",
+    "apk",
+    "deb",
+    "rpm",
+    "appimage",
+    "run",
+    "bin",
+    "mobileconfig",
+    "configprofile",
+    // macOS location files
+    "webloc",
+    "inetloc",
+    "fileloc",
+    "ftploc",
+];
+
+/// Types Windows runs, mounts or opens from a double click, which other
+/// platforms treat as ordinary files: a developer's `.js` or `.py`, a VM's
+/// `.vhdx` or a `.chm` manual on a Mac is not a warning.
+#[rustfmt::skip]
+const WINDOWS_ONLY_EXTENSIONS: &[&str] = &[
+    // Scripts
+    "js",
+    "py",
+    "pyw",
+    "pyc",
+    "pyo",
+    "pyd",
+    "pyz",
+    "pyzw",
+    "rb",
+    "rbw",
+    "pl",
+    // Disk images
+    "vhd",
+    "vhdx",
+    // Help files
+    "chm",
+    "hlp",
+    // Access databases and shortcuts; elsewhere `.mat` is MATLAB data
+    "accdb",
+    "accde",
+    "accdr",
+    "accda",
+    "mad",
+    "maf",
+    "mag",
+    "mam",
+    "maq",
+    "mar",
+    "mas",
+    "mat",
+    "mav",
+    "maw",
+];
+
+/// Whether a download of this name must be confirmed before it is kept. The
+/// last extension decides, after the trailing dots and spaces Windows ignores
+/// are dropped, so `report.pdf.exe` and `setup.exe.` are caught and
+/// `exe.txt` is not.
+pub fn is_dangerous_file(name: &str) -> bool {
+    is_dangerous_file_on(name, cfg!(target_os = "windows"))
+}
+
+pub fn is_dangerous_file_on(name: &str, windows: bool) -> bool {
+    let name = name.trim_end_matches(['.', ' ']);
+    name.rsplit_once('.').is_some_and(|(stem, extension)| {
+        let known = |list: &[&str]| {
+            list.iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        };
+        !stem.is_empty()
+            && !extension.is_empty()
+            && (known(DANGEROUS_EXTENSIONS) || (windows && known(WINDOWS_ONLY_EXTENSIONS)))
+    })
+}
+
+/// Whether a download from `url` crossed the network unencrypted: plain http
+/// to a host outside the person's own network.
+pub fn is_insecure_source(url: &url::Url) -> bool {
+    url.scheme() == "http"
+        && !url
+            .host_str()
+            .is_some_and(crate::certificates::is_local_host)
+}
+
+/// Whether a download's final response address leaves it held: a plain
+/// http one by the rule above, or one the engine could not read or parse,
+/// since nothing then says it was encrypted.
+pub fn is_insecure_response(url: Option<&str>) -> bool {
+    url.and_then(|url| url::Url::parse(url).ok())
+        .is_none_or(|url| is_insecure_source(&url))
+}
+
 pub fn canonical_id(id: &str) -> bool {
     DownloadId::parse(id).is_some_and(|value| value.to_string() == id)
 }
@@ -347,6 +636,8 @@ pub enum DownloadStoreCall {
     Forget(DownloadId),
     /// Deletes every terminal record. Transfers still writing keep theirs.
     Clear,
+    /// Deletes the terminal records created at or after the unix second.
+    ClearSince(i64),
     ClearStaging {
         id: DownloadId,
         expected: FileIdentity,
@@ -507,6 +798,7 @@ mod tests {
             identity: None,
             writer: None,
             writer_released: false,
+            insecure: false,
         };
         assert!(record.update_progress(5, Some(10)));
         assert!(!record.update_progress(5, None));
@@ -540,6 +832,232 @@ mod tests {
             limit: 100
         }
         .validate());
+    }
+    #[test]
+    fn pause_keep_and_discard_name_a_canonical_download_like_cancel() {
+        let id = DownloadId::generate().to_string();
+        for call in [
+            DownloadCall::Pause { id: id.clone() },
+            DownloadCall::Keep { id: id.clone() },
+            DownloadCall::Discard { id: id.clone() },
+        ] {
+            assert!(call.validate());
+        }
+        for bad in ["../x", "", "not-an-id"] {
+            assert!(!DownloadCall::Pause { id: bad.into() }.validate());
+            assert!(!DownloadCall::Keep { id: bad.into() }.validate());
+            assert!(!DownloadCall::Discard { id: bad.into() }.validate());
+        }
+        assert!(!DownloadState::Held.terminal());
+    }
+    #[test]
+    fn programs_installers_and_scripts_are_held_and_documents_are_not() {
+        for name in [
+            "setup.exe",
+            "Setup.EXE",
+            "installer.msi",
+            "Zephium.dmg",
+            "tool.pkg",
+            "run.bat",
+            "run.cmd",
+            "profile.ps1",
+            "screensaver.scr",
+            "app.jar",
+            "archive.app",
+            "script.vbs",
+            "macro.docm",
+            "tool.sh",
+            "link.url",
+            "drive.iso",
+            "a.b.exe",
+        ] {
+            assert!(is_dangerous_file(name), "{name}");
+        }
+        for name in [
+            "report.pdf",
+            "photo.jpg",
+            "notes.txt",
+            "bundle.zip",
+            "data.csv",
+            "exe.txt",
+            "exe",
+            ".exe",
+            "download",
+            "page.html",
+            "movie.mp4",
+            "README",
+        ] {
+            assert!(!is_dangerous_file(name), "{name}");
+        }
+    }
+    #[test]
+    fn scripts_that_only_windows_runs_on_a_double_click_are_held_only_there() {
+        for name in ["build.js", "tool.py", "gem.rb", "x.pl"] {
+            assert!(is_dangerous_file_on(name, true), "{name}");
+            assert!(!is_dangerous_file_on(name, false), "{name}");
+        }
+        // Programs are held everywhere.
+        assert!(is_dangerous_file_on("setup.exe", false));
+        assert!(is_dangerous_file_on("setup.exe", true));
+    }
+    #[test]
+    fn disk_images_shortcuts_and_installer_formats_are_held_everywhere() {
+        let extensions = [
+            // Disk images
+            "img",
+            "iso",
+            "dmgpart",
+            "imgpart",
+            "udif",
+            "ndif",
+            "smi",
+            "dc42",
+            "diskcopy42",
+            "sparseimage",
+            "sparsebundle",
+            "dvdr",
+            "toast",
+            // Windows shell files, installers and diagnostics
+            "msc",
+            "library-ms",
+            "search-ms",
+            "searchconnector-ms",
+            "settingcontent-ms",
+            "appinstaller",
+            "diagcab",
+            "diagcfg",
+            "diagpkg",
+            "website",
+            // macOS location files, scripts and profiles
+            "webloc",
+            "inetloc",
+            "fileloc",
+            "ftploc",
+            "applescript",
+            "wflow",
+            "configprofile",
+            "dylib",
+            // Shell scripts and office carriers
+            "tcsh",
+            "shar",
+            "oxt",
+            "iqy",
+            "vsdm",
+            "vssm",
+            "vstm",
+        ];
+        for extension in extensions {
+            for windows in [false, true] {
+                for name in [
+                    format!("file.{extension}"),
+                    format!("File.{}", extension.to_uppercase()),
+                    format!("a.b.{extension}"),
+                    format!("file.{extension}."),
+                    format!("file.{extension}  "),
+                    format!("file.{extension}. . "),
+                ] {
+                    assert!(is_dangerous_file_on(&name, windows), "{name} {windows}");
+                }
+                for name in [
+                    format!("photo.{extension}.txt"),
+                    format!("notes.{extension}.pdf"),
+                    format!("{extension}.txt"),
+                    format!(".{extension}"),
+                    extension.to_string(),
+                ] {
+                    assert!(!is_dangerous_file_on(&name, windows), "{name} {windows}");
+                }
+            }
+        }
+        for name in [
+            "search.ms",
+            "settings.content",
+            "photo.imge",
+            "photo.im",
+            "backup.sparse",
+            "bookmark.loc",
+            "report.accdb.bak",
+        ] {
+            assert!(!is_dangerous_file_on(name, true), "{name}");
+            assert!(!is_dangerous_file_on(name, false), "{name}");
+        }
+    }
+    #[test]
+    fn types_only_windows_opens_are_held_only_there() {
+        for extension in [
+            "vhd", "vhdx", "chm", "hlp", "pyd", "pyz", "pyzw", "accdb", "accde", "accdr", "accda",
+            "mad", "maf", "mag", "mam", "maq", "mar", "mas", "mat", "mav", "maw",
+        ] {
+            for name in [
+                format!("disk.{extension}"),
+                format!("Disk.{}", extension.to_uppercase()),
+                format!("disk.{extension}."),
+                format!("disk.{extension}  "),
+                format!("disk.{extension}. . "),
+            ] {
+                assert!(is_dangerous_file_on(&name, true), "{name}");
+                assert!(!is_dangerous_file_on(&name, false), "{name}");
+            }
+            for name in [
+                format!("photo.{extension}.txt"),
+                format!("notes.{extension}.pdf"),
+                format!("{extension}.txt"),
+                format!(".{extension}"),
+                extension.to_string(),
+            ] {
+                assert!(!is_dangerous_file_on(&name, true), "{name}");
+                assert!(!is_dangerous_file_on(&name, false), "{name}");
+            }
+        }
+    }
+    #[test]
+    fn the_extension_lists_hold_lowercase_names_once() {
+        let mut seen = std::collections::HashSet::new();
+        for extension in DANGEROUS_EXTENSIONS.iter().chain(WINDOWS_ONLY_EXTENSIONS) {
+            assert_eq!(*extension, extension.to_ascii_lowercase());
+            assert!(seen.insert(*extension), "{extension} is listed twice");
+        }
+    }
+    #[test]
+    fn a_disguised_extension_is_judged_by_what_the_system_will_run() {
+        // The last extension decides, however the name is dressed.
+        assert!(is_dangerous_file("invoice.pdf.exe"));
+        assert!(is_dangerous_file("setup.exe."));
+        assert!(is_dangerous_file("setup.exe  "));
+        assert!(is_dangerous_file("setup.exe. . "));
+        assert!(!is_dangerous_file("setup.exe.txt"));
+        assert!(!is_dangerous_file("setup.exe.pdf"));
+        // A name that sanitizing leaves is still judged by its extension.
+        assert!(is_dangerous_file(&safe_filename("..\\..\\evil.EXE")));
+    }
+
+    #[test]
+    fn only_plain_http_from_outside_the_local_network_is_insecure() {
+        for (url, insecure) in [
+            ("http://files.example.com/setup.zip", true),
+            ("http://93.184.216.34/a.bin", true),
+            ("https://files.example.com/setup.zip", false),
+            ("http://127.0.0.1:8000/a.bin", false),
+            ("http://192.168.1.20/a.bin", false),
+            ("http://printer.local/driver.pkg", false),
+            ("http://[::1]/a.bin", false),
+            ("blob:https://example.com/0f1e", false),
+            ("data:text/plain,hi", false),
+        ] {
+            let url = url::Url::parse(url).unwrap();
+            assert_eq!(is_insecure_source(&url), insecure, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_response_address_that_cannot_be_read_counts_as_insecure() {
+        assert!(is_insecure_response(None));
+        assert!(is_insecure_response(Some("not a url")));
+        assert!(is_insecure_response(Some("http://files.example.com/a.zip")));
+        assert!(!is_insecure_response(Some(
+            "https://files.example.com/a.zip"
+        )));
+        assert!(!is_insecure_response(Some("blob:https://example.com/0f1e")));
     }
     #[test]
     fn abandoned_native_calls_complete_with_unavailable_once() {

@@ -96,6 +96,26 @@ describe("search request lifecycle", () => {
     controller.dispose();
   });
 
+  it("starts from the rows the host is already showing, unsettled", async () => {
+    const snapshots: SearchSnapshot[] = [];
+    const controller = createSearchController({
+      owner,
+      send: async () => true,
+      update: (state) => snapshots.push(state),
+      shown: { results: [row("rust")], answered: "rust" },
+      id: () => "request",
+    });
+    controller.start();
+    expect(snapshots.at(0)).toMatchObject({
+      results: [row("rust")],
+      answered: "rust",
+      pending: true,
+      settled: false,
+    });
+    expect(controller.context()).toBeNull();
+    controller.dispose();
+  });
+
   it("retains rows through an empty intermediate response and settles only at the end", async () => {
     const snapshots: SearchSnapshot[] = [];
     const controller = createSearchController({
@@ -237,4 +257,61 @@ describe("search request lifecycle", () => {
     });
     controller.dispose();
   });
+});
+
+it("activates a shortcut synchronously and re-reads enabled settings", () => {
+  vi.useFakeTimers();
+  let enabled = true;
+  const controller = createSearchController({
+    owner,
+    send: async () => true,
+    update: () => {},
+    shortcuts: () => [
+      {
+        id: "youtube",
+        name: "YouTube",
+        keywords: ["yt"],
+        domain: "youtube.com",
+        enabled,
+        search_url: "https://youtube.com/?q={query}",
+        home_url: "https://youtube.com/",
+        suggestions: null,
+      },
+    ],
+  });
+  controller.change("yt");
+  expect(controller.activeShortcut()).toBeNull();
+  controller.change("yt ");
+  expect(controller.activeShortcut()?.id).toBe("youtube");
+  enabled = false;
+  expect(controller.activeShortcut()).toBeNull();
+  controller.dispose();
+  expect(vi.getTimerCount()).toBe(0);
+  vi.useRealTimers();
+});
+
+it("leaves no timers or repeated requests after a shortcut answer settles", async () => {
+  vi.useFakeTimers();
+  const send = vi.fn(async () => true);
+  const controller = createSearchController({
+    owner,
+    send,
+    update: () => {},
+    id: () => "shortcut",
+  });
+  controller.change("yt cats");
+  await vi.advanceTimersByTimeAsync(0);
+  controller.receive({
+    context: { ...owner, request_id: "shortcut" },
+    query: "yt cats",
+    shortcut: "youtube",
+    completion: null,
+    pending: false,
+    results: [row("cats")],
+  });
+  expect(vi.getTimerCount()).toBe(0);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(send).toHaveBeenCalledOnce();
+  controller.dispose();
+  vi.useRealTimers();
 });

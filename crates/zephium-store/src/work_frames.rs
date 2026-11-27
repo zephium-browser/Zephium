@@ -24,10 +24,35 @@ pub struct WorkFrameRecord {
 
 pub struct WorkFrameStore {
     root: PathBuf,
+    retired: std::sync::Mutex<std::collections::HashSet<ProfileId>>,
 }
 impl WorkFrameStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            retired: Default::default(),
+        }
+    }
+    /// Closes writers before erasing the profile's exact frame directory.
+    pub fn retire_profile(&self, profile: ProfileId) -> std::io::Result<()> {
+        let mut retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        retired.insert(profile);
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(meta) if meta.file_type().is_dir() => {}
+            Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        let dir = self.dir(profile);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_dir() => std::fs::remove_dir_all(&dir)?,
+            Ok(_) => std::fs::remove_file(&dir)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        #[cfg(unix)]
+        std::fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
     }
     fn dir(&self, profile: ProfileId) -> PathBuf {
         self.root.join(profile.to_string())
@@ -42,6 +67,10 @@ impl WorkFrameStore {
         record: &WorkFrameRecord,
         png: &[u8],
     ) -> std::io::Result<()> {
+        let retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&profile) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         if png.len() > MAX_FRAME_BYTES || record.url.len() > MAX_URL_BYTES {
             return Err(std::io::Error::other("frame out of bounds"));
         }
@@ -63,6 +92,10 @@ impl WorkFrameStore {
     }
     /// Every stored frame of one work, oldest first.
     pub fn list(&self, profile: ProfileId, work: WorkId) -> Vec<WorkFrameRecord> {
+        let retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&profile) {
+            return Vec::new();
+        }
         let mut records: Vec<(std::time::SystemTime, WorkFrameRecord)> = Vec::new();
         let Ok(entries) = std::fs::read_dir(self.dir(profile)) else {
             return Vec::new();
@@ -98,6 +131,10 @@ impl WorkFrameStore {
         attempt: WorkAttemptId,
         step: WorkStepId,
     ) -> Option<Vec<u8>> {
+        let retired = self.retired.lock().unwrap_or_else(|p| p.into_inner());
+        if retired.contains(&profile) {
+            return None;
+        }
         let path = self
             .dir(profile)
             .join(format!("{}.png", Self::stem(attempt, step)));
@@ -195,5 +232,18 @@ mod tests {
         assert!(store.list(profile, a).is_empty());
         assert_eq!(store.list(profile, b).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retired_profile_frames_cannot_be_recreated_by_late_publishers() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = WorkFrameStore::new(dir.path().join("frames"));
+        let profile = ProfileId::from(99);
+        let record = record(WorkId::from(1), 1);
+        store.put(profile, &record, b"private pixels").unwrap();
+        store.retire_profile(profile).unwrap();
+        assert!(store.put(profile, &record, b"late pixels").is_err());
+        assert!(store.read(profile, record.attempt, record.step).is_none());
+        assert!(!store.dir(profile).exists());
     }
 }

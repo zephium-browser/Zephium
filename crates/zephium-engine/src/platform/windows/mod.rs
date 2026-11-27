@@ -22,13 +22,26 @@ mod agentic_input_probe;
 mod agentic_probe_resources;
 #[cfg(feature = "native-agentic-semantic-probe")]
 mod agentic_semantic_probe;
+pub(crate) mod browsing_data;
 #[cfg(any(test, feature = "windows-cdp-spike"))]
 #[allow(dead_code)]
 mod cdp;
+mod certificates;
 mod content_filter;
 mod find;
+mod leftover_processes;
+pub use leftover_processes::{
+    browser_process_record, generation_report_lines, WindowsLeftoverProcesses,
+};
+mod http_auth;
+pub(crate) use certificates::clear_certificate_decisions;
 pub(crate) use find::{find, FindReport, FindSession};
+pub(crate) use http_auth::BasicAuthResponder;
+mod audio;
+pub use audio::{install_audio_observer, AudioObserver};
 mod automatic_pip;
+mod favicon;
+pub use favicon::{install_favicon_observer, FaviconObserver};
 mod fullscreen;
 pub(crate) use automatic_pip::automatic_pip;
 mod fullscreen_transition;
@@ -44,9 +57,11 @@ pub(crate) mod browse_reader;
 // The host is the sole transaction owner. Physical Windows qualification is
 // still required before claiming runtime behavior beyond cross-compilation.
 mod cookie_transfer;
+pub(crate) mod extension_navigation;
 pub(crate) mod extensions;
 #[cfg(feature = "agentic-browser")]
 pub(crate) mod page_glow;
+mod page_layer;
 #[cfg(feature = "agentic-browser")]
 mod semantic_action;
 #[cfg(feature = "agentic-browser")]
@@ -54,12 +69,16 @@ mod semantic_action;
 // physical Windows isolated-world qualifier promotes the support claim.
 #[allow(dead_code)]
 mod semantic_runtime;
+mod sidebar_card;
 // The bounded native capture adapter is compiled now, but the Windows host
 // keeps screenshot dispatch closed with semantic support until qualification.
 mod apps;
 mod native_paths;
 pub(crate) use apps::{external_app_name, open_external_app};
+mod page_memory;
 mod paint;
+mod refused_frames;
+pub(crate) use page_memory::{main_frame_id, sample_renderers};
 #[cfg(feature = "agentic-browser")]
 #[allow(dead_code)]
 mod semantic_screenshot;
@@ -127,28 +146,33 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    ICoreWebView2, ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment10,
-    ICoreWebView2Environment5, ICoreWebView2Environment7, ICoreWebView2Environment8,
-    ICoreWebView2Profile2, ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10,
-    ICoreWebView2_13, ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
+    ICoreWebView2, ICoreWebView2AcceleratorKeyPressedEventArgs, ICoreWebView2Controller,
+    ICoreWebView2Environment, ICoreWebView2Environment10, ICoreWebView2Environment5,
+    ICoreWebView2Environment7, ICoreWebView2Environment8, ICoreWebView2Profile2,
+    ICoreWebView2Settings4, ICoreWebView2Settings7, ICoreWebView2_10, ICoreWebView2_13,
+    ICoreWebView2_14, ICoreWebView2_18, ICoreWebView2_5,
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED, COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL,
     COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN, COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,
     COREWEBVIEW2_PDF_TOOLBAR_ITEMS_PRINT, COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE,
-    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS,
+    COREWEBVIEW2_PDF_TOOLBAR_ITEMS_SAVE_AS, COREWEBVIEW2_PROCESS_FAILED_KIND,
     COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
     COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
-    COREWEBVIEW2_PROCESS_KIND_BROWSER, COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED,
+    COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED, COREWEBVIEW2_PROCESS_KIND_BROWSER,
+    COREWEBVIEW2_SERVER_CERTIFICATE_ERROR_ACTION_CANCEL,
 };
 use webview2_com::{
     AcceleratorKeyPressedEventHandler, BasicAuthenticationRequestedEventHandler,
     BrowserProcessExitedEventHandler, CallDevToolsProtocolMethodCompletedHandler,
     ClearBrowsingDataCompletedHandler, ClientCertificateRequestedEventHandler,
-    HistoryChangedEventHandler, LaunchingExternalUriSchemeEventHandler,
-    NavigationStartingEventHandler, NewBrowserVersionAvailableEventHandler,
-    ProcessFailedEventHandler, ServerCertificateErrorDetectedEventHandler,
-    SourceChangedEventHandler,
+    ExecuteScriptCompletedHandler, HistoryChangedEventHandler,
+    LaunchingExternalUriSchemeEventHandler, NavigationStartingEventHandler,
+    NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler,
+    ServerCertificateErrorDetectedEventHandler, SourceChangedEventHandler,
+    ZoomFactorChangedEventHandler,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_SHIFT,
@@ -161,8 +185,8 @@ use windows_core::{IUnknown, Interface, HSTRING, PWSTR};
 use wry::WebViewExtWindows;
 use zephium_core::ports::engine::{EngineEvent, Shortcut};
 
-const PAGE_URL_UTF16_LIMIT: usize = 8 * 1_024;
-const PAGE_URL_UTF8_LIMIT: usize = 8 * 1_024;
+const PAGE_URL_UTF16_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
+const PAGE_URL_UTF8_LIMIT: usize = zephium_core::navigation::MAX_URL_BYTES;
 const WINDOWS_PATH_UTF16_LIMIT: usize = 32_767;
 const WINDOWS_PATH_UTF8_LIMIT: usize = 4 * WINDOWS_PATH_UTF16_LIMIT;
 const VERSION_UTF16_LIMIT: usize = 256;
@@ -196,7 +220,7 @@ pub fn user_style_refusal(
         .then_some(UserScriptRefusalReason::UnsupportedMatchSet)
 }
 
-fn take_pwstr_bounded(
+pub(crate) fn take_pwstr_bounded(
     source: PWSTR,
     max_utf16_units: usize,
     max_utf8_bytes: usize,
@@ -285,13 +309,17 @@ fn configure_with_credential_denied(
     let core10 = core.cast::<ICoreWebView2_10>()?;
     let core5 = core.cast::<ICoreWebView2_5>()?;
     let core14 = core.cast::<ICoreWebView2_14>()?;
+    let extension_frames = ExtensionFrames::default();
     let mut policy = SecurityPolicy {
         core: core.clone(),
         core18: core18.clone(),
         core10: core10.clone(),
         core5: core5.clone(),
         core14: core14.clone(),
+        extension_frames: extension_frames.clone(),
         frame_token: None,
+        judged_frame_token: None,
+        refused_frame_requests: None,
         external_token: None,
         basic_auth_token: None,
         client_certificate_token: None,
@@ -368,6 +396,7 @@ fn configure_with_credential_denied(
     // Raw content views never use host objects or web messages. Disable the
     // mechanisms in the runtime too, so a future accidental handler cannot
     // silently turn into a bridge.
+    crate::reputation::configure(&core)?;
     let settings = unsafe { core.Settings()? };
     // The PDF viewer has its own Save, Save As and Print surfaces. They do not
     // reliably pass through DownloadStarting, so Settings7 is mandatory for
@@ -394,8 +423,8 @@ fn configure_with_credential_denied(
         }
         // Generic and agent views retain download/menu denial. The human-view
         // constructor may enable a bounded native menu only after installing
-        // its download broker and a separate SaveAsUIShowing denial hook;
-        // document SaveAs is not part of the DownloadStarting protocol.
+        // its download broker and a separate SaveAsUIShowing gate; document
+        // SaveAs is not part of the DownloadStarting protocol.
         settings.SetAreDefaultContextMenusEnabled(false)?;
         // Native modal dialogs are likewise disabled until browser chrome has
         // an origin-labelled, rate-limited dialog broker.
@@ -410,7 +439,9 @@ fn configure_with_credential_denied(
     // Wry's navigation callback covers top-level navigations. WebView2 has a
     // separate event for frames; cancel first so URI extraction or policy
     // evaluation failure cannot accidentally authorize the navigation.
-    let frame_navigation = NavigationStartingEventHandler::create(Box::new(|_, args| {
+    let frame_navigation = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+        // A frame navigating keeps list-update work waiting for quiet pages.
+        zephium_core::blocker::PageActivity::shared().note_navigation();
         let Some(args) = args else {
             return Ok(());
         };
@@ -418,10 +449,15 @@ fn configure_with_credential_denied(
             args.SetCancel(true)?;
             let mut uri = PWSTR::null();
             args.Uri(&mut uri)?;
+            // An app link goes on only so WebView2 raises
+            // LaunchingExternalUriScheme, whose handlers always cancel it and
+            // ask the person first; cancelled here, a frame's link is lost.
             if take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT).is_some_and(
                 |uri| {
                     zephium_core::navigation::is_allowed_str(&uri)
                         || zephium_core::navigation::is_subframe_document(&uri)
+                        || zephium_core::navigation::external_app_link(&uri).is_some()
+                        || extension_frames.admits(&uri)
                 },
             ) {
                 args.SetCancel(false)?;
@@ -459,19 +495,53 @@ pub struct SecurityPolicy {
     core10: ICoreWebView2_10,
     core5: ICoreWebView2_5,
     core14: ICoreWebView2_14,
+    extension_frames: ExtensionFrames,
     frame_token: Option<i64>,
+    judged_frame_token: Option<i64>,
+    refused_frame_requests: Option<refused_frames::RefusedFrameRequests>,
     external_token: Option<i64>,
     basic_auth_token: Option<i64>,
     client_certificate_token: Option<i64>,
     certificate_error_token: Option<i64>,
 }
 
+/// Which `chrome-extension://` child frames the frame check lets load. Empty
+/// until a view's owner supplies its extension grants, so raw, private, agent
+/// and chrome views keep refusing every extension frame.
+#[derive(Clone, Default)]
+struct ExtensionFrames(Rc<RefCell<Option<ExtensionFrameAdmission>>>);
+
+type ExtensionFrameAdmission = Box<dyn Fn(&str) -> bool>;
+
+impl ExtensionFrames {
+    fn admits(&self, uri: &str) -> bool {
+        url::Url::parse(uri)
+            .ok()
+            .is_some_and(|url| zephium_core::navigation::extension_document_id(&url).is_some())
+            && self
+                .0
+                .try_borrow()
+                .is_ok_and(|admits| admits.as_ref().is_some_and(|admits| admits(uri)))
+    }
+}
+
 impl SecurityPolicy {
+    /// Lets a page frame an extension's document when `admits` grants that
+    /// extension in this view's profile, as password managers do for their
+    /// inline menus and passkey prompts. Main-frame loads keep their own
+    /// gate, and Chromium still refuses a document the extension does not
+    /// list in `web_accessible_resources`.
+    pub fn admit_extension_frames(&mut self, admits: impl Fn(&str) -> bool + 'static) {
+        if let Ok(mut slot) = self.extension_frames.0.try_borrow_mut() {
+            *slot = Some(Box::new(admits));
+        }
+    }
+
     /// Human tabs: WebView2 still never launches an app link itself; each
     /// one goes to `request`, so the browser can ask the person first.
     pub fn route_external_uris(
         &mut self,
-        request: impl Fn(&str, bool) + 'static,
+        request: impl Fn(&str, bool, Option<&str>) + 'static,
     ) -> windows_core::Result<()> {
         let handler = LaunchingExternalUriSchemeEventHandler::create(Box::new(move |_, args| {
             let Some(args) = args else {
@@ -483,10 +553,19 @@ impl SecurityPolicy {
                 args.IsUserInitiated(&mut user_gesture)?;
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
+                let mut origin = PWSTR::null();
+                // The origin of the frame that asked; an empty one is unknown.
+                let origin = args
+                    .InitiatingOrigin(&mut origin)
+                    .ok()
+                    .and_then(|_| {
+                        take_pwstr_bounded(origin, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
+                    })
+                    .filter(|origin| !origin.is_empty());
                 if let Some(uri) =
                     take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT)
                 {
-                    request(&uri, user_gesture.as_bool());
+                    request(&uri, user_gesture.as_bool(), origin.as_deref());
                 }
             }
             Ok(())
@@ -503,6 +582,69 @@ impl SecurityPolicy {
         }
         Ok(())
     }
+
+    /// Cancels each frame navigation `blocks` refuses. The security handler
+    /// runs first, so a frame it cancelled stays cancelled.
+    ///
+    /// WebView2 sends the frame's request without waiting for this answer,
+    /// so each refused address is also held by the view, which answers that
+    /// request itself before it leaves. A redirect hop is judged and held the
+    /// same way.
+    pub fn judge_frame_navigations(
+        &mut self,
+        blocks: impl Fn(&str) -> bool + 'static,
+        unreadable: impl Fn() + 'static,
+    ) -> windows_core::Result<()> {
+        if self.refused_frame_requests.is_none() {
+            // Without it a refused frame is still never shown; only its
+            // request goes out, as it did before.
+            match refused_frames::RefusedFrameRequests::hold(&self.core) {
+                Ok(held) => self.refused_frame_requests = Some(held),
+                Err(error) => {
+                    eprintln!("content blocker: refused frame requests are not held: {error}")
+                }
+            }
+        }
+        let held = self
+            .refused_frame_requests
+            .as_ref()
+            .map(refused_frames::RefusedFrameRequests::handle);
+        let handler = NavigationStartingEventHandler::create(Box::new(move |_, args| {
+            let Some(args) = args else {
+                return Ok(());
+            };
+            unsafe {
+                let mut uri = PWSTR::null();
+                let received = args.Uri(&mut uri);
+                let uri = take_pwstr_bounded(uri, PAGE_URL_UTF16_LIMIT, PAGE_URL_UTF8_LIMIT);
+                let uri = received.ok().and(uri);
+                if uri.is_none() {
+                    unreadable();
+                }
+                if frame_refused(uri.as_deref(), &blocks) {
+                    args.SetCancel(true)?;
+                    if let (Some(uri), Some(held)) = (uri.as_deref(), held.as_ref()) {
+                        held.refuse(uri);
+                    }
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0_i64;
+        unsafe {
+            self.core
+                .add_FrameNavigationStarting(&handler, &mut token)?
+        };
+        if let Some(previous) = self.judged_frame_token.replace(token) {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(previous) };
+        }
+        Ok(())
+    }
+}
+
+/// A frame whose address cannot be read is refused, never let through.
+fn frame_refused(uri: Option<&str>, blocks: impl Fn(&str) -> bool) -> bool {
+    uri.is_none_or(blocks)
 }
 
 impl Drop for SecurityPolicy {
@@ -510,6 +652,10 @@ impl Drop for SecurityPolicy {
         if let Some(token) = self.frame_token.take() {
             let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
         }
+        if let Some(token) = self.judged_frame_token.take() {
+            let _ = unsafe { self.core.remove_FrameNavigationStarting(token) };
+        }
+        self.refused_frame_requests = None;
         if let Some(token) = self.external_token.take() {
             let _ = unsafe { self.core18.remove_LaunchingExternalUriScheme(token) };
         }
@@ -523,6 +669,16 @@ impl Drop for SecurityPolicy {
             let _ = unsafe { self.core14.remove_ServerCertificateErrorDetected(token) };
         }
     }
+}
+
+pub(crate) fn environment_user_data_folder(
+    environment: &ICoreWebView2Environment,
+) -> Option<std::path::PathBuf> {
+    let environment7 = environment.cast::<ICoreWebView2Environment7>().ok()?;
+    let mut folder = PWSTR::null();
+    unsafe { environment7.UserDataFolder(&mut folder) }.ok()?;
+    take_pwstr_bounded(folder, WINDOWS_PATH_UTF16_LIMIT, WINDOWS_PATH_UTF8_LIMIT)
+        .map(std::path::PathBuf::from)
 }
 
 /// Verify properties of the environment WebView2 actually created. Loader
@@ -684,8 +840,29 @@ pub fn install_crash_handler(
     webview: &wry::WebView,
     on_failure: impl Fn(ProcessFailure) + 'static,
 ) -> windows_core::Result<CrashObserver> {
+    install_process_failure_handler(webview, on_failure, None)
+}
+
+/// A person's tab: also says when its page stops responding (`false`) and
+/// when it answers again (`true`). WebView2 repeats the unresponsive report
+/// every few seconds while the renderer is hung; one queued script per hang
+/// completes once the renderer runs again.
+pub fn install_crash_handler_with_responsiveness(
+    webview: &wry::WebView,
+    on_failure: impl Fn(ProcessFailure) + 'static,
+    on_responsive: impl Fn(bool) + 'static,
+) -> windows_core::Result<CrashObserver> {
+    install_process_failure_handler(webview, on_failure, Some(Rc::new(on_responsive)))
+}
+
+fn install_process_failure_handler(
+    webview: &wry::WebView,
+    on_failure: impl Fn(ProcessFailure) + 'static,
+    on_responsive: Option<Rc<dyn Fn(bool)>>,
+) -> windows_core::Result<CrashObserver> {
     let core = webview.webview();
-    let handler = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+    let probing = Rc::new(Cell::new(false));
+    let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
         let Some(args) = args else {
             return Ok(());
         };
@@ -698,17 +875,68 @@ pub fn install_crash_handler(
             COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED => {
                 on_failure(ProcessFailure::Renderer)
             }
-            // A subframe failure is not a top-level page death. Likewise an
-            // unresponsive page must not be destroyed without user consent.
-            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
-            | COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {}
-            _ => {}
+            // An unresponsive page is never ended without the person's say.
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE => {
+                if let (Some(report), Some(core)) = (on_responsive.as_ref(), sender.as_ref()) {
+                    report(false);
+                    probe_responsiveness(core, &probing, report);
+                }
+            }
+            // A subframe, GPU or utility process WebView2 brings back itself.
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => {
+                if let Some(core) = sender.as_ref() {
+                    page_memory::gpu_process_exited(core);
+                }
+                log_ignored_process_failure(kind)
+            }
+            other => log_ignored_process_failure(other),
         }
         Ok(())
     }));
     let mut token = Default::default();
     unsafe { core.add_ProcessFailed(&handler, &mut token)? };
     Ok(CrashObserver { core, token })
+}
+
+/// Queues a no-op script behind the hung page's work, once per hang. It
+/// completes only when the renderer runs again.
+fn probe_responsiveness(core: &ICoreWebView2, probing: &Rc<Cell<bool>>, report: &Rc<dyn Fn(bool)>) {
+    if probing.replace(true) {
+        return;
+    }
+    let settled = probing.clone();
+    let answered = report.clone();
+    let handler = ExecuteScriptCompletedHandler::create(Box::new(move |result, _| {
+        settled.set(false);
+        if result.is_ok() {
+            answered(true);
+        }
+        Ok(())
+    }));
+    // SAFETY: the sender's live core on its UI thread; constant script.
+    if unsafe { core.ExecuteScript(windows_core::w!("0"), &handler) }.is_err() {
+        probing.set(false);
+    }
+}
+
+static LOGGED_PROCESS_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn log_ignored_process_failure(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) {
+    let bit = 1_u32.checked_shl(kind.0.clamp(0, 31) as u32).unwrap_or(0);
+    let logged = LOGGED_PROCESS_FAILURES.fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+    if logged & bit == 0 {
+        let name = match kind {
+            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED => "subframe renderer",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED => "GPU",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED => "utility",
+            COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED => "sandbox helper",
+            _ => "other",
+        };
+        eprintln!(
+            "engine: a WebView2 {name} process ended ({}); left to WebView2",
+            kind.0
+        );
+    }
 }
 
 /// Registrations that make the native WebView2 source and back/forward list
@@ -1081,6 +1309,7 @@ pub(crate) enum BrowserProcessExitEvent {
         expected_process_id: u32,
         generation: BrowserProcessGeneration,
         observed_process_id: u32,
+        failed: bool,
     },
     Invalid {
         expected_process_id: u32,
@@ -1110,6 +1339,7 @@ struct SharedBrowserProcessExitProof {
 
 struct BrowserProcessExitProofData {
     state: BrowserProcessExitProofState,
+    failed: bool,
     // One profile can have only one admitted erasure attempt. Keeping exactly
     // one continuation makes late settlement allocation-bounded without a
     // permanently parked waiter thread.
@@ -1161,6 +1391,14 @@ impl BrowserProcessExitProof {
         // A mismatch or unreadable callback permanently poisons this proof.
         // Once the expected event was accepted, later environment events are
         // irrelevant to this already-completed process lifetime.
+        if data.state == BrowserProcessExitProofState::Pending
+            && observed == BrowserProcessExitProofState::Exited
+        {
+            data.failed = matches!(event, BrowserProcessExitEvent::Exited { failed: true, .. });
+            if data.failed {
+                eprintln!("shutdown: WebView2 browser process exited with FAILED; cleanup is permitted but shutdown is not clean");
+            }
+        }
         data.state = match (data.state, observed) {
             (BrowserProcessExitProofState::Pending, next) => next,
             (BrowserProcessExitProofState::Invalid, _) => BrowserProcessExitProofState::Invalid,
@@ -1214,6 +1452,15 @@ impl BrowserProcessExitProof {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .state
+    }
+
+    fn exited_cleanly(&self) -> bool {
+        let data = self
+            .shared
+            .data
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        data.state == BrowserProcessExitProofState::Exited && !data.failed
     }
 
     fn run_after_exit(&self, action: Box<dyn FnOnce() + Send>) -> bool {
@@ -1296,6 +1543,7 @@ pub(crate) fn install_browser_process_exit_observer(
         shared: Arc::new(SharedBrowserProcessExitProof {
             data: std::sync::Mutex::new(BrowserProcessExitProofData {
                 state: BrowserProcessExitProofState::Pending,
+                failed: false,
                 exit_action: None,
             }),
             ready: std::sync::Condvar::new(),
@@ -1323,6 +1571,7 @@ pub(crate) fn install_browser_process_exit_observer(
                     expected_process_id,
                     generation,
                     observed_process_id: process_id,
+                    failed: exit_kind == COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_FAILED,
                 })
             })
             .unwrap_or(BrowserProcessExitEvent::Invalid {
@@ -1518,6 +1767,19 @@ pub fn install_privileged_environment_registration(
     }
 }
 
+/// The browser process of the privileged environment registered for
+/// `label`, whose exit the final teardown proves. A WebView that joins that
+/// process, as a mini window's toolbar joins the launcher's, is covered by
+/// that proof and registers nothing of its own.
+pub fn privileged_environment_process(label: &str) -> Option<u32> {
+    PRIVILEGED_ENVIRONMENT_REGISTRATIONS.with(|registrations| {
+        let registrations = registrations.try_borrow().ok()?;
+        registrations
+            .get(label)
+            .map(|registration| registration.exit_guard.expected_process_id())
+    })
+}
+
 /// Remove only the runtime-update event when a privileged window is
 /// destroyed. Its exact Environment5/HANDLE proof stays registered through
 /// `run_return` and the bounded final apartment pump.
@@ -1584,12 +1846,16 @@ fn privileged_observer_set_is_exact(expected_labels: &[&str], observed: &[(Strin
         && processes.len() == observed.len()
 }
 
-/// After Tauri's `run_return`, pump this same UI apartment for a bounded tail
-/// and require the exact main/panel environment set before authorizing UDF
-/// deletion. The registrations are always released after the result is fixed.
-pub fn finalize_privileged_environment_registrations(expected_labels: &[&str]) -> bool {
+/// After Tauri drains its native windows, pump this UI apartment until the
+/// caller's deadline. Return separate exit and clean-exit proofs; only the
+/// exact main/panel environment set authorizes UDF deletion. Registrations
+/// are always released after the result is fixed.
+pub fn finalize_privileged_environment_registrations(
+    expected_labels: &[&str],
+    deadline: std::time::Instant,
+) -> (bool, bool) {
     if PRIVILEGED_ENVIRONMENT_FINALIZING.with(|finalizing| finalizing.replace(true)) {
-        return false;
+        return (false, false);
     }
     let registrations = PRIVILEGED_ENVIRONMENT_REGISTRATIONS.with(|registrations| {
         let Ok(mut registrations) = registrations.try_borrow_mut() else {
@@ -1598,7 +1864,7 @@ pub fn finalize_privileged_environment_registrations(expected_labels: &[&str]) -
         Some(std::mem::take(&mut *registrations))
     });
     let Some(mut registrations) = registrations else {
-        return false;
+        return (false, false);
     };
     for registration in registrations.values_mut() {
         if !registration.detach_update() {
@@ -1613,7 +1879,6 @@ pub fn finalize_privileged_environment_registrations(expected_labels: &[&str]) -
         .collect::<Vec<_>>();
     let exact_set = privileged_observer_set_is_exact(expected_labels, &observed);
     if exact_set {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while registrations
             .values()
             .any(|registration| !registration.exit_guard.exact_exit_is_proven())
@@ -1641,8 +1906,12 @@ pub fn finalize_privileged_environment_registrations(expected_labels: &[&str]) -
             }
             proven
         });
+    let clean = proven
+        && registrations
+            .values()
+            .all(|registration| registration.exit_guard.observer.proof.exited_cleanly());
     drop(registrations);
-    proven
+    (proven, clean)
 }
 
 fn pump_privileged_exit_callbacks(deadline: std::time::Instant) {
@@ -1813,7 +2082,7 @@ impl BrowserProcessShutdownObligation {
 pub(crate) fn wait_for_browser_process_shutdown(
     obligations: Vec<BrowserProcessShutdownObligation>,
     timeout: std::time::Duration,
-) -> bool {
+) -> (bool, bool) {
     let deadline = std::time::Instant::now() + timeout;
     for obligation in &obligations {
         let state = obligation.exit_proof.wait_until(deadline);
@@ -1825,17 +2094,21 @@ pub(crate) fn wait_for_browser_process_shutdown(
             obligation.process.has_exited(),
         );
         if state != BrowserProcessExitProofState::Exited {
-            return false;
+            return (false, false);
         }
     }
-    obligations.into_iter().all(|obligation| {
+    let clean = obligations
+        .iter()
+        .all(|obligation| obligation.exit_proof.exited_cleanly());
+    let exited = obligations.into_iter().all(|obligation| {
         let raw = HANDLE(obligation.process.handle.as_raw_handle());
         // An Environment5 callback can arrive just before its original process
         // HANDLE signals. Wait only the remainder of the same global bound.
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let millis = remaining.as_millis().min(u128::from(u32::MAX - 1)) as u32;
         unsafe { WaitForSingleObject(raw, millis) == WAIT_OBJECT_0 }
-    })
+    });
+    (exited, exited && clean)
 }
 
 // WebView2 swallows browser accelerators before the page or any menu sees
@@ -1849,6 +2122,83 @@ impl Drop for AcceleratorRegistration {
     fn drop(&mut self) {
         let _ = unsafe { self.controller.remove_AcceleratorKeyPressed(self.token) };
     }
+}
+
+/// F10 and Alt+Space belong to the window's caption, yet WebView2 takes them
+/// before the window sees them. They reach the parent as the messages Windows
+/// itself would have produced.
+fn forward_caption_key(
+    controller: Option<&ICoreWebView2Controller>,
+    args: &ICoreWebView2AcceleratorKeyPressedEventArgs,
+    key: u32,
+    modifiers: (bool, bool, bool),
+) -> windows_core::Result<()> {
+    use crate::caption_keys::{classify, CaptionKey};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::Input::KeyboardAndMouse::VK_F10;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PostMessageW, SC_KEYMENU, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    };
+
+    let (ctrl, shift, alt) = modifiers;
+    let (Some(controller), Some(caption_key)) = (controller, classify(key, ctrl, shift, alt))
+    else {
+        return Ok(());
+    };
+    // SAFETY: the arguments and controller are live for this callback.
+    unsafe {
+        args.SetHandled(true)?;
+        let mut lparam = 0i32;
+        args.KeyEventLParam(&mut lparam)?;
+        // Holding the key must not repeat what its first press did.
+        if lparam & (1 << 30) != 0 {
+            return Ok(());
+        }
+        let mut parent = HWND::default();
+        controller.ParentWindow(&mut parent)?;
+        match caption_key {
+            CaptionKey::Buttons => PostMessageW(
+                Some(parent),
+                WM_SYSKEYDOWN,
+                WPARAM(usize::from(VK_F10.0)),
+                LPARAM(lparam as u32 as isize),
+            ),
+            CaptionKey::SystemMenu => PostMessageW(
+                Some(parent),
+                WM_SYSCOMMAND,
+                WPARAM(SC_KEYMENU as usize),
+                LPARAM(' ' as isize),
+            ),
+        }
+    }
+}
+
+/// Lets the caption hear its keys from a WebView that is not one of the
+/// engine's own, such as the browser chrome. Lives as long as the controller.
+pub fn bridge_caption_keys(controller: &ICoreWebView2Controller) -> windows_core::Result<()> {
+    let handler = AcceleratorKeyPressedEventHandler::create(Box::new(move |controller, args| {
+        let Some(args) = args else {
+            return Ok(());
+        };
+        let mut kind = COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN;
+        unsafe { args.KeyEventKind(&mut kind)? };
+        if kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN
+            && kind != COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN
+        {
+            return Ok(());
+        }
+        let mut key = 0u32;
+        unsafe { args.VirtualKey(&mut key)? };
+        let down = |vk: i32| unsafe { (GetKeyState(vk) as u16 & 0x8000) != 0 };
+        let modifiers = (
+            down(VK_CONTROL.0 as i32),
+            down(VK_SHIFT.0 as i32),
+            down(VK_MENU.0 as i32),
+        );
+        forward_caption_key(controller.as_ref(), &args, key, modifiers)
+    }));
+    let mut token = Default::default();
+    unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token) }
 }
 
 pub fn install_accelerators(
@@ -1888,24 +2238,73 @@ pub fn install_accelerators(
         {
             return Ok(());
         }
-        let hit = shortcuts
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .find(|s| s.key == key && s.ctrl == ctrl && s.shift == shift && s.alt == alt)
-            .map(|shortcut| shortcut.id.clone());
+        let hit = {
+            let shortcuts = shortcuts
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Shortcut::match_windows(&shortcuts, key, ctrl, shift, alt)
+                .map(|shortcut| shortcut.id.clone())
+        };
         if let Some(command) = hit {
             unsafe { args.SetHandled(true)? };
             sink(EngineEvent::ShortcutPressed {
                 item: item(),
                 command,
             });
+            return Ok(());
         }
-        Ok(())
+        forward_caption_key(controller.as_ref(), &args, key, (ctrl, shift, alt))
     }));
     let mut token = Default::default();
     unsafe { controller.add_AcceleratorKeyPressed(&handler, &mut token)? };
     Ok(Some(AcceleratorRegistration { controller, token }))
+}
+
+/// Tells the engine when the person zooms the page itself, with Ctrl and the
+/// mouse wheel. `applied` holds what this view was last asked for, so a change
+/// the engine made on request is not taken for the person's.
+pub struct ZoomRegistration {
+    controller: ICoreWebView2Controller,
+    token: i64,
+}
+
+impl Drop for ZoomRegistration {
+    fn drop(&mut self) {
+        let _ = unsafe { self.controller.remove_ZoomFactorChanged(self.token) };
+    }
+}
+
+pub fn install_zoom_listener(
+    view: &wry::WebView,
+    applied: std::rc::Rc<std::cell::Cell<f64>>,
+    sink: Arc<dyn Fn(EngineEvent) + Send + Sync>,
+    item: impl Fn() -> zephium_core::ids::ItemId + 'static,
+) -> windows_core::Result<ZoomRegistration> {
+    let controller = view.controller();
+    let handler = ZoomFactorChangedEventHandler::create(Box::new(move |controller, _| {
+        let Some(controller) = controller else {
+            return Ok(());
+        };
+        let mut factor = 0.0;
+        unsafe { controller.ZoomFactor(&mut factor)? };
+        if !factor.is_finite() || (factor - applied.get()).abs() < 0.001 {
+            return Ok(());
+        }
+        let adopted = factor.clamp(crate::MIN_PAGE_ZOOM, crate::MAX_PAGE_ZOOM);
+        applied.set(adopted);
+        // WebView2 keeps a zoom made in the page for that page alone and drops
+        // it on the next navigation. Making it the view's own zoom lets it
+        // last, as one asked for does.
+        let _ = unsafe { controller.SetZoomFactor(adopted) };
+        sink(EngineEvent::ZoomGesture {
+            id: item(),
+            scale: adopted,
+        });
+        Ok(())
+    }));
+    let mut token = Default::default();
+    unsafe { controller.add_ZoomFactorChanged(&handler, &mut token)? };
+    Ok(ZoomRegistration { controller, token })
 }
 
 // Edge's sleeping-tabs primitive: a suspended view frees most of its
@@ -1943,6 +2342,92 @@ pub fn resume(view: &wry::WebView) {
         return;
     };
     let _ = unsafe { v3.Resume() };
+}
+
+/// The DevTools protocol's reload with the cache ignored is what Edge's own
+/// hard reload does, and it leaves cookies and site data alone.
+pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
+    let controller = view.controller();
+    let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+        return false;
+    };
+    let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+    unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.reload"),
+            &HSTRING::from(r#"{"ignoreCache":true}"#),
+            &handler,
+        )
+    }
+    .is_ok()
+}
+
+/// The browser's own list around the current entry, as (title, address) in
+/// order with the index of the current one. The answer is asynchronous; a
+/// refused call is reported by the return value and never calls `done`.
+pub fn history_session(
+    view: &wry::WebView,
+    done: impl FnOnce(Option<(Vec<(String, String)>, usize)>) + 'static,
+) -> bool {
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            done(
+                result
+                    .is_ok()
+                    .then(|| crate::history_list::parse(&response))
+                    .flatten()
+                    .map(|history| history.window()),
+            );
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    unsafe {
+        view.webview().CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &handler,
+        )
+    }
+    .is_ok()
+}
+
+/// Goes to the entry `offset` steps from the current one when it is still at
+/// `url`. The list is read again first, so the entry id comes from the
+/// browser's list as it is now and not from one shown earlier.
+pub fn go_to_history_entry(view: &wry::WebView, offset: i32, url: &str) -> bool {
+    let core = view.webview();
+    let url = url.to_owned();
+    let navigate = core.clone();
+    let handler =
+        CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |result, response| {
+            let entry = result
+                .is_ok()
+                .then(|| crate::history_list::parse(&response))
+                .flatten()
+                .and_then(|history| history.entry_at(offset, &url));
+            if let Some(id) = entry {
+                let settled =
+                    CallDevToolsProtocolMethodCompletedHandler::create(Box::new(|_, _| Ok(())));
+                // SAFETY: exact STA-owned core and immutable argument buffers.
+                let _ = unsafe {
+                    navigate.CallDevToolsProtocolMethod(
+                        &HSTRING::from("Page.navigateToHistoryEntry"),
+                        &HSTRING::from(format!(r#"{{"entryId":{id}}}"#)),
+                        &settled,
+                    )
+                };
+            }
+            Ok(())
+        }));
+    // SAFETY: exact STA-owned core and immutable argument buffers.
+    unsafe {
+        core.CallDevToolsProtocolMethod(
+            &HSTRING::from("Page.getNavigationHistory"),
+            &HSTRING::from("{}"),
+            &handler,
+        )
+    }
+    .is_ok()
 }
 
 pub fn stop_loading(view: &wry::WebView) {
@@ -2012,6 +2497,7 @@ mod process_exit_tests {
             shared: Arc::new(SharedBrowserProcessExitProof {
                 data: std::sync::Mutex::new(BrowserProcessExitProofData {
                     state: BrowserProcessExitProofState::Pending,
+                    failed: false,
                     exit_action: None,
                 }),
                 ready: std::sync::Condvar::new(),
@@ -2039,10 +2525,10 @@ mod process_exit_tests {
         assert!(shutdown.process.is_running());
         // Shared ownership does not prove exit or turn a pending Environment5
         // registration into a clean zero-obligation shutdown.
-        assert!(!wait_for_browser_process_shutdown(
-            vec![shutdown],
-            std::time::Duration::ZERO
-        ));
+        assert_eq!(
+            wait_for_browser_process_shutdown(vec![shutdown], std::time::Duration::ZERO),
+            (false, false)
+        );
     }
 
     #[test]
@@ -2065,6 +2551,7 @@ mod process_exit_tests {
                         expected_process_id: 41,
                         generation: proof.generation(),
                         observed_process_id: 41,
+                        failed: false,
                     });
                 } else {
                     handle_exited.set(true);
@@ -2102,12 +2589,31 @@ mod process_exit_tests {
     }
 
     #[test]
+    fn failed_browser_exit_allows_cleanup_but_is_not_clean() {
+        let proof = proof(42);
+        proof.record(BrowserProcessExitEvent::Exited {
+            expected_process_id: 42,
+            generation: proof.generation(),
+            observed_process_id: 42,
+            failed: true,
+        });
+        let cleaned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = cleaned.clone();
+        assert!(proof.run_after_exit(Box::new(move || {
+            done.store(true, std::sync::atomic::Ordering::Release);
+        })));
+        assert!(cleaned.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!proof.exited_cleanly());
+    }
+
+    #[test]
     fn only_the_recorded_pid_satisfies_group_exit_proof() {
         let proof = proof(41);
         proof.record(BrowserProcessExitEvent::Exited {
             expected_process_id: 41,
             generation: BrowserProcessGeneration(7),
             observed_process_id: 41,
+            failed: false,
         });
         assert_eq!(
             proof.wait_until(std::time::Instant::now()),
@@ -2122,11 +2628,13 @@ mod process_exit_tests {
             expected_process_id: 41,
             generation: BrowserProcessGeneration(7),
             observed_process_id: 42,
+            failed: false,
         });
         proof.record(BrowserProcessExitEvent::Exited {
             expected_process_id: 41,
             generation: BrowserProcessGeneration(7),
             observed_process_id: 41,
+            failed: false,
         });
         assert_eq!(
             proof.wait_until(std::time::Instant::now()),
@@ -2145,6 +2653,7 @@ mod process_exit_tests {
             expected_process_id: 41,
             generation: BrowserProcessGeneration(7),
             observed_process_id: 41,
+            failed: false,
         });
         assert_eq!(
             proof.wait_until(std::time::Instant::now()),
@@ -2235,6 +2744,7 @@ mod process_exit_tests {
             expected_process_id: 41,
             generation: BrowserProcessGeneration(7),
             observed_process_id: 41,
+            failed: false,
         };
         proof.record(event);
         proof.record(event);
@@ -2268,5 +2778,28 @@ mod bootstrap_history_tests {
             &["https://a.test/", "https://b.test/"]
         )));
         assert!(!blank_bootstrap_only("not json"));
+    }
+}
+
+#[cfg(test)]
+mod frame_judge_tests {
+    use super::frame_refused;
+
+    #[test]
+    fn a_frame_whose_address_cannot_be_read_is_refused() {
+        let blocks = |uri: &str| uri.contains("scam");
+        assert!(frame_refused(None, blocks));
+        assert!(frame_refused(Some("https://scam.example/"), blocks));
+        assert!(!frame_refused(Some("https://fine.example/"), blocks));
+    }
+}
+
+#[cfg(feature = "agentic-browser")]
+pub(crate) mod tab_preview;
+/// Without the image codec there is nothing to make a preview with.
+#[cfg(not(feature = "agentic-browser"))]
+pub(crate) mod tab_preview {
+    pub(crate) fn capture(_view: &wry::WebView, done: Box<dyn FnOnce(Option<Vec<u8>>) + Send>) {
+        done(None);
     }
 }

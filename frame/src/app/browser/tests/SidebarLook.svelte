@@ -18,8 +18,13 @@
     "Agentic Infrastructure - Vercel",
     "New Tab",
   ].map((title, index) => tabFixture({ id: `t${index}`, title }));
+  // The first has no page open, as a kept site is until it is visited.
   const kept = ["YouTube", "Spotify", "X"].map((title, index) =>
-    tabFixture({ id: `s${index}`, title }),
+    tabFixture({
+      id: `s${index}`,
+      title,
+      availability: index === 0 ? { state: "sleeping" } : null,
+    }),
   );
   const node = (id: string, section: "favorites" | "today"): SidebarNodeView => ({
     id,

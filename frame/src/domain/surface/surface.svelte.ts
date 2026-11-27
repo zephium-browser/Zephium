@@ -5,7 +5,15 @@ import { settle } from "$domain/operations";
 import { events } from "$shared/ipc/native-events";
 
 export type BrowserPage =
-  "settings" | "extensions" | "history" | "downloads" | "work" | "tasks" | "notes" | "time";
+  | "settings"
+  | "extensions"
+  | "history"
+  | "downloads"
+  | "work"
+  | "tasks"
+  | "notes"
+  | "time"
+  | "source";
 let page = $state<BrowserPage | null>(null);
 // The page a browser page was opened over, so closing it returns there: Settings
 // opened from Work gives the window back to Work, not to Browse.
@@ -18,6 +26,13 @@ let observationLifetime = new AbortController();
 let initialized = false;
 let initializing: Promise<void> | null = null;
 export const currentPage = () => page;
+/** A tool open in full: the page a panel's full mode opens. */
+export const toolPage = () =>
+  page === "tasks" ||
+  page === "notes" ||
+  page === "time" ||
+  page === "history" ||
+  page === "downloads";
 export const navigationFailed = () => error;
 async function initialize(epoch: number) {
   const listeners = await listenAll([
@@ -46,7 +61,8 @@ async function initialize(epoch: number) {
               destination === "downloads" ||
               destination === "tasks" ||
               destination === "notes" ||
-              destination === "time"
+              destination === "time" ||
+              destination === "source"
             ? destination
             : undefined;
       if (confirmed !== undefined) {

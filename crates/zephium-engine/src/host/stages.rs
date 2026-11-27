@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use raw_window_handle::RawWindowHandle;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use wry::WebView;
 
 use zephium_core::geometry::Rect;
@@ -18,7 +18,7 @@ use super::dispatch::try_with_stage_failure;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_renderer_exit;
 use super::EngineHost;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::ParentHandle;
 
 #[cfg(target_os = "macos")]
@@ -134,9 +134,9 @@ impl EngineHost {
     fn reconcile_new_view_with_stages(&self, id: ItemId) -> bool {
         let expected = self
             .stages
-            .values()
-            .filter(|stage| stage.contains_item(id))
-            .cloned()
+            .iter()
+            .filter(|(_, stage)| stage.contains_item(id))
+            .map(|(window, stage)| (*window, stage.clone()))
             .collect::<Vec<_>>();
         if expected.is_empty() {
             // The controller and its child HWND were constructed hidden.
@@ -153,8 +153,10 @@ impl EngineHost {
         let presentable = view.presentable && view.presentation_permit.load(Ordering::Acquire);
         let presentation_permit = view.presentation_permit.clone();
         let mut reconciled = true;
-        for stage in expected {
-            if !stage.has_view(id) {
+        for (window, stage) in expected {
+            // A page built after its layout arrived was made under the main
+            // window; a mini window's stage takes it under its own first.
+            if !stage.has_view(id) && self.move_view_to_stage(window, id, view, &stage) {
                 stage.insert_view(id, view, generation.clone(), presentation_permit.clone());
             }
             if !stage.has_view(id) {
@@ -219,6 +221,12 @@ impl EngineHost {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
+        // A layout that was already on its way when its window was released
+        // has nothing left to place. It is skipped, never a failed stage.
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if released(&self.window_parents, window) {
+            return true;
+        }
         let applied = self.apply_content(window, tree, region, motion);
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.fullscreen_layout_applied(window, &shown);
@@ -267,7 +275,11 @@ impl EngineHost {
             }
             return applied;
         };
-        if !stage_set_frame(&stage, &self.parent, r, motion) {
+        let Some(parent) = self.parent_for(window) else {
+            stage.abort_content_update(update_epoch);
+            return false;
+        };
+        if !stage_set_frame(&stage, parent, r, motion) {
             stage.abort_content_update(update_epoch);
             return false;
         }
@@ -287,6 +299,17 @@ impl EngineHost {
             };
             let mut inserted = false;
             if !stage.has_view(*id) {
+                // A page moving between windows, as a mini window's page
+                // does when it opens in the main window, leaves its old stage
+                // first so no two stages ever claim one native view.
+                for (other, previous) in &self.stages {
+                    if *other != window && previous.has_view(*id) {
+                        previous.remove_view(*id);
+                    }
+                }
+                if !stage.content_update_is_current(update_epoch) {
+                    return !stage.has_terminal_failure();
+                }
                 if let Some(native_view) = webview_nsview(view) {
                     if !stage.insert_view(*id, native_view, view.presentation_permit.clone()) {
                         stage.abort_content_update(update_epoch);
@@ -360,6 +383,19 @@ impl EngineHost {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(crate) fn raise_chrome(&mut self, window: WindowId, raised: bool, card: Rect, slide: bool) {
+        if let Some(stage) = self.stages.get(&window) {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = (card, slide);
+                stage.raise_chrome(raised);
+            }
+            #[cfg(target_os = "windows")]
+            stage.raise_chrome(raised, card, slide);
+        }
+    }
+
     #[cfg(not(target_os = "macos"))]
     fn apply_content(
         &mut self,
@@ -397,6 +433,13 @@ impl EngineHost {
                     let Some(generation) = view.event_permit.active_token() else {
                         return false;
                     };
+                    // A page moving between windows, as a mini window's page
+                    // does when it opens in the main window, leaves its old
+                    // stage and moves under this stage's window first, so no
+                    // two stages ever claim one native view.
+                    if !self.move_view_to_stage(window, *id, view, &stage) {
+                        return false;
+                    }
                     if !stage.insert_view(*id, view, generation, view.presentation_permit.clone()) {
                         return false;
                     }
@@ -427,14 +470,14 @@ impl EngineHost {
         if !stage.apply(region, tree, &tabs) {
             return false;
         }
-        // Off-screen views drop to the low-memory hint (reversible, nothing
-        // freezes); actual suspension waits for the shell's idle verdict.
-        // Becoming visible resumes a suspended view natively.
+        // Off-screen views keep their memory: the low-memory hint only paged
+        // it out to be paged back in on return, and freed no commit. Actual
+        // suspension waits for the shell's idle verdict; becoming visible
+        // resumes a suspended view natively.
         #[cfg(target_os = "windows")]
         {
-            use wry::{MemoryUsageLevel, WebViewExtWindows};
             let mut woken = Vec::new();
-            for (id, view) in &self.views {
+            for id in self.views.keys() {
                 // A layout belongs to one window; resource policy belongs to
                 // the whole host. Updating window A must not mark a visible
                 // view in window B hidden or make it eligible for suspension.
@@ -444,7 +487,6 @@ impl EngineHost {
                 }
                 if off {
                     self.hidden.insert(*id);
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Low);
                 } else {
                     self.hidden.remove(id);
                     self.dormant.remove(id);
@@ -453,13 +495,14 @@ impl EngineHost {
                     // A rapid show/hide must not issue overlapping TrySuspend
                     // operations against the same native view.
                     self.suspend_failed.remove(id);
-                    let _ = view.set_memory_usage_level(MemoryUsageLevel::Normal);
+                    self.suspend_retries.remove(id);
                     woken.push(*id);
                 }
             }
             for id in woken {
                 self.cancel_suspend_guard(id);
                 self.refresh_missed_styles(id);
+                self.resume_store_button_poll(id);
             }
         }
         self.refresh_visible_generic_styles();
@@ -489,10 +532,7 @@ impl EngineHost {
         if let Some(stage) = self.stages.get(&window) {
             return Some(stage.clone());
         }
-        let RawWindowHandle::Win32(h) = self.parent.0 else {
-            return None;
-        };
-        let parent = HWND(h.hwnd.get() as *mut _);
+        let parent = win32_parent(self.parent_for(window)?)?;
         let native_terminal_failure = self.native_terminal_failure.clone();
         let stage = Stage::new(parent, GAP, move |id, generation| {
             let admitted = with_renderer_exit(id, move |host| {
@@ -571,7 +611,7 @@ impl EngineHost {
             return Some(stage.clone());
         }
         let mtm = MainThreadMarker::new()?;
-        let content = content_view(&self.parent)?;
+        let content = content_view(self.parent_for(window)?)?;
         let native_terminal_failure = self.native_terminal_failure.clone();
         let stage = ContentStage::new(
             mtm,
@@ -598,6 +638,148 @@ impl EngineHost {
         stage.cover_pointer();
         self.stages.insert(window, stage.clone());
         Some(stage)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl EngineHost {
+    /// `None` for a window already released: a late layout for it must not
+    /// build a stage in the main window instead.
+    fn parent_for(&self, window: WindowId) -> Option<&ParentHandle> {
+        match self.window_parents.get(&window) {
+            Some(parent) => parent.as_ref(),
+            None => Some(&self.parent),
+        }
+    }
+
+    /// Gives `window` its own native window. Its stage is built inside that
+    /// window on its first layout. The main window, a window already given
+    /// one, and a handle of another platform's kind are refused.
+    pub(crate) fn attach_window(&mut self, window: WindowId, handle: RawWindowHandle) -> bool {
+        if self.window_parents.contains_key(&window)
+            || self.stages.contains_key(&window)
+            || !native_window_handle(&handle)
+            || same_native_window(&handle, &self.parent.0)
+        {
+            return false;
+        }
+        self.window_parents
+            .insert(window, Some(ParentHandle(handle)));
+        true
+    }
+
+    /// Retires the stage of a window that is going away. A page still on it
+    /// leaves with the stage and joins another window on its next layout;
+    /// until then it is kept, hidden, by the main window, so it never goes
+    /// with the native window it was shown in.
+    pub(crate) fn release_window(&mut self, window: WindowId) {
+        if !self
+            .window_parents
+            .get(&window)
+            .is_some_and(Option::is_some)
+        {
+            return;
+        }
+        if let Some(stage) = self.stages.remove(&window) {
+            #[cfg(target_os = "macos")]
+            {
+                for id in stage.attached_items().unwrap_or_default() {
+                    stage.remove_view(id);
+                }
+                stage.retire();
+            }
+            #[cfg(target_os = "windows")]
+            {
+                use wry::WebViewExtWindows;
+                let main = win32_parent(&self.parent);
+                for id in stage.attached_items() {
+                    stage.remove_view(id);
+                    if let (Some(view), Some(main)) = (self.views.get(&id), main) {
+                        let _ = view.set_visible(false);
+                        if view.reparent(main.0 as isize).is_err() {
+                            eprintln!("engine: a released window's page stayed in place");
+                        }
+                    }
+                }
+                if let Some(parent) = stage.parent_window() {
+                    crate::platform::imp::forget_window_caption_offset(parent.0 as isize);
+                }
+            }
+        }
+        self.window_parents.insert(window, None);
+    }
+}
+
+/// Whether `window` had its own native window and has released it.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn released<T>(parents: &std::collections::HashMap<WindowId, Option<T>>, window: WindowId) -> bool {
+    parents.get(&window).is_some_and(Option::is_none)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn native_window_handle(handle: &RawWindowHandle) -> bool {
+    if cfg!(target_os = "macos") {
+        matches!(handle, RawWindowHandle::AppKit(_))
+    } else {
+        matches!(handle, RawWindowHandle::Win32(_))
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn same_native_window(left: &RawWindowHandle, right: &RawWindowHandle) -> bool {
+    match (left, right) {
+        (RawWindowHandle::AppKit(left), RawWindowHandle::AppKit(right)) => {
+            left.ns_view == right.ns_view
+        }
+        (RawWindowHandle::Win32(left), RawWindowHandle::Win32(right)) => left.hwnd == right.hwnd,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn win32_parent(parent: &ParentHandle) -> Option<HWND> {
+    let RawWindowHandle::Win32(h) = parent.0 else {
+        return None;
+    };
+    Some(HWND(h.hwnd.get() as *mut _))
+}
+
+#[cfg(target_os = "windows")]
+impl EngineHost {
+    /// Takes `id` off every other window's stage and puts its native window
+    /// under `stage`'s window. False when the move was refused natively; the
+    /// page then stays where it was and the layout is not applied.
+    fn move_view_to_stage(
+        &self,
+        window: WindowId,
+        id: ItemId,
+        view: &WebView,
+        stage: &Stage,
+    ) -> bool {
+        use wry::WebViewExtWindows;
+        for (other, previous) in &self.stages {
+            if *other != window && previous.has_view(id) {
+                previous.remove_view(id);
+            }
+        }
+        let Some(parent) = stage.parent_window() else {
+            return false;
+        };
+        // A page already under this window, as every main-window tab is,
+        // is left alone: only a page crossing windows is reparented.
+        let mut current = HWND::default();
+        // SAFETY: the controller belongs to this live view and this runs on
+        // its UI thread.
+        if unsafe { view.controller().ParentWindow(&mut current) }.is_ok() && current == parent {
+            return true;
+        }
+        match view.reparent(parent.0 as isize) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("engine: a page could not move to its window: {error}");
+                false
+            }
+        }
     }
 }
 

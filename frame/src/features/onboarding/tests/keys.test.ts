@@ -9,7 +9,7 @@ const press = (init: KeyboardEventInit, previous = NOTHING_HELD) =>
 describe("heldParts", () => {
   it("lights the platform's own modifier for CmdOrCtrl", () => {
     const held = press({ code: "MetaLeft", metaKey: true });
-    expect(heldParts("CmdOrCtrl+Shift+Space", held, true)).toEqual([true, false, false]);
+    expect(heldParts("CmdOrCtrl+Shift+Space", held, true)).toEqual([false, true, false]);
     expect(heldParts("CmdOrCtrl+Shift+Space", held, false)).toEqual([false, false, false]);
   });
 
@@ -28,6 +28,23 @@ describe("heldParts", () => {
       held,
     );
     expect(heldParts("CmdOrCtrl+Shift+Space", held, false)).toEqual([true, true, false]);
+  });
+
+  it("matches physical letter, digit and arrow codes to their displayed keycaps", () => {
+    for (const [key, code] of [
+      ["L", "KeyL"],
+      ["1", "Digit1"],
+      ["Up", "ArrowUp"],
+    ]) {
+      const held = press({ code, metaKey: true });
+      expect(heldParts(`CmdOrCtrl+${key}`, held, true)).toEqual([true, true]);
+    }
+  });
+
+  it("lights modifiers in display order for remapped shortcuts", () => {
+    const held = press({ code: "KeyL", metaKey: true });
+    expect(heldParts("CmdOrCtrl+Option+L", held, true)).toEqual([false, true, true]);
+    expect(heldParts("Shift+Ctrl+L", held, false)).toEqual([false, false, true]);
   });
 
   it("reads Alt and Option as one key", () => {

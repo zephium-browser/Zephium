@@ -23,7 +23,9 @@ import type {
   ImportJobView,
   ItemsChanged,
   KeymapChanged,
+  MiniView,
   LayoutChanged,
+  MediaPlayerChanged,
   OperationProcessed,
   PagePermissionPromptChanged,
   RuntimeStatusChanged,
@@ -34,11 +36,13 @@ import type {
   VoiceLevels,
   SwipeScroll,
   WebExtensionAccessRequested,
+  WebExtensionStoreClicked,
 } from "./bindings";
 
 type PayloadEvent<T> = { payload: T };
 type Listener<T> = (event: PayloadEvent<T>) => void;
 type PresentationTab = { tab: TabChanged; active: string | null };
+type MiniPresentation = { tab: TabChanged };
 
 function scopedEvent<T>(name: string) {
   return {
@@ -54,6 +58,7 @@ function scopedEvent<T>(name: string) {
 // with @tauri-apps/api/event: its listen command accepts a caller-selected
 // target, which would let the launcher panel subscribe to main-window state.
 export const nativeEventNames = {
+  windowsReputationManaged: "zephium:windows-reputation-managed",
   workEnvironmentChanged: "zephium:work-environment-changed",
   workChanged: "zephium:work-changed",
   workHumanChanged: "zephium:work-human-changed",
@@ -62,6 +67,8 @@ export const nativeEventNames = {
   pageAssistChanged: "zephium:page-assist-changed",
   accountChanged: "zephium:account-changed",
   panelState: "zephium:panel-state",
+  mini: "zephium:mini",
+  miniPresentation: "zephium:mini-presentation",
   favicons: "zephium:favicons",
   noteOpenRequested: "zephium:note-open-requested",
   resourceChanged: "zephium:resource-changed",
@@ -77,6 +84,7 @@ export const nativeEventNames = {
   extensionActionShortcut: "zephium:extension-action-shortcut",
   pagePermissionPromptChanged: "zephium:page-permission-prompt",
   webExtensionAccessRequested: "zephium:web-extension-access",
+  webExtensionStoreClicked: "zephium:web-extension-store-click",
   webExtensionDropped: "zephium:web-extension-dropped",
   browserReturn: "zephium:browser-return",
   presentationTab: "zephium:presentation-tab",
@@ -86,6 +94,7 @@ export const nativeEventNames = {
   find: "zephium:find",
   searchChanged: "zephium:search",
   layoutChanged: "zephium:layout",
+  mediaPlayerChanged: "zephium:media-player",
   operationProcessed: "zephium:operation-processed",
   runtimeStatusChanged: "zephium:runtime-status",
   blockerStatusChanged: "zephium:blocker-status",
@@ -97,6 +106,7 @@ export const nativeEventNames = {
 } as const;
 
 export const events = {
+  windowsReputationManaged: scopedEvent<boolean>(nativeEventNames.windowsReputationManaged),
   workEnvironmentChanged: scopedEvent<WorkEnvironmentChanged>(
     nativeEventNames.workEnvironmentChanged,
   ),
@@ -116,6 +126,8 @@ export const events = {
   notesChanged: scopedEvent<NoteChanges>(nativeEventNames.notesChanged),
   downloadsChanged: scopedEvent<DownloadsChanged>(nativeEventNames.downloadsChanged),
   panelState: scopedEvent<PanelState>(nativeEventNames.panelState),
+  mini: scopedEvent<MiniView>(nativeEventNames.mini),
+  miniPresentation: scopedEvent<MiniPresentation>(nativeEventNames.miniPresentation),
   browserCredentialCapabilityChanged: scopedEvent<BrowserCredentialCapabilityChanged>(
     nativeEventNames.browserCredentialCapabilityChanged,
   ),
@@ -134,6 +146,9 @@ export const events = {
   webExtensionAccessRequested: scopedEvent<WebExtensionAccessRequested>(
     nativeEventNames.webExtensionAccessRequested,
   ),
+  webExtensionStoreClicked: scopedEvent<WebExtensionStoreClicked>(
+    nativeEventNames.webExtensionStoreClicked,
+  ),
   /** The path of an extension package dropped on the browser. */
   webExtensionDropped: scopedEvent<string>(nativeEventNames.webExtensionDropped),
   browserReturn: scopedEvent<ItemsChanged>(nativeEventNames.browserReturn),
@@ -144,6 +159,7 @@ export const events = {
   find: scopedEvent<FindResultView>(nativeEventNames.find),
   searchChanged: scopedEvent<SearchChanged>(nativeEventNames.searchChanged),
   layoutChanged: scopedEvent<LayoutChanged>(nativeEventNames.layoutChanged),
+  mediaPlayerChanged: scopedEvent<MediaPlayerChanged>(nativeEventNames.mediaPlayerChanged),
   operationProcessed: scopedEvent<OperationProcessed>(nativeEventNames.operationProcessed),
   runtimeStatusChanged: scopedEvent<RuntimeStatusChanged>(nativeEventNames.runtimeStatusChanged),
   blockerStatusChanged: scopedEvent<BlockerStatusChanged>(nativeEventNames.blockerStatusChanged),

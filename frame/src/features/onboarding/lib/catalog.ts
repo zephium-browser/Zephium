@@ -59,11 +59,11 @@ export const SITE_URLS: Readonly<Record<string, string>> = {
 /** The browsers people most often come from, in the order they are offered
  *  until native has looked for what is actually installed. */
 export const BROWSERS: readonly (readonly [string, string])[] = [
-  ["chrome", "Chrome"],
   ["arc", "Arc"],
   ["zen", "Zen"],
+  ["chrome", "Chrome"],
   ["safari", "Safari"],
-  ["firefox", "Firefox"],
   ["brave", "Brave"],
+  ["firefox", "Firefox"],
   ["edge", "Edge"],
 ];

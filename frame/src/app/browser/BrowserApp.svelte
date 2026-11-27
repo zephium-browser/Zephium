@@ -17,6 +17,7 @@
   import { operations } from "$domain/operations";
   import { pagePermissions } from "$domain/permissions";
   import { runtime } from "$domain/runtime";
+  import { mediaPlayer } from "$domain/media-player";
   import { updates } from "$domain/updates";
   import { focus } from "$domain/time";
   import { tabs } from "$domain/tabs";
@@ -32,6 +33,7 @@
   import { acceleratorFrom } from "$shared/lib/accelerator";
   import { applyLanguage } from "$shared/lib/locale.svelte";
   import { applySpaceTheme, spaceThemeValues } from "$features/tabs";
+  import * as m from "$shared/i18n/messages";
   import Shell from "./Shell.svelte";
 
   // Follows the stored preference and nothing else. Adopting reads the
@@ -40,7 +42,8 @@
   // the page's slide short.
   $effect(() => {
     const mode = preferences.value("sidebar.mode");
-    if (mode === "default" || mode === "compact") untrack(() => sidebar.adoptMode(mode));
+    if (mode === "default" || mode === "compact" || mode === "hidden")
+      untrack(() => sidebar.adoptMode(mode));
   });
 
   $effect(() => {
@@ -86,9 +89,13 @@
     });
   });
 
-  let pagePermissionPrompt = $derived(pagePermissions.prompt());
+  // A prompt in the sidebar leaves the page and chrome usable; only the
+  // sheet, shown without that column, holds the window.
+  let pagePermissionSheet = $derived(
+    pagePermissions.prompt()?.in_sidebar === false ? pagePermissions.prompt() : null,
+  );
   let consentActive = $derived(
-    pagePermissionPrompt !== null || webext.review() !== null || webext.accessRequest() !== null,
+    pagePermissionSheet !== null || webext.review() !== null || webext.accessRequest() !== null,
   );
 
   // Page keystrokes are matched natively (menu bar, engine key tables, the
@@ -113,6 +120,26 @@
   $effect(() => {
     if (extensionProfile) void webext.refresh();
   });
+  // The listing in front shows the browser's own install button in the page.
+  let frontTab = $derived(tabs.activeTab()?.id);
+  let frontListing = $derived(
+    webext.isAvailable() && browserPage.currentPage() === null
+      ? extensions.chromeStoreListingId(tabs.activeTab()?.url ?? "")
+      : null,
+  );
+  // Again as loading ends: a view replaced under the tab starts with none.
+  let frontLoading = $derived(tabs.activeTab()?.loading ?? false);
+  $effect(() => {
+    void frontLoading;
+    if (frontTab === undefined || frontListing === null) return;
+    webext.showStoreButton(frontTab, frontListing, (state) =>
+      state === "remove"
+        ? m.webext_store_remove()
+        : state === "adding"
+          ? m.webext_store_adding()
+          : m.webext_store_install(),
+    );
+  });
   onMount(() => {
     let disposed = false;
 
@@ -127,12 +154,15 @@
     const browserPageReady = browserPage.init();
     const preferencesReady = preferences.init();
     const runtimeReady = runtime.init();
+    // Native offers the player with the same bootstrap that supplies tabs.
+    void mediaPlayer.init();
     void focus.init();
     void updates.init();
     void updateNotices.init();
     const extensionsReady = extensions.init();
     void webext.refresh();
     const stopAccess = webext.listenForAccess();
+    const stopStoreClicks = webext.listenForStoreClicks();
     const stopDrops = webext.listenForDrops(() => browserPage.currentPage() !== "work");
     const pagePermissionsReady = pagePermissions.init();
 
@@ -195,12 +225,14 @@
       operations.dispose();
       blocker.dispose();
       runtime.dispose();
+      mediaPlayer.dispose();
       updates.dispose();
       updateNotices.dispose();
       focus.dispose();
       extensions.dispose();
       pagePermissions.dispose();
       void stopAccess.then((stop) => stop());
+      void stopStoreClicks.then((stop) => stop());
       void stopDrops.then((stop) => stop());
       favicons.dispose();
       tabs.dispose();
@@ -226,8 +258,8 @@
   {#key webext.accessRequest()!.request}
     <WebExtensionAccessPrompt request={webext.accessRequest()!} />
   {/key}
-{:else if pagePermissionPrompt !== null}
-  {#key `${pagePermissionPrompt.profile_id}:${pagePermissionPrompt.item_id}:${pagePermissionPrompt.request_id}`}
-    <PagePermissionPrompt prompt={pagePermissionPrompt} />
+{:else if pagePermissionSheet !== null}
+  {#key `${pagePermissionSheet.profile_id}:${pagePermissionSheet.item_id}:${pagePermissionSheet.request_id}`}
+    <PagePermissionPrompt prompt={pagePermissionSheet} />
   {/key}
 {/if}

@@ -4,11 +4,21 @@
   words stay available to assistive technology.
 -->
 <script lang="ts">
-  import { Download01Icon, HourglassIcon, Link04Icon } from "@hugeicons/core-free-icons";
+  import {
+    Delete02Icon,
+    Download01Icon,
+    HourglassIcon,
+    Link04Icon,
+  } from "@hugeicons/core-free-icons";
   import * as notices from "$session/notice.svelte";
   import Icon from "$shared/ui/Icon";
 
-  const GLYPHS = { link: Link04Icon, download: Download01Icon, focus: HourglassIcon };
+  const GLYPHS = {
+    link: Link04Icon,
+    download: Download01Icon,
+    focus: HourglassIcon,
+    data: Delete02Icon,
+  };
   /** A glyph reads faster than a sentence, so it leaves sooner. */
   const LINGER = 1600;
   /** Matches the exit transition below. */

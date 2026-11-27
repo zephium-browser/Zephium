@@ -34,6 +34,35 @@ describe("clockFace", () => {
   });
 });
 
+describe("clockFace with the system's own setting", () => {
+  it("follows a 24-hour system even where the locale counts in 12", () => {
+    expect(clockFace(evening, "system", "en-US", true)).toEqual({
+      time: "21:07",
+      period: null,
+      periodLeading: false,
+    });
+  });
+
+  it("follows a 12-hour system even where the locale counts in 24", () => {
+    expect(clockFace(evening, "system", "en-GB", false).period?.toLowerCase()).toBe("pm");
+  });
+
+  it("leaves the locale in charge when the system cannot say", () => {
+    expect(clockFace(evening, "system", "en-US", null).period).toBe("PM");
+  });
+
+  it("is overruled by an explicit choice", () => {
+    expect(clockFace(evening, "12h", "en-US", true).period).toBe("PM");
+    expect(clockFace(evening, "24h", "en-US", false).period).toBeNull();
+  });
+
+  it("starts the 24-hour day at 00, not 24", () => {
+    const midnight = new Date(2026, 8, 28, 0, 5);
+    expect(clockFace(midnight, "24h", "en-US").time).toBe("00:05");
+    expect(clockFace(midnight, "system", "en-US", true).time).toBe("00:05");
+  });
+});
+
 describe("clockFormat", () => {
   it("reads unknown stored values as the system format", () => {
     expect(clockFormat("24h")).toBe("24h");

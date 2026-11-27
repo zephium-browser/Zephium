@@ -129,11 +129,15 @@ impl ConnectionToolSet {
         view.profile().to_string()
     }
 
-    async fn connection(&self, profile: &str, id: &str) -> Result<Arc<McpConnection>, String> {
+    pub(super) async fn connection(
+        &self,
+        profile: &str,
+        id: &str,
+    ) -> Result<Arc<McpConnection>, String> {
         let key = (profile.to_owned(), id.to_owned());
         {
             let mut pool = self.pool.lock().map_err(|_| "busy".to_owned())?;
-            pool.retain(|_, (_, used)| used.elapsed() < IDLE);
+            pool.retain(|_, (connection, used)| used.elapsed() < IDLE && connection.is_current());
             if let Some((connection, used)) = pool.get_mut(&key) {
                 *used = Instant::now();
                 return Ok(connection.clone());
@@ -173,7 +177,9 @@ impl ConnectionToolSet {
                 tokio::time::sleep(IDLE).await;
                 let Some(pool) = pool.upgrade() else { return };
                 let Ok(mut pool) = pool.lock() else { return };
-                pool.retain(|_, (_, used)| used.elapsed() < IDLE);
+                pool.retain(|_, (connection, used)| {
+                    used.elapsed() < IDLE && connection.is_current()
+                });
                 if pool.is_empty() {
                     return;
                 }

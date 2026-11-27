@@ -14,9 +14,19 @@
     lit?: boolean;
     /** Drawn when a site supplies no icon, or has not supplied one yet. */
     fallback?: IconSvgElement;
+    /** Cuts the corner a sound badge sits in. */
+    notched?: boolean;
   };
 
-  let { image, tone = "mid", loading = false, size = 17, lit = false, fallback }: Props = $props();
+  let {
+    image,
+    tone = "mid",
+    loading = false,
+    size = 17,
+    lit = false,
+    fallback,
+    notched = false,
+  }: Props = $props();
   let canvas: HTMLCanvasElement | undefined = $state();
 
   let radius = $derived(Math.max(4, Math.round(size * 0.28)));
@@ -40,6 +50,7 @@
   class="favicon"
   data-favicon
   data-loading={loading}
+  data-notched={notched || undefined}
   style:width={`${size}px`}
   style:height={`${size}px`}
   aria-hidden="true"

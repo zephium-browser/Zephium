@@ -2,21 +2,25 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use webview2_com::ExecuteScriptCompletedHandler;
 use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller;
 
-use windows::core::{w, BOOL};
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, GetStockObject, MonitorFromWindow, BLACK_BRUSH, HBRUSH,
+    MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
-use windows::Win32::System::SystemServices::SS_BLACKRECT;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+use crate::fullscreen::{window_settled, ScreenRect, WindowPlacement};
 
 thread_local! {
     static TIMERS: RefCell<HashMap<usize, Weak<RefCell<State>>>> = RefCell::new(HashMap::new());
@@ -29,11 +33,11 @@ struct State {
     began: Instant,
     changed: Instant,
     fading: Option<Instant>,
-    rect: RECT,
+    placement: WindowPlacement,
     animate: bool,
     controller: Option<ICoreWebView2Controller>,
     entering: bool,
-    restore: Option<RECT>,
+    restore: Option<ScreenRect>,
     layout_seen: bool,
     epoch: u64,
     pending: bool,
@@ -108,26 +112,26 @@ impl FullscreenTransition {
         parent: HWND,
         controller: Option<ICoreWebView2Controller>,
         entering: bool,
-        restore: Option<RECT>,
+        restore: Option<ScreenRect>,
     ) -> Option<Self> {
-        let mut rect = RECT::default();
-        unsafe { GetWindowRect(parent, &mut rect) }.ok()?;
+        let placement = placement(parent)?;
         // Owned popups support native alpha without the compatibility-manifest
         // and hit-testing problems of layered child windows. Follow owner resize
         // synchronously, allocating only its current client area.
+        let module = unsafe { GetModuleHandleW(None) }.unwrap_or_default();
         let cover = unsafe {
             CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                w!("STATIC"),
-                w!(""),
-                WS_POPUP | WINDOW_STYLE(SS_BLACKRECT.0),
+                cover_class(),
+                PCWSTR::null(),
+                WS_POPUP,
                 0,
                 0,
                 0,
                 0,
                 Some(parent),
                 None,
-                None,
+                Some(module.into()),
                 None,
             )
         }
@@ -155,7 +159,7 @@ impl FullscreenTransition {
             began: now,
             changed: now,
             fading: None,
-            rect,
+            placement,
             animate,
             controller,
             entering,
@@ -208,20 +212,56 @@ impl FullscreenTransition {
     }
 }
 
-fn window_ready(parent: HWND, rect: RECT, entering: bool, restore: Option<RECT>) -> bool {
-    if !entering {
-        return restore.is_none_or(|expected| expected == rect);
+fn screen_rect(rect: RECT) -> ScreenRect {
+    ScreenRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
+}
+
+fn placement(window: HWND) -> Option<WindowPlacement> {
+    let mut outer = RECT::default();
+    let mut client = RECT::default();
+    let mut origin = POINT::default();
+    unsafe {
+        GetWindowRect(window, &mut outer).ok()?;
+        GetClientRect(window, &mut client).ok()?;
+        ClientToScreen(window, &mut origin)
+            .as_bool()
+            .then_some(())?;
+    }
+    Some(WindowPlacement {
+        window: screen_rect(outer),
+        client: ScreenRect {
+            left: origin.x,
+            top: origin.y,
+            right: origin.x + client.right,
+            bottom: origin.y + client.bottom,
+        },
+    })
+}
+
+/// The area the shell draws in, which is what the window has to return to
+/// after a page has had the screen.
+pub(super) fn client_rect(window: HWND) -> Option<ScreenRect> {
+    placement(window).map(|placement| placement.client)
+}
+
+fn window_ready(
+    parent: HWND,
+    placement: WindowPlacement,
+    entering: bool,
+    restore: Option<ScreenRect>,
+) -> bool {
     let monitor = unsafe { MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool()
-        && rect.left <= info.rcMonitor.left
-        && rect.top <= info.rcMonitor.top
-        && rect.right >= info.rcMonitor.right
-        && rect.bottom >= info.rcMonitor.bottom
+        && window_settled(placement, screen_rect(info.rcMonitor), entering, restore)
 }
 
 fn sample_page(owner: &Rc<RefCell<State>>) {
@@ -304,6 +344,41 @@ fn sample_matches(reply: &str, bounds: RECT, entering: bool) -> bool {
         && parts[3].as_array().is_some_and(|videos| videos.len() <= 8)
 }
 
+// The cover is black by its class, not by a control style: a static
+// rectangle takes the system's window-frame colour, which is grey on
+// current Windows.
+fn cover_class() -> PCWSTR {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    let name = NAME.get_or_init(|| {
+        let name = "ZephiumFullscreenCover"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(cover_proc),
+            lpszClassName: PCWSTR(name.as_ptr()),
+            hInstance: unsafe { GetModuleHandleW(None) }.unwrap_or_default().into(),
+            hbrBackground: HBRUSH(unsafe { GetStockObject(BLACK_BRUSH) }.0),
+            ..Default::default()
+        };
+        unsafe { RegisterClassW(&class) };
+        name
+    });
+    PCWSTR(name.as_ptr())
+}
+
+unsafe extern "system" fn cover_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
 fn position(parent: HWND, cover: HWND) {
     let mut rect = RECT::default();
     let mut origin = POINT::default();
@@ -373,20 +448,19 @@ unsafe extern "system" fn tick(_: HWND, _: u32, timer: usize, _: u32) {
     };
     let parent = current.parent;
     drop(current);
-    let mut rect = RECT::default();
-    let valid = unsafe { GetWindowRect(parent, &mut rect) }.is_ok();
+    let current = placement(parent);
     let (cover, alpha) = {
         let Ok(mut state) = owner.try_borrow_mut() else {
             return;
         };
-        if !valid {
+        let Some(current) = current else {
             drop(state);
             close(&owner);
             return;
-        }
+        };
         let now = Instant::now();
-        if state.rect != rect {
-            state.rect = rect;
+        if state.placement != current {
+            state.placement = current;
             state.changed = now;
             state.fading = None;
             state.epoch = state.epoch.wrapping_add(1);
@@ -405,7 +479,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, timer: usize, _: u32) {
             && (elapsed >= MAX_HOLD
                 || (state.page_ready
                     && state.layout_seen
-                    && window_ready(parent, rect, state.entering, state.restore)
+                    && window_ready(parent, current, state.entering, state.restore)
                     && now.duration_since(state.changed) >= PAGE_SETTLE))
         {
             state.fading = Some(now);
@@ -435,6 +509,7 @@ unsafe extern "system" fn tick(_: HWND, _: u32, timer: usize, _: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::core::w;
 
     #[test]
     fn page_sample_requires_current_viewport_and_fullscreen_state() {
@@ -485,9 +560,21 @@ mod tests {
             )
             .unwrap()
         });
+        let placed = placement(parent.0).unwrap();
+        assert!(
+            placed.window.left <= placed.client.left
+                && placed.window.top <= placed.client.top
+                && placed.window.right >= placed.client.right
+                && placed.window.bottom >= placed.client.bottom
+        );
         let first = FullscreenTransition::new(parent.0, None, true, None).unwrap();
         let first_cover = first.0.borrow().cover.unwrap();
         assert!(unsafe { IsWindow(Some(first_cover)) }.as_bool());
+        assert_eq!(
+            unsafe { GetClassLongPtrW(first_cover, GCLP_HBRBACKGROUND) },
+            unsafe { GetStockObject(BLACK_BRUSH) }.0 as usize,
+            "the cover is black, not the system window-frame colour"
+        );
         let second = FullscreenTransition::new(parent.0, None, true, None).unwrap();
         drop(first);
         assert!(!unsafe { IsWindow(Some(first_cover)) }.as_bool());

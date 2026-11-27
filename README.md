@@ -125,8 +125,9 @@ along.
 - Inactive tabs go to sleep and wake when you return, so memory stays low with
   many tabs open.
 - A native ad and tracker blocker, on by default, built on Brave's
-  [adblock-rust](https://github.com/brave/adblock-rust) with EasyList and
-  EasyPrivacy. Requests are stopped before a page can make them, and you can
+  [adblock-rust](https://github.com/brave/adblock-rust) with EasyList,
+  EasyPrivacy and uBlock Origin's filters. Requests are stopped before a page
+  can make them, and you can
   hide anything else on a page with a click.
 
 ### Designed to live in
@@ -170,11 +171,21 @@ Edge.
 
 ## Private by default
 
-- **No telemetry.** Zephium doesn't collect or send anything about how you
-  browse.
+- **No Zephium telemetry.** Zephium has no first-party browsing telemetry.
+  On Windows, Microsoft Edge WebView2 sends required diagnostic data to
+  Microsoft; optional diagnostics follow Windows settings. Microsoft Defender
+  SmartScreen is on by default and can send website addresses and download
+  information to Microsoft for reputation checks. Settings → Privacy offers
+  a SmartScreen switch (effective after restarting Zephium) and a link to
+  Windows diagnostic settings. If Windows cannot apply OFF, the switch is
+  shown as managed and the browser continues to start. An unavailable startup
+  preference read keeps SmartScreen on and shows that launch fallback in Settings.
+  Turning either optional diagnostics or SmartScreen off does not disable required
+  WebView2 diagnostics. See
+  [Microsoft's WebView2 data and privacy documentation](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/data-privacy).
 - **No account needed.** History, tasks, notes, memory and time live on your
-  device. An account is only for Zephium AI, and until you sign in, Zephium
-  never contacts our servers.
+  device. An account is only needed for Zephium AI. Update checks, protection
+  lists and extension services can contact their servers without signing in.
 - **Zephium AI keeps no content.** Requests pass through to the model that
   answers them. We count usage for your plan, never store prompts, answers or
   pages, and never see your card.
@@ -257,7 +268,9 @@ Please report vulnerabilities privately, not in a public issue. See
 Zephium is licensed under the [Mozilla Public License 2.0](LICENSE).
 
 The bundled EasyList and EasyPrivacy filter lists are used under
-[CC BY-SA 3.0](assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt); see
+[CC BY-SA 3.0](assets/blocker-seed/v1/LICENSE-CC-BY-SA-3.0.txt), and uBlock
+Origin's filters and quick fixes, unmodified, under
+[GPL-3.0](assets/blocker-seed/v1/LICENSE-GPL-3.0.txt); see
 [the notice](assets/blocker-seed/v1/NOTICE) for attribution.
 
 The Zephium name and logo are not licensed under the MPL.
@@ -265,5 +278,6 @@ The Zephium name and logo are not licensed under the MPL.
 ## Acknowledgements
 
 Zephium stands on [Tauri](https://tauri.app), [Wry](https://github.com/tauri-apps/wry),
-Brave's [adblock-rust](https://github.com/brave/adblock-rust) and
-[EasyList](https://easylist.to).
+Brave's [adblock-rust](https://github.com/brave/adblock-rust),
+[EasyList](https://easylist.to) and uBlock Origin's
+[uAssets](https://github.com/uBlockOrigin/uAssets).

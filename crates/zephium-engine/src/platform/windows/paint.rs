@@ -15,7 +15,9 @@ use zephium_core::ids::ItemId;
 use super::{schedule_browser_timeout, ContentPolicyTimeout, Stage};
 
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
-const MAX_COVER_TIME: Duration = Duration::from_millis(600);
+// Long enough for most sites' first paint after commit: lifting sooner shows
+// the engine's empty white page, which reads as a flash.
+const MAX_COVER_TIME: Duration = Duration::from_millis(1200);
 // ExecuteScript does not await promises and WebView2 has no paint event, so
 // the handoff asks again each display frame or two.
 const POLL_INTERVAL: Duration = Duration::from_millis(32);

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { holdChromeModal } from "$domain/surface";
 
   let {
     open = $bindable(false),
@@ -19,6 +20,11 @@
   let dialog = $state<HTMLDialogElement>();
   let opener: HTMLElement | null = null;
   const uid = $props.id();
+
+  // Pages leave the screen while it is open, or they would cover it.
+  $effect(() => {
+    if (open) return holdChromeModal();
+  });
 
   // The platform's own modal: the page behind goes inert, Tab stays inside,
   // and Escape cancels. Focus goes back to what opened it.
@@ -44,6 +50,10 @@
   aria-labelledby={`${uid}-title`}
   aria-describedby={description ? `${uid}-body` : undefined}
   onclose={closed}
+  oncancel={(event) => {
+    event.preventDefault();
+    open = false;
+  }}
   onclick={(event) => {
     if (event.target === dialog) open = false;
   }}

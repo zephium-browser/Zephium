@@ -33,7 +33,8 @@ use super::{
 
 const READ_TIMEOUT: Duration = Duration::from_secs(8);
 const OUTLINE_TIMEOUT: Duration = Duration::from_secs(3);
-const CALL_TIMEOUT: Duration = Duration::from_secs(90);
+const CALL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const CALL_OVERALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// Longest a new tab is watched for its first load.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(12);
 /// Longest a new tab may stay unknown to the shell before it counts as open.
@@ -257,6 +258,20 @@ impl Reply {
 
     // ----------------------------------------------------------------- reads
 
+    fn other_sites(&self, target: &str) -> Vec<String> {
+        self.with_data(|data| {
+            data.read_sites
+                .iter()
+                .map(|(_, site)| site)
+                .filter(|site| site.as_str() != target)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     async fn read_tab(&self, tab: &str) -> Result<usize, PageAssistFaultV1> {
         let ports = self.service.ports();
         let facts = ports
@@ -321,6 +336,7 @@ impl Reply {
             }
         }
         self.with_data(|data| {
+            data.read_sites.insert((tab.to_owned(), site));
             data.reads.push(ReadRecord {
                 tab: tab.to_owned(),
                 epoch: facts.epoch,
@@ -396,7 +412,8 @@ impl Reply {
                         parts.push(format!("(The page {host} could not be read just now.)"));
                     }
                 },
-                Admitted::Selection { tab, text } => {
+                Admitted::Selection { tab, site, text } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     let letters = self
                         .with_data(|data| data.reads.iter().position(|read| &read.tab == tab))
                         .flatten()
@@ -405,8 +422,13 @@ impl Reply {
                     parts.push(prompt::selection_block(&letters, text));
                 }
                 Admitted::Element {
-                    host, label, pick, ..
+                    tab,
+                    site,
+                    host,
+                    label,
+                    pick,
                 } => {
+                    self.with_data(|data| data.read_sites.insert((tab.clone(), site.clone())));
                     parts.push(prompt::element_block(
                         host,
                         label,
@@ -428,12 +450,45 @@ impl Reply {
 
     fn history(&self) -> Vec<WorkModelMessage> {
         let messages = {
-            let state = self.service.state();
-            state
-                .live
-                .get(&self.conversation)
-                .map(|live| live.conversation.messages().to_vec())
-                .unwrap_or_default()
+            let mut state = self.service.state();
+            let Some(live) = state.live.get_mut(&self.conversation) else {
+                return Vec::new();
+            };
+            let messages = live.conversation.messages().to_vec();
+            let mut sites = std::collections::BTreeSet::new();
+            let mut unknown = false;
+            for message in &messages {
+                if let PageAssistMessageV1::Person { attachments, .. } = message {
+                    for attachment in attachments {
+                        let (tab, host) = match attachment {
+                            PageAssistAttachmentV1::Page { tab, host, .. }
+                            | PageAssistAttachmentV1::Selection { tab, host, .. }
+                            | PageAssistAttachmentV1::Element { tab, host, .. } => (tab, host),
+                        };
+                        if let Some(site) = site_of(Some(&format!("https://{host}"))) {
+                            sites.insert((tab.clone(), site));
+                        } else {
+                            unknown = true;
+                        }
+                    }
+                }
+                if let PageAssistMessageV1::Reply { id, .. } = message {
+                    if *id == self.reply {
+                        continue;
+                    }
+                    if let Some(data) = live.replies.get(id) {
+                        sites.extend(data.read_sites.iter().cloned());
+                        unknown |= data.unknown_read_sites;
+                    } else {
+                        unknown = true;
+                    }
+                }
+            }
+            if let Some(data) = live.replies.get_mut(&self.reply) {
+                data.read_sites.extend(sites);
+                data.unknown_read_sites |= unknown;
+            }
+            messages
         };
         let mut model = Vec::new();
         for exchange in prompt::history(&messages) {
@@ -454,14 +509,39 @@ impl Reply {
         text: &mut Text,
         hosted: bool,
     ) -> Result<zephium_core::work::model::WorkModelOutcome, End> {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<String>();
+        self.call_limited(
+            model,
+            request,
+            text,
+            hosted,
+            CALL_IDLE_TIMEOUT,
+            CALL_OVERALL_TIMEOUT,
+        )
+        .await
+    }
+
+    async fn call_limited(
+        &self,
+        model: &ResolvedModel,
+        request: WorkModelRequest,
+        text: &mut Text,
+        hosted: bool,
+        idle_timeout: Duration,
+        overall_timeout: Duration,
+    ) -> Result<zephium_core::work::model::WorkModelOutcome, End> {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Option<String>>();
         let events = move |event: WorkModelEvent| {
-            if let WorkModelEvent::Text(chunk) = event {
-                let _ = sender.send(chunk);
-            }
+            let chunk = match event {
+                WorkModelEvent::Text(chunk) if chunk.is_empty() => return,
+                WorkModelEvent::Text(chunk) => Some(chunk),
+                _ => None,
+            };
+            let _ = sender.send(chunk);
         };
-        let call = tokio::time::timeout(CALL_TIMEOUT, model.client.call(request, &events));
+        let call = tokio::time::timeout(overall_timeout, model.client.call(request, &events));
         tokio::pin!(call);
+        let idle = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle);
         let outcome = loop {
             let wait = text
                 .pacer
@@ -469,36 +549,72 @@ impl Reply {
                 .map(|due| Duration::from_millis(due.saturating_sub(self.now())));
             tokio::select! {
                 biased;
-                Some(chunk) = receiver.recv() => self.take(text, &chunk),
+                _ = &mut idle => break None,
+                outcome = &mut call => break Some(outcome),
+                Some(chunk) = receiver.recv() => {
+                    idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                    if let Some(chunk) = chunk {
+                        self.take(text, &chunk);
+                    }
+                },
                 _ = tokio::time::sleep(wait.unwrap_or_default()), if wait.is_some() => {
                     let due = text.pacer.poll(self.now());
                     self.deliver(text, due);
                 }
-                outcome = &mut call => break outcome,
             }
         };
         while let Ok(chunk) = receiver.try_recv() {
-            self.take(text, &chunk);
+            if let Some(chunk) = chunk {
+                self.take(text, &chunk);
+            }
         }
         match outcome {
-            Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(error)) => Err(End::Failed(fault::model_fault(error, hosted))),
-            Err(_) => Err(End::Failed(PageAssistFaultV1::Model {
-                fault: WorkModelFaultV1::ProviderDown,
-                retry_after_ms: None,
-            })),
+            Some(Ok(Ok(outcome))) => Ok(outcome),
+            Some(Ok(Err(error))) => Err(End::Failed(fault::model_fault(error, hosted))),
+            Some(Err(_)) | None => Err(End::Failed(PageAssistFaultV1::TimedOut)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn call_for_test(
+        &self,
+        model: &ResolvedModel,
+        request: WorkModelRequest,
+        idle_timeout: Duration,
+        overall_timeout: Duration,
+    ) -> Option<PageAssistFaultV1> {
+        match self
+            .call_limited(
+                model,
+                request,
+                &mut Text::default(),
+                false,
+                idle_timeout,
+                overall_timeout,
+            )
+            .await
+        {
+            Ok(_) => None,
+            Err(End::Failed(fault)) => Some(fault),
+            Err(_) => Some(PageAssistFaultV1::Unavailable),
         }
     }
 }
 
 fn add_usage(total: &mut WorkModelUsage, usage: &WorkModelUsage) {
-    total.input_tokens += usage.input_tokens;
-    total.cached_input_tokens += usage.cached_input_tokens;
-    total.cache_write_input_tokens += usage.cache_write_input_tokens;
-    total.output_tokens += usage.output_tokens;
-    total.reasoning_tokens += usage.reasoning_tokens;
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.cached_input_tokens = total
+        .cached_input_tokens
+        .saturating_add(usage.cached_input_tokens);
+    total.cache_write_input_tokens = total
+        .cache_write_input_tokens
+        .saturating_add(usage.cache_write_input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.reasoning_tokens = total
+        .reasoning_tokens
+        .saturating_add(usage.reasoning_tokens);
     total.cost_micros = match (total.cost_micros, usage.cost_micros) {
-        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
         (a, b) => a.or(b),
     };
 }
@@ -726,6 +842,14 @@ fn list_tabs(reply: &Reply) -> String {
         .take(60)
         .map(|tab| {
             let host = tab.url.as_deref().map(host_of).unwrap_or_default();
+            let site = site_of(tab.url.as_deref()).unwrap_or_else(|| {
+                if host.is_empty() {
+                    "?".to_owned()
+                } else {
+                    host.clone()
+                }
+            });
+            reply.with_data(|data| data.read_sites.insert((tab.id.clone(), site)));
             let title = text::bounded(&text::clean(&tab.title), 90).replace('"', "'");
             format!(
                 "{} · {} · \"{}\"",
@@ -855,14 +979,25 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
             .unwrap_or_default()
     };
     for target in targets {
-        let url = match refs::parse(&target) {
-            Some(reference) => reply
-                .record_of(reference)
-                .and_then(|record| record.page.fragments.get(&reference.passage)?.href.clone()),
-            None => Some(target.clone()).filter(|url| links.contains(url)),
+        let (url, source) = match refs::parse(&target) {
+            Some(reference) => match reply.record_of(reference) {
+                Some(record) => (
+                    record
+                        .page
+                        .fragments
+                        .get(&reference.passage)
+                        .and_then(|fragment| fragment.href.clone()),
+                    Some(record.page.site),
+                ),
+                None => (None, None),
+            },
+            None => (Some(target.clone()).filter(|url| links.contains(url)), None),
         };
         match url {
-            Some(url) if !urls.contains(&url) => urls.push(url),
+            Some(url) if !urls.contains(&url) => {
+                approve_navigation(reply, text, &url, source.as_deref()).await?;
+                urls.push(url);
+            }
             Some(_) => {}
             None => refused.push(target),
         }
@@ -939,6 +1074,88 @@ async fn open_tabs(reply: &Reply, text: &mut Text, targets: Vec<String>) -> Tool
     Ok(summary)
 }
 
+/// A read link is data, not permission to send information to another site.
+/// Missing provenance is conservative: it cannot prove a same-site move.
+async fn approve_navigation(
+    reply: &Reply,
+    text: &mut Text,
+    url: &str,
+    source: Option<&str>,
+) -> Result<(), String> {
+    if super::written_links(&reply.words).any(|written| written == url) {
+        return Ok(());
+    }
+    let inherited_source = if source.is_none() {
+        let state = reply.service.state();
+        let sites: std::collections::BTreeSet<String> = state
+            .live
+            .get(&reply.conversation)
+            .into_iter()
+            .flat_map(|live| live.replies.values())
+            .flat_map(|data| &data.reads)
+            .filter(|record| {
+                record
+                    .page
+                    .fragments
+                    .values()
+                    .any(|fragment| fragment.href.as_deref() == Some(url))
+            })
+            .map(|record| record.page.site.clone())
+            .collect();
+        (sites.len() == 1)
+            .then(|| sites.into_iter().next())
+            .flatten()
+    } else {
+        None
+    };
+    let source = source.or(inherited_source.as_deref());
+    let destination = site_of(Some(url));
+    let cross_site = source
+        .zip(destination.as_deref())
+        .is_none_or(|(from, to)| from != to);
+    let holds_other_data = reply
+        .with_data(|data| {
+            data.unknown_read_sites
+                || data
+                    .read_sites
+                    .iter()
+                    .any(|(_, site)| Some(site.as_str()) != source)
+        })
+        .unwrap_or(true);
+    if !cross_site || !holds_other_data {
+        return Ok(());
+    }
+    if url.chars().count() > 2048 || url != text::clean(url) || destination.is_none() {
+        return Err("That destination cannot be safely reviewed.".into());
+    }
+    let proposal = |state| PageAssistBlockV1::Steps {
+        steps: vec![PageAssistStepV1 {
+            index: 0,
+            label: format!(
+                "Allow opening {url}\nFrom {}",
+                source.unwrap_or("an unknown source")
+            ),
+            category: Some(WorkConfirmCategoryV1::Communication),
+            state,
+            reason: None,
+        }],
+    };
+    let block = reply.add_block(text, proposal(PageAssistStepStateV1::Confirm));
+    let state = match decision(reply, block).await {
+        Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
+            PageAssistStepStateV1::Done
+        }
+        Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+        _ => PageAssistStepStateV1::Skipped,
+    };
+    reply.set_block(block, proposal(state));
+    if state == PageAssistStepStateV1::Done {
+        Ok(())
+    } else {
+        Err("The destination was not approved. Do not send its information another way.".into())
+    }
+}
+
 /// Waits for a new tab's first load, bounded.
 async fn settled(ports: &super::Ports, tab: &str) {
     let started = tokio::time::Instant::now();
@@ -956,19 +1173,57 @@ async fn settled(ports: &super::Ports, tab: &str) {
 async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> ToolOutcome {
     let ports = reply.service.ports().clone();
     let target = target.trim();
+    let mut search = None;
+    let mut source = None;
     let url = if let Some(query) = target
         .strip_prefix("search:")
         .map(str::trim)
         .filter(|query| !query.is_empty())
     {
-        ports
+        if query.chars().count() > 512
+            || query != text::clean(query)
+            || zephium_agentic::contains_recognized_secret(query)
+        {
+            return Err(
+                "That search cannot be safely reviewed. Use a shorter query without credentials."
+                    .into(),
+            );
+        }
+        let url = ports
             .tabs
             .search_url(&reply.profile, query)
-            .ok_or_else(|| "That search cannot be made.".to_owned())?
+            .ok_or_else(|| "That search cannot be made.".to_owned())?;
+        let destination = zephium_agentic::SemanticOrigin::parse(&url)
+            .map_err(|_| "That search destination cannot be safely reviewed.".to_owned())?
+            .as_url()
+            .origin()
+            .ascii_serialization();
+        let proposal = |state| PageAssistBlockV1::Search {
+            destination: destination.clone(),
+            query: query.to_owned(),
+            state,
+        };
+        let block = reply.add_block(text, proposal(PageAssistStepStateV1::Confirm));
+        let state = match decision(reply, block).await {
+            Ok(PageAssistDecisionV1::Approve) if reply.cancel.reason().is_none() => {
+                PageAssistStepStateV1::Running
+            }
+            Ok(PageAssistDecisionV1::Decline) => PageAssistStepStateV1::Declined,
+            _ => PageAssistStepStateV1::Skipped,
+        };
+        reply.set_block(block, proposal(state));
+        if state != PageAssistStepStateV1::Running {
+            return Err("The search was not approved. Do not send the query another way.".into());
+        }
+        search = Some((block, destination, query.to_owned()));
+        url
     } else if let Some(reference) = refs::parse(target) {
         reply
             .record_of(reference)
-            .and_then(|record| record.page.fragments.get(&reference.passage)?.href.clone())
+            .and_then(|record| {
+                source = Some(record.page.site);
+                record.page.fragments.get(&reference.passage)?.href.clone()
+            })
             .ok_or_else(|| format!("{target} is not a link of a page you read."))?
     } else {
         let known = {
@@ -983,11 +1238,29 @@ async fn go_to(reply: &Reply, text: &mut Text, target: &str, new_tab: bool) -> T
         }
         target.to_owned()
     };
+    if search.is_none() {
+        approve_navigation(reply, text, &url, source.as_deref()).await?;
+    }
     let working = reply.with_data(|data| data.working.clone()).flatten();
-    match working.filter(|_| !new_tab) {
+    let result = match working.filter(|_| !new_tab) {
         Some(tab) => move_tab(reply, text, &ports, &tab, &url).await,
         None => open_in_front(reply, text, &ports, &url).await,
+    };
+    if let Some((block, destination, query)) = search {
+        reply.set_block(
+            block,
+            PageAssistBlockV1::Search {
+                destination,
+                query,
+                state: if result.is_ok() {
+                    PageAssistStepStateV1::Done
+                } else {
+                    PageAssistStepStateV1::Failed
+                },
+            },
+        );
     }
+    result
 }
 
 /// Follows `url` in the tab the reply works in, as a step on that page.
@@ -1277,9 +1550,17 @@ fn category(effect: StepEffect) -> Option<WorkConfirmCategoryV1> {
 }
 
 /// Refuses, from the step's own read, steps the engine must never run:
-/// protected fields and links away from the site are refused, anything a
+/// secrets, protected fields and links away from the site are refused, anything a
 /// verb cannot use is unsuitable.
 fn admissible(record: &ReadRecord, step: &StepRequest) -> Result<(), StepFailure> {
+    if step.verb == Verb::Fill
+        && step
+            .value
+            .as_deref()
+            .is_some_and(zephium_agentic::contains_recognized_secret)
+    {
+        return Err(StepFailure::Refused);
+    }
     let Some(target) = step.target else {
         return if step.verb == Verb::Scroll {
             Ok(())
@@ -1375,6 +1656,25 @@ impl Plan {
         if let Some(row) = self.rows.get_mut(index) {
             if !label.is_empty() {
                 row.label = text::bounded(&text::clean(label), 120);
+                let sites = reply.other_sites(&self.record.page.site);
+                let unknown = reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true);
+                if let Some(value) = self.requests.get(index).and_then(|step| {
+                    (step.verb == Verb::Fill && (!sites.is_empty() || unknown))
+                        .then_some(step.value.as_deref())
+                        .flatten()
+                }) {
+                    let sources = if sites.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} → ", sites.join(", "))
+                    };
+                    row.label = format!(
+                        "{value:?} → {}\n{sources}{}",
+                        row.label, self.record.page.site
+                    );
+                }
             }
             if category(effect).is_some() {
                 row.category = category(effect);
@@ -1398,7 +1698,7 @@ impl Plan {
             .map(|row| {
                 let state = match (row.state, row.reason) {
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Refused)) => {
-                        "refused: a protected field or a link to another site"
+                        "refused: a secret, a protected field or a link to another site"
                     }
                     (PageAssistStepStateV1::Failed, Some(PageAssistStepReasonV1::Unsuitable)) => {
                         "failed: that passage is not a control this verb can use"
@@ -1583,20 +1883,30 @@ async fn act(reply: &Reply, text: &mut Text, steps: Vec<Step>) -> Result<ToolOut
 /// `Err(None)` ends the steps and tells the model; `Err(Some)` ends the reply.
 async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<(), Option<End>> {
     let page = reply.service.ports().page.clone();
-    for index in 0..plan.requests.len() {
+    let mut index = 0;
+    while index < plan.requests.len() {
         if reply.took_over.swap(false, Ordering::AcqRel) {
             take_over(reply, text, plan, index).await?;
+            continue;
         }
         let step = plan.requests[index].clone();
         let resolved = admissible(&plan.record, &step)
             .and_then(|()| page.resolve(&plan.tab, plan.epoch, &step));
-        let resolved = match resolved {
+        let mut resolved = match resolved {
             Ok(resolved) => resolved,
             Err(failure) => {
                 plan.fail(reply, index, failure);
                 return Err(None);
             }
         };
+        if step.verb == Verb::Fill
+            && (!reply.other_sites(&plan.record.page.site).is_empty()
+                || reply
+                    .with_data(|data| data.unknown_read_sites)
+                    .unwrap_or(true))
+        {
+            resolved.effect = StepEffect::Commit(WorkConfirmCategoryV1::Type);
+        }
         if let StepEffect::Commit(_) = resolved.effect {
             plan.mark(
                 reply,
@@ -1621,6 +1931,9 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 Err(reason) => return Err(Some(End::Cancelled(reason))),
             }
         }
+        if reply.took_over.load(Ordering::Acquire) {
+            continue;
+        }
         plan.mark(
             reply,
             index,
@@ -1641,6 +1954,7 @@ async fn run_steps(reply: &Reply, text: &mut Text, plan: &mut Plan) -> Result<()
                 return Err(None);
             }
         }
+        index += 1;
     }
     Ok(())
 }
@@ -1700,4 +2014,24 @@ async fn take_over(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_counters_saturate_across_replies() {
+        let usage = WorkModelUsage {
+            input_tokens: u64::MAX,
+            cached_input_tokens: u64::MAX,
+            cache_write_input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+            cost_micros: Some(u64::MAX),
+        };
+        let mut total = usage;
+        add_usage(&mut total, &usage);
+        assert_eq!(total, usage);
+    }
 }

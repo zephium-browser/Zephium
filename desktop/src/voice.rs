@@ -94,6 +94,7 @@ pub(crate) enum VoiceFaultV1 {
 #[tauri_specta(event_name = "zephium:voice-changed")]
 pub(crate) struct VoiceChanged {
     pub(crate) take: u32,
+    pub(crate) request: String,
     pub(crate) phase: VoicePhaseV1,
     pub(crate) engine: Option<VoiceEngineV1>,
     /// The words so far, while listening, when the engine streams them.
@@ -108,6 +109,7 @@ pub(crate) struct VoiceChanged {
 #[tauri_specta(event_name = "zephium:voice-levels")]
 pub(crate) struct VoiceLevels {
     pub(crate) take: u32,
+    pub(crate) request: String,
     pub(crate) levels: Vec<u8>,
 }
 
@@ -129,6 +131,27 @@ pub(crate) enum VoicePrivacyV1 {
 }
 
 const MAX_PARTIAL_BYTES: usize = 4 * 1024;
+
+#[cfg(any(test, feature = "work-product"))]
+fn owns_take(request: &str, take: Option<u32>, current_request: &str, current_take: u32) -> bool {
+    !request.is_empty()
+        && request == current_request
+        && take.is_none_or(|take| take == current_take)
+}
+
+fn valid_request(request: &str) -> bool {
+    request.len() == 36
+        && request
+            .bytes()
+            .any(|byte| byte.is_ascii_hexdigit() && byte != b'0')
+        && request.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
 #[cfg(target_os = "macos")]
 const PRIVACY_PANE: &str = "x-apple.systempreferences:com.apple.preference.security?";
 
@@ -230,6 +253,7 @@ mod product {
     }
 
     enum Phase {
+        Resolving,
         Starting { cancelled: bool },
         Listening(Capture),
         Finishing(Option<tauri::async_runtime::JoinHandle<()>>),
@@ -237,8 +261,40 @@ mod product {
 
     struct Live {
         take: u32,
-        engine: VoiceEngine,
+        request: String,
+        engine: Option<VoiceEngine>,
         phase: Phase,
+    }
+
+    enum Cancellation {
+        Refused,
+        Opening,
+        Taken(Live),
+    }
+
+    fn cancel_current(
+        current: &mut Option<Live>,
+        request: &str,
+        take: Option<u32>,
+    ) -> Cancellation {
+        if !current
+            .as_ref()
+            .is_some_and(|live| owns_take(request, take, &live.request, live.take))
+        {
+            return Cancellation::Refused;
+        }
+        if let Some(Live {
+            phase: Phase::Starting { cancelled },
+            ..
+        }) = current.as_mut()
+        {
+            // Native capture is still opening; retain its owner until it drains.
+            *cancelled = true;
+            return Cancellation::Opening;
+        }
+        current
+            .take()
+            .map_or(Cancellation::Refused, Cancellation::Taken)
     }
 
     static LIVE: Mutex<Option<Live>> = Mutex::new(None);
@@ -251,6 +307,7 @@ mod product {
     struct Relay {
         app: tauri::AppHandle,
         take: u32,
+        request: String,
         engine: VoiceEngine,
     }
 
@@ -262,6 +319,7 @@ mod product {
                 "zephium:voice-levels",
                 &VoiceLevels {
                     take: self.take,
+                    request: self.request.clone(),
                     levels: levels.iter().map(|level| percent(*level)).collect(),
                 },
             );
@@ -272,6 +330,7 @@ mod product {
                 &self.app,
                 &VoiceChanged {
                     take: self.take,
+                    request: self.request.clone(),
                     phase: VoicePhaseV1::Listening,
                     engine: Some(engine_v1(self.engine)),
                     partial: Some(bounded(text)),
@@ -334,7 +393,7 @@ mod product {
         }
     }
 
-    pub(super) async fn start(app: tauri::AppHandle) -> VoiceStartV1 {
+    pub(super) async fn start(app: tauri::AppHandle, request: String) -> VoiceStartV1 {
         let refused = |fault| {
             write_diagnostic(format_args!("voice: phase=refused fault={fault:?}"));
             VoiceStartV1 {
@@ -343,33 +402,62 @@ mod product {
                 fault: Some(fault),
             }
         };
-        if live().is_some() {
-            return refused(VoiceFaultV1::Busy);
-        }
+        let take = {
+            let mut current = live();
+            if current.is_some() {
+                return refused(VoiceFaultV1::Busy);
+            }
+            let Ok(take) = NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            }) else {
+                return refused(VoiceFaultV1::Unavailable);
+            };
+            *current = Some(Live {
+                take,
+                request: request.clone(),
+                engine: None,
+                phase: Phase::Resolving,
+            });
+            take
+        };
+        let discard_reservation = || {
+            let mut current = live();
+            if current.as_ref().is_some_and(|live| live.take == take) {
+                *current = None;
+            }
+        };
         let resolved = resolve().await;
         let Some(engine) = resolved.engine else {
+            discard_reservation();
             return refused(VoiceFaultV1::NoEngine);
         };
         let recognition = match (engine, resolved.locale) {
             (VoiceEngine::OnDevice, Some(locale)) => Recognition::OnDevice { locale },
-            (VoiceEngine::OnDevice, None) => return refused(VoiceFaultV1::LanguageUnavailable),
+            (VoiceEngine::OnDevice, None) => {
+                discard_reservation();
+                return refused(VoiceFaultV1::LanguageUnavailable);
+            }
             _ => Recognition::Upload,
         };
-        let take = NEXT.fetch_add(1, Ordering::Relaxed);
         {
-            let mut live = live();
-            if live.is_some() {
-                return refused(VoiceFaultV1::Busy);
-            }
-            *live = Some(Live {
-                take,
-                engine,
-                phase: Phase::Starting { cancelled: false },
-            });
+            let mut current = live();
+            let Some(current) = current
+                .as_mut()
+                .filter(|live| live.take == take && live.request == request)
+            else {
+                return VoiceStartV1 {
+                    take: None,
+                    engine: None,
+                    fault: None,
+                };
+            };
+            current.engine = Some(engine);
+            current.phase = Phase::Starting { cancelled: false };
         }
         let relay = Arc::new(Relay {
             app: app.clone(),
             take,
+            request: request.clone(),
             engine,
         });
         let started =
@@ -395,6 +483,7 @@ mod product {
                     &app,
                     &VoiceChanged {
                         take,
+                        request: request.clone(),
                         phase: VoicePhaseV1::Listening,
                         engine: Some(engine_v1(engine)),
                         partial: None,
@@ -436,9 +525,12 @@ mod product {
     /// Ends the current take's capture and turns it into words. Only the
     /// take named may be finished, so a late pause cannot end a newer one.
     pub(super) fn finish(app: tauri::AppHandle, take: u32) -> bool {
-        let (capture, engine) = {
+        let (capture, engine, request) = {
             let mut live = live();
             let Some(current) = live.as_mut().filter(|live| live.take == take) else {
+                return false;
+            };
+            let Some(engine) = current.engine else {
                 return false;
             };
             if !matches!(current.phase, Phase::Listening(_)) {
@@ -449,13 +541,14 @@ mod product {
             else {
                 return false;
             };
-            (capture, current.engine)
+            (capture, engine, current.request.clone())
         };
         if engine.cloud() {
             emit(
                 &app,
                 &VoiceChanged {
                     take,
+                    request: request.clone(),
                     phase: VoicePhaseV1::Transcribing,
                     engine: Some(engine_v1(engine)),
                     partial: None,
@@ -501,6 +594,7 @@ mod product {
                 &settle_app,
                 &VoiceChanged {
                     take,
+                    request,
                     phase: if fault.is_some() {
                         VoicePhaseV1::Failed
                     } else {
@@ -532,28 +626,13 @@ mod product {
             .map(|live| live.take)
     }
 
-    pub(super) fn current() -> Option<u32> {
-        live().as_ref().map(|live| live.take)
-    }
-
-    pub(super) fn cancel(app: &tauri::AppHandle) -> bool {
+    pub(super) fn cancel(app: &tauri::AppHandle, request: &str, take: Option<u32>) -> bool {
         let taken = {
-            let mut live = live();
-            match live.as_mut() {
-                Some(Live {
-                    phase: Phase::Starting { cancelled },
-                    ..
-                }) => {
-                    // The capture is released as soon as it finishes opening.
-                    *cancelled = true;
-                    return true;
-                }
-                Some(_) => live.take(),
-                None => None,
+            match cancel_current(&mut live(), request, take) {
+                Cancellation::Refused => return false,
+                Cancellation::Opening => return true,
+                Cancellation::Taken(taken) => taken,
             }
-        };
-        let Some(taken) = taken else {
-            return false;
         };
         match taken.phase {
             Phase::Listening(capture) => {
@@ -562,20 +641,69 @@ mod product {
                 }));
             }
             Phase::Finishing(Some(handle)) => handle.abort(),
-            Phase::Finishing(None) | Phase::Starting { .. } => {}
+            Phase::Finishing(None) | Phase::Starting { .. } | Phase::Resolving => {}
         }
         emit(
             app,
             &VoiceChanged {
                 take: taken.take,
+                request: taken.request,
                 phase: VoicePhaseV1::Cancelled,
-                engine: Some(engine_v1(taken.engine)),
+                engine: taken.engine.map(engine_v1),
                 partial: None,
                 text: None,
                 fault: None,
             },
         );
         true
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn stale_cancellation_preserves_replacement_and_matching_cancel_retires_reservation() {
+            let mut current = Some(Live {
+                take: 2,
+                request: "new".into(),
+                engine: None,
+                phase: Phase::Resolving,
+            });
+            assert!(matches!(
+                cancel_current(&mut current, "old", Some(1)),
+                Cancellation::Refused
+            ));
+            assert_eq!(current.as_ref().unwrap().take, 2);
+            assert!(matches!(
+                cancel_current(&mut current, "new", Some(1)),
+                Cancellation::Refused
+            ));
+            assert_eq!(current.as_ref().unwrap().take, 2);
+            assert!(matches!(
+                cancel_current(&mut current, "new", None),
+                Cancellation::Taken(_)
+            ));
+            assert!(current.is_none());
+        }
+
+        #[test]
+        fn cancelling_an_opening_capture_retains_its_owner_until_start_settles() {
+            let mut current = Some(Live {
+                take: 2,
+                request: "new".into(),
+                engine: None,
+                phase: Phase::Starting { cancelled: false },
+            });
+            assert!(matches!(
+                cancel_current(&mut current, "new", Some(2)),
+                Cancellation::Opening
+            ));
+            assert!(matches!(
+                current.as_ref().unwrap().phase,
+                Phase::Starting { cancelled: true }
+            ));
+        }
     }
 }
 
@@ -662,20 +790,24 @@ pub(crate) async fn voice_choose_language(
 /// the system asks for permission.
 #[tauri::command]
 #[specta::specta]
-pub(crate) async fn voice_start(caller: WebviewWindow, app: tauri::AppHandle) -> VoiceStartV1 {
+pub(crate) async fn voice_start(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    request: String,
+) -> VoiceStartV1 {
     let refused = |fault| VoiceStartV1 {
         take: None,
         engine: None,
         fault: Some(fault),
     };
-    if !authorize(&caller, CallerPolicy::Main, "voice_start") {
+    if !authorize(&caller, CallerPolicy::Main, "voice_start") || !valid_request(&request) {
         return refused(VoiceFaultV1::Unavailable);
     }
     #[cfg(feature = "work-product")]
-    return product::start(app).await;
+    return product::start(app, request).await;
     #[cfg(not(feature = "work-product"))]
     {
-        let _ = app;
+        let _ = (app, request);
         refused(VoiceFaultV1::Unavailable)
     }
 }
@@ -696,18 +828,23 @@ pub(crate) fn voice_stop(caller: WebviewWindow, app: tauri::AppHandle, take: u32
     }
 }
 
-/// Discards the current take, whatever its phase.
+/// Discards only this start request's take, whatever its phase.
 #[tauri::command]
 #[specta::specta]
-pub(crate) fn voice_cancel(caller: WebviewWindow, app: tauri::AppHandle) -> bool {
-    if !authorize(&caller, CallerPolicy::Main, "voice_cancel") {
+pub(crate) fn voice_cancel(
+    caller: WebviewWindow,
+    app: tauri::AppHandle,
+    request: String,
+    take: Option<u32>,
+) -> bool {
+    if !authorize(&caller, CallerPolicy::Main, "voice_cancel") || !valid_request(&request) {
         return false;
     }
     #[cfg(feature = "work-product")]
-    return product::current().is_some() && product::cancel(&app);
+    return product::cancel(&app, &request, take);
     #[cfg(not(feature = "work-product"))]
     {
-        let _ = app;
+        let _ = (app, request, take);
         false
     }
 }
@@ -768,9 +905,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cancellation_authority_binds_both_request_and_optional_take() {
+        assert!(owns_take("current", Some(2), "current", 2));
+        assert!(owns_take("current", None, "current", 2));
+        assert!(!owns_take("old", Some(1), "current", 2));
+        assert!(!owns_take("current", Some(1), "current", 2));
+        assert!(!owns_take("", None, "current", 2));
+    }
+
+    #[test]
+    fn request_identity_is_bounded_nonzero_uuid_text() {
+        assert!(valid_request("12345678-1234-1234-1234-123456789abc"));
+        for request in [
+            "",
+            "request",
+            "00000000-0000-0000-0000-000000000000",
+            "12345678/1234-1234-1234-123456789abc",
+            "12345678-1234-1234-1234-123456789abg",
+        ] {
+            assert!(!valid_request(request), "{request}");
+        }
+    }
+
+    #[test]
     fn changes_and_status_have_stable_wire_shapes() {
         let change = VoiceChanged {
             take: 3,
+            request: "request".into(),
             phase: VoicePhaseV1::Failed,
             engine: Some(VoiceEngineV1::OpenAi),
             partial: None,
@@ -780,7 +941,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(change).unwrap(),
             serde_json::json!({
-                "take": 3, "phase": "failed", "engine": "open_ai", "partial": null,
+                "take": 3, "request": "request", "phase": "failed", "engine": "open_ai", "partial": null,
                 "text": null, "fault": "key_refused"
             })
         );

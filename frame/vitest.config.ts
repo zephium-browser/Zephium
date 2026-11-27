@@ -72,6 +72,10 @@ export default defineConfig({
         test: {
           name: "component",
           provide: {
+            privilegedPermissionsPolicy:
+              /const PRIVILEGED_PERMISSIONS_POLICY: &str = "([^"]+)";/u.exec(
+                readFileSync(new URL("../desktop/src/lib.rs", import.meta.url), "utf8"),
+              )?.[1] ?? "",
             formSubmitRuntime: readFileSync(
               new URL(
                 "../crates/zephium-engine/src/platform/form_submit_observer.js",
@@ -122,7 +126,7 @@ export default defineConfig({
                 readFileSync(new URL("../desktop/tauri.conf.json", import.meta.url), "utf8"),
               ).app.security.csp["style-src"] as string,
               // Match the HTML style elements to which Tauri adds nonce sources.
-              inlineStyleCount: ["./browser.html", "./panel.html"].reduce(
+              inlineStyleCount: ["./browser.html", "./panel.html", "./mini.html"].reduce(
                 (count, path) =>
                   count +
                   (readFileSync(new URL(path, import.meta.url), "utf8").match(/<style(?:\s|>)/giu)
@@ -131,6 +135,7 @@ export default defineConfig({
               ),
             },
           },
+          setupFiles: ["./vitest.component.setup.ts"],
           include: ["src/**/*.component.test.ts"],
           // Playwright retires the oldest of 10,000 live requests. Parallel
           // files flood that window while a slow manual mock is still being
@@ -142,8 +147,10 @@ export default defineConfig({
             screenshotFailures: false,
             commands: { benchPhotos, webkitFootprint },
             // Retina is the display this chrome is drawn for, and the one
-            // where a radius or a hairline can actually be judged.
-            provider: playwright({ contextOptions: { deviceScaleFactor: 2 } }),
+            // where a radius or a hairline can actually be judged. Dates and
+            // amounts follow the browser's locale, which is the machine's own
+            // (en-GB writes "13 Oct"), so the suites read one fixed locale.
+            provider: playwright({ contextOptions: { deviceScaleFactor: 2, locale: "en-US" } }),
             instances: [
               {
                 browser:

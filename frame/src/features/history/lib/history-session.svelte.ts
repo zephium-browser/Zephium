@@ -73,9 +73,12 @@ export class HistorySession {
     this.range = "everything";
     this.error = null;
     this.loading = false;
+    this.busy = false;
   }
 
   search(value: string) {
+    this.listing += 1;
+    this.cursor = null;
     this.query = value.slice(0, 512);
     clearTimeout(this.searchTimer);
     this.searchTimer = setTimeout(() => void this.reload(), SEARCH_DEBOUNCE_MS);
@@ -119,11 +122,16 @@ export class HistorySession {
   /** Removes every visit to each address, and the rows showing them. */
   async forget(urls: readonly string[]) {
     if (!urls.length || this.busy) return;
+    this.listing += 1;
+    this.loading = false;
     this.busy = true;
+    const lifetime = this.lifetime;
     const response = await this.call({ kind: "forget", urls: [...urls] });
+    if (lifetime.signal.aborted) return;
     this.busy = false;
     if (response?.kind === "removed") {
       this.visits = this.visits.filter((visit) => !urls.includes(visit.url));
+      await this.reload();
       return;
     }
     this.error = response?.kind === "error" ? response.error : "unavailable";
@@ -133,7 +141,9 @@ export class HistorySession {
   async clear() {
     if (this.busy) return;
     this.busy = true;
+    const lifetime = this.lifetime;
     const response = await this.call({ kind: "clear", range: this.range });
+    if (lifetime.signal.aborted) return;
     this.busy = false;
     if (response?.kind === "removed") {
       this.cursor = null;

@@ -103,6 +103,26 @@ pub struct Page {
 
 impl Index {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        match Self::open_once(path) {
+            Ok(index) => Ok(index),
+            Err(error)
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                ) =>
+            {
+                // Markdown is authoritative. Preserve the failed cache and
+                // its sidecars for recovery, then let reconciliation rebuild.
+                // Busy, permissions and unknown schemas never take this path.
+                quarantine(path)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                Self::open_once(path)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_once(path: &Path) -> rusqlite::Result<Self> {
         if let Ok(meta) = std::fs::symlink_metadata(path) {
             if !meta.file_type().is_file() {
                 return Err(rusqlite::Error::InvalidPath(path.to_path_buf()));
@@ -187,6 +207,13 @@ impl Index {
             )?,
             SCHEMA => {}
             _ => return Err(rusqlite::Error::InvalidQuery),
+        }
+        let check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        if check != "ok" {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                Some("notes index integrity check failed".into()),
+            ));
         }
         Ok(Self { conn })
     }
@@ -451,11 +478,30 @@ impl Index {
     }
 
     pub fn backlinks(&self, id: &str) -> rusqlite::Result<Vec<Row>> {
+        let keys = self
+            .conn
+            .prepare_cached(
+                "SELECT stem_key,title_key FROM notes WHERE id=?1 AND trashed_at IS NULL",
+            )?
+            .query_row([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?;
+        let Some((stem, title)) = keys else {
+            return Ok(Vec::new());
+        };
+        // A matching name is only a backlink when opening it resolves here.
+        // Resolve each of the two keys once, rather than once per source note.
+        let named = self.resolve(&stem)?.is_some_and(|note| note.id == id);
+        let titled = title != stem && self.resolve(&title)?.is_some_and(|note| note.id == id);
+        if !named && !titled {
+            return Ok(Vec::new());
+        }
         let mut statement = self.conn.prepare_cached(&format!(
             "SELECT {} FROM notes n WHERE n.trashed_at IS NULL AND n.id<>?1 AND EXISTS(
-               SELECT 1 FROM note_links l, notes me WHERE me.id=?1 AND l.source=n.id
-                 AND (l.target=me.stem_key OR l.target=me.title_key))
-             ORDER BY n.modified DESC LIMIT ?2",
+               SELECT 1 FROM note_links l WHERE l.source=n.id
+                 AND (l.target=?2 OR l.target=?3))
+             ORDER BY n.modified DESC LIMIT ?4",
             COLUMNS
                 .split(',')
                 .map(|c| format!("n.{c}"))
@@ -463,7 +509,15 @@ impl Index {
                 .join(",")
         ))?;
         let rows = statement
-            .query_map(params![id, MAX_BACKLINKS], row)?
+            .query_map(
+                params![
+                    id,
+                    named.then_some(stem),
+                    titled.then_some(title),
+                    MAX_BACKLINKS
+                ],
+                row,
+            )?
             .collect();
         rows
     }
@@ -492,9 +546,137 @@ impl Index {
     }
 }
 
+fn quarantine(path: &Path) -> std::io::Result<()> {
+    use std::fs;
+    use std::io;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    let mut reserved = None;
+    for n in 0..16 {
+        let directory = parent.join(format!(".index-corrupt-{}-{n}", std::process::id()));
+        match builder.create(&directory) {
+            Ok(()) => {
+                reserved = Some(directory);
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let directory = reserved.ok_or_else(|| io::Error::from(io::ErrorKind::AlreadyExists))?;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut source = path.as_os_str().to_owned();
+        source.push(suffix);
+        let source = std::path::PathBuf::from(source);
+        match fs::symlink_metadata(&source) {
+            Ok(meta) if meta.file_type().is_file() => {
+                let name = source
+                    .file_name()
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+                fs::rename(&source, directory.join(name))?;
+            }
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::InvalidInput)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_index_is_quarantined_and_rebuilt_from_markdown() {
+        let base = tempfile::tempdir().unwrap();
+        let profile = "profile";
+        let parent = base.path().join("notes").join(profile);
+        std::fs::create_dir_all(parent.join("Notes")).unwrap();
+        std::fs::write(
+            parent.join("Notes/Survives.md"),
+            "# Survives\n\nDurable text",
+        )
+        .unwrap();
+        let corrupt = b"not a SQLite index; retain this recovery evidence";
+        std::fs::write(parent.join("index.sqlite"), corrupt).unwrap();
+        let mut library = crate::library::Library::open(base.path(), profile).unwrap();
+        library.reconcile(1).unwrap();
+        let rows = library.index().rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Survives");
+        drop(library);
+        let mut reopened = crate::library::Library::open(base.path(), profile).unwrap();
+        reopened.reconcile(2).unwrap();
+        assert_eq!(reopened.index().rows().unwrap()[0].title, "Survives");
+        assert!(std::fs::read_dir(parent).unwrap().flatten().any(|entry| {
+            std::fs::read(entry.path().join("index.sqlite"))
+                .ok()
+                .as_deref()
+                == Some(corrupt)
+        }));
+    }
+
+    #[test]
+    fn newer_index_schema_is_not_quarantined_or_replaced() {
+        let base = tempfile::tempdir().unwrap();
+        let path = base.path().join("index.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA user_version=99;").unwrap();
+        drop(connection);
+        assert!(Index::open(&path).is_err());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            99
+        );
+        assert!(std::fs::read_dir(base.path())
+            .unwrap()
+            .flatten()
+            .all(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".index-corrupt-")
+            }));
+    }
+
+    #[test]
+    fn quarantine_preserves_every_index_sidecar_byte() {
+        let base = tempfile::tempdir().unwrap();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            std::fs::write(
+                base.path().join(format!("index.sqlite{suffix}")),
+                format!("evidence{suffix}"),
+            )
+            .unwrap();
+        }
+        quarantine(&base.path().join("index.sqlite")).unwrap();
+        let directory = std::fs::read_dir(base.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            assert_eq!(
+                std::fs::read_to_string(directory.join(format!("index.sqlite{suffix}"))).unwrap(),
+                format!("evidence{suffix}")
+            );
+        }
+    }
 
     pub(crate) fn note(id: &str, path: &str, title: &str, modified: i64) -> Row {
         Row {
@@ -614,6 +796,53 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(backlinks, [C, B]);
+    }
+
+    #[test]
+    fn backlinks_follow_file_name_precedence_and_fall_back_after_trash() {
+        let mut index = Index::memory();
+        let mut file_match = note(A, "Plans.md", "Summer", 1);
+        index.put(&file_match, "", &[]).unwrap();
+        index
+            .put(&note(B, "Ideas.md", "Plans", 2), "", &[])
+            .unwrap();
+        index
+            .put(&note(C, "Source.md", "Source", 3), "", &["plans".into()])
+            .unwrap();
+
+        assert_eq!(index.resolve("plans").unwrap().unwrap().id, A);
+        assert_eq!(index.backlinks(A).unwrap()[0].id, C);
+        assert!(index.backlinks(B).unwrap().is_empty());
+
+        file_match.trashed_at = Some(4);
+        index.put(&file_match, "", &[]).unwrap();
+        assert_eq!(index.resolve("plans").unwrap().unwrap().id, B);
+        assert!(index.backlinks(A).unwrap().is_empty());
+        assert_eq!(index.backlinks(B).unwrap()[0].id, C);
+    }
+
+    #[test]
+    fn backlinks_follow_the_same_title_winner_as_link_resolution() {
+        let mut index = Index::memory();
+        index
+            .put(&note(A, "First.md", "Shared title", 1), "", &[])
+            .unwrap();
+        index
+            .put(&note(B, "Second.md", "Shared title", 2), "", &[])
+            .unwrap();
+        index
+            .put(
+                &note(C, "Source.md", "Source", 3),
+                "",
+                &["shared title".into(), "second".into()],
+            )
+            .unwrap();
+
+        assert_eq!(index.resolve("shared title").unwrap().unwrap().id, B);
+        assert!(index.backlinks(A).unwrap().is_empty());
+        let backlinks = index.backlinks(B).unwrap();
+        assert_eq!(backlinks.len(), 1);
+        assert_eq!(backlinks[0].id, C);
     }
 
     #[test]

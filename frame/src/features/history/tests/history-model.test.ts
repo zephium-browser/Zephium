@@ -72,6 +72,15 @@ describe("history rows", () => {
 });
 
 describe("match emphasis", () => {
+  it("maps lowercase expansions back to the original title", () => {
+    expect(matchRange("İstanbul", "stan")).toEqual([1, 5]);
+    expect(matchRange("İstanbul News", "news")).toEqual([9, 13]);
+    expect(matchRange("İstanbul", "i")).toEqual([0, 1]);
+    expect(matchRange("🙂İstanbul", "tan")).toEqual([4, 7]);
+    expect(matchRange("İstanbul", "İ")).toEqual([0, 1]);
+    expect(matchRange("İ ΟΣ", "ος")).toEqual([2, 4]);
+  });
+
   it("marks the span the query accounts for, case-insensitively", () => {
     expect(matchRange("Example Domain", "domain")).toEqual([8, 14]);
     expect(matchRange("Example Domain", "  ")).toBeNull();

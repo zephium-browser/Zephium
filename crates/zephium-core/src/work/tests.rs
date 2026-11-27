@@ -704,6 +704,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
@@ -718,6 +719,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         search_fallback: None,
     };
     assert!(WorkAgentGrantV1 {
+        no_usage_charge: false,
         max_turns: 0,
         ..grant.clone()
     }
@@ -729,6 +731,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
         model: "anthropic/claude-haiku-4-5-20251001".into(),
     };
     let browser = WorkAgentGrantV1 {
+        no_usage_charge: false,
         provider: WorkSearchProvider::Browser,
         model: "bing".into(),
         search_fallback: Some(fallback.clone()),
@@ -741,6 +744,7 @@ fn agent_executions_commit_steps_incrementally_and_finish_explicitly() {
     assert!(!browser.admits_search(WorkSearchProvider::OpenAi, PUBLIC_SEARCH_MODEL));
     assert!(!grant.admits_search(WorkSearchProvider::Native, &fallback.model));
     assert!(WorkAgentGrantV1 {
+        no_usage_charge: false,
         search_fallback: Some(fallback),
         ..grant.clone()
     }
@@ -1483,6 +1487,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
     succeeded_read.evidence = Some(11.into());
     assert!(succeeded_read.validate().is_ok());
     let grant = |folders: Vec<&str>| WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         lead: None,
         provider: super::search::WorkSearchProvider::OpenAi,
@@ -1507,6 +1512,7 @@ fn person_steps_settle_at_once_and_followups_ride_only_on_finish() {
         ("", false),
     ] {
         let started = WorkAgentGrantV1 {
+            no_usage_charge: false,
             skill: Some(skill.into()),
             ..grant(vec![])
         };
@@ -2188,6 +2194,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         max_workers: 2,
     };
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         draft: None,
         lead: None,
         provider: WorkSearchProvider::OpenAi,
@@ -2207,6 +2214,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         vec![account("https://a.example.com", 1); MAX_WORK_ACCOUNT_GRANTS + 1],
     ] {
         assert!(WorkAgentGrantV1 {
+            no_usage_charge: false,
             accounts,
             ..grant.clone()
         }
@@ -2214,6 +2222,7 @@ fn stored_origin_grants_still_load_and_session_pages_carry_their_badge() {
         .is_err());
     }
     let legacy = serde_json::to_value(WorkAgentGrantV1 {
+        no_usage_charge: false,
         accounts: vec![],
         ..grant.clone()
     })
@@ -2610,4 +2619,32 @@ fn a_held_site_step_round_trips_and_its_decision_matches_its_status() {
         approve,
         WorkRuntimeIntent::ApproveStep { for_run: false, .. }
     ));
+}
+
+#[test]
+fn token_or_operation_overflow_does_not_invent_model_charges() {
+    use super::runtime::*;
+    let limits = WorkExecutionLimits {
+        model_tokens: 100,
+        cost_micro_usd: 1000,
+        operations: 2,
+        timeout_seconds: 60,
+        max_workers: 1,
+    };
+    for cost in [0, 125] {
+        let bounded = WorkUsage {
+            model_tokens: 101,
+            cost_micro_usd: cost,
+            operations: 3,
+            accounting: WorkUsageAccounting::Exact,
+        }
+        .bounded_by(limits);
+        assert_eq!(bounded.model_tokens, 100);
+        assert_eq!(bounded.cost_micro_usd, cost);
+        assert_eq!(bounded.operations, 2);
+        assert_eq!(
+            bounded.accounting,
+            WorkUsageAccounting::ConservativeReservation
+        );
+    }
 }

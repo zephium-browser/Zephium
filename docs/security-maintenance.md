@@ -106,7 +106,7 @@ An exception in `deny.toml` requires an owner, reason, removal plan, and expiry
 within the bounded review horizon. On expiry, remove or upgrade the dependency;
 extending an exception is a new security decision and requires review.
 
-The complete pnpm graph is intentionally checked at `high` severity:
+The complete pnpm graph is checked, including development dependencies:
 
 ```sh
 node scripts/ci/audit-dependencies.mjs
@@ -117,8 +117,11 @@ other build tools execute while producing signed artifacts. The only local
 exception is GHSA-vfj7-8cjw-p6xm in build-only braces 3.0.3: the command verifies
 all affected installed paths against exact patched-file hashes and exercises
 hostile patterns and direct ASTs before accepting its depth-limit mitigation.
-Other high/critical advisories and registry failures remain blocking. When this check
-fails:
+All other high/critical advisories and registry failures remain blocking.
+Every moderate finding warns for review, including runtime, development-only,
+mixed and unclassified occurrences. Review the advisory and exposure, then
+upgrade or remove the package. A newly published moderate advisory alone must
+not break main without a code or lockfile change. When this check fails:
 
 1. Confirm the advisory and affected resolved version against the package
    registry/advisory source.
@@ -126,9 +129,9 @@ fails:
    production, or the shipped application.
 3. Upgrade or remove it and regenerate the lockfile deliberately.
 4. Re-run the frontend checks and the production build.
-5. If no fixed dependency graph exists, keep production release blocked. Do
-   not lower the audit severity or omit development dependencies as a release
-   workaround.
+5. If no fixed graph exists for a blocking finding, keep the release blocked.
+   Do not omit development dependencies or downgrade high/critical findings as a
+   workaround. Review all moderate warnings before the next release.
 
 Registry availability is different from a vulnerability result. A network or
 registry failure should be retried from the controlled release environment;
@@ -197,3 +200,10 @@ For every candidate, retain:
 
 Any source, lockfile, floor, exception, build image, signing input, or workflow
 change invalidates the prior evidence and requires a new candidate run.
+
+Stable draft publication follows
+[the release procedure](../.github/RELEASE.md#draft-review-and-stable-publication).
+Component failures block a draft unless the release is explicitly dispatched
+with `emergency=true`; that bypass is visible in its release notes. Hosted green
+checks do not supply native device evidence. Review the final downloaded assets
+before publication and retain useful device results against their hashes.

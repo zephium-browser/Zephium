@@ -1,0 +1,20 @@
+[package]
+name = "zephium-map"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+html5ever = "=0.39.0"
+encoding_rs = "=0.8.41"
+psl = "=2.1.220"
+thiserror.workspace = true
+url = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+quick-xml = "=0.42.0"
+zephium-core.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

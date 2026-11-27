@@ -1,9 +1,11 @@
-//! Named disposable sessions in the already isolated QA data root. No product flag.
+//! Named disposable sessions in an already isolated QA data root (extensions
+//! and protection QA). No product flag.
 use std::path::PathBuf;
 
-pub(super) fn session_label() -> std::io::Result<Option<String>> {
+/// `flag` is the whole `--name=` prefix of the QA application's own argument.
+pub(super) fn session_label(flag: &str) -> std::io::Result<Option<String>> {
     let labels: Vec<_> = std::env::args()
-        .filter_map(|arg| arg.strip_prefix("--webext-qa-session=").map(str::to_owned))
+        .filter_map(|arg| arg.strip_prefix(flag).map(str::to_owned))
         .collect();
     match labels.as_slice() {
         [] => Ok(None),

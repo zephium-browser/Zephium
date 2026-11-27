@@ -39,7 +39,8 @@ pub fn stem_for(title: &str) -> String {
         stem = "Untitled".into();
     }
     if reserved_on_windows(&stem) {
-        stem.push_str(" note");
+        let suffix_at = stem.find('.').unwrap_or(stem.len());
+        stem.insert_str(suffix_at, " note");
     }
     stem
 }
@@ -118,9 +119,22 @@ mod tests {
         assert_eq!(stem_for("..hidden."), "hidden");
         assert_eq!(stem_for("\u{7}"), "Untitled");
         assert_eq!(stem_for("con"), "con note");
-        assert_eq!(stem_for("COM1.txt"), "COM1.txt note");
+        assert_eq!(stem_for("COM1.txt"), "COM1 note.txt");
         assert_eq!(stem_for(&"a".repeat(500)).chars().count(), MAX_STEM_CHARS);
         assert!(stem_for(&"é".repeat(150)).len() <= MAX_STEM_BYTES);
+    }
+
+    #[test]
+    fn reserved_names_with_dots_are_changed_before_the_first_extension() {
+        for (title, expected) in [
+            ("COM1.txt", "COM1 note.txt"),
+            ("aux.backup", "aux note.backup"),
+            ("NUL.folder.part", "NUL note.folder.part"),
+        ] {
+            let stem = stem_for(title);
+            assert_eq!(stem, expected);
+            assert!(!reserved_on_windows(&stem));
+        }
     }
 
     #[test]

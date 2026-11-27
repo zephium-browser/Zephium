@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Trackers</title>
+<p>Requests well-known ad and tracker hosts for the page's blocker to refuse.</p>
+<script>
+  const reachable = async (url) => {
+    try {
+      await fetch(url + '?r=' + Math.random(), { mode: 'no-cors', cache: 'no-store' });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  window.online = () => reachable('https://example.com/');
+  window.blocked = async (url) => (await window.online()) && !(await reachable(url));
+</script>

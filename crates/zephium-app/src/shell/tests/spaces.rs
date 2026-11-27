@@ -326,7 +326,6 @@ fn a_tab_moves_to_another_space_and_the_space_it_left_keeps_going() {
     space_op(&mut shell, SpaceCommand::Switch(studio));
     assert_eq!(active_id(&screen), second, "it is in front where it went");
 
-    let profile = shell.windows.focused().unwrap().profile;
     shell.handle(Command::SetTabEssential {
         id: second,
         essential: true,
@@ -334,8 +333,9 @@ fn a_tab_moves_to_another_space_and_the_space_it_left_keeps_going() {
     });
     assert!(matches!(
         shell.items.get(second).unwrap().placement,
-        Placement::Favorites { profile: owner } if owner == profile
+        Placement::Favorites { space } if space == studio
     ));
+    // An Essential moves as an Essential, to the other space's.
     let favorite = space_op(
         &mut shell,
         SpaceCommand::MoveTab {
@@ -343,7 +343,11 @@ fn a_tab_moves_to_another_space_and_the_space_it_left_keeps_going() {
             space: home,
         },
     );
-    assert_eq!(favorite.outcome, OperationOutcome::Rejected);
+    assert_ne!(favorite.outcome, OperationOutcome::Rejected);
+    assert!(matches!(
+        shell.items.get(second).unwrap().placement,
+        Placement::Favorites { space } if space == home
+    ));
 }
 
 #[test]
@@ -429,4 +433,165 @@ fn the_tab_arrows_walk_the_sidebar_and_wrap() {
     assert_eq!(active_id(&screen), first);
     shell.handle(Command::Run("tab.above".into()));
     assert_eq!(active_id(&screen), second);
+}
+
+fn essentials_of(shell: &Shell, space: SpaceId) -> Vec<ItemId> {
+    shell.items.roots(Placement::Favorites { space }).to_vec()
+}
+
+/// The Essentials the sidebar is being sent, as tab ids.
+fn essentials_shown(screen: &Screen) -> Vec<String> {
+    last(screen)
+        .nodes
+        .iter()
+        .filter(|node| node.section == zephium_ipc::SidebarSectionView::Favorites)
+        .filter_map(|node| match &node.kind {
+            zephium_ipc::SidebarNodeKindView::Tab { tab_id } => Some(tab_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A page in the space on screen, made an Essential of it.
+fn keep_page(shell: &mut Shell, screen: &Screen, address: &str) -> ItemId {
+    shell.handle(Command::Open);
+    let id = active_id(screen);
+    navigate_and_commit(shell, id, address);
+    let kept = shell.handle_operation(Command::SetTabEssential {
+        id,
+        essential: true,
+        before: None,
+    });
+    assert_ne!(kept.outcome, OperationOutcome::Rejected);
+    id
+}
+
+#[test]
+fn each_space_shows_only_its_own_essentials() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let home = current(&shell);
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    let mail = keep_page(&mut shell, &screen, "mail.example");
+    assert_eq!(essentials_of(&shell, home), [mail]);
+    assert_eq!(essentials_shown(&screen), [mail.to_string()]);
+
+    let studio = create(&mut shell, "Studio", SpaceLook::default());
+    assert!(
+        essentials_shown(&screen).is_empty(),
+        "a new space starts without any"
+    );
+    assert!(essentials_of(&shell, studio).is_empty());
+    let board = keep_page(&mut shell, &screen, "board.example");
+    assert_eq!(essentials_of(&shell, studio), [board]);
+    assert_eq!(essentials_shown(&screen), [board.to_string()]);
+    assert_eq!(essentials_of(&shell, home), [mail], "home keeps its own");
+
+    space_op(&mut shell, SpaceCommand::Switch(home));
+    assert_eq!(essentials_shown(&screen), [mail.to_string()]);
+    space_op(&mut shell, SpaceCommand::Switch(studio));
+    assert_eq!(essentials_shown(&screen), [board.to_string()]);
+}
+
+#[test]
+fn another_spaces_essential_is_out_of_reach_until_its_space_is_shown() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let home = current(&shell);
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    let mail = keep_page(&mut shell, &screen, "mail.example");
+    create(&mut shell, "Studio", SpaceLook::default());
+    let before = active_id(&screen);
+
+    shell.handle(Command::Activate(mail));
+
+    assert_eq!(active_id(&screen), before, "it is not this space's");
+    assert!(!shell.item_in_focused_scope(mail));
+    space_op(&mut shell, SpaceCommand::Switch(home));
+    assert_eq!(current(&shell), home);
+    assert!(shell.item_in_focused_scope(mail));
+}
+
+#[test]
+fn closing_an_essential_leaves_the_other_spaces_alone() {
+    let (mut shell, _engine, screen, _store) = browsed();
+    let home = current(&shell);
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    let mail = keep_page(&mut shell, &screen, "mail.example");
+    let studio = create(&mut shell, "Studio", SpaceLook::default());
+    let board = keep_page(&mut shell, &screen, "board.example");
+
+    shell.handle(Command::Close(board));
+
+    let after = essentials_of(&shell, studio);
+    assert_eq!(after.len(), 1, "closing ends the page, not the Essential");
+    assert!(!shell.items.tab(after[0]).unwrap().has_view());
+    assert_eq!(essentials_of(&shell, home), [mail]);
+    assert!(shell.items.tab(mail).unwrap().has_view());
+}
+
+#[test]
+fn deleting_a_space_takes_its_essentials_and_their_pages_with_it() {
+    let (mut shell, engine, screen, _store) = browsed();
+    let home = current(&shell);
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    let mail = keep_page(&mut shell, &screen, "mail.example");
+    let studio = create(&mut shell, "Studio", SpaceLook::default());
+    let board = keep_page(&mut shell, &screen, "board.example");
+    assert!(shell.items.insert_unloaded_tab(
+        ItemId::from(7_001),
+        Placement::Favorites { space: studio },
+        url::Url::parse("https://idle.example/").unwrap(),
+        "Idle",
+    ));
+
+    let deleted = space_op(&mut shell, SpaceCommand::Delete(studio));
+
+    assert_ne!(deleted.outcome, OperationOutcome::Rejected);
+    assert!(shell.items.get(board).is_none());
+    assert!(shell.items.get(ItemId::from(7_001)).is_none());
+    assert!(engine.calls().contains(&format!("close {board}")));
+    assert!(essentials_of(&shell, studio).is_empty());
+    assert_eq!(essentials_of(&shell, home), [mail]);
+    assert_eq!(essentials_shown(&screen), [mail.to_string()]);
+}
+
+#[test]
+fn essentials_stay_with_their_space_across_a_restart() {
+    let (mut shell, _engine, screen, store) = browsed();
+    let home = current(&shell);
+    navigate_and_commit(&mut shell, active_id(&screen), "home.example");
+    let mail = keep_page(&mut shell, &screen, "mail.example");
+    let studio = create(&mut shell, "Studio", SpaceLook::default());
+    let board = keep_page(&mut shell, &screen, "board.example");
+    shell.persist();
+
+    let (mut restored, _engine, _screen) = setup_with(store);
+    restored.handle(Command::Bootstrap);
+
+    assert_eq!(essentials_of(&restored, home), [mail]);
+    assert_eq!(essentials_of(&restored, studio), [board]);
+}
+
+#[test]
+fn imported_essentials_keep_the_admitted_space_after_switching() {
+    let (mut shell, _engine, _screen, _store) = browsed();
+    let home = current(&shell);
+    let studio = create(&mut shell, "Studio", SpaceLook::default());
+    let site = |url: &str| crate::ImportedSite {
+        url: url.into(),
+        title: url.into(),
+    };
+
+    let destination = shell.import_destination().unwrap();
+    space_op(&mut shell, SpaceCommand::Switch(home));
+    shell.handle(Command::Import {
+        destination,
+        work: Box::new(crate::ImportWork::Essentials(vec![
+            site("https://mail.example/"),
+            site("https://board.example/"),
+        ])),
+        done: crate::ImportCompletion::new(|_| {}),
+    });
+
+    assert_eq!(essentials_of(&shell, studio).len(), 2);
+    assert!(essentials_of(&shell, home).is_empty());
 }

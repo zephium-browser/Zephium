@@ -15,6 +15,7 @@ let page: string | null = null;
 let query = $state("");
 let matches = $state<number | null>(null);
 let active = $state<number | null>(null);
+let stepFailed = $state(false);
 /** Raised each time the field should take focus, read by whichever field is mounted. */
 let focusRequest = $state(0);
 /** Kept after the field closes, so Find Next can pick up where it left off. */
@@ -23,12 +24,14 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let restoreSidebar: (() => void) | null = null;
 let stop: (() => void) | null = null;
 let disposed = false;
+let request = 0;
 
 export const isOpen = () => open;
 export const searching = () => page;
 export const text = () => query;
 export const count = () => matches;
 export const position = () => active;
+export const failed = () => stepFailed;
 export const focusRequested = () => focusRequest;
 
 function listen() {
@@ -39,6 +42,7 @@ function listen() {
       if (!open || payload.query !== query) return;
       matches = payload.matches;
       active = payload.active;
+      stepFailed = false;
     })
     .then((off) => {
       if (disposed) off();
@@ -46,8 +50,23 @@ function listen() {
     });
 }
 
-function search(value: string, forward: boolean) {
-  void commands.pageFind(value, forward).catch(() => false);
+function search(value: string, forward: boolean, stepping = false) {
+  const attempt = ++request;
+  stepFailed = false;
+  const failed = () => {
+    if (!open || query !== value || request !== attempt) return;
+    if (stepping && matches !== null) stepFailed = true;
+    else {
+      matches = 0;
+      active = null;
+    }
+  };
+  void commands
+    .pageFind(value, forward)
+    .then((accepted) => {
+      if (!accepted) failed();
+    })
+    .catch(failed);
 }
 
 /** Opens the field (revealing a compact sidebar for as long as it is open)
@@ -63,9 +82,11 @@ export function show(tab: string | null) {
 }
 
 export function setText(value: string) {
+  request += 1;
   query = value.slice(0, 512);
   matches = null;
   active = null;
+  stepFailed = false;
   clearTimeout(timer);
   if (!query) {
     void commands.pageFind(null, true).catch(() => false);
@@ -86,17 +107,19 @@ export function step(forward: boolean, tab: string | null) {
   }
   if (!query) return;
   clearTimeout(timer);
-  search(query, forward);
+  search(query, forward, true);
 }
 
 export function hide() {
   if (!open) return;
   open = false;
+  request += 1;
   page = null;
   clearTimeout(timer);
   query = "";
   matches = null;
   active = null;
+  stepFailed = false;
   void commands.pageFind(null, true).catch(() => false);
   restoreSidebar?.();
   restoreSidebar = null;

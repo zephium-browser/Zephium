@@ -7,22 +7,41 @@ export type ClockFace = { time: string; period: string | null; periodLeading: bo
 
 const faces = new Map<string, Intl.DateTimeFormat>();
 
-function formatter(format: ClockFormat, locale: string | undefined): Intl.DateTimeFormat {
-  const key = `${locale ?? ""}|${format}`;
+/** The system's choice stands in for "system" when the host reports one;
+ *  otherwise the locale keeps its own. A 24-hour clock counts 0-23, as
+ *  `hour12: false` would not in every engine. */
+function formatter(
+  format: ClockFormat,
+  locale: string | undefined,
+  system24: boolean | null,
+): Intl.DateTimeFormat {
+  const chosen = format === "system" && system24 !== null ? (system24 ? "24h" : "12h") : format;
+  const key = `${locale ?? ""}|${chosen}`;
   let found = faces.get(key);
   if (!found) {
     found = new Intl.DateTimeFormat(locale, {
       hour: "numeric",
       minute: "2-digit",
-      ...(format === "system" ? {} : { hour12: format === "12h" }),
+      ...(chosen === "system"
+        ? {}
+        : chosen === "24h"
+          ? { hourCycle: "h23" as const }
+          : { hour12: true }),
     });
     faces.set(key, found);
   }
   return found;
 }
 
-export function clockFace(at: Date, format: ClockFormat, locale?: string): ClockFace {
-  const parts = formatter(format, locale).formatToParts(at);
+/** `system24` is whether the operating system is set to 24-hour time, or null
+ *  where it cannot say. */
+export function clockFace(
+  at: Date,
+  format: ClockFormat,
+  locale?: string,
+  system24: boolean | null = null,
+): ClockFace {
+  const parts = formatter(format, locale, system24).formatToParts(at);
   const period = parts.findIndex((part) => part.type === "dayPeriod");
   if (period < 0)
     return { time: parts.map((part) => part.value).join(""), period: null, periodLeading: false };

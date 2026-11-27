@@ -16,6 +16,8 @@ export function today(): string {
 
 /** Keeps the day current while a surface is showing it. */
 export function watchToday(): () => void {
+  const now = todayKey();
+  if (now !== current) current = now;
   watchers += 1;
   // Midnight while a list is open must not leave yesterday's work in Today.
   stop ??= everyWhileVisible(60_000, () => {

@@ -7,6 +7,8 @@ vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
     runCommand: vi.fn(async () => ({ accepted: true, operation_id: null })),
+    sidebarSetHidden: async () => {},
+    sidebarPeek: async () => {},
     sidebarSetWidth: vi.fn(async () => undefined),
     sidebarResize: async () => false,
     sidebarResizeGuide: async () => true,

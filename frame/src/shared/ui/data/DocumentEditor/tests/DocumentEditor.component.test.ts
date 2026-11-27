@@ -1,8 +1,12 @@
 import { expect, test, vi } from "vitest";
 import { render } from "vitest-browser-svelte";
 import { loadDocumentEditor } from "../index";
+
+// Prepare the lazy dependency graph with the fixture imports. The test's
+// budget measures draft ownership and teardown, not cold Vite transforms.
+const { default: Editor } = await loadDocumentEditor();
+
 test("publishes plain text drafts, preserves them across prop updates, and releases the editor", async () => {
-  const { default: Editor } = await loadDocumentEditor();
   const onedit = vi.fn();
   const screen = await render(Editor, { paragraphs: ["<img src=x>"], label: "Draft", onedit });
   expect(screen.container.querySelector("img")).toBeNull();

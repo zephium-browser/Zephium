@@ -15,7 +15,7 @@
         "hiddenTitle": true,
         "titleBarStyle": "Overlay",
         "transparent": true,
-        "trafficLightPosition": { "x": 7, "y": 25 },
+        "trafficLightPosition": { "x": 7, "y": 22 },
         "url": "browser.html"
       }
     ]

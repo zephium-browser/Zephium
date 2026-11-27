@@ -21,6 +21,10 @@ test("a missing or refused key leads to Settings → AI", () => {
   expect(faultView({ reason: "no_model" }).fix?.command).toBe("settings.ai");
 });
 
+test("a request over the provider plan's per-minute limit is not retried", () => {
+  expect(model("plan_limit")).toMatchObject({ retry: "no", fix: { command: "settings.ai" } });
+});
+
 test("a plan a model needs and the daily limit point at the account", () => {
   expect(model("plan_required").fix?.command).toBe("settings.account");
   expect(model("daily_limit").message).toContain("resets");
@@ -59,4 +63,11 @@ test("a page still loading is asked again, not called unavailable", () => {
   expect(view.retry).toBe("now");
   expect(view.message).toContain("still loading");
   expect(faultView({ reason: "invalid" }).retry).toBe("no");
+});
+
+test("a model timeout names stalled or overlong progress, not provider failure", () => {
+  const view = faultView({ reason: "timed_out" });
+  expect(view).toMatchObject({ retry: "now", fix: null });
+  expect(view.message).toMatch(/stopped responding|too long/u);
+  expect(view.message).not.toBe(model("provider_down").message);
 });

@@ -158,7 +158,9 @@ export class DownloadSession {
           });
         this.entries = more
           ? [
-              ...this.entries,
+              ...this.entries.map(
+                (current) => entries.find((entry) => entry.id === current.id) ?? current,
+              ),
               ...entries.filter((entry) => !this.entries.some((old) => old.id === entry.id)),
             ]
           : [
@@ -217,7 +219,14 @@ export class DownloadSession {
       } else if (call.kind === "clear") {
         this.entries = this.entries.filter((entry) => !finished(entry));
         await this.reload();
-      } else if (call.kind === "forget" || call.kind === "cancel" || call.kind === "resume") {
+      } else if (
+        call.kind === "forget" ||
+        call.kind === "cancel" ||
+        call.kind === "resume" ||
+        call.kind === "pause" ||
+        call.kind === "keep" ||
+        call.kind === "discard"
+      ) {
         await this.reload();
       }
     } catch {

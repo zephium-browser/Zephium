@@ -22,13 +22,14 @@ const state = vi.hoisted(() => ({
 }));
 // Rust serves the account picture and a pick being framed; pictures stand in here.
 vi.mock("$domain/account/account-model", async (original) => ({
-  ...(await original<typeof import("$domain/account/account-model")>()),
+  ...(await original<typeof import("$domain/account")>()),
   avatarUrl: (revision: number | null | undefined) => (revision ? portraitFixture : null),
   stagedAvatarUrl: () => landscapeFixture,
 }));
 vi.mock("$shared/ipc/bindings", async () => {
   const { mockBindings } = await import("$shared/testing/bindings");
   return mockBindings({
+    chromeModal: async () => {},
     accountGet: async () => ({ account: state.account!, fault: null, retry_after: null }),
     accountUsageHistory: async () => state.history ?? history,
     profilesGet: async () => ({ status: "ok" as const, data: null }),

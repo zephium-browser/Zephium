@@ -13,6 +13,7 @@ const entry = (received: number, total: number | null): DownloadView => ({
   received: String(received),
   total: total === null ? null : String(total),
   error: null,
+  insecure: false,
 });
 
 test("the rate settles across readings and starts over when a transfer restarts", () => {
@@ -26,12 +27,30 @@ test("the rate settles across readings and starts over when a transfer restarts"
   expect(rate.observe("d", 500, 4000)).toBeNull();
 });
 
+test("a resumed transfer does not include the paused interval in its rate", () => {
+  const rate = new TransferRate();
+  rate.observe("d", 0, 0);
+  expect(rate.observe("d", 1000, 1000)).toBe(1000);
+  rate.retain([{ id: "d", state: "receiving" }]);
+  expect(rate.observe("d", 2000, 2000)).toBe(1000);
+  rate.retain([{ id: "d", state: "paused" }]);
+  expect(rate.observe("d", 2000, 601_000)).toBeNull();
+  expect(rate.observe("d", 3000, 602_000)).toBe(1000);
+});
+
 test("the line says how far along and how long is left once it knows", () => {
   expect(transferLine(entry(512, null), 100)).toBe("512 B");
   expect(transferLine(entry(1024, 4096), null)).toBe("1 KB of 4 KB");
   expect(transferLine(entry(0, 120_000), 1000)).toMatch(/^0 B of 117.2 KB · 2 min left$/u);
   expect(formatTimeLeft(0.2)).toMatch(/^1 sec/u);
   expect(formatTimeLeft(7200)).toMatch(/^2 hr/u);
+});
+
+test.each([
+  [1024, "1 KB of 1 KB"],
+  [2048, "2 KB of 1 KB"],
+])("does not estimate time with %i bytes received out of 1024", (received, summary) => {
+  expect(transferLine(entry(received, 1024), 1024)).toBe(summary);
 });
 
 test("a file's kind comes from its name", () => {

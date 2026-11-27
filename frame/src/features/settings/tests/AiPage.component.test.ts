@@ -107,6 +107,21 @@ test("a role follows Automatic until the person chooses a model", async () => {
   expect(native.choose).toHaveBeenCalledWith(PROFILE, "lead", "anthropic/claude-sonnet-5-5");
 });
 
+test("a refused model change restores the stored choice and reports the failure", async () => {
+  await page.viewport(1100, 1200);
+  const view = models({ keys: { anthropic: "valid" }, lead: "anthropic/claude-opus-5-5" });
+  native.read.mockResolvedValue(view);
+  native.choose.mockReset().mockResolvedValue({ ...view, fault: "request" });
+  const screen = await render(AiPage);
+  const control = screen.getByLabelText("Work", { exact: true });
+  await control.click();
+  await page.getByRole("option", { name: /Claude Sonnet 5.5/u }).click();
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("The model couldn’t be changed");
+  await expect.element(control).toHaveTextContent("Automatic · Claude Opus 5.5");
+});
+
 test("billing trouble preserves acceptance and the old Cloud group stays gone", async () => {
   await page.viewport(1100, 1200);
   const view = models({ keys: { open_ai: "valid" }, cloud: true });

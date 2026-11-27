@@ -231,3 +231,27 @@ mod tests {
         );
     }
 }
+
+/// External applications require original reviewed access and authenticated
+/// publisher identity. Compatibility-injected permissions and a public manifest
+/// key are insufficient; legacy registries and unreviewed optional grants deny.
+pub fn external_native_messaging_allowed(reviewed: &[String], publisher_verified: bool) -> bool {
+    publisher_verified
+        && reviewed
+            .iter()
+            .any(|permission| permission == "nativeMessaging")
+}
+
+#[cfg(test)]
+mod native_authority_tests {
+    use super::*;
+
+    #[test]
+    fn compatibility_permission_cannot_authorize_external_native_hosts() {
+        let prepared = vec!["nativeMessaging".to_owned()];
+        assert!(!external_native_messaging_allowed(&[], true));
+        assert!(!external_native_messaging_allowed(&prepared, false));
+        assert!(external_native_messaging_allowed(&prepared, true));
+        assert!(!external_native_messaging_allowed(&[], false));
+    }
+}

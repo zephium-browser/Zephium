@@ -164,6 +164,37 @@ async function settle(
   }
 }
 
+let sidebarHosts = 0;
+let reportedHost: boolean | null = null;
+
+function reportHost() {
+  // One report per task, so a remount does not flap the layout.
+  queueMicrotask(() => {
+    const next = sidebarHosts > 0;
+    if (next === reportedHost) return;
+    reportedHost = next;
+    void commands.pagePermissionCardHost(next).catch(() => {
+      reportedHost = null;
+    });
+  });
+}
+
+/**
+ * Marks the expanded sidebar's address field as on screen, where a prompt
+ * shows as a card with the page still visible. Returns the release.
+ */
+export function hostInSidebar(): () => void {
+  sidebarHosts += 1;
+  reportHost();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    sidebarHosts -= 1;
+    reportHost();
+  };
+}
+
 export function respond(
   retained: PagePermissionPromptEntryView,
   decision: PagePermissionPromptDecisionInput,

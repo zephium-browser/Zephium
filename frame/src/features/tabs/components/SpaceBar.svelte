@@ -5,11 +5,15 @@
   import { tabs } from "$domain/tabs";
   import { uiCommands as ui } from "$domain/ui-commands";
   import Icon from "$shared/ui/Icon";
-  import { untrack } from "svelte";
+  import { untrack, type Snippet } from "svelte";
   import SpaceGlyph from "./SpaceGlyph.svelte";
   import SpaceFlowBody from "./SpaceFlowBody.svelte";
   import * as requests from "../lib/space-requests.svelte";
   import { SpaceFlow } from "../lib/space-flow.svelte";
+
+  /** What the browser sets beside the plus: pinned extensions. */
+  let { extras, onOpenChange }: { extras?: Snippet; onOpenChange?: (open: boolean) => void } =
+    $props();
 
   // The switcher loads the first time the chip is approached or opened, and
   // stays, so reopening is the panel's motion alone.
@@ -23,6 +27,10 @@
   let chip = $state<HTMLButtonElement>();
   const flow = new SpaceFlow((restore) => {
     if (restore) chip?.focus();
+  });
+  $effect(() => {
+    onOpenChange?.(flow.open);
+    return () => onOpenChange?.(false);
   });
 
   $effect(() => {
@@ -45,7 +53,16 @@
     const away = () => flow.dismiss();
     // WebKit does not focus a pressed button, so Escape is heard window-wide.
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing) return;
+      if (
+        event.key !== "Escape" ||
+        event.isComposing ||
+        event.keyCode === 229 ||
+        event.defaultPrevented
+      )
+        return;
+      // The panel owns Escape ahead of the selection beneath it, regardless
+      // of the order in which the window listeners were installed.
+      event.preventDefault();
       event.stopPropagation();
       flow.escape();
     };
@@ -81,13 +98,16 @@
     <span class="space-name">{flow.active?.name ?? ""}</span>
     <span class="space-chevron"><Icon icon={ArrowDown01Icon} size={12} strokeWidth={2} /></span>
   </button>
-  <button
-    type="button"
-    class="space-new-tab"
-    title={m.new_tab()}
-    aria-label={m.new_tab()}
-    onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
-  >
+  <div class="space-end">
+    {@render extras?.()}
+    <button
+      type="button"
+      class="space-new-tab"
+      title={m.new_tab()}
+      aria-label={m.new_tab()}
+      onclick={tabs.open}><Icon icon={Add01Icon} size={16} /></button
+    >
+  </div>
   <div
     bind:this={panel}
     class="ui-menu ui-disclosure-panel ui-popover space-panel sidebar-softens"
@@ -167,12 +187,19 @@
     rotate: 180deg;
   }
 
+  .space-end {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 2px;
+    margin-inline-start: auto;
+  }
+
   .space-new-tab {
     display: grid;
     flex: none;
     width: 30px;
     height: 30px;
-    margin-inline-start: auto;
     padding: 0;
     border: 0;
     border-radius: 50%;

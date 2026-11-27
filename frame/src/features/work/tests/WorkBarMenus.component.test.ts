@@ -39,3 +39,22 @@ test("blank lines do not keep the composer tall: it rests at its own height when
   await expect.poll(() => area().getBoundingClientRect().height).toBe(rest);
   await screen.unmount();
 });
+
+test("a portal selection keeps the composer engaged when WebKit leaves focus on the body", async () => {
+  await page.viewport(1000, 600);
+  const screen = await render(BarMenuStage, { restoreFocus: false });
+  await screen.getByRole("textbox").click();
+  await screen.getByRole("button", { name: "Model" }).click();
+  await page.getByRole("button", { name: "Opus" }).click();
+  await new Promise<void>((done) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => done())),
+  );
+  await expect
+    .poll(() => screen.container.querySelector<HTMLElement>(".work-bar")!.dataset.engaged)
+    .toBe("true");
+  await userEvent.click(document.body, { position: { x: 20, y: 20 } });
+  await expect
+    .poll(() => screen.container.querySelector<HTMLElement>(".work-bar")!.dataset.engaged)
+    .toBe("false");
+  await screen.unmount();
+});

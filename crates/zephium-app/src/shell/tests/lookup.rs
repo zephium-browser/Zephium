@@ -29,15 +29,16 @@ impl zephium_core::ports::notes::Notes for FakeNotes {
         done(NoteResponse::Page { items, next: None });
     }
 
-    fn release(&self, _profile: ProfileId, done: Box<dyn FnOnce() + Send>) {
+    fn release(&self, _profile: ProfileId, done: Box<dyn FnOnce() + Send>) -> bool {
         done();
+        true
     }
 }
 
 fn runs_on_any_thread<T: Send>(_: &T) {}
 
 fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    jiff::Zoned::now().date().strftime("%Y-%m-%d").to_string()
 }
 
 #[test]

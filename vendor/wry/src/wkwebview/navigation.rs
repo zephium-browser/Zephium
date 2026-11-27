@@ -1,13 +1,18 @@
+#[cfg(target_os = "macos")]
+use std::{
+  cell::{Cell, RefCell},
+  rc::{Rc, Weak},
+};
 use std::{
   collections::{hash_map::Entry, HashMap, VecDeque},
   sync::{Mutex, OnceLock},
 };
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use objc2::{DeclaredClass, Message};
+use objc2::{msg_send, rc::Retained, DeclaredClass, Message};
 use objc2_foundation::{
   MainThreadMarker, NSError, NSHTTPURLResponse, NSObjectProtocol, NSString,
-  NSURLErrorFailingURLErrorKey, NSURL,
+  NSURLErrorFailingURLErrorKey, NSURLResponse, NSURL,
 };
 use objc2_web_kit::{
   WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationResponse,
@@ -20,7 +25,9 @@ use crate::wkwebview::ios::WKWebView::WKWebView;
 use objc2_web_kit::WKWebView;
 
 use crate::{
-  native_bounds::{bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, PAGE_URL_LIMIT},
+  native_bounds::{
+    bounded_nsstring, CUSTOM_PROTOCOL_METHOD_LIMIT, ORIGIN_PART_LIMIT, PAGE_URL_LIMIT,
+  },
   AppleNavigationAction, AppleNavigationType, NavigationEvent, NavigationEventPhase,
   NavigationFailure, NavigationId, PageLoadEvent,
 };
@@ -29,7 +36,120 @@ use super::class::wry_navigation_delegate::WryNavigationDelegate;
 
 const ACTIVE_APPLE_NAVIGATION_LIMIT: usize = 64;
 const APPLE_REDIRECT_EVENT_LIMIT: usize = 32;
-const WEB_EXTENSION_URL_PREFIX: &str = "webkit-extension://";
+// WebKit's default extension scheme, and the `chrome-extension` base URL the
+// embedder assigns each context so Chrome extensions see their usual origin.
+const WEB_EXTENSION_URL_PREFIXES: [&str; 2] = ["webkit-extension://", "chrome-extension://"];
+
+#[cfg(target_os = "macos")]
+type PolicyAnswer = Box<dyn FnOnce(WKNavigationActionPolicy)>;
+
+#[cfg(target_os = "macos")]
+struct MainFramePolicyDecision(RefCell<Option<PolicyAnswer>>);
+
+#[cfg(target_os = "macos")]
+impl MainFramePolicyDecision {
+  fn is_pending(&self) -> bool {
+    self.0.borrow().is_some()
+  }
+
+  fn settle(&self, policy: WKNavigationActionPolicy) {
+    let answer = self.0.borrow_mut().take();
+    if let Some(answer) = answer {
+      answer(policy);
+    }
+  }
+
+  fn apply(self: &Rc<Self>, allowed: bool, hold: &crate::MainFrameNavigationHoldHandler) {
+    if !self.is_pending() {
+      return;
+    }
+    if !allowed {
+      self.settle(WKNavigationActionPolicy::Cancel);
+      return;
+    }
+    let handle = MainFrameNavigationHold(Rc::downgrade(self));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hold(handle))) {
+      Ok(true) => {}
+      Ok(false) => self.settle(WKNavigationActionPolicy::Allow),
+      Err(_) => self.settle(WKNavigationActionPolicy::Cancel),
+    }
+  }
+}
+
+/// A weak, one-shot release handle for one view's main-frame policy decision.
+/// A superseded or closed view's decision has already been cancelled.
+#[cfg(target_os = "macos")]
+pub struct MainFrameNavigationHold(Weak<MainFramePolicyDecision>);
+
+#[cfg(target_os = "macos")]
+impl MainFrameNavigationHold {
+  /// Whether this exact decision still awaits an answer.
+  pub fn is_pending(&self) -> bool {
+    self
+      .0
+      .upgrade()
+      .is_some_and(|decision| decision.is_pending())
+  }
+
+  /// Releases this decision if it is still pending.
+  pub fn resume(self) {
+    if let Some(decision) = self.0.upgrade() {
+      decision.settle(WKNavigationActionPolicy::Allow);
+    }
+  }
+
+  /// Cancels this decision if it is still pending.
+  pub fn cancel(self) {
+    if let Some(decision) = self.0.upgrade() {
+      decision.settle(WKNavigationActionPolicy::Cancel);
+    }
+  }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub(crate) struct MainFrameNavigationHolds {
+  closed: Cell<bool>,
+  current: RefCell<Option<Rc<MainFramePolicyDecision>>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MainFrameNavigationHolds {
+  fn begin(&self, answer: PolicyAnswer) -> Rc<MainFramePolicyDecision> {
+    let decision = Rc::new(MainFramePolicyDecision(RefCell::new(Some(answer))));
+    if self.closed.get() {
+      decision.settle(WKNavigationActionPolicy::Cancel);
+    } else {
+      // Publish the new generation before answering the old one. WebKit can
+      // reenter, and must see the new generation if it does.
+      let previous = self.current.replace(Some(decision.clone()));
+      if let Some(previous) = previous {
+        previous.settle(WKNavigationActionPolicy::Cancel);
+      }
+    }
+    decision
+  }
+
+  pub(crate) fn cancel(&self) {
+    let current = self.current.take();
+    if let Some(current) = current {
+      current.settle(WKNavigationActionPolicy::Cancel);
+    }
+  }
+
+  pub(crate) fn close(&self) {
+    self.closed.set(true);
+    self.cancel();
+  }
+}
+
+#[cfg(target_os = "macos")]
+fn main_frame_hold_handler(
+  target_is_main_frame: Option<bool>,
+  hold: Option<&crate::MainFrameNavigationHoldHandler>,
+) -> Option<&crate::MainFrameNavigationHoldHandler> {
+  hold.filter(|_| target_is_main_frame == Some(true))
+}
 
 #[cfg(target_os = "macos")]
 fn extension_tab_trace_enabled() -> bool {
@@ -59,11 +179,36 @@ fn navigation_origin_category(value: &str) -> &'static str {
   }
 }
 
+// Only a view served by a WebKit extension controller has a handler that can
+// authorize an extension child frame; every other view keeps the host policy,
+// which refuses these schemes.
 fn native_web_extension_subframe_owns_policy(
   url: &str,
   target_is_main_frame: Option<bool>,
+  has_extension_controller: impl FnOnce() -> bool,
 ) -> bool {
-  target_is_main_frame == Some(false) && url.starts_with(WEB_EXTENSION_URL_PREFIX)
+  target_is_main_frame == Some(false)
+    && WEB_EXTENSION_URL_PREFIXES
+      .iter()
+      .any(|prefix| url.starts_with(prefix))
+    && has_extension_controller()
+}
+
+// `webExtensionController` exists from macOS 15.4 and iOS 18.4; earlier
+// systems have no extension controller.
+fn has_web_extension_controller(webview: &WKWebView) -> bool {
+  // SAFETY: `webview` is the live view WebKit is asking about, so its
+  // configuration is valid; the message is sent only after the selector is
+  // confirmed, and it returns a nullable retained object.
+  unsafe {
+    let configuration = webview.configuration();
+    if !configuration.respondsToSelector(objc2::sel!(webExtensionController)) {
+      return false;
+    }
+    let controller: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
+      objc2::msg_send![&*configuration, webExtensionController];
+    controller.is_some()
+  }
 }
 
 /// URL attribution for WKNavigation's public delegate contract.
@@ -84,6 +229,7 @@ pub(crate) struct AppleNavigationEventState {
   next_record_token: Option<u128>,
   programmatic_load_depth: usize,
   deferred_flush_scheduled: bool,
+  pending_policy_refusal: Option<String>,
 }
 
 impl Default for AppleNavigationEventState {
@@ -94,6 +240,7 @@ impl Default for AppleNavigationEventState {
       next_record_token: Some(1),
       programmatic_load_depth: 0,
       deferred_flush_scheduled: false,
+      pending_policy_refusal: None,
     }
   }
 }
@@ -105,6 +252,14 @@ impl AppleNavigationEventState {
     };
     if depth > ACTIVE_APPLE_NAVIGATION_LIMIT {
       return false;
+    }
+    if self.programmatic_load_depth == 0 {
+      // Only proven policy refusals are superseded. A merely delayed start
+      // can still belong to a valid overlapping load and must keep its URL.
+      self
+        .active
+        .retain(|_, record| !record.policy_refused || record.start_observed);
+      self.pending_policy_refusal = None;
     }
     self.programmatic_load_depth = depth;
     true
@@ -124,6 +279,10 @@ impl AppleNavigationEventState {
       registration_accepted: true,
       ..Default::default()
     };
+    let policy_refused = self.pending_policy_refusal.as_deref() == Some(url.as_str());
+    if policy_refused {
+      self.pending_policy_refusal = None;
+    }
     let Some(record) = self.record_or_insert(key) else {
       update.registration_accepted = false;
       self.settle_programmatic_boundary(&mut update);
@@ -134,6 +293,7 @@ impl AppleNavigationEventState {
         update.registration_accepted = false;
       } else {
         record.programmatic_url = Some(url);
+        record.policy_refused = policy_refused;
         update.events = drain_record(key, record);
         if record.terminal.is_some() {
           self.active.remove(&key);
@@ -142,6 +302,32 @@ impl AppleNavigationEventState {
     }
     self.settle_programmatic_boundary(&mut update);
     update
+  }
+
+  fn policy_refused(&mut self, url: &str) {
+    if self.programmatic_load_depth != 0 {
+      // The policy action may belong to loadRequest before it returns its
+      // identity. An older same-address registration makes correlation
+      // ambiguous; never retire that delayed attempt as the new refusal.
+      if self.programmatic_load_depth == 1
+        && !self
+          .active
+          .values()
+          .any(|record| record.programmatic_url.as_deref() == Some(url))
+      {
+        self.pending_policy_refusal = Some(url.to_owned());
+      }
+      return;
+    }
+    let mut candidates = self
+      .active
+      .values_mut()
+      .filter(|record| !record.start_observed && record.programmatic_url.as_deref() == Some(url));
+    if let Some(record) = candidates.next() {
+      if candidates.next().is_none() {
+        record.policy_refused = true;
+      }
+    }
   }
 
   fn settle_programmatic_boundary(&mut self, update: &mut AppleNavigationUpdate) {
@@ -365,10 +551,15 @@ impl AppleNavigationEventState {
     self.next_record_token = Some(1);
     self.programmatic_load_depth = 0;
     self.deferred_flush_scheduled = false;
+    self.pending_policy_refusal = None;
   }
 }
 
 struct AppleNavigationRecord {
+  // Prevent native pointer reuse while a registration can still receive a
+  // callback. The record, not an integer address, owns the native identity.
+  navigation: Option<Retained<WKNavigation>>,
+  policy_refused: bool,
   token: u128,
   programmatic_url: Option<String>,
   committed_url: Option<String>,
@@ -385,6 +576,8 @@ struct AppleNavigationRecord {
 impl AppleNavigationRecord {
   fn new(token: u128) -> Self {
     Self {
+      navigation: None,
+      policy_refused: false,
       token,
       programmatic_url: None,
       committed_url: None,
@@ -526,6 +719,8 @@ fn apply_navigation_update(
 ) -> bool {
   if update.stop_loading {
     if let Some(webview) = webview {
+      #[cfg(target_os = "macos")]
+      this.ivars().main_frame_navigation_holds.cancel();
       unsafe { webview.stopLoading() };
     }
   }
@@ -558,6 +753,8 @@ fn schedule_deferred_navigation_flush(this: &WryNavigationDelegate) {
 }
 
 pub(crate) fn begin_programmatic_navigation(this: &WryNavigationDelegate) -> bool {
+  #[cfg(target_os = "macos")]
+  this.ivars().main_frame_navigation_holds.cancel();
   if this.ivars().navigation_event_handler.is_none() {
     return true;
   }
@@ -585,7 +782,13 @@ pub(crate) fn register_programmatic_navigation(
     return true;
   }
   let update = with_navigation_state(&this.ivars().navigation_event_state, |state| {
-    state.register_programmatic(navigation_key(navigation), url)
+    let key = navigation_key(navigation);
+    let update = state.register_programmatic(key, url);
+    if let Some(record) = state.active.get_mut(&key) {
+      // SAFETY: WebKit supplies a live navigation for this callback/load.
+      record.navigation = unsafe { Retained::retain(navigation as *const _ as *mut _) };
+    }
+    update
   });
   let accepted = update.registration_accepted;
   apply_navigation_update(this, None, update);
@@ -630,6 +833,10 @@ fn navigation_error_phase(domain: Option<&str>, code: isize) -> NavigationEventP
 
 /// The category a person can be told; never the native error text.
 fn navigation_failure(domain: Option<&str>, code: isize) -> NavigationFailure {
+  // WebKitErrorFrameLoadBlockedByContentBlocker.
+  if (domain, code) == (Some("WebKitErrorDomain"), 104) {
+    return NavigationFailure::Blocked;
+  }
   if domain != Some("NSURLErrorDomain") {
     return NavigationFailure::Other;
   }
@@ -700,9 +907,41 @@ pub(crate) fn did_fail_navigation(
   // Failed event is emitted now or from a deferred flush.
   if phase == NavigationEventPhase::Failed {
     if let Some(handler) = &this.ivars().navigation_failure_handler {
+      #[allow(unused_mut)]
+      let mut failure = navigation_failure(domain.as_deref(), error.code());
+      #[cfg(target_os = "macos")]
+      if failure == NavigationFailure::Insecure {
+        if let Some(refused) =
+          crate::wkwebview::server_trust::certificate_failure(error, error.code())
+        {
+          failure = NavigationFailure::Certificate(refused.problem);
+          if let Some(report) = &this.ivars().certificate_failure_handler {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| report(refused)));
+          }
+        }
+      }
+      // The view's current address is still the page before; only the
+      // error names the address the content rule refused.
+      let document = if failure == NavigationFailure::Blocked {
+        error
+          .userInfo()
+          .objectForKey(unsafe { NSURLErrorFailingURLErrorKey })
+          .and_then(|value| {
+            value
+              .downcast_ref::<NSURL>()
+              .and_then(|url| url.absoluteString())
+          })
+          .and_then(|value| bounded_nsstring(&value, PAGE_URL_LIMIT))
+          .map_or(crate::FailedDocument::Kept, |url| {
+            crate::FailedDocument::Refused { url }
+          })
+      } else {
+        crate::FailedDocument::Kept
+      };
       handler(
         NavigationId::from_raw(navigation_key(navigation) as u64),
-        navigation_failure(domain.as_deref(), error.code()),
+        failure,
+        document,
       );
     }
   }
@@ -717,6 +956,10 @@ pub(crate) fn did_commit_navigation(
   webview: &WKWebView,
   navigation: &WKNavigation,
 ) {
+  #[cfg(target_os = "macos")]
+  if this.ivars().navigation_event_handler.is_none() {
+    this.ivars().script_dialogs.document_committed();
+  }
   if this.ivars().navigation_event_handler.is_some() {
     let committed_url = unsafe {
       webview
@@ -728,6 +971,8 @@ pub(crate) fn did_commit_navigation(
       state.committed(navigation_key(navigation), committed_url)
     });
     if update.guard_presentation {
+      #[cfg(target_os = "macos")]
+      this.ivars().script_dialogs.document_committed();
       // WKNavigationDelegate's didCommit boundary precedes presentation of
       // the newly committed main-frame document. Hide once per exact native
       // identity before calling the embedder; duplicate callbacks cannot
@@ -797,6 +1042,13 @@ pub(crate) fn navigation_policy(
       false
     };
     if should_download {
+      #[cfg(target_os = "macos")]
+      if action
+        .targetFrame()
+        .is_some_and(|frame| frame.isMainFrame())
+      {
+        this.ivars().main_frame_navigation_holds.cancel();
+      }
       let has_download_handler = this.ivars().has_download_handler;
       if has_download_handler {
         (*handler).call((WKNavigationActionPolicy::Download,));
@@ -810,6 +1062,16 @@ pub(crate) fn navigation_policy(
         .and_then(|url| url.absoluteString())
         .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
       else {
+        let target = match action.targetFrame().map(|frame| frame.isMainFrame()) {
+          Some(true) => crate::NativeUrlTarget::MainFrame,
+          Some(false) => crate::NativeUrlTarget::Subframe,
+          None => crate::NativeUrlTarget::NewWindow,
+        };
+        #[cfg(target_os = "macos")]
+        if matches!(target, crate::NativeUrlTarget::MainFrame) {
+          this.ivars().main_frame_navigation_holds.cancel();
+        }
+        crate::report_native_url_refused(this.ivars().native_url_refused_handler.as_ref(), target);
         (*handler).call((WKNavigationActionPolicy::Cancel,));
         return;
       };
@@ -860,7 +1122,9 @@ pub(crate) fn navigation_policy(
       // verifies both the exact loaded context and `web_accessible_resources`.
       // Keep main-frame and target-less actions on the host policy path.
       let target_is_main_frame = action.targetFrame().map(|frame| frame.isMainFrame());
-      if native_web_extension_subframe_owns_policy(&url, target_is_main_frame) {
+      if native_web_extension_subframe_owns_policy(&url, target_is_main_frame, || {
+        has_web_extension_controller(webview)
+      }) {
         (*handler).call((WKNavigationActionPolicy::Allow,));
         return;
       }
@@ -877,12 +1141,65 @@ pub(crate) fn navigation_policy(
         .HTTPMethod()
         .and_then(|method| bounded_nsstring(&method, CUSTOM_PROTOCOL_METHOD_LIMIT))
         .is_some_and(|method| method == "GET");
+      let source = action.sourceFrame().map(|frame| {
+        let origin = frame.securityOrigin();
+        // An origin that does not fit is left empty: the frame is still
+        // known, its site is not.
+        let (scheme, host, port) = u16::try_from(origin.port())
+          .ok()
+          .and_then(|port| {
+            Some((
+              bounded_nsstring(&origin.protocol(), ORIGIN_PART_LIMIT)?,
+              bounded_nsstring(&origin.host(), ORIGIN_PART_LIMIT)?,
+              port,
+            ))
+          })
+          .unwrap_or_default();
+        crate::AppleNavigationSource {
+          is_main_frame: frame.isMainFrame(),
+          scheme,
+          host,
+          port,
+        }
+      });
+      #[cfg(target_os = "macos")]
+      let held = main_frame_hold_handler(
+        target_is_main_frame,
+        this.ivars().main_frame_navigation_hold.as_deref(),
+      )
+      .map(|hold| {
+        let handler = handler.copy();
+        let delegate = objc2::rc::Weak::new(this);
+        let url = url.clone();
+        let decision = this
+          .ivars()
+          .main_frame_navigation_holds
+          .begin(Box::new(move |policy| {
+            if policy == WKNavigationActionPolicy::Cancel {
+              if let Some(delegate) = delegate.load() {
+                with_navigation_state(&delegate.ivars().navigation_event_state, |state| {
+                  state.policy_refused(&url);
+                });
+              }
+            }
+            handler.call((policy,));
+          }));
+        (hold, decision)
+      });
+      #[cfg(target_os = "macos")]
+      if held
+        .as_ref()
+        .is_some_and(|(_, decision)| !decision.is_pending())
+      {
+        return;
+      }
       let policy_allows = function(
         url.clone(),
         AppleNavigationAction {
           navigation_type,
           is_get,
           target_is_main_frame,
+          source,
         },
       );
       #[cfg(target_os = "macos")]
@@ -898,18 +1215,27 @@ pub(crate) fn navigation_policy(
         );
       }
       #[cfg(target_os = "macos")]
+      if held
+        .as_ref()
+        .is_some_and(|(_, decision)| !decision.is_pending())
+      {
+        return;
+      }
+      #[cfg(target_os = "macos")]
       if policy_allows && target_is_main_frame == Some(true) {
         if let Some(observe) = &this.ivars().main_frame_navigation_attempt_handler {
           observe(url.clone());
         }
-        if let Some(hold) = &this.ivars().main_frame_navigation_hold {
-          let handler = handler.copy();
-          let resume: Box<dyn FnOnce()> =
-            Box::new(move || handler.call((WKNavigationActionPolicy::Allow,)));
-          if hold(resume) {
-            return;
-          }
-        }
+      }
+      #[cfg(target_os = "macos")]
+      if let Some((hold, decision)) = held {
+        decision.apply(policy_allows, hold);
+        return;
+      }
+      if !policy_allows && target_is_main_frame == Some(true) {
+        with_navigation_state(&this.ivars().navigation_event_state, |state| {
+          state.policy_refused(&url);
+        });
       }
       match policy_allows {
         true => (*handler).call((WKNavigationActionPolicy::Allow,)),
@@ -926,40 +1252,56 @@ pub(crate) fn navigation_policy_response(
   response: &WKNavigationResponse,
   handler: &block2::Block<dyn Fn(WKNavigationResponsePolicy)>,
 ) {
+  // SAFETY: `response` is the live object WebKit passed to this delegate
+  // call and `-response` takes no arguments. Apple declares the result
+  // nonnull, but WebKit on macOS 27 has returned nil during a
+  // process-swapping navigation, so it is received as optional instead of
+  // through the generated getter, which panics on nil.
   unsafe {
-    let can_show_mime_type = response.canShowMIMEType();
+    let native_response: Option<Retained<NSURLResponse>> = msg_send![response, response];
+    let facts = native_response.map(|native| NavigationResponseFacts {
+      can_show_mime_type: response.canShowMIMEType(),
+      attachment: native
+        .downcast_ref::<NSHTTPURLResponse>()
+        .and_then(|native| {
+          native.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition"))
+        })
+        .and_then(|value| bounded_nsstring(&value, crate::native_bounds::DOWNLOAD_FILENAME_LIMIT))
+        .is_some_and(|value| is_attachment_disposition(&value)),
+      url_admitted: !response.isForMainFrame()
+        || native
+          .URL()
+          .and_then(|url| url.absoluteString())
+          .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
+          .is_some(),
+    });
+    let policy = navigation_response_policy(facts, this.ivars().has_download_handler);
+    (*handler).call((policy,));
+  }
+}
 
-    let native_response = response.response();
-    let attachment = native_response
-      .downcast_ref::<NSHTTPURLResponse>()
-      .and_then(|response| {
-        response.valueForHTTPHeaderField(&NSString::from_str("Content-Disposition"))
-      })
-      .and_then(|value| bounded_nsstring(&value, crate::native_bounds::DOWNLOAD_FILENAME_LIMIT))
-      .is_some_and(|value| is_attachment_disposition(&value));
-    if !can_show_mime_type || attachment {
-      let has_download_handler = this.ivars().has_download_handler;
-      if has_download_handler {
-        (*handler).call((WKNavigationResponsePolicy::Download,));
-      } else {
-        (*handler).call((WKNavigationResponsePolicy::Cancel,));
-      }
-      return;
-    }
+struct NavigationResponseFacts {
+  can_show_mime_type: bool,
+  attachment: bool,
+  url_admitted: bool,
+}
 
-    if response.isForMainFrame() {
-      let response = response.response();
-      let Some(_url) = response
-        .URL()
-        .and_then(|url| url.absoluteString())
-        .and_then(|url| bounded_nsstring(&url, PAGE_URL_LIMIT))
-      else {
-        (*handler).call((WKNavigationResponsePolicy::Cancel,));
-        return;
-      };
-    }
-
-    (*handler).call((WKNavigationResponsePolicy::Allow,));
+fn navigation_response_policy(
+  response: Option<NavigationResponseFacts>,
+  has_download_handler: bool,
+) -> WKNavigationResponsePolicy {
+  let Some(response) = response else {
+    return WKNavigationResponsePolicy::Cancel;
+  };
+  if !response.can_show_mime_type || response.attachment {
+    return match has_download_handler {
+      true => WKNavigationResponsePolicy::Download,
+      false => WKNavigationResponsePolicy::Cancel,
+    };
+  }
+  match response.url_admitted {
+    true => WKNavigationResponsePolicy::Allow,
+    false => WKNavigationResponsePolicy::Cancel,
   }
 }
 
@@ -967,6 +1309,8 @@ pub(crate) fn web_content_process_did_terminate(
   this: &WryNavigationDelegate,
   _webview: &WKWebView,
 ) {
+  #[cfg(target_os = "macos")]
+  this.ivars().main_frame_navigation_holds.cancel();
   with_navigation_state(&this.ivars().navigation_event_state, |state| {
     state.clear();
   });
@@ -980,6 +1324,98 @@ pub(crate) fn web_content_process_did_terminate(
 #[cfg(test)]
 mod navigation_event_state_tests {
   use super::*;
+
+  #[cfg(target_os = "macos")]
+  mod main_frame_holds {
+    use super::*;
+    use objc2_web_kit::WKNavigationActionPolicy as Policy;
+
+    fn answer(log: &Rc<RefCell<Vec<WKNavigationActionPolicy>>>) -> PolicyAnswer {
+      let log = log.clone();
+      Box::new(move |policy| log.borrow_mut().push(policy))
+    }
+
+    fn defer(decision: &Rc<MainFramePolicyDecision>) -> MainFrameNavigationHold {
+      let waiting = Rc::new(RefCell::new(None));
+      let saved = waiting.clone();
+      decision.apply(true, &move |hold| {
+        saved.replace(Some(hold));
+        true
+      });
+      waiting.take().unwrap()
+    }
+
+    #[test]
+    fn main_frame_hold_preserves_immediate_admission_and_policy_refusal() {
+      let holds = MainFrameNavigationHolds::default();
+      let log = Rc::new(RefCell::new(Vec::new()));
+      holds.begin(answer(&log)).apply(true, &|hold| {
+        assert!(hold.is_pending());
+        false
+      });
+      let called = Rc::new(Cell::new(false));
+      let observed = called.clone();
+      holds.begin(answer(&log)).apply(false, &move |_| {
+        observed.set(true);
+        true
+      });
+      assert!(!called.get());
+      assert_eq!(*log.borrow(), [Policy::Allow, Policy::Cancel]);
+
+      let hook = |_: MainFrameNavigationHold| true;
+      assert!(main_frame_hold_handler(Some(true), Some(&hook)).is_some());
+      assert!(main_frame_hold_handler(Some(true), None).is_none());
+      assert!(main_frame_hold_handler(Some(false), Some(&hook)).is_none());
+      assert!(main_frame_hold_handler(None, Some(&hook)).is_none());
+    }
+
+    #[test]
+    fn a_replacement_cancels_only_its_own_views_hold() {
+      let first_view = MainFrameNavigationHolds::default();
+      let second_view = MainFrameNavigationHolds::default();
+      let log = Rc::new(RefCell::new(Vec::new()));
+      let first = first_view.begin(answer(&log));
+      let old = defer(&first);
+      let other = second_view.begin(answer(&log));
+      let other_waiting = defer(&other);
+      let replacement = first_view.begin(answer(&log));
+      assert!(!old.is_pending());
+      old.resume();
+      assert!(other.is_pending());
+      assert!(replacement.is_pending());
+      assert_eq!(*log.borrow(), [Policy::Cancel]);
+
+      let waiting = defer(&replacement);
+      assert_eq!(*log.borrow(), [Policy::Cancel]);
+      waiting.resume();
+      first_view.cancel();
+      assert_eq!(*log.borrow(), [Policy::Cancel, Policy::Allow]);
+      second_view.close();
+      other_waiting.resume();
+      assert_eq!(
+        *log.borrow(),
+        [Policy::Cancel, Policy::Allow, Policy::Cancel]
+      );
+    }
+
+    #[test]
+    fn teardown_cancels_pending_and_reentrant_policy_answers_once() {
+      let holds = Rc::new(MainFrameNavigationHolds::default());
+      let weak_holds = Rc::downgrade(&holds);
+      let log = Rc::new(RefCell::new(Vec::new()));
+      let first_answer = answer(&log);
+      let first = holds.begin(Box::new(move |policy| {
+        first_answer(policy);
+        weak_holds.upgrade().unwrap().close();
+      }));
+      let stale = defer(&first);
+      let replacement = holds.begin(answer(&log));
+      assert!(!replacement.is_pending());
+      stale.resume();
+      assert!(!holds.begin(answer(&log)).is_pending());
+      assert_eq!(*log.borrow(), [Policy::Cancel; 3]);
+    }
+  }
 
   fn phases(update: &AppleNavigationUpdate) -> Vec<NavigationEventPhase> {
     update.events.iter().map(|event| event.phase).collect()
@@ -996,24 +1432,44 @@ mod navigation_event_state_tests {
 
   #[test]
   fn web_extension_child_resources_delegate_only_to_native_webkit_policy() {
-    let extension = "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html";
-    assert!(native_web_extension_subframe_owns_policy(
-      extension,
-      Some(false)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(
-      extension,
-      Some(true)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(extension, None));
-    assert!(!native_web_extension_subframe_owns_policy(
-      "https://example.com/frame",
-      Some(false)
-    ));
-    assert!(!native_web_extension_subframe_owns_policy(
+    let owns = |url, frame| native_web_extension_subframe_owns_policy(url, frame, || true);
+    for extension in [
+      "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html",
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu-button.html",
+    ] {
+      assert!(owns(extension, Some(false)));
+      assert!(!owns(extension, Some(true)));
+      assert!(!owns(extension, None));
+    }
+    assert!(!owns("https://example.com/frame", Some(false)));
+    assert!(!owns(
       "webkit-extensionx://abcdefghijklmnopabcdefghijklmnop/frame",
       Some(false)
     ));
+    assert!(!owns(
+      "chrome-extensionx://nngceckbapebfimnlniiiahkandclblb/frame",
+      Some(false)
+    ));
+  }
+
+  #[test]
+  fn views_without_an_extension_controller_keep_extension_frames_on_host_policy() {
+    // A raw tab, the browser chrome or a private tab: a page framing an
+    // extension resource there stays with the host callback, which refuses it.
+    for extension in [
+      "webkit-extension://abcdefghijklmnopabcdefghijklmnop/inline/menu.html",
+      "chrome-extension://nngceckbapebfimnlniiiahkandclblb/overlay/menu-button.html",
+    ] {
+      assert!(!native_web_extension_subframe_owns_policy(
+        extension,
+        Some(false),
+        || false
+      ));
+    }
+    // The controller is only consulted for an extension child frame.
+    native_web_extension_subframe_owns_policy("https://example.com/", Some(false), || {
+      panic!("consulted for a web frame")
+    });
   }
 
   #[test]
@@ -1327,10 +1783,71 @@ mod navigation_event_state_tests {
   }
 
   #[test]
+  fn superseded_unstarted_programmatic_loads_release_identity_capacity() {
+    let mut state = AppleNavigationEventState::default();
+    for key in 0..(ACTIVE_APPLE_NAVIGATION_LIMIT * 3) {
+      assert!(register(&mut state, key, "https://policy-cancelled.example/").registration_accepted);
+      state.policy_refused("https://policy-cancelled.example/");
+      assert_eq!(state.active.len(), 1);
+    }
+    assert!(register(&mut state, 999, "https://allowed.example/").registration_accepted);
+    assert_eq!(
+      phases(&state.started(999)),
+      vec![NavigationEventPhase::Started]
+    );
+    assert_eq!(
+      phases(&state.committed(999, Some("https://allowed.example/".into()))),
+      vec![NavigationEventPhase::Committed]
+    );
+  }
+
+  #[test]
+  fn reentrant_policy_refusal_is_bound_when_load_request_returns() {
+    let mut state = AppleNavigationEventState::default();
+    assert!(state.begin_programmatic());
+    state.policy_refused("https://refused.example/");
+    assert!(
+      state
+        .register_programmatic(71, "https://refused.example/".into())
+        .registration_accepted
+    );
+    assert!(register(&mut state, 72, "https://allowed.example/").registration_accepted);
+    assert!(!state.active.contains_key(&71));
+    assert_eq!(state.started(72).events[0].url, "https://allowed.example/");
+  }
+
+  #[test]
+  fn same_address_reentrant_refusal_cannot_retire_an_older_delayed_load() {
+    let mut state = AppleNavigationEventState::default();
+    assert!(register(&mut state, 81, "https://same.example/").registration_accepted);
+    assert!(state.begin_programmatic());
+    state.policy_refused("https://same.example/");
+    assert!(
+      state
+        .register_programmatic(82, "https://same.example/".into())
+        .registration_accepted
+    );
+    assert!(register(&mut state, 83, "https://other.example/").registration_accepted);
+    assert_eq!(state.started(81).events[0].url, "https://same.example/");
+    assert!(state.active.contains_key(&82));
+  }
+
+  #[test]
+  fn unstarted_unproven_attempts_still_obey_the_identity_budget() {
+    let mut state = AppleNavigationEventState::default();
+    for key in 0..ACTIVE_APPLE_NAVIGATION_LIMIT {
+      assert!(register(&mut state, key, "https://delayed.example/").registration_accepted);
+    }
+    assert!(!register(&mut state, 999, "https://overflow.example/").registration_accepted);
+    assert_eq!(state.active.len(), ACTIVE_APPLE_NAVIGATION_LIMIT);
+  }
+
+  #[test]
   fn active_navigation_identity_budget_is_fail_closed() {
     let mut state = AppleNavigationEventState::default();
     for key in 0..ACTIVE_APPLE_NAVIGATION_LIMIT {
       assert!(register(&mut state, key, &format!("https://{key}.example/")).registration_accepted);
+      state.started(key);
     }
     assert!(state.begin_programmatic());
     let overflow = state.register_programmatic(
@@ -1408,6 +1925,64 @@ mod attachment_tests {
 }
 
 #[cfg(test)]
+mod response_policy_tests {
+  use super::{navigation_response_policy, NavigationResponseFacts};
+  use objc2_web_kit::WKNavigationResponsePolicy;
+
+  fn facts(
+    can_show_mime_type: bool,
+    attachment: bool,
+    url_admitted: bool,
+  ) -> NavigationResponseFacts {
+    NavigationResponseFacts {
+      can_show_mime_type,
+      attachment,
+      url_admitted,
+    }
+  }
+
+  #[test]
+  fn a_missing_response_is_cancelled() {
+    assert_eq!(
+      navigation_response_policy(None, true),
+      WKNavigationResponsePolicy::Cancel
+    );
+    assert_eq!(
+      navigation_response_policy(None, false),
+      WKNavigationResponsePolicy::Cancel
+    );
+  }
+
+  #[test]
+  fn undisplayable_and_attachment_responses_download_only_with_a_handler() {
+    for response in [facts(false, false, true), facts(true, true, true)] {
+      assert_eq!(
+        navigation_response_policy(Some(response), true),
+        WKNavigationResponsePolicy::Download
+      );
+    }
+    for response in [facts(false, false, true), facts(true, true, true)] {
+      assert_eq!(
+        navigation_response_policy(Some(response), false),
+        WKNavigationResponsePolicy::Cancel
+      );
+    }
+  }
+
+  #[test]
+  fn displayable_responses_are_allowed_only_with_an_admitted_url() {
+    assert_eq!(
+      navigation_response_policy(Some(facts(true, false, true)), false),
+      WKNavigationResponsePolicy::Allow
+    );
+    assert_eq!(
+      navigation_response_policy(Some(facts(true, false, false)), true),
+      WKNavigationResponsePolicy::Cancel
+    );
+  }
+}
+
+#[cfg(test)]
 mod cancellation_tests {
   use super::*;
 
@@ -1429,6 +2004,10 @@ mod cancellation_tests {
     assert_eq!(
       navigation_failure(Some("WebKitErrorDomain"), -1009),
       NavigationFailure::Other
+    );
+    assert_eq!(
+      navigation_failure(Some("WebKitErrorDomain"), 104),
+      NavigationFailure::Blocked
     );
   }
   #[test]

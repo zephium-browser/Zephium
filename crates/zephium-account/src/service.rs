@@ -31,6 +31,8 @@ const MAX_NAME_CHARS: usize = 100;
 const RESEND_AFTER: Duration = Duration::from_secs(60);
 /// Plan and usage older than this are fetched again when someone looks.
 const STALE_AFTER: Duration = Duration::from_secs(60);
+/// How long a vault that refused is left alone before it is asked again.
+const VAULT_PAUSE: Duration = Duration::from_secs(60);
 const CHECKOUT_WATCH: Duration = Duration::from_secs(15 * 60);
 /// How long a received checkout link is offered again instead of asking the
 /// service for another, which it refuses while one is open.
@@ -83,6 +85,9 @@ pub struct View {
     /// The revision of the account picture held here, to ask
     /// [`Service::avatar_image`] for; none shows initials.
     pub avatar: Option<u32>,
+    /// The session is signed in, but the OS vault would not give up its
+    /// bearer, so nothing that needs the server can run.
+    pub vault_fault: bool,
 }
 
 /// The account picture's bytes, for one account at one address on one server.
@@ -157,6 +162,10 @@ struct Inner {
     avatar_missing: Option<String>,
     /// Cancels the upload under way.
     avatar_upload: Option<Arc<Notify>>,
+    /// When the vault last refused to give up the bearer. Until the pause
+    /// has passed it is not asked again, so a denied Keychain is not
+    /// prompted on every call.
+    vault_fault: Option<Instant>,
 }
 
 impl Inner {
@@ -178,6 +187,7 @@ impl Inner {
         self.checkout_link = None;
         self.avatar = None;
         self.avatar_missing = None;
+        self.vault_fault = None;
         if let Some(cancel) = self.avatar_upload.take() {
             cancel.notify_one();
         }
@@ -292,6 +302,7 @@ impl Service {
                 avatar_revisions: 0,
                 avatar_missing: None,
                 avatar_upload: None,
+                vault_fault: None,
             }),
             observer: OnceLock::new(),
             avatar_writes: tokio::sync::Mutex::new(()),
@@ -343,6 +354,7 @@ impl Service {
             billing_review: inner.billing_review,
             plan_change: inner.visible_change().cloned(),
             avatar: inner.held_avatar().map(|held| held.revision),
+            vault_fault: inner.signed_in && inner.vault_fault.is_some(),
         }
     }
 
@@ -521,6 +533,12 @@ impl Service {
             if let Some(token) = &inner.token {
                 return Ok(token.clone());
             }
+            if inner
+                .vault_fault
+                .is_some_and(|at| at.elapsed() < VAULT_PAUSE)
+            {
+                return Err(AccountError::Vault);
+            }
             (inner.epoch, inner.origin())
         };
         let token = match self.vault.load(&origin) {
@@ -529,13 +547,32 @@ impl Service {
                 self.forget(epoch);
                 return Err(AccountError::SignedOut);
             }
-            Err(VaultFault::Inaccessible) => return Err(AccountError::Vault),
+            Err(VaultFault::Inaccessible) => {
+                let first = {
+                    let mut inner = self.lock();
+                    let first = inner.epoch == epoch && inner.vault_fault.is_none();
+                    if inner.epoch == epoch {
+                        inner.vault_fault = Some(Instant::now());
+                    }
+                    first
+                };
+                if first {
+                    self.notify();
+                }
+                return Err(AccountError::Vault);
+            }
         };
         let mut inner = self.lock();
         if inner.epoch != epoch || !inner.signed_in {
             return Err(AccountError::SignedOut);
         }
-        Ok(inner.token.get_or_insert(token).clone())
+        let recovered = inner.vault_fault.take().is_some();
+        let token = inner.token.get_or_insert(token).clone();
+        drop(inner);
+        if recovered {
+            self.notify();
+        }
+        Ok(token)
     }
 
     /// The hosted gateway refused the bearer: the session is over.
@@ -1201,8 +1238,11 @@ impl Service {
     pub async fn sign_out(&self) -> Result<(), AccountError> {
         let (client, epoch) = self.client();
         let origin = self.origin();
-        if let Ok(token) = self.bearer() {
-            let _ = client.sign_out(&token).await;
+        // A vault that just refused is not asked again to tell the server.
+        if self.lock().vault_fault.is_none() {
+            if let Ok(token) = self.bearer() {
+                let _ = client.sign_out(&token).await;
+            }
         }
         self.forget(epoch);
         self.forget_local_history();

@@ -225,6 +225,15 @@ pub(crate) fn close(shared: &Shared, extension: &str) -> bool {
     page.inspect(Page::close).is_some()
 }
 
+/// The open offscreen document's address.
+pub(crate) fn url(shared: &Shared, extension: &str) -> Option<String> {
+    let documents = shared.offscreen.0.borrow();
+    let page = documents.get(extension)?;
+    unsafe { page.view.URL() }
+        .and_then(|url| url.absoluteString())
+        .map(|url| url.to_string())
+}
+
 pub(crate) fn has(shared: &Shared, extension: &str) -> bool {
     shared.offscreen.0.borrow().contains_key(extension)
 }
@@ -297,9 +306,35 @@ fn resolve(context: &WKWebExtensionContext, path: &str) -> Result<Retained<NSURL
     let url = NSURL::URLWithString_relativeToURL(&NSString::from_str(path), Some(&base))
         .and_then(|url| url.absoluteURL())
         .ok_or("Invalid offscreen document URL.")?;
-    let same_origin = url.scheme() == base.scheme() && url.host() == base.host();
+    // NSURL can expose Swift-backed NSString values whose Objective-C equality
+    // signature differs from NSObject's. Compare their values in Rust instead.
+    let same_origin = url.scheme().map(|value| value.to_string())
+        == base.scheme().map(|value| value.to_string())
+        && url.host().map(|value| value.to_string()) == base.host().map(|value| value.to_string());
     if !same_origin {
         return Err("The offscreen document must be one of the extension's own pages.".into());
     }
     Ok(url)
+}
+
+/// Main-thread origin qualification used only by the standalone lab.
+#[cfg(feature = "lab")]
+pub(crate) fn verify_origin(context: &WKWebExtensionContext) -> Result<(), String> {
+    let own = resolve(context, "manifest.json")?;
+    resolve(
+        context,
+        &own.absoluteString().ok_or("missing own URL")?.to_string(),
+    )?;
+    let base = unsafe { context.baseURL() };
+    let scheme = base.scheme().ok_or("missing extension scheme")?.to_string();
+    let host = base.host().ok_or("missing extension host")?.to_string();
+    for path in [
+        format!("https://{host}/manifest.json"),
+        format!("{scheme}://different-origin.invalid/manifest.json"),
+    ] {
+        if resolve(context, &path).is_ok() {
+            return Err(format!("offscreen origin admitted {path}"));
+        }
+    }
+    Ok(())
 }

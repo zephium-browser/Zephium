@@ -175,7 +175,11 @@ impl ReadFailureTrace {
             zephium_app::work_trace::record(format_args!(
                 "work: phase=page event=browser_failure cause={failure:?}{} state={:?} calls={} actions={} snapshots={} inspection_refusals={} navigation_refusals={} action_refusals={} last_action_refusal={:?} last_tool={:?} content=redacted",
                 if matches!(format!("{failure:?}").as_str(), "Contract" | "Browser(Continuation)") {
-                    format!(" site={}", zephium_agent_controller::last_contract_site())
+                    format!(
+                        " site={} persistence={:?}",
+                        zephium_agent_controller::last_contract_site(),
+                        snapshot.persistence_failure
+                    )
                 } else if format!("{failure:?}") == "Native(TimedOut)" {
                     format!(" timeout_stage={}", zephium_engine::last_action_timeout_stage())
                 } else {
@@ -625,7 +629,8 @@ impl NativeWorkComposition {
         } else if settings.decisions == WorkDecisionPreference::Interactions {
             settings.decisions = WorkDecisionPreference::Disabled;
         }
-        let decisions = settings.decisions;
+        let decisions = effective_decision_preference(probe.no_usage_charge(), settings.decisions);
+        settings.decisions = decisions;
         let mut request = request;
         if page_task(&request) {
             request.limits.cost_micro_usd = request.limits.cost_micro_usd.min(page_task_cost(
@@ -979,9 +984,14 @@ impl NativeWorkComposition {
         let construction_attempt = invocation.construction_attempt;
         let mut ready_deadline = original_deadline
             .min(Instant::now() + construction_attempt.budget() + Duration::from_secs(15));
-        configure_decisions(&mut invocation, decisions, original_deadline)
-            .await
-            .inspect_err(|error| refusals.report(&format!("decisions:{error:?}")))?;
+        configure_decisions(
+            &mut invocation,
+            decisions,
+            attempt.no_usage_charge(),
+            original_deadline,
+        )
+        .await
+        .inspect_err(|error| refusals.report(&format!("decisions:{error:?}")))?;
         // Getting ready is timed from the launch, not from loading keys.
         ready_deadline = ready_deadline.max(
             original_deadline
@@ -1273,7 +1283,12 @@ impl NativeWorkComposition {
                     trace("close:abandoned");
                     return Ok(BrowserRun {
                         status: WorkAttemptStatus::Failed,
-                        usage: Some(uncertain_usage(settled, model_in_flight, limits)),
+                        usage: Some(uncertain_usage(
+                            settled,
+                            model_in_flight,
+                            limits,
+                            attempt.no_usage_charge(),
+                        )),
                         artifacts: vec![],
                         intervention: None,
                         note: Some(
@@ -1610,8 +1625,13 @@ impl NativeWorkComposition {
                                 .map_err(|_| WorkError::Invalid)?;
                         }
                         resume_stage = "decisions";
-                        configure_decisions(&mut invocation, plan.decisions, resume_deadline)
-                            .await?;
+                        configure_decisions(
+                            &mut invocation,
+                            plan.decisions,
+                            attempt.no_usage_charge(),
+                            resume_deadline,
+                        )
+                        .await?;
                         resume_stage = "spec";
                         let successor_run = invocation
                             .input
@@ -1780,7 +1800,12 @@ impl NativeWorkComposition {
                     trace("close:uncertain");
                     return Ok(BrowserRun {
                         status: WorkAttemptStatus::Failed,
-                        usage: Some(uncertain_usage(settled, model_in_flight, limits)),
+                        usage: Some(uncertain_usage(
+                            settled,
+                            model_in_flight,
+                            limits,
+                            attempt.no_usage_charge(),
+                        )),
                         artifacts: vec![],
                         note: Some(
                             storage_note(&snapshot)
@@ -1788,6 +1813,7 @@ impl NativeWorkComposition {
                                     construction_note(
                                         snapshot.construction_timed_out,
                                         construction_attempt,
+                                        snapshot.failure,
                                     )
                                 })
                                 .or_else(|| intervention_note(intervention.as_ref()))
@@ -2008,7 +2034,7 @@ impl NativeWorkComposition {
                     }
                     if let Some(request) = guard.0.take_public_asset() {
                         let bytes = bounded_public_record_fetch(
-                            zephium_agentic::public_asset::fetch_public_record_image(request.url()),
+                            public_record_image(self.public_routes.get(), request.url()),
                             || {
                                 original_spec
                                     .clock
@@ -2202,17 +2228,17 @@ impl NativeWorkComposition {
                         (signed_in.is_some() || stalled).then(|| {
                             add_usage(
                                 prior_usage,
-                                uncertain_usage(settled, model_in_flight, limits),
+                                uncertain_usage(
+                                    settled,
+                                    model_in_flight,
+                                    limits,
+                                    attempt.no_usage_charge(),
+                                ),
                             )
                             .filter(|usage| usage.within(limits))
                         })?
                     })
-                    .unwrap_or(WorkUsage {
-                        model_tokens: limits.model_tokens,
-                        cost_micro_usd: limits.cost_micro_usd,
-                        operations: limits.operations,
-                        accounting: WorkUsageAccounting::ConservativeReservation,
-                    }),
+                    .unwrap_or_else(|| page_reservation(limits, attempt.no_usage_charge())),
                 );
                 // A signed-in page's title never leaves the page.
                 // A search's results page reads as a Read but its step is the
@@ -2310,7 +2336,7 @@ impl NativeWorkComposition {
                 }
                 let note = match disposition {
                     _ if snapshot.construction_timed_out => {
-                        construction_note(true, construction_attempt)
+                        construction_note(true, construction_attempt, snapshot.failure)
                     }
                     _ if storage_note(&snapshot).is_some() => storage_note(&snapshot),
                     _ if not_ready => Some("The browser was not ready for this page"),
@@ -2539,10 +2565,15 @@ fn intervention_note(intervention: Option<&WorkInterventionV1>) -> Option<&'stat
     })
 }
 /// Closed words for a page read that ended in failure; never page or model text.
+/// A site found unreachable after the load timed out says so.
 fn construction_note(
     timed_out: bool,
     attempt: zephium_agentic::WorkBrowserConstructionAttempt,
+    failure: Option<AgentWorkFailure>,
 ) -> Option<&'static str> {
+    if timed_out && failure == Some(AgentWorkFailure::Unreachable) {
+        return Some(zephium_core::work::runtime::read_note::UNREACHABLE);
+    }
     timed_out.then_some(match attempt {
         zephium_agentic::WorkBrowserConstructionAttempt::Initial => {
             zephium_core::work::runtime::read_note::CONSTRUCTION_TIMEOUT
@@ -2579,6 +2610,7 @@ fn failure_note(failure: AgentWorkFailure) -> &'static str {
         AgentWorkFailure::Deadline => "The page took too long",
         AgentWorkFailure::ContextLost => zephium_core::work::runtime::read_note::UNSETTLED,
         AgentWorkFailure::Redirected => "The page redirects elsewhere",
+        AgentWorkFailure::Unreachable => zephium_core::work::runtime::read_note::UNREACHABLE,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             "The page needed more steps than one read allows"
         }
@@ -2636,18 +2668,28 @@ fn settled_model_usage(settled: WorkUsage, tokens: u64, cost_micro_usd: u64) -> 
 }
 /// Model calls settle before their tool runs, so a page failing under a tool
 /// has an exact model bill. A call still in flight keeps the reservation.
+fn page_reservation(limits: WorkExecutionLimits, no_usage_charge: bool) -> WorkUsage {
+    WorkUsage {
+        model_tokens: limits.model_tokens,
+        cost_micro_usd: if no_usage_charge {
+            0
+        } else {
+            limits.cost_micro_usd
+        },
+        operations: limits.operations,
+        accounting: WorkUsageAccounting::ConservativeReservation,
+    }
+}
 fn uncertain_usage(
     settled: WorkUsage,
     model_in_flight: bool,
     limits: WorkExecutionLimits,
+    no_usage_charge: bool,
 ) -> WorkUsage {
-    if model_in_flight || !settled.within(limits) {
-        WorkUsage {
-            model_tokens: limits.model_tokens,
-            cost_micro_usd: limits.cost_micro_usd,
-            operations: limits.operations,
-            accounting: WorkUsageAccounting::ConservativeReservation,
-        }
+    if model_in_flight {
+        page_reservation(limits, no_usage_charge)
+    } else if !settled.within(limits) {
+        settled.bounded_by(limits)
     } else {
         WorkUsage {
             operations: settled.operations.max(1),
@@ -2744,6 +2786,7 @@ fn page_failure_outcome(failure: AgentWorkFailure) -> WorkPageOutcomeV1 {
     use WorkPageOutcomeV1 as Outcome;
     let stage = match failure {
         AgentWorkFailure::Redirected => return Outcome::Redirected,
+        AgentWorkFailure::Unreachable => return Outcome::SiteError,
         AgentWorkFailure::Cancelled => return Outcome::Cancelled,
         AgentWorkFailure::Browser(Browser::TurnLimit | Browser::ActionLimit) => {
             return Outcome::TooManySteps;
@@ -2816,6 +2859,18 @@ mod closed_result_tests {
         ] {
             assert_eq!(failure_note(failure), "Work could not bind its decision to the current page state; this does not establish a site loading failure");
         }
+    }
+
+    #[test]
+    fn an_unreachable_site_is_a_site_error_not_an_unsettled_page() {
+        assert_eq!(
+            failure_note(AgentWorkFailure::Unreachable),
+            zephium_core::work::runtime::read_note::UNREACHABLE
+        );
+        assert_eq!(
+            page_failure_outcome(AgentWorkFailure::Unreachable),
+            WorkPageOutcomeV1::SiteError
+        );
     }
 
     #[test]
@@ -3049,16 +3104,35 @@ mod closed_result_tests {
     fn construction_notes_require_native_timeout_and_distinguish_the_retry() {
         use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
         use zephium_core::work::runtime::read_note;
-        assert_eq!(construction_note(false, Attempt::Initial), None);
-        assert_eq!(construction_note(false, Attempt::SlowPageRetry), None);
-        assert_eq!(
-            construction_note(true, Attempt::Initial),
-            Some(read_note::CONSTRUCTION_TIMEOUT)
-        );
-        assert_eq!(
-            construction_note(true, Attempt::SlowPageRetry),
-            Some(read_note::SLOW_SITE)
-        );
+        for failure in [None, Some(AgentWorkFailure::Deadline)] {
+            assert_eq!(construction_note(false, Attempt::Initial, failure), None);
+            assert_eq!(
+                construction_note(false, Attempt::SlowPageRetry, failure),
+                None
+            );
+            assert_eq!(
+                construction_note(true, Attempt::Initial, failure),
+                Some(read_note::CONSTRUCTION_TIMEOUT)
+            );
+            assert_eq!(
+                construction_note(true, Attempt::SlowPageRetry, failure),
+                Some(read_note::SLOW_SITE)
+            );
+        }
+    }
+
+    #[test]
+    fn a_site_found_unreachable_after_a_timeout_says_it_could_not_be_reached() {
+        use zephium_agentic::WorkBrowserConstructionAttempt as Attempt;
+        use zephium_core::work::runtime::read_note;
+        let unreachable = Some(AgentWorkFailure::Unreachable);
+        for attempt in [Attempt::Initial, Attempt::SlowPageRetry] {
+            assert_eq!(
+                construction_note(true, attempt, unreachable),
+                Some(read_note::UNREACHABLE)
+            );
+            assert_eq!(construction_note(false, attempt, unreachable), None);
+        }
     }
 
     #[test]
@@ -3336,7 +3410,7 @@ mod closed_result_tests {
             9500,
             2600,
         );
-        let usage = uncertain_usage(settled, false, limits);
+        let usage = uncertain_usage(settled, false, limits, false);
         assert_eq!(
             (usage.model_tokens, usage.cost_micro_usd, usage.operations),
             (18_500, 5_100, 2)
@@ -3345,15 +3419,21 @@ mod closed_result_tests {
             usage.accounting,
             WorkUsageAccounting::ConservativeReservation
         );
-        let reserved = uncertain_usage(settled, true, limits);
+        let reserved = uncertain_usage(settled, true, limits, false);
         assert_eq!(
             (reserved.model_tokens, reserved.cost_micro_usd),
             (100_000, 100_000)
         );
-        let empty = uncertain_usage(WorkUsage::default(), false, limits);
+        let local = uncertain_usage(WorkUsage::default(), true, limits, true);
+        assert_eq!(local.cost_micro_usd, 0);
+        assert_eq!(local.model_tokens, limits.model_tokens);
+        assert_eq!(local.operations, limits.operations);
+        let empty = uncertain_usage(WorkUsage::default(), false, limits, false);
         assert_eq!((empty.model_tokens, empty.operations), (0, 1));
         let over = settled_model_usage(WorkUsage::default(), 200_000, 10);
-        assert_eq!(uncertain_usage(over, false, limits).model_tokens, 100_000);
+        let bounded = uncertain_usage(over, false, limits, false);
+        assert_eq!(bounded.model_tokens, 100_000);
+        assert_eq!(bounded.cost_micro_usd, 10);
     }
 
     #[test]
@@ -3443,12 +3523,27 @@ struct ResumePlan {
     #[cfg(feature = "public-qualification")]
     loopback_anonymous: bool,
 }
+
+/// The original attempt's pricing policy survives every held-page continuation.
+fn effective_decision_preference(
+    no_usage_charge: bool,
+    preference: WorkDecisionPreference,
+) -> WorkDecisionPreference {
+    if no_usage_charge && preference != WorkDecisionPreference::Disabled {
+        WorkDecisionPreference::Emulation
+    } else {
+        preference
+    }
+}
+
 async fn configure_decisions(
     invocation: &mut crate::TrustedWorkRequest,
     preference: WorkDecisionPreference,
+    no_usage_charge: bool,
     deadline: Instant,
 ) -> Result<(), WorkError> {
     use zephium_agent_controller::AgentBrowserDecisionProvider;
+    let preference = effective_decision_preference(no_usage_charge, preference);
     if preference == WorkDecisionPreference::Disabled {
         return Ok(());
     }
@@ -3770,9 +3865,23 @@ fn compile_step(
     resume: Option<ResumeCompile>,
     gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
+    if probe.no_usage_charge()
+        && !free_page_models(&settings.access, settings.decision_model.as_ref())
+    {
+        return Err(refused(&settings, "pricing", WorkError::Invalid));
+    }
     let decision_model = settings.decision_model.take();
     compile_page_step(probe, request, settings, collection, resume, gate, None)
         .map(|request| with_decision_model(request, decision_model))
+}
+
+fn free_page_models(
+    access: &AgentBrowserModelAccess,
+    decision: Option<&AgentProviderModelClient>,
+) -> bool {
+    let free = |model: &AgentProviderModelClient| model.reservation_cost_micro_usd(1, 1) == Some(0);
+    matches!(access, AgentBrowserModelAccess::Chosen(model) if free(model))
+        && decision.is_none_or(free)
 }
 
 fn with_decision_model(
@@ -3794,6 +3903,11 @@ fn compile_page_step(
     gate: Option<std::sync::Arc<crate::open_objective::site_work::SiteGate>>,
     results: Option<std::sync::Arc<crate::open_objective::results_page::ResultsReader>>,
 ) -> Result<crate::TrustedWorkRequest, WorkError> {
+    if probe.no_usage_charge()
+        && !free_page_models(&settings.access, settings.decision_model.as_ref())
+    {
+        return Err(refused(&settings, "pricing", WorkError::Invalid));
+    }
     if settings.profile.profile() != probe.profile() {
         return Err(refused(&settings, "profile", WorkError::ProfileUnavailable));
     }
@@ -4478,6 +4592,39 @@ mod decision_credential_tests {
 mod human_budget_tests {
     use super::*;
 
+    #[test]
+    fn local_decisions_remain_local_across_repeated_human_resumes() {
+        for selected in [
+            WorkDecisionPreference::Recommended,
+            WorkDecisionPreference::Interactions,
+            WorkDecisionPreference::Emulation,
+        ] {
+            let captured = effective_decision_preference(true, selected);
+            assert_eq!(captured, WorkDecisionPreference::Emulation);
+            let mut resumed = captured;
+            for _ in 0..3 {
+                resumed = effective_decision_preference(true, resumed);
+                assert_eq!(resumed, WorkDecisionPreference::Emulation);
+            }
+        }
+    }
+
+    #[test]
+    fn local_resumes_preserve_disabled_and_paid_resumes_preserve_their_provider() {
+        assert_eq!(
+            effective_decision_preference(true, WorkDecisionPreference::Disabled),
+            WorkDecisionPreference::Disabled
+        );
+        for selected in [
+            WorkDecisionPreference::Recommended,
+            WorkDecisionPreference::Interactions,
+            WorkDecisionPreference::Emulation,
+            WorkDecisionPreference::Disabled,
+        ] {
+            assert_eq!(effective_decision_preference(false, selected), selected);
+        }
+    }
+
     struct Unused;
 
     impl work_model::WorkModelClient for Unused {
@@ -4488,6 +4635,38 @@ mod human_budget_tests {
         ) -> work_model::WorkModelFuture<'a> {
             Box::pin(async { Err(work_model::WorkModelError::Network) })
         }
+    }
+
+    #[test]
+    fn a_zero_charge_fact_rejects_paid_page_or_decision_models() {
+        let mut entry = zephium_agentic::lead::models::builtin()
+            .into_iter()
+            .next()
+            .unwrap();
+        let paid = AgentProviderModelClient::try_new(&entry, std::sync::Arc::new(Unused)).unwrap();
+        entry.model.provider = work_model::WorkModelProvider::Compatible;
+        entry.price = Some(work_model::WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        });
+        let free = AgentProviderModelClient::try_new(&entry, std::sync::Arc::new(Unused)).unwrap();
+        assert!(free_page_models(
+            &AgentBrowserModelAccess::Chosen(free.clone()),
+            None
+        ));
+        assert!(free_page_models(
+            &AgentBrowserModelAccess::Chosen(free.clone()),
+            Some(&free)
+        ));
+        assert!(!free_page_models(
+            &AgentBrowserModelAccess::Chosen(free),
+            Some(&paid)
+        ));
+        assert!(!free_page_models(
+            &AgentBrowserModelAccess::Chosen(paid),
+            None
+        ));
     }
 
     #[test]
@@ -4920,6 +5099,16 @@ mod public_asset_retry_tests {
     }
 }
 
+async fn public_record_image(
+    routes: Option<&zephium_agentic::public_asset::RouteSource>,
+    url: &str,
+) -> Result<Vec<u8>, zephium_agentic::public_asset::PublicAssetError> {
+    match routes {
+        Some(routes) => zephium_agentic::public_asset::fetch_public_record_image(routes, url).await,
+        None => Err(zephium_agentic::public_asset::PublicAssetError::RouteRefused),
+    }
+}
+
 async fn bounded_public_record_fetch(
     fetch: impl std::future::Future<
         Output = Result<Vec<u8>, zephium_agentic::public_asset::PublicAssetError>,
@@ -4994,6 +5183,28 @@ mod public_record_fetch_stop_tests {
             bounded_public_record_fetch(fetch, || current.load(Ordering::SeqCst))
                 .await
                 .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn a_public_record_picture_needs_a_direct_route_from_the_composition_root() {
+        use zephium_agentic::public_asset::{PublicAssetError, RouteSource};
+        let url = "https://images.example.com/a.png";
+        assert_eq!(
+            public_record_image(None, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        assert_eq!(
+            public_record_image(Some(&routes), url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(
+            public_record_image(Some(&routes), url).await,
+            Err(PublicAssetError::RouteRefused)
         );
     }
 }

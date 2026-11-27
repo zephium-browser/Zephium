@@ -1,4 +1,5 @@
 <script lang="ts">
+  import * as m from "$shared/i18n/messages";
   import { PuzzleIcon } from "@hugeicons/core-free-icons";
   import { onMount } from "svelte";
   import type { WebExtensionAccessRequestView } from "$shared/ipc/bindings";
@@ -10,8 +11,9 @@
   let { request }: { request: WebExtensionAccessRequestView } = $props();
   let denyButton = $state<HTMLButtonElement>();
   let busy = $derived(webext.isAnswering());
+  let failure = $derived(webext.accessError());
   let extension = $derived(webext.named(request.extension_id));
-  let name = $derived(extension?.name ?? "An extension");
+  let name = $derived(extension?.name ?? m.webext_access_prompt_extension());
 
   onMount(() => queueMicrotask(() => denyButton?.focus()));
 
@@ -41,16 +43,16 @@
       id="web-extension-access-title"
       class="min-w-0 flex-1 self-center text-[14px] leading-5 font-semibold text-text"
     >
-      “{name}” wants more access
+      {m.webext_access_prompt_title({ name })}
     </h1>
   </div>
 
   <div id="web-extension-access-list" class="mt-3 rounded-row bg-fill px-3 py-2.5">
     <p class="text-[10.5px] leading-4 font-medium tracking-wide text-faint uppercase">
-      It would be able to
+      {m.webext_access_prompt_abilities()}
     </p>
     {#if request.warnings.length === 0}
-      <p class="mt-1.5 text-[11.5px] leading-4 text-text">Use additional browser features.</p>
+      <p class="mt-1.5 text-[11.5px] leading-4 text-text">{m.webext_access_prompt_features()}</p>
     {:else}
       <ul class="mt-1.5 space-y-1.5 text-[11.5px] leading-4 text-text">
         {#each request.warnings as warning (warning)}
@@ -63,6 +65,10 @@
     {/if}
   </div>
 
+  {#if failure !== null}
+    <p role="alert" class="mt-3 text-[11.5px] leading-4 text-danger">{failure}</p>
+  {/if}
+
   <div class="mt-4 flex justify-end gap-2">
     <Button
       bind:ref={denyButton}
@@ -70,10 +76,10 @@
       disabled={busy}
       onclick={() => void webext.answerAccess(false)}
     >
-      Deny
+      {m.webext_access_prompt_deny()}
     </Button>
     <Button variant="primary" pending={busy} onclick={() => void webext.answerAccess(true)}>
-      Allow
+      {m.webext_access_prompt_allow()}
     </Button>
   </div>
 </PromptSheet>

@@ -28,7 +28,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             total: 1024 * 1024 * 1024,
-            file: 64 * 1024 * 1024,
+            file: 128 * 1024 * 1024,
             entries: 20_000,
         }
     }

@@ -8,6 +8,7 @@ import type {
 } from "$shared/ipc/bindings";
 import { resourceCall } from "./transport";
 import { events } from "$shared/ipc/native-events";
+import { registerCloseTask } from "$shared/lib/close";
 import { newerRevision } from "./resource-model";
 
 const RETRY_DELAYS = [500, 1500, 4000];
@@ -44,13 +45,22 @@ export class OwnedObjects {
   readonly #loading = new Set<string>();
   /** Resources read once, whatever they turned out to be. */
   readonly #read = new SvelteSet<string>();
+  readonly #failed = new SvelteSet<string>();
+  readonly #removeCloseTask: () => void;
+  #stopped = false;
 
   constructor(profile: string) {
     this.#profile = profile;
+    this.#removeCloseTask = registerCloseTask(async () => {
+      const saved = await this.flushAll();
+      if (saved && this.#stopped) this.#removeCloseTask();
+      return saved;
+    });
   }
 
   /** Agent edits arrive through the same authoritative resource event as user edits. */
   async start() {
+    this.#stopped = false;
     const epoch = ++this.#epoch;
     const stop = await events.resourceChanged.listen(({ payload }) => {
       if (
@@ -73,10 +83,17 @@ export class OwnedObjects {
   }
 
   stop() {
+    this.#stopped = true;
     ++this.#epoch;
     this.#stop?.();
     this.#stop = null;
-    void this.flushAll();
+    void this.flushAll().then((saved) => {
+      if (saved && this.#stopped) this.#removeCloseTask();
+    });
+  }
+
+  get failed(): boolean {
+    return this.#failed.size > 0;
   }
 
   #admit(record: ResourceRecord) {
@@ -173,7 +190,7 @@ export class OwnedObjects {
     await next;
   }
 
-  async #write(id: string): Promise<void> {
+  async #write(id: string, retry = true): Promise<void> {
     const shown = this.#pending.get(id);
     const data = shown && kept(shown);
     const record = this.#records.get(id);
@@ -191,7 +208,7 @@ export class OwnedObjects {
           related: record.draft.related,
           content: {
             kind: "object",
-            object: { version: 1, data, evidence: [] },
+            object: { ...record.draft.content.object, data },
           },
         },
       },
@@ -202,10 +219,28 @@ export class OwnedObjects {
       this.#records.set(id, response.record);
       // Only the edit this write carried is settled; a newer one stays pending.
       if (this.#pending.get(id) === shown) this.#pending.delete(id);
+      this.#failed.delete(id);
       return;
     }
-    // Preserve the local draft on conflicts. Replacing the entire fresh record
-    // here would erase disjoint changes made by a running block tool.
+    if (response.kind === "error" && response.error === "conflict" && retry) {
+      const fresh = await this.#call({ kind: "get", id });
+      if (
+        fresh.kind === "record" &&
+        fresh.record.id === id &&
+        !fresh.record.trashed &&
+        fresh.record.draft.content.kind === "object" &&
+        newerRevision(fresh.record.revision, record.revision) &&
+        JSON.stringify(fresh.record.draft.content.object.data) ===
+          JSON.stringify(record.draft.content.object.data)
+      ) {
+        this.#admit(fresh.record);
+        await this.#write(id, false);
+        return;
+      }
+    }
+    // Keep both versions when the content changed; guessing a merge could erase
+    // another editor's words. Metadata-only changes can safely take the edit.
+    this.#failed.add(id);
   }
 
   async #mutate(command: ResourceCommand): Promise<ResourceResponse> {

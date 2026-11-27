@@ -13,6 +13,7 @@ import { commands } from "$shared/ipc/bindings";
 import { IS_MAC } from "$shared/platform";
 import type { SidebarCardAction } from "$shared/ui/SidebarCard";
 import { releaseNotesUrl, updates } from "$domain/updates";
+import { runtime } from "$domain/runtime";
 import * as notices from "./notices.svelte";
 import type { UpdateCard, UpdatePill } from "./select";
 
@@ -39,6 +40,16 @@ export function cardView(card: UpdateCard): CardView {
       icon: Alert02Icon,
       actions: [],
       dismiss: notices.dismissSession,
+    };
+  }
+  if (card.kind === "cleanup") {
+    return {
+      key: "cleanup",
+      title: m.runtime_cleanup_title(),
+      detail: m.runtime_cleanup_detail(),
+      icon: Shield01Icon,
+      actions: [],
+      dismiss: notices.dismissCleanup,
     };
   }
   if (card.kind === "updated") {
@@ -100,10 +111,21 @@ export const pillLabel = (pill: UpdatePill) =>
     ? m.update_install_manual()
     : pill.kind === "ready"
       ? m.update_relaunch()
-      : m.update_installing();
+      : pill.kind === "restart"
+        ? restartLabel(pill.reason)
+        : m.update_installing();
+
+/** What restarting does, said on the pill and in Settings › About. */
+const restartLabel = (reason: "runtime_update" | "profile") =>
+  reason === "profile" ? m.navigation_error_restart() : m.update_restart_finish();
+
+/** A pill whose action is under way takes no second press. */
+export const pillBusy = (pill: UpdatePill) =>
+  pill.kind === "installing" || (pill.kind === "restart" && pill.pending);
 
 export function activatePill(pill: UpdatePill) {
   if (pill.kind === "manual")
     void commands.browserOpenUrl(releaseNotesUrl(pill.version), true).catch(() => {});
   else if (pill.kind === "ready") void updates.relaunch();
+  else if (pill.kind === "restart") void runtime.relaunch();
 }

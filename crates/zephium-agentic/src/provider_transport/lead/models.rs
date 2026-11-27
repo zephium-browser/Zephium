@@ -299,6 +299,18 @@ const SPECS: &[Spec] = &[
         search: false,
         price: (0.075, 0.0375, 0.3),
     },
+    Spec {
+        provider: P::Groq,
+        model: "qwen/qwen3.8-27b",
+        name: "Qwen 3.8 27B",
+        roles: &[R::Lead, R::Page],
+        recommended: false,
+        context: 131_072,
+        output: 16_384,
+        vision: false,
+        search: false,
+        price: (0.8, 0.8, 4.0),
+    },
     // https://inference-docs.cerebras.ai/models, paid tier limits.
     Spec {
         provider: P::Cerebras,
@@ -881,7 +893,11 @@ mod tests {
         assert!(efforts(P::XAi, "grok-4.3").is_empty());
         assert_eq!(efforts(P::DeepSeek, "deepseek-v4-pro"), vec![Low, High]);
         assert!(efforts(P::Mistral, "mistral-medium-3-5").is_empty());
-        assert!(efforts(P::Groq, "qwen/qwen3.8-27b").is_empty());
+        assert_eq!(
+            efforts(P::Groq, "qwen/qwen3.8-27b"),
+            vec![Low, Medium, High]
+        );
+        assert!(efforts(P::Groq, "llama-3.3-70b-versatile").is_empty());
         assert!(efforts(P::Compatible, "llama").is_empty());
 
         assert_eq!(nearest_effort(&[Low, High], Medium), Some(High));

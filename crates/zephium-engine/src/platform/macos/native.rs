@@ -292,6 +292,7 @@ pub fn configure(
     }
 
     unsafe { wk.setInspectable(true) };
+    super::location::serve(&wk);
     // Pinch magnifies the page the way Safari's does; page zoom stays separate.
     unsafe { wk.setAllowsMagnification(true) };
     let view: &NSView = &wk;
@@ -358,8 +359,86 @@ fn validate_data_store_postcondition(
     Ok(())
 }
 
+/// WebKit revalidates the page and its subresources against the origin.
+pub fn reload_ignoring_cache(view: &wry::WebView) -> bool {
+    use wry::WebViewExtMacOS;
+    view.cancel_main_frame_navigation_hold();
+    unsafe { webkit(view).reloadFromOrigin() }.is_some()
+}
+
 pub fn stop_loading(view: &wry::WebView) {
+    use wry::WebViewExtMacOS;
+    view.cancel_main_frame_navigation_hold();
     unsafe { webkit(view).stopLoading() };
+}
+
+/// WebKit's back/forward list around the current entry, as (title, address)
+/// in order, with the index of the current one. Only the nearest entries
+/// each way are copied out of the list.
+pub fn history_session(
+    view: &wry::WebView,
+    done: impl FnOnce(Option<(Vec<(String, String)>, usize)>),
+) -> bool {
+    use zephium_core::ports::engine::MAX_HISTORY_SIDE;
+    let page = webkit(view);
+    // SAFETY: public WebKit reads on the main thread.
+    let list = unsafe { page.backForwardList() };
+    let entry = |item: &objc2_web_kit::WKBackForwardListItem| {
+        let address = unsafe { item.URL() }
+            .absoluteString()
+            .map(|url| url.to_string())
+            .filter(|url| url.len() <= 8 * 1024)
+            .unwrap_or_default();
+        let title = unsafe { item.title() }
+            .map(|title| title.to_string())
+            .filter(|title| title.len() <= 8 * 1024)
+            .unwrap_or_default();
+        (title, address)
+    };
+    let Some(current) = (unsafe { list.currentItem() }) else {
+        done(None);
+        return true;
+    };
+    let behind: Vec<_> = unsafe { list.backList() }.iter().collect();
+    let back: Vec<_> = behind
+        .iter()
+        .rev()
+        .take(MAX_HISTORY_SIDE)
+        .map(|item| entry(item))
+        .collect();
+    let forward: Vec<_> = unsafe { list.forwardList() }
+        .iter()
+        .take(MAX_HISTORY_SIDE)
+        .map(|item| entry(&item))
+        .collect();
+    let current_at = back.len();
+    let session = back
+        .into_iter()
+        .rev()
+        .chain(std::iter::once(entry(&current)))
+        .chain(forward)
+        .collect();
+    done(Some((session, current_at)));
+    true
+}
+
+/// Goes to the entry `offset` steps from the current one when it is still at
+/// `url`. WebKit counts the offset itself, so a list read earlier cannot send
+/// the view to a different entry than the one shown.
+pub fn go_to_history_entry(view: &wry::WebView, offset: i32, url: &str) -> bool {
+    if offset == 0 {
+        return false;
+    }
+    let page = webkit(view);
+    // SAFETY: public WebKit access on the main thread.
+    let list = unsafe { page.backForwardList() };
+    let Some(item) = (unsafe { list.itemAtIndex(offset as isize) }) else {
+        return false;
+    };
+    let at = unsafe { item.URL() }
+        .absoluteString()
+        .map(|at| at.to_string());
+    at.as_deref() == Some(url) && unsafe { page.goToBackForwardListItem(&item) }.is_some()
 }
 
 /// Suspension also refuses the page's own attempts to play until it is
@@ -460,6 +539,51 @@ pub(crate) fn page_footprint(view: &wry::WebView) -> Option<u64> {
     (status == 0).then_some(info.ri_phys_footprint)
 }
 
+/// Asks the page's web process for a reply that runs no page script, which a
+/// hung process never sends. False when WebKit offers no such call, or no way
+/// to end the process if the reply never comes.
+pub(crate) fn ask_web_process(view: &wry::WebView, answered: impl FnOnce() + 'static) -> bool {
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    let supported = unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_isJITEnabled:)]
+    } && unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)]
+    };
+    if !supported {
+        return false;
+    }
+    let answered = std::cell::Cell::new(Some(answered));
+    let reply = block2::RcBlock::new(move |_: objc2::runtime::Bool| {
+        if let Some(answered) = answered.take() {
+            answered();
+        }
+    });
+    // SAFETY: the selector is present; WebKit copies the block and calls it
+    // once on the main thread, also when the process exits.
+    let () = unsafe { objc2::msg_send![&*page, _isJITEnabled: &*reply] };
+    true
+}
+
+/// Ends the page's web process through WebKit, which accounts for it as it
+/// would for a crash.
+pub(crate) fn end_web_process(view: &wry::WebView) {
+    let page = webkit(view);
+    // SAFETY: main-thread WebKit access; the SPI is used only when present.
+    if unsafe {
+        objc2::msg_send![&*page, respondsToSelector: objc2::sel!(_killWebContentProcessAndResetState)]
+    } {
+        let () = unsafe { objc2::msg_send![&*page, _killWebContentProcessAndResetState] };
+    }
+}
+
+/// Identity is borrowed only while the host groups its currently live views.
+pub(crate) fn background_preferences_key(view: &wry::WebView) -> usize {
+    // SAFETY: main-thread access to the live view's retained configuration.
+    let preferences = unsafe { webkit(view).configuration().preferences() };
+    (&*preferences as *const objc2_web_kit::WKPreferences) as usize
+}
+
 /// Hidden pages are throttled by default and suspended once dormant. WebKit
 /// keeps a page running while it is audible or capturing, whatever this says,
 /// and resumes it as soon as it becomes visible.
@@ -471,8 +595,8 @@ pub(crate) fn set_background_suspension(view: &wry::WebView, suspend: bool) {
         Policy::Throttle
     };
     let page = webkit(view);
-    // SAFETY: main-thread WebKit access; each view owns its preferences
-    // object, so this changes only this page's background scheduling.
+    // SAFETY: main-thread WebKit access. Popup views may share preferences;
+    // the host groups suspension votes before requesting Suspend.
     unsafe {
         let preferences = page.configuration().preferences();
         if preferences.inactiveSchedulingPolicy() != target {

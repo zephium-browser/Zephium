@@ -647,9 +647,10 @@ fn groq_and_cerebras_take_effort_only_where_their_models_accept_it() {
     let groq = body(WorkModelProvider::Groq, "openai/gpt-oss-120b");
     assert_eq!(groq["reasoning_effort"], "medium");
     assert_eq!(groq["parallel_tool_calls"], false);
-    assert!(body(WorkModelProvider::Groq, "qwen/qwen3.8-27b")
-        .get("reasoning_effort")
-        .is_none());
+    let groq_qwen = body(WorkModelProvider::Groq, "qwen/qwen3.8-27b");
+    assert_eq!(groq_qwen["reasoning_effort"], "medium");
+    assert_eq!(groq_qwen["reasoning_format"], "hidden");
+    assert!(groq.get("reasoning_format").is_none());
     let cerebras = body(WorkModelProvider::Cerebras, "qwen-3.8-27b");
     assert_eq!(cerebras["reasoning_effort"], "medium");
     assert!(cerebras.get("parallel_tool_calls").is_none());
@@ -962,4 +963,60 @@ fn every_offered_effort_reaches_its_wire_request() {
         );
         assert_eq!(body["reasoning"]["effort"], words[effort as usize]);
     }
+}
+
+#[test]
+fn usage_counters_saturate_in_anthropic() {
+    let fixture = named(&[
+        (
+            "message_start",
+            json!({"type":"message_start","message":{"usage":{"input_tokens":u64::MAX,"cache_read_input_tokens":u64::MAX,"cache_creation_input_tokens":u64::MAX}}}),
+        ),
+        (
+            "message_delta",
+            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"cache_read_input_tokens":u64::MAX}}),
+        ),
+        ("message_stop", json!({"type":"message_stop"})),
+    ]);
+    assert_eq!(
+        decode(WorkModelWire::AnthropicMessages, &fixture)
+            .1
+            .unwrap()
+            .usage
+            .input_tokens,
+        u64::MAX
+    );
+}
+
+#[test]
+fn usage_counters_saturate_in_gemini() {
+    let fixture = data(&[
+        json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":u64::MAX,"toolUsePromptTokenCount":1,"candidatesTokenCount":u64::MAX,"thoughtsTokenCount":1}}),
+    ]);
+    let usage = decode(WorkModelWire::Gemini, &fixture).1.unwrap().usage;
+    assert_eq!(usage.input_tokens, u64::MAX);
+    assert_eq!(usage.output_tokens, u64::MAX);
+}
+
+#[test]
+fn usage_counters_saturate_across_turns() {
+    let make = || Decoded {
+        usage: WorkModelUsage {
+            input_tokens: u64::MAX,
+            cached_input_tokens: u64::MAX,
+            output_tokens: u64::MAX,
+            reasoning_tokens: u64::MAX,
+            ..Default::default()
+        },
+        cache_write_tokens: u64::MAX,
+        searches: u32::MAX,
+        provider_cost_micros: Some(u64::MAX),
+        ..Default::default()
+    };
+    let mut total = make();
+    total.absorb(make());
+    assert_eq!(total.usage, make().usage);
+    assert_eq!(total.cache_write_tokens, u64::MAX);
+    assert_eq!(total.searches, u32::MAX);
+    assert_eq!(total.provider_cost_micros, Some(u64::MAX));
 }

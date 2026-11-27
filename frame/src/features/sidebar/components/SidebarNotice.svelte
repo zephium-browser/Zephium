@@ -1,5 +1,11 @@
 <script lang="ts">
-  import { Download01Icon, HourglassIcon, Link04Icon } from "@hugeicons/core-free-icons";
+  import {
+    Delete02Icon,
+    Download01Icon,
+    HourglassIcon,
+    Link04Icon,
+  } from "@hugeicons/core-free-icons";
+  import * as attention from "$session/attention.svelte";
   import * as notices from "$session/notice.svelte";
   import Icon from "$shared/ui/Icon";
 
@@ -8,10 +14,19 @@
   /** Matches the exit transition below. */
   const EXIT = 140;
 
-  const GLYPHS = { link: Link04Icon, download: Download01Icon, focus: HourglassIcon };
+  const GLYPHS = {
+    link: Link04Icon,
+    download: Download01Icon,
+    focus: HourglassIcon,
+    data: Delete02Icon,
+  };
 
   let current = $derived(notices.notice());
   let leaving = $state(false);
+
+  $effect(() => {
+    if (current?.kind === "focus" || current?.kind === "download") return attention.hold();
+  });
 
   $effect(() => {
     const shown = current;
@@ -41,7 +56,7 @@
     flex: none;
     align-items: center;
     gap: 10px;
-    margin: 6px 8px;
+    margin: 6px var(--sidebar-inset);
     padding: 8px 12px 8px 8px;
     border-radius: var(--radius-row);
     background: var(--row-active);

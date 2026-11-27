@@ -78,15 +78,17 @@ impl Script {
                             json!({"kind": "reply", "title": "Shorter trip", "data": {
                             "headline": "Home a day early", "text": "The plan now ends on Friday."}}),
                         ),
-                        call(
-                            "r5",
-                            "create",
-                            json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
-                                {"title": "Fly home early", "kind": "travel"}]}}),
-                        ),
                     ]
                 }
-                2 => {
+                // This update depends on r2's durable revision. A later model
+                // turn observes that settlement instead of racing its read.
+                2 => vec![call(
+                    "r5",
+                    "create",
+                    json!({"kind": "plan", "title": "Your trip, shorter", "data": {"steps": [
+                        {"title": "Fly home early", "kind": "travel"}]}}),
+                )],
+                3 => {
                     // A second plan on the same subject revises the first.
                     assert!(!seen.contains("already covers this subject"), "{seen}");
                     vec![call(
@@ -587,6 +589,7 @@ pub(super) fn command(work: WorkId, expected: WorkRevision) -> WorkCommandV1 {
         command: WorkCommandId::generate(),
         intent: WorkRuntimeIntent::BeginAgent {
             grant: WorkAgentGrantV1 {
+                no_usage_charge: false,
                 draft: None,
                 provider: WorkSearchProvider::OpenAi,
                 model: PUBLIC_SEARCH_MODEL.into(),
@@ -797,21 +800,31 @@ async fn a_lead_run_splits_into_parts_builds_the_result_and_revises_on_follow_up
     .unwrap();
     let follow_up = second.executions.last().unwrap();
     assert!(follow_up.parts.is_empty());
-    let revised = follow_up
+    let plans: Vec<_> = follow_up
         .artifacts
         .iter()
-        .find(|a| a.data.kind_name() == "plan")
-        .unwrap();
+        .filter(|a| a.data.kind_name() == "plan")
+        .collect();
+    // Both settled updates remain immutable history; only the newest stands.
+    assert_eq!(plans.len(), 2);
+    let (revised, latest) = (plans[0], plans[1]);
     assert_eq!(revised.revises, Some(object("plan").id));
     assert_eq!(revised.title, "Your trip");
-    assert_eq!(
-        follow_up
-            .artifacts
-            .iter()
-            .filter(|a| a.data.kind_name() == "plan")
-            .count(),
-        1
-    );
+    assert_eq!(latest.revises, Some(revised.id));
+    let canvas = crate::work_lead::objects::canvas(&second, follow_up.id);
+    let current: Vec<_> = canvas
+        .iter()
+        .filter(|object| object.current && object.artifact.data.kind_name() == "plan")
+        .collect();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].artifact.id, latest.id);
+    assert_eq!(current[0].artifact.title, "Your trip");
+    let WorkArtifactDataV1::Plan { steps, .. } = &current[0].artifact.data else {
+        panic!("the current plan")
+    };
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].title, "Fly home early");
+    assert_eq!(steps[0].when, None);
 }
 
 /// A part whose site fails says what it needs; the lead may not stand a
@@ -1067,7 +1080,7 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
     };
     let answering = {
         let handle = handle.clone();
-        tokio::spawn(async move {
+        async move {
             let mut answered = 0;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1082,21 +1095,47 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                 let Some(execution) = projection.executions.last() else {
                     continue;
                 };
-                let open = execution.steps.iter().find_map(|step| match &step.kind {
-                    WorkStepKindV1::Ask {
-                        options,
-                        answer: None,
-                        purpose,
-                        ..
-                    } if step.status == WorkStepStatus::Running => {
-                        Some((step.id, options[0].clone(), *purpose))
+                let intent = execution.steps.iter().find_map(|step| {
+                    if step.status != WorkStepStatus::Running {
+                        return None;
                     }
-                    _ => None,
+                    match &step.kind {
+                        WorkStepKindV1::Ask {
+                            options,
+                            answer: None,
+                            purpose,
+                            ..
+                        } => {
+                            assert_eq!(*purpose, Some(WorkAskPurposeV1::Connection));
+                            Some(WorkRuntimeIntent::AnswerStep {
+                                execution: execution.id,
+                                step: step.id,
+                                answer: options[0].clone(),
+                            })
+                        }
+                        WorkStepKindV1::Confirm { confirm } if confirm.decision.is_none() => {
+                            assert_eq!(confirm.site, "slack");
+                            assert_eq!(confirm.action, "run echo");
+                            assert_eq!(confirm.headline, "Echo on Slack?");
+                            assert!(!confirm.run_option);
+                            assert_eq!(
+                                serde_json::from_str::<Value>(confirm.text.as_deref().unwrap())
+                                    .unwrap(),
+                                json!({"text": "mentions"})
+                            );
+                            Some(WorkRuntimeIntent::ApproveStep {
+                                execution: execution.id,
+                                step: step.id,
+                                approve: true,
+                                for_run: false,
+                            })
+                        }
+                        _ => None,
+                    }
                 });
-                let Some((step, first, purpose)) = open else {
+                let Some(intent) = intent else {
                     continue;
                 };
-                assert_eq!(purpose, Some(WorkAskPurposeV1::Connection));
                 answered += 1;
                 let _ = handle
                     .work_command(
@@ -1106,11 +1145,7 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                             work,
                             expected_revision: projection.work.revision,
                             command: WorkCommandId::generate(),
-                            intent: WorkRuntimeIntent::AnswerStep {
-                                execution: execution.id,
-                                step,
-                                answer: first,
-                            },
+                            intent,
                         },
                     )
                     .unwrap()
@@ -1119,24 +1154,29 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
                     return answered;
                 }
             }
-        })
+        }
     };
-    let done = drive(
-        &mut shell,
-        &queue,
-        WorkLeadService::new(handle.clone()).run(
-            profile,
-            command(work, WorkRevision::INITIAL),
-            None,
-            models,
-            &Search,
-            |_, _| async { panic!("the Slack part never opens the website") },
-            |_| {},
-        ),
+    let service = WorkLeadService::new(handle.clone());
+    let done = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        drive(&mut shell, &queue, async {
+            tokio::select! {
+            result = service.run(
+                profile,
+                command(work, WorkRevision::INITIAL),
+                None,
+                models,
+                &Search,
+                |_, _| async { panic!("the Slack part never opens the website") },
+                |_| {},
+            ) => result,
+            answered = answering => panic!("fixture responder stopped after {answered} answers"),
+            }
+        }),
     )
     .await
+    .expect("the local fixture run must settle after its consent decisions")
     .unwrap();
-    answering.abort();
     let run = &done.executions[0];
     let asks: Vec<&str> = run
         .steps
@@ -1150,10 +1190,31 @@ async fn a_service_the_person_connected_is_offered_once_before_its_website() {
     let slack = &run.parts[0];
     assert_eq!(slack.helper, WorkHelperV1::Connection);
     assert_eq!(slack.state, WorkPartStateV1::Done);
-    assert!(run
+    let confirmations: Vec<_> = run
         .steps
         .iter()
-        .any(|s| matches!(&s.kind, WorkStepKindV1::Call { call } if call.service == "slack")));
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Confirm { confirm } => Some(confirm),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(confirmations.len(), 1);
+    assert_eq!(
+        confirmations[0].decision,
+        Some(WorkConfirmDecisionV1::Approved)
+    );
+    let calls: Vec<_> = run
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            WorkStepKindV1::Call { call } => Some((step.status, call)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, WorkStepStatus::Succeeded);
+    assert_eq!(calls[0].1.service, "slack");
+    assert_eq!(calls[0].1.tool, "slack__echo");
     let _ = std::fs::remove_dir_all(&data);
 }
 
@@ -1596,6 +1657,37 @@ impl WorkModelClient for Turns {
     }
 }
 
+/// Turns whose tool calls stream before the turn ends, as a provider's do.
+struct StreamedTurns(fn(usize, &str) -> Vec<WorkModelPart>);
+impl WorkModelClient for StreamedTurns {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        events: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let assistant = (self.0)(turn, &results(&request));
+            for part in &assistant {
+                if let WorkModelPart::ToolCall(tool) = part {
+                    events(WorkModelEvent::ToolCall(tool.clone()));
+                }
+            }
+            // Room for a streamed reply to be published before the turn ends.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage::default(),
+                assistant,
+            })
+        })
+    }
+}
+
 async fn scripted(
     objective: &str,
     turns: fn(usize, &str) -> Vec<WorkModelPart>,
@@ -1726,6 +1818,15 @@ async fn scripted_search(
     search: &dyn WorkPublicSearchProvider,
     browse: fn(WorkAgentBrowseRequest) -> WorkBrowserOutcome,
 ) -> WorkExecutionFact {
+    scripted_on(objective, Arc::new(Turns(turns)), search, browse).await
+}
+
+async fn scripted_on(
+    objective: &str,
+    client: Arc<dyn WorkModelClient>,
+    search: &dyn WorkPublicSearchProvider,
+    browse: fn(WorkAgentBrowseRequest) -> WorkBrowserOutcome,
+) -> WorkExecutionFact {
     let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
     let (mut shell, queue, handle, profile) = fixture(store);
     let create = handle
@@ -1736,7 +1837,7 @@ async fn scripted_search(
     let work = create.work_id().unwrap();
     drive(&mut shell, &queue, create).await.unwrap();
     let lead = LeadModel {
-        client: Arc::new(Turns(turns)),
+        client,
         ..model(Arc::new(Script {
             calls: Mutex::new(Vec::new()),
         }))
@@ -1869,7 +1970,7 @@ async fn a_lead_search_reads_the_engines_results_then_the_page_it_picks() {
                     ),
                 ]
             }
-            _ => panic!("the run finished at turn 2"),
+            _ => panic!("the run finished at turn 2: {seen}"),
         }
     }
     fn browse(request: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
@@ -2002,6 +2103,456 @@ async fn a_challenged_results_page_falls_back_to_the_models_own_search() {
     assert_eq!(evidence.provider, WorkSearchProvider::Native);
     assert_eq!(evidence.model, SEARCH_MODEL);
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_sheet_made_beside_a_read_that_fails_waits_for_it_and_is_refused() {
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![
+                call(
+                    "f",
+                    "web_fetch",
+                    json!({"url": "https://example.test/pricing"}),
+                ),
+                call(
+                    "t",
+                    "create",
+                    json!({"kind": "sheet", "title": "Pricing", "data": {
+                    "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+                    "rows": [{"cells": ["Hobby", "Free"]}, {"cells": ["Pro", "$20"]}]}}),
+                ),
+            ],
+            1 => {
+                assert!(
+                    seen.contains("no page you tried to read could be read"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "It didn't open.", "title": "Pricing"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn browse(_: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        WorkBrowserOutcome {
+            status: WorkStepStatus::Failed,
+            note: Some("The page could not be read".into()),
+            ..outcome(None, vec![])
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search("Price the plans", turns, &browser_search(&asked), browse).await;
+    assert!(
+        !run.artifacts
+            .iter()
+            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        "no sheet stands on a page that could not be read"
+    );
+    assert!(run
+        .artifacts
+        .iter()
+        .any(|a| matches!(a.data, WorkArtifactDataV1::Reply { .. })));
+}
+
+#[tokio::test]
+async fn a_retried_sheet_leaves_out_keys_that_are_no_source_of_the_run() {
+    fn sheet() -> WorkModelPart {
+        call(
+            "t",
+            "create",
+            json!({"kind": "sheet", "title": "Pricing", "sources": ["s9"], "data": {
+            "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+            "rows": [{"cells": ["Hobby", "Free"], "source": "s8"}]}}),
+        )
+    }
+    fn turns(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![sheet()],
+            1 => {
+                assert!(seen.contains("s9 is not a source of this run"), "{seen}");
+                vec![sheet()]
+            }
+            2 => {
+                assert!(
+                    seen.contains("the sources s9, s8 (not sources of this run)"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "Hobby is free", "text": "Pro was not priced."}}),
+                    ),
+                    call("d", "finish", json!({"say": "Done.", "title": "Pricing"})),
+                ]
+            }
+            _ => panic!("the run finished at turn 2"),
+        }
+    }
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let run = scripted_search("Price the plans", turns, &browser_search(&asked), |_| {
+        panic!("no page is read")
+    })
+    .await;
+    let sheet = run
+        .artifacts
+        .iter()
+        .find(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. }))
+        .expect("the retried sheet is placed");
+    assert!(sheet.evidence.is_empty(), "{:?}", sheet.evidence);
+}
+
+#[tokio::test]
+async fn a_streamed_reply_claiming_a_check_waits_for_the_turns_reads() {
+    fn claim(turn: usize, seen: &str, claiming: WorkModelPart) -> Vec<WorkModelPart> {
+        match turn {
+            0 => vec![
+                call(
+                    "f",
+                    "web_fetch",
+                    json!({"url": "https://example.test/pricing"}),
+                ),
+                claiming,
+            ],
+            1 => {
+                assert!(
+                    seen.contains("headline calls the result finished or checked")
+                        || seen.contains("Not finished"),
+                    "{seen}"
+                );
+                vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call(
+                        "d",
+                        "finish",
+                        json!({"say": "It didn't open.", "title": "Pricing"}),
+                    ),
+                ]
+            }
+            _ => panic!("the run finished at turn 1"),
+        }
+    }
+    fn created(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing", "data": {
+                "headline": "Pricing checked", "text": "Pro is $20 a month."}}),
+            ),
+        )
+    }
+    fn quoted(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing",
+                "data": "{\"headline\": \"Pricing checked\", \"text\": \"Pro is $20 a month.\"}"}),
+            ),
+        )
+    }
+    fn beside(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "create",
+                json!({"kind": "reply", "title": "Pricing",
+                "headline": "No issues found and pricing checked", "text": "Pro is $20 a month."}),
+            ),
+        )
+    }
+    fn finished(turn: usize, seen: &str) -> Vec<WorkModelPart> {
+        claim(
+            turn,
+            seen,
+            call(
+                "c",
+                "finish",
+                json!({"say": "Done.", "title": "Pricing", "reply": {
+                "headline": "Pricing checked", "text": "Pro is $20 a month."}}),
+            ),
+        )
+    }
+    fn browse(_: WorkAgentBrowseRequest) -> WorkBrowserOutcome {
+        WorkBrowserOutcome {
+            status: WorkStepStatus::Failed,
+            note: Some("The page could not be read".into()),
+            ..outcome(None, vec![])
+        }
+    }
+    for turns in [
+        created as fn(usize, &str) -> Vec<WorkModelPart>,
+        quoted,
+        beside,
+        finished,
+    ] {
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let run = scripted_on(
+            "Price the plans",
+            Arc::new(StreamedTurns(turns)),
+            &browser_search(&asked),
+            browse,
+        )
+        .await;
+        let headlines: Vec<_> = run
+            .artifacts
+            .iter()
+            .filter_map(|a| match &a.data {
+                WorkArtifactDataV1::Reply { headline, .. } => Some(headline.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headlines, ["I couldn't read the pricing page"]);
+    }
+}
+
+/// A research part placing a sheet while a page is still loading: the
+/// lead's read in the same turn, or (`.0`) the helper's own read beside it.
+struct HelperBesideRead(bool);
+impl WorkModelClient for HelperBesideRead {
+    fn call<'a>(
+        &'a self,
+        request: WorkModelRequest,
+        _: &'a (dyn Fn(WorkModelEvent) + Send + Sync),
+    ) -> WorkModelFuture<'a> {
+        // The lead reads with web_fetch, a helper with read.
+        let fetch = |tool: &str| call("f", tool, json!({"url": "https://example.test/pricing"}));
+        Box::pin(async move {
+            let turn = request
+                .messages
+                .iter()
+                .filter(|m| matches!(m, WorkModelMessage::Assistant(_)))
+                .count();
+            let lead = request
+                .system
+                .iter()
+                .any(|b| b.text.contains("You are the Work agent"));
+            let assistant = match (lead, turn) {
+                (true, 0) => {
+                    let mut calls = vec![call(
+                        "p",
+                        "start_part",
+                        json!({"title": "Plans", "helper": "research",
+                        "goal": "The plans on the pricing page"}),
+                    )];
+                    if !self.0 {
+                        calls.push(fetch("web_fetch"));
+                    }
+                    calls
+                }
+                (true, _) => vec![
+                    call(
+                        "r",
+                        "create",
+                        json!({"kind": "reply", "title": "Pricing", "data": {
+                        "headline": "I couldn't read the pricing page", "text": "It didn't open. Try again."}}),
+                    ),
+                    call("d", "finish", json!({"say": "It didn't open."})),
+                ],
+                (false, 0) => {
+                    let sheet = call(
+                        "t",
+                        "create",
+                        json!({"kind": "sheet", "title": "Pricing", "data": {
+                        "columns": [{"label": "Plan", "kind": "text"}, {"label": "Price", "kind": "text"}],
+                        "rows": [{"cells": ["Hobby", "Free"]}, {"cells": ["Pro", "$20"]}]}}),
+                    );
+                    if self.0 {
+                        vec![fetch("read"), sheet]
+                    } else {
+                        vec![sheet]
+                    }
+                }
+                (false, _) => vec![call(
+                    "h",
+                    "finish",
+                    json!({"summary": "No plans", "digest": "Nothing was read.", "found": false}),
+                )],
+            };
+            Ok(WorkModelOutcome {
+                stop: WorkModelStop::ToolUse,
+                usage: WorkModelUsage {
+                    input_tokens: 1_000,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 100,
+                    reasoning_tokens: 0,
+                    cost_micros: None,
+                },
+                assistant,
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_helpers_sheet_waits_for_the_reads_begun_before_it() {
+    for own in [false, true] {
+        helper_sheet_beside_a_failed_read(own).await;
+    }
+}
+
+async fn helper_sheet_beside_a_failed_read(own: bool) {
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective: "Price the plans on https://example.test/pricing".into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(HelperBesideRead(own)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            command(work, WorkRevision::INITIAL),
+            None,
+            models,
+            &Search,
+            |_, _| async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Ok(WorkBrowserOutcome {
+                    status: WorkStepStatus::Failed,
+                    note: Some("The page could not be read".into()),
+                    ..outcome(None, vec![])
+                })
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    assert!(
+        !run.artifacts
+            .iter()
+            .any(|a| matches!(a.data, WorkArtifactDataV1::Sheet { .. })),
+        "a sheet on no page read stood (helper's own read: {own})"
+    );
+}
+
+/// A read batch that ends the run (here its time runs out) ends the turn:
+/// the object created beside it is never stored for the ending run.
+#[tokio::test]
+async fn an_object_beside_a_read_that_ends_the_run_is_never_placed() {
+    fn turns(turn: usize, _: &str) -> Vec<WorkModelPart> {
+        assert_eq!(turn, 0, "the run ends with its first turn");
+        vec![
+            call(
+                "f",
+                "web_fetch",
+                json!({"url": "https://vercel.com/pricing"}),
+            ),
+            call(
+                "g",
+                "web_fetch",
+                json!({"url": "https://en.wikipedia.org/wiki/Vercel"}),
+            ),
+            call(
+                "r",
+                "create",
+                json!({"kind": "reply", "title": "Pricing", "data": {
+                "headline": "Vercel Pro is $20 a month", "text": "Hobby is free."}}),
+            ),
+        ]
+    }
+    let store = Arc::new(zephium_store::SqliteStore::in_memory().unwrap());
+    let (mut shell, queue, handle, profile) = fixture(store);
+    let create = handle
+        .work_document(WorkIntent::Create {
+            objective:
+                "Price Vercel from https://vercel.com/pricing and https://en.wikipedia.org/wiki/Vercel"
+                    .into(),
+        })
+        .unwrap();
+    let work = create.work_id().unwrap();
+    drive(&mut shell, &queue, create).await.unwrap();
+    let lead = LeadModel {
+        client: Arc::new(Turns(turns)),
+        ..model(Arc::new(Script {
+            calls: Mutex::new(Vec::new()),
+        }))
+    };
+    let models = WorkLeadModels {
+        lead: lead.clone(),
+        page: lead.clone(),
+        light: lead,
+    };
+    let mut begin = command(work, WorkRevision::INITIAL);
+    let WorkRuntimeIntent::BeginAgent { limits, .. } = &mut begin.intent else {
+        unreachable!()
+    };
+    limits.timeout_seconds = 1;
+    limits.max_workers = 1;
+    let opened = std::sync::atomic::AtomicUsize::new(0);
+    let opened = &opened;
+    let done = drive(
+        &mut shell,
+        &queue,
+        WorkLeadService::new(handle.clone()).run(
+            profile,
+            begin,
+            None,
+            models,
+            &Search,
+            // The attempt's time runs out while its first page loads, so the
+            // second is never opened and the run ends.
+            |_, _| async move {
+                opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+                Ok(outcome(None, vec![]))
+            },
+            |_| {},
+        ),
+    )
+    .await
+    .unwrap();
+    let run = &done.executions[0];
+    assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_ne!(run.status, WorkExecutionStatus::Running);
+    assert!(run.artifacts.is_empty(), "{:?}", run.artifacts);
+    assert!(run
+        .steps
+        .iter()
+        .all(|step| !matches!(step.kind, WorkStepKindV1::Publish)));
 }
 
 /// A read whose first load the page's server redirected: the browser read
@@ -2314,10 +2865,7 @@ fn zero_folder_computer_parts_share_picker_and_only_accept_real_choice() {
 }
 
 async fn zero_folder_computer_parts_body() {
-    let folder = tempfile::Builder::new()
-        .prefix("zephium-picker-home-")
-        .tempdir()
-        .unwrap();
+    let folder = crate::work_files::test_tempdir();
     let _home = crate::work_files::TestGrantHome::new(folder.path().canonicalize().unwrap());
     let project = folder.path().join("Documents/project");
     std::fs::create_dir_all(&project).unwrap();

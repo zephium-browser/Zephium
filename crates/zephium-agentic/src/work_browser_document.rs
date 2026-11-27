@@ -145,6 +145,31 @@ impl std::fmt::Debug for WorkBrowserRedirect {
     }
 }
 
+/// Set once when a read's main-frame load could not reach its site: no
+/// connection, an unknown host, a refused or insecure connection. The page
+/// still fails; its owner names it unreachable rather than lost.
+#[derive(Clone, Default)]
+pub struct WorkBrowserUnreachable(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl WorkBrowserUnreachable {
+    /// Marks the load as never having reached its site.
+    pub fn record(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// Whether the load never reached its site.
+    pub fn unreachable(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl std::fmt::Debug for WorkBrowserUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WorkBrowserUnreachable")
+            .field(&self.unreachable())
+            .finish()
+    }
+}
+
 /// HTTPS, or plain HTTP on a loopback host (local qualification sites only).
 pub fn site_scheme(target: &ContextNavigationTarget) -> bool {
     let url = target.as_url();
@@ -310,6 +335,14 @@ mod tests {
         slot.record(ContextNavigationTarget::parse("https://www.example.com/b").unwrap());
         assert_eq!(slot.destination(), Some(first));
         assert!(!format!("{slot:?}").contains("example"));
+    }
+
+    #[test]
+    fn an_unreachable_slot_is_shared_by_its_clones() {
+        let slot = WorkBrowserUnreachable::default();
+        assert!(!slot.unreachable());
+        slot.clone().record();
+        assert!(slot.unreachable());
     }
 
     #[test]

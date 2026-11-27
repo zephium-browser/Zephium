@@ -51,13 +51,14 @@ describe("contextSelection", () => {
           },
         ],
         objectives,
+        urls: new Map([["https://docs.example/a", "d1"]]),
       },
     );
     expect(selection).toEqual({
       environment: "env",
       items: [
         { element: "e-note", revision: "12" },
-        { element: "e-tab", revision: "https://docs.example/a" },
+        { element: "e-tab", revision: "d1" },
         { element: "e-obj", revision: "7" },
         { element: "e-art", revision: "art-9" },
       ],
@@ -74,6 +75,16 @@ describe("contextSelection", () => {
       environment: "env",
       items: [{ element: "e-unknown", revision: "4" }],
     });
+  });
+
+  test("a tab is context by its address's digest, never the address itself", () => {
+    const url = `https://outlook.live.com/mail/0/inbox/id/${"A".repeat(200)}`;
+    const tabs = [tabFixture({ id: "tab-1", url })];
+    const known = { notes: [], objectives: new Map() };
+    expect(contextSelection(snapshot, ["e-tab"], tabs, known)).toBeNull();
+    expect(
+      contextSelection(snapshot, ["e-tab"], tabs, { ...known, urls: new Map([[url, "d2"]]) }),
+    ).toEqual({ environment: "env", items: [{ element: "e-tab", revision: "d2" }] });
   });
 
   test("is null without a snapshot, a selection, or any resolvable token", () => {

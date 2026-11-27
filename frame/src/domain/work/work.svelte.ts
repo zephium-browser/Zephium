@@ -75,7 +75,6 @@ export class WorkSession {
   failure = $state<string | null>(null);
   loading = $state(false);
   pending = $state.raw<Mutation | null>(null);
-  composer = $state("");
   activity = $state.raw<WorkSignalV1[]>([]);
   /** Pages the latest runs opened, with their newest frames; kept after a run ends. */
   pages = $state.raw<WorkPageV1[]>([]);
@@ -110,10 +109,11 @@ export class WorkSession {
       await this.reload();
       if (this.selected === work) await this.open(work);
     });
+    // Only a save that has not landed holds up a close. An artifact edit is
+    // on its way as that save, so it is the pending mutation that is asked.
     this.removeCloseTask = registerCloseTask(async () => {
       if (this.writing) await this.writing;
-      const settled = this.pending ? await this.retry() : true;
-      return settled && !this.composer && this.artifacts.size === 0;
+      return this.pending ? await this.retry() : true;
     });
   }
   async start() {
@@ -338,22 +338,28 @@ export class WorkSession {
     });
   }
   get canRelease() {
-    return (
-      !this.pending &&
-      !this.composer &&
-      !this.selected &&
-      this.artifacts.size === 0 &&
-      this.queues.size === 0
-    );
+    return !this.pending && !this.selected && this.artifacts.size === 0 && this.queues.size === 0;
   }
-  artifactDraft(artifact: string) {
-    return this.artifacts.get(`${this.selected}:${artifact}`);
+  artifactDraft(artifact: string, work = this.selected) {
+    return this.artifacts.get(`${work}:${artifact}`);
   }
-  editArtifact(execution: string, artifact: string, data?: WorkArtifactDataV1) {
-    const work = this.projection?.work;
-    const fact = this.projection?.executions.find((item) => item.id === execution);
+  editArtifact(
+    execution: string,
+    artifact: string,
+    data?: WorkArtifactDataV1,
+    projection = this.projection,
+  ) {
+    const work = projection?.work;
+    const fact = projection?.executions.find((item) => item.id === execution);
     const original = fact?.artifacts.find((item) => item.id === artifact);
-    if (!work || !fact || !original || !["needs_review", "completed"].includes(fact.status)) return;
+    if (
+      !work ||
+      work.profile !== this.profile ||
+      !fact ||
+      !original ||
+      (original.data.kind !== "draft" && !["needs_review", "completed"].includes(fact.status))
+    )
+      return;
     const key = `${work.id}:${artifact}`;
     const previous = this.artifacts.get(key);
     const user = fact.user_artifacts?.find((item) => item.artifact === artifact);
@@ -671,7 +677,6 @@ export class WorkSession {
     }
     if (reply.kind === "authoring_applied") {
       if (call.kind === "author" && call.command.intent.kind === "create") {
-        this.composer = "";
         this.selected = reply.receipt.work;
       }
       if (reply.receipt.deleted && this.selected === reply.receipt.work) this.back();

@@ -106,3 +106,21 @@ fn transparent_startup_parent_erases_first_paint_without_waiting_for_redraw() {
     assert_eq!(legacy_pixels, [0x00ff_ffff; 3]);
     assert_eq!(fixed_pixels, [0; 3]);
 }
+
+#[test]
+fn a_runtime_without_a_required_interface_is_too_old_not_broken() {
+    use crate::startup_alert::{StartupFailure, StartupProblem};
+    use windows::Win32::Foundation::{E_ACCESSDENIED, E_NOINTERFACE};
+
+    let missing: StartupFailure = windows::core::Error::new(
+        E_NOINTERFACE,
+        "this WebView2 runtime does not provide Settings3",
+    )
+    .into();
+    assert_eq!(missing.problem(), StartupProblem::WebViewOutdated);
+    assert!(missing.detail().contains("Settings3"));
+    let denied: StartupFailure = windows::core::Error::new(E_ACCESSDENIED, "denied").into();
+    assert_eq!(denied.problem(), StartupProblem::Other);
+    let on_runtime = missing.on_runtime("120.0.2210.91");
+    assert!(on_runtime.detail().contains("120.0.2210.91"));
+}

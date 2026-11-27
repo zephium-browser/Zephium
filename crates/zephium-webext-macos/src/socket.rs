@@ -141,7 +141,7 @@ impl Socket {
         }
 
         let delegate = SessionDelegate::new(self.key);
-        let configuration = NSURLSessionConfiguration::defaultSessionConfiguration();
+        let configuration = network_configuration();
         let session = unsafe {
             NSURLSession::sessionWithConfiguration_delegate_delegateQueue(
                 &configuration,
@@ -346,5 +346,38 @@ impl SessionDelegate {
             .try_with(|sockets| sockets.borrow().get(&key).cloned())
             .ok()
             .flatten()
+    }
+}
+
+/// Configuration for one broker socket.
+fn network_configuration() -> Retained<NSURLSessionConfiguration> {
+    // The compatibility bridge has no profile cookie or credential API.
+    // Do not borrow Foundation's process-wide persistent network state. Each
+    // socket is stateless even relative to another extension in this profile.
+    let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
+    configuration.setHTTPShouldSetCookies(false);
+    configuration.setHTTPCookieStorage(None);
+    configuration.setURLCredentialStorage(None);
+    configuration.setURLCache(None);
+    configuration
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broker_sockets_have_no_ambient_network_stores() {
+        for _principal in [
+            "profile-a/extension-a",
+            "profile-b/extension-a",
+            "profile-a/extension-b",
+        ] {
+            let configuration = network_configuration();
+            assert!(!configuration.HTTPShouldSetCookies());
+            assert!(configuration.HTTPCookieStorage().is_none());
+            assert!(configuration.URLCredentialStorage().is_none());
+            assert!(configuration.URLCache().is_none());
+        }
     }
 }

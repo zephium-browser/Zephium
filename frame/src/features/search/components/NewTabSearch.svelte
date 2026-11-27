@@ -7,13 +7,19 @@
   import SearchField from "$shared/ui/SearchField";
   import IconButton from "$shared/ui/IconButton";
   import ResultList from "./ResultList.svelte";
+  import EngineMenu from "./EngineMenu.svelte";
   import { createSearchSurface } from "../lib/search-surface.svelte";
+  import { parkCaret } from "$shared/lib/parked-caret";
 
   let {
     tabId,
+    loadMenu,
+    onsettings,
     onactive,
   }: {
+    onsettings?: () => void;
     tabId: string | null;
+    loadMenu?: () => Promise<typeof import("$shared/ui/Menu")>;
     /** Whether a query is in the field, so the page can make room for it. */
     onactive?: (active: boolean) => void;
   } = $props();
@@ -39,6 +45,20 @@
   let available = $state(420);
 
   let active = $derived(surface.query.trim().length > 0);
+  let focused = $state(false);
+  // A parked caret stands in for the focus, so the field keeps its awake look.
+  let parked = $state(false);
+
+  function picked(next: string | null) {
+    if (next !== null) surface.changed(next);
+    const field = input;
+    if (!field) return;
+    field.focus();
+    if (next !== null) {
+      field.value = next;
+      field.setSelectionRange(next.length, next.length);
+    }
+  }
   let visible = $derived(
     surface.open &&
       active &&
@@ -85,8 +105,11 @@
   }
 
   function keydown(event: KeyboardEvent) {
-    if (surface.composing || event.isComposing) return;
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    // See LauncherPanel: WebKit's committing keydown arrives after compositionend.
+    if (surface.composing || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Backspace" && surface.backspace()) {
+      event.preventDefault();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       void surface.move(event.key === "ArrowDown" ? 1 : -1);
     } else if (event.key === "Escape") {
@@ -102,8 +125,10 @@
     measure();
     window.addEventListener("resize", measure);
     const stop = surface.mount();
+    const unpark = input ? parkCaret(input, (value) => (parked = value)) : () => {};
     return () => {
       window.removeEventListener("resize", measure);
+      unpark();
       stop();
     };
   });
@@ -112,6 +137,7 @@
 <div
   bind:this={root}
   class="dock"
+  data-shortcut={surface.activeShortcut?.id}
   data-active={active}
   data-open={visible}
   style:--available={`${available}px`}
@@ -123,7 +149,9 @@
   <div class="bar" data-glass-text>
     <SearchField
       size="page"
-      label={m.search_web()}
+      label={surface.activeShortcut
+        ? m.search_shortcut_label({ name: surface.activeShortcut.name })
+        : m.search_web()}
       placeholder={m.search_web_short()}
       value={surface.query}
       bind:ref={input}
@@ -141,18 +169,29 @@
         maxlength: 2048,
         spellcheck: false,
         autocapitalize: "off",
+        autocorrect: "off",
         // Room for the clear control, which is placed over the field rather
         // than threaded through the shared primitive for one caller's sake.
         style: surface.query ? "padding-inline-end: 40px" : undefined,
         onkeydown: keydown,
         onfocus: () => {
+          focused = true;
           measure();
           surface.focused();
         },
+        onblur: () => (focused = false),
         oncompositionstart: surface.compositionStart,
         oncompositionend: (event) => surface.compositionEnd(event.currentTarget.value),
       }}
-    />
+    >
+      {#snippet lead()}<EngineMenu
+          query={surface.query}
+          awake={focused || parked || active}
+          {loadMenu}
+          {onsettings}
+          onpick={picked}
+        />{/snippet}
+    </SearchField>
     {#if surface.query}
       <span class="clear">
         <IconButton
@@ -230,7 +269,7 @@
     box-shadow: none;
   }
 
-  .dock .bar :global(.ui-search[data-size] svg) {
+  .dock .bar :global(.ui-search[data-size] > svg) {
     inline-size: 16px;
     block-size: 16px;
   }
@@ -254,17 +293,27 @@
      highlight that glides between them. */
   .sheet {
     --row-radius: calc(var(--radius-panel) - 6px);
+    --gap: 6px;
 
     position: absolute;
-    inset-block-start: calc(100% + 6px);
+    inset-block-start: calc(100% + var(--gap));
     inset-inline: 0;
     z-index: 1;
     max-block-size: var(--available);
     overflow: hidden;
     border-radius: var(--radius-panel);
-    background: var(--color-raised);
+
+    /* A sheet of frosted glass on the sky: the sky's own frost, laid where
+       the picture lies beneath it, under the glass's tint. Stretching a
+       small picture is the blur, so nothing is blurred as it opens. */
+    background:
+      linear-gradient(var(--sky-card), var(--sky-card)),
+      var(--sky-frost, none) var(--sky-frost-x, 0) calc(var(--sky-frost-y, 0px) - var(--gap)) /
+        var(--sky-frost-size, cover) no-repeat,
+      var(--color-raised);
     box-shadow:
-      inset 0 0 0 1px var(--color-border),
+      inset 0 0 0 0.5px var(--sky-card-edge, var(--color-border)),
+      inset 0 1px 0 var(--sky-card-rim, transparent),
       var(--shadow-float);
     transform-origin: 50% 0;
     animation: sheet-in 340ms var(--ease-emphasized) backwards;

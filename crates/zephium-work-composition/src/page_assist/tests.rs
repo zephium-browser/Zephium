@@ -24,6 +24,7 @@ fn profile() -> ProfileId {
 #[derive(Default)]
 struct PageState {
     facts: HashMap<String, TabFacts>,
+    listed_tabs: Option<Vec<TabSummary>>,
     readouts: HashMap<String, Readout>,
     selection: Option<String>,
     highlights: Vec<String>,
@@ -34,6 +35,8 @@ struct PageState {
     cleared: Vec<String>,
     reads: u64,
     picks: Vec<Pick>,
+    cancelled_picks: Vec<String>,
+    cleared_picks: Vec<(String, u64)>,
     outline: Option<Outline>,
     glows: Vec<(String, Glow)>,
 }
@@ -144,8 +147,12 @@ impl PagePort for FakePage {
         let found = self.lock().picks.iter().find(|p| p.pick == pick).cloned();
         Box::pin(async move { found })
     }
-    fn pick_clear(&self, _tab: &str, _pick: u64) {}
-    fn pick_cancel(&self, _tab: &str) {}
+    fn pick_clear(&self, tab: &str, pick: u64) {
+        self.lock().cleared_picks.push((tab.to_owned(), pick));
+    }
+    fn pick_cancel(&self, tab: &str) {
+        self.lock().cancelled_picks.push(tab.to_owned());
+    }
     fn glow(&self, tab: &str, glow: Glow) {
         self.lock().glows.push((tab.to_owned(), glow));
     }
@@ -277,12 +284,27 @@ fn entry(tools: bool) -> WorkModelEntry {
 struct FakeModels {
     entry: WorkModelEntry,
     client: Arc<FakeClient>,
+    gate: Arc<Gate>,
+}
+
+/// Holds the model lookup until opened, while `held` is set.
+#[derive(Default)]
+struct Gate {
+    held: AtomicBool,
+    reached: Notify,
+    open: Notify,
 }
 
 impl ModelSource for FakeModels {
     fn entry<'a>(&'a self, _profile: &'a ProfileId) -> BoxFuture<'a, Option<ModelChoice>> {
         let entry = self.entry.clone();
+        let gate = self.gate.clone();
         Box::pin(async move {
+            if gate.held.load(Ordering::SeqCst) {
+                let open = gate.open.notified();
+                gate.reached.notify_one();
+                open.await;
+            }
             Some(ModelChoice {
                 entry,
                 effort: Some(WorkModelReasoning::High),
@@ -331,7 +353,7 @@ impl Settings for Switch {
     }
 }
 
-struct FakeTabs(Mutex<Vec<String>>, Arc<FakePage>);
+struct FakeTabs(Mutex<Vec<String>>, Arc<FakePage>, Mutex<Option<String>>);
 impl Tabs for FakeTabs {
     fn navigate(&self, _profile: &ProfileId, tab: &str, url: &str) -> bool {
         self.0.lock().unwrap().push(format!("{tab} → {url}"));
@@ -353,15 +375,21 @@ impl Tabs for FakeTabs {
         true
     }
     fn search_url(&self, _profile: &ProfileId, query: &str) -> Option<String> {
-        Some(format!(
-            "https://duckduckgo.com/?q={}",
-            query.replace(' ', "+")
-        ))
+        let base = self
+            .2
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "https://duckduckgo.com/".into());
+        Some(format!("{base}?q={}", query.replace(' ', "+")))
     }
     fn profile(&self, space: &str) -> Option<ProfileId> {
         (space == SPACE).then(profile)
     }
     fn list(&self, _profile: &ProfileId, _space: &str) -> Vec<TabSummary> {
+        if let Some(tabs) = &self.1.lock().listed_tabs {
+            return tabs.clone();
+        }
         vec![
             TabSummary {
                 id: TAB.into(),
@@ -461,7 +489,7 @@ impl StyleStore for Styles {
 #[derive(Default)]
 struct Store(Mutex<HashMap<String, (StoredConversation, String)>>);
 impl ConversationStore for Store {
-    fn list(&self, _profile: &ProfileId, _limit: u32) -> Vec<StoredConversation> {
+    fn list(&self, _profile: &ProfileId, limit: u32) -> Vec<StoredConversation> {
         let mut list: Vec<StoredConversation> = self
             .0
             .lock()
@@ -470,12 +498,16 @@ impl ConversationStore for Store {
             .map(|(entry, _)| entry.clone())
             .collect();
         list.sort_by_key(|entry| std::cmp::Reverse(entry.updated_ms));
+        list.truncate(limit as usize);
         list
     }
     fn load(&self, _profile: &ProfileId, id: &str) -> Option<String> {
         self.0.lock().unwrap().get(id).map(|(_, body)| body.clone())
     }
     fn save(&self, _profile: &ProfileId, entry: &StoredConversation, body: String) -> bool {
+        if body.len() > MAX_CHAT_BODY_BYTES || entry.title.len() > MAX_CHAT_TITLE_BYTES {
+            return false;
+        }
         self.0
             .lock()
             .unwrap()
@@ -498,6 +530,7 @@ struct Harness {
     work: Arc<FakeWork>,
     store: Arc<Store>,
     styles: Arc<Styles>,
+    gate: Arc<Gate>,
 }
 
 fn passage(id: u16, role: Role, text: &str) -> Passage {
@@ -599,17 +632,19 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
     });
     let sink = Arc::new(Sink::default());
     let ai = Arc::new(Switch(AtomicBool::new(true)));
-    let tabs = Arc::new(FakeTabs(Mutex::default(), page.clone()));
+    let tabs = Arc::new(FakeTabs(Mutex::default(), page.clone(), Mutex::default()));
     let work = Arc::new(FakeWork::default());
     let store = Arc::new(Store::default());
     let styles = Arc::new(Styles::default());
     let notes = Arc::new(Notes::default());
+    let gate = Arc::new(Gate::default());
     let service = PageAssist::new(Ports {
         page: page.clone(),
         tabs: tabs.clone(),
         models: Arc::new(FakeModels {
             entry: entry(tools),
             client: client.clone(),
+            gate: gate.clone(),
         }),
         events: sink.clone(),
         clock: Arc::new(RealClock(Instant::now())),
@@ -630,10 +665,37 @@ fn harness_with(turns: Vec<Turn>, tools: bool) -> Harness {
         work,
         store,
         styles,
+        gate,
     }
 }
 
 impl Harness {
+    fn fill_field(&self, kind: FieldKind, effect: StepEffect) {
+        let mut page = self.page.lock();
+        page.readouts
+            .get_mut(TAB)
+            .unwrap()
+            .passages
+            .push(passage(7, Role::Field(kind), "Message"));
+        page.steps.insert(
+            7,
+            ResolvedStep {
+                label: "Type into \"Message\"".into(),
+                effect,
+            },
+        );
+    }
+
+    async fn waiting(&self) {
+        for _ in 0..200 {
+            if self.state().await != PageAssistReplyStateV1::Working {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(self.state().await, PageAssistReplyStateV1::Waiting);
+    }
+
     async fn conversation(&self) -> String {
         self.service.status(SPACE, Some(TAB)).await.conversation.id
     }
@@ -893,6 +955,82 @@ async fn only_links_that_were_read_or_written_open() {
 }
 
 #[tokio::test]
+async fn outbound_links_wait_for_approval_after_other_or_unknown_site_reads() {
+    for name in ["go_to", "open_tabs"] {
+        for unknown in [false, true] {
+            for approve in [false, true] {
+                let navigation = tool(
+                    name,
+                    if name == "go_to" {
+                        json!({"target": if unknown { "https://emudhra.com/exit" } else { "a1" }, "new_tab": true})
+                    } else {
+                        json!({"targets": [if unknown { "https://emudhra.com/exit" } else { "a1" }]})
+                    },
+                );
+                let turns = if unknown {
+                    vec![say("Earlier reply."), navigation, say("Finished.")]
+                } else {
+                    vec![
+                        tool("list_tabs", json!({})),
+                        tool("read_page", json!({"tab": "t2"})),
+                        navigation,
+                        say("Finished."),
+                    ]
+                };
+                let h = harness(turns);
+                if unknown {
+                    h.ask("Earlier", true).await.unwrap();
+                    h.settle().await;
+                    let conversation = h.conversation().await;
+                    for data in h
+                        .service
+                        .state()
+                        .live
+                        .get_mut(&conversation)
+                        .unwrap()
+                        .replies
+                        .values_mut()
+                    {
+                        data.unknown_read_sites = true;
+                        data.reads.clear();
+                    }
+                }
+                let reply = h.ask("Summarize this", !unknown).await.unwrap();
+                h.waiting().await;
+                assert!(h.tabs.0.lock().unwrap().is_empty());
+                let blocks = h.blocks().await;
+                let (block, label) = blocks
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, block)| match block {
+                        PageAssistBlockV1::Steps { steps } => Some((index, &steps[0].label)),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(label.contains("https://emudhra.com/exit"), "{label}");
+                let conversation = h.conversation().await;
+                assert!(h.service.decide(
+                    &conversation,
+                    reply,
+                    u16::try_from(block).unwrap(),
+                    if approve {
+                        PageAssistDecisionV1::Approve
+                    } else {
+                        PageAssistDecisionV1::Decline
+                    }
+                ));
+                h.settle().await;
+                assert_eq!(
+                    h.tabs.0.lock().unwrap().len(),
+                    usize::from(approve),
+                    "{name} unknown={unknown}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_later_message_can_open_items_shown_earlier() {
     let h = harness(vec![
         tool(
@@ -952,6 +1090,444 @@ async fn a_commit_step_waits_for_the_person() {
     };
     assert_eq!(steps[0].state, PageAssistStepStateV1::Done);
     assert_eq!(steps[0].category, Some(WorkConfirmCategoryV1::Purchase));
+}
+
+#[tokio::test]
+async fn fills_without_cross_site_reads_need_no_approval() {
+    for other_tab in [false, true] {
+        for (kind, effect) in [
+            (FieldKind::Search, StepEffect::Read),
+            (FieldKind::Text, StepEffect::Draft),
+        ] {
+            let mut turns = Vec::new();
+            if other_tab {
+                turns.push(tool("list_tabs", json!({})));
+                turns.push(tool("read_page", json!({"tab": "t2"})));
+            }
+            turns.push(tool("read_page", json!({"tab": "t1"})));
+            turns.push(tool("act", json!({"steps": [{"verb": "fill", "ref": "a7", "value": "https://docs.example.com/ is in my question"}]})));
+            turns.push(say("Done."));
+            let h = harness(turns);
+            h.fill_field(kind, effect);
+            {
+                let mut page = h.page.lock();
+                page.facts.get_mut("tab-2").unwrap().url =
+                    Some("https://docs.ycombinator.com/guide".into());
+                page.listed_tabs = Some(vec![
+                    TabSummary {
+                        id: TAB.into(),
+                        title: "News".into(),
+                        url: Some("https://news.ycombinator.com/".into()),
+                    },
+                    TabSummary {
+                        id: "tab-2".into(),
+                        title: "Docs".into(),
+                        url: Some("https://docs.ycombinator.com/guide".into()),
+                    },
+                ]);
+            }
+            h.ask("Type https://docs.example.com/ is in my question", true)
+                .await
+                .unwrap();
+            h.settle().await;
+            assert_eq!(h.page.lock().acted.len(), 1);
+            assert!(!h.sink.0.lock().unwrap().iter().any(|event| matches!(
+                event.kind,
+                PageAssistEventV1::State {
+                    state: PageAssistReplyStateV1::Waiting
+                }
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn cross_site_fills_wait_for_each_decision() {
+    let value = format!("private  \"quoted\" text {} tail\u{202e}", "x".repeat(180));
+    for source in ["listed", "read", "opened"] {
+        for decision in [PageAssistDecisionV1::Approve, PageAssistDecisionV1::Decline] {
+            let mut turns = match source {
+                "opened" => vec![tool("go_to", json!({"target": "a1", "new_tab": true}))],
+                "read" => vec![
+                    tool("list_tabs", json!({})),
+                    tool("read_page", json!({"tab": "t2"})),
+                ],
+                _ => vec![tool("list_tabs", json!({}))],
+            };
+            turns.push(tool(
+                "act",
+                json!({"steps": [
+                    {"verb": "fill", "ref": "a7", "value": value},
+                    {"verb": "type", "ref": "a7", "value": "second value"}
+                ]}),
+            ));
+            turns.push(say("Done."));
+            turns.push(tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "new reply"}]}),
+            ));
+            turns.push(say("Done."));
+            let h = harness(turns);
+            h.fill_field(FieldKind::Search, StepEffect::Read);
+            if source == "read" {
+                // Listing itself stays on-site; only read_page discloses the other site.
+                h.page.lock().listed_tabs = Some(vec![
+                    TabSummary {
+                        id: TAB.into(),
+                        title: "News".into(),
+                        url: Some("https://news.ycombinator.com/".into()),
+                    },
+                    TabSummary {
+                        id: "tab-2".into(),
+                        title: "Docs".into(),
+                        url: Some("https://docs.ycombinator.com/".into()),
+                    },
+                ]);
+            }
+            h.ask("Summarize this page", true).await.unwrap();
+            h.waiting().await;
+            assert!(h.page.lock().acted.is_empty());
+            let blocks = h.blocks().await;
+            let (block, steps) = blocks
+                .iter()
+                .enumerate()
+                .find_map(|(block, value)| match value {
+                    PageAssistBlockV1::Steps { steps } => Some((block, steps)),
+                    _ => None,
+                })
+                .unwrap();
+            let site = if source == "opened" {
+                "emudhra.com"
+            } else {
+                "example.com"
+            };
+            assert_eq!(steps[0].category, Some(WorkConfirmCategoryV1::Type));
+            assert_eq!(
+                steps[0].label,
+                format!("{value:?} → Type into \"Message\"\n{site} → ycombinator.com")
+            );
+            let conversation = h.conversation().await;
+            assert!(h
+                .service
+                .decide(&conversation, 2, u16::try_from(block).unwrap(), decision));
+            if decision == PageAssistDecisionV1::Approve {
+                for _ in 0..200 {
+                    if h.page.lock().acted.len() == 1 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                h.waiting().await;
+                assert_eq!(
+                    h.page.lock().acted[0].value.as_deref(),
+                    Some(value.as_str())
+                );
+                assert!(h.service.decide(
+                    &conversation,
+                    2,
+                    u16::try_from(block).unwrap(),
+                    decision
+                ));
+            }
+            h.settle().await;
+            let expected = if decision == PageAssistDecisionV1::Approve {
+                2
+            } else {
+                0
+            };
+            assert_eq!(h.page.lock().acted.len(), expected);
+            let PageAssistBlockV1::Steps { steps } = &h.blocks().await[block] else {
+                panic!()
+            };
+            if decision == PageAssistDecisionV1::Decline {
+                assert_eq!(steps[0].state, PageAssistStepStateV1::Declined);
+                assert_eq!(steps[1].state, PageAssistStepStateV1::Skipped);
+            } else {
+                assert!(steps
+                    .iter()
+                    .all(|step| step.state == PageAssistStepStateV1::Done));
+            }
+            let reply = h.ask("Type new reply", true).await.unwrap();
+            h.waiting().await;
+            assert_eq!(h.page.lock().acted.len(), expected);
+            assert!(h
+                .service
+                .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+            h.settle().await;
+            assert_eq!(h.page.lock().acted.len(), expected + 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cross_site_fill_approval_is_invalidated_by_human_input() {
+    for changed in [false, true] {
+        let h = harness(vec![
+            tool("list_tabs", json!({})),
+            tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "draft"}]}),
+            ),
+            say("Done."),
+        ]);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        let reply = h.ask("Fill the field", true).await.unwrap();
+        h.waiting().await;
+        let conversation = h.conversation().await;
+        let reads_before_takeover = h.page.lock().reads;
+        h.service.human_input(TAB);
+        if changed {
+            h.page.lock().steps.get_mut(&7).unwrap().label = "Type into \"Other\"".into();
+        }
+        assert!(h
+            .service
+            .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+        for _ in 0..200 {
+            if h.state().await != PageAssistReplyStateV1::Waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(h.state().await, PageAssistReplyStateV1::Paused);
+        assert!(h.page.lock().acted.is_empty());
+        assert!(h.service.resume(&conversation, reply));
+        if !changed {
+            for _ in 0..200 {
+                if h.state().await != PageAssistReplyStateV1::Paused {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            h.waiting().await;
+            assert!(h.page.lock().acted.is_empty());
+            assert!(h
+                .service
+                .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+        }
+        h.settle().await;
+        let page = h.page.lock();
+        assert!(
+            page.reads > reads_before_takeover,
+            "resuming revalidates the page"
+        );
+        assert_eq!(page.acted.len(), usize::from(!changed));
+        if !changed {
+            assert!(page.acted[0].read > reads_before_takeover);
+        }
+    }
+}
+
+#[tokio::test]
+async fn history_provenance_survives_replay_and_missing_in_memory_records() {
+    for restored in [false, true] {
+        let h = harness(vec![
+            tool("list_tabs", json!({})),
+            say("The other page is Guide."),
+            say("Remembered Guide."),
+            tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Guide"}]}),
+            ),
+            say("Done."),
+        ]);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        h.ask("Name the other page", true).await.unwrap();
+        h.settle().await;
+        let conversation = h.conversation().await;
+        if restored {
+            assert!(h.service.new_conversation(SPACE));
+            h.service.state().live.remove(&conversation);
+            assert!(h.service.open(SPACE, &conversation));
+        }
+        h.ask("Remember it", false).await.unwrap();
+        h.settle().await;
+        assert!(
+            h.request_text(2).contains("The other page is Guide."),
+            "restored={restored}: {}",
+            h.request_text(2)
+        );
+        let reply = h.ask("Type it", true).await.unwrap();
+        h.waiting().await;
+        assert!(h.request_text(3).contains("Remembered Guide."));
+        assert!(h.page.lock().acted.is_empty());
+        let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+            panic!()
+        };
+        assert!(steps[0]
+            .label
+            .starts_with("\"Guide\" → Type into \"Message\"\n"));
+        assert!(h
+            .service
+            .decide(&conversation, reply, 0, PageAssistDecisionV1::Decline));
+        h.settle().await;
+        assert!(h.page.lock().acted.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn history_keeps_attachment_title_provenance_when_the_page_read_failed() {
+    let h = harness(vec![
+        say("Could not read the page."),
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Other title"}]}),
+        ),
+        say("Done."),
+    ]);
+    {
+        let mut page = h.page.lock();
+        let mut source = facts("https://docs.example.com/");
+        source.title = Some("Other title".into());
+        page.facts.insert(TAB.into(), source);
+        page.readouts.remove(TAB);
+    }
+    h.ask("Read this", true).await.unwrap();
+    h.settle().await;
+    {
+        let mut page = h.page.lock();
+        page.facts
+            .insert(TAB.into(), facts("https://news.ycombinator.com/"));
+        page.readouts.insert(TAB.into(), hacker_news());
+    }
+    h.fill_field(FieldKind::Text, StepEffect::Draft);
+    let reply = h.ask("Type the title", true).await.unwrap();
+    h.waiting().await;
+    assert!(h.request_text(1).contains("Other title"));
+    assert!(h.page.lock().acted.is_empty());
+    let conversation = h.conversation().await;
+    assert!(h
+        .service
+        .decide(&conversation, reply, 0, PageAssistDecisionV1::Decline));
+    h.settle().await;
+    assert!(h.page.lock().acted.is_empty());
+}
+
+#[tokio::test]
+async fn same_site_history_does_not_require_fill_approval() {
+    let h = harness(vec![
+        say("This page is Hacker News."),
+        tool(
+            "act",
+            json!({"steps": [{"verb": "fill", "ref": "a7", "value": "Hacker News"}]}),
+        ),
+        say("Done."),
+    ]);
+    h.fill_field(FieldKind::Text, StepEffect::Draft);
+    h.ask("Name this page", true).await.unwrap();
+    h.settle().await;
+    h.ask("Type it", true).await.unwrap();
+    h.settle().await;
+    assert_eq!(h.page.lock().acted.len(), 1);
+}
+
+#[tokio::test]
+async fn cross_site_attachments_require_fill_approval() {
+    for element in [false, true] {
+        let h = harness(vec![
+            tool(
+                "act",
+                json!({"steps": [{"verb": "fill", "ref": "a7", "value": "attached text"}]}),
+            ),
+            say("Done."),
+        ]);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        let attachment = if element {
+            h.page.lock().picks.push(Pick {
+                pick: 4,
+                label: "Document".into(),
+                text: "attached text".into(),
+                selector: None,
+            });
+            let picked = h.service.pick(SPACE, "tab-2").await.pick.unwrap();
+            PageAssistAttachV1::Element {
+                tab: "tab-2".into(),
+                pick: picked.pick,
+            }
+        } else {
+            h.page.lock().selection = Some("attached text".into());
+            PageAssistAttachV1::Selection {
+                tab: "tab-2".into(),
+            }
+        };
+        let conversation = h.conversation().await;
+        let (reply, task) = h
+            .service
+            .ask(PageAssistAskV1 {
+                space: SPACE.into(),
+                conversation: conversation.clone(),
+                text: "Read these".into(),
+                suggestion: None,
+                attachments: vec![PageAssistAttachV1::Page { tab: TAB.into() }, attachment],
+            })
+            .await
+            .unwrap();
+        tokio::spawn(task);
+        h.waiting().await;
+        assert!(h.page.lock().acted.is_empty());
+        assert_eq!(
+            h.service.state().live[&conversation].replies[&reply]
+                .reads
+                .len(),
+            1,
+            "the attachment has no full-page read in this reply"
+        );
+        let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+            panic!()
+        };
+        assert!(steps[0].label.contains("example.com → ycombinator.com"));
+        assert!(h
+            .service
+            .decide(&conversation, reply, 0, PageAssistDecisionV1::Approve));
+        h.settle().await;
+        assert_eq!(h.page.lock().acted.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn secret_fills_are_refused_even_after_approval() {
+    for approved_first in [false, true] {
+        let mut turns = Vec::new();
+        let mut steps = Vec::new();
+        if approved_first {
+            turns.push(tool("list_tabs", json!({})));
+            steps.push(json!({"verb": "fill", "ref": "a7", "value": "safe text"}));
+        }
+        steps.push(json!({"verb": "fill", "ref": "a7", "value": "sk-inertFixtureToken"}));
+        turns.push(tool("act", json!({"steps": steps})));
+        turns.push(say("Refused."));
+        let h = harness(turns);
+        h.fill_field(FieldKind::Text, StepEffect::Draft);
+        h.ask("Fill the field", true).await.unwrap();
+        if approved_first {
+            h.waiting().await;
+            let conversation = h.conversation().await;
+            assert!(h
+                .service
+                .decide(&conversation, 2, 0, PageAssistDecisionV1::Approve));
+        }
+        // A broken secret guard may ask again; even approving it must not type the secret.
+        for _ in 0..200 {
+            if h.service.state().running.is_empty() {
+                break;
+            }
+            if h.state().await == PageAssistReplyStateV1::Waiting {
+                let conversation = h.conversation().await;
+                h.service
+                    .decide(&conversation, 2, 0, PageAssistDecisionV1::Approve);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        h.settle().await;
+        assert_eq!(h.page.lock().acted.len(), usize::from(approved_first));
+        let PageAssistBlockV1::Steps { steps } = &h.blocks().await[0] else {
+            panic!()
+        };
+        assert_eq!(
+            steps.last().unwrap().reason,
+            Some(PageAssistStepReasonV1::Refused)
+        );
+        assert_eq!(steps.last().unwrap().state, PageAssistStepStateV1::Failed);
+    }
 }
 
 #[tokio::test]
@@ -1101,6 +1677,43 @@ async fn stop_drops_the_call_and_cancels_the_reply() {
 }
 
 #[tokio::test]
+async fn closing_the_panel_drops_its_running_call() {
+    let h = harness(vec![Turn {
+        deltas: vec!["Thinking".into()],
+        hang: true,
+        ..Turn::default()
+    }]);
+    h.ask("Long one", true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    h.service.close(SPACE);
+    h.settle().await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Cancelled);
+    h.ask("Again", false).await.unwrap();
+    h.settle().await;
+}
+
+#[tokio::test]
+async fn closing_a_space_preserves_other_spaces_element_picks() {
+    let h = harness(Vec::new());
+    h.page.lock().facts.get_mut("tab-2").unwrap().space = Some("other-space".into());
+    for (tab, pick) in [(TAB, 1), ("tab-2", 2)] {
+        h.service.state().picks.insert(
+            (tab.to_owned(), pick),
+            PickRecord {
+                epoch: 1,
+                label: "Pick".into(),
+            },
+        );
+    }
+    h.service.close(SPACE);
+    assert!(h.service.state().picks.contains_key(&("tab-2".into(), 2)));
+    assert!(!h.service.state().picks.contains_key(&(TAB.into(), 1)));
+    assert_eq!(h.page.lock().cancelled_picks, [TAB]);
+    assert_eq!(h.page.lock().cleared_picks, [(TAB.into(), 1)]);
+}
+
+#[tokio::test]
 async fn model_faults_end_the_reply_with_their_reason() {
     let h = harness(vec![Turn {
         error: Some(WorkModelError::RateLimited {
@@ -1119,6 +1732,89 @@ async fn model_faults_end_the_reply_with_their_reason() {
             fault: WorkModelFaultV1::RateLimited,
             retry_after_ms: Some(3_000)
         })
+    );
+}
+
+async fn model_call_with_timeouts(
+    turn: Turn,
+    idle: Duration,
+    overall: Duration,
+) -> Option<PageAssistFaultV1> {
+    let h = harness(vec![say("Warmup"), turn]);
+    h.ask("Warmup", false).await.unwrap();
+    h.settle().await;
+    let request = h.requests()[0].clone();
+    h.client.dropped.store(false, Ordering::Release);
+    let conversation = h.conversation().await;
+    let reply = agent::Reply {
+        service: h.service.clone(),
+        conversation,
+        space: SPACE.into(),
+        profile: profile(),
+        reply: 2,
+        words: String::new(),
+        suggestion: None,
+        attachments: Vec::new(),
+        cancel: Arc::new(Cancel::default()),
+        leased: Arc::new(AtomicBool::new(false)),
+        took_over: Arc::new(AtomicBool::new(false)),
+        glowing: Mutex::new(Vec::new()),
+    };
+    let model = ResolvedModel {
+        entry: entry(true),
+        effort: None,
+        client: h.client.clone(),
+    };
+    let fault = reply.call_for_test(&model, request, idle, overall).await;
+    assert!(h.client.dropped.load(Ordering::Acquire));
+    fault
+}
+
+#[tokio::test]
+async fn model_stream_progress_resets_the_idle_timeout() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 30],
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_silent_model_times_out_without_claiming_provider_failure() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                hang: true,
+                ..Turn::default()
+            },
+            Duration::from_millis(40),
+            Duration::from_secs(2)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
+    );
+}
+
+#[tokio::test]
+async fn continuous_model_progress_still_has_an_overall_cap() {
+    assert_eq!(
+        model_call_with_timeouts(
+            Turn {
+                deltas: vec!["part ".into(); 100],
+                ..Turn::default()
+            },
+            Duration::from_millis(100),
+            Duration::from_millis(40)
+        )
+        .await,
+        Some(PageAssistFaultV1::TimedOut)
     );
 }
 
@@ -1180,6 +1876,26 @@ async fn conversations_start_over_and_reopen_from_history() {
     assert!(h.service.delete(SPACE, &first));
     assert_ne!(h.conversation().await, first);
     assert_eq!(h.service.history(SPACE).conversations.len(), 1);
+}
+
+#[test]
+fn history_lists_every_kept_conversation() {
+    let h = harness(vec![]);
+    for index in 0..zephium_core::ports::store::MAX_CHATS {
+        let entry = StoredConversation {
+            id: format!("conversation-{index}"),
+            space: SPACE.into(),
+            title: format!("Conversation {index}"),
+            updated_ms: index as u64,
+        };
+        assert!(h.store.save(&profile(), &entry, String::new()));
+    }
+    let history = h.service.history(SPACE);
+    assert_eq!(
+        history.conversations.len(),
+        zephium_core::ports::store::MAX_CHATS
+    );
+    assert_eq!(history.conversations.last().unwrap().id, "conversation-0");
 }
 
 #[tokio::test]
@@ -1374,6 +2090,101 @@ async fn the_log_carries_counts_and_names_never_page_or_model_text() {
 }
 
 #[tokio::test]
+async fn a_search_waits_before_disclosing_page_text() {
+    let h = harness(vec![
+        tool(
+            "go_to",
+            json!({"target": "search: confidential client budget 71329 euros"}),
+        ),
+        say("Done."),
+    ]);
+    h.ask("Summarize this page", true).await.unwrap();
+    for _ in 0..200 {
+        if h.state().await != PageAssistReplyStateV1::Working {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Waiting);
+    assert!(h.tabs.0.lock().unwrap().is_empty());
+    let conversation = h.conversation().await;
+    assert!(h
+        .service
+        .decide(&conversation, 2, 0, PageAssistDecisionV1::Decline));
+    h.settle().await;
+    assert!(h.tabs.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn search_approval_names_the_complete_custom_origin() {
+    for (base, origin) in [
+        (
+            "https://search.example:8443/find",
+            "https://search.example:8443",
+        ),
+        ("https://[::1]:9443/find", "https://[::1]:9443"),
+    ] {
+        let h = harness(vec![tool(
+            "go_to",
+            json!({"target": "search: private marker"}),
+        )]);
+        *h.tabs.2.lock().unwrap() = Some(base.into());
+        h.ask("Read this page", true).await.unwrap();
+        for _ in 0..200 {
+            if h.state().await == PageAssistReplyStateV1::Waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(h.state().await, PageAssistReplyStateV1::Waiting);
+        assert!(h.tabs.0.lock().unwrap().is_empty());
+        assert!(
+            matches!(&h.blocks().await[0], PageAssistBlockV1::Search { destination, query, .. }
+            if destination == origin && query == "private marker")
+        );
+        assert!(h.service.stop(SPACE));
+        h.settle().await;
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_search_revokes_the_pending_approval() {
+    let h = harness(vec![tool(
+        "go_to",
+        json!({"target": "search: private marker"}),
+    )]);
+    h.ask("Read this page", true).await.unwrap();
+    for _ in 0..200 {
+        if h.state().await == PageAssistReplyStateV1::Waiting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Waiting);
+    assert!(h.service.stop(SPACE));
+    h.settle().await;
+    let conversation = h.conversation().await;
+    assert!(!h
+        .service
+        .decide(&conversation, 2, 0, PageAssistDecisionV1::Approve));
+    assert!(h.tabs.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unreviewable_searches_are_refused_without_navigation() {
+    for query in ["x".repeat(513), "hidden\u{202e}query".into()] {
+        let h = harness(vec![
+            tool("go_to", json!({"target": format!("search: {query}")})),
+            say("Refused."),
+        ]);
+        h.ask("Read this page", true).await.unwrap();
+        h.settle().await;
+        assert!(h.tabs.0.lock().unwrap().is_empty());
+        assert!(h.tool_result(1).1);
+    }
+}
+
+#[tokio::test]
 async fn go_to_searches_opens_in_front_and_reads_the_page() {
     let h = harness(vec![
         tool(
@@ -1384,6 +2195,22 @@ async fn go_to_searches_opens_in_front_and_reads_the_page() {
         say("Opened the search."),
     ]);
     h.ask("Open Wikipedia's page on Rust", false).await.unwrap();
+    for _ in 0..200 {
+        if h.state().await == PageAssistReplyStateV1::Waiting {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(h.state().await, PageAssistReplyStateV1::Waiting);
+    assert!(h.tabs.0.lock().unwrap().is_empty());
+    assert!(
+        matches!(&h.blocks().await[0], PageAssistBlockV1::Search { destination, query, .. }
+        if destination == "https://duckduckgo.com" && query == "rust programming language wikipedia")
+    );
+    let conversation = h.conversation().await;
+    assert!(h
+        .service
+        .decide(&conversation, 2, 0, PageAssistDecisionV1::Approve));
     h.settle().await;
     assert_eq!(
         *h.tabs.0.lock().unwrap(),
@@ -1437,4 +2264,125 @@ async fn go_to_follows_the_link_in_the_tab_being_worked_in() {
         (steps[0].label.as_str(), steps[0].state),
         ("Go to emudhra.com", PageAssistStepStateV1::Done)
     );
+}
+
+fn exchange(id: u32, words: &str, answer: &str) -> [PageAssistMessageV1; 2] {
+    [
+        PageAssistMessageV1::Person {
+            id,
+            text: words.into(),
+            suggestion: None,
+            attachments: Vec::new(),
+        },
+        PageAssistMessageV1::Reply {
+            id: id + 1,
+            state: PageAssistReplyStateV1::Done,
+            phase: None,
+            blocks: vec![PageAssistBlockV1::Text {
+                text: answer.into(),
+                cites: Vec::new(),
+            }],
+            cost: None,
+            fault: None,
+            inert: false,
+        },
+    ]
+}
+
+fn view_of(exchanges: u32, answer: &str) -> PageAssistConversationV1 {
+    PageAssistConversationV1 {
+        id: "c1".into(),
+        title: Some("Long".into()),
+        messages: (0..exchanges)
+            .flat_map(|n| exchange(n * 2 + 1, &format!("q{n}"), answer))
+            .collect(),
+        seq: 9,
+    }
+}
+
+#[test]
+fn a_conversation_past_the_body_limit_stores_its_newest_exchanges() {
+    let view = view_of(40, &"a".repeat(1000));
+    let whole = serde_json::to_string(&view).unwrap();
+    assert_eq!(
+        stored_body(&view, whole.len()).as_deref(),
+        Some(whole.as_str())
+    );
+
+    let limit = whole.len() / 3;
+    let body = stored_body(&view, limit).expect("the newest exchanges fit");
+    assert!(body.len() <= limit);
+    let stored: PageAssistConversationV1 = serde_json::from_str(&body).unwrap();
+    assert_eq!((stored.id.as_str(), stored.seq), ("c1", 9));
+    assert!(matches!(
+        stored.messages[0],
+        PageAssistMessageV1::Person { .. }
+    ));
+    assert_eq!(stored.messages.last(), view.messages.last());
+    let next = PageAssistConversationV1 {
+        messages: view.messages[view.messages.len() - stored.messages.len() - 2..].to_vec(),
+        ..view.clone()
+    };
+    assert!(
+        serde_json::to_string(&next).unwrap().len() > limit,
+        "keeps as much as fits"
+    );
+}
+
+#[test]
+fn a_single_exchange_past_the_body_limit_is_not_stored() {
+    let view = view_of(2, &"a".repeat(4000));
+    assert_eq!(stored_body(&view, 3000), None);
+}
+
+#[test]
+fn stored_titles_keep_whole_characters_within_the_store_limit() {
+    let title = "😀".repeat(60);
+    let stored = stored_title(&title);
+    assert!(stored.len() <= MAX_CHAT_TITLE_BYTES);
+    assert_eq!(stored, "😀".repeat(MAX_CHAT_TITLE_BYTES / 4));
+    assert_eq!(stored_title("Short"), "Short");
+}
+
+#[tokio::test]
+async fn a_conversation_titled_in_wide_characters_reaches_history() {
+    let h = harness(vec![say("Fine.")]);
+    h.ask(&"😀".repeat(60), false).await.unwrap();
+    h.settle().await;
+    let history = h.service.history(SPACE);
+    assert_eq!(history.conversations.len(), 1);
+    assert!(history.conversations[0].title.starts_with('😀'));
+}
+
+#[tokio::test]
+async fn a_question_held_past_new_conversation_never_starts() {
+    let h = harness(vec![say("First."), say("Late.")]);
+    h.ask("One", false).await.unwrap();
+    h.settle().await;
+    let asked = h.conversation().await;
+    h.gate.held.store(true, Ordering::SeqCst);
+    let reached = h.gate.reached.notified();
+    let service = h.service.clone();
+    let asked_id = asked.clone();
+    let pending = tokio::spawn(async move {
+        service
+            .ask(PageAssistAskV1 {
+                space: SPACE.into(),
+                conversation: asked_id,
+                text: "First question".into(),
+                suggestion: None,
+                attachments: Vec::new(),
+            })
+            .await
+            .map(|(reply, _)| reply)
+    });
+    reached.await;
+    assert!(h.service.new_conversation(SPACE));
+    h.gate.held.store(false, Ordering::SeqCst);
+    h.gate.open.notify_one();
+    assert_eq!(pending.await.unwrap(), Err(PageAssistFaultV1::Invalid));
+    assert!(h.service.state().running.is_empty());
+    let status = h.service.status(SPACE, Some(TAB)).await;
+    assert_ne!(status.conversation.id, asked);
+    assert!(status.conversation.messages.is_empty());
 }

@@ -452,13 +452,15 @@ impl Decoder {
             let read = read.unwrap_or(self.usage.cached_input_tokens);
             let written = written.unwrap_or(self.cache_write);
             let fresh = fresh.unwrap_or_else(|| {
-                self.usage
-                    .input_tokens
-                    .saturating_sub(self.usage.cached_input_tokens + self.cache_write)
+                self.usage.input_tokens.saturating_sub(
+                    self.usage
+                        .cached_input_tokens
+                        .saturating_add(self.cache_write),
+                )
             });
             self.usage.cached_input_tokens = read;
             self.cache_write = written;
-            self.usage.input_tokens = fresh + read + written;
+            self.usage.input_tokens = fresh.saturating_add(read).saturating_add(written);
         }
         if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
             self.usage.output_tokens = output;

@@ -34,6 +34,7 @@ style.textContent = primitives + tokens.replace("@theme static", ":root") + brow
 document.head.append(style);
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
   delete document.documentElement.dataset.theme;
 });
@@ -63,6 +64,7 @@ function serve(all: HistoryVisitView[]) {
       removed = all.map((entry) => entry.url);
       return { kind: "removed", count: all.length } satisfies HistoryResponse;
     }
+    if (call.kind !== "page") return { kind: "error", error: "invalid" } satisfies HistoryResponse;
     const needle = call.query.toLowerCase();
     const window = { hour: 3600, day: 24 * 3600, week: 7 * 24 * 3600, everything: null }[
       call.range
@@ -82,8 +84,16 @@ function serve(all: HistoryVisitView[]) {
   });
 }
 
-test("groups visits under the day they happened", async () => {
-  serve([visit("Rust Book", 60), visit("Release Notes", 2 * 60), visit("Old Article", DAY + 3600)]);
+test.each([0, 12, 23])("groups visits under the day they happened at %i:30", async (hour) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 9, 28, hour, 30));
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  serve([
+    visit("Rust Book", 60),
+    visit("Release Notes", 2 * 60),
+    visit("Old Article", (Date.now() - yesterday.getTime()) / 1000),
+  ]);
   render(HistoryPage);
 
   await expect.element(page.getByText("Rust Book")).toBeVisible();
@@ -263,4 +273,51 @@ test("renders in both themes", async () => {
   await page.screenshot({ path: "../../../../../target/history-page-dark.png" });
   document.documentElement.dataset.theme = "light";
   await page.screenshot({ path: "../../../../../target/history-page-light.png" });
+});
+
+test.each(["{Enter}", " "])("Remove handles %s without opening the selected visit", async (key) => {
+  const only = visit("Forgettable", 60);
+  serve([only]);
+  render(HistoryPage);
+  await expect.element(page.getByText("Forgettable")).toBeVisible();
+  const list = page.getByRole("listbox").element() as HTMLElement;
+  list.focus();
+  await userEvent.keyboard("{Home}");
+  const remove = page.getByRole("button", { name: "Remove from history" });
+  await expect.element(remove).toBeVisible();
+  remove.element().focus();
+  await expect.element(remove).toHaveFocus();
+  await userEvent.keyboard(key);
+  await expect.element(page.getByText("Forgettable")).not.toBeInTheDocument();
+  expect(native.history).toHaveBeenCalledWith("profile", { kind: "forget", urls: [only.url] });
+  expect(native.open).not.toHaveBeenCalled();
+});
+
+test.each(["light", "dark"])("History metadata reaches 4.5:1 contrast in %s", async (theme) => {
+  document.documentElement.dataset.theme = theme;
+  serve([visit("Readable metadata", 60)]);
+  const screen = await render(HistoryPage);
+  await expect.element(page.getByText("Readable metadata")).toBeVisible();
+  const shell = screen.container.querySelector<HTMLElement>(".library-shell")!;
+  const rgb = (value: string) => value.match(/[\d.]+/gu)!.map(Number);
+  const background = rgb(getComputedStyle(shell).backgroundColor);
+  const luminance = (channels: number[]) =>
+    channels.slice(0, 3).reduce((sum, value, index) => {
+      const channel = value / 255;
+      return (
+        sum +
+        (channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4) *
+          [0.2126, 0.7152, 0.0722][index]!
+      );
+    }, 0);
+  for (const element of screen.container.querySelectorAll(".host, time, .count")) {
+    const foreground = rgb(getComputedStyle(element).color);
+    const alpha = foreground[3] ?? 1;
+    const painted = foreground
+      .slice(0, 3)
+      .map((value, index) => value * alpha + background[index]! * (1 - alpha));
+    const fg = luminance(painted),
+      bg = luminance(background);
+    expect((Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05)).toBeGreaterThanOrEqual(4.5);
+  }
 });

@@ -4,8 +4,63 @@
     "id": "aeblfdkhhhdcdjpifhhbdiojplfjncoa",
     "popup": false,
     "allow": [
-      "connectNative"
+      "connectNative",
+      "permissions.contains"
+    ],
+    "check": [
+      {
+        "url": "/login.html",
+        "eval": "await focusFields(); return document.getElementById('1p-menu-live-region') !== null"
+      }
     ]
+  },
+  {
+    "name": "AdBlock",
+    "id": "gighmmpiobklfepjocnamgkkbiglidom",
+    "popup": false,
+    "allow": [
+      "webbundle"
+    ],
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 45000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ]
+  },
+  {
+    "name": "Adblock Plus",
+    "id": "cfhdojbkjhnklbpkdaibdccddilifddb",
+    "popup": false,
+    "allow": [
+      "webbundle"
+    ],
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 45000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ]
+  },
+  {
+    "name": "AdGuard",
+    "id": "bgnkhhnnamicmpeenaelnjfhikgbkllg",
+    "popup": true,
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 20000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ],
+    "known": "its popup renders nothing; blocking works"
+  },
+  {
+    "name": "Authenticator",
+    "id": "bhghoamapcdpbohphigoooaddinpkbai",
+    "popup": true
   },
   {
     "name": "Bitwarden",
@@ -13,6 +68,22 @@
     "popup": true,
     "allow": [
       "connectNative"
+    ],
+    "popup_has": [
+      "default password manager"
+    ],
+    "logs": [
+      {
+        "has": "Autofill monitoring disabled",
+        "min": 2
+      }
+    ],
+    "check": [
+      {
+        "url": "/login.html",
+        "settle": 2000,
+        "eval": "return document.getElementById('inner').contentDocument.readyState === 'complete'"
+      }
     ]
   },
   {
@@ -21,17 +92,20 @@
     "popup": true,
     "allow": [
       "Can't find variable: document",
-      "browserPromise.runtime.sendMessage"
+      "browserPromise.runtime.sendMessage",
+      "captureVisibleTab"
     ]
   },
   {
     "name": "Dark Reader",
     "id": "eimadpbcbfnmbkopoojfekhnkhdbieeh",
     "popup": true,
-    "check": {
-      "url": "https://example.com/",
-      "eval": "return document.querySelector('style.darkreader') !== null"
-    }
+    "check": [
+      {
+        "url": "/light.html",
+        "eval": "return document.querySelector('style.darkreader') !== null"
+      }
+    ]
   },
   {
     "name": "Dashlane",
@@ -39,6 +113,15 @@
     "popup": true,
     "allow": [
       "is not a function"
+    ],
+    "popup_has": [
+      "log in"
+    ],
+    "check": [
+      {
+        "url": "/login.html",
+        "eval": "const filled = (doc) => doc.querySelector('#pass[data-dashlane-rid]') !== null; return document.querySelector('#pass[data-dashlane-classification=password]') !== null && filled(document.getElementById('inner').contentDocument)"
+      }
     ]
   },
   {
@@ -52,28 +135,41 @@
     ]
   },
   {
-    "name": "Google Docs Offline",
-    "id": "ghbmnnjooekpmoecnnnilnnbdlolhkhi",
-    "popup": false
-  },
-  {
     "name": "DuckDuckGo",
     "id": "bkdgflcldnnnapblkhphbgpggdiikppg",
     "popup": false,
     "allow": [
       "isSupported",
       "current tab"
-    ]
+    ],
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 20000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ],
+    "known": "exempts localhost pages with an allowAllRequests rule, so the local fixture can't show its blocking"
   },
   {
     "name": "Enhancer for YouTube",
     "id": "ponfpcnoihfmfllpaingbgckeeldkhle",
     "popup": false,
-    "check": {
-      "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-      "wait": 10000,
-      "eval": "return document.querySelector('[id^=\"efyt\"], [class*=\"efyt\"]') !== null"
-    }
+    "check": [
+      {
+        "url": "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "wait": 10000,
+        "eval": "return document.querySelector('[id^=\"efyt\"], [class*=\"efyt\"]') !== null"
+      }
+    ]
+  },
+  {
+    "name": "Enpass",
+    "id": "kmcfomidfpdkfieipokbalgegidffkal",
+    "popup": false,
+    "allow": [
+      "sendNativeMessage"
+    ]
   },
   {
     "name": "Evernote Web Clipper",
@@ -89,6 +185,13 @@
     "popup": true,
     "allow": [
       "Menu item not found"
+    ],
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 20000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
     ]
   },
   {
@@ -97,9 +200,21 @@
     "popup": true
   },
   {
+    "name": "Google Docs Offline",
+    "id": "ghbmnnjooekpmoecnnnilnnbdlolhkhi",
+    "popup": false
+  },
+  {
+    "name": "Google Keep",
+    "id": "lpcaedmchfhocbbapmcbpinfpgnhiddi",
+    "popup": true,
+    "known": "needs a Google account sign-in (identity.getAuthToken), which Zephium doesn't have"
+  },
+  {
     "name": "Google Translate",
     "id": "aapbdbdomjkkjkaonfhkkikfgjllcleb",
-    "popup": true
+    "popup": true,
+    "allow": ["does not have access to this tab"]
   },
   {
     "name": "Grammarly",
@@ -109,10 +224,12 @@
       "executeScript",
       "CSRFToken"
     ],
-    "check": {
-      "url": "https://example.com/",
-      "eval": "return document.querySelector('grammarly-desktop-integration') !== null"
-    }
+    "check": [
+      {
+        "url": "/text.html",
+        "eval": "return document.querySelector('grammarly-desktop-integration') !== null"
+      }
+    ]
   },
   {
     "name": "Honey",
@@ -124,18 +241,68 @@
     ]
   },
   {
+    "name": "Hypothesis",
+    "id": "bjfhmglciegochdpefhhlphglcehbmek",
+    "popup": false
+  },
+  {
+    "name": "JSON Formatter",
+    "id": "bcjindcccaagfpapjjmafapmmgkkhgoa",
+    "popup": false,
+    "check": [
+      {
+        "url": "/data.json",
+        "eval": "return document.getElementById('jsonFormatterParsed') !== null"
+      }
+    ]
+  },
+  {
+    "name": "KeePassXC-Browser",
+    "id": "oboonakemofpalcgghocfoadofidjkkk",
+    "popup": true,
+    "popup_has": [
+      "keepassxc"
+    ],
+    "allow": [
+      "connectNative"
+    ]
+  },
+  {
     "name": "Keeper",
     "id": "bfogiafebfohielmmehodmfbbebbbpei",
     "popup": false,
     "allow": [
       "runtime.connect"
+    ]
+  },
+  {
+    "name": "LanguageTool",
+    "id": "oldceeleldhonbafppcapldpdifcinji",
+    "popup": true,
+    "popup_has": [
+      "languagetool"
     ],
-    "known": "its popup never answers"
+    "check": [
+      {
+        "url": "/text.html",
+        "eval": "return document.documentElement.dataset.ltInstalled === 'true'"
+      }
+    ]
   },
   {
     "name": "LastPass",
     "id": "hdokiejnpimakedhajhdlcegeplioahd",
-    "popup": true
+    "popup": true,
+    "popup_has": [
+      "log in"
+    ],
+    "check": [
+      {
+        "url": "/login.html",
+        "eval": "const inField = (doc) => doc.querySelectorAll('[data-lastpass-icon-for]').length >= 2; return inField(document) && inField(document.getElementById('inner').contentDocument)"
+      }
+    ],
+    "known": "signed out, its in-field icons come and go with its own server settings; unchanged code passed and failed on 2026-10-31"
   },
   {
     "name": "Loom",
@@ -154,6 +321,23 @@
     "popup": false
   },
   {
+    "name": "NordPass",
+    "id": "eiaeiblijfjekdanodkjadfinkhbfgcd",
+    "popup": false,
+    "check": [
+      {
+        "url": "/login.html",
+        "eval": "const live = (doc) => doc.querySelector('div[role=status][aria-live=polite]') !== null && doc.querySelector('div[role=alert][aria-live=assertive]') !== null; return live(document) && live(document.getElementById('inner').contentDocument)"
+      }
+    ]
+  },
+  {
+    "name": "NordVPN",
+    "id": "fjoaledfpmneenckfbpdfhkmimnjocfa",
+    "popup": true,
+    "known": "needs chrome.proxy and declarativeNetRequest.RuleActionType, which WebKit lacks"
+  },
+  {
     "name": "Notion Web Clipper",
     "id": "knheggckgoiihginacbkhaalnibhilkk",
     "popup": true
@@ -162,16 +346,19 @@
     "name": "Octotree",
     "id": "bkhaagjahfmjljalopjnoealnfndnagc",
     "popup": false,
-    "check": {
-      "url": "https://github.com/refined-github/refined-github",
-      "wait": 8000,
-      "eval": "return document.querySelector('.octotree-sidebar, [class*=\"octotree\"]') !== null"
-    }
+    "check": [
+      {
+        "url": "https://github.com/refined-github/refined-github",
+        "wait": 8000,
+        "eval": "return document.querySelector('.octotree-sidebar, [class*=\"octotree\"]') !== null"
+      }
+    ]
   },
   {
     "name": "OneTab",
     "id": "chphlpgkkbolifaimnlloiipkdnihall",
-    "popup": false
+    "popup": false,
+    "allow": ["Identifier is already used"]
   },
   {
     "name": "Phantom",
@@ -182,10 +369,32 @@
     ]
   },
   {
+    "name": "Privacy Badger",
+    "id": "pkehgijcmpdhfbdbbnkijodmdjhbjlgp",
+    "popup": true,
+    "allow": [
+      "setBadgeTextColor"
+    ],
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 20000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ]
+  },
+  {
     "name": "Proton Pass",
     "id": "ghmbeldphafepmbegfdlkpapadhbakde",
-    "popup": false,
-    "known": "its background never finishes starting"
+    "popup": true,
+    "popup_lacks": [
+      "difficulties activating"
+    ]
+  },
+  {
+    "name": "Proton VPN",
+    "id": "jplgfhpmjnbigmhklmmbgecoobifkmpa",
+    "popup": true
   },
   {
     "name": "Raindrop",
@@ -204,11 +413,13 @@
     "allow": [
       "tab.id"
     ],
-    "check": {
-      "url": "https://github.com/refined-github/refined-github",
-      "wait": 8000,
-      "eval": "return document.querySelector('[class*=\"rgh-\"]') !== null"
-    }
+    "check": [
+      {
+        "url": "https://github.com/refined-github/refined-github",
+        "wait": 8000,
+        "eval": "return document.querySelector('[class*=\"rgh-\"]') !== null"
+      }
+    ]
   },
   {
     "name": "Return YouTube Dislike",
@@ -216,8 +427,27 @@
     "popup": true
   },
   {
+    "name": "RoboForm",
+    "id": "pnlccmojcmeohlpggmfnbbiapkmbliob",
+    "popup": false,
+    "check": [
+      {
+        "url": "/login.html",
+        "eval": "return document.querySelector('[popover]') !== null"
+      }
+    ],
+    "allow": [
+      "connectNative"
+    ]
+  },
+  {
     "name": "Session Buddy",
     "id": "edacconmaakjimmfgnblocblbcdcpbko",
+    "popup": false
+  },
+  {
+    "name": "Simplify Gmail",
+    "id": "pbmlfaiicoikhdbjagjbglnbfcbcojpj",
     "popup": false
   },
   {
@@ -252,12 +482,37 @@
   {
     "name": "uBlock Origin Lite",
     "id": "ddkjiahejlhfcafbddmgiahcphecmpfh",
-    "popup": true
+    "popup": true,
+    "check": [
+      {
+        "url": "/blockers.html",
+        "wait": 20000,
+        "eval": "return await blocked('https://securepubads.g.doubleclick.net/tag/js/gpt.js')"
+      }
+    ]
+  },
+  {
+    "name": "Unhook",
+    "id": "khncfooichmfjbepaaaebmommgaepoid",
+    "popup": false,
+    "check": [
+      {
+        "url": "https://www.youtube.com/",
+        "wait": 10000,
+        "eval": "return document.documentElement.getAttributeNames().some((name) => name.startsWith('hide_'))"
+      }
+    ]
   },
   {
     "name": "Video Speed Controller",
     "id": "nffaoalbilbmmfgbnbgppjihopabppdk",
-    "popup": true
+    "popup": true,
+    "check": [
+      {
+        "url": "/video.html",
+        "eval": "return document.querySelector('vsc-controller') !== null"
+      }
+    ]
   },
   {
     "name": "Vimium",
@@ -265,6 +520,13 @@
     "popup": true,
     "allow": [
       "activeTab.url"
+    ],
+    "check": [
+      {
+        "url": "/login.html",
+        "keys": "f",
+        "eval": "return document.getElementById('vimium-hint-marker-container') !== null"
+      }
     ]
   },
   {
@@ -281,6 +543,14 @@
     "name": "Wappalyzer",
     "id": "gppongmhjkpfnbhagpmjfkannfbllamg",
     "popup": true
+  },
+  {
+    "name": "Wayback Machine",
+    "id": "fpnmgdkabkmnadcjpehmlllkndpkmiak",
+    "popup": false,
+    "allow": [
+      "documentUrlPatterns"
+    ]
   },
   {
     "name": "Zotero Connector",

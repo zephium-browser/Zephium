@@ -90,7 +90,7 @@ impl Keymap {
         let shown = self.work_pane_shown.load(Ordering::Acquire);
         self.resolved()
             .iter()
-            .filter(|command| command.group != Group::Global)
+            .filter(|command| command.id != "launcher.toggle")
             .filter(|command| shown || command.group != Group::Work)
             .filter(|command| self.offers(command.id))
             .filter_map(|command| shortcut(command.id, command.accelerator.as_deref()?))
@@ -136,7 +136,13 @@ impl Keymap {
                 .resolved()
                 .iter()
                 .filter(|_| !recording)
-                .filter(|command| command.group == Group::Keys)
+                .filter(|command| {
+                    // Tab cycling also has a menu item, but the menu only sees
+                    // the key after the focused page has, and a page keystroke
+                    // hides the pointer until the mouse moves.
+                    command.group == Group::Keys
+                        || matches!(command.id, "tab.recent.next" | "tab.recent.previous")
+                })
                 .filter(|command| self.offers(command.id))
                 .filter_map(|command| {
                     let accelerator = command.accelerator.as_deref()?;
@@ -499,6 +505,31 @@ pub(crate) fn keymap_reset(
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn custom_theme_keys_take_precedence_over_zoom_aliases_in_pages() {
+        for id in ["theme.system", "theme.light", "theme.dark"] {
+            let keymap = Keymap::default();
+            write(&keymap.overrides).insert(id.to_owned(), "Ctrl+Shift+=".to_owned());
+            let table = keymap.engine_table();
+            assert_eq!(
+                Shortcut::match_windows(&table, 0xBB, true, true, false)
+                    .map(|shortcut| shortcut.id.as_str()),
+                Some(id)
+            );
+            assert!(!table
+                .iter()
+                .any(|shortcut| shortcut.id == "launcher.toggle"));
+            write(&keymap.overrides).insert(id.to_owned(), String::new());
+            let table = keymap.engine_table();
+            assert_eq!(
+                Shortcut::match_windows(&table, 0xBB, true, true, false)
+                    .map(|shortcut| shortcut.id.as_str()),
+                Some("zoom.in")
+            );
+        }
+    }
+
     #[test]
     fn page_tables_carry_work_keys_only_while_the_pane_is_shown() {
         let keymap = Keymap::default();
@@ -554,6 +585,20 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycling_keys_are_taken_before_the_page_sees_them() {
+        // A keystroke that reaches a page hides the pointer on macOS, so each
+        // platform must match Ctrl+Tab and Ctrl+Shift+Tab ahead of the page.
+        let keymap = Keymap::default();
+        keymap.refresh_tables();
+        for id in ["tab.recent.next", "tab.recent.previous"] {
+            #[cfg(target_os = "macos")]
+            assert!(read(&keymap.key_table).iter().any(|(_, held)| *held == id));
+            #[cfg(not(target_os = "macos"))]
+            assert!(keymap.engine_table().iter().any(|s| s.id == id));
+        }
+    }
+
+    #[test]
     fn page_keys_use_the_platform_primary_modifier() {
         let reload = shortcut("nav.reload", "CmdOrCtrl+R");
         if cfg!(target_os = "macos") {
@@ -563,5 +608,15 @@ mod tests {
             assert!(reload.ctrl && !reload.shift && !reload.alt);
             assert_eq!(reload.key, 0x52);
         }
+    }
+
+    #[test]
+    fn bare_function_keys_and_alt_arrows_match_as_written() {
+        let f5 = shortcut("nav.reload.alt", "F5").expect("F5 key");
+        assert!(!f5.ctrl && !f5.shift && !f5.alt);
+        assert_eq!(f5.key, 0x74);
+        let back = shortcut("nav.back.alt", "Alt+Left").expect("Alt+Left key");
+        assert!(back.alt && !back.ctrl && !back.shift);
+        assert_eq!(back.key, 0x25);
     }
 }

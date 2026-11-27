@@ -6,6 +6,7 @@
     sites,
     above,
     compact = false,
+    roomy = false,
     tools = true,
     foot,
   }: {
@@ -13,6 +14,8 @@
     /** Kept sites that did not fit beside the shelf, in rows over it. */
     above?: Snippet;
     compact?: boolean;
+    /** At rail width with a tool beside it, the profile's stack has room. */
+    roomy?: boolean;
     /** The profile and its tools; Work keeps its own on the canvas. */
     tools?: boolean;
     /** What closes the rail at its very foot, below the kept sites. */
@@ -39,11 +42,12 @@
   <div class="dock-base">
     {#if tools && !compact}<ToolShelf />
       <span class="dock-rule" aria-hidden="true"></span>{/if}
-    {#if sites}<div class="dock-sites-slot" data-under-panel={compact || undefined}>
+    {#if sites}<div class="dock-sites-slot">
         {@render sites()}
       </div>{/if}
     {#if tools && compact}<span class="dock-rule" aria-hidden="true"></span><ToolShelf
         compact
+        {roomy}
       />{/if}
     {#if foot}<span class="dock-rule" aria-hidden="true"></span>{@render foot()}{/if}
   </div>
@@ -112,7 +116,10 @@
     height: 1px;
   }
 
+  /* The kept sites are a step of the rail themselves, so with none the rule
+     stands one gap below what is above the dock, as the profile stands one
+     below the rule. */
   .dock[data-compact="true"] .dock-sites-slot {
-    flex: none;
+    display: contents;
   }
 </style>

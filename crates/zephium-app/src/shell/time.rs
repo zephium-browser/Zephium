@@ -107,16 +107,14 @@ fn blocked_sites(value: &str) -> Vec<String> {
 
 /// Wall-clock milliseconds as the local zone reads them.
 fn local_ms(utc_ms: i64) -> i64 {
-    use chrono::TimeZone;
-    let offset = chrono::Local
-        .timestamp_millis_opt(utc_ms)
-        .single()
-        .map_or(0, |local| i64::from(local.offset().local_minus_utc()));
+    let offset = jiff::Timestamp::from_millisecond(utc_ms).map_or(0, |instant| {
+        i64::from(jiff::tz::TimeZone::system().to_offset(instant).seconds())
+    });
     utc_ms + offset * 1000
 }
 
 fn utc_now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 fn local_day(utc_ms: i64) -> i64 {
@@ -126,7 +124,7 @@ fn local_day(utc_ms: i64) -> i64 {
 /// A page's registrable domain, so `m.youtube.com` and `www.youtube.com`
 /// are one site. Hosts without a known suffix, such as `localhost`, stay
 /// whole.
-fn site_of(url: &url::Url) -> Option<String> {
+pub(super) fn site_of(url: &url::Url) -> Option<String> {
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }

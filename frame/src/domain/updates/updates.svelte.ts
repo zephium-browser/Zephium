@@ -1,6 +1,6 @@
 /**
  * Zephium's own updates, as native reports them. A check downloads a newer
- * release in the background; nothing installs until the person relaunches.
+ * release in the background; installs on relaunch, or on a normal macOS quit.
  * Development builds report `unavailable` and are never checked.
  */
 import { commands, type UpdateStatus } from "$shared/ipc/bindings";

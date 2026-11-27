@@ -29,3 +29,6 @@ expect true false false Cargo.lock desktop/src/lib.rs
 expect true true true .github/workflows/ci.yml
 expect true true true scripts/ci/scope.sh
 expect true true false desktop/tauri.conf.json
+
+# Release policy and its regressions must reach the workflows job.
+expect true true true scripts/release/check_tag_ref.sh scripts/release/test_tag_ref.py

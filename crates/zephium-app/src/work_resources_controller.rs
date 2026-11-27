@@ -208,7 +208,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         _now: AgentPolicyInstant,
     ) -> Result<(), AgentWorkFailure> {
         if !self.screenshot {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.screenshot = false;
         // This is original callback accounting, not new browser authority.
@@ -312,7 +312,10 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .map_err(Self::error)?
             .rearm()
             .map_err(Self::error)?;
-        let pending = self.action.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let pending = self
+            .action
+            .as_mut()
+            .ok_or_else(|| crate::contract_failure!())?;
         let Some(event) = pending.poll(now).map_err(Self::error)? else {
             return Ok(None);
         };
@@ -346,7 +349,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             || self.revoke.is_some()
             || self.delivered
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         let (pending, operation) =
             PendingNavigation::prepare(&self.browser, source, now).map_err(Self::error)?;
@@ -354,7 +357,10 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         Ok(operation)
     }
     fn cancel_navigation_preparation(&mut self) -> Result<(), AgentWorkFailure> {
-        let pending = self.navigation.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let pending = self
+            .navigation
+            .as_mut()
+            .ok_or_else(|| crate::contract_failure!())?;
         pending.cancel_preparation().map_err(Self::error)?;
         self.navigation.take();
         Ok(())
@@ -391,7 +397,10 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             .map_err(Self::error)?
             .rearm()
             .map_err(Self::error)?;
-        let pending = self.navigation.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let pending = self
+            .navigation
+            .as_mut()
+            .ok_or_else(|| crate::contract_failure!())?;
         let Some(event) = pending.poll(now).map_err(Self::error)? else {
             return Ok(None);
         };
@@ -425,7 +434,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             || self.revoke.is_some()
             || self.delivered
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         let request = self
             .browser
@@ -482,7 +491,7 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
             || self.revoke.is_some()
             || self.delivered
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         let request = self
             .browser
@@ -515,11 +524,14 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         now: AgentPolicyInstant,
     ) -> Result<Option<SemanticObservation>, AgentWorkFailure> {
         self.rearm().map_err(Self::error)?;
-        let (pending, _) = self.read.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let (pending, _) = self
+            .read
+            .as_mut()
+            .ok_or_else(|| crate::contract_failure!())?;
         let Some(event) = pending.poll(now).map_err(Self::error)? else {
             return Ok(None);
         };
-        let (_, request) = self.read.take().ok_or(AgentWorkFailure::Contract)?;
+        let (_, request) = self.read.take().ok_or_else(|| crate::contract_failure!())?;
         let snapshot = match event {
             WorkBrowserObservationEvent::Snapshot(snapshot) => *snapshot,
             WorkBrowserObservationEvent::Refused(failure) => {
@@ -637,7 +649,10 @@ impl AgentWorkRetainedBrowser for RetainedBrowser {
         // Physical receipt may be consumed during notifier Running. Scoped
         // actor drain is not notifier completion or successor admission: the
         // original native reservation and application health still gate those.
-        let pending = self.revoke.as_mut().ok_or(AgentWorkFailure::Contract)?;
+        let pending = self
+            .revoke
+            .as_mut()
+            .ok_or_else(|| crate::contract_failure!())?;
         match pending.poll(now).map_err(Self::error)? {
             None => Ok(None),
             Some(LifecycleResult::Delivered(proof)) => {

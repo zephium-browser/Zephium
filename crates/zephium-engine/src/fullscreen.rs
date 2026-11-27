@@ -35,6 +35,56 @@ impl NativeFullscreen {
     }
 }
 
+/// A rectangle in virtual-screen pixels.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ScreenRect {
+    pub(crate) left: i32,
+    pub(crate) top: i32,
+    pub(crate) right: i32,
+    pub(crate) bottom: i32,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl ScreenRect {
+    fn covers(self, other: Self) -> bool {
+        self.left <= other.left
+            && self.top <= other.top
+            && self.right >= other.right
+            && self.bottom >= other.bottom
+    }
+}
+
+/// A window as the person sees it: the area the shell draws in is what a
+/// fullscreen page has to fill. The window rectangle around it is not a
+/// guide, since a maximized window keeps its frame off-screen and may keep
+/// the monitor-sized rectangle fullscreen gave it after leaving.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WindowPlacement {
+    pub(crate) window: ScreenRect,
+    pub(crate) client: ScreenRect,
+}
+
+/// Whether the host window stands where an element fullscreen transition is
+/// headed. Entering, its drawing area has to fill the monitor. Leaving, it
+/// has to have stopped doing so, or be back at the drawing area it had
+/// before: a window that was monitor-sized to begin with returns to exactly
+/// the fullscreen rectangle, and one that was snapped or maximized does not
+/// return to the rectangle it left.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn window_settled(
+    now: WindowPlacement,
+    monitor: ScreenRect,
+    entering: bool,
+    before: Option<ScreenRect>,
+) -> bool {
+    if entering {
+        return now.client.covers(monitor);
+    }
+    now.client != monitor || before == Some(now.client)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FullscreenEffect {
     /// Tell the shell whether `id` is the fullscreen page.
@@ -173,6 +223,135 @@ mod tests {
 
     fn id() -> ItemId {
         ItemId::generate()
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> ScreenRect {
+        ScreenRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    fn placed(window: ScreenRect, client: ScreenRect) -> WindowPlacement {
+        WindowPlacement { window, client }
+    }
+
+    const MONITOR: ScreenRect = ScreenRect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+
+    #[test]
+    fn a_normal_window_settles_when_it_fills_the_monitor_and_when_it_is_back() {
+        let before = rect(200, 100, 1400, 900);
+        let normal = placed(before, before);
+        let full = placed(MONITOR, MONITOR);
+        assert!(!window_settled(normal, MONITOR, true, Some(before)));
+        assert!(window_settled(full, MONITOR, true, Some(before)));
+        assert!(!window_settled(full, MONITOR, false, Some(before)));
+        assert!(window_settled(normal, MONITOR, false, Some(before)));
+    }
+
+    #[test]
+    fn a_maximized_window_settles_on_its_work_area_not_on_the_rectangle_it_left() {
+        // Taskbar at the bottom: the frame hangs 8 px off-screen on three
+        // sides, and the drawing area is clamped to the work area.
+        let work = rect(0, 0, 1920, 1032);
+        let maximized = placed(rect(-8, -8, 1928, 1040), work);
+        assert!(!window_settled(maximized, MONITOR, true, Some(work)));
+        assert!(window_settled(
+            placed(MONITOR, MONITOR),
+            MONITOR,
+            true,
+            Some(work)
+        ));
+        // Leaving, Windows may keep the monitor-sized rectangle fullscreen
+        // gave the window and only clamp its drawing area again.
+        assert!(!window_settled(
+            placed(MONITOR, MONITOR),
+            MONITOR,
+            false,
+            Some(work)
+        ));
+        assert!(window_settled(
+            placed(MONITOR, work),
+            MONITOR,
+            false,
+            Some(work)
+        ));
+        assert!(window_settled(maximized, MONITOR, false, Some(work)));
+    }
+
+    #[test]
+    fn a_maximized_window_settles_beside_a_side_or_hidden_taskbar() {
+        for work in [
+            rect(96, 0, 1920, 1080),
+            rect(0, 0, 1824, 1080),
+            rect(0, 48, 1920, 1080),
+            rect(0, 0, 1920, 1079),
+            rect(1, 0, 1920, 1080),
+        ] {
+            assert!(!window_settled(
+                placed(MONITOR, work),
+                MONITOR,
+                true,
+                Some(work)
+            ));
+            assert!(window_settled(
+                placed(MONITOR, MONITOR),
+                MONITOR,
+                true,
+                Some(work)
+            ));
+            assert!(!window_settled(
+                placed(MONITOR, MONITOR),
+                MONITOR,
+                false,
+                Some(work)
+            ));
+            assert!(window_settled(
+                placed(MONITOR, work),
+                MONITOR,
+                false,
+                Some(work)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_window_that_returns_elsewhere_still_settles() {
+        // A snapped window comes back to the rectangle it had before it was
+        // snapped.
+        let snapped = rect(960, 0, 1920, 1032);
+        let unsnapped = rect(300, 200, 1500, 900);
+        assert!(window_settled(
+            placed(unsnapped, unsnapped),
+            MONITOR,
+            false,
+            Some(snapped)
+        ));
+        assert!(!window_settled(
+            placed(MONITOR, MONITOR),
+            MONITOR,
+            false,
+            Some(snapped)
+        ));
+    }
+
+    #[test]
+    fn a_window_that_was_already_monitor_sized_settles_where_it_began() {
+        // Fullscreen before the page took the screen, or sized to the monitor
+        // by hand: leaving puts it back in the same place.
+        let full = placed(MONITOR, MONITOR);
+        assert!(window_settled(full, MONITOR, true, Some(MONITOR)));
+        assert!(window_settled(full, MONITOR, false, Some(MONITOR)));
+        assert!(!window_settled(full, MONITOR, false, None));
+        let work = rect(0, 0, 1920, 1032);
+        assert!(window_settled(placed(MONITOR, work), MONITOR, false, None));
     }
 
     #[test]

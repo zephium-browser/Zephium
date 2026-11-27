@@ -12,6 +12,9 @@ type Drop = {
   over: Element | null;
   /** The tab under the pointer, which a placement goes before. */
   before: string | null;
+  /** Whether native may read the point as the page: never over a sidebar
+   *  that floats above it. */
+  page: boolean;
 };
 
 type Options = {
@@ -60,6 +63,9 @@ export class RowDrag {
   #options: Options;
   #down: { x: number; y: number } | null = null;
   #id = "";
+  #pointerId: number | null = null;
+  #captured: HTMLElement | null = null;
+  #listening = false;
   #dragging = false;
   #pointer = { x: 0, y: 0 };
   #frame = 0;
@@ -70,6 +76,8 @@ export class RowDrag {
   #landing: Reorder | null = null;
   #essential = false;
   #bounds: DOMRect | null = null;
+  #floating = false;
+  #native = false;
   #slot = -1;
   #page = false;
 
@@ -77,29 +85,97 @@ export class RowDrag {
     this.#options = options;
   }
 
+  isForeignPointer(pointerId: number): boolean {
+    return this.#pointerId !== null && pointerId !== this.#pointerId;
+  }
+
+  #onLostCapture = (event: PointerEvent) => {
+    if (this.isForeignPointer(event.pointerId)) return;
+    this.abandon();
+  };
+
+  #onWindowBlur = () => {
+    this.abandon();
+  };
+
+  #onWindowPointerEnd = (event: PointerEvent) => {
+    if (this.isForeignPointer(event.pointerId)) return;
+    this.abandon();
+  };
+
+  #onContextMenu = () => {
+    if (this.#dragging) this.abandon();
+  };
+
+  #onKeyDown = (event: KeyboardEvent) => {
+    if (!this.#dragging || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.#swallow = true;
+    this.abandon();
+  };
+
+  #attachWindowListeners() {
+    if (this.#listening || typeof window === "undefined") return;
+    this.#listening = true;
+    window.addEventListener("blur", this.#onWindowBlur);
+    window.addEventListener("pointerup", this.#onWindowPointerEnd);
+    window.addEventListener("pointercancel", this.#onWindowPointerEnd);
+    window.addEventListener("contextmenu", this.#onContextMenu, true);
+    window.addEventListener("keydown", this.#onKeyDown, true);
+  }
+
+  #detachWindowListeners() {
+    if (!this.#listening || typeof window === "undefined") return;
+    this.#listening = false;
+    window.removeEventListener("blur", this.#onWindowBlur);
+    window.removeEventListener("pointerup", this.#onWindowPointerEnd);
+    window.removeEventListener("pointercancel", this.#onWindowPointerEnd);
+    window.removeEventListener("contextmenu", this.#onContextMenu, true);
+    window.removeEventListener("keydown", this.#onKeyDown, true);
+  }
+
   down(event: PointerEvent, id: string) {
     if (event.button !== 0) return;
+    if (this.isForeignPointer(event.pointerId)) return;
+    this.#swallow = false;
+    if (this.#dragging || this.#down !== null) this.abandon();
     this.#down = { x: event.clientX, y: event.clientY };
     this.#id = id;
+    this.#pointerId = event.pointerId;
     this.#dragging = false;
+    this.#attachWindowListeners();
   }
 
   move(event: PointerEvent) {
     const start = this.#down;
     if (start === null) return;
+    if (this.isForeignPointer(event.pointerId)) return;
+    if (event.isTrusted && event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      this.abandon();
+      return;
+    }
     if (
       !this.#dragging &&
       Math.abs(event.clientX - start.x) + Math.abs(event.clientY - start.y) > 4
     ) {
       const target = event.currentTarget;
-      if (target instanceof HTMLElement) target.setPointerCapture(event.pointerId);
+      if (target instanceof HTMLElement) {
+        try {
+          target.setPointerCapture(event.pointerId);
+          this.#captured = target;
+          target.addEventListener("lostpointercapture", this.#onLostCapture);
+        } catch {
+          // Synthetic pointer events in tests may not map to an active pointer.
+        }
+      }
       this.#dragging = true;
       tabDrag.begin(this.#id);
       document.body.style.cursor = "grabbing";
-      this.#bounds =
-        target instanceof Element
-          ? (target.closest(".browser-sidebar")?.getBoundingClientRect() ?? null)
-          : null;
+      const sidebar = target instanceof Element ? target.closest(".browser-sidebar") : null;
+      this.#bounds = sidebar?.getBoundingClientRect() ?? null;
+      this.#floating = sidebar?.hasAttribute("data-hidden") ?? false;
+      this.#native = false;
       this.#slot = -1;
       this.#page = false;
       const reorder = this.#options.reorder();
@@ -124,11 +200,18 @@ export class RowDrag {
       this.#feel(inPlace, x);
       this.ghost = { id: this.#id, x, y };
       tabDrag.hover(x, y);
-      tabs.dragOver(x, y);
+      if (this.#onPage(x, y)) {
+        this.#native = true;
+        tabs.dragOver(x, y);
+      } else if (this.#native) {
+        this.#native = false;
+        tabs.dragOver(null, null);
+      }
     });
   }
 
   up(event: PointerEvent) {
+    if (event.pointerId !== this.#pointerId) return;
     const over = document.elementFromPoint(event.clientX, event.clientY);
     const before = placeBefore(over, event.clientX, event.clientY, this.#id);
     const dragged = this.#dragging;
@@ -166,10 +249,18 @@ export class RowDrag {
       y: event.clientY,
       over,
       before,
+      page: this.#onPage(event.clientX, event.clientY),
     });
   }
 
+  #onPage(x: number, y: number) {
+    const bounds = this.#bounds;
+    if (!this.#floating || bounds === null) return true;
+    return x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom;
+  }
+
   cancel(event: PointerEvent) {
+    if (event.pointerId !== this.#pointerId) return;
     this.#release(event);
     this.#reorder?.release();
     this.#reset();
@@ -207,24 +298,49 @@ export class RowDrag {
     this.#page = page;
   }
 
+  #releaseCapture(pointerId = this.#pointerId) {
+    const target = this.#captured;
+    if (!target) return;
+    this.#captured = null;
+    target.removeEventListener("lostpointercapture", this.#onLostCapture);
+    if (pointerId !== null && target.hasPointerCapture(pointerId)) {
+      try {
+        target.releasePointerCapture(pointerId);
+      } catch {
+        // Ignore if capture was already released.
+      }
+    }
+  }
+
   #release(event: PointerEvent) {
+    this.#releaseCapture(event.pointerId);
     const target = event.currentTarget;
     if (target instanceof HTMLElement && target.hasPointerCapture(event.pointerId)) {
-      target.releasePointerCapture(event.pointerId);
+      try {
+        target.releasePointerCapture(event.pointerId);
+      } catch {
+        // Ignore if capture was already released.
+      }
     }
   }
 
   #reset() {
+    const wasDragging = this.#dragging;
+    this.#detachWindowListeners();
+    this.#releaseCapture();
     if (this.#frame !== 0) {
       cancelAnimationFrame(this.#frame);
       this.#frame = 0;
     }
     this.#down = null;
     this.#id = "";
+    this.#pointerId = null;
     this.#dragging = false;
     this.#reorder = null;
     this.ghost = null;
-    document.body.style.cursor = "";
-    tabDrag.end();
+    if (wasDragging) {
+      document.body.style.cursor = "";
+      tabDrag.end();
+    }
   }
 }

@@ -1,15 +1,13 @@
 //! One bounded, cookie-free fetch of a public image for media admission.
 //! The bytes are data for the store's own sniffing and decoding; nothing
 //! here trusts a server's declared type beyond a coarse `image/*` gate.
-use reqwest::{redirect::Policy, Client};
-use std::{
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
-    },
-    time::Duration,
-};
+//! Every fetch connects directly, and only while the shared route is direct:
+//! it never goes around the person's proxy.
+use reqwest::{dns::Resolve, redirect::Policy, Client};
+use std::{future::Future, sync::Arc, time::Duration};
+pub use zephium_public_fetch::guard::{public_address, public_https, public_resolver};
+use zephium_public_fetch::SYSTEM_ROUTE_TIMEOUT;
+pub use zephium_public_fetch::{PublicRoute, RouteSource};
 
 /// Largest public image body accepted before decoding; admission scales a
 /// large photo down to display size before it is stored.
@@ -29,161 +27,43 @@ pub enum PublicAssetError {
     TooLarge,
     /// The server did not answer with an image body.
     NotAnImage,
+    /// The route is proxied or not known: a direct fetch would go around it.
+    RouteRefused,
 }
 
-/// Only public HTTPS origins: no loopback, private, link-local, or `.local`.
-pub fn public_https(url: &url::Url) -> bool {
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.as_str().len() > 4096
-    {
-        return false;
-    }
-    match url.host() {
-        Some(url::Host::Domain(domain)) => {
-            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-            !domain.is_empty()
-                && domain != "localhost"
-                && !domain.ends_with(".localhost")
-                && !domain.ends_with(".local")
-                && !domain.ends_with(".internal")
-                && domain.contains('.')
-        }
-        Some(url::Host::Ipv4(ip)) => public_address(IpAddr::V4(ip)),
-        Some(url::Host::Ipv6(ip)) => public_address(IpAddr::V6(ip)),
-        None => false,
-    }
+/// How long a fetch started before the route is known waits for it: one
+/// system read's timeout and a margin.
+pub const ROUTE_SETTLE_WAIT: Duration =
+    SYSTEM_ROUTE_TIMEOUT.saturating_add(Duration::from_millis(500));
+
+async fn within(
+    settled: impl Future<Output = ()>,
+    route: impl FnOnce() -> PublicRoute,
+    bound: Duration,
+) -> PublicRoute {
+    let _ = tokio::time::timeout(bound, settled).await;
+    route()
 }
 
-/// Conservatively admits public unicast addresses, excluding private, loopback,
-/// link-local, documentation, transition/tunnel and reserved special-purpose blocks.
-/// Callers must apply this to the exact addresses used by their connector.
-pub fn public_address(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(ip) => {
-            let [a, b, c, _] = ip.octets();
-            !(ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || a == 0
-                || a >= 224
-                || a == 100 && (64..=127).contains(&b)
-                || a == 192 && (b == 0 && c == 0 || b == 88 && c == 99)
-                || a == 198 && (18..=19).contains(&b))
-        }
-        IpAddr::V6(ip) => {
-            let parts = ip.segments();
-            // Public unicast only, excluding transition/tunnel and reserved
-            // special-purpose blocks rather than interpreting embedded hosts.
-            (parts[0] & 0xe000) == 0x2000
-                && parts[0] != 0x2002
-                && !(parts[0] == 0x2001 && (parts[1] < 0x0200 || parts[1] == 0x0db8))
-                && !(parts[0] == 0x3fff && parts[1] < 0x1000)
-        }
-    }
+pub(crate) async fn settled_route(routes: &RouteSource) -> PublicRoute {
+    within(routes.settled(), || routes.route(), ROUTE_SETTLE_WAIT).await
 }
-fn public_addresses(
-    addresses: impl Iterator<Item = SocketAddr>,
-) -> Result<reqwest::dns::Addrs, std::io::Error> {
-    let mut kept = Vec::new();
-    for address in addresses.take(33) {
-        if kept.len() == 32 || !public_address(address.ip()) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "non-public image address or resolution limit",
-            ));
-        }
-        kept.push(address);
-    }
-    if kept.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "no public image address",
-        ));
-    }
-    Ok(Box::new(kept.into_iter()))
+
+pub(crate) async fn with_direct_route<T>(
+    routes: &RouteSource,
+    operation: impl Future<Output = Result<T, PublicAssetError>>,
+) -> Result<T, PublicAssetError> {
+    direct(settled_route(routes).await)?;
+    routes
+        .while_direct(operation)
+        .await
+        .map_err(|_| PublicAssetError::RouteRefused)?
 }
-// getaddrinfo runs on a blocking worker and cannot be cancelled by dropping
-// its async waiter. Keep a global physical bound until that worker returns.
-struct ResolverSlots {
-    used: AtomicUsize,
-    maximum: usize,
-}
-impl ResolverSlots {
-    fn new(maximum: usize) -> Self {
-        Self {
-            used: AtomicUsize::new(0),
-            maximum,
-        }
-    }
-    fn reserve(self: &Arc<Self>) -> Result<ResolverPermit, std::io::Error> {
-        self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                (used < self.maximum).then(|| used + 1)
-            })
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "public image resolver capacity",
-                )
-            })?;
-        Ok(ResolverPermit {
-            slots: self.clone(),
-            returned: false,
-        })
-    }
-}
-struct ResolverPermit {
-    slots: Arc<ResolverSlots>,
-    returned: bool,
-}
-impl ResolverPermit {
-    fn returned(mut self) {
-        self.returned = true;
-    }
-}
-impl Drop for ResolverPermit {
-    fn drop(&mut self) {
-        // A panic or a dropped queued worker is not a confirmed resolver return.
-        // Conservatively quarantine its slot instead of advertising false capacity.
-        if self.returned {
-            self.slots.used.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
-}
-async fn resolve_with(
-    slots: Arc<ResolverSlots>,
-    resolve: impl FnOnce() -> std::io::Result<reqwest::dns::Addrs> + Send + 'static,
-) -> std::io::Result<reqwest::dns::Addrs> {
-    let permit = slots.reserve()?;
-    tokio::task::spawn_blocking(move || {
-        let result = resolve();
-        permit.returned();
-        result
-    })
-    .await
-    .map_err(|_| std::io::Error::other("public image resolver did not return"))?
-}
-struct PublicResolver;
-impl reqwest::dns::Resolve for PublicResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        static SLOTS: OnceLock<Arc<ResolverSlots>> = OnceLock::new();
-        let slots = SLOTS
-            .get_or_init(|| Arc::new(ResolverSlots::new(4)))
-            .clone();
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            Ok(resolve_with(slots, move || {
-                // These exact checked addresses reach the connector; there is no
-                // second resolution between validation and socket creation.
-                public_addresses((host.as_str(), 0).to_socket_addrs()?)
-            })
-            .await?)
-        })
+
+fn direct(route: PublicRoute) -> Result<(), PublicAssetError> {
+    match route {
+        PublicRoute::Direct => Ok(()),
+        PublicRoute::Proxied | PublicRoute::Unsupported => Err(PublicAssetError::RouteRefused),
     }
 }
 
@@ -288,12 +168,28 @@ pub fn display_variant(url: &str) -> Option<String> {
 /// HTTPS redirects, and returns at most [`MAX_PUBLIC_IMAGE_BYTES`]. A CDN
 /// that serves display sizes is asked for one first; the address as given is
 /// the fallback.
-pub async fn fetch_public_image(url: &str) -> Result<Vec<u8>, PublicAssetError> {
+pub async fn fetch_public_image(
+    routes: &RouteSource,
+    url: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
+    let parsed = image_target(url)?;
+    with_direct_route(routes, fetch_image(public_resolver(), url, parsed)).await
+}
+
+fn image_target(url: &str) -> Result<url::Url, PublicAssetError> {
     let parsed = url::Url::parse(url).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(&parsed) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    let client = public_client(Arc::new(PublicResolver))?;
+    Ok(parsed)
+}
+
+async fn fetch_image(
+    resolver: Arc<dyn Resolve>,
+    url: &str,
+    parsed: url::Url,
+) -> Result<Vec<u8>, PublicAssetError> {
+    let client = public_client(resolver)?;
     if let Some(variant) = display_variant(url).and_then(|v| url::Url::parse(&v).ok()) {
         if let Ok(bytes) = fetch_with(&client, variant).await {
             return Ok(bytes);
@@ -304,13 +200,28 @@ pub async fn fetch_public_image(url: &str) -> Result<Vec<u8>, PublicAssetError> 
 
 /// Exact anonymous record-source retrieval: no URL variants, credentials or redirects.
 /// The caller owns the original short deadline and must drop this future on cancellation.
-pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAssetError> {
+pub async fn fetch_public_record_image(
+    routes: &RouteSource,
+    raw: &str,
+) -> Result<Vec<u8>, PublicAssetError> {
+    let target = record_target(raw)?;
+    with_direct_route(routes, fetch_record_image(public_resolver(), target)).await
+}
+
+fn record_target(raw: &str) -> Result<crate::ContextNavigationTarget, PublicAssetError> {
     let target =
         crate::ContextNavigationTarget::parse(raw).map_err(|_| PublicAssetError::InvalidUrl)?;
     if !public_https(target.as_url()) || !crate::semantic_wire::model_safe_public_url(&target) {
         return Err(PublicAssetError::InvalidUrl);
     }
-    let client = public_client_builder(Arc::new(PublicResolver))
+    Ok(target)
+}
+
+async fn fetch_record_image(
+    resolver: Arc<dyn Resolve>,
+    target: crate::ContextNavigationTarget,
+) -> Result<Vec<u8>, PublicAssetError> {
+    let client = public_client_builder(resolver)
         .redirect(Policy::none())
         .build()
         .map_err(|_| PublicAssetError::Unavailable)?;
@@ -324,8 +235,12 @@ pub async fn fetch_public_record_image(raw: &str) -> Result<Vec<u8>, PublicAsset
 
 /// A client for one small anonymous JSON lookup: no redirects, a short
 /// deadline, the same public-address resolver as image fetches.
-pub(crate) fn lookup_client(timeout: Duration) -> Result<Client, PublicAssetError> {
-    public_client_builder(Arc::new(PublicResolver))
+pub(crate) fn lookup_client(
+    route: PublicRoute,
+    timeout: Duration,
+) -> Result<Client, PublicAssetError> {
+    direct(route)?;
+    public_client_builder(public_resolver())
         .redirect(Policy::none())
         .timeout(timeout)
         .connect_timeout(timeout)
@@ -333,21 +248,26 @@ pub(crate) fn lookup_client(timeout: Duration) -> Result<Client, PublicAssetErro
         .map_err(|_| PublicAssetError::Unavailable)
 }
 
-fn public_client(resolver: Arc<dyn reqwest::dns::Resolve>) -> Result<Client, PublicAssetError> {
+fn public_client(resolver: Arc<dyn Resolve>) -> Result<Client, PublicAssetError> {
     public_client_builder(resolver)
         .build()
         .map_err(|_| PublicAssetError::Unavailable)
 }
-fn public_client_builder(resolver: Arc<dyn reqwest::dns::Resolve>) -> reqwest::ClientBuilder {
+fn permits_redirect(previous: usize, target: &url::Url) -> bool {
+    previous <= MAX_REDIRECTS && public_https(target)
+}
+
+fn public_client_builder(resolver: Arc<dyn Resolve>) -> reqwest::ClientBuilder {
     Client::builder()
         .no_proxy()
         .dns_resolver(resolver)
         .https_only(true)
         .redirect(Policy::custom(|attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS || !public_https(attempt.url()) {
-                attempt.stop()
-            } else {
+            // `previous()` starts with the original request, not a redirect.
+            if permits_redirect(attempt.previous().len(), attempt.url()) {
                 attempt.follow()
+            } else {
+                attempt.stop()
             }
         }))
         .referer(false)
@@ -413,6 +333,26 @@ async fn fetch_bounded(
 
 #[cfg(test)]
 mod tests {
+    async fn image(
+        route: impl Future<Output = PublicRoute>,
+        resolver: Arc<dyn Resolve>,
+        url: &str,
+    ) -> Result<Vec<u8>, PublicAssetError> {
+        let parsed = image_target(url)?;
+        direct(route.await)?;
+        fetch_image(resolver, url, parsed).await
+    }
+
+    async fn record_image(
+        route: impl Future<Output = PublicRoute>,
+        resolver: Arc<dyn Resolve>,
+        raw: &str,
+    ) -> Result<Vec<u8>, PublicAssetError> {
+        let target = record_target(raw)?;
+        direct(route.await)?;
+        fetch_record_image(resolver, target).await
+    }
+
     #[tokio::test]
     async fn exact_record_fetch_refuses_private_and_secret_destinations_before_transport() {
         for url in [
@@ -424,71 +364,16 @@ mod tests {
             "https://images.example.com/a.png?access_token=secret",
         ] {
             assert_eq!(
-                fetch_public_record_image(url).await,
+                record_image(std::future::pending(), public_resolver(), url).await,
                 Err(PublicAssetError::InvalidUrl)
             );
         }
     }
 
     use super::*;
-
-    #[tokio::test]
-    async fn cancelled_dns_waiter_retains_capacity_until_physical_return() {
-        let slots = Arc::new(ResolverSlots::new(1));
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let owned = slots.clone();
-        let caller = tokio::spawn(async move {
-            resolve_with(owned, move || {
-                let _ = started_tx.send(());
-                release_rx.recv().unwrap();
-                public_addresses(["93.184.216.34:443".parse().unwrap()].into_iter())
-            })
-            .await
-        });
-        started_rx.await.unwrap();
-        caller.abort();
-        assert!(matches!(caller.await, Err(error) if error.is_cancelled()));
-        assert_eq!(slots.used.load(Ordering::Acquire), 1);
-        let refused = resolve_with(slots.clone(), || {
-            panic!("capacity must refuse before worker dispatch")
-        })
-        .await;
-        assert!(matches!(refused, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
-        release_tx.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while slots.used.load(Ordering::Acquire) != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let next = resolve_with(slots.clone(), || {
-            public_addresses(["93.184.216.34:443".parse().unwrap()].into_iter())
-        })
-        .await
-        .unwrap();
-        assert_eq!(next.count(), 1);
-        assert_eq!(slots.used.load(Ordering::Acquire), 0);
-    }
-
-    #[tokio::test]
-    async fn returned_dns_error_releases_capacity_but_panic_does_not() {
-        let slots = Arc::new(ResolverSlots::new(1));
-        let error = resolve_with(slots.clone(), || {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "injected",
-            ))
-        })
-        .await;
-        assert!(matches!(error, Err(error) if error.kind() == std::io::ErrorKind::NotFound));
-        assert_eq!(slots.used.load(Ordering::Acquire), 0);
-        let panic = resolve_with(slots.clone(), || panic!("injected resolver panic")).await;
-        assert!(matches!(panic, Err(error) if error.kind() == std::io::ErrorKind::Other));
-        assert_eq!(slots.used.load(Ordering::Acquire), 1);
-        assert!(slots.reserve().is_err());
-    }
+    use std::future::ready;
+    use std::net::SocketAddr;
+    use zephium_public_fetch::guard::public_addresses;
 
     #[test]
     fn cdns_are_asked_for_a_display_sized_picture() {
@@ -535,102 +420,193 @@ mod tests {
         assert_eq!(display_variant("https://example.com/a.jpg"), None);
     }
 
-    #[test]
-    fn only_public_https_origins_are_fetchable() {
-        for ok in [
-            "https://cdn.example/a.png",
-            "https://93.184.216.34/logo.webp",
-            "https://images.example.co.uk/x.jpg?w=200",
-        ] {
-            assert!(public_https(&url::Url::parse(ok).unwrap()), "{ok}");
-        }
-        for bad in [
-            "http://cdn.example/a.png",
-            "https://localhost/a.png",
-            "https://api.localhost/a.png",
-            "https://printer.local/a.png",
-            "https://metadata.internal/a.png",
-            "https://127.0.0.1/a.png",
-            "https://10.0.0.5/a.png",
-            "https://169.254.169.254/latest",
-            "https://100.64.0.1/a.png",
-            "https://[::1]/a.png",
-            "https://[fd00::1]/a.png",
-            "https://[fe80::1]/a.png",
-            "https://user:pw@cdn.example/a.png",
-            "https://intranet/a.png",
-        ] {
-            assert!(!public_https(&url::Url::parse(bad).unwrap()), "{bad}");
-        }
-    }
-    #[test]
-    fn resolved_addresses_cannot_cross_private_or_special_networks() {
-        let denied = [
-            "0.1.2.3",
-            "10.0.0.1",
-            "100.64.0.1",
-            "100.127.255.255",
-            "127.0.0.1",
-            "169.254.1.1",
-            "172.16.0.1",
-            "192.0.0.8",
-            "192.88.99.1",
-            "192.168.1.1",
-            "198.18.1.1",
-            "198.19.255.255",
-            "198.51.100.1",
-            "203.0.113.1",
-            "224.0.0.1",
-            "240.0.0.1",
-            "255.255.255.255",
-            "::",
-            "::1",
-            "::ffff:127.0.0.1",
-            "64:ff9b::a00:1",
-            "fc00::1",
-            "fe80::1",
-            "ff02::1",
-            "2001::1",
-            "2001:2::1",
-            "2001:db8::1",
-            "2002:7f00:1::1",
-            "3fff::1",
-        ];
-        let good: SocketAddr = "93.184.216.34:443".parse().unwrap();
-        for address in denied {
-            let ip = address.parse().unwrap();
-            assert!(!public_address(ip), "{address}");
-            assert!(public_addresses([good, SocketAddr::new(ip, 443)].into_iter()).is_err());
-            assert!(public_addresses([SocketAddr::new(ip, 443), good].into_iter()).is_err());
-        }
-        for address in [
-            "1.1.1.1",
-            "8.8.8.8",
-            "100.63.255.255",
-            "100.128.0.1",
-            "198.17.255.255",
-            "198.20.0.0",
-            "2606:4700::1111",
-            "2001:4860:4860::8888",
-        ] {
-            assert!(public_address(address.parse().unwrap()), "{address}");
-        }
-        assert!(public_addresses(std::iter::empty()).is_err());
-        assert_eq!(
-            public_addresses(std::iter::repeat_n(good, 32))
-                .unwrap()
-                .count(),
-            32
-        );
-        assert!(public_addresses(std::iter::repeat_n(good, 33)).is_err());
-    }
-
     struct RebindingAnswer(SocketAddr);
     impl reqwest::dns::Resolve for RebindingAnswer {
         fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
             let address = self.0;
             Box::pin(async move { Ok(public_addresses([address].into_iter())?) })
         }
+    }
+
+    #[derive(Default)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+    impl reqwest::dns::Resolve for CountingResolver {
+        fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let loopback = SocketAddr::from(([127, 0, 0, 1], 443));
+            Box::pin(async move { Ok(public_addresses([loopback].into_iter())?) })
+        }
+    }
+
+    #[tokio::test]
+    async fn every_fetch_refuses_unless_the_route_is_direct_before_any_lookup() {
+        let image_url = "https://images.example.com/a.png";
+        for route in [PublicRoute::Proxied, PublicRoute::Unsupported] {
+            let resolver = Arc::new(CountingResolver::default());
+            assert_eq!(
+                image(ready(route), resolver.clone(), image_url).await,
+                Err(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(
+                record_image(ready(route), resolver.clone(), image_url).await,
+                Err(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(
+                lookup_client(route, Duration::from_secs(1)).err(),
+                Some(PublicAssetError::RouteRefused)
+            );
+            assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 0);
+        }
+        let resolver = Arc::new(CountingResolver::default());
+        assert_eq!(
+            image(ready(PublicRoute::Direct), resolver.clone(), image_url).await,
+            Err(PublicAssetError::Unavailable)
+        );
+        assert_eq!(
+            record_image(ready(PublicRoute::Direct), resolver.clone(), image_url).await,
+            Err(PublicAssetError::Unavailable)
+        );
+        assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 2);
+        assert!(lookup_client(PublicRoute::Direct, Duration::from_secs(1)).is_ok());
+        assert_eq!(
+            image(
+                std::future::pending(),
+                resolver,
+                "http://images.example.com/a.png"
+            )
+            .await,
+            Err(PublicAssetError::InvalidUrl)
+        );
+    }
+
+    /// A route that becomes known when `settle` is sent, as the source's
+    /// first system read does.
+    fn launching() -> (
+        tokio::sync::oneshot::Sender<PublicRoute>,
+        impl Future<Output = PublicRoute>,
+    ) {
+        let (settle, settled) = tokio::sync::oneshot::channel::<PublicRoute>();
+        let known = Arc::new(std::sync::Mutex::new(PublicRoute::Unsupported));
+        let route = {
+            let known = known.clone();
+            async move {
+                within(
+                    async {
+                        if let Ok(route) = settled.await {
+                            *known.lock().unwrap() = route;
+                        }
+                    },
+                    || *known.lock().unwrap(),
+                    Duration::from_millis(150),
+                )
+                .await
+            }
+        };
+        (settle, route)
+    }
+
+    #[tokio::test]
+    async fn a_fetch_started_before_the_route_is_known_waits_for_it_within_the_bound() {
+        let image_url = "https://images.example.com/a.png";
+        for (settles, expected, lookups) in [
+            (Some(PublicRoute::Direct), PublicAssetError::Unavailable, 1),
+            (
+                Some(PublicRoute::Proxied),
+                PublicAssetError::RouteRefused,
+                0,
+            ),
+            (
+                Some(PublicRoute::Unsupported),
+                PublicAssetError::RouteRefused,
+                0,
+            ),
+            (None, PublicAssetError::RouteRefused, 0),
+        ] {
+            for record in [false, true] {
+                let resolver = Arc::new(CountingResolver::default());
+                let (settle, route) = launching();
+                let started = std::time::Instant::now();
+                let fetch = {
+                    let resolver = resolver.clone();
+                    tokio::spawn(async move {
+                        if record {
+                            record_image(route, resolver, image_url).await
+                        } else {
+                            image(route, resolver, image_url).await
+                        }
+                    })
+                };
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                assert_eq!(resolver.0.load(std::sync::atomic::Ordering::Acquire), 0);
+                let unsent = match settles {
+                    Some(route) => {
+                        settle.send(route).unwrap();
+                        None
+                    }
+                    None => Some(settle),
+                };
+                assert_eq!(fetch.await.unwrap(), Err(expected), "{settles:?} {record}");
+                drop(unsent);
+                assert_eq!(
+                    resolver.0.load(std::sync::atomic::Ordering::Acquire),
+                    lookups,
+                    "{settles:?} {record}"
+                );
+                if settles.is_some() {
+                    assert!(started.elapsed() < Duration::from_millis(150));
+                } else {
+                    assert!(started.elapsed() >= Duration::from_millis(150));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn once_settled_the_wait_completes_on_its_first_poll() {
+        use futures_util::FutureExt as _;
+        assert!(ROUTE_SETTLE_WAIT > SYSTEM_ROUTE_TIMEOUT);
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(routes.settled().now_or_never(), Some(()));
+        assert_eq!(
+            settled_route(&routes).now_or_never(),
+            Some(PublicRoute::Proxied)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shared_route_source_gates_the_public_entry_points() {
+        let routes = RouteSource::new(&tokio::runtime::Handle::current());
+        let url = "https://images.example.com/a.png";
+        assert_eq!(
+            within(
+                routes.settled(),
+                || routes.route(),
+                Duration::from_millis(50)
+            )
+            .await,
+            PublicRoute::Unsupported
+        );
+        routes.set_app_proxy(zephium_core::proxy::from_settings(
+            "http",
+            "proxy.example.com:3128",
+        ));
+        assert_eq!(routes.route(), PublicRoute::Proxied);
+        assert_eq!(
+            fetch_public_image(&routes, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        assert_eq!(
+            fetch_public_record_image(&routes, url).await,
+            Err(PublicAssetError::RouteRefused)
+        );
+        assert_eq!(
+            crate::youtube_oembed::fetch(&routes, "https://youtu.be/dQw4w9WgXcQ").await,
+            Err(PublicAssetError::RouteRefused)
+        );
     }
     #[tokio::test]
     async fn a_public_hostname_resolving_to_loopback_never_connects() {
@@ -680,4 +656,14 @@ mod tests {
             std::io::ErrorKind::WouldBlock
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn public_redirect_policy_allows_three_hops_and_refuses_the_fourth() {
+    let target = url::Url::parse("https://example.com/asset.png").unwrap();
+    assert!(permits_redirect(MAX_REDIRECTS, &target));
+    assert!(!permits_redirect(MAX_REDIRECTS + 1, &target));
+    let private = url::Url::parse("https://127.0.0.1/asset.png").unwrap();
+    assert!(!permits_redirect(1, &private));
 }

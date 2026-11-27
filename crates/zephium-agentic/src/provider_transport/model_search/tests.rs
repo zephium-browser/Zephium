@@ -254,3 +254,39 @@ async fn nothing_is_sent_past_the_budget_for_a_secret_or_for_another_model() {
     assert!(reserved.model_tokens > SEARCH_CONTEXT_TOKENS);
     assert!(reserved.cost_micro_usd > 0);
 }
+
+#[test]
+fn local_native_search_never_invents_a_flat_fee_or_advertised_charge() {
+    let mut model = entry(
+        true,
+        Some(WorkModelPrice {
+            input: 0,
+            cached_input: 0,
+            output: 0,
+        }),
+    );
+    model.model.provider = WorkModelProvider::Compatible;
+    let provider = ModelNativeSearch::try_new(
+        model,
+        Arc::new(Scripted {
+            script: Box::new(|| panic!("no provider call")),
+            requests: Mutex::new(vec![]),
+        }),
+    )
+    .unwrap();
+    let reservation = provider.reservation(100).unwrap();
+    assert_eq!(reservation.cost_micro_usd, 0);
+    assert!(reservation.model_tokens > 0);
+    let usage = provider.settle(
+        WorkModelUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cost_micros: Some(9000),
+            ..Default::default()
+        },
+        reservation,
+    );
+    assert_eq!(usage.cost_micro_usd, 0);
+    assert_eq!(usage.model_tokens, 110);
+    assert_eq!(usage.operations, 1);
+}

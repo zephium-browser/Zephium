@@ -1,0 +1,119 @@
+import "$styles/global.css";
+import { afterEach, expect, test, vi } from "vitest";
+import { render } from "vitest-browser-svelte";
+import { emitNativeEvent } from "$shared/testing/native-events";
+import { tabFixture, revision, spaceFixture } from "$shared/testing/fixtures";
+import { tabs } from "$domain/tabs";
+import { surface } from "$domain/surface";
+import { preferences } from "$domain/preferences";
+import { adoptMode } from "$session/sidebar-mode.svelte";
+import { retryImage } from "$session/newtab-background.svelte";
+import Shell from "../Shell.svelte";
+
+vi.mock("$shared/platform", () => ({ IS_WINDOWS: true, IS_MAC: false }));
+const caption = vi.hoisted(() => ({ shown: false, replay: vi.fn() }));
+vi.mock("../WorkWorkspace.svelte", async () => await import("./StageStub.svelte"));
+vi.mock("$domain/resources", async (original) => ({
+  ...(await original<Record<string, unknown>>()),
+  mediaUrl: () => "/src/shared/sky/assets/sky-day.avif",
+}));
+vi.mock("$shared/ipc/bindings", async () => {
+  const { mockBindings } = await import("$shared/testing/bindings");
+  return mockBindings({
+    captionReplay: async () => {
+      caption.replay();
+      window.dispatchEvent(
+        new CustomEvent("zephium:caption", {
+          detail: { shown: caption.shown, height: 32, duration: 0 },
+        }),
+      );
+    },
+    pagePermissionCardHost: async () => {},
+    tabsBootstrap: async () => {},
+    settingGet: async () => null,
+    sidebarSetWidth: async () => {},
+    sidebarSetHidden: async () => {},
+    blockerStats: async () => ({ status: "ok", data: { today: 0, last7Days: 0, days: [] } }),
+    timeCall: async () => ({ kind: "focus_days", days: [] }),
+  });
+});
+afterEach(() => {
+  caption.shown = false;
+  caption.replay.mockClear();
+  adoptMode("default");
+  surface.dispose();
+  tabs.dispose();
+  preferences.dispose();
+  retryImage();
+  delete document.documentElement.dataset.material;
+});
+
+test("New Tab replays a caption revealed before mount and follows later changes", async () => {
+  await preferences.init();
+  await surface.init();
+  await tabs.init();
+  const fresh = tabFixture({ id: "tab", url: null, title: "", projection_revision: revision(20) });
+  const items = {
+    profile: { id: "00000000000000000000000901", name: "Personal", kind: "default" as const },
+    spaces: [spaceFixture("space", "Home")],
+    active_space_id: "space",
+    nodes: [],
+    split_group: null,
+    projection_revision: revision(20),
+    tabs: [{ ...fresh, url: "https://example.com" }],
+    active: fresh.id,
+  };
+  emitNativeEvent("itemsChanged", items);
+  const screen = await render(Shell);
+  expect(screen.container.querySelector(".newtab")).toBeNull();
+  caption.shown = true;
+  window.dispatchEvent(
+    new CustomEvent("zephium:caption", { detail: { shown: true, height: 32, duration: 220 } }),
+  );
+  emitNativeEvent("itemsChanged", {
+    ...items,
+    projection_revision: revision(21),
+    tabs: [{ ...fresh, projection_revision: revision(21) }],
+  });
+  const control = () => screen.container.querySelector<HTMLElement>(".newtab .control")!;
+  await expect.poll(() => control()?.style.translate).toMatch(/^0(?:px)? [1-9]\d*(?:\.\d+)?px$/u);
+  expect(caption.replay).toHaveBeenCalledTimes(1);
+  expect(control().style.transitionDuration).toBe("0ms");
+  window.dispatchEvent(
+    new CustomEvent("zephium:caption", { detail: { shown: false, height: 32, duration: 220 } }),
+  );
+  await expect.poll(() => control().style.translate).toMatch(/^0(?:px)?(?: 0(?:px)?)?$/u);
+  expect(control().style.transitionDuration).toBe("220ms");
+});
+
+test("custom images remove sky light, and failure restores it; the hidden card wears no picture", async () => {
+  await preferences.init();
+  await surface.init();
+  await tabs.init();
+  const fresh = tabFixture({ id: "tab", url: null, title: "", projection_revision: revision(20) });
+  emitNativeEvent("itemsChanged", {
+    profile: { id: "00000000000000000000000901", name: "Personal", kind: "default" },
+    spaces: [spaceFixture("space", "Home")],
+    active_space_id: "space",
+    nodes: [],
+    split_group: null,
+    projection_revision: revision(20),
+    tabs: [fresh],
+    active: fresh.id,
+  });
+  emitNativeEvent("uiCommand", "preference.ui.newtab-tasks=false");
+  adoptMode("hidden");
+  document.documentElement.dataset.material = "mica";
+  const screen = await render(Shell);
+  const sidebar = () => screen.container.querySelector<HTMLElement>(".browser-sidebar")!;
+  await expect.poll(() => screen.container.querySelector(".sky-light")).not.toBeNull();
+  expect(sidebar().style.getPropertyValue("--sidebar-frost")).toBe("");
+  emitNativeEvent("uiCommand", `preference.ui.newtab-image=${"a".repeat(64)}`);
+  emitNativeEvent("uiCommand", "preference.ui.newtab-background=image");
+  await expect.poll(() => screen.container.querySelector(".sky-light")).toBeNull();
+  expect(document.documentElement.dataset.material).toBe("mica");
+  await expect.poll(() => screen.container.querySelector(".newtab img")).not.toBeNull();
+  screen.container.querySelector(".newtab img")!.dispatchEvent(new Event("error"));
+  await expect.poll(() => screen.container.querySelector(".sky-light")).not.toBeNull();
+  expect(document.documentElement.dataset.material).toBe("mica");
+});

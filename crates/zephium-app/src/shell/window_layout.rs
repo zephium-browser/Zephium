@@ -15,6 +15,41 @@ pub(super) struct GrabbedDivider {
 }
 
 impl Shell {
+    pub(super) fn peek_sidebar(&mut self, peek: bool, slide: bool) {
+        let Some(win) = self.windows.focused() else {
+            return;
+        };
+        if peek && (!win.metrics.sidebar_hidden || !self.window_visible) {
+            if win.sidebar_peek {
+                self.peek_sidebar(false, false);
+            }
+            return;
+        }
+        let id = win.id;
+        let card = layout::hidden_card(win.size, win.metrics);
+        if !peek {
+            // Retire replay intent even if native cleanup is refused.
+            self.windows.get_mut(id).unwrap().sidebar_peek = false;
+        }
+        let dispatch = self.engine.raise_chrome(id, peek, card, slide);
+        if peek && dispatch == NativeDispatch::Scheduled {
+            self.windows.get_mut(id).unwrap().sidebar_peek = true;
+        }
+    }
+
+    pub(super) fn refresh_sidebar_peek(&self) {
+        if let Some(win) = self
+            .windows
+            .focused()
+            .filter(|win| win.sidebar_peek && win.metrics.sidebar_hidden && self.window_visible)
+        {
+            let card = layout::hidden_card(win.size, win.metrics);
+            // Repeating the raised target keeps an in-flight native slide;
+            // only its card geometry changes with these admitted metrics.
+            let _ = self.engine.raise_chrome(win.id, true, card, true);
+        }
+    }
+
     pub(super) fn resolve_drop(&self, x: f64, y: f64) -> Option<split::Drop> {
         if self.active_browser_page().is_some() {
             return None;
@@ -32,8 +67,15 @@ impl Shell {
     }
 
     /// A relayout that is one step of a deliberate change of shape, which
-    /// the chrome and the content carry out as a journey.
+    /// the chrome and the content carry out as a journey. mini windows lay
+    /// out with it, since what changed may be their page.
     pub(super) fn relayout_with(&self, travel: bool) -> NativeDispatch {
+        let main = self.relayout_main_with(travel);
+        self.relayout_mini_windows();
+        main
+    }
+
+    fn relayout_main_with(&self, travel: bool) -> NativeDispatch {
         let filling = self.window_filling_fullscreen();
         let Some(win) = self.windows.focused() else {
             return NativeDispatch::Rejected;
@@ -52,12 +94,14 @@ impl Shell {
         };
         let present = tree.as_ref().is_some_and(|t| self.present(t));
         let mut l = layout::compute(win.size, win.mode, win.metrics, present);
-        // A browser-owned consent prompt is window-modal. Native page views
+        // A browser-owned consent sheet is window-modal. Native page views
         // are sibling views above chrome on every platform, so CSS alone
-        // cannot prevent a page from obscuring the prompt or receiving input
+        // cannot prevent a page from obscuring the sheet or receiving input
         // behind it. Remove content from the native stage and expand
-        // privileged chrome for exactly the lifetime of the retained prompt.
-        let privileged_overlay_active = self.page_permissions.is_visible()
+        // privileged chrome for exactly the lifetime of the retained sheet.
+        // A prompt in the sidebar needs neither: no page view overlaps it.
+        let privileged_overlay_active = self.page_permission_modal()
+            || self.chrome_modal
             || self.active_browser_page().is_some()
             || self.focus_covers();
         // `Items` marks a prospective view resident before its CreateView
@@ -101,7 +145,14 @@ impl Shell {
                         tab.has_view()
                             && (tab.url.is_some()
                                 || tab.content == zephium_core::item::TabContent::ExtensionOwned)
-                            && !self.presentation.deferred_first_content_layout.contains(id)
+                            // Verified, the layout that admits the page is
+                            // the one that makes room for it.
+                            && (!self.presentation.deferred_first_content_layout.contains(id)
+                                || self
+                                    .presentation
+                                    .pending_presentations
+                                    .get(id)
+                                    .is_some_and(|pending| pending.chrome_applied))
                     })
                 })
             });
@@ -133,7 +184,9 @@ impl Shell {
             dividers,
             work_pane,
         }));
-        self.engine.set_content(win.id, tree, l.content)
+        let applied = self.engine.set_content(win.id, tree, l.content);
+        self.reconcile_page_permission_placement();
+        applied
     }
 
     pub(super) fn locate_divider(&self, x: f64, y: f64) -> Option<GrabbedDivider> {
@@ -264,7 +317,7 @@ impl Shell {
     fn present(&self, tree: &Pane) -> bool {
         tree.tabs()
             .iter()
-            .any(|id| self.items.tab(*id).is_some_and(TabState::has_view))
+            .any(|id| self.items.tab(*id).is_some_and(TabState::shows_page))
     }
 
     // The split group persists across tab switches (Arc model): members show
@@ -281,14 +334,16 @@ impl Shell {
                 && tree
                     .tabs()
                     .into_iter()
-                    .all(|id| self.items.tab(id).is_some_and(TabState::has_view))
+                    .all(|id| self.items.tab(id).is_some_and(TabState::shows_page))
             {
                 return Some(tree);
             }
         }
+        // A view a failure covers keeps its history but stays off the
+        // stage, where chrome explains the failure instead.
         self.items
             .tab(active)
-            .is_some_and(TabState::has_view)
+            .is_some_and(TabState::shows_page)
             .then_some(Pane::Leaf(active))
     }
 

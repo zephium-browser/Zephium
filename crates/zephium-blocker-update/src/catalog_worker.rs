@@ -136,6 +136,16 @@ impl CatalogUpdateWorker {
             Worker::Official(worker) => worker.reject_candidate(identity, failure, reason, done),
         }
     }
+    /// Calls `wake` after each status the worker publishes. The signed
+    /// repository worker is not provisioned and keeps the routine check.
+    pub fn set_change_waker(&self, wake: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        match &self.0 {
+            #[cfg(feature = "tuf")]
+            Worker::Tuf(_) => drop(wake),
+            #[cfg(feature = "official-https")]
+            Worker::Official(worker) => worker.set_change_waker(wake),
+        }
+    }
     /// Waits for a newer status revision, without periodic background polling.
     pub fn wait_for_change(&self, revision: u64, timeout: Duration) -> WaitForStatus {
         match &self.0 {

@@ -1,8 +1,6 @@
 //! Task-scoped document checkpoints through the original Work owners.
 
 use super::*;
-#[cfg(feature = "probe-harness")]
-use std::io::Write as _;
 
 /// Where a document checkpoint comes from: the model's Navigate or Back, or
 /// a same-site load the page started after an admitted action.

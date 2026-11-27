@@ -11,6 +11,27 @@ import {
 } from "../lib/connections";
 
 describe("the server form", () => {
+  test("pasted Windows commands keep path separators", () => {
+    expect(
+      splitCommand(
+        String.raw`"C:\Program Files\Tools\server.exe" --config C:\Users\me\config.json`,
+      ),
+    ).toEqual([
+      String.raw`C:\Program Files\Tools\server.exe`,
+      "--config",
+      String.raw`C:\Users\me\config.json`,
+    ]);
+    const words = [
+      String.raw`C:\Tools\server.exe`,
+      String.raw`C:\a b\config.json`,
+      String.raw`C:\it's\server.exe`,
+    ];
+    expect(splitCommand(joinCommand(words))).toEqual(words);
+    expect(splitCommand(String.raw`\\server\share\server.exe`)).toEqual([
+      String.raw`\\server\share\server.exe`,
+    ]);
+  });
+
   test("command lines split and join the way a shell reads them", () => {
     expect(splitCommand(`npx -y "@scope/server" ~/My\\ Files 'a b'`)).toEqual([
       "npx",

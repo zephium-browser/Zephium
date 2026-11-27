@@ -2,25 +2,14 @@
   import Button from "$shared/ui/Button";
   import * as m from "$shared/i18n/messages";
   import type { CatalogEntry } from "../lib/catalog";
-  import { catalogIcon } from "../lib/catalog-icons";
 
   let { entry, installed, onget }: { entry: CatalogEntry; installed: boolean; onget: () => void } =
     $props();
-
-  let icon = $state<string | null>(null);
-
-  $effect(() => {
-    let current = true;
-    void catalogIcon(entry.icon).then((url) => {
-      if (current) icon = url;
-    });
-    return () => (current = false);
-  });
 </script>
 
 <li class="card">
   <span class="badge" aria-hidden="true">
-    {#if icon}<img src={icon} alt="" />{:else}{entry.name.charAt(0)}{/if}
+    <img src={entry.icon} alt="" />
   </span>
   <span class="text">
     <span class="name">{entry.name}</span>
@@ -56,16 +45,6 @@
     place-items: center;
     width: 32px;
     height: 32px;
-    border-radius: var(--radius-control-compact);
-    background: var(--color-fill);
-    font-size: var(--text-body);
-    font-weight: 550;
-    color: var(--color-text);
-  }
-
-  /* Store icons carry their own shape; the tile only holds their place. */
-  .badge:has(img) {
-    background: none;
   }
 
   .badge img {

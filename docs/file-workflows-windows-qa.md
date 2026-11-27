@@ -76,14 +76,23 @@ Never weaken security policy or disable Defender to make a check pass.
 ## Explicit limits
 
 - Foreground downloads save to Downloads by default, or to a directory with a
-  picker-issued identity. Ask-first remains optional. The event has no originating-
-  frame activation/navigation ID, so this does not claim initiating-frame consent;
-  WebView2's multiple-automatic-download permission remains denied.
+  picker-issued identity. A site's first download asks whether it may save
+  files; the answer is kept per site in Site settings. The event has no
+  originating-frame activation/navigation ID, so this does not claim
+  initiating-frame consent. A second automatic download raises WebView2's own
+  multiple-download prompt, and that answer is kept as the site's Automatic
+  downloads setting.
 - Upload selection is WebView2-owned. The pinned stable API has no equivalent
   to Zephium's macOS initiating-frame upload broker; do not claim parity for that
   interception boundary.
 - Automatic resume/replay is not implemented. Interrupted POST/blob downloads
   must be retried from their website; replaying a saved URL would lose semantics.
+  A person can pause a receiving download (`DownloadOperation.Pause`) and resume
+  it from the same retained operation; a user pause is held for 30 minutes.
+- A finished download whose type is on the dangerous list (`is_dangerous_file`)
+  stays in its hidden staging directory in the `held` state until the person
+  keeps or deletes it, for up to an hour; only Keep publishes it, with the same
+  Attachment Services and zone-stream treatment as any other download.
 - Protected publication requires a filesystem supporting the enforced identity,
   ACL and zone-stream guarantees. Unsupported destinations fail closed. FAT/exFAT
   and particular network/cloud-provider paths are not promised.

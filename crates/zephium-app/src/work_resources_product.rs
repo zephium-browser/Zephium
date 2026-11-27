@@ -43,7 +43,7 @@ impl PreparedRetainedContinuation {
             run: spec.identity.owner(),
             deadline: spec.expires_at,
             prepare: Box::new(move |browser, audit, waiting| {
-                let waiting = waiting.ok_or(AgentWorkFailure::Contract)?;
+                let waiting = waiting.ok_or_else(|| crate::contract_failure!())?;
                 StagedActor::try_new(
                     input,
                     browser,
@@ -128,7 +128,7 @@ impl PreparedRetainedWork {
         if !self.spec.isolated_public
             && attempt != zephium_agentic::WorkBrowserConstructionAttempt::Initial
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.construction_attempt = attempt;
         Ok(self)
@@ -142,7 +142,7 @@ impl PreparedRetainedWork {
             || self.profile.profile() != page.profile
             || self.spec.deadline > page.deadline
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.page = Some(page);
         Ok(self)
@@ -157,7 +157,7 @@ impl PreparedRetainedWork {
                 .work
                 .is_some_and(|work| session.admits(self.profile.profile(), work))
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.anonymous_session = Some(session);
         Ok(self)
@@ -170,7 +170,7 @@ impl PreparedRetainedWork {
         redirect: zephium_agentic::WorkBrowserRedirect,
     ) -> Result<Self, AgentWorkFailure> {
         if !self.spec.isolated_public || !self.spec.document_policy.is_public() {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         self.redirect = Some(redirect);
         Ok(self)
@@ -227,7 +227,7 @@ impl PreparedRetainedWork {
             || !std::ptr::addr_eq(Arc::as_ptr(&journal), Arc::as_ptr(&audit))
             || spec.deadline <= Instant::now()
         {
-            return Err(AgentWorkFailure::Contract);
+            return Err(crate::contract_failure!());
         }
         Ok(Self {
             construction_attempt: Default::default(),
@@ -575,7 +575,7 @@ impl RetainedWorkHandle {
                 let mut snapshot = error.into_inner().snapshot;
                 snapshot.phase = RetainedWorkPhase::Uncertain;
                 snapshot.usage = None;
-                snapshot.failure = Some(AgentWorkFailure::Contract);
+                snapshot.failure = Some(crate::contract_failure!());
                 snapshot
             }
         }
@@ -1022,6 +1022,7 @@ impl ProductWork {
             self.fail();
             return;
         };
+        let unreachable = zephium_agentic::WorkBrowserUnreachable::default();
         match owner.construct_isolated(
             WorkBrowserResourceId::generate(),
             prepared.spec.identity.id(),
@@ -1033,6 +1034,7 @@ impl ProductWork {
             prepared.spec.anonymous_read_authority.clone(),
             prepared.anonymous_session,
             prepared.redirect.clone(),
+            Some(unreachable.clone()),
             Some((prepared.construction_attempt, prepared.spec.deadline)),
             now,
         ) {
@@ -1047,10 +1049,11 @@ impl ProductWork {
                     prepared.journal,
                     prepared.audit,
                 ));
-                if let (Some(redirect), Some(coordinator)) =
-                    (prepared.redirect, self.coordinator.as_mut())
-                {
-                    coordinator.set_redirect(redirect);
+                if let Some(coordinator) = self.coordinator.as_mut() {
+                    coordinator.set_unreachable(unreachable);
+                    if let Some(redirect) = prepared.redirect {
+                        coordinator.set_redirect(redirect);
+                    }
                 }
                 if let Some(group) = self.runtime_group.take() {
                     if let Some(coordinator) = self.coordinator.as_mut() {

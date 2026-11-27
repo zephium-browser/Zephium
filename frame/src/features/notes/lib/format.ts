@@ -1,7 +1,6 @@
 import * as m from "$shared/i18n/messages";
 import type { SectionKey } from "./sections";
 
-const DAY = 24 * 60 * 60 * 1000;
 const locale = () => (typeof navigator === "undefined" ? "en" : navigator.language);
 
 let formats: {
@@ -33,9 +32,9 @@ function f() {
   return formats;
 }
 
-function startOfDay(time: number): number {
+function startOfDay(time: number, daysAgo = 0): number {
   const date = new Date(time);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - daysAgo).getTime();
 }
 
 /** When a note last changed, as its row shows it: a time today, a weekday
@@ -43,8 +42,8 @@ function startOfDay(time: number): number {
 export function rowDate(modified: number, now: number): string {
   const today = startOfDay(now);
   if (modified >= today) return f().time.format(modified);
-  if (modified >= today - DAY) return m.note_yesterday();
-  if (modified >= today - 6 * DAY) return f().weekday.format(modified);
+  if (modified >= startOfDay(today, 1)) return m.note_yesterday();
+  if (modified >= startOfDay(today, 6)) return f().weekday.format(modified);
   return new Date(modified).getFullYear() === new Date(now).getFullYear()
     ? f().date.format(modified)
     : f().dateYear.format(modified);

@@ -28,25 +28,64 @@ const withGeneration = (generation: number) => {
 const boxes = (row: HTMLElement) =>
   [row, ...row.querySelectorAll<HTMLElement>("*")].map((node) => {
     const box = node.getBoundingClientRect();
-    return [box.x, box.y, box.width, box.height].map(Math.round).join(",");
+    // Keep subpixel movement, discarding only floating-point noise. Whole-pixel
+    // rounding turns a half-pixel center's adjacent doubles into a 1px jump.
+    return [box.x, box.y, box.width, box.height].map((value) => value.toFixed(6)).join(",");
   });
 
 async function settle() {
   await new Promise((done) => setTimeout(done, 1200));
 }
 
+function canvasTarget() {
+  const target = document.createElement("div");
+  // Mount into the real room: sizing after async render lets camera follow
+  // start a glide against the canvas's temporary 240px minimum height.
+  target.style.width = "1440px";
+  target.style.height = "820px";
+  document.body.append(target);
+  return target;
+}
+
+test("stillness samples keep a half-pixel center across floating-point noise", () => {
+  const node = document.createElement("div");
+  const rect = vi.spyOn(node, "getBoundingClientRect");
+  // The 28px bar's 1px border leaves 27px around its 14px children: y = 504.5.
+  rect.mockReturnValue(new DOMRect(634, 504.5 - Number.EPSILON * 504.5, 14, 14));
+  const before = boxes(node);
+  rect.mockReturnValue(new DOMRect(634, 504.5, 14, 14));
+  expect(boxes(node)).toEqual(before);
+  rect.mockRestore();
+});
+
+test.each([0, 1, 2, 3])("stillness samples detect subpixel motion in coordinate %i", (index) => {
+  const node = document.createElement("div");
+  const values: [number, number, number, number] = [634, 504.5, 14, 14];
+  const rect = vi.spyOn(node, "getBoundingClientRect").mockReturnValue(new DOMRect(...values));
+  const before = boxes(node);
+  values[index]! += 1 / 64;
+  rect.mockReturnValue(new DOMRect(...values));
+  expect(boxes(node)).not.toEqual(before);
+  rect.mockRestore();
+});
+
 test("a sign-in the run waits on holds its page still while frames refresh", async () => {
   await page.viewport(1440, 820);
   const screen = await render(PartsCanvas, {
-    scene: withGeneration(1),
-    viewport: { x: 40, y: 90, zoom: 1 },
-    held: [signIn(72_000)],
+    target: canvasTarget(),
+    props: {
+      scene: withGeneration(1),
+      viewport: { x: 40, y: 90, zoom: 1 },
+      held: [signIn(72_000)],
+    },
   });
-  screen.container.style.width = "1440px";
-  screen.container.style.height = "820px";
   await expect.poll(() => screen.container.querySelector("[data-part] .window")).not.toBeNull();
   const row = screen.container.querySelector<HTMLElement>("[data-part]:has(.window)")!;
   await settle();
+  const matrix = new DOMMatrixReadOnly(
+    getComputedStyle(screen.container.querySelector(".svelte-flow__viewport")!).transform,
+  );
+  expect([matrix.m41, matrix.m42, matrix.a]).toEqual([40, 90, 1]);
   const before = boxes(row);
   const view = screen.container.querySelector(".svelte-flow__viewport")!.getAttribute("style");
 
@@ -81,12 +120,13 @@ test("a sign-in the run waits on holds its page still while frames refresh", asy
 test("empty space around a part's windows pans the canvas, its windows and name keep the pointer", async () => {
   await page.viewport(1440, 820);
   const screen = await render(PartsCanvas, {
-    scene: withGeneration(1),
-    viewport: { x: 40, y: 90, zoom: 1 },
-    held: [signIn(72_000)],
+    target: canvasTarget(),
+    props: {
+      scene: withGeneration(1),
+      viewport: { x: 40, y: 90, zoom: 1 },
+      held: [signIn(72_000)],
+    },
   });
-  screen.container.style.width = "1440px";
-  screen.container.style.height = "820px";
   await expect.poll(() => screen.container.querySelector("[data-part] .page")).not.toBeNull();
   const row = screen.container.querySelector<HTMLElement>("[data-part]:has(.page)")!;
   const node = row.closest<HTMLElement>(".svelte-flow__node")!;

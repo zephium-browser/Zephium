@@ -5,8 +5,10 @@ use super::*;
 // A committed document is acknowledged as soon as privileged chrome verifies
 // its exact revision-bearing URL projection. This deadline bounds only
 // callback/native-dispatch admission retries; it is never an intentional
-// first-paint delay or authority for a timeout reveal.
-const PRESENTATION_ADMISSION_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+// first-paint delay or authority for a timeout reveal. It is generous because
+// a busy chrome renderer (launch restoring many tabs, an occluded window) is
+// slow, not wrong, and missing it retires a healthy page.
+const PRESENTATION_ADMISSION_HARD_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
     std::time::Duration::from_millis(25),
     std::time::Duration::from_millis(50),
@@ -16,7 +18,7 @@ const PRESENTATION_ADMISSION_RETRY_DELAYS: [std::time::Duration; 7] = [
     std::time::Duration::from_millis(800),
     std::time::Duration::from_secs(1),
 ];
-pub(super) const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 12;
+pub(super) const MAX_PRESENTATION_ADMISSION_REJECTIONS: u8 = 20;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PendingPresentation {
@@ -51,6 +53,8 @@ pub(super) struct PresentationState {
     /// The last sidebar snapshot offered to chrome. Chrome holds it plus the
     /// per-tab deltas since, so a snapshot equal to it would change nothing.
     pub(super) last_items: std::cell::RefCell<Option<zephium_ipc::ItemsState>>,
+    /// The player last offered to chrome, as of its page's report.
+    pub(super) last_media_player: std::cell::RefCell<Option<Option<zephium_ipc::MediaPlayerView>>>,
 }
 
 impl Shell {
@@ -187,10 +191,44 @@ impl Shell {
         }
     }
 
+    /// The page in front of the chrome that presents `id`: the page itself in
+    /// a mini window, the focused window's active tab otherwise.
+    fn presentation_active(&self, id: ItemId) -> Option<ItemId> {
+        if self.mini_window_of(id).is_some() {
+            return Some(id);
+        }
+        self.windows.focused().and_then(|window| window.active)
+    }
+
+    /// A mini window's page is verified by that window's own toolbar.
+    fn dispatch_chrome_presentation(
+        &self,
+        presentation: ChromePresentation,
+        done: ChromePresentationCallback,
+    ) -> ChromePresentationDispatch {
+        match self.mini_window_of(presentation.id) {
+            Some(window) => self
+                .chrome
+                .apply_mini_presentation(window, presentation, done),
+            None => self.chrome.apply_tab_for_presentation(presentation, done),
+        }
+    }
+
+    fn emit_presented_tab(&self, id: ItemId, tab: TabView) {
+        match self.mini_window_of(id) {
+            Some(window) => (self.emit)(Projection::Mini(self.mini_view(window, Some(tab)))),
+            None => (self.emit)(Projection::Tab(tab)),
+        }
+    }
+
     /// Applies the exact tab projection inside privileged chrome and waits for
     /// its eval callback before allowing the raw child to reveal. This method
     /// never blocks the shell actor or a native UI thread.
-    fn request_chrome_presentation(&mut self, id: ItemId, navigation: NavigationPresentationId) {
+    pub(super) fn request_chrome_presentation(
+        &mut self,
+        id: ItemId,
+        navigation: NavigationPresentationId,
+    ) {
         let Some(pending) = self
             .presentation
             .pending_presentations
@@ -224,23 +262,16 @@ impl Shell {
             self.cancel_exact_pending_presentation(id, navigation);
             return;
         };
-        let projection = self.presentation_tab_view(
-            id,
-            tab,
-            self.icon_ref(
-                zephium_ipc::IconSurface::Chrome,
-                tab,
-                self.profile_of_item(id),
-            ),
-        );
+        let projection =
+            self.presentation_tab_view(id, tab, self.tab_icon(id, tab, self.profile_of_item(id)));
         let projection_revision = projection.projection_revision.clone();
         self.record_tab_projection_revision(id, &projection_revision);
         self.remember_tab_view(id, &projection);
         self.publish_icons();
-        let active = self.windows.focused().and_then(|window| window.active);
+        let active = self.presentation_active(id);
         let Some(queue) = self.self_queue.clone() else {
             let synchronous_projection = projection.clone();
-            let dispatch = self.chrome.apply_tab_for_presentation(
+            let dispatch = self.dispatch_chrome_presentation(
                 ChromePresentation {
                     settings_visible: self.active_browser_page()
                         == Some(crate::BrowserPage::Settings),
@@ -256,7 +287,7 @@ impl Shell {
                 // A synchronous adapter already applied this exact revision;
                 // mirror it to non-chrome projection observers afterward.
                 // Privileged chrome ignores the equal-revision duplicate.
-                (self.emit)(Projection::Tab(synchronous_projection));
+                self.emit_presented_tab(id, synchronous_projection);
                 self.on_chrome_presentation_applied(
                     id,
                     navigation,
@@ -289,7 +320,7 @@ impl Shell {
             current.chrome_request_in_flight = true;
         }
         let synchronous_projection = projection.clone();
-        let dispatch = self.chrome.apply_tab_for_presentation(
+        let dispatch = self.dispatch_chrome_presentation(
             ChromePresentation {
                 settings_visible: self.active_browser_page() == Some(crate::BrowserPage::Settings),
                 id,
@@ -311,7 +342,7 @@ impl Shell {
         );
         match dispatch {
             ChromePresentationDispatch::Applied => {
-                (self.emit)(Projection::Tab(synchronous_projection));
+                self.emit_presented_tab(id, synchronous_projection);
                 self.on_chrome_presentation_applied(
                     id,
                     navigation,
@@ -368,7 +399,7 @@ impl Shell {
             .last_tab_projection_revision
             .try_borrow()
             .is_ok_and(|revisions| revisions.get(&id) == Some(&projection_revision));
-        let active_exact = self.windows.focused().and_then(|window| window.active) == active;
+        let active_exact = self.presentation_active(id) == active;
         if !revision_exact || !active_exact {
             // The original exact timer remains armed. It will clear the
             // in-flight bit and issue a newer projection; this stale callback
@@ -496,7 +527,21 @@ impl Shell {
         // lifecycle callback; either way this id cannot silently keep using
         // the hidden generation after the shell marks it failed.
         let _ = self.engine.close(id);
-        self.on_view_creation_failed(id);
+        let shown = self.windows.focused().and_then(|window| window.active) == Some(id)
+            || self.work_pane_shows(id)
+            || self
+                .visible_tree()
+                .is_some_and(|tree| tree.tabs().contains(&id));
+        if shown {
+            self.on_view_creation_failed(id);
+        } else {
+            // Nobody saw this page; it sleeps and loads again when opened.
+            self.record_view_retirement(id);
+            self.zoom.pending.remove(&id);
+            self.cancel_pending_presentation(id);
+            self.items.mark_view_discarded(id);
+            self.project_tab(id);
+        }
     }
 
     pub(super) fn on_presentation_fallback(

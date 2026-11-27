@@ -36,11 +36,13 @@ use crate::{
       AppleNavigationEventState,
     },
   },
-  AppleNavigationAction, NavigationEvent, NavigationFailure, NavigationId, PageLoadEvent,
-  WryWebView,
+  AppleNavigationAction, FailedDocument, NavigationEvent, NavigationFailure, NavigationId,
+  PageLoadEvent, WryWebView,
 };
 
 use super::wry_download_delegate::WryDownloadDelegate;
+#[cfg(target_os = "macos")]
+use crate::{wkwebview::navigation::MainFrameNavigationHolds, MainFrameNavigationHoldHandler};
 
 pub struct BlockedLoadCounter {
   pub identifier: Retained<NSString>,
@@ -71,6 +73,8 @@ impl Drop for BlockedLoadCounter {
 }
 
 pub struct WryNavigationDelegateIvars {
+  #[cfg(target_os = "macos")]
+  pub script_dialogs: std::rc::Rc<super::super::script_dialog::ScriptDialogs>,
   pub blocked_loads: std::cell::RefCell<Option<BlockedLoadCounter>>,
   pub pending_scripts: Arc<Mutex<Option<Vec<String>>>>,
   pub has_download_handler: bool,
@@ -81,13 +85,23 @@ pub struct WryNavigationDelegateIvars {
   #[cfg(target_os = "macos")]
   pub main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
   #[cfg(target_os = "macos")]
-  pub main_frame_navigation_hold: Option<Box<dyn Fn(Box<dyn FnOnce()>) -> bool>>,
+  pub main_frame_navigation_hold: Option<Box<MainFrameNavigationHoldHandler>>,
+  #[cfg(target_os = "macos")]
+  pub(crate) main_frame_navigation_holds: MainFrameNavigationHolds,
   #[cfg(target_os = "macos")]
   pub credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
+  #[cfg(target_os = "macos")]
+  pub http_auth_handler: Option<Box<crate::http_auth::HttpAuthHandler>>,
+  #[cfg(target_os = "macos")]
+  pub certificate_failure_handler: Option<Box<dyn Fn(crate::CertificateFailure)>>,
+  #[cfg(target_os = "macos")]
+  pub server_trust_exceptions: Option<crate::ServerTrustExceptions>,
   pub download_delegate: Option<Retained<WryDownloadDelegate>>,
   pub on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent)>>,
   pub navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
-  pub navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+  pub navigation_failure_handler:
+    Option<Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>>,
+  pub native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
   pub navigation_presentation_guard: Option<Box<dyn Fn()>>,
   // `AppleNavigationEventState` intentionally uses a non-wrapping `u128`
   // record token, which gives it 16-byte alignment on Apple 64-bit targets.
@@ -162,6 +176,7 @@ define_class!(
       }
       if let Some(delegate) = &self.ivars().download_delegate {
         if let Some(native) = &delegate.ivars().native {
+          let _menu = crate::wkwebview::ContextMenuDownload::begin();
           if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| native(download))).is_err() {
             unsafe { download.cancel(None) };
           }
@@ -274,7 +289,7 @@ define_class!(
     #[unsafe(method(webView:didReceiveAuthenticationChallenge:completionHandler:))]
     unsafe fn deny_authentication_challenge(
       &self,
-      _webview: &WKWebView,
+      webview: &WKWebView,
       challenge: &NSURLAuthenticationChallenge,
       completion_handler: &block2::DynBlock<
         dyn Fn(NSURLSessionAuthChallengeDisposition, *mut NSURLCredential),
@@ -282,11 +297,36 @@ define_class!(
     ) {
       // HTTP authentication, client certificates, and server-trust decisions
       // have different safe defaults. Preserve WebKit/Foundation's ordinary
-      // system trust evaluation for TLS certificates; cancel every challenge
-      // that could otherwise select credentials or expose native auth UI.
+      // system trust evaluation for TLS certificates; an opted-in embedder
+      // answers HTTP sign-in challenges; cancel every other challenge that
+      // could select credentials or expose native auth UI.
       let protection_space = challenge.protectionSpace();
       let method = protection_space.authenticationMethod();
+      if let Some(handler) = &self.ivars().http_auth_handler {
+        if let Some(request) = crate::wkwebview::http_auth::challenge(webview, challenge, &method) {
+          let responder = crate::wkwebview::http_auth::responder(completion_handler);
+          // A panicking embedder drops the responder while unwinding, which
+          // cancels the native request.
+          let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(request, responder)));
+          return;
+        }
+      }
       let disposition = if method.isEqualToString(NSURLAuthenticationMethodServerTrust) {
+        // Only a chain the embedder excepted, for its exact origin and leaf,
+        // and that still fails system evaluation, is accepted here.
+        if let Some(credential) = self
+          .ivars()
+          .server_trust_exceptions
+          .as_ref()
+          .and_then(|exceptions| crate::wkwebview::server_trust::excepted(exceptions, challenge))
+        {
+          completion_handler.call((
+            NSURLSessionAuthChallengeDisposition::UseCredential,
+            Retained::as_ptr(&credential).cast_mut(),
+          ));
+          return;
+        }
         NSURLSessionAuthChallengeDisposition::PerformDefaultHandling
       } else {
         if let Some(notify) = &self.ivars().credential_challenge_denied_handler {
@@ -330,15 +370,26 @@ impl WryNavigationDelegate {
     apple_navigation_action_handler: Option<Box<dyn Fn(String, AppleNavigationAction) -> bool>>,
     #[cfg(target_os = "macos")] main_frame_navigation_attempt_handler: Option<Box<dyn Fn(String)>>,
     #[cfg(target_os = "macos")] main_frame_navigation_hold: Option<
-      Box<dyn Fn(Box<dyn FnOnce()>) -> bool>,
+      Box<MainFrameNavigationHoldHandler>,
     >,
     #[cfg(target_os = "macos")] credential_challenge_denied_handler: Option<std::rc::Rc<dyn Fn()>>,
+    #[cfg(target_os = "macos")] http_auth_handler: Option<Box<crate::http_auth::HttpAuthHandler>>,
+    #[cfg(target_os = "macos")] certificate_failure_handler: Option<
+      Box<dyn Fn(crate::CertificateFailure)>,
+    >,
+    #[cfg(target_os = "macos")] server_trust_exceptions: Option<crate::ServerTrustExceptions>,
     download_delegate: Option<Retained<WryDownloadDelegate>>,
     on_page_load_handler: Option<Box<dyn Fn(PageLoadEvent, String)>>,
     navigation_event_handler: Option<Box<dyn Fn(NavigationEvent)>>,
-    navigation_failure_handler: Option<Box<dyn Fn(NavigationId, NavigationFailure)>>,
+    navigation_failure_handler: Option<
+      Box<dyn Fn(NavigationId, NavigationFailure, FailedDocument)>,
+    >,
+    native_url_refused_handler: Option<crate::NativeUrlRefusedHandler>,
     navigation_presentation_guard: Option<Box<dyn Fn()>>,
     on_web_content_process_terminate_handler: Option<Box<dyn Fn()>>,
+    #[cfg(target_os = "macos")] script_dialogs: std::rc::Rc<
+      super::super::script_dialog::ScriptDialogs,
+    >,
     mtm: MainThreadMarker,
   ) -> Retained<Self> {
     let navigation_policy_function =
@@ -374,6 +425,8 @@ impl WryNavigationDelegate {
     let delegate = mtm
       .alloc::<WryNavigationDelegate>()
       .set_ivars(WryNavigationDelegateIvars {
+        #[cfg(target_os = "macos")]
+        script_dialogs,
         blocked_loads: Default::default(),
         pending_scripts,
         navigation_policy_function,
@@ -382,7 +435,15 @@ impl WryNavigationDelegate {
         #[cfg(target_os = "macos")]
         main_frame_navigation_hold,
         #[cfg(target_os = "macos")]
+        main_frame_navigation_holds: MainFrameNavigationHolds::default(),
+        #[cfg(target_os = "macos")]
         credential_challenge_denied_handler,
+        #[cfg(target_os = "macos")]
+        http_auth_handler,
+        #[cfg(target_os = "macos")]
+        certificate_failure_handler,
+        #[cfg(target_os = "macos")]
+        server_trust_exceptions,
         has_download_handler,
         #[cfg(target_os = "macos")]
         new_window_req_handler,
@@ -390,6 +451,7 @@ impl WryNavigationDelegate {
         on_page_load_handler,
         navigation_event_handler,
         navigation_failure_handler,
+        native_url_refused_handler,
         navigation_presentation_guard,
         navigation_event_state: Box::new(Mutex::new(AppleNavigationEventState::default())),
         on_web_content_process_terminate_handler,

@@ -307,7 +307,15 @@ impl Accelerator {
     /// are held to the same rule except for the few bare keys they declare.
     pub fn bindable(&self, platform: Platform) -> Result<(), AcceleratorError> {
         let function = matches!(self.key, Key::Function(_));
-        if !self.has_primary(platform) && !function {
+        // Alt+Left, Alt+Right and Alt+Home are the browser's own keys on
+        // Windows and Linux. Without Control they are not AltGr, and no text
+        // field gives them a meaning. Option+Arrow moves by word on macOS.
+        let alt_navigation = platform == Platform::Other
+            && self.alt
+            && !self.ctrl
+            && !self.shift
+            && matches!(self.key, Key::Left | Key::Right | Key::Home);
+        if !self.has_primary(platform) && !function && !alt_navigation {
             return Err(AcceleratorError::Unbindable);
         }
         // Ctrl+Alt is AltGr on many Windows and Linux layouts: it types text.
@@ -460,6 +468,20 @@ mod tests {
             Err(AcceleratorError::Unbindable)
         );
         assert_eq!(parse("F6", other).bindable(other), Ok(()));
+        assert_eq!(parse("Alt+Left", other).bindable(other), Ok(()));
+        assert_eq!(parse("Alt+Home", other).bindable(other), Ok(()));
+        assert_eq!(
+            parse("Alt+Left", mac).bindable(mac),
+            Err(AcceleratorError::Unbindable)
+        );
+        assert_eq!(
+            parse("Alt+Up", other).bindable(other),
+            Err(AcceleratorError::Unbindable)
+        );
+        assert_eq!(
+            parse("Alt+Shift+Left", other).bindable(other),
+            Err(AcceleratorError::Unbindable)
+        );
         assert_eq!(
             parse("Ctrl+Alt+N", other).bindable(other),
             Err(AcceleratorError::Unbindable)

@@ -9,7 +9,7 @@ fn profile() -> ProfileId {
 
 // The first open of a profile database validates every schema version, which a
 // loaded debug build can spend longer on than the store's reply budget.
-fn warm_schema_cache() {
+pub(super) fn warm_schema_cache() {
     let mut conn = Connection::open_in_memory().unwrap();
     migrations::apply(&mut conn, migrations::PROFILE).unwrap();
 }

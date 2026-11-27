@@ -2473,6 +2473,7 @@ async fn agent_workflow(
         )
         .map_err(|_| "link_provider")?;
     let grant = WorkAgentGrantV1 {
+        no_usage_charge: false,
         lead: None,
         provider: zephium_core::work::search::WorkSearchProvider::OpenAi,
         model: zephium_core::work::search::PUBLIC_SEARCH_MODEL.into(),
@@ -2760,7 +2761,7 @@ async fn agent_workflow(
 fn probe_folder() -> Result<std::path::PathBuf, &'static str> {
     let home = std::env::var_os("HOME").ok_or("home")?;
     let folder = std::path::PathBuf::from(home)
-        .join("Library/Caches/app.zephium.probe")
+        .join(super::acceptance::PROBE_FOLDERS)
         .join(format!("files-{}", std::process::id()));
     std::fs::create_dir_all(&folder).map_err(|_| "probe_folder")?;
     std::fs::write(

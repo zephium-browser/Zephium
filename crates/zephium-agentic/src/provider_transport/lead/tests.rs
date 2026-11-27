@@ -363,6 +363,27 @@ fn http_failures_classify_without_provider_text() {
         stream_error("credit_balance_exhausted"),
         WorkModelError::OverBudget
     );
+    let groq_plan = br#"{"error":{"message":"Request too large for model `openai/gpt-oss-120b` in organization `org_x` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 15847, please reduce your message size and try again.","type":"tokens","code":"rate_limit_exceeded"}}"#;
+    assert_eq!(
+        classify(StatusCode::PAYLOAD_TOO_LARGE, groq_plan),
+        WorkModelError::PlanLimit
+    );
+    let openai_plan = br#"{"error":{"message":"Request too large for gpt-5 in organization org-x on tokens per min (TPM): Limit 30000, Requested 52000.","type":"tokens","code":"rate_limit_exceeded"}}"#;
+    assert_eq!(
+        classify(StatusCode::TOO_MANY_REQUESTS, openai_plan),
+        WorkModelError::PlanLimit
+    );
+    let reached = br#"{"error":{"message":"Rate limit reached for gpt-5 on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.","type":"tokens","code":"rate_limit_exceeded"}}"#;
+    assert_eq!(
+        classify(StatusCode::TOO_MANY_REQUESTS, reached),
+        WorkModelError::RateLimited {
+            retry_after_ms: None
+        }
+    );
+    assert_eq!(
+        classify(StatusCode::PAYLOAD_TOO_LARGE, b"{}"),
+        WorkModelError::ContextTooLong
+    );
     let mut headers = HeaderMap::new();
     headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
     assert_eq!(retry_after(&headers), Some(Duration::from_secs(7)));
@@ -1144,4 +1165,65 @@ fn a_rows_stream_limits_wait_a_little_past_the_servers_own() {
     .with_call_limits(Some(90_000), Some(600_000));
     assert_eq!(client.idle_timeout, Some(Duration::from_secs(105)));
     assert_eq!(client.call_timeout, Some(Duration::from_secs(615)));
+}
+
+#[test]
+fn local_endpoint_usage_preserves_explicit_rates_and_keeps_tokens() {
+    for base in ["http://localhost:11434/v1", "https://192.168.1.2/v1"] {
+        let client = LeadClient::new(
+            LeadTarget::compatible(base).unwrap(),
+            Arc::new(LeadStaticCredential::new(
+                LeadSecret::new("fixture".into()).unwrap(),
+            )),
+            Some(WorkModelPrice {
+                input: 1000,
+                cached_input: 100,
+                output: 5000,
+            }),
+        );
+        let result = client.usage(&Decoded {
+            usage: WorkModelUsage {
+                input_tokens: 100,
+                output_tokens: 10,
+                ..Default::default()
+            },
+            provider_cost_micros: Some(9000),
+            searches: 1,
+            ..Default::default()
+        });
+        assert_eq!(result.cost_micros, Some(9000));
+        assert_eq!(result.input_tokens, 100);
+        assert_eq!(
+            client
+                .usage(&Decoded {
+                    usage: WorkModelUsage {
+                        input_tokens: 1_000_000,
+                        output_tokens: 100_000,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .cost_micros,
+            Some(1500)
+        );
+        let free = LeadClient::new(
+            LeadTarget::compatible(base).unwrap(),
+            Arc::new(LeadStaticCredential::new(
+                LeadSecret::new("fixture".into()).unwrap(),
+            )),
+            None,
+        );
+        assert_eq!(
+            free.usage(&Decoded {
+                usage: WorkModelUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .cost_micros,
+            Some(0)
+        );
+    }
 }

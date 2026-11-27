@@ -41,8 +41,8 @@ use super::Theme;
 use crate::{
   custom_protocol_workaround,
   native_admission::{
-    InFlightAdmission, InFlightPermit, CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
-    CUSTOM_PROTOCOL_OVERFLOW_STATUS,
+    InFlightAdmission, InFlightPermit, WaitList, CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT,
+    CUSTOM_PROTOCOL_OVERFLOW_STATUS, CUSTOM_PROTOCOL_WAITING_LIMIT,
   },
   native_bounds::{
     bounded_utf16, CustomProtocolRequestBudget, NativeStringLimit,
@@ -127,6 +127,13 @@ thread_local! {
   // asynchronous protocol workers receive only a numeric lookup token.
   static PENDING_WEB_RESOURCE_RESPONSES:
     RefCell<HashMap<usize, PendingWebResourceResponse>> = RefCell::new(HashMap::new());
+  // Requests past their scheme's in-flight bound wait here, deferred, in
+  // arrival order within each scheme, and start as permits are released.
+  static WAITING_WEB_RESOURCE_REQUESTS: RefCell<WaitList<WebResourcePool, WaitingWebResourceRequest>> =
+    const { RefCell::new(WaitList::new(CUSTOM_PROTOCOL_WAITING_LIMIT)) };
+  // Set while waiters are being started, so a response completed inside a
+  // started handler does not start another drain beneath this one.
+  static DRAINING_WEB_RESOURCE_REQUESTS: Cell<bool> = const { Cell::new(false) };
   // Generic Drop cannot report a native close failure to its caller. Retain
   // such debts on the creating apartment until the embedder drains them.
   // Overflow is an invariant failure: intentionally leak the owned native
@@ -327,11 +334,20 @@ fn web_error_failure(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<crate::Nav
     | COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT
     | COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET => Failure::Unreachable,
     COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT => Failure::TimedOut,
-    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED
-    | COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => Failure::Insecure,
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_COMMON_NAME_IS_INCORRECT => {
+      Failure::Certificate(crate::CertificateProblem::NameMismatch)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED => {
+      Failure::Certificate(crate::CertificateProblem::Expired)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_REVOKED => {
+      Failure::Certificate(crate::CertificateProblem::Revoked)
+    }
+    // Self-signed and unknown issuers, among other chain faults.
+    COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID => {
+      Failure::Certificate(crate::CertificateProblem::Untrusted)
+    }
+    COREWEBVIEW2_WEB_ERROR_STATUS_CLIENT_CERTIFICATE_CONTAINS_ERRORS => Failure::Insecure,
     _ => Failure::Other,
   })
 }
@@ -340,6 +356,7 @@ fn web_error_failure(status: COREWEBVIEW2_WEB_ERROR_STATUS) -> Option<crate::Nav
 struct InFlightNavigationUrls {
   urls: HashMap<u64, String>,
   committed: HashSet<u64>,
+  error_documents: HashSet<u64>,
 }
 
 impl InFlightNavigationUrls {
@@ -358,9 +375,20 @@ impl InFlightNavigationUrls {
     self.urls.get(&id).cloned()
   }
 
-  fn finish(&mut self, id: u64) -> Option<String> {
+  /// WebView2 committed its error document for this navigation, in place
+  /// of the one shown. False for a navigation that is not tracked.
+  fn error_document(&mut self, id: u64) -> bool {
+    self.urls.contains_key(&id) && {
+      self.error_documents.insert(id);
+      true
+    }
+  }
+
+  /// The address and whether an error document replaced the shown one.
+  fn finish(&mut self, id: u64) -> Option<(String, bool)> {
     self.committed.remove(&id);
-    self.urls.remove(&id)
+    let replaced = self.error_documents.remove(&id);
+    self.urls.remove(&id).map(|url| (url, replaced))
   }
 }
 
@@ -641,8 +669,12 @@ pub(crate) struct InnerWebView {
   pub controller: ICoreWebView2Controller,
   pub webview: ICoreWebView2,
   pub env: ICoreWebView2Environment,
-  custom_protocol_admission: InFlightAdmission,
+  custom_protocol_admission: SchemeAdmissions,
   cleanup: RefCell<Option<NativeCleanupDebt>>,
+  /// Present only for a page a person reads. It is set while a Save As the
+  /// browser asked for is in flight, and is the only thing that lets
+  /// `SaveAsUIShowing` through; a view without it denies every Save As.
+  save_as: Option<Rc<Cell<bool>>>,
   // Store FileDropController in here to make sure it gets dropped when
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
@@ -805,6 +837,153 @@ fn web_resource_failure_response(status: StatusCode) -> HttpResponse<Cow<'static
   response
 }
 
+/// One in-flight bound per custom scheme of a WebView, sealed together at
+/// teardown, so a burst on one scheme (a page's settings reads over IPC)
+/// never holds back another (the bundled modules a lazy view imports).
+#[derive(Clone, Default)]
+struct SchemeAdmissions(Rc<RefCell<Vec<InFlightAdmission>>>);
+
+impl SchemeAdmissions {
+  fn add(&self) -> InFlightAdmission {
+    let admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    match self.0.try_borrow_mut() {
+      Ok(mut admissions) => admissions.push(admission.clone()),
+      // A scope teardown cannot reach is never opened.
+      Err(_) => admission.seal_and_drain(),
+    }
+    admission
+  }
+
+  fn seal_and_drain(&self) {
+    let admissions = match self.0.try_borrow() {
+      Ok(admissions) => admissions.clone(),
+      Err(_) => return,
+    };
+    for admission in admissions {
+      admission.seal_and_drain();
+    }
+  }
+}
+
+/// One scheme of one WebView. Equal by identity, not by the counter it carries.
+struct WebResourcePool {
+  hwnd: isize,
+  protocol: usize,
+  admission: InFlightAdmission,
+}
+
+impl PartialEq for WebResourcePool {
+  fn eq(&self, other: &Self) -> bool {
+    self.hwnd == other.hwnd && self.protocol == other.protocol
+  }
+}
+
+/// Hands an admitted request to its scheme's handler. A waiting request
+/// passes itself so its deferral is reused, and fails closed if starting stops
+/// before the response is owned.
+type StartWebResourceRequest = Rc<
+  dyn Fn(
+    &ICoreWebView2WebResourceRequestedEventArgs,
+    &str,
+    Option<WaitingWebResourceRequest>,
+    usize,
+    InFlightPermit,
+  ) -> windows::core::Result<()>,
+>;
+
+/// A deferred request waiting for its scheme's in-flight slot. It owns the
+/// native deferral until it starts; dropped instead, it completes with an
+/// empty 503 exactly once.
+struct WaitingWebResourceRequest {
+  args: ICoreWebView2WebResourceRequestedEventArgs,
+  env: ICoreWebView2Environment,
+  deferral: Option<ICoreWebView2Deferral>,
+  uri: String,
+  protocol: usize,
+  start: StartWebResourceRequest,
+}
+
+impl WaitingWebResourceRequest {
+  fn take_deferral(&mut self) -> Option<ICoreWebView2Deferral> {
+    self.deferral.take()
+  }
+
+  /// Completes with `response` in place of the scheme's own.
+  fn complete_with(mut self, response: &ICoreWebView2WebResourceResponse) {
+    if let Some(deferral) = self.deferral.take() {
+      unsafe {
+        let _ = self.args.SetResponse(response);
+        let _ = deferral.Complete();
+      }
+    }
+  }
+
+  fn start(mut self, permit: InFlightPermit) {
+    let start = self.start.clone();
+    let args = self.args.clone();
+    let uri = std::mem::take(&mut self.uri);
+    let protocol = self.protocol;
+    let _ = start(&args, &uri, Some(self), protocol, permit);
+  }
+}
+
+impl Drop for WaitingWebResourceRequest {
+  fn drop(&mut self) {
+    let Some(deferral) = self.deferral.take() else {
+      return;
+    };
+    unsafe {
+      let failure = web_resource_failure_response(CUSTOM_PROTOCOL_OVERFLOW_STATUS);
+      if let Ok(response) = InnerWebView::prepare_web_request_response(&self.env, &failure) {
+        let _ = self.args.SetResponse(&response);
+      }
+      let _ = deferral.Complete();
+    }
+  }
+}
+
+/// Starts waiting requests while their schemes have room. Called after
+/// anything that can free a slot; a release inside a started handler leaves
+/// the loop already running to pick it up.
+fn drain_waiting_web_resource_requests() {
+  if DRAINING_WEB_RESOURCE_REQUESTS
+    .try_with(|draining| draining.replace(true))
+    .unwrap_or(true)
+  {
+    return;
+  }
+  loop {
+    let ready = WAITING_WEB_RESOURCE_REQUESTS
+      .try_with(|waiting| {
+        let mut waiting = waiting.try_borrow_mut().ok()?;
+        if waiting.is_empty() {
+          return None;
+        }
+        waiting.take_ready(|pool| pool.admission.try_acquire())
+      })
+      .ok()
+      .flatten();
+    let Some((waiting, permit)) = ready else {
+      break;
+    };
+    waiting.start(permit);
+  }
+  let _ = DRAINING_WEB_RESOURCE_REQUESTS.try_with(|draining| draining.set(false));
+}
+
+/// A WebView going away fails its waiting requests closed, outside the borrow.
+fn cancel_waiting_web_resource_requests(hwnd: isize) {
+  let taken = WAITING_WEB_RESOURCE_REQUESTS
+    .try_with(|waiting| {
+      waiting
+        .try_borrow_mut()
+        .map(|mut waiting| waiting.take_where(|pool| pool.hwnd == hwnd))
+        .unwrap_or_default()
+    })
+    .unwrap_or_default();
+  drop(taken);
+}
+
 fn pending_response_hwnd(hwnd: isize) -> HWND {
   HWND(hwnd as *mut core::ffi::c_void)
 }
@@ -868,9 +1047,11 @@ fn finish_pending_web_resource_response(token: usize, response: HttpResponse<Cow
     let _ = unsafe { KillTimer(Some(pending_response_hwnd(pending.hwnd)), token) };
     pending.finish(response);
   }
+  drain_waiting_web_resource_requests();
 }
 
 fn cancel_pending_web_resource_responses(hwnd: isize) {
+  cancel_waiting_web_resource_requests(hwnd);
   let pending = PENDING_WEB_RESOURCE_RESPONSES.with(|responses| {
     if let Ok(mut responses) = responses.try_borrow_mut() {
       let tokens: Vec<_> = responses
@@ -904,6 +1085,7 @@ unsafe extern "system" fn web_resource_response_timeout(
       Ok(Some(pending)) => {
         let _ = unsafe { KillTimer(Some(hwnd), token) };
         pending.finish(web_resource_failure_response(StatusCode::GATEWAY_TIMEOUT));
+        drain_waiting_web_resource_requests();
       }
       Ok(None) => {
         // A late timer notification after normal completion must not leave a
@@ -999,6 +1181,25 @@ const fn extension_startup_refusal(
   }
 }
 
+/// The kinds whose request WebView2 may put to the person with its own
+/// origin-labelled prompt when the embedder answers [`PermissionResponse::Prompt`].
+/// File-system access, autoplay, window management and anything unknown stay
+/// denied.
+pub(crate) fn prompts_natively(kind: PermissionKind) -> bool {
+  matches!(
+    kind,
+    PermissionKind::Camera
+      | PermissionKind::Microphone
+      | PermissionKind::Geolocation
+      | PermissionKind::Notifications
+      | PermissionKind::ClipboardRead
+      | PermissionKind::Midi
+      | PermissionKind::Sensors
+      | PermissionKind::LocalFonts
+      | PermissionKind::AutomaticDownloads
+  )
+}
+
 impl InnerWebView {
   #[inline]
   pub fn new(
@@ -1088,7 +1289,9 @@ impl InnerWebView {
       Err(error) => return Err(construction.finish_failure(error)),
     };
     construction.retain_controller(&controller);
-    if let Some(startup_gate) = &pl_attrs.browser_extension_startup_gate {
+    if pl_attrs.browser_extension_startup_gate.is_some()
+      || pl_attrs.controller_initialization_hook.is_some()
+    {
       let core = unsafe { controller.CoreWebView2() }
         .map_err(webview2_com::Error::WindowsError)
         .map_err(Error::WebView2Error);
@@ -1096,13 +1299,22 @@ impl InnerWebView {
         Ok(core) => core,
         Err(error) => return Err(construction.finish_failure(error)),
       };
-      if let Err(error) = startup_gate(&env, &core) {
+      if let Err(error) = crate::native_controller_init::run(
+        &env,
+        &core,
+        pl_attrs.browser_extension_startup_gate.as_deref(),
+        pl_attrs.controller_initialization_hook.as_deref(),
+      ) {
         return Err(construction.finish_failure(Error::WebView2Error(
           webview2_com::Error::WindowsError(error),
         )));
       }
     }
-    let custom_protocol_admission = InFlightAdmission::new(CUSTOM_PROTOCOL_IN_FLIGHT_LIMIT);
+    let custom_protocol_admission = SchemeAdmissions::default();
+    let save_as = pl_attrs
+      .native_context_menu_handler
+      .is_some()
+      .then(|| Rc::new(Cell::new(false)));
     let webview = match Self::init_webview(
       parent,
       hwnd,
@@ -1114,6 +1326,7 @@ impl InnerWebView {
       is_child,
       &mut construction,
       &custom_protocol_admission,
+      save_as.clone(),
     ) {
       Ok(webview) => webview,
       Err(error) => {
@@ -1169,6 +1382,7 @@ impl InnerWebView {
       env,
       custom_protocol_admission,
       cleanup: RefCell::new(Some(cleanup)),
+      save_as,
       drag_drop_controller,
     })
   }
@@ -1435,7 +1649,8 @@ impl InnerWebView {
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
     construction: &mut ControllerConstructionGuard,
-    custom_protocol_admission: &InFlightAdmission,
+    custom_protocol_admission: &SchemeAdmissions,
+    save_as: Option<Rc<Cell<bool>>>,
   ) -> Result<ICoreWebView2> {
     let webview = unsafe { controller.CoreWebView2()? };
 
@@ -1520,17 +1735,23 @@ impl InnerWebView {
 
     // Install one construction-time broker for every permission. Missing
     // callbacks, malformed native state, and `Default` all remain denied;
-    // `Prompt` defers only camera and microphone to WebView2's own prompt.
+    // `Prompt` defers only the kinds in `prompts_natively` to WebView2's own
+    // prompt.
     let clipboard = attributes.clipboard;
     let permission_handler = attributes.permission_handler.take();
+    let saves_decisions = pl_attrs.permission_decisions_saved;
     unsafe {
       webview.add_PermissionRequested(
         &PermissionRequestedEventHandler::create(Box::new(move |_, args| {
           let Some(args) = args else { return Ok(()) };
           args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
           // A persisted decision would outlive this broker's policy and
-          // suppress later requests, so nothing set here is saved.
-          if let Ok(args3) = args.cast::<ICoreWebView2PermissionRequestedEventArgs3>() {
+          // suppress later requests, so nothing set here is saved; only the
+          // person's own answer to the native prompt may be, below.
+          let args3 = args
+            .cast::<ICoreWebView2PermissionRequestedEventArgs3>()
+            .ok();
+          if let Some(args3) = &args3 {
             let _ = args3.SetSavesInProfile(false);
           }
 
@@ -1563,11 +1784,15 @@ impl InnerWebView {
               .map(|handler| handler(permission_kind))
               .unwrap_or(PermissionResponse::Deny)
           };
-          let media = kind == COREWEBVIEW2_PERMISSION_KIND_CAMERA
-            || kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE;
           match response {
             PermissionResponse::Allow => args.SetState(COREWEBVIEW2_PERMISSION_STATE_ALLOW)?,
-            PermissionResponse::Prompt if media => {
+            PermissionResponse::Prompt if prompts_natively(permission_kind) => {
+              // Without the interface WebView2 would save by default, so
+              // the prompt is shown only where the choice can be scoped.
+              let Some(args3) = &args3 else { return Ok(()) };
+              if saves_decisions {
+                args3.SetSavesInProfile(true)?;
+              }
               args.SetState(COREWEBVIEW2_PERMISSION_STATE_DEFAULT)?
             }
             _ => {}
@@ -1611,11 +1836,33 @@ impl InnerWebView {
       // suppression. Require the current interface and cancel before
       // suppressing the dialog so a later HRESULT failure stays fail-closed.
       let webview25 = webview.cast::<ICoreWebView2_25>()?;
+      let gate = save_as.clone();
+      let resource_save = attributes
+        .download_policy
+        .inspect_metadata(|| pl_attrs.native_resource_save_handler.clone())
+        .flatten()
+        .filter(|_| {
+          pl_attrs.native_context_menu_handler.is_some()
+            && pl_attrs.native_download_handler.is_some()
+        });
+      let save_owner = controller.clone();
       webview25.add_SaveAsUIShowing(
-        &SaveAsUIShowingEventHandler::create(Box::new(|_, args| {
+        &SaveAsUIShowingEventHandler::create(Box::new(move |_, args| {
           if let Some(args) = args {
             args.SetCancel(true)?;
-            args.SetSuppressDefaultDialog(true)?;
+            let document = gate.as_ref().is_some_and(|gate| gate.get());
+            let resource = !document
+              && resource_save.as_ref().is_some_and(|handler| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&save_owner)))
+                  .unwrap_or(false)
+              });
+            let allowed = document || resource;
+            // Resource Save As enters DownloadStarting next. The broker owns
+            // its picker and staging path; document Save As has a separate UI.
+            args.SetSuppressDefaultDialog(!document)?;
+            if allowed {
+              args.SetCancel(false)?;
+            }
           }
           Ok(())
         })),
@@ -1718,6 +1965,8 @@ impl InnerWebView {
   }
 
   #[inline]
+  // Native registration keeps distinct controller, navigation and cleanup owners.
+  #[allow(clippy::too_many_arguments)]
   unsafe fn attach_handlers(
     hwnd: HWND,
     controller: &ICoreWebView2Controller,
@@ -1800,8 +2049,7 @@ impl InnerWebView {
             let tracked = committed_urls
               .lock()
               .unwrap_or_else(|poisoned| poisoned.into_inner())
-              .urls
-              .contains_key(&navigation_id);
+              .error_document(navigation_id);
             if tracked {
               if let Some(guard) = navigation_presentation_guard.as_ref() {
                 guard();
@@ -1856,12 +2104,17 @@ impl InnerWebView {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .finish(navigation_id);
-          if let Some(url) = url {
+          if let Some((url, replaced)) = url {
             if !succeeded.as_bool() {
               if let (Some(report), Some(failure)) =
                 (failure_handler.as_ref(), web_error_failure(status))
               {
-                report(NavigationId::from_raw(navigation_id), failure);
+                let document = if replaced {
+                  crate::FailedDocument::Replaced { url: url.clone() }
+                } else {
+                  crate::FailedDocument::Kept
+                };
+                report(NavigationId::from_raw(navigation_id), failure, document);
               }
             }
             completed_handler(NavigationEvent {
@@ -1876,6 +2129,7 @@ impl InnerWebView {
       )?;
     }
 
+    let native_url_refused = attributes.native_url_refused_handler.clone();
     // Legacy page load handler.
     if let Some(on_page_load_handler) = attributes.on_page_load_handler.take() {
       let on_page_load_handler = Rc::new(on_page_load_handler);
@@ -1918,6 +2172,7 @@ impl InnerWebView {
     let nav_callback = attributes.navigation_handler.take();
     if nav_callback.is_some() || navigation_event_handler.is_some() {
       let starting_handler = navigation_event_handler.clone();
+      let starting_refused = native_url_refused.clone();
       let starting_urls = in_flight_navigation_urls.clone();
       webview.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |_, args| {
@@ -1931,10 +2186,17 @@ impl InnerWebView {
 
           let uri = {
             let mut uri = PWSTR::null();
-            args.Uri(&mut uri)?;
-            take_pwstr_bounded(uri, PAGE_URL_LIMIT)
+            let received = args.Uri(&mut uri);
+            let uri = take_pwstr_bounded(uri, PAGE_URL_LIMIT);
+            received.ok().and(uri)
           };
 
+          if uri.is_none() {
+            crate::report_native_url_refused(
+              starting_refused.as_ref(),
+              crate::NativeUrlTarget::MainFrame,
+            );
+          }
           let admitted = match (&nav_callback, uri.as_ref()) {
             (Some(callback), Some(uri)) => callback(uri.clone()),
             (Some(_), None) => false,
@@ -2026,10 +2288,15 @@ impl InnerWebView {
           };
           let uri = {
             let mut uri = PWSTR::null();
-            args.Uri(&mut uri)?;
-            take_pwstr_bounded(uri, PAGE_URL_LIMIT)
+            let received = args.Uri(&mut uri);
+            let uri = take_pwstr_bounded(uri, PAGE_URL_LIMIT);
+            received.ok().and(uri)
           };
           let Some(uri) = uri else {
+            crate::report_native_url_refused(
+              native_url_refused.as_ref(),
+              crate::NativeUrlTarget::NewWindow,
+            );
             return Ok(());
           };
 
@@ -2118,19 +2385,6 @@ impl InnerWebView {
     Self::attach_main_thread_dispatcher(hwnd)?;
 
     if let Some(handler) = pl_attrs.native_context_menu_handler.clone() {
-      // Save-page/SaveAs is distinct from DownloadStarting. Keep that separate
-      // filesystem surface denied even when selected download/edit menu items
-      // are enabled. Registration is mandatory before any content can load.
-      let core25: ICoreWebView2_25 = webview.cast()?;
-      core25.add_SaveAsUIShowing(
-        &SaveAsUIShowingEventHandler::create(Box::new(|_, args| {
-          if let Some(args) = args {
-            args.SetCancel(true)?;
-          }
-          Ok(())
-        })),
-        token,
-      )?;
       let owner = controller.clone();
       let core11: ICoreWebView2_11 = webview.cast()?;
       core11.add_ContextMenuRequested(
@@ -2347,7 +2601,7 @@ impl InnerWebView {
     http_or_https: &'static str,
     attributes: &mut WebViewAttributes,
     token: &mut EventRegistrationToken,
-    protocol_admission: &InFlightAdmission,
+    protocol_admissions: &SchemeAdmissions,
   ) -> Result<()> {
     for name in attributes.custom_protocols.keys() {
       // WebView2 supports non-standard protocols only on Windows 10+, so we have to use this workaround
@@ -2371,9 +2625,91 @@ impl InnerWebView {
     }
 
     let env = env.clone();
-    let custom_protocols = std::mem::take(&mut attributes.custom_protocols);
+    // Each scheme keeps its own in-flight bound, in a fixed order the waiting
+    // list can name by index.
+    let protocols: Rc<Vec<_>> = Rc::new(
+      std::mem::take(&mut attributes.custom_protocols)
+        .into_iter()
+        .map(|(name, handler)| (name, handler, protocol_admissions.add()))
+        .collect(),
+    );
     let main_thread_id = std::thread::current().id();
-    let protocol_admission = protocol_admission.clone();
+    let pending_hwnd = hwnd.0 as isize;
+
+    // Hands one admitted request to its scheme's handler. The permit moves into
+    // the pending response; a waiting request's deferral is reused, and if
+    // starting stops before the response owns it, the waiter fails it closed.
+    let start: StartWebResourceRequest = {
+      let env = env.clone();
+      let protocols = protocols.clone();
+      Rc::new(
+        move |args: &ICoreWebView2WebResourceRequestedEventArgs,
+              uri: &str,
+              mut waiting: Option<WaitingWebResourceRequest>,
+              protocol: usize,
+              permit: InFlightPermit| {
+          let Some((custom_protocol, custom_protocol_handler, _)) = protocols.get(protocol) else {
+            return Ok(());
+          };
+          let webview_request = args.Request()?;
+          let request =
+            match Self::prepare_request(http_or_https, custom_protocol, &webview_request, uri) {
+              Ok(req) => req,
+              Err(e) => {
+                let err_response = Self::prepare_web_request_err(&env, e)?;
+                match waiting {
+                  Some(waiting) => waiting.complete_with(&err_response),
+                  None => args.SetResponse(&err_response)?,
+                }
+                return Ok(());
+              }
+            };
+
+          let deferral = match waiting
+            .as_mut()
+            .and_then(WaitingWebResourceRequest::take_deferral)
+          {
+            Some(deferral) => deferral,
+            None => args.GetDeferral()?,
+          };
+          let Some(pending_token) =
+            insert_pending_web_resource_response(PendingWebResourceResponse {
+              args: args.clone(),
+              env: env.clone(),
+              deferral,
+              hwnd: pending_hwnd,
+              completed: false,
+              _permit: permit,
+            })
+          else {
+            return Ok(());
+          };
+
+          let async_responder = Box::new(move |sent_response| {
+            let handler = move || {
+              finish_pending_web_resource_response(pending_token, sent_response);
+            };
+
+            if std::thread::current().id() == main_thread_id {
+              handler();
+            } else {
+              Self::dispatch_handler(pending_hwnd, handler);
+            }
+          });
+
+          #[cfg(feature = "tracing")]
+          let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
+          custom_protocol_handler(
+            &webview_id,
+            request,
+            RequestAsyncResponder {
+              responder: Some(async_responder),
+            },
+          );
+          Ok(())
+        },
+      )
+    };
 
     webview.add_WebResourceRequested(
       &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
@@ -2405,66 +2741,53 @@ impl InnerWebView {
         #[cfg(feature = "tracing")]
         span.record("uri", &uri);
 
-        if let Some((custom_protocol, custom_protocol_handler)) = custom_protocols
-          .iter()
-          .find(|(protocol, _)| custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol))
-        {
-          let Some(permit) = protocol_admission.try_acquire() else {
-            // Do not acquire a native deferral for rejected work. Installing
-            // the empty failure response synchronously completes this event
-            // and leaves no pending object or accounting obligation behind.
-            let failure = web_resource_failure_response(CUSTOM_PROTOCOL_OVERFLOW_STATUS);
-            let response = Self::prepare_web_request_response(&env, &failure)?;
-            args.SetResponse(&response)?;
+        let Some(protocol) = protocols.iter().position(|(protocol, _, _)| {
+          custom_protocol_workaround::is_work_around_uri(&uri, http_or_https, protocol)
+        }) else {
+          return Ok(());
+        };
+        let pool = WebResourcePool {
+          hwnd: pending_hwnd,
+          protocol,
+          admission: protocols[protocol].2.clone(),
+        };
+        // Within a scheme nothing overtakes an earlier arrival.
+        let queued_ahead = WAITING_WEB_RESOURCE_REQUESTS
+          .try_with(|waiting| {
+            waiting
+              .try_borrow()
+              .map(|waiting| waiting.has_waiting(&pool))
+              .unwrap_or(true)
+          })
+          .unwrap_or(true);
+        if !queued_ahead {
+          if let Some(permit) = pool.admission.try_acquire() {
+            start(&args, &uri, None, protocol, permit)?;
+            drain_waiting_web_resource_requests();
             return Ok(());
-          };
-          let request = match Self::prepare_request(http_or_https, custom_protocol, &webview_request, &uri)
-          {
-            Ok(req) => req,
-            Err(e) => {
-              let err_response = Self::prepare_web_request_err(&env, e)?;
-              args.SetResponse(&err_response)?;
-              return Ok(());
-            }
-          };
-
-          let deferral = args.GetDeferral()?;
-          let Some(pending_token) =
-            insert_pending_web_resource_response(PendingWebResourceResponse {
-              args: args.clone(),
-              env: env.clone(),
-              deferral,
-              hwnd: hwnd.0 as isize,
-              completed: false,
-              _permit: permit,
-            })
-          else {
-            return Ok(());
-          };
-          let dispatcher_hwnd = hwnd.0 as isize;
-
-          let async_responder = Box::new(move |sent_response| {
-            let handler = move || {
-              finish_pending_web_resource_response(pending_token, sent_response);
-            };
-
-            if std::thread::current().id() == main_thread_id {
-              handler();
-            } else {
-              Self::dispatch_handler(dispatcher_hwnd, handler);
-            }
-          });
-
-          #[cfg(feature = "tracing")]
-          let _span = tracing::info_span!("wry::custom_protocol::call_handler").entered();
-          custom_protocol_handler(
-            &webview_id,
-            request,
-            RequestAsyncResponder {
-              responder: Some(async_responder),
-            },
-          );
+          }
         }
+
+        // Past the bound the request waits its turn rather than fail: a refused
+        // module import stays failed until its document reloads. Only a flood
+        // past the wait list too is refused, with an empty 503.
+        let waiting = WaitingWebResourceRequest {
+          args: args.clone(),
+          env: env.clone(),
+          deferral: Some(args.GetDeferral()?),
+          uri,
+          protocol,
+          start: start.clone(),
+        };
+        let refused = WAITING_WEB_RESOURCE_REQUESTS
+          .try_with(move |list| match list.try_borrow_mut() {
+            Ok(mut list) => list.push(pool, waiting).err(),
+            Err(_) => Some(waiting),
+          })
+          .ok()
+          .flatten();
+        drop(refused);
+        drain_waiting_web_resource_requests();
 
         Ok(())
       })),
@@ -3422,6 +3745,26 @@ impl InnerWebView {
     unsafe { set_background_color(&self.controller, background_color) }
   }
 
+  /// Shows WebView2's own Save As for the loaded document. Only a view a person
+  /// reads may; any other refuses, and a Save As the page starts is still
+  /// denied, because the gate is open only while this call is in flight.
+  pub fn show_save_as(&self) -> Result<()> {
+    let Some(gate) = self.save_as.clone() else {
+      return Err(windows::core::Error::from_hresult(E_ACCESSDENIED).into());
+    };
+    let webview = self.webview.cast::<ICoreWebView2_25>()?;
+    gate.set(true);
+    let closing = gate.clone();
+    let handler = ShowSaveAsUICompletedHandler::create(Box::new(move |_, _| {
+      closing.set(false);
+      Ok(())
+    }));
+    unsafe { webview.ShowSaveAsUI(&handler) }.map_err(|error| {
+      gate.set(false);
+      error.into()
+    })
+  }
+
   pub fn set_memory_usage_level(&self, level: MemoryUsageLevel) -> Result<()> {
     let webview = self.webview.cast::<ICoreWebView2_19>()?;
     // https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2memoryusagetargetlevel
@@ -3629,11 +3972,31 @@ mod tests {
       None,
       "one navigation gates presentation once"
     );
-    assert_eq!(urls.finish(0).as_deref(), Some("https://redirect.example/"));
+    assert_eq!(
+      urls.finish(0),
+      Some(("https://redirect.example/".into(), false))
+    );
     assert!(urls.admit(
       IN_FLIGHT_NAVIGATION_LIMIT as u64,
       "https://reused.example/".into()
     ));
+  }
+
+  #[test]
+  fn an_error_document_is_reported_only_for_its_own_tracked_navigation() {
+    let mut urls = InFlightNavigationUrls::default();
+    assert!(!urls.error_document(7), "an untracked navigation");
+    assert!(urls.admit(7, "https://down.example/".into()));
+    assert!(urls.admit(8, "https://up.example/".into()));
+    assert!(urls.error_document(7));
+    assert_eq!(urls.finish(7), Some(("https://down.example/".into(), true)));
+    assert_eq!(urls.finish(8), Some(("https://up.example/".into(), false)));
+    assert!(urls.admit(7, "https://down.example/".into()));
+    assert_eq!(
+      urls.finish(7),
+      Some(("https://down.example/".into(), false)),
+      "a reused identity starts clean"
+    );
   }
 
   #[test]

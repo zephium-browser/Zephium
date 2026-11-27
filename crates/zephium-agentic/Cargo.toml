@@ -21,6 +21,7 @@ provider-transport = [
     "dep:zephium-decision",
     "dep:httpdate",
     "dep:zephium-credentials",
+    "dep:zephium-public-fetch",
 ]
 # Fixed loopback fixtures and native-probe support are diagnostic code. The
 # crate-level optimized-build refusal makes this feature mechanically
@@ -51,10 +52,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "net"], optional = true }
 ulid.workspace = true
 url.workspace = true
-zeroize = { version = "=1.9.0", optional = true }
+zeroize = { version = "=1.9.1", optional = true }
 zephium-decision = { workspace = true, optional = true }
 httpdate = { version = "=1.0.3", optional = true }
 zephium-core.workspace = true
+zephium-public-fetch = { path = "../zephium-public-fetch", version = "=0.1.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 zephium-credentials = { workspace = true, optional = true }
@@ -62,7 +64,7 @@ zephium-credentials = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "=3.7.0", optional = true }
 security-framework-sys = { version = "=2.17.0", optional = true }
-dirs = { version = "=6.0.0", optional = true }
+dirs = { version = "=7.0.0", optional = true }
 zephium-credentials = { workspace = true, optional = true }
 
 [dev-dependencies]

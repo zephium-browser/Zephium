@@ -35,16 +35,22 @@
   let panel = $state<HTMLElement>();
   let button = $state<HTMLButtonElement>();
 
-  const items = () => [...(panel?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
+  const items = () => [
+    ...(panel?.querySelectorAll<HTMLElement>(
+      '[role="menuitem"]:not(:disabled):not([aria-disabled="true"])',
+    ) ?? []),
+  ];
 
-  function show() {
+  function show(last = false) {
     material = menuMaterialFor(button);
     open = true;
     onopen?.();
     if (!menu) return;
     // A menu opened from the keyboard should already have a target; opened
     // by pointer it should not steal the cursor's place in the list.
-    queueMicrotask(() => items()[0]?.focus());
+    queueMicrotask(() => {
+      if (open) (last ? items().at(-1) : items()[0])?.focus();
+    });
   }
 
   function dismiss(restore: boolean) {
@@ -74,6 +80,11 @@
   });
 
   function onkeydown(event: KeyboardEvent) {
+    if (menu && !open && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+      event.preventDefault();
+      show(event.key === "ArrowUp");
+      return;
+    }
     if (event.key === "Escape" && open) {
       event.stopPropagation();
       dismiss(true);
@@ -144,11 +155,13 @@
     role={menu ? "menu" : "group"}
     onclick={(event) => {
       // Choosing from a menu closes it. Owning that here keeps every caller
-      // from having to remember, and from needing a handle on this state.
+      // from having to remember, and from needing a handle on this state. A
+      // panel's own control that leaves it (opening a page or a dialog) says
+      // so with data-dismiss.
+      const target = event.target as Element | null;
       if (
-        menu &&
-        !(event.target as Element | null)?.closest("[data-keep-open]") &&
-        (event.target as Element | null)?.closest('[role="menuitem"]')
+        target?.closest("[data-dismiss]") ||
+        (menu && !target?.closest("[data-keep-open]") && target?.closest('[role="menuitem"]'))
       )
         dismiss(true);
     }}

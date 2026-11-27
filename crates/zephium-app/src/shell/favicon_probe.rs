@@ -1,12 +1,14 @@
-//! Icons for origins no tab has shown, such as the sources of a Work run.
-//! Held and stored rasters are delivered at once; the rest go, a few at a
-//! time, to the anonymous origin prober the desktop attaches. An origin that
-//! gave nothing is not asked again for an hour.
+//! Icons for origins no tab has shown, such as the sources of a Work run, and
+//! the icon addresses a tab's page declared. Held and stored rasters are
+//! delivered at once; the rest go, a few at a time, to the anonymous prober
+//! the desktop attaches. An origin that gave nothing is not asked again for an
+//! hour.
 
 use super::*;
 
 use crate::store_reads::FAVICON_CACHE_MAX_AGE_SECONDS;
-use favicons::TRACKED_ICON_ORIGIN_CAPACITY;
+use crate::{FaviconPageSource, FaviconProbe, FaviconProberAttachment};
+use favicons::{FailedIcons, IconTarget, TRACKED_ICON_ORIGIN_CAPACITY};
 use zephium_ipc::IconSurface;
 
 pub(super) const FAVICON_PROBE_CONCURRENCY: usize = 4;
@@ -16,17 +18,54 @@ const FAVICON_PROBE_PENDING_LOOKUPS: usize = 8;
 
 type ProbeKey = (ProfileId, String);
 
-#[derive(Default)]
+/// A tab's page icon waiting for, or held by, the prober.
+pub(super) struct PageJob {
+    pub(super) id: ItemId,
+    pub(super) target: IconTarget,
+    source: FaviconPageSource,
+}
+
 pub(super) struct FaviconProbeState {
-    prober: Option<crate::FaviconProber>,
+    prober: Option<FaviconProberAttachment>,
     queued: std::collections::VecDeque<ProbeKey>,
     in_flight: std::collections::HashSet<ProbeKey>,
-    failed: std::collections::HashMap<ProbeKey, std::time::Instant>,
+    /// In flight when a proxy stopped the prober; their replies are not failures.
+    cancelled: std::collections::HashSet<ProbeKey>,
+    failed: FailedIcons,
     lookups: std::collections::BTreeMap<u64, ProfileId>,
     lookup_generation: u64,
     /// Surfaces other than chrome that listed an origin before its icon was
     /// held. Chrome is always sent arriving icons; these are sent them once.
     wanted: std::collections::HashMap<ProbeKey, Vec<IconSurface>>,
+    /// Page icons by ticket, waiting or in flight; at most one per tab.
+    jobs: std::collections::HashMap<u64, PageJob>,
+    job_of: std::collections::HashMap<ItemId, u64>,
+    queued_jobs: std::collections::VecDeque<u64>,
+    in_flight_jobs: std::collections::HashSet<u64>,
+    next_ticket: u64,
+}
+
+impl Default for FaviconProbeState {
+    fn default() -> Self {
+        Self {
+            prober: None,
+            queued: Default::default(),
+            in_flight: Default::default(),
+            cancelled: Default::default(),
+            failed: FailedIcons::with_limits(
+                TRACKED_ICON_ORIGIN_CAPACITY,
+                FAVICON_PROBE_FAILURE_TTL,
+            ),
+            lookups: Default::default(),
+            lookup_generation: 0,
+            wanted: Default::default(),
+            jobs: Default::default(),
+            job_of: Default::default(),
+            queued_jobs: Default::default(),
+            in_flight_jobs: Default::default(),
+            next_ticket: 0,
+        }
+    }
 }
 
 /// The probe fetches over HTTPS only, so only an HTTPS origin can be asked.
@@ -87,9 +126,36 @@ impl Shell {
         }
     }
 
-    pub(super) fn attach_favicon_prober(&mut self, prober: crate::FaviconProber) {
+    pub(super) fn attach_favicon_prober(&mut self, prober: FaviconProberAttachment) {
         self.favicons.probe.prober.get_or_insert(prober);
         self.pump_favicon_probes();
+    }
+
+    pub(super) fn stop_network_favicon_probes(&mut self) {
+        let probe = &mut self.favicons.probe;
+        if let Some(prober) = &probe.prober {
+            (prober.cancel_network)();
+        }
+        probe.cancelled.extend(probe.in_flight.iter().cloned());
+        for key in probe.queued.drain(..) {
+            probe.wanted.remove(&key);
+        }
+        let mut cancelled = Vec::new();
+        probe.queued_jobs.retain(|ticket| {
+            if probe
+                .jobs
+                .get(ticket)
+                .is_some_and(|job| matches!(job.source, FaviconPageSource::Addresses(_)))
+            {
+                cancelled.push(*ticket);
+                false
+            } else {
+                true
+            }
+        });
+        for ticket in cancelled {
+            self.favicon_fetched(ticket, None, None, Vec::new());
+        }
     }
 
     pub(super) fn probe_favicons(&mut self, profile: ProfileId, origins: Vec<String>) {
@@ -119,10 +185,7 @@ impl Shell {
             let probe = &self.favicons.probe;
             if probe.in_flight.contains(&key)
                 || probe.queued.contains(&key)
-                || probe
-                    .failed
-                    .get(&key)
-                    .is_some_and(|at| now.duration_since(*at) < FAVICON_PROBE_FAILURE_TTL)
+                || probe.failed.contains(&key, now)
             {
                 continue;
             }
@@ -217,6 +280,12 @@ impl Shell {
 
     fn queue_favicon_probes(&mut self, profile: ProfileId, origins: Vec<String>) {
         let probe = &mut self.favicons.probe;
+        if self.proxy.server().is_some() {
+            for origin in origins {
+                probe.wanted.remove(&(profile, origin));
+            }
+            return;
+        }
         for origin in origins {
             let key = (profile, origin);
             if probe.queued.len() >= MAX_FAVICON_BATCH_ORIGINS
@@ -235,12 +304,84 @@ impl Shell {
         let Some(prober) = probe.prober.clone() else {
             return;
         };
-        while probe.in_flight.len() < FAVICON_PROBE_CONCURRENCY {
+        while probe.in_flight.len() + probe.in_flight_jobs.len() < FAVICON_PROBE_CONCURRENCY {
+            // A tab waiting on its page's icon goes before a list's.
+            if let Some(ticket) = probe.queued_jobs.pop_front() {
+                let Some(job) = probe.jobs.get(&ticket) else {
+                    continue;
+                };
+                probe.in_flight_jobs.insert(ticket);
+                (prober.probe)(FaviconProbe::Page {
+                    ticket,
+                    profile: job.target.profile,
+                    origin: job.target.origin.clone(),
+                    source: job.source.clone(),
+                });
+                continue;
+            }
             let Some(key) = probe.queued.pop_front() else {
                 break;
             };
             probe.in_flight.insert(key.clone());
-            prober(key.0, key.1);
+            (prober.probe)(FaviconProbe::Origin {
+                profile: key.0,
+                origin: key.1,
+            });
+        }
+    }
+
+    /// Whether page icons can be fetched at all.
+    pub(super) fn page_prober_attached(&self) -> bool {
+        self.favicons.probe.prober.is_some()
+    }
+
+    /// Queues the prober's work for one tab's page, replacing any earlier job
+    /// of that tab, and returns its ticket.
+    pub(super) fn queue_page_job(
+        &mut self,
+        id: ItemId,
+        target: IconTarget,
+        source: FaviconPageSource,
+    ) -> u64 {
+        self.drop_page_job(id);
+        let probe = &mut self.favicons.probe;
+        probe.next_ticket = probe.next_ticket.wrapping_add(1).max(1);
+        let ticket = probe.next_ticket;
+        probe.jobs.insert(ticket, PageJob { id, target, source });
+        probe.job_of.insert(id, ticket);
+        probe.queued_jobs.push_back(ticket);
+        self.pump_favicon_probes();
+        ticket
+    }
+
+    /// Forgets a tab's job. One already with the prober still answers, and
+    /// that answer is dropped.
+    pub(super) fn drop_page_job(&mut self, id: ItemId) {
+        let probe = &mut self.favicons.probe;
+        if let Some(ticket) = probe.job_of.remove(&id) {
+            probe.jobs.remove(&ticket);
+            probe.queued_jobs.retain(|queued| *queued != ticket);
+        }
+    }
+
+    pub(super) fn favicon_fetched(
+        &mut self,
+        ticket: u64,
+        rgba: Option<Vec<u8>>,
+        source: Option<String>,
+        failed: Vec<String>,
+    ) {
+        let probe = &mut self.favicons.probe;
+        probe.in_flight_jobs.remove(&ticket);
+        let job = probe.jobs.remove(&ticket);
+        if let Some(job) = &job {
+            if probe.job_of.get(&job.id) == Some(&ticket) {
+                probe.job_of.remove(&job.id);
+            }
+        }
+        self.pump_favicon_probes();
+        if let Some(job) = job {
+            self.on_page_icon_fetched(job.id, job.target, rgba, source, failed);
         }
     }
 
@@ -254,6 +395,7 @@ impl Shell {
         if !self.favicons.probe.in_flight.remove(&key) {
             return;
         }
+        let cancelled = self.favicons.probe.cancelled.remove(&key);
         let admitted = self.profiles.get(profile).is_some()
             && rgba
                 .as_deref()
@@ -263,25 +405,18 @@ impl Shell {
             self.publish_icons();
         } else {
             self.favicons.probe.wanted.remove(&key);
-            self.remember_failed_probe(key);
+            if !cancelled && self.proxy.server().is_none() {
+                self.remember_failed_probe(key);
+            }
         }
         self.pump_favicon_probes();
     }
 
     fn remember_failed_probe(&mut self, key: ProbeKey) {
-        let now = std::time::Instant::now();
-        let failed = &mut self.favicons.probe.failed;
-        failed.retain(|_, at| now.duration_since(*at) < FAVICON_PROBE_FAILURE_TTL);
-        if failed.len() >= TRACKED_ICON_ORIGIN_CAPACITY {
-            if let Some(oldest) = failed
-                .iter()
-                .min_by_key(|(_, at)| **at)
-                .map(|(key, _)| key.clone())
-            {
-                failed.remove(&oldest);
-            }
-        }
-        failed.insert(key, now);
+        self.favicons
+            .probe
+            .failed
+            .insert(key, std::time::Instant::now());
     }
 
     pub(super) fn clear_pending_favicon_probe_lookups(&mut self) {

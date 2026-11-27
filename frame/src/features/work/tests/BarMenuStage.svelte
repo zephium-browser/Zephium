@@ -2,6 +2,7 @@
   import { Popover } from "bits-ui";
   import WorkBar from "../components/bar/WorkBar.svelte";
 
+  let { restoreFocus = true }: { restoreFocus?: boolean } = $props();
   let value = $state("");
   let open = $state(false);
 </script>
@@ -12,7 +13,11 @@
       <Popover.Root bind:open>
         <Popover.Trigger class="model-trigger">Model</Popover.Trigger>
         <Popover.Portal>
-          <Popover.Content>
+          <Popover.Content
+            onCloseAutoFocus={(event) => {
+              if (!restoreFocus) event.preventDefault();
+            }}
+          >
             <button type="button" onclick={() => (open = false)}>Opus</button>
           </Popover.Content>
         </Popover.Portal>

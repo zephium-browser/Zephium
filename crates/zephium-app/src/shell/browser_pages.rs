@@ -25,6 +25,11 @@ fn restored_tab_matches_snapshot(old: &TabView, tab: &TabState) -> bool {
                 zephium_core::item::BrowserOwnedTab::Extensions
             )
         ) | (
+            zephium_ipc::TabContentView::Source,
+            zephium_core::item::TabContent::BrowserOwned(
+                zephium_core::item::BrowserOwnedTab::Source
+            )
+        ) | (
             zephium_ipc::TabContentView::ExtensionOwned,
             zephium_core::item::TabContent::ExtensionOwned
         )
@@ -52,6 +57,9 @@ impl Shell {
                         zephium_core::item::TabContent::BrowserOwned(
                             zephium_core::item::BrowserOwnedTab::Extensions,
                         ) => Some(crate::BrowserPage::Extensions),
+                        zephium_core::item::TabContent::BrowserOwned(
+                            zephium_core::item::BrowserOwnedTab::Source,
+                        ) => Some(crate::BrowserPage::Source),
                         zephium_core::item::TabContent::Web
                         | zephium_core::item::TabContent::ExtensionOwned => None,
                     })
@@ -171,6 +179,13 @@ impl Shell {
         if let Some(crate::BrowserPage::Extensions) = page {
             return self.open_extensions_tab();
         }
+        // A source tab brings its own page; nothing opens it by name.
+        if page == Some(crate::BrowserPage::Source) {
+            return operation_result(
+                OperationOutcome::Rejected,
+                OperationReason::UnsupportedCommand,
+            );
+        }
         let Some(window) = self.windows.focused().map(|window| window.id) else {
             return operation_result(OperationOutcome::Rejected, OperationReason::NoFocusedWindow);
         };
@@ -231,6 +246,7 @@ impl Shell {
         self.browser_after_return = None;
         let previous = self.browser_page;
         self.browser_page = page.map(|page| (window, page));
+        self.cancel_page_permission_if_not_foreground();
         self.drop_divider();
         if page != Some(crate::BrowserPage::Work) {
             self.retire_work_pane();

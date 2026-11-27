@@ -174,6 +174,13 @@ fn block_note(block: &Block) -> Option<String> {
                 .collect();
             format!("[opened tabs: {}]", opened.join(", "))
         }
+        Block::Search {
+            destination,
+            query,
+            state,
+        } => {
+            format!("[search on {destination}: {query} ({state:?})]")
+        }
         Block::Steps { steps } => {
             let rows: Vec<String> = steps
                 .iter()

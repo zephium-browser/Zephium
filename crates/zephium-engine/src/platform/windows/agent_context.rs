@@ -128,6 +128,7 @@ pub(crate) struct AgentOwnedViewCallbacks<
     invariant: Invariant,
     panic: Panic,
     redirect: Option<Rc<dyn Fn(zephium_agentic::ContextNavigationTarget)>>,
+    unreachable: Option<Rc<dyn Fn()>>,
     credential_denied: Option<Rc<dyn Fn()>>,
 }
 
@@ -150,6 +151,7 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
             invariant,
             panic,
             redirect: None,
+            unreachable: None,
             credential_denied: None,
         }
     }
@@ -165,6 +167,12 @@ impl<Navigation, Location, RendererLost, BrowserLost, Invariant, Panic>
         redirect: impl Fn(zephium_agentic::ContextNavigationTarget) + 'static,
     ) -> Self {
         self.redirect = Some(Rc::new(redirect));
+        self
+    }
+    /// Told, before the document fails, that its main-frame load could not
+    /// reach the site (no connection, unknown host, refused or insecure).
+    pub(crate) fn with_unreachable(mut self, callback: impl Fn() + 'static) -> Self {
+        self.unreachable = Some(Rc::new(callback));
         self
     }
 }
@@ -1708,12 +1716,14 @@ where
         invariant: on_invariant_failure,
         panic: on_callback_panic,
         redirect: on_redirect,
+        unreachable: on_unreachable,
         credential_denied: on_credential_denied,
     } = callbacks;
     let navigation = AgentNavigationController::default();
     let navigation_policy = navigation.clone();
     let work_policy = work_navigation.clone();
     let work_events = work_navigation.clone();
+    let work_failures = work_navigation.clone();
     let work_location = work_navigation.clone();
     let navigation_events = navigation.clone();
     let renderer_events = navigation.clone();
@@ -1749,6 +1759,7 @@ where
     let renderer_panic = panic_callback.clone();
     let browser_panic = panic_callback.clone();
     let semantic_panic = panic_callback.clone();
+    let unreachable_panic = panic_callback.clone();
     let semantic_navigation = semantic_plan.clone();
     let semantic_policy = semantic_plan.clone();
     let semantic_renderer = semantic_plan.clone();
@@ -1765,6 +1776,18 @@ where
         })
         .with_visible(false)
         .with_focused(false)
+        .with_navigation_failure_handler(move |id, failure, _| {
+            // Only the construction load's own failure: a load it replaced or
+            // one after the document was ready leaves the slot unchanged.
+            let construction = work_failures
+                .as_ref()
+                .is_some_and(|gate| gate.construction_failure(id));
+            if let Some(unreachable) = on_unreachable.as_ref().filter(|_| {
+                construction && crate::platform::work_document_navigation::unreachable(&failure)
+            }) {
+                invoke_unit_callback(unreachable.as_ref(), unreachable_panic.as_ref());
+            }
+        })
         .with_devtools(false)
         .with_autoplay(false)
         .with_hotkeys_zoom(false)
@@ -1864,7 +1887,7 @@ where
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_download_policy(DownloadPolicy::DenyWithoutMetadata)
         .with_page_close_policy(PageClosePolicy::Ignore)
-        .with_additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI")
+        .with_additional_browser_args(crate::network::browser_arguments())
         .with_browser_accelerator_keys(false)
         .with_default_context_menus(false)
         .with_environment(environment.clone());
@@ -1882,6 +1905,9 @@ where
     if let AgentOwnedProfile::Automation { name } = &profile {
         builder = builder.with_profile_name(name.clone());
     }
+
+    builder =
+        builder.with_controller_initialization_hook(|_, core| crate::reputation::configure(core));
 
     if extensions_enabled {
         if !matches!(&profile, AgentOwnedProfile::Automation { .. }) {

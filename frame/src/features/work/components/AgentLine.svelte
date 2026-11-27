@@ -36,7 +36,7 @@
     onfocusagent,
     onwaitingpage,
     onreview,
-    onsteered,
+    prepareDraft,
     human = null,
     onopenstep,
     working = [],
@@ -78,8 +78,8 @@
     onwaitingpage?: (card: string) => void;
     /** Opens the change the run is proposing, so the person can read it whole. */
     onreview?: (step: string) => void;
-    /** The draft was handed to the agent or queued; clear the composer. */
-    onsteered?: () => void;
+    /** Persist the exact words before handing them to the agent. */
+    prepareDraft?: () => Promise<{ text: string; clear: () => Promise<boolean> } | null>;
     /** The work's held pages, for the asks a sign-in wall puts. */
     human?: WorkHumanSession | null;
     /** Opens the page an ask is about, in the centre. */
@@ -314,6 +314,7 @@
     missing_key: m.work_fault_missing_key,
     key_refused: m.work_fault_key_refused,
     provider_credit: m.work_fault_provider_credit,
+    plan_limit: m.work_fault_plan_limit,
   };
   const faultFix = $derived.by(() => {
     switch (fault) {
@@ -333,6 +334,7 @@
       case "missing_key":
       case "key_refused":
       case "provider_credit":
+      case "plan_limit":
         return { label: m.work_model_manage(), command: "settings.ai" };
       default:
         return null;
@@ -514,10 +516,12 @@
     }
   }
   async function steer() {
-    const text = draft.trim();
-    if (!text) return;
-    if (!(await session.steer(text))) session.enqueue(text);
-    onsteered?.();
+    if (!prepareDraft) return;
+    const submitted = await prepareDraft();
+    const text = submitted?.text.trim();
+    if (!submitted || !text) return;
+    if (!(await session.steer(text))) return;
+    await submitted.clear();
   }
   async function stop() {
     if (!execution || blocked) return;

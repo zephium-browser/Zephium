@@ -7,9 +7,7 @@ use zephium_core::ports::engine::EngineEvent;
 
 use super::permits::EventPermit;
 use super::EngineHost;
-use crate::fullscreen::FullscreenEffect;
-#[cfg(target_os = "macos")]
-use crate::fullscreen::NativeFullscreen;
+use crate::fullscreen::{FullscreenEffect, NativeFullscreen};
 
 /// How long a closed tab may wait for WebKit to bring its page home from the
 /// fullscreen window before it is torn down regardless.
@@ -38,7 +36,7 @@ impl EngineHost {
         let state = crate::platform::imp::fullscreen_state(&view.view);
         #[cfg(target_os = "macos")]
         if state == NativeFullscreen::Inactive {
-            crate::platform::imp::set_background_suspension(&view.view, self.dormant.contains(&id));
+            self.apply_background_suspension();
             for stage in self.stages.values() {
                 if stage.has_view(id) {
                     let _ = stage.adopt_after_fullscreen(id);
@@ -49,6 +47,9 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         self.sync_stage_fullscreen();
         self.apply_fullscreen_effects(effects);
+        if state == NativeFullscreen::Inactive {
+            self.automatic_pip_after_fullscreen(id);
+        }
     }
 
     pub(crate) fn exit_fullscreen(&mut self, id: ItemId) {

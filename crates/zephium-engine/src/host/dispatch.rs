@@ -253,8 +253,22 @@ enum HostTaskKey {
     // deadline (or the reverse) would leave the attempt's guard unsettled.
     #[cfg(target_os = "windows")]
     SuspendDeadline(ItemId),
+    // A suspend retry's timer: kept in the lifecycle band, so a full queue
+    // of ordinary work cannot drop it and leave a hidden page awake.
+    #[cfg(target_os = "windows")]
+    SuspendRetry(ItemId),
+    // Closing a page opened only to reach a profile, once its call answered:
+    // a full queue of ordinary work must not leave it running.
+    #[cfg(any(test, target_os = "windows"))]
+    TemporarySpare(ProfileId),
     #[cfg(target_os = "windows")]
     Extension(zephium_core::extensions::ExtensionRuntimeInstance, bool),
+    #[cfg(target_os = "macos")]
+    Scriptlets(ProfileId),
+    // A closed page's answer deadline: a full queue of ordinary work must not
+    // drop it and leave a hung process running.
+    #[cfg(target_os = "macos")]
+    ClosingDeadline(u64),
 }
 
 struct QueuedHostTask {
@@ -330,7 +344,7 @@ pub(crate) fn install(
     >,
     sink: crate::EngineEventIngressSink,
     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
-) -> Result<(), String> {
+) -> Result<Option<zephium_core::runtime_security::RuntimeSecurityAdvisory>, String> {
     let _install_claim = HostInstallClaim::acquire()?;
     let user_content = super::scripts::UserContentRegistry::with_initial_global(
         initial_user_content_generation,
@@ -346,12 +360,32 @@ pub(crate) fn install(
     #[cfg(not(target_os = "windows"))]
     let content_rule_cache = crate::erasure::canonical_owned_root(&data_root.join("content-rules"))
         .map_err(|error| format!("cannot secure content-rule cache: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let scriptlet_root = crate::erasure::canonical_owned_root(&data_root.join("scriptlets"))
+        .map_err(|error| format!("cannot secure scriptlet packages: {error}"))?;
+    #[cfg(target_os = "macos")]
+    let private_scriptlet_root =
+        crate::erasure::canonical_owned_root(&data_root.join("private-scriptlets"))
+            .map_err(|error| format!("cannot secure private scriptlet packages: {error}"))?;
     #[cfg(target_os = "windows")]
     let private_runtime = zephium_core::webview2::RuntimeGeneration::prepare(
         &data_root.join("private-runtime"),
         zephium_core::webview2::RuntimeGenerationKind::RawPrivate,
+        &crate::platform::imp::WindowsLeftoverProcesses,
     )
     .map_err(|error| format!("cannot create private WebView2 generation: {error}"))?;
+    #[cfg(target_os = "windows")]
+    for line in crate::platform::imp::generation_report_lines("private", private_runtime.report()) {
+        eprintln!("{line}");
+    }
+    #[cfg(target_os = "windows")]
+    let cleanup_advisory = private_runtime
+        .report()
+        .overdue
+        .is_some()
+        .then(zephium_core::runtime_security::RuntimeSecurityAdvisory::cleanup_overdue);
+    #[cfg(not(target_os = "windows"))]
+    let cleanup_advisory = None;
     HOST_SEALED.with(|sealed| sealed.set(false));
     PENDING.with(|pending| {
         pending
@@ -425,9 +459,17 @@ pub(crate) fn install(
             content_rule_preflight: None,
             #[cfg(not(target_os = "windows"))]
             preflight_cache_digests: Default::default(),
+            #[cfg(not(target_os = "windows"))]
+            retained_cache_digests: Vec::new(),
             blocker_statistics: HashMap::new(),
             focus_gate: Default::default(),
             blocker_sites: HashMap::new(),
+            blocker_navigation: HashMap::new(),
+            popup_sites: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            native_tab_download_ask: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            certificate_exceptions: HashMap::new(),
             page_styles: HashMap::new(),
             picker: None,
             next_picker: 0,
@@ -467,8 +509,12 @@ pub(crate) fn install(
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
             #[cfg(target_os = "macos")]
+            closing: Default::default(),
+            #[cfg(target_os = "macos")]
             next_fullscreen_retirement: 0,
             stages: HashMap::new(),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            window_parents: HashMap::new(),
             native_terminal_failure,
             #[cfg(not(target_os = "windows"))]
             shutdown_completion: None,
@@ -482,6 +528,10 @@ pub(crate) fn install(
             work_site_loads: HashMap::new(),
             #[cfg(target_os = "macos")]
             webext: Default::default(),
+            #[cfg(target_os = "macos")]
+            scriptlets: super::scriptlets::Scriptlets::new(scriptlet_root, private_scriptlet_root),
+            #[cfg(target_os = "windows")]
+            scriptlets: Default::default(),
             #[cfg(target_os = "windows")]
             windows_extensions: Default::default(),
             #[cfg(target_os = "windows")]
@@ -491,9 +541,17 @@ pub(crate) fn install(
             #[cfg(target_os = "windows")]
             desired_dormant: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
+            dormant_request: 0,
+            #[cfg(target_os = "windows")]
+            dormant_cycles: std::collections::HashMap::new(),
+            #[cfg(target_os = "windows")]
+            temporary_page: None,
+            #[cfg(target_os = "windows")]
             suspending: std::collections::HashSet::new(),
             #[cfg(target_os = "windows")]
             suspend_failed: std::collections::HashSet::new(),
+            #[cfg(target_os = "windows")]
+            suspend_retries: HashMap::new(),
             #[cfg(target_os = "windows")]
             suspend_uncertain: std::collections::HashSet::new(),
             #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -540,8 +598,9 @@ pub(crate) fn install(
             erasure_attempts: HashMap::new(),
             sink: Sink::new(sink),
         });
-        Ok(())
-    })
+        Ok::<(), String>(())
+    })?;
+    Ok(cleanup_advisory)
 }
 
 // WebView2 construction pumps the Windows message loop. A nested main-thread
@@ -572,6 +631,7 @@ pub(super) fn try_open_native_tab(
     activity: crate::navigation_epoch::NavigationActivity,
     url: &str,
     features: wry::NewWindowFeatures,
+    clicked: bool,
 ) -> wry::NewWindowResponse {
     if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
         return wry::NewWindowResponse::Deny;
@@ -583,7 +643,22 @@ pub(super) fn try_open_native_tab(
         let Some(host) = slot.as_mut() else {
             return wry::NewWindowResponse::Deny;
         };
-        host.open_native_tab(source, permit, activity, url, features)
+        host.open_native_tab(source, permit, activity, url, features, clicked)
+    })
+}
+
+/// Synchronous: a key monitor must answer whether it consumed the event.
+#[cfg(target_os = "macos")]
+pub(crate) fn try_perform_extension_command(event: &objc2_app_kit::NSEvent) -> bool {
+    if HOST_SEALED.with(Cell::get) || HOST_INSTALLING.with(Cell::get) {
+        return false;
+    }
+    HOST.with(|slot| {
+        let Ok(slot) = slot.try_borrow() else {
+            return false;
+        };
+        slot.as_ref()
+            .is_some_and(|host| host.webext.perform_command(event))
     })
 }
 
@@ -919,6 +994,16 @@ fn drain_page_permission_terminals_with_host(host: &mut EngineHost) -> bool {
     false
 }
 
+/// Admits the release of a window that is going away in the close band, so
+/// a busy reentrant queue never drops it the way it can drop ordinary work.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn try_with_window_release<F>(f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(HostTaskPriority::Close, None, f)
+}
+
 pub(crate) fn try_with_close<F>(id: ItemId, f: F) -> bool
 where
     F: FnOnce(&mut EngineHost) + 'static,
@@ -1141,6 +1226,28 @@ pub(super) fn with_extension_lifecycle<F>(
     );
 }
 
+/// The profile's scriptlet context is in place, or its wait timed out.
+#[cfg(target_os = "macos")]
+pub(super) fn with_scriptlets_ready<F>(profile: ProfileId, f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::Scriptlets(profile)),
+        f,
+    );
+}
+
+/// A view took, or failed to take, a replaced scriptlet program.
+#[cfg(target_os = "windows")]
+pub(super) fn with_scriptlets<F>(f: F)
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    let _ = with_priority(HostTaskPriority::Lifecycle, None, f);
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn with_profile_exit<F>(
     profile: ProfileId,
@@ -1164,6 +1271,59 @@ where
     with_priority(
         HostTaskPriority::Lifecycle,
         Some(HostTaskKey::Suspend(id)),
+        f,
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+pub(super) fn with_temporary_spare_release<F>(
+    profile: ProfileId,
+    f: F,
+    defer: impl FnOnce(Box<dyn FnOnce()>) -> bool,
+) where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    if HOST_SEALED.with(Cell::get) {
+        return;
+    }
+    // Even a free host may be inside WebView2's completion Invoke. The
+    // ordinary pending queue drains at the end of host callbacks, which is
+    // also too early; enter it only from the later native loop turn.
+    if !defer(Box::new(move || {
+        if !with_priority(
+            HostTaskPriority::Lifecycle,
+            Some(HostTaskKey::TemporarySpare(profile)),
+            f,
+        ) && !HOST_SEALED.with(Cell::get)
+        {
+            eprintln!("engine: temporary page release could not reach the engine host");
+        }
+    })) {
+        // Never close inline. Leave the spare for a later release, reuse, or shutdown.
+        eprintln!("engine: temporary page release could not be deferred");
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn with_closing_deadline<F>(token: u64, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::ClosingDeadline(token)),
+        f,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn with_suspend_retry<F>(id: ItemId, f: F) -> bool
+where
+    F: FnOnce(&mut EngineHost) + 'static,
+{
+    with_priority(
+        HostTaskPriority::Lifecycle,
+        Some(HostTaskKey::SuspendRetry(id)),
         f,
     )
 }
@@ -1581,10 +1741,9 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                             "windows-work-shutdown: stage=process_wait_start obligations={} provenance_valid={process_provenance_valid}; content=redacted",
                             browser_processes.len());
                     }
-                    let process_exit_proven = process_provenance_valid
-                        && crate::platform::imp::wait_for_browser_process_shutdown(
+                    let (process_exit_proven, process_exit_clean) = crate::platform::imp::wait_for_browser_process_shutdown(
                             browser_processes,
-                            std::time::Duration::from_secs(5),
+                            std::time::Duration::from_secs(20),
                         );
                     #[cfg(all(debug_assertions, feature = "native-agentic-work-lifetime-diagnostic"))]
                     {
@@ -1592,7 +1751,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=process_wait_complete proven={process_exit_proven}; content=redacted");
                     }
-                    if !process_exit_proven {
+                    if !process_provenance_valid || !process_exit_proven {
                         eprintln!(
                             "privacy: WebView2 full process-group shutdown could not be proven"
                         );
@@ -1616,7 +1775,7 @@ pub(crate) fn shutdown(done: Box<dyn FnOnce(bool) + Send>) {
                         let _ = writeln!(std::io::stderr().lock(),
                             "windows-work-shutdown: stage=private_cleanup_complete clean={cleaned}; content=redacted");
                     }
-                    finish(cleaned);
+                    finish(cleaned && process_exit_clean);
                 });
             if let Err(error) = spawned {
                 eprintln!("shutdown: could not start WebView2 cleanup worker: {error}");
@@ -1676,6 +1835,42 @@ mod tests {
             key: Some(key),
             task: Box::new(|_: &mut EngineHost| {}),
         }
+    }
+
+    #[test]
+    fn failed_windows_browser_exit_cleans_up_without_authorizing_clean_shutdown() {
+        let native = include_str!("../platform/windows/mod.rs");
+        let record = native
+            .split("fn record(&self, event: BrowserProcessExitEvent)")
+            .nth(1)
+            .unwrap()
+            .split("fn wait_until")
+            .next()
+            .unwrap();
+        assert!(record.contains(
+            "data.failed = matches!(event, BrowserProcessExitEvent::Exited { failed: true, .. })"
+        ));
+        let clean = native
+            .split("fn exited_cleanly(&self)")
+            .nth(1)
+            .unwrap()
+            .split("fn run_after_exit")
+            .next()
+            .unwrap();
+        assert!(clean.contains("!data.failed"));
+        let shutdown = include_str!("dispatch.rs")
+            .split("let (process_exit_proven, process_exit_clean)")
+            .nth(1)
+            .unwrap()
+            .split("if let Err(error) = spawned")
+            .next()
+            .unwrap();
+        assert!(
+            shutdown.find("cleanup_after_proven_exit()").unwrap()
+                < shutdown
+                    .find("finish(cleaned && process_exit_clean)")
+                    .unwrap()
+        );
     }
 
     #[test]
@@ -1748,6 +1943,149 @@ mod tests {
             .expect("install clears pending work after claiming");
         assert!(claim < seal_reset);
         assert!(claim < pending_reset);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn install_empty_host_for_release_test() -> tempfile::TempDir {
+        make_unavailable_for_test();
+        let root = tempfile::tempdir().unwrap();
+        // No native views are constructed: the unused parent is just a token.
+        #[cfg(target_os = "macos")]
+        let parent = RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(
+            std::ptr::NonNull::<u8>::dangling().cast(),
+        ));
+        #[cfg(target_os = "windows")]
+        let parent = RawWindowHandle::Win32(raw_window_handle::Win32WindowHandle::new(
+            std::num::NonZeroIsize::new(1).unwrap(),
+        ));
+        let dispatch: crate::MainThreadDispatch = Arc::new(|_| panic!("no native dispatch"));
+        let failure: Arc<dyn Fn(&'static str) + Send + Sync> =
+            Arc::new(|reason| panic!("unexpected terminal failure: {reason}"));
+        install(
+            parent,
+            root.path().to_owned(),
+            dispatch.clone(),
+            UserContentGeneration::new(1).unwrap(),
+            UserContent::default(),
+            Arc::new(crate::NativeOpenAuthority {
+                retirement: Arc::default(),
+                dispatch,
+                fatal: failure.clone(),
+            }),
+            Arc::new(|_| {}),
+            failure,
+        )
+        .unwrap();
+        root
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_waits_for_loop_turn_with_a_free_host() {
+        let _root = install_empty_host_for_release_test();
+        let turns = RefCell::new(VecDeque::new());
+        let releases = std::rc::Rc::new(Cell::new(0));
+        let released = releases.clone();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            move |_| released.set(released.get() + 1),
+            |task| {
+                turns.borrow_mut().push_back(task);
+                true
+            },
+        );
+        assert_eq!(releases.get(), 0, "Close must not run inside completion");
+        assert_eq!(turns.borrow().len(), 1);
+        // Another native callback must not drain the release prematurely.
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 0);
+
+        turns.borrow_mut().pop_front().unwrap()();
+        assert_eq!(
+            releases.get(),
+            1,
+            "the next turn releases without more host work"
+        );
+        let released = releases.clone();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            move |_| released.set(released.get() + 1),
+            |task| {
+                turns.borrow_mut().push_back(task);
+                true
+            },
+        );
+        let turn = turns.borrow_mut().pop_front().unwrap();
+        HOST.with(|host| {
+            // A nested native pump may deliver the wake while the host is
+            // borrowed. It must retain the existing lifecycle queue behavior.
+            let _borrow = host.borrow_mut();
+            turn();
+            assert_eq!(releases.get(), 1);
+        });
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 2);
+        assert!(try_with(|_| {}));
+        assert_eq!(releases.get(), 2, "each release must run exactly once");
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        assert!(turns.borrow().is_empty());
+        make_unavailable_for_test();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_is_owned_by_shutdown_if_it_wins_the_loop_turn() {
+        let _root = install_empty_host_for_release_test();
+        let turn = Cell::new(None);
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("shutdown already owns the spare"),
+            |task| {
+                turn.set(Some(task));
+                true
+            },
+        );
+        assert!(with_priority(HostTaskPriority::Shutdown, None, |_| {}));
+        HOST.with(|host| *host.borrow_mut() = None);
+        turn.take().unwrap()();
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("a sealed host must not release again"),
+            |_| panic!("a sealed host needs no release wake"),
+        );
+        make_unavailable_for_test();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn temporary_spare_release_leaves_page_when_deferral_is_refused() {
+        let _root = install_empty_host_for_release_test();
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("failed deferral must never fall back to inline Close"),
+            |_| false,
+        );
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        make_unavailable_for_test();
+    }
+
+    #[test]
+    fn temporary_spare_release_leaves_page_when_host_is_unavailable() {
+        make_unavailable_for_test();
+        let turn = Cell::new(None);
+        with_temporary_spare_release(
+            ProfileId::generate(),
+            |_| panic!("failed host admission must never release the page"),
+            |task| {
+                turn.set(Some(task));
+                true
+            },
+        );
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        turn.take().unwrap()();
+        assert!(PENDING.with(|pending| pending.borrow().is_empty()));
+        make_unavailable_for_test();
     }
 
     #[test]
@@ -1934,6 +2272,51 @@ mod tests {
                 .count(),
             AGENT_CONTEXT_TERMINAL_PENDING_HOST_TASK_CAPACITY
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn closed_page_deadlines_are_admitted_where_ordinary_work_is_refused() {
+        let mut pending = VecDeque::new();
+        for _ in 0..NORMAL_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::Normal)
+            ));
+        }
+        assert!(!enqueue_pending(
+            &mut pending,
+            queued(HostTaskPriority::Normal)
+        ));
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, HostTaskKey::ClosingDeadline(1))
+        ));
+
+        // At the band's ceiling each deadline displaces lower work, and two
+        // closed pages never coalesce into one deadline.
+        for _ in pending.len()..NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY {
+            assert!(enqueue_pending(
+                &mut pending,
+                queued(HostTaskPriority::Observation)
+            ));
+        }
+        assert!(enqueue_pending(
+            &mut pending,
+            keyed(HostTaskPriority::Lifecycle, HostTaskKey::ClosingDeadline(2))
+        ));
+        assert_eq!(
+            pending.len(),
+            NON_NAVIGATION_COMMIT_PENDING_HOST_TASK_CAPACITY
+        );
+        let deadlines = pending
+            .iter()
+            .filter_map(|task| match task.key {
+                Some(HostTaskKey::ClosingDeadline(token)) => Some(token),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deadlines, [1, 2]);
     }
 
     #[test]

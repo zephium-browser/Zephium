@@ -6,12 +6,20 @@
 //!
 //! A scenario is a JSON array of steps, run in order:
 //! - `{"load": "<dir or .crx>", "compat": true, "id": "<optional id>"}`
+//!   Use `"compat": false, "verify_background_start": true` for an already
+//!   prepared package that reports the worker startup signal.
 //! - `{"background": true}` starts the last loaded extension's background
-//! - `{"tab": "<url>"}` opens a tab and waits for it to load
+//! - `{"background_waiters": 8, "cancel": false}` checks concurrent startup
+//!   settlement, optionally unloading while readiness is pending
+//! - `{"tab": "<url>"}` opens a tab and waits for it to load; `{"blank": true}`
+//!   opens one with no page, as the browser's new tab
 //! - `{"page": "<path>"}` opens one of the extension's pages in a probe view
-//! - `{"eval": "<async function body>", "in": "page" | "tab", "timeout": 5000}`
+//! - `{"eval": "<async function body>", "in": "page" | "tab", "timeout": 5000,
+//!   "as": "<label>"}` prints `RESULT <label> <value>` when labelled
 //! - `{"keys": "<text>", "in": "tab" | "page"}` types real key presses
-//! - `{"sleep": <ms>}`
+//! - `{"sleep": <ms>}`; `{"mark": "<name>"}` prints `MARK <name>`
+//! - `{"close": "tabs" | "popup"}` closes every tab but the first, or the popup
+//! - `{"auth": "<url>"}` offers a sign-in challenge for `url` to extensions
 //! - `{"unload": true}` unloads the last loaded extension; `{"erase": true}`
 //!   unloads it and erases its stored data
 //!
@@ -37,6 +45,9 @@ use zephium_webext_macos::{
     compat, ExtensionSpec, Grants, Host, LogLevel, Runtime, TabRequest, TabRequestDone,
     TabSnapshot, WindowSnapshot,
 };
+
+#[path = "lab/data.rs"]
+mod data;
 
 const WINDOW: u64 = 1;
 
@@ -69,6 +80,7 @@ fn main() {
 
 struct LabHost {
     lab: RefCell<std::rc::Weak<Lab>>,
+    data: data::LabData,
 }
 
 impl Host for LabHost {
@@ -95,22 +107,26 @@ impl Host for LabHost {
 
     fn present_popup(&self, extension: &str, action: &objc2_web_kit::WKWebExtensionAction) -> bool {
         eprintln!("[lab] WebKit popup for {extension}");
-        let Some(view) = (unsafe { action.popupWebView() }) else {
+        let (Some(view), Some(popover)) = (unsafe { action.popupWebView() }, unsafe {
+            action.popupPopover()
+        }) else {
             return false;
         };
         let Some(lab) = self.lab.borrow().upgrade() else {
             return false;
         };
-        view.setFrame(NSRect::new(
-            NSPoint::new(900.0, 0.0),
-            NSSize::new(500.0, 800.0),
-        ));
-        if let Some(old) = lab.page.borrow_mut().replace(view.clone()) {
-            old.removeFromSuperview();
-        }
-        if let Some(content) = lab.window.contentView() {
-            content.addSubview(&view);
-        }
+        let Some(content) = lab.window.contentView() else {
+            return false;
+        };
+        // Sized by WebKit as the browser's popover is, so the popup's own
+        // layout is what gets measured.
+        popover.showRelativeToRect_ofView_preferredEdge(
+            NSRect::new(NSPoint::new(1300.0, 700.0), NSSize::new(20.0, 20.0)),
+            &content,
+            objc2_foundation::NSRectEdge::MinY,
+        );
+        *lab.popover.borrow_mut() = Some(popover);
+        lab.page.borrow_mut().replace(view);
         true
     }
 
@@ -150,6 +166,10 @@ impl Host for LabHost {
                     }
                     *id != tab
                 });
+                if lab.active.get() == tab {
+                    let first = lab.tabs.borrow().first().map_or(0, |(id, _)| *id);
+                    lab.active.set(first);
+                }
                 lab.publish();
                 done(Ok(None));
             }
@@ -162,10 +182,70 @@ impl Host for LabHost {
             _ => done(Err("not supported by the lab".into())),
         }
     }
+
+    fn browser_data(
+        &self,
+        _extension: &str,
+        call: zephium_core::extension_data::ExtensionDataCall,
+        done: Box<dyn FnOnce(zephium_core::extension_data::ExtensionDataReply)>,
+    ) {
+        let (reply, change) = self.data.answer(call);
+        let lab = self.lab.borrow().clone();
+        let heard = change.filter(|change| self.data.heard(change));
+        // The shell answers from another thread, later.
+        after(10, move || {
+            done(reply);
+            if let (Some(change), Some(lab)) = (heard, lab.upgrade()) {
+                println!("CHANGE {change:?}");
+                lab.runtime.data_changed(change);
+            }
+        });
+    }
+
+    fn downloads(
+        &self,
+        request: zephium_webext_macos::DownloadRequest,
+        done: Box<dyn FnOnce(Result<zephium_webext_macos::DownloadAnswer, String>)>,
+    ) {
+        let started = matches!(request, zephium_webext_macos::DownloadRequest::Start { .. });
+        let erased = match request {
+            zephium_webext_macos::DownloadRequest::Erase(id) => Some(id),
+            _ => None,
+        };
+        let (answer, changed) = self.data.download(request);
+        let lab = self.lab.borrow().clone();
+        after(10, move || {
+            done(answer);
+            let Some(lab) = lab.upgrade() else { return };
+            let report = |lab: &Lab, erased: Vec<u64>| {
+                if lab.runtime.hears_downloads() {
+                    let items = lab.host.data.downloads.borrow().clone();
+                    lab.runtime.downloads_changed(items, erased);
+                }
+            };
+            if changed {
+                report(&lab, erased.into_iter().collect());
+            }
+            // A started download finishes a moment later.
+            if started {
+                after(100, move || {
+                    if lab.host.data.finish_downloads() {
+                        report(&lab, Vec::new());
+                    }
+                });
+            }
+        });
+    }
+
+    fn data_interest(&self, interest: zephium_core::extension_data::ExtensionDataInterest) {
+        println!("INTEREST {interest:?}");
+        self.data.interest.set(interest);
+    }
 }
 
 struct Lab {
     mtm: MainThreadMarker,
+    host: Rc<LabHost>,
     window: Retained<NSWindow>,
     runtime: Runtime,
     steps: RefCell<VecDeque<Value>>,
@@ -173,6 +253,7 @@ struct Lab {
     active: Cell<u64>,
     next_tab: Cell<u64>,
     page: RefCell<Option<Retained<WKWebView>>>,
+    popover: RefCell<Option<Retained<objc2_app_kit::NSPopover>>>,
     extension: RefCell<Option<String>>,
     scratch: PathBuf,
 }
@@ -194,6 +275,7 @@ impl Lab {
 
         let host = Rc::new(LabHost {
             lab: RefCell::new(std::rc::Weak::new()),
+            data: Default::default(),
         });
         // WebKit's in-memory controller never delivers extension pages'
         // messages to the worker, so the lab uses a persistent profile: fresh
@@ -212,6 +294,7 @@ impl Lab {
         let _ = std::fs::create_dir_all(&scratch);
         let lab = Rc::new(Self {
             mtm,
+            host: host.clone(),
             window,
             runtime,
             steps: RefCell::new(VecDeque::new()),
@@ -219,6 +302,7 @@ impl Lab {
             active: Cell::new(0),
             next_tab: Cell::new(1),
             page: RefCell::new(None),
+            popover: RefCell::new(None),
             extension: RefCell::new(None),
             scratch,
         });
@@ -268,7 +352,19 @@ impl Lab {
                         id,
                         root,
                         grants,
+                        external_native_messaging: step
+                            .get("reviewed_native_app")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        native_messaging_grantable: step
+                            .get("grantable_native_app")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                         inspectable: true,
+                        verify_background_start: step
+                            .get("verify_background_start")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(compat),
                     };
                     this.runtime.load(spec, move |result| {
                         println!("LOADED {result:?}");
@@ -280,12 +376,76 @@ impl Lab {
                     std::process::exit(1);
                 }
             }
+        } else if step.get("native_open_admission").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            match this.runtime.verify_native_open_admission(&id) {
+                Ok(()) => {
+                    println!("NATIVE OPEN ADMISSION PASSED: matching reviewed context admitted; unreviewed, mismatched, unloaded and ungranted contexts refused");
+                    next();
+                }
+                Err(error) => {
+                    eprintln!("NATIVE OPEN ADMISSION FAILED: {error}");
+                    std::process::exit(1);
+                }
+            }
+        } else if step.get("offscreen_origin_admission").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            match this.runtime.verify_offscreen_origin(&id) {
+                Ok(()) => {
+                    println!("OFFSCREEN ORIGIN PASSED: relative and absolute own pages admitted; cross-scheme and cross-host refused");
+                    next();
+                }
+                Err(error) => {
+                    eprintln!("OFFSCREEN ORIGIN FAILED: {error}");
+                    std::process::exit(1);
+                }
+            }
         } else if step.get("background").is_some() {
             let id = this.extension.borrow().clone().unwrap_or_default();
             this.runtime.start_background(&id, move |result| {
                 println!("BACKGROUND {result:?}");
                 next();
             });
+        } else if let Some(url) = step.get("auth").and_then(Value::as_str) {
+            let host = url
+                .split("://")
+                .nth(1)
+                .and_then(|rest| rest.split('/').next());
+            let details = zephium_webext_macos::AuthDetails {
+                request_id: "lab-1".into(),
+                url: url.into(),
+                scheme: "basic".into(),
+                host: host.unwrap_or_default().into(),
+                port: 443,
+                proxy: false,
+                tab: Some(this.active.get()),
+            };
+            this.runtime.auth_required(details, move |answer| {
+                match answer {
+                    Some(zephium_webext_macos::AuthAnswer::Credentials { username, .. }) => {
+                        println!("AUTH credentials for {username}")
+                    }
+                    Some(zephium_webext_macos::AuthAnswer::Cancel) => println!("AUTH cancel"),
+                    None => println!("AUTH none"),
+                }
+                next();
+            });
+        } else if step.get("blank").is_some() {
+            // A tab with no page behind it, as the browser's new tab is.
+            let id = this.next_tab.get();
+            this.next_tab.set(id + 1);
+            let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
+            let view = unsafe {
+                WKWebView::initWithFrame_configuration(
+                    WKWebView::alloc(this.mtm),
+                    frame,
+                    &this.configuration(),
+                )
+            };
+            this.tabs.borrow_mut().push((id, view));
+            this.active.set(id);
+            this.publish();
+            next();
         } else if let Some(url) = step.get("tab").and_then(Value::as_str) {
             let id = this.open_tab(url, true);
             let view = this.tab_view(id).expect("tab exists");
@@ -293,6 +453,39 @@ impl Lab {
         } else if let Some(path) = step.get("page").and_then(Value::as_str) {
             let view = this.open_page(path);
             wait_loaded(view, next);
+        } else if step.get("background_waiters").is_some() {
+            let id = this.extension.borrow().clone().unwrap_or_default();
+            let count = step
+                .get("background_waiters")
+                .and_then(Value::as_u64)
+                .unwrap_or(8)
+                .clamp(1, 65);
+            let results = Rc::new(RefCell::new(Vec::new()));
+            for _ in 0..count {
+                let results = results.clone();
+                this.runtime.start_background(&id, move |result| {
+                    results.borrow_mut().push(result.is_ok());
+                });
+            }
+            if step.get("cancel").and_then(Value::as_bool) == Some(true) {
+                let lab = this.clone();
+                after(500, move || {
+                    lab.runtime.unload(&id);
+                });
+            }
+            // Outlive both readiness deadlines, so late callbacks are counted.
+            after(11_000, move || {
+                let results = results.borrow();
+                println!(
+                    "RESULT background-waiters {}",
+                    serde_json::json!({
+                        "requested": count, "settled": results.len(),
+                        "ok": results.iter().filter(|ok| **ok).count(),
+                        "errors": results.iter().filter(|ok| !**ok).count(),
+                    })
+                );
+                next();
+            });
         } else if let Some(body) = step.get("eval").and_then(Value::as_str) {
             let timeout = step.get("timeout").and_then(Value::as_u64).unwrap_or(5000);
             let view = match step.get("in").and_then(Value::as_str) {
@@ -303,15 +496,25 @@ impl Lab {
                 println!("EVAL SKIPPED: no view");
                 return next();
             };
+            let label = step
+                .get("as")
+                .and_then(Value::as_str)
+                .map(|label| format!("{label} "))
+                .unwrap_or_default();
             evaluate(this.mtm, &view, body, timeout, move |result| {
-                println!("RESULT {result}");
+                println!("RESULT {label}{result}");
                 next();
             });
         } else if step.get("action").is_some() {
             let id = this.extension.borrow().clone().unwrap_or_default();
             let tab = Some(this.active.get()).filter(|tab| *tab != 0);
             *this.page.borrow_mut() = None;
-            this.runtime.perform_action(&id, tab);
+            // As the browser does: the background first, then the action.
+            let acting = this.clone();
+            let target = id.clone();
+            this.runtime.wake_then(&id, move || {
+                acting.runtime.perform_action(&target, tab);
+            });
             let lab = this.clone();
             let ticks = Cell::new(0u32);
             let waiting = this.clone();
@@ -320,11 +523,14 @@ impl Lab {
                     ticks.set(ticks.get() + 1);
                     waiting.page.borrow().is_some() || ticks.get() > 100
                 },
-                move || match lab.page.borrow().clone() {
-                    Some(view) => wait_loaded(view, next),
-                    None => {
-                        println!("NO POPUP");
-                        next()
+                move || {
+                    let view = lab.page.borrow().clone();
+                    match view {
+                        Some(view) => wait_loaded(view, next),
+                        None => {
+                            println!("NO POPUP");
+                            next()
+                        }
                     }
                 },
             );
@@ -366,6 +572,31 @@ impl Lab {
                 println!("ERASED");
                 after(1500, next);
             });
+        } else if let Some(name) = step.get("mark").and_then(Value::as_str) {
+            println!("MARK {name}");
+            next();
+        } else if let Some(what) = step.get("close").and_then(Value::as_str) {
+            match what {
+                "popup" => {
+                    this.page.borrow_mut().take();
+                    if let Some(popover) = this.popover.borrow_mut().take() {
+                        popover.close();
+                    }
+                }
+                _ => {
+                    let first = this.tabs.borrow().first().map_or(0, |(id, _)| *id);
+                    this.tabs.borrow_mut().retain(|(id, view)| {
+                        if *id != first {
+                            load(view, "about:blank");
+                            view.removeFromSuperview();
+                        }
+                        *id == first
+                    });
+                    this.active.set(first);
+                    this.publish();
+                }
+            }
+            after(300, next);
         } else if let Some(ms) = step.get("sleep").and_then(Value::as_u64) {
             after(ms, next);
         } else {

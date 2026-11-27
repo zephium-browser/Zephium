@@ -24,7 +24,7 @@ export type ImportSource = {
   running: boolean;
 };
 
-type KindState = "queued" | "running" | "done" | "failed" | "skipped";
+type KindState = "queued" | "running" | "done" | "partial" | "failed" | "skipped";
 
 /** Why a kind failed, when there is something the person can do about it. */
 export type ImportProblem = "busy" | "permission" | "unreadable" | "missing" | "storage";
@@ -60,8 +60,10 @@ let adapter = $state.raw<ImportAdapter | null>(null);
 let sources = $state.raw<ImportSource[] | null>(null);
 let job = $state.raw<ImportJob | null>(null);
 let starting = $state(false);
+let refusedSource = $state.raw<{ id: string; name: string } | null>(null);
 let stop: (() => void) | null = null;
 let generation = 0;
+let lifetime = 0;
 
 /** Whether native can import at all in this build. */
 export const available = () => adapter !== null;
@@ -69,6 +71,7 @@ export const available = () => adapter !== null;
 export const found = () => sources;
 export const current = () => job;
 export const busy = () => starting || (job !== null && !job.finished);
+export const startFailure = () => refusedSource;
 
 /** Native installs itself here once it can import; null withdraws it. */
 export function provide(next: ImportAdapter | null) {
@@ -93,12 +96,22 @@ export async function start(source: string, profile: string, kinds: ImportKind[]
   const port = adapter;
   if (!port || busy() || kinds.length === 0) return false;
   starting = true;
+  refusedSource = null;
+  const attempted = {
+    id: source,
+    name: sources?.find((entry) => entry.id === source)?.name ?? source,
+  };
+  const owner = lifetime;
   try {
-    return await port.start(source, profile, kinds);
+    const accepted = await port.start(source, profile, kinds);
+    if (owner !== lifetime) return false;
+    if (!accepted) refusedSource = attempted;
+    return accepted;
   } catch {
+    if (owner === lifetime) refusedSource = attempted;
     return false;
   } finally {
-    starting = false;
+    if (owner === lifetime) starting = false;
   }
 }
 
@@ -116,10 +129,12 @@ export async function openPermissionSettings(source: string) {
 }
 
 function reset() {
+  lifetime++;
   generation++;
   stop?.();
   stop = null;
   sources = null;
   job = null;
   starting = false;
+  refusedSource = null;
 }

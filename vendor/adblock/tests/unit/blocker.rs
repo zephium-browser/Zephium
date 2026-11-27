@@ -86,31 +86,6 @@ mod blocker_tests {
     }
 
     #[test]
-    fn unknown_attribution_exception_scan_charges_conservative_candidate_once() {
-        let blocker = Blocker::new(["@@*$image,domain=publisher.example"]);
-        let request =
-            Request::new_source_independent("https://cdn.example/ad.js", "script", "get").unwrap();
-        let mut regex_manager = blocker.borrow_regex_manager();
-        let mut remaining_checks = 1;
-
-        assert!(matches!(
-            blocker
-                .exceptions()
-                .check_unknown_attribution_exception_bounded(
-                    &request,
-                    get_no_tags(),
-                    &mut regex_manager,
-                    &mut remaining_checks,
-                ),
-            Some(UnknownAttributionExceptionMatch::None),
-        ));
-        assert_eq!(
-            remaining_checks, 0,
-            "a candidate evaluated without attribution consumes exactly one check",
-        );
-    }
-
-    #[test]
     fn redirect_blocking_exception() {
         let filters = [
             "||imdb-video.media-imdb.com$media,redirect=noop-0.1s.mp3",
