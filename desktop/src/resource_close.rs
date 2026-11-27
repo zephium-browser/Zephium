@@ -105,7 +105,7 @@ impl Gate {
     fn forget_window(&mut self, label: &str, cancel_survivors: bool) -> Vec<(String, String)> {
         self.touched.remove(label);
         self.pending.remove(label);
-        if cancel_survivors && !self.flushed.is_empty() && !self.system_closing {
+        if cancel_survivors && !self.system_closing {
             self.prepared = false;
             std::mem::take(&mut self.flushed)
                 .into_iter()
@@ -814,6 +814,20 @@ mod tests {
 
         assert!(!gate.touched.contains(super::super::MAIN_LABEL));
         assert_eq!(cancelled, [("browser-2".into(), "survivor-token".into())]);
+    }
+
+    #[test]
+    fn close_without_tokens_reopens_resource_admission() {
+        let mut gate = Gate {
+            prepared: true,
+            ..Gate::default()
+        };
+
+        let cancelled = gate.forget_window("browser-1", true);
+
+        assert!(cancelled.is_empty());
+        assert!(!gate.prepared);
+        assert!(gate.touch("browser-2", || false));
     }
 
     #[test]
