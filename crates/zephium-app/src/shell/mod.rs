@@ -2034,80 +2034,78 @@ impl Shell {
         let mut rejection_emission_clean = true;
         let pending_profile_creations = std::mem::take(&mut self.pending_profile_creations);
         for (generation, operation_id) in pending_profile_creations {
-            let completion =
-                if let Some(pending) = self.pending_profile_rollbacks.remove(&generation) {
-                    if pending
-                        .publication_state
-                        .compare_exchange(
-                            0,
-                            2,
-                            std::sync::atomic::Ordering::AcqRel,
-                            std::sync::atomic::Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.rollback_profile_creation(pending.profile, pending.space, generation);
-                        operation_result(
-                            OperationOutcome::Rejected,
-                            OperationReason::StoreAdmissionRejected,
-                        )
-                    } else {
-                        let (settled, ready) = &*pending.publication_result;
-                        let mut settled = settled
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        while settled.is_none()
-                            && std::time::Instant::now() < publication_deadline
-                        {
-                            let remaining =
-                                publication_deadline
-                                    .saturating_duration_since(std::time::Instant::now());
-                            let (next, timeout) = ready
-                                .wait_timeout(settled, remaining)
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            settled = next;
-                            if timeout.timed_out() {
-                                break;
-                            }
-                        }
-                        let outcome = *settled;
-                        drop(settled);
-                        match outcome {
-                            Some(true) => {
-                                self.save_avatar(pending.profile, pending.avatar, pending.photo);
-                                self.project_profiles();
-                                operation_result(
-                                    OperationOutcome::Applied,
-                                    OperationReason::MutationApplied,
-                                )
-                            }
-                            Some(false) => {
-                                self.rollback_profile_creation(
-                                    pending.profile,
-                                    pending.space,
-                                    generation,
-                                );
-                                operation_result(
-                                    OperationOutcome::Rejected,
-                                    OperationReason::StoreAdmissionRejected,
-                                )
-                            }
-                            None => {
-                                self.pending_profile_rollbacks.insert(generation, pending);
-                                rejection_emission_clean = false;
-                                operation_result(
-                                    OperationOutcome::Deferred,
-                                    OperationReason::StoreOutcomeUnknown,
-                                )
-                            }
-                        }
-                    }
-                } else {
+            let completion = if let Some(pending) =
+                self.pending_profile_rollbacks.remove(&generation)
+            {
+                if pending
+                    .publication_state
+                    .compare_exchange(
+                        0,
+                        2,
+                        std::sync::atomic::Ordering::AcqRel,
+                        std::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    self.rollback_profile_creation(pending.profile, pending.space, generation);
                     operation_result(
                         OperationOutcome::Rejected,
                         OperationReason::StoreAdmissionRejected,
                     )
-                };
+                } else {
+                    let (settled, ready) = &*pending.publication_result;
+                    let mut settled = settled
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    while settled.is_none() && std::time::Instant::now() < publication_deadline {
+                        let remaining = publication_deadline
+                            .saturating_duration_since(std::time::Instant::now());
+                        let (next, timeout) = ready
+                            .wait_timeout(settled, remaining)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        settled = next;
+                        if timeout.timed_out() {
+                            break;
+                        }
+                    }
+                    let outcome = *settled;
+                    drop(settled);
+                    match outcome {
+                        Some(true) => {
+                            self.save_avatar(pending.profile, pending.avatar, pending.photo);
+                            self.project_profiles();
+                            operation_result(
+                                OperationOutcome::Applied,
+                                OperationReason::MutationApplied,
+                            )
+                        }
+                        Some(false) => {
+                            self.rollback_profile_creation(
+                                pending.profile,
+                                pending.space,
+                                generation,
+                            );
+                            operation_result(
+                                OperationOutcome::Rejected,
+                                OperationReason::StoreAdmissionRejected,
+                            )
+                        }
+                        None => {
+                            self.pending_profile_rollbacks.insert(generation, pending);
+                            rejection_emission_clean = false;
+                            operation_result(
+                                OperationOutcome::Deferred,
+                                OperationReason::StoreOutcomeUnknown,
+                            )
+                        }
+                    }
+                }
+            } else {
+                operation_result(
+                    OperationOutcome::Rejected,
+                    OperationReason::StoreAdmissionRejected,
+                )
+            };
             if let Some(operation_id) = operation_id {
                 let mut completion = completion;
                 completion.operation_id = operation_id;
