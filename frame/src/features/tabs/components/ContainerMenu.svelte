@@ -92,6 +92,16 @@
       operationError = true;
     }
   }
+  async function assign(container: string | null) {
+    if (!currentTab) return;
+    operationError = false;
+    try {
+      const result = await tabDomain.assignTabContainer(currentTab.id, container);
+      if (result.outcome !== "applied" && result.outcome !== "deferred") operationError = true;
+    } catch {
+      operationError = true;
+    }
+  }
   function radioKeys(event: KeyboardEvent) {
     if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key))
       return;
@@ -242,7 +252,7 @@
           class="container-option default"
           type="button"
           aria-pressed={!currentTab?.container_id}
-          onclick={() => currentTab && void tabDomain.assignTabContainer(currentTab.id, null)}
+          onclick={() => void assign(null)}
         >
           <span class="dot"></span><span>Default browsing</span>{#if !currentTab?.container_id}<span
               class="check">✓</span
@@ -254,8 +264,7 @@
               class="container-option"
               type="button"
               aria-pressed={selected(container.id)}
-              onclick={() =>
-                currentTab && void tabDomain.assignTabContainer(currentTab.id, container.id)}
+              onclick={() => void assign(container.id)}
             >
               <span class="dot"
                 ><Icon
