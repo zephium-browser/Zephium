@@ -1919,6 +1919,16 @@ fn opening_an_occupied_url_creates_a_local_tab() {
     let opened = shell.windows.get(second_window).unwrap().active.unwrap();
     assert_ne!(opened, first);
     assert_eq!(shell.windows.get(first_window).unwrap().active, Some(first));
+    assert!(
+        shell.items.tab(opened).is_some_and(|tab| {
+            tab.url
+                .as_ref()
+                .is_some_and(|url| url.as_str() == "https://docs.example/")
+        }) || shell
+            .items
+            .pending_navigation_url(opened)
+            .is_some_and(|url| url.as_str() == "https://docs.example/")
+    );
 }
 
 fn open_order(screen: &Screen) -> Vec<ItemId> {

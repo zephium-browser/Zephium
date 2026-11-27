@@ -629,6 +629,42 @@ impl Shell {
     pub(super) fn close_in_any_space(&mut self, id: ItemId) {
         if self.item_in_focused_scope(id) {
             let _ = self.close(id);
+            let affected = self
+                .windows
+                .iter()
+                .filter(|window| {
+                    window.active == Some(id)
+                        || window.splits.as_ref().is_some_and(|tree| tree.contains(id))
+                })
+                .map(|window| (window.id, window.space, window.active == Some(id)))
+                .collect::<Vec<_>>();
+            for (window_id, space, was_active) in affected {
+                let replacement = was_active
+                    .then(|| {
+                        self.today_tabs(space).into_iter().find(|candidate| {
+                            !self.windows.iter().any(|window| {
+                                window.active == Some(*candidate)
+                                    || window
+                                        .splits
+                                        .as_ref()
+                                        .is_some_and(|tree| tree.contains(*candidate))
+                            })
+                        })
+                    })
+                    .flatten();
+                if let Some(window) = self.windows.get_mut(window_id) {
+                    if let Some(tree) = window.splits.take() {
+                        window.splits = tree.remove(id);
+                    }
+                    if was_active {
+                        window.active = replacement;
+                    }
+                }
+                if let Some(replacement) = replacement {
+                    self.items.set_lifecycle(replacement, Lifecycle::Active);
+                }
+            }
+            let _ = self.commit(Vec::new());
             return;
         }
         self.forget_removed_tab_state(id);

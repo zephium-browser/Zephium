@@ -101,6 +101,57 @@ fn close_uses_free_successor() {
 }
 
 #[test]
+fn closing_a_focused_tab_repairs_other_windows_that_show_it() {
+    let (mut shell, _, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let removed = active_id(&screen);
+    shell.handle(Command::Open);
+    let focused_active = active_id(&screen);
+    shell.handle(Command::Open);
+    let free_replacement = active_id(&screen);
+    let focused_window = shell.windows.focused().unwrap().id;
+
+    assert_eq!(
+        shell
+            .handle_operation(Command::Run("window.new".into()))
+            .outcome,
+        OperationOutcome::Deferred
+    );
+    let other_window = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != focused_window)
+        .unwrap();
+    shell.handle(Command::BrowserWindowAttached {
+        window: other_window,
+        size: Size::new(1100.0, 720.0),
+    });
+    shell.windows.get_mut(focused_window).unwrap().active = Some(focused_active);
+    let other = shell.windows.get_mut(other_window).unwrap();
+    other.active = Some(removed);
+    other.splits = Some(Pane::leaf(removed));
+
+    shell.close_in_any_space(removed);
+
+    assert_eq!(
+        shell.windows.get(focused_window).unwrap().active,
+        Some(focused_active)
+    );
+    assert_eq!(
+        shell.windows.get(other_window).unwrap().active,
+        Some(free_replacement)
+    );
+    assert!(!shell
+        .windows
+        .get(other_window)
+        .unwrap()
+        .splits
+        .as_ref()
+        .is_some_and(|tree| tree.contains(removed)));
+}
+
+#[test]
 fn recently_closed_tab_restores_with_a_fresh_identity_and_durable_metadata() {
     let store = Arc::new(FakeStore::default());
     let (mut shell, engine, screen) = setup_with(store.clone());
