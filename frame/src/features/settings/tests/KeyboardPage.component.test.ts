@@ -126,9 +126,7 @@ test("reports reserved Ctrl+A when recorded on Windows AZERTY", async () => {
   const screen = await render(KeyboardPage);
   await screen.getByRole("button", { name: "Change the shortcut for New tab" }).click();
   window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyQ", key: "a", ctrlKey: true }));
-  await vi.waitFor(() =>
-    expect(native.bind).toHaveBeenLastCalledWith("tab.new", "Ctrl+A", false),
-  );
+  await vi.waitFor(() => expect(native.bind).toHaveBeenLastCalledWith("tab.new", "Ctrl+A", false));
   await expect.element(screen.getByText("That shortcut belongs to the system.")).toBeVisible();
 });
 
