@@ -8220,6 +8220,8 @@ fn finish_browser_setup(
                     // that do not emit a preventable close request first.
                     tauri::WindowEvent::Destroyed => {
                         #[cfg(target_os = "windows")]
+                        platform::imp::unwatch_middle_clicks(&resize_window);
+                        #[cfg(target_os = "windows")]
                         if !platform::imp::remove_privileged_version_observer(MAIN_LABEL) {
                             diagnostic!(
                                 "runtime: main WebView2 update observer removal was reentrant"

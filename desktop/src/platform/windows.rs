@@ -166,8 +166,23 @@ pub fn init(
         expected_user_data_folder,
         PrivilegedEnvironment::Own(on_runtime_update),
     );
+    if hardened.is_ok() {
+        if let Ok(hwnd) = window.hwnd() {
+            pointer::listen_buttons(hwnd, zephium_engine::record_middle_click);
+        }
+    }
     apply_material(window, true);
     hardened
+}
+
+fn middle_click_foreground_changed(owner: Option<windows::Win32::Foundation::HWND>) {
+    zephium_engine::watch_middle_clicks(owner);
+}
+
+pub fn unwatch_middle_clicks(window: &WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        pointer::forget_buttons(hwnd, zephium_engine::record_middle_click);
+    }
 }
 
 /// F10 and Alt+Space typed into the chrome WebView never reach the window, so

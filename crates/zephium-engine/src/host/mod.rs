@@ -410,6 +410,7 @@ impl Drop for ObservedView {
             }
             use wry::WebViewExtWindows;
             if !self.native_close_attempted {
+                crate::platform::imp::middle_click::forget_view(self.view.hwnd());
                 self.native_close_attempted = true;
                 if let Err(debt) = self.view.close() {
                     let debt = OwnedWindowsCleanupDebt::new(debt, self.native_resource.take());
@@ -439,6 +440,7 @@ impl ObservedView {
             .content_policy_registration
             .take()
             .is_some_and(|registration| registration.retire().is_err());
+        crate::platform::imp::middle_click::forget_view(self.view.hwnd());
         self.native_close_attempted = true;
         let debt = self
             .view

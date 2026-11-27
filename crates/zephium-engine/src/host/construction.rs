@@ -1481,6 +1481,12 @@ impl EngineHost {
             let popup_policy = popup_policy.clone();
             builder = builder.with_new_window_req_handler(move |url, mut features| {
                 let clicked = popup_policy.clicked(features.user_initiated);
+                #[cfg(target_os = "windows")]
+                if permit.active_token().is_some() {
+                    // Settle the hint even if admission or a reentrant host
+                    // borrow later refuses the request.
+                    popup_policy.apply_click_disposition(clicked, &mut features);
+                }
                 features.user_initiated = popup_policy.admits(
                     features.user_initiated,
                     tracker
@@ -2217,7 +2223,7 @@ impl EngineHost {
                 return None;
             }
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         popup_policy.bind(&view);
         // Lets Safari's Web Inspector reach tab pages and the content scripts
         // running in them while diagnosing extensions.
