@@ -1882,6 +1882,45 @@ fn opening_an_address_already_open_goes_to_its_tab_unless_turned_off() {
     assert_ne!(opened, blank);
 }
 
+#[test]
+fn opening_an_occupied_url_creates_a_local_tab() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    navigate_and_commit(&mut shell, first, "https://docs.example/");
+    let first_window = shell.windows.focused().unwrap().id;
+
+    assert_eq!(
+        shell
+            .handle_operation(Command::Run("window.new".into()))
+            .outcome,
+        OperationOutcome::Deferred
+    );
+    let second_window = shell
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .find(|window| *window != first_window)
+        .unwrap();
+    shell.handle(Command::BrowserWindowAttached {
+        window: second_window,
+        size: Size::new(1100.0, 720.0),
+    });
+    shell.handle(Command::BrowserWindowFocused {
+        window: second_window,
+        focused: true,
+    });
+
+    shell.handle(Command::OpenUrl {
+        input: "https://docs.example/".into(),
+        new_tab: true,
+    });
+
+    let opened = shell.windows.get(second_window).unwrap().active.unwrap();
+    assert_ne!(opened, first);
+    assert_eq!(shell.windows.get(first_window).unwrap().active, Some(first));
+}
+
 fn open_order(screen: &Screen) -> Vec<ItemId> {
     last(screen)
         .nodes

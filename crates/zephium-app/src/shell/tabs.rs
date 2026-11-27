@@ -600,10 +600,11 @@ impl Shell {
     pub(super) fn open_tab_for(&self, url: &str) -> Option<ItemId> {
         let window = self.windows.focused()?;
         self.keyboard_tabs(window.space).into_iter().find(|id| {
-            self.items.tab(*id).is_some_and(|tab| {
-                tab.content == zephium_core::item::TabContent::Web
-                    && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
-            })
+            !self.item_visible_in_other_window(*id, window.profile)
+                && self.items.tab(*id).is_some_and(|tab| {
+                    tab.content == zephium_core::item::TabContent::Web
+                        && tab.url.as_ref().is_some_and(|open| open.as_str() == url)
+                })
         })
     }
 
